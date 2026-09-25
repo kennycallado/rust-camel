@@ -22,8 +22,16 @@
 //!   route files or the inline `routes:` block) with no filesystem
 //!   route discovery.
 //!
-//! No compile-time asset is resolved at runtime, nothing is extracted
-//! to a temporary location, and the watcher never activates.
+//! Asset resolution (r2embed Task 3.2): the substitution table recorded
+//! at compile time is the ONLY runtime resolution path. Before kind
+//! dispatch, the in-memory asset registry is populated from the decoded
+//! store (memory-served classes read through it, never the filesystem)
+//! and the substitution table's recorded byte spans are rewritten —
+//! last-offset-first — to the confined per-boot materialization paths of
+//! the disk-written classes (TLS cert/key/CA, `xslt:`, `validator:`,
+//! `sql:file:`). The runtime never text-searches or canonicalizes
+//! declared strings, and TLS-class resolution is embedded-only with no
+//! host fallback. The watcher never activates.
 //! `${env:NAME}` resolves from the deployment environment through the
 //! discovery and config seams. Declared job `args:` resolve at startup
 //! through the same parser path as normal jobs with NO dynamic flags
@@ -43,14 +51,19 @@
 //! failure, so 1 stays reserved for them); 2 argument misuse, store or
 //! configuration validation, boot failure, or report-write failure.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Serialize;
 
 use super::CompileError;
 use super::manifest;
+use super::store::{
+    SubstitutionContext, SubstitutionEntry, SubstitutionSpan, VirtualDocumentStore,
+};
 use super::trailer::{self, Trailer, TrailerKind};
 use crate::commands::run::{Discover, LifecycleFailure, LifecycleSpec};
 
@@ -329,6 +342,368 @@ pub async fn run_embedded_document(request: EmbeddedRequest) -> ExitCode {
     ExitCode::from(run_embedded_document_code(request).await as u8)
 }
 
+/// URI-site percent-encoding set: everything except the RFC 3986
+/// unreserved set (`A-Za-z0-9-._~`) and the path separator `/`. The
+/// confined path must survive as a literal file path for the legacy
+/// readers that do NOT percent-decode (`camel-xslt`, `camel-sql` open
+/// the substituted value directly), so already-safe characters stay
+/// raw; whitespace and URI-meaningful characters (`%`, `&`, `=`, `?`,
+/// `#`, controls, non-ASCII) encode to `%XX` and round-trip through the
+/// decoding consumers (`camel-validator` percent-decodes its schema
+/// path).
+const URI_SITE_SET: &percent_encoding::AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'/')
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// Pre-boot asset preparation failure: registry population, path-safety
+/// enforcement, or confined materialization. Every variant is a
+/// fail-closed exit-2 diagnostic; nothing boots.
+#[derive(Debug)]
+enum PrepareError {
+    /// The embedded manifest could not be re-parsed (defense in depth;
+    /// decode already validated it).
+    Manifest(String),
+    /// Registry population failed a positional/digest check.
+    Registry(camel_bundles::AssetRegistryError),
+    /// A disk-written class needs a writable temp location and
+    /// `std::env::temp_dir()` is not one. Names the class and the OS
+    /// cause (read-only contract, r2embed Task 3.2 Step 5).
+    TempUnavailable {
+        /// Class of the first substitution-targeted asset.
+        class: String,
+        /// Underlying OS error.
+        source: std::io::Error,
+    },
+    /// Confined materialization failed (planted entry, symlink,
+    /// confinement check).
+    Materialize(super::materialize::MaterializeError),
+    /// The substitution path-safety rule rejected a site.
+    Rule(CompileError),
+    /// A store invariant the substitution rewrite relies on does not
+    /// hold (unreadable entry, out-of-bounds range). Defensive: decode
+    /// validates these.
+    StoreInconsistent(String),
+}
+
+impl fmt::Display for PrepareError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Manifest(reason) => write!(f, "compiled artifact manifest is invalid: {reason}"),
+            Self::Registry(e) => write!(f, "asset registry population failed: {e}"),
+            Self::TempUnavailable { class, source } => write!(
+                f,
+                "{class} asset requires a writable temp directory for confined \
+                 materialization: {source}"
+            ),
+            Self::Materialize(e) => write!(f, "confined materialization failed: {e}"),
+            Self::Rule(e) => e.fmt(f),
+            Self::StoreInconsistent(reason) => write!(f, "substitution rewrite failed: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for PrepareError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Registry(e) => Some(e),
+            Self::TempUnavailable { source, .. } => Some(source),
+            Self::Materialize(e) => Some(e),
+            Self::Rule(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+/// Populates the process-global asset registry from the decoded store's
+/// entries, positionally paired with the manifest's `embedded_files`
+/// (same canonical order), verifying every entry's kind, length, and
+/// BLAKE3 digest. Population happens exactly once per process; normal
+/// `camel run` never populates the registry.
+fn populate_asset_registry(
+    store: &VirtualDocumentStore,
+    manifest: &manifest::Manifest,
+) -> Result<(), PrepareError> {
+    let registry = camel_bundles::AssetRegistry::global();
+    if registry.is_populated() {
+        return Ok(());
+    }
+    let mut assets = Vec::with_capacity(store.index.entries.len());
+    for entry in &store.index.entries {
+        let Some(bytes) = store.read(&entry.path) else {
+            return Err(PrepareError::StoreInconsistent(format!(
+                "store entry {} is unreadable",
+                entry.path
+            )));
+        };
+        assets.push(camel_bundles::RegistryAsset {
+            logical_path: entry.path.clone(),
+            kind: entry.kind.as_str().to_string(),
+            bytes: bytes.to_vec(),
+        });
+    }
+    let declared: Vec<camel_bundles::RegistryManifestEntry> = manifest
+        .embedded_files
+        .iter()
+        .map(|file| camel_bundles::RegistryManifestEntry {
+            kind: file.kind.as_str().to_string(),
+            length: file.length,
+            digest: file.digest.clone(),
+        })
+        .collect();
+    registry
+        .populate(assets, &declared)
+        .map_err(PrepareError::Registry)
+}
+
+/// Enforces the substitution path-safety rule at one substitution site
+/// (r2embed Task 3.2, Step 2): every site requires the confined path to
+/// be valid UTF-8 (guaranteed by the `&str` parameter; the caller
+/// rejects non-UTF-8 confined paths with the same diagnostic) with no
+/// ASCII control characters; `literal` sites additionally restrict the
+/// characters to `[A-Za-z0-9._/+-]`. A violation fails closed with the
+/// named diagnostic `substitution path-safety rule violation`, naming
+/// the site and the offending character. URI sites pass the charset
+/// clause: their value is percent-encoded afterwards.
+fn enforce_substitution_path_safety(
+    site: &str,
+    confined: &str,
+    context: SubstitutionContext,
+) -> Result<(), CompileError> {
+    let violation = |detail: String| {
+        CompileError::InvalidDocument(format!(
+            "substitution path-safety rule violation at site '{site}': {detail}"
+        ))
+    };
+    for c in confined.chars() {
+        if c.is_ascii_control() {
+            return Err(violation(format!(
+                "character {c:?} (U+{:04X}) is an ASCII control character, rejected at every \
+                 site",
+                c as u32
+            )));
+        }
+    }
+    if context == SubstitutionContext::Literal {
+        for c in confined.chars() {
+            if !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '+' | '-')) {
+                return Err(violation(format!(
+                    "character {c:?} (U+{:04X}) is outside the literal-site safe set \
+                     [A-Za-z0-9._/+-]",
+                    c as u32
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Applies the recorded substitution spans to one site entry's bytes,
+/// LAST-OFFSET-FIRST: later spans are rewritten before earlier ones so
+/// every earlier offset — and with it every line start — stays stable
+/// across applications. Each recorded span is replaced exactly once;
+/// non-recorded text is untouched. An out-of-bounds, inverted, or
+/// overlapping span pair fails closed.
+fn apply_span_rewrites(
+    bytes: &[u8],
+    replacements: &[(SubstitutionSpan, Vec<u8>)],
+) -> Result<Vec<u8>, CompileError> {
+    let mut ordered: Vec<&(SubstitutionSpan, Vec<u8>)> = replacements.iter().collect();
+    ordered.sort_by_key(|(span, _)| std::cmp::Reverse(span.start));
+    for window in ordered.windows(2) {
+        let (later, earlier) = (window[0].0, window[1].0);
+        if later.start < earlier.end {
+            return Err(CompileError::InvalidDocument(format!(
+                "overlapping substitution spans {}..{} and {}..{}",
+                earlier.start, earlier.end, later.start, later.end
+            )));
+        }
+    }
+    let mut out = bytes.to_vec();
+    for (span, replacement) in ordered {
+        let start = span.start as usize;
+        let end = span.end as usize;
+        if start > end || end > out.len() {
+            return Err(CompileError::InvalidDocument(format!(
+                "substitution span {}..{} is out of bounds for a {}-byte entry",
+                span.start,
+                span.end,
+                out.len()
+            )));
+        }
+        out.splice(start..end, replacement.iter().cloned());
+    }
+    Ok(out)
+}
+
+/// Rewrites every site entry's recorded spans inside the store: site
+/// bytes are replaced, and the content blob is rebuilt with every
+/// entry's offset and length recomputed, so the store's canonical
+/// invariants (contiguous coverage, per-entry ranges) hold for the
+/// by-value consumers downstream.
+fn rewrite_store_entries(
+    store: &mut VirtualDocumentStore,
+    sites: &BTreeMap<String, Vec<(SubstitutionSpan, Vec<u8>)>>,
+) -> Result<(), CompileError> {
+    if sites.is_empty() {
+        return Ok(());
+    }
+    let old = std::mem::take(&mut store.content);
+    let mut new_content = Vec::with_capacity(old.len());
+    let mut cursor = 0usize;
+    for entry in &mut store.index.entries {
+        let start = entry.offset as usize;
+        let end = start + entry.length as usize;
+        if start > end || end > old.len() {
+            return Err(CompileError::InvalidDocument(format!(
+                "store entry {} has an out-of-bounds range",
+                entry.path
+            )));
+        }
+        if start > cursor {
+            new_content.extend_from_slice(&old[cursor..start]);
+        }
+        cursor = cursor.max(end);
+        match sites.get(&entry.path) {
+            Some(spans) => {
+                let rewritten = apply_span_rewrites(&old[start..end], spans)?;
+                entry.offset = new_content.len() as u64;
+                entry.length = rewritten.len() as u64;
+                new_content.extend_from_slice(&rewritten);
+            }
+            None => {
+                entry.offset = new_content.len() as u64;
+                new_content.extend_from_slice(&old[start..end]);
+            }
+        }
+    }
+    if cursor < old.len() {
+        new_content.extend_from_slice(&old[cursor..]);
+    }
+    store.content = new_content;
+    Ok(())
+}
+
+/// The pre-boot asset preparation at the DECIDED single swap point
+/// (r2embed Task 3.2): after decode, before the route/job kind dispatch.
+///
+/// 1. The asset registry is populated from the store's entries
+///    (positional manifest pairing, digest verification) — the
+///    memory-served class's FS of record.
+/// 2. Every substitution site's target is a legacy path reader, so the
+///    targeted assets are the materialized set: they are written into a
+///    per-boot confined directory (static-file entries stay
+///    memory-served and never touch the filesystem).
+/// 3. The substitution path-safety rule is enforced at every site
+///    BEFORE anything is written; `uri` sites then receive the
+///    percent-encoded confined path, `literal` sites the raw confined
+///    path.
+/// 4. The recorded byte spans — and only those — are rewritten in the
+///    store's document and config entries, applied last-offset-first.
+///    Runtime never text-searches or canonicalizes declared strings, and
+///    TLS-class resolution is embedded-only: no host fallback exists.
+///
+/// Returns the materialization guard when a per-boot directory exists;
+/// dropping it removes the directory on shutdown AND boot failure.
+fn prepare_embedded_assets(
+    store: &mut VirtualDocumentStore,
+    manifest_json: &str,
+) -> Result<Option<super::materialize::Materialization>, PrepareError> {
+    let manifest = manifest::Manifest::from_canonical_json(manifest_json.as_bytes())
+        .map_err(|e| PrepareError::Manifest(e.to_string()))?;
+    populate_asset_registry(store, &manifest)?;
+
+    // The materialized set: substitution targets in canonical table
+    // order, with their relative path under the per-boot directory and
+    // their class (for the read-only diagnostic).
+    let mut targets: Vec<(&SubstitutionEntry, String, String)> = Vec::new();
+    for entry in &store.index.substitutions {
+        let Some(rel) = entry.asset.strip_prefix("assets/") else {
+            return Err(PrepareError::StoreInconsistent(format!(
+                "substitution target {} is not an asset entry",
+                entry.asset
+            )));
+        };
+        let Some(class) = store
+            .index
+            .entries
+            .iter()
+            .find(|candidate| candidate.path == entry.asset)
+            .and_then(|candidate| candidate.asset_class.clone())
+        else {
+            return Err(PrepareError::StoreInconsistent(format!(
+                "substitution target {} is not a store asset entry",
+                entry.asset
+            )));
+        };
+        targets.push((entry, rel.to_string(), class));
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+
+    // A disk-written class exists, so a writable temp location is
+    // required: the read-only contract's materialized-class side.
+    let first_class = targets[0].2.clone();
+    let materialization = super::materialize::Materialization::create().map_err(|source| {
+        PrepareError::TempUnavailable {
+            class: first_class,
+            source,
+        }
+    })?;
+
+    // Path-safety rule at EVERY site before anything is written.
+    let mut sites: BTreeMap<String, Vec<(SubstitutionSpan, Vec<u8>)>> = BTreeMap::new();
+    for (entry, rel, _class) in &targets {
+        let confined_path = materialization
+            .confined_path(rel)
+            .map_err(PrepareError::Materialize)?;
+        let Some(confined) = confined_path.to_str() else {
+            return Err(PrepareError::Rule(CompileError::InvalidDocument(format!(
+                "substitution path-safety rule violation at site '{}': the confined path is not \
+                 valid UTF-8",
+                entry.document
+            ))));
+        };
+        enforce_substitution_path_safety(&entry.document, confined, entry.context)
+            .map_err(PrepareError::Rule)?;
+        let replacement = match entry.context {
+            SubstitutionContext::Literal => confined.as_bytes().to_vec(),
+            SubstitutionContext::Uri => utf8_percent_encode(confined, URI_SITE_SET)
+                .to_string()
+                .into_bytes(),
+        };
+        let site_spans = sites.entry(entry.document.clone()).or_default();
+        for span in &entry.spans {
+            site_spans.push((*span, replacement.clone()));
+        }
+    }
+
+    // Write exactly the targeted assets (deduped), never the whole
+    // store.
+    let mut written: Vec<&str> = Vec::new();
+    for (entry, rel, _class) in &targets {
+        if written.contains(&entry.asset.as_str()) {
+            continue;
+        }
+        let Some(bytes) = store.read(&entry.asset) else {
+            return Err(PrepareError::StoreInconsistent(format!(
+                "substitution target {} is unreadable",
+                entry.asset
+            )));
+        };
+        materialization
+            .write(rel, bytes)
+            .map_err(PrepareError::Materialize)?;
+        written.push(entry.asset.as_str());
+    }
+
+    rewrite_store_entries(store, &sites).map_err(PrepareError::Rule)?;
+    Ok(Some(materialization))
+}
+
 /// Self-detect a compiled artifact before any CLI parsing (Task 2.3).
 ///
 /// Probes `current_exe()` and decodes its trailer (version-aware:
@@ -438,10 +813,35 @@ pub async fn run_embedded_document_code(request: EmbeddedRequest) -> i32 {
                 crate::commands::job::run_embedded_job(&source_name, &document, report).await
             }
         },
-        EmbeddedRequest::VirtualStore { kind, store, .. } => match kind {
-            TrailerKind::Route => run_embedded_store_route(&store, report.as_deref()).await,
-            TrailerKind::Job => crate::commands::job::run_embedded_job_store(store, report).await,
-        },
+        EmbeddedRequest::VirtualStore {
+            kind,
+            mut store,
+            manifest_json,
+            ..
+        } => {
+            // The DECIDED single swap point (r2embed Task 3.2): after
+            // decode, BEFORE the kind dispatch. The store is rewritten
+            // IN-LEASE and passed by value below, so neither
+            // `drive_lifecycle` nor `run_embedded_job_store` changes.
+            let materialization = match prepare_embedded_assets(&mut store, &manifest_json) {
+                Ok(prepared) => prepared,
+                Err(e) => {
+                    eprintln!("compiled artifact error: {e}");
+                    return EXIT_REJECTION;
+                }
+            };
+            let code = match kind {
+                TrailerKind::Route => run_embedded_store_route(&store, report.as_deref()).await,
+                TrailerKind::Job => {
+                    crate::commands::job::run_embedded_job_store(store, report).await
+                }
+            };
+            // The confined per-boot directory is removed on BOTH the
+            // graceful return and every boot-failure return above: the
+            // guard drops at this scope's end either way.
+            drop(materialization);
+            code
+        }
     }
 }
 
@@ -680,6 +1080,123 @@ mod tests {
             RouteReport::failed("boom".to_string()).to_json(),
             r#"{"kind":"route","status":"failed","error":"boom"}"#
         );
+    }
+
+    /// The substitution path-safety rule rejects an ASCII control
+    /// character at EVERY site (literal and uri alike), rejects a space
+    /// at a `literal` site (outside `[A-Za-z0-9._/+-]`) naming the
+    /// offending character, and passes a space at a `uri` site (the
+    /// value percent-encodes) — r2embed Task 3.2.
+    #[test]
+    fn substitution_path_safety_rule_rejects_control_and_unsafe_literal_chars() {
+        use super::SubstitutionContext;
+        use super::enforce_substitution_path_safety;
+
+        let phrase = "substitution path-safety rule violation";
+        let ctrl: String = std::iter::once('c')
+            .chain(std::iter::once('\u{7}'))
+            .collect();
+        let ctrl_path = format!("/tmp/boot/{ctrl}/svc.crt");
+
+        // Control character: rejected at both site kinds, naming the
+        // site and the diagnostic phrase.
+        for context in [SubstitutionContext::Literal, SubstitutionContext::Uri] {
+            let err = enforce_substitution_path_safety("routes/app.yaml", &ctrl_path, context)
+                .expect_err("control characters are rejected at every site");
+            assert!(
+                err.to_string().contains(phrase),
+                "diagnostic names the rule: {err}"
+            );
+            assert!(
+                err.to_string().contains("routes/app.yaml"),
+                "diagnostic names the site: {err}"
+            );
+        }
+
+        // Space at a literal site: outside the safe set, rejected with
+        // the offending character named.
+        let spaced = "/tmp/boot dir/svc.crt";
+        let err = enforce_substitution_path_safety(
+            "routes/app.yaml",
+            spaced,
+            SubstitutionContext::Literal,
+        )
+        .expect_err("a literal-site space is outside the safe set");
+        assert!(
+            err.to_string().contains(phrase),
+            "diagnostic names the rule: {err}"
+        );
+        assert!(
+            err.to_string().contains(' '),
+            "diagnostic names the offending character: {err}"
+        );
+
+        // The same space at a uri site PASSES: the value percent-encodes.
+        enforce_substitution_path_safety("routes/app.yaml", spaced, SubstitutionContext::Uri)
+            .expect("a uri-site space passes (percent-encoded)");
+
+        // Clean paths pass at both site kinds.
+        let clean = "/tmp/camel-assets-ab12cd34/certs/svc.crt";
+        for context in [SubstitutionContext::Literal, SubstitutionContext::Uri] {
+            enforce_substitution_path_safety("routes/app.yaml", clean, context)
+                .expect("a safe path passes at every site");
+        }
+    }
+
+    /// The span rewrite applies recorded spans LAST-OFFSET-FIRST and is
+    /// surgical: every recorded span is replaced exactly once, byte
+    /// offsets of line starts stay stable across applications, and
+    /// non-recorded text is untouched — r2embed Task 3.2.
+    #[test]
+    fn span_rewrite_applies_last_offset_first_and_is_surgical() {
+        use super::SubstitutionSpan;
+        use super::apply_span_rewrites;
+
+        // Offsets: "alpha XX mid YY end ZZ\nnext XX line\nlast YY\n"
+        // spans: 6..8, 13..15, 20..22, 28..30, 41..43; line starts:
+        // "next" at 23, "last" at 36.
+        let text = b"alpha XX mid YY end ZZ\nnext XX line\nlast YY\n";
+        assert_eq!(&text[6..8], b"XX", "fixture span sanity");
+        assert_eq!(&text[23..27], b"next", "fixture line-start sanity");
+        assert_eq!(&text[36..40], b"last", "fixture line-start sanity");
+
+        let span = |start: u64, end: u64| SubstitutionSpan { start, end };
+        // All replacements are length-preserving except the LAST one
+        // (41..43, 2 -> 6 bytes): applying last-offset-first means that
+        // expansion is applied FIRST and shifts no recorded span and no
+        // line start before it. A first-offset-first application would
+        // inflate the earlier spans' offsets and corrupt the rewrite.
+        let replacements = vec![
+            (span(6, 8), b"P1".to_vec()),
+            (span(13, 15), b"P2".to_vec()),
+            (span(20, 22), b"P3".to_vec()),
+            (span(28, 30), b"P4".to_vec()),
+            (span(41, 43), b"LONGER".to_vec()),
+        ];
+
+        let out = apply_span_rewrites(text, &replacements).expect("rewrite succeeds");
+
+        // Every recorded span replaced exactly once, in order.
+        assert_eq!(
+            out.as_slice(),
+            &b"alpha P1 mid P2 end P3\nnext P4 line\nlast LONGER\n"[..],
+            "all recorded spans are replaced exactly once"
+        );
+
+        // Surgical: non-recorded text untouched.
+        for literal in ["alpha ", " mid ", " end ", "\nnext ", " line\nlast ", "\n"] {
+            assert!(
+                out.windows(literal.len()).any(|w| w == literal.as_bytes()),
+                "non-recorded text survives: {literal:?} in {}",
+                String::from_utf8_lossy(&out)
+            );
+        }
+
+        // Line-start offsets stable across applications: with the
+        // last-offset-first order, the length-changing final rewrite
+        // never moves an earlier line start.
+        assert_eq!(&out[23..27], b"next", "second line start keeps its offset");
+        assert_eq!(&out[36..40], b"last", "third line start keeps its offset");
     }
 
     /// `from_v2` decodes the store and re-validates the typed reference

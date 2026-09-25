@@ -5,8 +5,8 @@
 //! diagnostics, and the absence or presence of the output artifact are
 //! asserted exactly as the CLI contract specifies. multidoc Task 1.2
 //! switches the writer to the v2 multi-document virtual store: every
-//! artifact is decoded through `decode_artifact` and carries
-//! `manifest_schema: 2`.
+//! artifact is decoded through `decode_artifact` and, since r2embed
+//! Task 1.1 / Task 2.2, carries `store_schema: 2` with `manifest_schema: 3`.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -108,7 +108,7 @@ fn compile_writes_executable_with_valid_trailer() {
     }
 
     // Decodable v2 route artifact: normalized payload, canonical
-    // schema-2 manifest, one-entry store.
+    // schema-3 manifest, one-entry store.
     let (v2, store, manifest) = decode_v2(&bytes);
     assert_eq!(v2.kind, TrailerKind::Route);
     assert_eq!(store.read("app.yaml"), Some(ROUTE_DOC.as_bytes()));
@@ -124,8 +124,8 @@ fn compile_writes_executable_with_valid_trailer() {
         "manifest source name must be the logical entry path: {manifest}"
     );
     assert!(
-        manifest.contains(r#""manifest_schema":2"#),
-        "v2 artifacts carry manifest schema 2: {manifest}"
+        manifest.contains(r#""manifest_schema":3"#),
+        "v2 artifacts carry manifest schema 3: {manifest}"
     );
 }
 
@@ -408,26 +408,50 @@ fn compile_allows_ordinary_key_fields() {
 
 /// Regression: the endpoint-scheme check must reach URI-bearing fields
 /// beyond `from`/`to` — `wire_tap`, `poll_enrich` (shorthand and `{uri}`
-/// forms), and route-level `dead_letter_channel`.
+/// forms), and route-level `dead_letter_channel`. Since r2embed Task 1.2
+/// only `wasm:` operands stay forbidden there: `xslt:`/`validator:`
+/// operands are collected assets and compile (their fixture files are
+/// embedded).
 #[test]
 fn compile_rejects_forbidden_schemes_in_nested_uri_fields() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("app.yaml"),
-        "routes:\n  - id: r\n    from: timer:t\n    steps:\n      - wire_tap: wasm:module.wasm\n      - poll_enrich: xslt:style.xsl\n    error_handler:\n      dead_letter_channel: validator:shape.xsd\n",
+        "routes:\n  - id: r\n    from: timer:t\n    steps:\n      - wire_tap: wasm:module.wasm\n",
     )
     .expect("write document");
 
     let output = compile(dir.path(), "app.yaml", "out.bin", None);
     assert_eq!(output.status.code(), Some(2));
     let stderr = stderr_of(&output);
-    for uri in ["wasm:module.wasm", "xslt:style.xsl", "validator:shape.xsd"] {
-        assert!(
-            stderr.contains(uri),
-            "rejection must name the nested endpoint '{uri}': {stderr}"
-        );
-    }
-    assert!(!dir.path().join("out.bin").exists(), "no output artifact");
+    assert!(
+        stderr.contains("wasm:module.wasm"),
+        "rejection must name the nested endpoint 'wasm:module.wasm': {stderr}"
+    );
+    assert!(
+        !dir.path().join("out.bin").exists(),
+        "no output artifact for a wasm operand"
+    );
+
+    // Collected operand schemes compile from nested URI fields.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("assets")).expect("mkdir assets");
+    std::fs::write(dir.path().join("assets/style.xsl"), "<xsl:stylesheet/>")
+        .expect("write stylesheet fixture");
+    std::fs::write(dir.path().join("assets/shape.xsd"), "<xs:schema/>")
+        .expect("write schema fixture");
+    std::fs::write(
+        dir.path().join("app.yaml"),
+        "routes:\n  - id: r\n    from: timer:t\n    steps:\n      - poll_enrich: xslt:assets/style.xsl\n    error_handler:\n      dead_letter_channel: validator:assets/shape.xsd\n",
+    )
+    .expect("write document");
+    let output = compile(dir.path(), "app.yaml", "out.bin", None);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "collected xslt/validator operands must compile: {}",
+        stderr_of(&output)
+    );
 
     // The full `{uri: ...}` enrich form is checked too; an allowed scheme
     // stays permitted.
@@ -448,25 +472,45 @@ fn compile_rejects_forbidden_schemes_in_nested_uri_fields() {
 
 /// Regression: the endpoint-scheme check must reach `scatter_gather.endpoints`
 /// (a sequence of endpoint URI strings), not just scalar URI fields.
+/// Since r2embed Task 1.2 only `wasm:` operands stay forbidden there;
+/// `xslt:`/`validator:` operands are collected assets and compile.
 #[test]
 fn compile_rejects_forbidden_schemes_in_scatter_gather_endpoints() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("app.yaml"),
-        "routes:\n  - id: r\n    from: timer:t\n    steps:\n      - scatter_gather:\n          endpoints:\n            - wasm:module.wasm\n            - xslt:style.xsl\n            - validator:shape.xsd\n",
+        "routes:\n  - id: r\n    from: timer:t\n    steps:\n      - scatter_gather:\n          endpoints:\n            - wasm:module.wasm\n",
     )
     .expect("write document");
 
     let output = compile(dir.path(), "app.yaml", "out.bin", None);
     assert_eq!(output.status.code(), Some(2));
     let stderr = stderr_of(&output);
-    for uri in ["wasm:module.wasm", "xslt:style.xsl", "validator:shape.xsd"] {
-        assert!(
-            stderr.contains(uri),
-            "rejection must name the scatter_gather endpoint '{uri}': {stderr}"
-        );
-    }
+    assert!(
+        stderr.contains("wasm:module.wasm"),
+        "rejection must name the scatter_gather endpoint 'wasm:module.wasm': {stderr}"
+    );
     assert!(!dir.path().join("out.bin").exists(), "no output artifact");
+
+    // Collected operand schemes compile from scatter_gather endpoints.
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("assets")).expect("mkdir assets");
+    std::fs::write(dir.path().join("assets/style.xsl"), "<xsl:stylesheet/>")
+        .expect("write stylesheet fixture");
+    std::fs::write(dir.path().join("assets/shape.xsd"), "<xs:schema/>")
+        .expect("write schema fixture");
+    std::fs::write(
+        dir.path().join("app.yaml"),
+        "routes:\n  - id: r\n    from: timer:t\n    steps:\n      - scatter_gather:\n          endpoints:\n            - xslt:assets/style.xsl\n            - validator:assets/shape.xsd\n",
+    )
+    .expect("write document");
+    let output = compile(dir.path(), "app.yaml", "out.bin", None);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "collected scatter_gather operand schemes must compile: {}",
+        stderr_of(&output)
+    );
 
     // Allowed schemes and runtime ${env:} expressions in scatter_gather
     // endpoints stay permitted.
@@ -710,7 +754,7 @@ fn compile_without_config_does_not_discover_ambient_config() {
         "no configuration references without --config"
     );
     assert_eq!(store.index.source_plan.references, vec!["app.yaml"]);
-    assert_eq!(store.index.store_schema, 1);
+    assert_eq!(store.index.store_schema, 2);
     let embedded = manifest["embedded_files"]
         .as_array()
         .expect("embedded_files");
@@ -945,8 +989,8 @@ fn compile_copies_executable_with_v2_trailer() {
     // terminal magic and decodes as a marked v2 artifact (decode_v2).
     assert_eq!(&bytes[bytes.len() - 8..], b"CAMELTR1");
 
-    // Manifest schema 2 with embedded-file metadata mirroring the store.
-    assert_eq!(manifest["manifest_schema"], 2);
+    // Manifest schema 3 with embedded-file metadata mirroring the store.
+    assert_eq!(manifest["manifest_schema"], 3);
     assert_eq!(manifest["kind"], "route");
     let embedded = manifest["embedded_files"]
         .as_array()
@@ -965,7 +1009,7 @@ fn compile_copies_executable_with_v2_trailer() {
     );
     assert_eq!(store.read("app.yaml"), Some(ROUTE_DOC.as_bytes()));
     assert!(store.read("prod.profile.toml").is_some());
-    assert_eq!(store.index.store_schema, 1);
+    assert_eq!(store.index.store_schema, 2);
     // Store index is decodable standalone from the artifact bytes too.
     assert!(StoreIndex::decode(&v2.index, v2.content.len()).is_ok());
 }

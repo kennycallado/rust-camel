@@ -29,16 +29,24 @@
 //! a v1 reader rejects v2 as an unsupported version, and a marked
 //! v2-family footer carrying any other version fails closed with that
 //! unsupported version named. A v2 decode applies
-//! the strict version-matched manifest rules (schema 2 with typed required
-//! fields, no unknown fields, canonical embedded paths/digests/order; the
-//! schema-less legacy form only in v1), validates the
+//! the strict version-matched manifest rules (schema 3 — the asset-aware
+//! form with `asset_class`, the secret-material `class`, null paths for
+//! secret-class entries, `total_embedded_bytes`, and `artifact_kind` — or
+//! the R1-era schema 2, each with typed required fields, no unknown
+//! fields, and canonical embedded digests; the schema-less legacy form
+//! only in v1), validates the
 //! content/index sections through the canonical
-//! [`VirtualDocumentStore`] decoder, enforces the typed reference
+//! [`VirtualDocumentStore`] decoder, enforces the schema pairing
+//! (manifest 3 ⇔ store 2, manifest 2 ⇔ store 1 — only when both schemas
+//! are known values, so unknown-schema diagnostics are named first) and
+//! the typed reference
 //! invariants (entry point, configuration references, and source plan must
 //! agree with the artifact kind), and enforces manifest/store agreement
 //! (the manifest source name is the store entry point; every
-//! `embedded_files` entry mirrors one store entry with the matching
-//! content digest) before the image is accepted.
+//! `embedded_files` entry mirrors one store entry by position with the
+//! matching content digest, and the entry path is exposed exactly when
+//! the class is public — secret-class entries withhold it) before the
+//! image is accepted.
 
 use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -72,9 +80,11 @@ const CHECKSUM_DOMAIN: &[u8] = b"rust-camel-trailer-v1";
 /// ASCII domain separator prefixed to every v2 checksum input.
 const CHECKSUM_DOMAIN_V2: &[u8] = b"rust-camel-trailer-v2";
 
-/// Maximum normalized document size accepted by [`normalize_document`], and
-/// the aggregate cap enforced by [`normalize_documents`] across all
-/// embedded documents of one artifact.
+/// Default value of the configurable aggregate payload cap
+/// (`--max-payload-bytes`, 16 MiB). Not an enforcement constant: the cap
+/// the compiler enforces is the one the operator configured, threaded to
+/// the single aggregation point in [`normalize_documents`] plus the
+/// combined document-plus-asset check in `crate::compile::sources`.
 pub const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 /// The kind of document embedded in an artifact.
@@ -154,6 +164,17 @@ pub enum TrailerError {
     InvalidManifestFields(String),
     /// Manifest declares a `manifest_schema` the reader does not support.
     InvalidManifestSchema(u64),
+    /// Manifest schema is not the required pair of the store index schema
+    /// (store 2 ⇔ manifest 3, store 1 ⇔ manifest 2). Checked only when
+    /// both schemas are known values.
+    InvalidSchemaPairing {
+        /// The decoded store index schema.
+        store_schema: u64,
+        /// The declared manifest schema.
+        manifest_schema: u64,
+        /// The manifest schema the store schema requires.
+        required_manifest_schema: u64,
+    },
     /// Embedded store content or index is invalid.
     InvalidStore(String),
 }
@@ -183,6 +204,16 @@ impl fmt::Display for TrailerError {
             Self::InvalidManifestSchema(schema) => {
                 write!(f, "unsupported manifest schema {schema}")
             }
+            Self::InvalidSchemaPairing {
+                store_schema,
+                manifest_schema,
+                required_manifest_schema,
+            } => write!(
+                f,
+                "manifest schema {manifest_schema} is not the pair of store schema \
+                 {store_schema}: store schema {store_schema} requires manifest schema \
+                 {required_manifest_schema}"
+            ),
             Self::InvalidStore(reason) => write!(f, "embedded store is invalid: {reason}"),
         }
     }
@@ -251,6 +282,7 @@ impl Trailer {
                 config_references: Vec::new(),
                 entry_point: source_name.to_string(),
                 entries: vec![StoreEntry {
+                    asset_class: None,
                     kind: StoreEntryKind::from(self.kind),
                     length: self.payload.len() as u64,
                     offset: 0,
@@ -260,6 +292,7 @@ impl Trailer {
                     references: vec![source_name.to_string()],
                 },
                 store_schema: STORE_SCHEMA,
+                substitutions: Vec::new(),
             },
         })
     }
@@ -542,11 +575,15 @@ fn decode_v2_marked(bytes: &[u8]) -> Result<TrailerV2, TrailerError> {
     }
 
     // Content/index validation through the canonical store decoder, then
-    // the typed reference invariants against the artifact kind: a
+    // the schema pairing and typed reference invariants: a
     // checksum-consistent image with an inconsistent store still fails
-    // closed, by name.
+    // closed, by name. The pairing check runs AFTER the store decode (the
+    // only site that knows both schemas) and only when both schemas are
+    // known values — an unknown store or manifest schema is named by its
+    // own decoder first.
     let decoded_index = StoreIndex::decode(index, content.len())
         .map_err(|e| TrailerError::InvalidStore(e.to_string()))?;
+    enforce_schema_pairing(&decoded_index, manifest)?;
     super::store::validate_typed_references(&decoded_index, kind)
         .map_err(|e| TrailerError::InvalidStore(e.to_string()))?;
 
@@ -563,13 +600,53 @@ fn decode_v2_marked(bytes: &[u8]) -> Result<TrailerV2, TrailerError> {
     })
 }
 
-/// Enforce schema-2 manifest/store agreement: the manifest `source_name`
+/// Enforce the v2 schema pairing (r2embed Task 2.2, design "nit a"):
+/// `manifest_schema: 3` is valid only with `store_schema: 2`, and
+/// `manifest_schema: 2` (the R1-era form) only with `store_schema: 1`,
+/// because the substitution table and asset classes only exist when both
+/// halves evolve together. Runs AFTER `StoreIndex::decode`, so an unknown
+/// store schema is already named by its own decoder ("unsupported store
+/// schema N"); an unknown manifest schema was already named by
+/// `validate_manifest` before the store decode. This check therefore only
+/// ever sees known schema values, and rejects the mismatched pairs in
+/// both directions.
+fn enforce_schema_pairing(index: &StoreIndex, manifest: &[u8]) -> Result<(), TrailerError> {
+    let value: serde_json::Value =
+        serde_json::from_slice(manifest).map_err(|_| TrailerError::InvalidManifest)?;
+    let schema = manifest::manifest_schema_of(&value).map_err(|_| TrailerError::InvalidManifest)?;
+    let required = match index.store_schema {
+        1 => manifest::MANIFEST_SCHEMA_V2,
+        2 => manifest::MANIFEST_SCHEMA,
+        // Unreachable through `decode_v2_marked` (the store decoder fails
+        // closed on any other schema first); kept fail-closed for defense
+        // in depth so a hand-routed index cannot bypass the pairing.
+        other => {
+            return Err(TrailerError::InvalidStore(format!(
+                "unsupported store schema {other}"
+            )));
+        }
+    };
+    if schema != required {
+        return Err(TrailerError::InvalidSchemaPairing {
+            store_schema: index.store_schema,
+            manifest_schema: schema,
+            required_manifest_schema: required,
+        });
+    }
+    Ok(())
+}
+
+/// Enforce v2 manifest/store agreement: the manifest `source_name`
 /// is the store `entry_point`, every `embedded_files` entry mirrors one
-/// store entry (path, kind, length) in canonical order, and its digest is
-/// the BLAKE3 of that entry's content range. The manifest was already
-/// parsed under the strict schema-2 rules; this closes the loop to the
-/// content/index sections so a checksum-consistent image whose manifest
-/// describes a different store still fails closed, by name.
+/// store entry by position (kind, length, and content digest are always
+/// compared), and the path rule follows the secret-material class: a
+/// `public` entry carries its path and it equals the store entry path, a
+/// `secret` entry withholds it (`path: null` — the digest-only exposure
+/// of bd rc-p823t), so `path` is null if and only if the class is
+/// `secret`. The manifest was already parsed under the strict per-schema
+/// field rules; this closes the loop to the content/index sections so a
+/// checksum-consistent image whose manifest describes a different store
+/// still fails closed, by name.
 fn validate_manifest_store_agreement(
     manifest: &[u8],
     content: &[u8],
@@ -591,11 +668,39 @@ fn validate_manifest_store_agreement(
         )));
     }
     for (file, entry) in parsed.embedded_files.iter().zip(&index.entries) {
-        if file.path != entry.path || file.kind != entry.kind || file.length != entry.length {
+        if file.kind != entry.kind || file.length != entry.length {
             return Err(TrailerError::InvalidManifestFields(format!(
-                "embedded_files entry for {:?} disagrees with the store entry path/kind/length",
-                file.path
+                "embedded_files entry for {:?} disagrees with the store entry kind/length",
+                entry.path
             )));
+        }
+        match file.class {
+            manifest::ManifestClass::Secret => {
+                if let Some(path) = &file.path {
+                    // allow-secret: names the class and path, never a value.
+                    return Err(TrailerError::InvalidManifestFields(format!(
+                        "embedded_files entry for {:?} is class secret but carries the path \
+                         {:?}: secret entries must withhold their path",
+                        entry.path, path
+                    )));
+                }
+            }
+            manifest::ManifestClass::Public => match &file.path {
+                Some(path) if path == &entry.path => {}
+                Some(path) => {
+                    return Err(TrailerError::InvalidManifestFields(format!(
+                        "embedded_files path {:?} disagrees with the store entry path {:?}",
+                        path, entry.path
+                    )));
+                }
+                None => {
+                    return Err(TrailerError::InvalidManifestFields(format!(
+                        "embedded_files entry for {:?} is class public but carries no path: \
+                         public entries must carry their path",
+                        entry.path
+                    )));
+                }
+            },
         }
         let range = entry.offset as usize..(entry.offset + entry.length) as usize;
         let Some(bytes) = content.get(range) else {
@@ -606,7 +711,7 @@ fn validate_manifest_store_agreement(
         if file.digest != blake3::hash(bytes).to_hex().to_string() {
             return Err(TrailerError::InvalidManifestFields(format!(
                 "embedded_files digest for {:?} does not match the store content",
-                file.path
+                entry.path
             )));
         }
     }
@@ -730,40 +835,51 @@ fn le_u64(win: &[u8]) -> u64 {
 }
 
 /// Normalize raw document bytes for embedding: valid UTF-8 only, remove one
-/// leading BOM, convert CRLF and lone CR to LF, preserve terminal-newline
-/// state, and enforce the [`MAX_PAYLOAD_BYTES`] encoded-byte limit.
+/// leading BOM, convert CRLF and lone CR to LF, and preserve
+/// terminal-newline state. Pure normalization — the payload cap is the
+/// configured knob, enforced once on the aggregate.
 pub fn normalize_document(bytes: &[u8]) -> Result<String, CompileError> {
     let text = std::str::from_utf8(bytes).map_err(|_| CompileError::InvalidUtf8)?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     // CRLF first, then any surviving lone CR; a terminal newline maps to a
     // terminal LF, and a document without one stays without one.
-    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-    if normalized.len() > MAX_PAYLOAD_BYTES {
-        return Err(CompileError::PayloadTooLarge);
+    Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+/// Enforce the configured aggregate payload cap over `total_bytes` of
+/// embedded payload. This is the single bound the compile enforces: the
+/// caller passes the aggregate of normalized document bytes plus verbatim
+/// asset bytes; the reader enforces no cap (decode validates lengths
+/// against file bounds and checksum).
+pub fn enforce_payload_cap(total_bytes: u64, max_payload_bytes: u64) -> Result<(), CompileError> {
+    if total_bytes > max_payload_bytes {
+        return Err(CompileError::PayloadTooLarge {
+            total: total_bytes,
+            cap: max_payload_bytes,
+        });
     }
-    Ok(normalized)
+    Ok(())
 }
 
 /// Normalize a set of documents with [`normalize_document`] and enforce the
-/// AGGREGATE [`MAX_PAYLOAD_BYTES`] limit across all embedded bytes: the sum
-/// of normalized byte lengths must not exceed 16 MiB, so no single document
-/// can smuggle an artifact past the cap by splitting it. Normalization rules
-/// are byte-for-byte the per-document rules: valid UTF-8 only, one BOM
-/// removed, CRLF and lone CR converted to LF, terminal-newline state
-/// preserved.
-pub fn normalize_documents(documents: &[&[u8]]) -> Result<Vec<String>, CompileError> {
+/// AGGREGATE `max_payload_bytes` limit across all embedded document bytes:
+/// the sum of normalized byte lengths must not exceed the configured cap,
+/// so no single document can smuggle an artifact past the cap by splitting
+/// it. Normalization rules are byte-for-byte the per-document rules: valid
+/// UTF-8 only, one BOM removed, CRLF and lone CR converted to LF,
+/// terminal-newline state preserved.
+pub fn normalize_documents(
+    documents: &[&[u8]],
+    max_payload_bytes: u64,
+) -> Result<Vec<String>, CompileError> {
     let mut normalized = Vec::with_capacity(documents.len());
-    let mut total = 0usize;
+    let mut total = 0u64;
     for document in documents {
         let text = normalize_document(document)?;
-        total = total
-            .checked_add(text.len())
-            .ok_or(CompileError::PayloadTooLarge)?;
+        total = total.saturating_add(u64::try_from(text.len()).unwrap_or(u64::MAX));
         normalized.push(text);
     }
-    if total > MAX_PAYLOAD_BYTES {
-        return Err(CompileError::PayloadTooLarge);
-    }
+    enforce_payload_cap(total, max_payload_bytes)?;
     Ok(normalized)
 }
 
@@ -989,18 +1105,35 @@ fn normalization_removes_bom_and_normalizes_line_endings() {
         normalize_document(&[0xFF, 0xFE]),
         Err(CompileError::InvalidUtf8)
     );
+}
 
-    // 16 MiB limit: exactly at the cap passes, one byte over is named.
-    let at_cap = vec![b'a'; MAX_PAYLOAD_BYTES];
+/// The payload cap is the configured `--max-payload-bytes` knob, enforced
+/// by the aggregate normalization pass: an aggregate at the cap passes, one
+/// byte over is named with its total and cap, and raising the cap accepts
+/// what the smaller cap rejected.
+#[test]
+fn normalize_documents_enforces_configured_cap() {
+    let docs: Vec<&[u8]> = vec![b"one\n", b"two\n"];
+    let total = ("one\n".len() + "two\n".len()) as u64;
+
+    // Under a generous cap: both normalize.
+    let normalized = normalize_documents(&docs, 1 << 20).expect("under cap");
+    assert_eq!(normalized, vec!["one\n", "two\n"]);
+
+    // Exactly at the configured cap passes.
+    assert!(normalize_documents(&docs, total).is_ok());
+
+    // One byte over the configured cap is named with the total AND cap.
     assert_eq!(
-        normalize_document(&at_cap),
-        Ok("a".repeat(MAX_PAYLOAD_BYTES))
+        normalize_documents(&docs, total - 1),
+        Err(CompileError::PayloadTooLarge {
+            total,
+            cap: total - 1
+        })
     );
-    let over_cap = vec![b'a'; MAX_PAYLOAD_BYTES + 1];
-    assert_eq!(
-        normalize_document(&over_cap),
-        Err(CompileError::PayloadTooLarge)
-    );
+
+    // Raising the cap accepts what the smaller cap rejected.
+    assert!(normalize_documents(&docs, total + 1).is_ok());
 }
 
 /// `Read` wrapper that counts delivered bytes, so the probe tests can pin
@@ -1320,6 +1453,9 @@ mod tests {
 use super::manifest::Manifest;
 
 #[cfg(test)]
+use super::store::StoreAsset;
+
+#[cfg(test)]
 use super::store::StoreDocument;
 
 /// BLAKE3 hex digest used in manifest `embedded_files` entries.
@@ -1350,35 +1486,41 @@ fn sample_documents() -> [StoreDocument; 3] {
     ]
 }
 
-/// A schema-2 manifest for the entry-point document, listing every embedded
-/// file in canonical index order.
+/// A schema-3 manifest for the entry-point document, listing every embedded
+/// file in canonical index order (same order as the store index).
 #[cfg(test)]
 fn sample_manifest(documents: &[StoreDocument], index: &StoreIndex) -> Manifest {
+    let embedded_files: Vec<manifest::EmbeddedFile> = index
+        .entries
+        .iter()
+        .map(|entry| {
+            let bytes = &documents
+                .iter()
+                .find(|d| d.path == entry.path)
+                .expect("entry must reference a sampled document")
+                .bytes;
+            manifest::EmbeddedFile {
+                asset_class: entry.asset_class.clone(),
+                class: manifest::ManifestClass::Public,
+                digest: digest(bytes),
+                kind: entry.kind,
+                length: entry.length,
+                path: Some(entry.path.clone()),
+            }
+        })
+        .collect();
+    let total_embedded_bytes = embedded_files.iter().map(|f| f.length).sum();
     Manifest {
         manifest_schema: manifest::MANIFEST_SCHEMA,
         source_name: "routes/main.yaml".to_string(),
         runtime_version: manifest::RUNTIME_VERSION.to_string(),
         kind: TrailerKind::Route,
+        artifact_kind: "server".to_string(),
         components: vec!["direct".to_string()],
         env_names: vec![],
         listeners: vec![],
-        embedded_files: index
-            .entries
-            .iter()
-            .map(|entry| {
-                let bytes = &documents
-                    .iter()
-                    .find(|d| d.path == entry.path)
-                    .expect("entry must reference a sampled document")
-                    .bytes;
-                manifest::EmbeddedFile {
-                    digest: digest(bytes),
-                    kind: entry.kind,
-                    length: entry.length,
-                    path: entry.path.clone(),
-                }
-            })
-            .collect(),
+        embedded_files,
+        total_embedded_bytes,
     }
 }
 
@@ -1701,30 +1843,36 @@ fn aggregate_normalization_preserves_utf8_bom_newlines_and_cap() {
     // Action + assertion: normalization is byte-for-byte the per-document
     // rules — BOM removed, CRLF and lone CR to LF, terminal-newline state
     // preserved (one keeps its trailing LF, the other stays without one).
-    let normalized = normalize_documents(&docs).expect("valid set must normalize");
+    let normalized =
+        normalize_documents(&docs, MAX_PAYLOAD_BYTES as u64).expect("valid set must normalize");
     assert_eq!(normalized[0], "routes:\n- id: a\n  from: direct:a\n");
     assert_eq!(normalized[1], "routes:\n- id: b\nfrom: direct:b");
 
     // Invalid UTF-8 in any entry is named.
     let invalid: Vec<&[u8]> = vec![b"ok", &[0xFF, 0xFE]];
     assert_eq!(
-        normalize_documents(&invalid),
+        normalize_documents(&invalid, MAX_PAYLOAD_BYTES as u64),
         Err(CompileError::InvalidUtf8)
     );
 
-    // Aggregate cap: two documents each under the per-document cap, but
-    // their sum over 16 MiB is rejected.
+    // Aggregate cap: two documents each under the cap, but their sum
+    // over the configured 16 MiB default is rejected with the total
+    // and cap named.
     let half = vec![b'a'; MAX_PAYLOAD_BYTES / 2 + 1];
     let over: Vec<&[u8]> = vec![&half, &half];
     assert_eq!(
-        normalize_documents(&over),
-        Err(CompileError::PayloadTooLarge)
+        normalize_documents(&over, MAX_PAYLOAD_BYTES as u64),
+        Err(CompileError::PayloadTooLarge {
+            total: (2 * (MAX_PAYLOAD_BYTES / 2 + 1)) as u64,
+            cap: MAX_PAYLOAD_BYTES as u64,
+        })
     );
 
     // Exactly at the aggregate cap passes.
     let half = &half[..MAX_PAYLOAD_BYTES / 2];
     let at_cap: Vec<&[u8]> = vec![half, half];
-    let normalized = normalize_documents(&at_cap).expect("aggregate at cap must pass");
+    let normalized =
+        normalize_documents(&at_cap, MAX_PAYLOAD_BYTES as u64).expect("aggregate at cap must pass");
     assert_eq!(normalized[0].len() + normalized[1].len(), MAX_PAYLOAD_BYTES);
 }
 
@@ -1801,16 +1949,20 @@ fn v2_manifest_store_disagreement_fails_closed() {
         source_name: "routes/main.yaml".to_string(),
         runtime_version: manifest::RUNTIME_VERSION.to_string(),
         kind: TrailerKind::Route,
+        artifact_kind: "server".to_string(),
         components: vec![],
         env_names: vec![],
         listeners: vec![],
+        total_embedded_bytes: store.index.entries[..1].iter().map(|e| e.length).sum(),
         embedded_files: store.index.entries[..1]
             .iter()
             .map(|entry| manifest::EmbeddedFile {
+                asset_class: entry.asset_class.clone(),
+                class: manifest::ManifestClass::Public,
                 digest: digest(b"[profiles.default]\n"),
                 kind: entry.kind,
                 length: entry.length,
-                path: entry.path.clone(),
+                path: Some(entry.path.clone()),
             })
             .collect(),
     };
@@ -1843,8 +1995,11 @@ fn v2_manifest_store_disagreement_fails_closed() {
     ));
 
     // Path/kind/length disagreement: one entry's length points elsewhere.
+    // The aggregate is moved with it so the schema-3 total check passes
+    // and the positional agreement rule is what rejects the image.
     let mut wrong_length = sample_manifest(&documents, &store.index);
     wrong_length.embedded_files[2].length += 1;
+    wrong_length.total_embedded_bytes += 1;
     let encoded = encode_v2(&TrailerV2 {
         kind: TrailerKind::Route,
         content: store.content,
@@ -1854,7 +2009,7 @@ fn v2_manifest_store_disagreement_fails_closed() {
     assert!(matches!(
         decode_artifact(&encoded),
         Err(TrailerError::InvalidManifestFields(reason))
-            if reason.contains("disagrees with the store entry path/kind/length")
+            if reason.contains("disagrees with the store entry kind/length")
     ));
 }
 
@@ -1891,6 +2046,102 @@ fn v2_manifest_source_name_entry_point_mismatch_fails_closed() {
                  \"routes/main.yaml\""
             )
     ));
+}
+
+/// r2embed Task 2.2: schema-2-store/schema-3-manifest agreement handles
+/// null-path secret entries — the derived form (secret entry with
+/// `path: null`) passes, a secret entry carrying a path fails closed, and
+/// a public entry with a null path fails closed, each with a named
+/// class/path diagnostic.
+#[test]
+fn v2_manifest_store_agreement_handles_secret_null_path() {
+    let route_text = "routes:\n- id: a\n  from: timer:a\n  steps:\n    - to: direct:a\n";
+    let documents = [StoreDocument {
+        path: "routes/app.yaml".to_string(),
+        kind: StoreEntryKind::Route,
+        bytes: route_text.as_bytes().to_vec(),
+    }];
+    let assets = [
+        StoreAsset {
+            bytes: b"CERT-BYTES".to_vec(),
+            class: Some("certificate".to_string()),
+            path: "tls/server.crt".to_string(),
+        },
+        StoreAsset {
+            bytes: b"KEY-BYTES".to_vec(),
+            class: Some("private key".to_string()),
+            path: "tls/server.key".to_string(),
+        },
+    ];
+    let store = VirtualDocumentStore::build_with_assets(
+        "routes/app.yaml",
+        &documents,
+        &assets,
+        &[],
+        &["routes/app.yaml".to_string()],
+        &[],
+    )
+    .expect("store must build");
+    let index_bytes = store.index.encode_canonical().expect("index encodes");
+    let base = manifest::derive_for_store(
+        &store,
+        TrailerKind::Route,
+        &[("routes/app.yaml".to_string(), route_text.to_string())],
+    )
+    .expect("manifest must derive");
+
+    let encode_with = |manifest: &Manifest| {
+        encode_v2(&TrailerV2 {
+            kind: TrailerKind::Route,
+            content: store.content.clone(),
+            index: index_bytes.clone(),
+            manifest: manifest.to_canonical_json().into_bytes(),
+        })
+    };
+
+    // Variant A (valid): the derived secret entry withholds its path.
+    let decoded = decode_artifact(&encode_with(&base))
+        .expect("the null-path secret form must decode")
+        .expect("terminal magic must mark the trailer present");
+    assert!(matches!(decoded, DecodedArtifact::V2(_)));
+
+    // Variant B (invalid): a secret entry carrying a non-null path. The
+    // schema-3 field rules name it first; the agreement check (below,
+    // never reached for this shape) enforces the same rule against the
+    // store index as defense in depth.
+    let mut leaked = base.clone();
+    let secret = leaked
+        .embedded_files
+        .iter_mut()
+        .find(|f| f.class == manifest::ManifestClass::Secret)
+        .expect("the private-key asset must be class secret");
+    secret.path = Some("assets/tls/server.key".to_string());
+    assert!(
+        matches!(
+            decode_artifact(&encode_with(&leaked)),
+            Err(TrailerError::InvalidManifestFields(reason))
+                if reason.contains("secret entry must withhold its path")
+                    && reason.contains("server.key")
+        ),
+        "a secret entry with a path must fail closed by name"
+    );
+
+    // Variant C (invalid): a public entry with a null path.
+    let mut hidden = base.clone();
+    let public = hidden
+        .embedded_files
+        .iter_mut()
+        .find(|f| f.class == manifest::ManifestClass::Public && f.kind == StoreEntryKind::Asset)
+        .expect("the certificate asset must be listed");
+    public.path = None;
+    assert!(
+        matches!(
+            decode_artifact(&encode_with(&hidden)),
+            Err(TrailerError::InvalidManifestFields(reason))
+                if reason.contains("public entry must carry its path")
+        ),
+        "a public entry with a null path must fail closed by name"
+    );
 }
 
 #[cfg(test)]
@@ -1962,7 +2213,7 @@ mod v2_corruption_tests {
         let mut bad_schema_manifest = sample_manifest(&documents, &store.index)
             .to_canonical_json()
             .into_bytes();
-        let needle = br#""manifest_schema":2"#.to_vec();
+        let needle = br#""manifest_schema":3"#.to_vec();
         let pos = bad_schema_manifest
             .windows(needle.len())
             .position(|w| w == needle.as_slice())
@@ -2203,20 +2454,20 @@ mod v2_corruption_tests {
         });
         assert!(decode_artifact(&v1).is_ok());
 
-        // And a v1 artifact carrying an explicit schema-2 manifest is
-        // rejected too: each trailer version accepts exactly its own
-        // manifest form.
-        let v1_schema2_manifest = format!(
-            r#"{{"components":[],"embedded_files":[],"env_names":[],"kind":"route","listeners":[],"manifest_schema":2,"runtime_version":"{rt}","source_name":"routes/main.yaml"}}"#,
+        // And a v1 artifact carrying an explicit current manifest schema
+        // is rejected too: each trailer version accepts exactly its own
+        // manifest form (v1 accepts only the schema-less legacy form).
+        let v1_schema3_manifest = format!(
+            r#"{{"artifact_kind":"server","components":[],"embedded_files":[],"env_names":[],"kind":"route","listeners":[],"manifest_schema":3,"runtime_version":"{rt}","source_name":"routes/main.yaml","total_embedded_bytes":0}}"#,
             rt = manifest::RUNTIME_VERSION,
         );
-        let v1_schema2 = encode(&Trailer {
+        let v1_schema3 = encode(&Trailer {
             kind: TrailerKind::Route,
             payload: b"routes:\n- id: main\n  from: direct:in\n".to_vec(),
-            manifest: v1_schema2_manifest.into_bytes(),
+            manifest: v1_schema3_manifest.into_bytes(),
         });
         assert_eq!(
-            decode_artifact(&v1_schema2),
+            decode_artifact(&v1_schema3),
             Err(TrailerError::InvalidManifestSchema(
                 manifest::MANIFEST_SCHEMA
             ))

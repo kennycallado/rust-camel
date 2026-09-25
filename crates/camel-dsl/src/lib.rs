@@ -39,8 +39,8 @@ pub use discovery::{
     discover_virtual_store,
 };
 pub use embedded_store::{
-    STORE_SCHEMA, SourcePlan, StoreDocument, StoreEntry, StoreEntryKind, StoreError, StoreIndex,
-    VirtualDocumentStore,
+    STORE_SCHEMA, SourcePlan, StoreAsset, StoreDocument, StoreEntry, StoreEntryKind, StoreError,
+    StoreIndex, SubstitutionContext, SubstitutionEntry, SubstitutionSpan, VirtualDocumentStore,
 };
 pub use env_interpolation::{interpolate_with_args, interpolate_yaml_source};
 pub use json::{

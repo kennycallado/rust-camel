@@ -13,6 +13,9 @@ categories.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+# Asset-registry digest verification (r2embed task 3.1); same locked
+# workspace crate camel-api/camel-cli already use.
+blake3.workspace = true
 camel-api.workspace = true
 camel-config.workspace = true
 camel-component-api.workspace = true

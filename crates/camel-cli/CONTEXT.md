@@ -144,10 +144,16 @@ appended (ADR-0075). The payload is captured before `${env:}` interpolation,
 so `${env:NAME}` expressions resolve from the deployment environment at
 artifact runtime, never from the compile environment. This crate owns both
 sides of the format: `compile::sources` (`SourceSelection`, `resolve`)
-resolves compile inputs, `compile::trailer` owns the `CAMELTR1` codec
-(v1 68-byte footer, v2 76-byte footer, `decode_artifact` dispatch), and
-`compile::manifest` owns the operational manifest with its independent
-`manifest_schema: 2` and `embedded_files` list. The canonical store model
+resolves compile inputs, `compile::policy` collects and confines the R2
+asset-reference matrix, `compile::store` embeds asset entries into the
+store, `compile::trailer` owns the `CAMELTR1` codec (v1 68-byte footer,
+v2 76-byte footer, `decode_artifact` dispatch), `compile::manifest` owns
+the operational manifest with its independent `manifest_schema: 3`
+(paired with `store_schema: 2`) and `embedded_files` list, and
+`compile::materialize` owns the confined per-boot asset materialization.
+`compile::runtime` owns the artifact boot seam: registry population,
+substitution, and the materialization guard, all before the route/job
+kind dispatch. The canonical store model
 lives in camel-dsl and is re-exported verbatim; this crate never defines a
 second one.
 
@@ -161,18 +167,39 @@ components, non-UTF-8 names, symlink escapes, duplicate canonical targets,
 duplicate logical paths, and out-of-root references fail with exit 2
 before any output is created. Declared pattern order is preserved and each
 pattern's matches sort by normalized logical path, so identical inputs
-produce identical artifact bytes. The aggregate normalized embedded bytes
-stay capped at 16 MiB. The store packs typed entries (`route`, `job`,
-`config`, `include`, `profile`) plus a canonical index (`store_schema: 1`,
-one logical entry point, ordered source plan). Compilation also fails
-closed (exit 2, no output) for non-native targets, for unsupported
-asset-bearing endpoint fields (certificates, private keys, CA files,
-WASM/plugin files, XSLT/XSD, SQL files, static directories, literal secret
-files, dynamic placeholders in those fields), and for compile-time
-`CAMEL_*` overrides. Explicitly declared route files, includes, profile
-sections, and job route sources are the supported virtual documents, not
-assets. Asset-bearing endpoint URI schemes (`wasm:`, `xslt:`,
-`validator:`) stay rejected in every URI-bearing field. Runtime endpoint
+produce identical artifact bytes. The aggregate bound (normalized
+document bytes plus verbatim asset bytes) defaults to 16 MiB and moves
+with `--max-payload-bytes`; the reader stays cap-free. The store packs
+typed entries (`route`, `job`, `config`, `include`, `profile`, `asset`)
+plus a canonical index (`store_schema: 2`, one logical entry point,
+ordered source plan, and the compile-time substitution table). Asset
+entries live under the `assets/` logical namespace and embed bytes
+verbatim — no BOM removal, no newline conversion, no UTF-8 requirement.
+Compilation embeds the R2 asset matrix: TLS-context `cert`/`key`/
+`client_ca` document fields, TLS endpoint URI parameters (`tlsCert`/
+`tlsKey` on HTTP/WS; gRPC `serverCertPath`/`serverKeyPath`/`clientCaPath`
+server-side and `caCertPath`/`clientCertPath`/`clientKeyPath`
+client-side), `xslt`/`xsd` fields and `xslt:`/`validator:` URI operands,
+`sql:file:` operands, and `static_dir` step-parameter trees. Compilation
+also fails closed (exit 2, no output) for non-native targets; for `wasm:`
+URI operands, `[beans.<name>]` plugin entries, and
+`[security.permissions.<name>]` WASM-provider `path` declarations
+(R2-only deferrals, bd rc-2ygmc / rc-fjutr — not permanent rejections);
+for file-valued secret fields — exactly the private-key family
+(`key`/`tlsKey`/`serverKeyPath`/`clientKeyPath`) — without
+`--embed-secrets` (bd rc-p823t: with the flag the artifact embeds the
+secret and writes mode 0700, otherwise 0755); for dynamic `${env:}`
+placeholders and absolute paths inside asset fields and TLS URI
+parameters; for a symlink inside a `static_dir` tree; and for
+compile-time `CAMEL_*` overrides. Two authoring shapes stay bounded: a
+document-level `static_dir:` key compiles into the store but is rejected
+at discovery as an unknown route field — fail-late, fail-closed
+(bd rc-epx5i); a document-field `tls:` block compiles, embeds, and
+materializes but has no booting consumer, because route-level `tls:` is
+an unknown DSL field at discovery — the bootable TLS shape is the
+`https://` URI parameters (bd rc-7mzdu). Explicitly declared route files,
+includes, profile sections, and job route sources are the supported
+virtual documents, not assets. Runtime endpoint
 URI paths (e.g. `file:`, `kafka:`, `log:`), runtime `${env:}` expressions
 outside forbidden fields, and deploy-side network/file I/O remain
 permitted.
@@ -183,12 +210,37 @@ corruption, an unsupported trailer version, or an unsupported
 store/manifest schema exits 2 with an integrity diagnostic; a valid
 artifact accepts only `--report <path>`, `--help`, `--version`, and
 `--manifest` (anything else exits 2 naming the argument). `--manifest`
-prints the manifest — schema, runtime version, kind, `embedded_files` metadata,
-components, required environment names, and listeners — and exits 0 without boot.
+prints the manifest — schema, runtime version, kind, `embedded_files`
+metadata (asset paths, classes, lengths, digests), `artifact_kind`,
+`total_embedded_bytes`, components, required environment names, and
+listeners — and exits 0 without boot; secret-class entries print only the
+class, length, and digest, the logical path stays withheld, and no asset
+bytes or key material appear in any output or log.
 Decoding yields an `EmbeddedRequest`: v1 trailers adapt to
 `EmbeddedRequest::SingleDocument` with unchanged behavior; v2 trailers
 build `EmbeddedRequest::VirtualStore` with the decoded store, manifest,
-and one entry point. Route artifacts call
+and one entry point. After decode and before the route/job kind dispatch —
+the single swap point, so both artifact kinds get identical treatment —
+the runtime populates the camel-bundles asset registry from the
+positionally paired store and manifest entries and applies the
+substitution table: recorded byte spans in document text and embedded
+config are rewritten last-offset-first to the confined per-boot
+materialization paths of the disk-written classes (`uri` sites
+percent-encoded, `literal` sites raw), while static files stay
+memory-served through the registry. The runtime never text-searches or
+canonicalizes declared strings, and TLS-class resolution is embedded-only
+with no host fallback. The substitution path-safety rule (valid UTF-8, no
+ASCII control characters at all sites; `literal` sites limited to
+`[A-Za-z0-9._/+-]`) fails closed before boot. `compile::materialize`
+writes only substitution-targeted assets into a random per-boot directory
+under `std::env::temp_dir()` — directory 0700, files 0600 via
+`create_new`, the nearest-existing ancestor re-checked across every
+created component — and a guard removes the directory on shutdown AND
+boot failure; `SIGKILL`, `process::exit`, or the second-stop-signal
+force-exit bypasses the guard and leaves residue (documented, bd
+rc-0ks57). An artifact with only static-file assets needs no writable
+temp; one with a disk-written class exits 2 before boot when
+`std::env::temp_dir()` is unwritable. Route artifacts call
 `camel_dsl::discover_virtual_store`, register every referenced route, and
 reuse the existing `camel run` boot, context start, signal shutdown,
 report, and exit handling with watch disabled; job artifacts consume the
@@ -197,8 +249,11 @@ lifecycle. Virtual source diagnostics use the `compiled://<logical-path>`
 identity. The runtime performs no source or config reads, no globbing, no
 canonicalization, no extraction, and no watch; only deployment-time
 endpoint I/O and `${env:}` resolution run. Stores are validated before
-boot, and unknown schemas, invalid references, malformed ranges, kind
-mismatches, checksum failures, or missing configuration entries exit 2
+boot, and unknown schemas, unpaired schema versions, invalid references,
+malformed ranges, kind mismatches, checksum failures, asset digest
+mismatches (the manifest/store agreement at decode owns the integrity
+check; the registry check is defense-in-depth), or missing configuration
+entries exit 2
 with zero routes booted, so artifacts run from a read-only root and a file
 placed beside the artifact after compilation is never loaded.
 
@@ -212,10 +267,13 @@ component boot, and context start, so no boot-speed claim is made before P0
 measurement.
 
 Extension boundaries sit on the store, not on new formats. R2 (deploy-time
-asset embedding) may add embedded files to the store; R3 (multi-entry
+asset embedding, landed) added asset entries and the substitution table to
+the store; R3 (multi-entry
 artifacts) may extend entry-point cardinality using the same store without
-changing R1 runtime semantics. Compression, signing, and cross-target
-compilation stay deferred.
+changing R1 runtime semantics. Compression (R6), signing (R4), and
+cross-target compilation (R7) stay deferred as roadmap milestones, not
+permanent non-goals; component-crate byte seams are additive
+per-consumer follow-ups.
 
 ## Build profiles
 

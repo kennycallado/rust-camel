@@ -1314,6 +1314,7 @@ name = "camel-bundles"
 version = "0.54.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "camel-api",
  "camel-auth",
  "camel-component-api",

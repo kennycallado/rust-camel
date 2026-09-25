@@ -11,9 +11,10 @@
 //! `<output>.tmp` (executable copy + v2 trailer) and renames it onto the
 //! output path. Every rejection — non-native target, dirty compile
 //! environment, `Camel.toml` in the working directory without
-//! `--config`, invalid UTF-8, oversize payload, unsupported asset,
-//! unresolvable or unconfined source, duplicate source, unknown
-//! profile, unparsable document — exits 2 with a named diagnostic;
+//! `--config`, invalid UTF-8, aggregate payload over the configured
+//! `--max-payload-bytes` cap, unsupported asset, secret-family asset
+//! without `--embed-secrets`, unresolvable or unconfined source,
+//! duplicate source, unknown profile, unparsable document — exits 2 with a named diagnostic;
 //! failures never delete or truncate a pre-existing output and never
 //! leave a usable partial artifact.
 //!
@@ -35,7 +36,7 @@ use clap::Args;
 use crate::compile::manifest;
 use crate::compile::policy;
 use crate::compile::sources::{self, SourceSelection};
-use crate::compile::store::VirtualDocumentStore;
+use crate::compile::store::{StoreEntryKind, VirtualDocumentStore};
 use crate::compile::trailer::{self, TrailerKind, TrailerV2};
 
 /// Exit code for every named compile rejection.
@@ -68,6 +69,25 @@ pub struct CompileArgs {
     /// Requires `--config`.
     #[arg(long = "profile", value_name = "NAME")]
     pub profile: Vec<String>,
+
+    /// Aggregate payload cap in bytes: the normalized document bytes plus
+    /// the verbatim asset bytes of one artifact must not exceed it. Must
+    /// be positive; defaults to 16777216 (16 MiB).
+    #[arg(
+        long,
+        value_name = "BYTES",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub max_payload_bytes: Option<u64>,
+
+    /// Opt in to embedding secret-family assets (exactly the private-key
+    /// family: the document `key` field and the `tlsKey`, `serverKeyPath`,
+    /// and `clientKeyPath` TLS URI parameters). Without this flag a
+    /// compile that collects a private-key asset fails closed before any
+    /// output; with it the secret embeds and the artifact is written
+    /// mode 0700.
+    #[arg(long)]
+    pub embed_secrets: bool,
 }
 
 /// Native target triple of this executable (`<arch>-unknown-linux-<libc>`).
@@ -175,9 +195,17 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
     // Resolve and confine the explicit multi-document source set. This
     // is the single read of the entry document; the normalized text the
     // resolver captured is what every later gate sees.
+    // The cap threads to the single aggregation point in
+    // `sources::resolve`; the flag-level validation (positive) already
+    // ran in the clap value parser, before any work.
+    let max_payload_bytes = args
+        .max_payload_bytes
+        .unwrap_or(trailer::MAX_PAYLOAD_BYTES as u64);
     let selection = SourceSelection {
         config_path: args.config.clone(),
         profiles: args.profile.clone(),
+        max_payload_bytes,
+        embed_secrets: args.embed_secrets,
     };
     let sources = match sources::resolve(&args.document, kind, &selection) {
         Ok(sources) => sources,
@@ -224,12 +252,17 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
     }
 
     // Build the canonical v2 store and the schema-2 manifest that
-    // mirrors it — all before any output byte exists.
-    let store = match VirtualDocumentStore::build(
+    // mirrors it — all before any output byte exists. The confined
+    // deploy-time assets and the substitution table resolved by
+    // `sources::resolve` (r2embed Task 1.2) join the documents in the
+    // store's canonical interleave.
+    let store = match VirtualDocumentStore::build_with_assets(
         &sources.entry_point,
         &sources.documents,
+        &sources.assets,
         &sources.config_references,
         &sources.source_plan,
+        &sources.substitutions,
     ) {
         Ok(store) => store,
         Err(e) => {
@@ -255,13 +288,26 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
     // Copy the current executable and append the v2 trailer
     // (`CAMELTR1 || content || index || manifest || 76-byte footer`) as
     // the only write phase.
+    // Single artifact write site: the file mode follows the store class
+    // inventory. Any embedded secret-family entry — exactly the
+    // private-key class, which only reaches the store under
+    // `--embed-secrets` — makes the artifact 0700 so secret material is
+    // never world-executable; everything else keeps 0755.
+    let artifact_mode = if store.index.entries.iter().any(|entry| {
+        entry.kind == StoreEntryKind::Asset
+            && entry.asset_class.as_deref() == Some(policy::SECRET_ASSET_CLASS)
+    }) {
+        0o700
+    } else {
+        0o755
+    };
     let artifact = TrailerV2 {
         kind,
         content: store.content,
         index: index_bytes,
         manifest: operational.to_canonical_json().into_bytes(),
     };
-    if let Err(e) = write_artifact(&args.output, &trailer::encode_v2(&artifact)) {
+    if let Err(e) = write_artifact(&args.output, &trailer::encode_v2(&artifact), artifact_mode) {
         eprintln!("camel compile: {e}");
         return EXIT_REJECTION;
     }
@@ -282,11 +328,19 @@ fn document_kind(path: &Path) -> Option<TrailerKind> {
 
 /// Copy `current_exe()` plus the encoded trailer into `output` atomically.
 /// Both are written to the sibling `<output>.tmp` first, flushed to disk,
-/// and only the complete temp file is renamed onto `output`. On any failure
-/// the temp file is removed and any pre-existing output is left untouched —
-/// a rejected or failed compile never deletes or truncates an existing
-/// artifact, and no partial artifact is ever visible at `output`.
-fn write_artifact(output: &Path, trailer_bytes: &[u8]) -> Result<(), String> {
+/// and only the complete temp file is renamed onto `output`, carrying
+/// `mode` (0755 for secret-free artifacts, 0700 when secret-family
+/// entries are embedded). The temp file is created exclusively, in one
+/// `create_new` open, with its final mode — so no window exists where
+/// secret-bearing bytes sit in a readable file before a post-copy chmod,
+/// and a planted symlink at `<output>.tmp` is refused instead of being
+/// followed. A pre-existing `<output>.tmp` (for example left by a crashed
+/// run) fails that open with a clear error naming it; this fail-closed
+/// behavior is intentional. On any failure the temp file is removed and
+/// any pre-existing output is left untouched — a rejected or failed
+/// compile never deletes or truncates an existing artifact, and no
+/// partial artifact is ever visible at `output`.
+fn write_artifact(output: &Path, trailer_bytes: &[u8], mode: u32) -> Result<(), String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("cannot locate the current executable: {e}"))?;
     let mut tmp_name = output.as_os_str().to_owned();
@@ -300,15 +354,23 @@ fn write_artifact(output: &Path, trailer_bytes: &[u8]) -> Result<(), String> {
     }
 
     let write = || -> std::io::Result<()> {
-        let mut out = std::fs::File::create(&tmp)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        // The file is born with its final mode (no post-copy chmod), and
+        // `create_new` refuses an existing entry — including a planted
+        // symlink — at the temp path instead of truncating and following
+        // it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(mode);
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        let mut out = opts.open(&tmp)?;
         let mut exe_file = std::fs::File::open(&exe)?;
         std::io::copy(&mut exe_file, &mut out)?;
         out.write_all(trailer_bytes)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            out.set_permissions(std::fs::Permissions::from_mode(0o755))?;
-        }
         // Flush the complete artifact before the rename (the same
         // temp-then-rename durability convention as the file component's
         // `atomic_write`).
@@ -351,6 +413,8 @@ mod empty_config_tests {
             target: None,
             config: Some(PathBuf::from("")),
             profile: Vec::new(),
+            max_payload_bytes: None,
+            embed_secrets: false,
         };
         assert_eq!(
             run_compile(&args),

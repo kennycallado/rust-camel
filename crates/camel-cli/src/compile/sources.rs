@@ -32,14 +32,18 @@
 //! and `routeFilesFromRoot` — whose runtime anchor is a discovered
 //! Camel.toml root — is rejected instead.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
 use noyalib::compat::serde_yaml as serde_yml;
 
 use super::CompileError;
-use super::store::{StoreDocument, StoreEntryKind, validate_path};
+use super::policy::{self, AssetRef};
+use super::store::{
+    StoreAsset, StoreDocument, StoreEntryKind, SubstitutionContext, SubstitutionEntry,
+    SubstitutionSpan, validate_path,
+};
 use super::trailer::{self, TrailerKind};
 
 /// Explicit compile-time source selection (the `--config` and
@@ -53,6 +57,14 @@ pub struct SourceSelection {
     /// Selected profile names in declaration order (`--profile <name>`,
     /// repeatable).
     pub profiles: Vec<String>,
+    /// Configured aggregate payload cap in bytes (`--max-payload-bytes`):
+    /// normalized document bytes plus verbatim asset bytes must fit under
+    /// it. Always positive.
+    pub max_payload_bytes: u64,
+    /// Secret-embed opt-in (`--embed-secrets`): without it, a collected
+    /// secret-family asset (exactly the private-key family) fails the
+    /// compile closed; with it, secret material embeds normally.
+    pub embed_secrets: bool,
 }
 
 /// The resolved, confined document set for one compile.
@@ -72,6 +84,12 @@ pub struct ResolvedSources {
     /// `(logical path, normalized text)` of every route/job document in
     /// plan order, for the asset policy and manifest derivation.
     pub route_documents: Vec<(String, String)>,
+    /// Confined deploy-time assets (r2embed Task 1.2): one entry per
+    /// canonical target, bytes embedded verbatim.
+    pub assets: Vec<StoreAsset>,
+    /// The compile-time substitution table: every (document, declared
+    /// string) spelling pair with its byte spans and asset logical path.
+    pub substitutions: Vec<SubstitutionEntry>,
 }
 
 /// Named source-resolution failures. Every variant carries the operator
@@ -125,9 +143,87 @@ pub enum SourceError {
     /// (reserved document suffix, unsupported extension, malformed
     /// glob).
     UnsupportedRouteSource(String),
+    /// A collected asset reference names a file that does not exist
+    /// under the selected root (reject-missing at compile time).
+    AssetMissing {
+        /// Document field or URI parameter the reference was declared in.
+        field: String,
+        /// Asset class of the reference.
+        class: String,
+        /// The declared path.
+        declared: String,
+    },
+    /// A collected asset reference resolves (after symlink-aware
+    /// canonicalization) outside the selected root.
+    AssetOutsideRoot {
+        /// Document field or URI parameter the reference was declared in.
+        field: String,
+        /// Asset class of the reference.
+        class: String,
+        /// The declared path.
+        declared: String,
+        /// The canonical confinement root.
+        root: PathBuf,
+    },
+    /// A collected asset reference is not a canonical relative name
+    /// (traversal, backslash, control byte, glob metacharacters, …).
+    AssetInvalidName {
+        /// Document field or URI parameter the reference was declared in.
+        field: String,
+        /// Asset class of the reference.
+        class: String,
+        /// The declared path.
+        declared: String,
+        /// The specific shape violation.
+        reason: String,
+    },
+    /// A symlink was encountered inside a `static_dir` tree: static
+    /// trees embed regular files only and fail closed on symlinks
+    /// (a silent skip could hide a pivot out of the tree).
+    StaticTreeSymlink {
+        /// The declared directory path.
+        declared: String,
+        /// The symlink, relative to the confinement root.
+        link: String,
+    },
+    /// A declared asset spelling does not occur verbatim in its site
+    /// entry's normalized bytes, so no substitution span can be
+    /// recorded (fail-closed rather than shipping an invalid index).
+    AssetSpanMissing {
+        /// The declared path.
+        declared: String,
+        /// The site entry logical path.
+        site: String,
+    },
+    /// Two substitution entries claim overlapping byte regions of one
+    /// site entry (one spelling occurring inside another's site): the
+    /// runtime rewrite walks spans last-offset-first assuming
+    /// disjointness, so overlap would double-rewrite a region.
+    AssetSpanOverlap {
+        /// The site entry logical path.
+        site: String,
+        /// The first overlapping declared spelling.
+        first: String,
+        /// The second overlapping declared spelling.
+        second: String,
+    },
     /// Normalization failed for the collected document set (invalid
-    /// UTF-8, or the aggregate 16 MiB embedded-byte cap).
+    /// UTF-8, or the configured aggregate payload cap breached by the
+    /// normalized bytes).
     Normalize(CompileError),
+    /// Compile policy rejected the collected configuration or document
+    /// set (fail-closed bean-plugin / WASM-security config assets, or
+    /// unusable document asset declarations). The wrapped error carries
+    /// the operator-facing diagnostic text unchanged.
+    Policy(CompileError),
+    /// A secret-family asset is present but `--embed-secrets` was not
+    /// passed: secret material never embeds without explicit opt-in.
+    SecretEmbedOptIn {
+        /// Document field or URI parameter the secret was declared in.
+        field: String,
+        /// The secret asset class name (always `private key`).
+        class: &'static str,
+    },
 }
 
 impl fmt::Display for SourceError {
@@ -183,11 +279,66 @@ impl fmt::Display for SourceError {
             Self::InvalidConfig(reason) => write!(f, "invalid configuration: {reason}"),
             Self::InvalidDocument(reason) => write!(f, "invalid document: {reason}"),
             Self::UnsupportedRouteSource(reason) => write!(f, "unsupported route source: {reason}"),
-            Self::Normalize(CompileError::PayloadTooLarge) => write!(
+            Self::AssetMissing {
+                field,
+                class,
+                declared,
+            } => write!(
                 f,
-                "embedded documents exceed the aggregate 16 MiB compile payload limit"
+                "asset field '{field}' ({class}): missing file '{declared}' under the \
+                 selected root (asset references resolve embedded-only and reject missing \
+                 at compile time)"
+            ),
+            Self::AssetOutsideRoot {
+                field,
+                class,
+                declared,
+                root,
+            } => write!(
+                f,
+                "asset field '{field}' ({class}): '{declared}' resolves outside the selected \
+                 root '{}' (confinement rejected; symlink escapes are not embeddable)",
+                root.display()
+            ),
+            Self::AssetInvalidName {
+                field,
+                class,
+                declared,
+                reason,
+            } => write!(
+                f,
+                "asset field '{field}' ({class}): invalid path '{declared}': {reason}"
+            ),
+            Self::StaticTreeSymlink { declared, link } => write!(
+                f,
+                "static directory '{declared}': symlink '{link}' inside the tree — static \
+                 trees embed regular files only and fail closed on symlinks instead of \
+                 silently skipping or following them"
+            ),
+            Self::AssetSpanMissing { declared, site } => write!(
+                f,
+                "asset '{declared}' in document '{site}': the declared spelling does not \
+                 occur verbatim in the normalized entry, so no substitution span can be \
+                 recorded"
+            ),
+            Self::AssetSpanOverlap {
+                site,
+                first,
+                second,
+            } => write!(
+                f,
+                "assets '{first}' and '{second}' in document '{site}': their substitution \
+                 spans overlap — one spelling occurs inside the other's site, and a \
+                 last-offset-first rewrite would corrupt the entry"
             ),
             Self::Normalize(inner) => write!(f, "{inner}"),
+            Self::Policy(inner) => write!(f, "{inner}"),
+            // allow-secret: names the field and class, never a secret value.
+            Self::SecretEmbedOptIn { field, class } => write!(
+                f,
+                "asset field '{field}' ({class}): embedding secret material requires \
+                 --embed-secrets (re-run with the flag to opt in)"
+            ),
         }
     }
 }
@@ -560,6 +711,14 @@ pub fn resolve(
             SourceError::InvalidConfig(format!("{}: {e}", config_canonical.display()))
         })?;
 
+        // r2embed Task 1.2: the selected Camel.toml itself must not
+        // declare bean plugins, WASM security permissions, or WASM
+        // security-policy modules — at the root and in every profile
+        // section that merges into the effective root (all fail closed
+        // before any output exists; recorded R2 deferrals).
+        policy::reject_config_assets(&config_logical, &config, &selection.profiles)
+            .map_err(SourceError::Policy)?;
+
         // Ordered include walk in canonical order, collected by
         // `camel_dsl::config_semantics::include_declarations`: top-level,
         // `[default]`, then each selected non-default profile section
@@ -605,9 +764,11 @@ pub fn resolve(
         config_references.push(config_logical);
 
         // Ordered includes: claimed, confined, embedded verbatim, and
-        // retained for profile-section extraction (camel-config applies
-        // profile sections per file, config first).
-        let mut include_tables: Vec<toml::Value> = Vec::with_capacity(include_decls.len());
+        // retained (with their logical paths) for profile-section
+        // extraction (camel-config applies profile sections per file,
+        // config first) and for the r2embed config-asset rejection.
+        let mut include_tables: Vec<(String, toml::Value)> =
+            Vec::with_capacity(include_decls.len());
         for declared in include_decls {
             let (canonical, logical) = resolver.resolve_declared_file(&declared, &root)?;
             let bytes = read_source(&canonical)?;
@@ -620,8 +781,16 @@ pub fn resolve(
                 kind: StoreEntryKind::Include,
                 bytes,
             });
-            config_references.push(logical);
-            include_tables.push(table);
+            config_references.push(logical.clone());
+            include_tables.push((logical, table));
+        }
+
+        // r2embed Task 1.2: every include in the chain obeys the same
+        // fail-closed bean-plugin / WASM-security rule, over its root
+        // and its runtime-merged profile sections alike.
+        for (path, table) in &include_tables {
+            policy::reject_config_assets(path, table, &selection.profiles)
+                .map_err(SourceError::Policy)?;
         }
 
         // Selected profile fragments in flag order: the first section
@@ -643,7 +812,7 @@ pub fn resolve(
                 .get(name)
                 .filter(|v| matches!(v, toml::Value::Table(_)));
             if found.is_none() {
-                for table in &include_tables {
+                for (_, table) in &include_tables {
                     if let Some(value) = table
                         .get(name)
                         .filter(|v| matches!(v, toml::Value::Table(_)))
@@ -702,12 +871,13 @@ pub fn resolve(
         }
     }
 
-    // Normalize the whole set with the aggregate 16 MiB cap. The entry
-    // text was normalized above for field extraction; normalization is
-    // idempotent (BOM removal, CRLF/CR folding), so re-normalizing it
+    // Normalize the whole set under the configured aggregate cap. The
+    // entry text was normalized above for field extraction; normalization
+    // is idempotent (BOM removal, CRLF/CR folding), so re-normalizing it
     // here is a no-op.
     let raw_slices: Vec<&[u8]> = raws.iter().map(|raw| raw.bytes.as_slice()).collect();
-    let normalized = trailer::normalize_documents(&raw_slices).map_err(SourceError::Normalize)?;
+    let normalized = trailer::normalize_documents(&raw_slices, selection.max_payload_bytes)
+        .map_err(SourceError::Normalize)?;
     let documents: Vec<StoreDocument> = raws
         .iter()
         .zip(normalized)
@@ -730,6 +900,54 @@ pub fn resolve(
         route_documents.push((path.clone(), text.to_string()));
     }
 
+    // r2embed Task 1.2: collect the revised asset matrix from every
+    // embedded document, then confine, deduplicate, and expand it into
+    // store assets plus the substitution table — all before any output
+    // byte exists.
+    let mut refs: Vec<AssetRef> = Vec::new();
+    for (path, text) in &route_documents {
+        refs.extend(policy::collect_document_assets(path, text).map_err(SourceError::Policy)?);
+    }
+
+    // Secret opt-in gate (r2embed Task 2.1): a secret-family asset —
+    // exactly the private-key family — never embeds without an explicit
+    // `--embed-secrets` flag. The offending reference is identified up
+    // front, but the gate verdict is returned only after resolution:
+    // a set that fails resolution for another named reason (missing,
+    // escaping, or placeholder asset) surfaces THAT rejection first,
+    // and the gate then fails closed before any output byte exists,
+    // naming the field and the secret class.
+    let secret = if selection.embed_secrets {
+        None
+    } else {
+        refs.iter()
+            .find(|reference| reference.class == crate::compile::policy::SECRET_ASSET_CLASS)
+            .map(|reference| (reference.field.clone(), reference.class))
+    };
+    let AssetSet {
+        assets,
+        substitutions,
+    } = resolve_assets(refs, &root, &route_documents)?;
+    if let Some((field, class)) = secret {
+        return Err(SourceError::SecretEmbedOptIn { field, class });
+    }
+
+    // The single aggregation point of the payload cap (r2embed Task
+    // 2.1): normalized document bytes plus verbatim asset bytes must
+    // together fit the configured `--max-payload-bytes` cap. The reader
+    // enforces no cap of its own.
+    let doc_total = documents.iter().fold(0u64, |acc, document| {
+        acc.saturating_add(u64::try_from(document.bytes.len()).unwrap_or(u64::MAX))
+    });
+    let asset_total = assets.iter().fold(0u64, |acc, asset| {
+        acc.saturating_add(u64::try_from(asset.bytes.len()).unwrap_or(u64::MAX))
+    });
+    trailer::enforce_payload_cap(
+        doc_total.saturating_add(asset_total),
+        selection.max_payload_bytes,
+    )
+    .map_err(SourceError::Normalize)?;
+
     Ok(ResolvedSources {
         kind,
         entry_point: doc_logical,
@@ -737,7 +955,369 @@ pub fn resolve(
         config_references,
         source_plan: plan,
         route_documents,
+        assets,
+        substitutions,
     })
+}
+
+/// The confined asset set for one compile: store assets (one per
+/// canonical target) plus the substitution table over every declared
+/// spelling.
+struct AssetSet {
+    assets: Vec<StoreAsset>,
+    substitutions: Vec<SubstitutionEntry>,
+}
+
+/// Resolve every collected asset reference through the R1 confinement
+/// rules (r2embed Task 1.2).
+///
+/// Anchored at the selected root; symlink-aware canonicalization must
+/// keep each target under it; missing targets are named rejections.
+/// `static directory` references expand to a deterministic sorted walk
+/// of regular files (a symlink inside the tree fails closed; other
+/// non-regular entries are skipped). References deduplicate by canonical
+/// target into one shared store asset — the substitution table keeps
+/// every alias spelling of a FILE target pointing at that single entry,
+/// while a tree declaration itself records no substitution site (F4:
+/// dir-level substitution semantics are deferred to the Phase-3
+/// registry review). Substitution sites are boundary-valid occurrences
+/// grouped per `(document, declared, context)`, and cross-entry span
+/// overlap is a named rejection (F1).
+fn resolve_assets(
+    refs: Vec<AssetRef>,
+    root: &Path,
+    documents: &[(String, String)],
+) -> Result<AssetSet, SourceError> {
+    // Canonical target -> `assets/`-prefixed store path. Deduplicating
+    // by canonical target keeps one shared entry per file; the first
+    // reference's class names the entry.
+    let mut claimed: HashMap<PathBuf, String> = HashMap::with_capacity(refs.len());
+    let mut assets: Vec<StoreAsset> = Vec::with_capacity(refs.len());
+    let mut resolved: Vec<(AssetRef, String)> = Vec::with_capacity(refs.len());
+
+    for reference in refs {
+        validate_asset_name(&reference)?;
+        let canonical = root.join(&reference.declared).canonicalize().map_err(|_| {
+            SourceError::AssetMissing {
+                field: reference.field.clone(),
+                class: reference.class.to_string(),
+                declared: reference.declared.clone(),
+            }
+        })?;
+        if !canonical.starts_with(root) {
+            return Err(SourceError::AssetOutsideRoot {
+                field: reference.field.clone(),
+                class: reference.class.to_string(),
+                declared: reference.declared.clone(),
+                root: root.to_path_buf(),
+            });
+        }
+
+        let store_path = if let Some(existing) = claimed.get(&canonical) {
+            existing.clone()
+        } else if reference.class == "static directory" {
+            if !canonical.is_dir() {
+                return Err(SourceError::AssetInvalidName {
+                    field: reference.field.clone(),
+                    class: reference.class.to_string(),
+                    declared: reference.declared.clone(),
+                    reason: "not a directory".to_string(),
+                });
+            }
+            let mut files = Vec::new();
+            walk_static_dir(&canonical, root, &reference, &mut files)?;
+            // The `claimed` set is consulted per walked FILE (review
+            // F3): nested or alias tree declarations share files, and
+            // each file becomes exactly one store asset.
+            for file in files {
+                if claimed.contains_key(&file) {
+                    continue;
+                }
+                let logical = logical_asset_path(root, &file, &reference)?;
+                let bytes = std::fs::read(&file).map_err(|_| SourceError::AssetMissing {
+                    field: reference.field.clone(),
+                    class: reference.class.to_string(),
+                    declared: reference.declared.clone(),
+                })?;
+                claimed.insert(file, format!("assets/{logical}"));
+                assets.push(StoreAsset {
+                    path: logical,
+                    class: Some(reference.class.to_string()),
+                    bytes,
+                });
+            }
+            // The tree declaration itself records NO substitution site
+            // (review F4): dir-level substitution semantics are deferred
+            // to the Phase-3 registry review — the expanded files'
+            // own references resolve through that registry.
+            continue;
+        } else {
+            if !canonical.is_file() {
+                return Err(SourceError::AssetInvalidName {
+                    field: reference.field.clone(),
+                    class: reference.class.to_string(),
+                    declared: reference.declared.clone(),
+                    reason: "not a regular file".to_string(),
+                });
+            }
+            let logical = logical_asset_path(root, &canonical, &reference)?;
+            let bytes = std::fs::read(&canonical).map_err(|_| SourceError::AssetMissing {
+                field: reference.field.clone(),
+                class: reference.class.to_string(),
+                declared: reference.declared.clone(),
+            })?;
+            let path = format!("assets/{logical}");
+            claimed.insert(canonical, path.clone());
+            assets.push(StoreAsset {
+                path: logical,
+                class: Some(reference.class.to_string()),
+                bytes,
+            });
+            path
+        };
+        resolved.push((reference, store_path));
+    }
+
+    // Group by (site document, declared string, site context): one
+    // substitution entry per distinct declared spelling per context —
+    // a mixed literal/uri declaration of one string keeps two entries
+    // instead of a first-seen-wins merge (review F1). Spans cover the
+    // boundary-valid sites of that context in the site entry's
+    // normalized bytes.
+    let mut groups: BTreeMap<
+        (String, String, SubstitutionContext),
+        (String, Vec<SubstitutionSpan>),
+    > = BTreeMap::new();
+    for (reference, store_path) in &resolved {
+        let entry = groups
+            .entry((
+                reference.site.clone(),
+                reference.declared.clone(),
+                reference.context,
+            ))
+            .or_insert_with(|| (store_path.clone(), Vec::new()));
+        let text = documents
+            .iter()
+            .find(|(path, _)| path == &reference.site)
+            .map(|(_, text)| text)
+            .ok_or_else(|| SourceError::AssetSpanMissing {
+                declared: reference.declared.clone(),
+                site: reference.site.clone(),
+            })?;
+        let mut spans = find_spans(text, &reference.declared, reference.context);
+        if spans.is_empty() {
+            return Err(SourceError::AssetSpanMissing {
+                declared: reference.declared.clone(),
+                site: reference.site.clone(),
+            });
+        }
+        spans.append(&mut entry.1);
+        spans.sort_by_key(|span| span.start);
+        spans.dedup();
+        entry.1 = spans;
+    }
+    let substitutions: Vec<SubstitutionEntry> = groups
+        .into_iter()
+        .map(
+            |((document, declared, context), (asset, spans))| SubstitutionEntry {
+                asset,
+                context,
+                declared,
+                document,
+                spans,
+            },
+        )
+        .collect();
+
+    // Cross-entry span overlap is a named rejection (review F1): the
+    // runtime rewrite walks each site's spans last-offset-first, so two
+    // entries claiming one byte region would double-rewrite it.
+    for (i, a) in substitutions.iter().enumerate() {
+        for b in &substitutions[i + 1..] {
+            if a.document != b.document {
+                continue;
+            }
+            let overlap = a
+                .spans
+                .iter()
+                .any(|s| b.spans.iter().any(|t| s.start < t.end && t.start < s.end));
+            if overlap {
+                return Err(SourceError::AssetSpanOverlap {
+                    site: a.document.clone(),
+                    first: a.declared.clone(),
+                    second: b.declared.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(AssetSet {
+        assets,
+        substitutions,
+    })
+}
+
+/// Validate a declared asset path: relative (absolute paths are already
+/// a policy rejection), no traversal or backslash, no control bytes, no
+/// dynamic placeholder, and no glob metacharacters — an asset names one
+/// compile-known file or directory. A leading `./` spelling is allowed:
+/// canonicalization normalizes it and the substitution table keeps the
+/// alias spelling verbatim.
+fn validate_asset_name(reference: &AssetRef) -> Result<(), SourceError> {
+    let invalid = |reason: &str| SourceError::AssetInvalidName {
+        field: reference.field.clone(),
+        class: reference.class.to_string(),
+        declared: reference.declared.clone(),
+        reason: reason.to_string(),
+    };
+    let declared = &reference.declared;
+    if declared.is_empty() {
+        return Err(invalid("empty path"));
+    }
+    if declared.starts_with('/') {
+        return Err(invalid("absolute path"));
+    }
+    if declared.contains('\\') {
+        return Err(invalid("backslash separator"));
+    }
+    if declared.contains("${") {
+        return Err(invalid("dynamic placeholder"));
+    }
+    if declared.contains('*')
+        || declared.contains('?')
+        || (declared.contains('[') && declared.contains(']'))
+    {
+        return Err(invalid("glob metacharacters"));
+    }
+    if declared.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        return Err(invalid("control byte"));
+    }
+    if declared.split('/').any(|segment| segment == "..") {
+        return Err(invalid("traversal '..'"));
+    }
+    Ok(())
+}
+
+/// Deterministic sorted walk of a static directory tree: depth-first
+/// with entries sorted by file name at each level, regular files only.
+/// A symlink inside the tree fails closed with a named diagnostic; other
+/// non-regular entries (FIFOs, sockets, devices) are skipped.
+fn walk_static_dir(
+    dir: &Path,
+    root: &Path,
+    reference: &AssetRef,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), SourceError> {
+    let missing = || SourceError::AssetMissing {
+        field: reference.field.clone(),
+        class: reference.class.to_string(),
+        declared: reference.declared.clone(),
+    };
+    let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)
+        .map_err(|_| missing())?
+        .collect::<Result<_, _>>()
+        .map_err(|_| missing())?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let file_type = entry.file_type().map_err(|_| missing())?;
+        let path = entry.path();
+        if file_type.is_symlink() {
+            let link = path.strip_prefix(root).map_or_else(
+                |_| path.display().to_string(),
+                |rel| rel.display().to_string(),
+            );
+            return Err(SourceError::StaticTreeSymlink {
+                declared: reference.declared.clone(),
+                link,
+            });
+        }
+        if file_type.is_dir() {
+            walk_static_dir(&path, root, reference, out)?;
+        } else if file_type.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Root-anchored logical asset path of a canonical file: UTF-8 relative
+/// `/` path, validated by the store path rules.
+fn logical_asset_path(
+    root: &Path,
+    canonical: &Path,
+    reference: &AssetRef,
+) -> Result<String, SourceError> {
+    let invalid = |reason: &str| SourceError::AssetInvalidName {
+        field: reference.field.clone(),
+        class: reference.class.to_string(),
+        declared: canonical.display().to_string(),
+        reason: reason.to_string(),
+    };
+    let rel = canonical
+        .strip_prefix(root)
+        .map_err(|_| SourceError::AssetOutsideRoot {
+            field: reference.field.clone(),
+            class: reference.class.to_string(),
+            declared: reference.declared.clone(),
+            root: root.to_path_buf(),
+        })?;
+    let mut logical = String::new();
+    for component in rel.components() {
+        let Component::Normal(part) = component else {
+            return Err(invalid("non-canonical component"));
+        };
+        let part = part.to_str().ok_or_else(|| invalid("non-UTF-8 name"))?;
+        if !logical.is_empty() {
+            logical.push('/');
+        }
+        logical.push_str(part);
+    }
+    validate_path(&logical).map_err(|_| invalid("not a canonical store path"))?;
+    Ok(logical)
+}
+
+/// Path-token continuation byte (review F1): when the byte before or
+/// after a match would extend a path token, the match is a substring of
+/// a longer spelling (`certs/ca.pem` inside `./certs/ca.pem`, the tail
+/// of `client_ca.pem`), not a site of the declared string.
+fn is_path_continuation(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'%' | b'+' | b':' | b'-')
+}
+
+/// Substitution sites of `needle` in `haystack` as ascending,
+/// non-overlapping byte spans, filtered by token boundaries and the
+/// site's context (review F1). A `uri` site sits immediately after a
+/// scheme colon or a `param=` separator; a `literal` site follows
+/// ordinary text — so one declared string occurring in both a URI and a
+/// literal field of one document yields two disjoint site sets, never a
+/// shared occurrence.
+fn find_spans(haystack: &str, needle: &str, context: SubstitutionContext) -> Vec<SubstitutionSpan> {
+    let mut spans = Vec::new();
+    if needle.is_empty() {
+        return spans;
+    }
+    let bytes = haystack.as_bytes();
+    let mut from = 0;
+    while let Some(position) = haystack[from..].find(needle) {
+        let start = from + position;
+        let end = start + needle.len();
+        let preceded = |expected: fn(u8) -> bool| start > 0 && expected(bytes[start - 1]);
+        let site = match context {
+            SubstitutionContext::Uri => preceded(|b| b == b':' || b == b'='),
+            SubstitutionContext::Literal => {
+                start == 0 || preceded(|b| !is_path_continuation(b) && b != b':' && b != b'=')
+            }
+        };
+        let terminated = end >= bytes.len() || !is_path_continuation(bytes[end]);
+        if site && terminated {
+            spans.push(SubstitutionSpan {
+                start: start as u64,
+                end: end as u64,
+            });
+        }
+        from = end;
+    }
+    spans
 }
 
 /// The document-declared route-source fields.
@@ -868,5 +1448,94 @@ mod tests {
              section must declare at least one selected profile itself; move at least one \
              selected profile section into the configuration document"
         );
+    }
+
+    /// Boundary-aware substitution sites (review F1): a match whose
+    /// neighboring byte continues a path token is a substring of a
+    /// longer spelling, not a site — the `certs/ca.pem` nested inside
+    /// `./certs/ca.pem` and the tail of `client_ca.pem` are not sites.
+    /// `uri` sites sit after a scheme colon or a `param=` separator;
+    /// `literal` sites follow ordinary text.
+    #[test]
+    fn find_spans_respects_token_boundaries_and_site_context() {
+        let text = "cert: ./certs/ca.pem\nclient_ca: certs/ca.pem\nnote: client_ca.pem\n";
+        let spans = find_spans(text, "certs/ca.pem", SubstitutionContext::Literal);
+        assert_eq!(
+            spans.len(),
+            1,
+            "nested alias and token-substring matches are not sites: {spans:?}"
+        );
+        assert_eq!(
+            &text[spans[0].start as usize..spans[0].end as usize],
+            "certs/ca.pem"
+        );
+        let dotted = find_spans(text, "./certs/ca.pem", SubstitutionContext::Literal);
+        assert_eq!(dotted.len(), 1, "the longer alias spelling is a site");
+
+        let uri_text = "steps:\n- to: 'xslt:transform.xslt'\nxslt: transform.xslt\n";
+        let uri = find_spans(uri_text, "transform.xslt", SubstitutionContext::Uri);
+        assert_eq!(uri.len(), 1, "a uri site follows the scheme colon: {uri:?}");
+        assert_eq!(
+            &uri_text[uri[0].start as usize..uri[0].end as usize],
+            "transform.xslt"
+        );
+        let literal = find_spans(uri_text, "transform.xslt", SubstitutionContext::Literal);
+        assert_eq!(
+            literal.len(),
+            1,
+            "a literal site follows ordinary text: {literal:?}"
+        );
+        assert!(
+            uri[0].end <= literal[0].start || literal[0].end <= uri[0].start,
+            "the two context sites never share a byte"
+        );
+    }
+
+    /// Cross-entry span overlap is a named compile rejection (review
+    /// F1): one spelling occurring inside another's site would corrupt
+    /// a last-offset-first rewrite.
+    #[test]
+    fn resolve_assets_rejects_cross_entry_span_overlap() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("my cert.pem"), "x").expect("write overlapping file");
+        std::fs::write(root.path().join("cert.pem"), "x").expect("write substring file");
+        let docs = vec![(
+            "app.yaml".to_string(),
+            "cert: \"my cert.pem\"\nclient_ca: cert.pem\n".to_string(),
+        )];
+        let refs = vec![
+            AssetRef {
+                class: "certificate",
+                declared: "my cert.pem".to_string(),
+                field: "cert".to_string(),
+                site: "app.yaml".to_string(),
+                context: SubstitutionContext::Literal,
+            },
+            AssetRef {
+                class: "client CA",
+                declared: "cert.pem".to_string(),
+                field: "client_ca".to_string(),
+                site: "app.yaml".to_string(),
+                context: SubstitutionContext::Literal,
+            },
+        ];
+        let Err(err) = resolve_assets(refs, root.path(), &docs) else {
+            panic!("a spelling inside another's site must be rejected");
+        };
+        let SourceError::AssetSpanOverlap {
+            site,
+            first,
+            second,
+        } = err
+        else {
+            panic!("unexpected error variant: {err:?}");
+        };
+        assert_eq!(site, "app.yaml");
+        for declared in [first, second] {
+            assert!(
+                declared == "my cert.pem" || declared == "cert.pem",
+                "diagnostic must name both spellings: {declared:?}"
+            );
+        }
     }
 }

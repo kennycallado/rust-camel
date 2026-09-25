@@ -26,8 +26,13 @@ use camel_config::config::CamelConfig;
 use camel_core::CamelContext;
 use camel_core::datasource::RuntimeDatasourceCatalog;
 
+pub mod asset_registry;
 pub mod security_boot;
 pub mod stream_collision;
+
+// Process-global read-only asset registry (r2embed task 3.1), doc-visible
+// at the crate root for the artifact runtime population in camel-cli.
+pub use asset_registry::{AssetRegistry, AssetRegistryError, RegistryAsset, RegistryManifestEntry};
 
 // Shared security compile-context builder (task 2.2), doc-visible at the
 // crate root for boot consumers.

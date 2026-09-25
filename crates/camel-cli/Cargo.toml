@@ -36,6 +36,10 @@ percent-encoding.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Confined per-boot materialization of substitution-targeted assets
+# (r2embed Task 3.2): materialize.rs creates the 0700 per-boot directory
+# in library code, so this is a regular dependency, not a dev one.
+tempfile = { workspace = true }
 tokio-util.workspace = true
 tokio.workspace = true
 toml.workspace = true
@@ -121,7 +125,6 @@ camel-auth.workspace = true
 # assembles a started SEDA consumer via NoopRuntimeObservability —
 # same shape as camel-component-seda's own dev-dependency).
 camel-component-api = { workspace = true, features = ["test-support"] }
-tempfile = { workspace = true }
 serde_json.workspace = true
 toml.workspace = true
 ron = { workspace = true }

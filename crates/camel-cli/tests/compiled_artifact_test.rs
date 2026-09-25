@@ -1541,7 +1541,7 @@ fn artifact_manifest_lists_virtual_store_without_boot() {
     );
     let manifest: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("stdout is manifest JSON");
-    assert_eq!(manifest["manifest_schema"], 2, "manifest: {manifest}");
+    assert_eq!(manifest["manifest_schema"], 3, "manifest: {manifest}");
     assert_eq!(manifest["kind"], "route", "manifest: {manifest}");
     assert_eq!(
         manifest["source_name"], "multi-app.yaml",

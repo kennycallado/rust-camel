@@ -13,18 +13,23 @@
 //! port fields as literal addresses or unresolved expressions plus the
 //! configuration-declared observability health/prometheus endpoints, and
 //! the `embedded_files`
-//! list of every bundled virtual document with its logical path, document
-//! kind, byte length, and content digest (hex BLAKE3 of the
-//! normalized bytes).
+//! list of every bundled virtual document AND asset with its logical
+//! path (withheld for secret-class entries), document/asset kind, asset
+//! class name, secret-material class, byte length, and content digest
+//! (hex BLAKE3 of the exact embedded bytes). Schema 3 additionally
+//! carries the `total_embedded_bytes` aggregate and the top-level
+//! `artifact_kind` (`job` | `server`).
 //!
-//! Decode is strict for schema 2: only the declared fields are accepted
+//! Decode is strict per schema: only the declared fields are accepted
 //! (unknown fields and wrong types rejected, never collapsed to
 //! defaults), `embedded_files` entries carry well-formed digests, kinds,
-//! lengths, and canonical paths in canonical path order, and the v2
-//! trailer decode additionally enforces agreement between the manifest
-//! and the embedded store (same entries, same content digests). The
-//! schema-less legacy form stays lenient and is accepted only in v1
-//! trailers.
+//! lengths, classes, and canonical paths (secret-class entries carry a
+//! null path), and the v2 trailer decode additionally enforces the
+//! schema pairing (manifest 3 ⇔ store 2, manifest 2 ⇔ store 1) and
+//! agreement between the manifest and the embedded store (same entries
+//! by position, same content digests, path exposed exactly when the
+//! class is public). The schema-less legacy form stays lenient and is
+//! accepted only in v1 trailers.
 //!
 //! Derivation runs on the normalized, pre-interpolation document text: the
 //! artifact captures authoring text before `${env:}` resolution, so every
@@ -43,33 +48,106 @@ use super::trailer::{FORMAT_VERSION, FORMAT_VERSION_V2, TrailerError, TrailerKin
 pub const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Manifest schema written by this crate. Validated independently from the
-/// trailer version.
-pub const MANIFEST_SCHEMA: u64 = 2;
+/// trailer version. Schema 3 is the asset-aware form: `embedded_files`
+/// entries carry `asset_class` and the secret-material `class`, secret
+/// entries withhold their path, and the manifest carries
+/// `total_embedded_bytes` and `artifact_kind`. Valid only paired with a
+/// schema-2 store index.
+pub const MANIFEST_SCHEMA: u64 = 3;
 
-/// Manifest schema of a legacy v1 artifact, whose JSON carried no
+/// Manifest schema of an R1-era v2 artifact (the operational fields and
+/// 4-field `embedded_files` entries only). Valid only paired with a
+/// schema-1 store index.
+pub const MANIFEST_SCHEMA_V2: u64 = 2;
+
+/// Manifest schema value of a legacy v1 artifact, whose JSON carried no
 /// `manifest_schema` field at all.
 pub const MANIFEST_SCHEMA_LEGACY: u64 = 1;
 
-/// One embedded virtual document as recorded in the manifest: logical path,
-/// document kind, byte length, and content digest (hex BLAKE3 of the
-/// normalized bytes).
+/// Secret-material class of one `embedded_files` entry: `public` for
+/// documents and every non-private-key asset, `secret` for exactly the
+/// private-key family. Distinct from `asset_class` (the class NAME, e.g.
+/// `certificate`); sealed ruling bd rc-p823t.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManifestClass {
+    /// Ordinary content: the logical path is exposed.
+    #[default]
+    Public,
+    /// Private-key family: the logical path is withheld (null) in the
+    /// manifest body and `--manifest` output.
+    Secret,
+}
+
+impl ManifestClass {
+    /// Canonical lowercase name used in the manifest JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Secret => "secret",
+        }
+    }
+
+    /// Inverse of [`ManifestClass::as_str`].
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "public" => Some(Self::Public),
+            "secret" => Some(Self::Secret),
+            _ => None,
+        }
+    }
+}
+
+/// The private-key family: the only secret-material class (sealed ruling
+/// bd rc-p823t). Exactly the asset classes `certificate`-style names map
+/// away from — an asset whose class NAME is `private key`.
+fn is_secret_class(asset_class: Option<&str>) -> bool {
+    asset_class == Some(crate::compile::policy::SECRET_ASSET_CLASS)
+}
+
+/// Top-level `artifact_kind` for a trailer kind: the trailer route kind
+/// maps to `server`, job to `job` (bd rc-p823t: the sealed R3 tripwire
+/// that lets an operator tell a bounded-run artifact from a listener
+/// artifact without booting).
+fn artifact_kind_for(kind: TrailerKind) -> &'static str {
+    match kind {
+        TrailerKind::Route => "server",
+        TrailerKind::Job => "job",
+    }
+}
+
+/// One embedded virtual document or asset as recorded in the manifest:
+/// logical path (withheld for secret-class entries), document/asset kind,
+/// asset class name, secret-material class, byte length, and content
+/// digest (hex BLAKE3 of the exact embedded bytes).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EmbeddedFile {
+    /// Asset class name (`certificate`, `private key`, `xslt`, …) for
+    /// asset entries; always null for document entries.
+    pub asset_class: Option<String>,
+    /// Secret-material class: `path` is null if and only if this is
+    /// [`ManifestClass::Secret`].
+    #[serde(default)]
+    pub class: ManifestClass,
     /// Content digest as lowercase hex BLAKE3.
     pub digest: String,
-    /// Document kind (`route`, `job`, `config`, `include`, `profile`).
+    /// Entry kind (`route`, `job`, `config`, `include`, `profile`,
+    /// `asset`).
     pub kind: StoreEntryKind,
-    /// Normalized byte length.
+    /// Byte length (normalized for documents, verbatim for assets).
     pub length: u64,
-    /// Canonical logical path.
-    pub path: String,
+    /// Canonical logical path; withheld (null) exactly for secret-class
+    /// entries. The store index retains the logical path for
+    /// substitution at runtime.
+    pub path: Option<String>,
 }
 
 /// Operational manifest of a compiled artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
-    /// Manifest schema; only [`MANIFEST_SCHEMA`] is written and
-    /// [`MANIFEST_SCHEMA_LEGACY`] is tolerated on decode.
+    /// Manifest schema; only [`MANIFEST_SCHEMA`] is written, and
+    /// [`MANIFEST_SCHEMA_V2`] and [`MANIFEST_SCHEMA_LEGACY`] are
+    /// tolerated on decode (each under its own store-schema pairing).
     pub manifest_schema: u64,
     /// Logical source name: input path relative to the compile working
     /// directory. Runtime source identity becomes `compiled://<source_name>`.
@@ -78,6 +156,9 @@ pub struct Manifest {
     pub runtime_version: String,
     /// Embedded artifact kind.
     pub kind: TrailerKind,
+    /// Top-level artifact kind for operators (`"job"` | `"server"`):
+    /// derived from `kind` (route → `server`, job → `job`).
+    pub artifact_kind: String,
     /// Endpoint URI schemes referenced by the route/job documents, in
     /// source order, followed by configuration-declared per-component
     /// config block names — sorted and deduped per entry, merged in
@@ -95,16 +176,20 @@ pub struct Manifest {
     /// observability health/prometheus endpoints (`host:port`, camel-config
     /// defaults filled in).
     pub listeners: Vec<String>,
-    /// Every bundled virtual document, in canonical path order.
+    /// Every bundled virtual document and asset, in the same canonical
+    /// order as the store index.
     pub embedded_files: Vec<EmbeddedFile>,
+    /// Sum of all content-entry byte lengths.
+    pub total_embedded_bytes: u64,
 }
 
 impl Manifest {
     /// Serialize to canonical UTF-8 JSON: compact, lexicographically ordered
     /// keys (serde_json maps are BTreeMaps), source-ordered arrays. This is
-    /// the schema-2 form carried by v2 artifacts.
+    /// the schema-3 form carried by v2 artifacts.
     pub fn to_canonical_json(&self) -> String {
         let value = serde_json::json!({
+            "artifact_kind": self.artifact_kind,
             "components": self.components,
             "embedded_files": self.embedded_files,
             "env_names": self.env_names,
@@ -113,6 +198,7 @@ impl Manifest {
             "manifest_schema": self.manifest_schema,
             "runtime_version": self.runtime_version,
             "source_name": self.source_name,
+            "total_embedded_bytes": self.total_embedded_bytes,
         });
         serde_json::to_string(&value).expect("json! of strings and arrays cannot fail") // allow-unwrap
     }
@@ -138,23 +224,36 @@ impl Manifest {
     }
 
     /// Parse and validate canonical manifest JSON. The schema is validated
-    /// independently from any trailer version: [`MANIFEST_SCHEMA`] and the
-    /// schema-less legacy v1 form are accepted, anything else is rejected.
-    /// The strict schema-2 field rules (`check_schema2_fields`) apply
-    /// whenever the declared schema is [`MANIFEST_SCHEMA`].
+    /// independently from any trailer version: [`MANIFEST_SCHEMA`] (3),
+    /// [`MANIFEST_SCHEMA_V2`] (2), and the schema-less legacy v1 form are
+    /// accepted, anything else is rejected. The strict per-schema field
+    /// rules apply whenever the declared schema is known: `check_schema3_
+    /// fields` for [`MANIFEST_SCHEMA`] and `check_schema2_fields` for
+    /// [`MANIFEST_SCHEMA_V2`]. The store-schema pairing is enforced where
+    /// both schemas are visible — in the trailer decode
+    /// (`decode_artifact`), never here.
     pub fn from_canonical_json(bytes: &[u8]) -> Result<Manifest, CompileError> {
         let value: serde_json::Value = serde_json::from_slice(bytes)
             .map_err(|e| CompileError::InvalidDocument(format!("manifest is not JSON: {e}")))?;
         let schema = manifest_schema_of(&value).map_err(|_| {
             CompileError::InvalidDocument("manifest schema is not an integer".to_string())
         })?;
-        if schema != MANIFEST_SCHEMA && schema != MANIFEST_SCHEMA_LEGACY {
+        if schema != MANIFEST_SCHEMA
+            && schema != MANIFEST_SCHEMA_V2
+            && schema != MANIFEST_SCHEMA_LEGACY
+        {
             return Err(CompileError::InvalidDocument(format!(
                 "unsupported manifest schema {schema}"
             )));
         }
-        if schema == MANIFEST_SCHEMA {
-            check_schema2_fields(&value).map_err(CompileError::InvalidDocument)?;
+        match schema {
+            MANIFEST_SCHEMA => {
+                check_schema3_fields(&value).map_err(CompileError::InvalidDocument)?;
+            }
+            MANIFEST_SCHEMA_V2 => {
+                check_schema2_fields(&value).map_err(CompileError::InvalidDocument)?;
+            }
+            _ => {}
         }
         let object = |field: &str| {
             value.get(field).and_then(serde_json::Value::as_str).ok_or(
@@ -192,26 +291,49 @@ impl Manifest {
                 ));
             }
             // Legacy v1 manifests predate `embedded_files`; absence is the
-            // empty list. For schema 2 the field is required, and
-            // `check_schema2_fields` has already rejected its absence.
+            // empty list. For schemas 2 and 3 the field is required, and
+            // the per-schema field check has already rejected its absence.
             None => Vec::new(),
+        };
+        // Schema 3 carries `artifact_kind` and `total_embedded_bytes`
+        // explicitly (validated by `check_schema3_fields`); older schemas
+        // predate both, so they are derived to keep the parsed struct
+        // total: the artifact kind from the trailer kind, and the
+        // aggregate from the entry lengths.
+        let (artifact_kind, total_embedded_bytes) = if schema == MANIFEST_SCHEMA {
+            (
+                object("artifact_kind")?.to_string(),
+                value
+                    .get("total_embedded_bytes")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or(CompileError::InvalidDocument(
+                        "manifest carries no total_embedded_bytes integer".to_string(),
+                    ))?,
+            )
+        } else {
+            (
+                artifact_kind_for(kind).to_string(),
+                embedded_files.iter().map(|f| f.length).sum(),
+            )
         };
         Ok(Manifest {
             manifest_schema: schema,
             source_name: object("source_name")?.to_string(),
             runtime_version: object("runtime_version")?.to_string(),
             kind,
+            artifact_kind,
             components: strings("components"),
             env_names: strings("env_names"),
             listeners: strings("listeners"),
             embedded_files,
+            total_embedded_bytes,
         })
     }
 }
 
 /// Read the effective manifest schema from parsed manifest JSON: the
 /// `manifest_schema` field, defaulting to the legacy schema when absent.
-fn manifest_schema_of(value: &serde_json::Value) -> Result<u64, ()> {
+pub(crate) fn manifest_schema_of(value: &serde_json::Value) -> Result<u64, ()> {
     match value.get("manifest_schema") {
         None => Ok(MANIFEST_SCHEMA_LEGACY),
         Some(v) => v.as_u64().ok_or(()),
@@ -234,6 +356,26 @@ const SCHEMA2_FIELDS: [&str; 8] = [
 
 /// Every field an `embedded_files` entry may carry.
 const EMBEDDED_FILE_FIELDS: [&str; 4] = ["digest", "kind", "length", "path"];
+
+/// Every field a schema-3 manifest may carry. Anything else is rejected:
+/// an unrecognized field would silently change meaning without a schema
+/// bump.
+const SCHEMA3_FIELDS: [&str; 10] = [
+    "artifact_kind",
+    "components",
+    "embedded_files",
+    "env_names",
+    "kind",
+    "listeners",
+    "manifest_schema",
+    "runtime_version",
+    "source_name",
+    "total_embedded_bytes",
+];
+
+/// Every field a schema-3 `embedded_files` entry may carry.
+const EMBEDDED_FILE_FIELDS3: [&str; 6] =
+    ["asset_class", "class", "digest", "kind", "length", "path"];
 
 /// BLAKE3 hex digest shape: exactly 64 lowercase hex characters.
 fn is_blake3_hex(digest: &str) -> bool {
@@ -325,6 +467,11 @@ fn check_embedded_file(item: &serde_json::Value) -> Result<String, String> {
         .get("kind")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "embedded_files entry carries no kind string".to_string())?;
+    // The manifest mirrors every store entry 1:1 (r2embed Task 1.2):
+    // the schema-2 store carries typed asset entries, so embedded_files
+    // entries accept `kind: "asset"` too. Per-asset `asset_class`/`
+    // `class` manifest fields are the schema-3 form (Task 2.2); schema-2
+    // entries keep the R1-era 4-field shape.
     if StoreEntryKind::from_name(kind).is_none() {
         return Err(format!("embedded_files entry names unknown kind {kind:?}"));
     }
@@ -343,13 +490,198 @@ fn check_embedded_file(item: &serde_json::Value) -> Result<String, String> {
     Ok(path.to_string())
 }
 
+/// Type- and shape-check one schema-3 `embedded_files` entry and return
+/// its byte length (for the aggregate check):
+///
+/// - exactly the [`EMBEDDED_FILE_FIELDS3`] fields;
+/// - `digest`: 64-character lowercase-hex BLAKE3;
+/// - `kind`: a known document/asset kind;
+/// - `asset_class`: null for document entries, a class name for asset
+///   entries;
+/// - `class`: `"public"` | `"secret"` — `secret` exactly when
+///   `asset_class` is the private-key family (sealed ruling bd rc-p823t);
+/// - `path`: null if and only if `class` is `"secret"`; a present path
+///   follows the same canonical-path rule as store entry paths.
+///
+/// Entry ORDER is not re-checked here: secret entries carry a null path,
+/// so path ordering is not expressible from the manifest alone. The
+/// canonical store order is enforced positionally by the trailer decode's
+/// manifest/store agreement check, which compares every entry against the
+/// store index.
+fn check_embedded_file3(item: &serde_json::Value) -> Result<u64, String> {
+    let Some(map) = item.as_object() else {
+        return Err("embedded_files entry is not a JSON object".to_string());
+    };
+    for key in map.keys() {
+        if !EMBEDDED_FILE_FIELDS3.contains(&key.as_str()) {
+            return Err(format!("unknown embedded_files field {key:?}"));
+        }
+    }
+    let digest = map
+        .get("digest")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "embedded_files entry carries no digest string".to_string())?;
+    if !is_blake3_hex(digest) {
+        return Err(format!(
+            "embedded_files digest {digest:?} is not 64-character lowercase hex"
+        ));
+    }
+    let kind = map
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "embedded_files entry carries no kind string".to_string())?;
+    let kind = StoreEntryKind::from_name(kind)
+        .ok_or_else(|| format!("embedded_files entry names unknown kind {kind:?}"))?;
+    let asset_class = map
+        .get("asset_class")
+        .map(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            "embedded_files entry carries no asset_class (string or null)".to_string()
+        })?;
+    if kind != StoreEntryKind::Asset && asset_class.is_some() {
+        return Err(format!(
+            "embedded_files {} entry must carry a null asset_class",
+            kind.as_str()
+        ));
+    }
+    if kind == StoreEntryKind::Asset && asset_class.is_none() {
+        return Err("embedded_files asset entry carries no asset_class string".to_string());
+    }
+    let class = map
+        .get("class")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "embedded_files entry carries no class string".to_string())?;
+    let class = ManifestClass::from_name(class)
+        .ok_or_else(|| format!("embedded_files entry names unknown class {class:?}"))?;
+    // The secret-material class is exactly the private-key family: any
+    // other classification is a lie and fails closed.
+    if is_secret_class(asset_class) != (class == ManifestClass::Secret) {
+        // allow-secret: the diagnostic names the class, never a value.
+        return Err(format!(
+            "embedded_files entry class {:?} does not match its asset_class {:?}: secret is exactly the private-key family",
+            class.as_str(),
+            asset_class
+        ));
+    }
+    let length = map
+        .get("length")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "embedded_files entry carries no length integer".to_string())?;
+    match map.get("path") {
+        Some(serde_json::Value::Null) => {
+            if class == ManifestClass::Public {
+                return Err(
+                    "embedded_files public entry must carry its path (found null)".to_string(),
+                );
+            }
+        }
+        Some(serde_json::Value::String(path)) => {
+            if class == ManifestClass::Secret {
+                // allow-secret: names the withheld path's presence, not a key value.
+                return Err(format!(
+                    "embedded_files secret entry must withhold its path (found {path:?})"
+                ));
+            }
+            super::store::validate_path(path)
+                .map_err(|e| format!("embedded_files path invalid: {e}"))?;
+        }
+        _ => {
+            return Err("embedded_files entry path must be a string or null".to_string());
+        }
+    }
+    Ok(length)
+}
+
+/// Strict field rules for a schema-3 manifest: the schema-2 rules plus
+/// the asset-aware additions —
+///
+/// - only the declared [`SCHEMA3_FIELDS`] may appear;
+/// - `kind`, `source_name`, and `runtime_version` are required strings;
+/// - `components`, `env_names`, and `listeners` are required arrays of
+///   strings;
+/// - `artifact_kind` is a required `"job"` | `"server"` string that
+///   agrees with the manifest `kind` (route → `server`, job → `job`);
+/// - `total_embedded_bytes` is a required integer equal to the sum of the
+///   `embedded_files` entry lengths;
+/// - `embedded_files` is a required array of entries passing
+///   [`check_embedded_file3`].
+fn check_schema3_fields(value: &serde_json::Value) -> Result<(), String> {
+    let Some(map) = value.as_object() else {
+        return Err("manifest is not a JSON object".to_string());
+    };
+    for key in map.keys() {
+        if !SCHEMA3_FIELDS.contains(&key.as_str()) {
+            return Err(format!("unknown schema-3 manifest field {key:?}"));
+        }
+    }
+    for field in ["kind", "source_name", "runtime_version"] {
+        if value
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        {
+            return Err(format!("schema-3 manifest carries no {field}"));
+        }
+    }
+    for field in ["components", "env_names", "listeners"] {
+        let Some(items) = value.get(field).and_then(serde_json::Value::as_array) else {
+            return Err(format!("schema-3 manifest field {field} is not an array"));
+        };
+        if items.iter().any(|item| item.as_str().is_none()) {
+            return Err(format!(
+                "schema-3 manifest array {field} carries a non-string entry"
+            ));
+        }
+    }
+    let artifact_kind = value
+        .get("artifact_kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "schema-3 manifest carries no artifact_kind string".to_string())?;
+    let kind = value
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "schema-3 manifest carries no kind".to_string())?;
+    if artifact_kind_for(
+        TrailerKind::from_name(kind)
+            .ok_or_else(|| "schema-3 manifest carries no recognizable kind".to_string())?,
+    ) != artifact_kind
+    {
+        return Err(format!(
+            "schema-3 manifest artifact_kind {artifact_kind:?} does not match kind {kind:?}"
+        ));
+    }
+    let Some(serde_json::Value::Array(items)) = value.get("embedded_files") else {
+        return Err("schema-3 manifest carries no embedded_files array".to_string());
+    };
+    let mut total = 0u64;
+    for item in items {
+        total = total.saturating_add(check_embedded_file3(item)?);
+    }
+    let declared = value
+        .get("total_embedded_bytes")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "schema-3 manifest carries no total_embedded_bytes integer".to_string())?;
+    if declared != total {
+        return Err(format!(
+            "schema-3 manifest total_embedded_bytes {declared} does not equal the entry length sum {total}"
+        ));
+    }
+    Ok(())
+}
+
 /// Validate manifest bytes for trailer decode and return the artifact kind.
 ///
-/// Each trailer version accepts exactly its own manifest form: a v1
+/// Each trailer version accepts exactly its own manifest forms: a v1
 /// trailer carries the schema-less legacy manifest only, and a v2 trailer
-/// requires `manifest_schema: 2` with the strict schema-2 field rules
-/// ([`check_schema2_fields`]). Fail closed on unknown schemas, non-JSON
-/// bytes, unrecognizable kinds, and incomplete schema-2 manifests.
+/// requires `manifest_schema: 3` with the strict schema-3 field rules
+/// ([`check_schema3_fields`]) or the R1-era `manifest_schema: 2` with the
+/// strict schema-2 field rules ([`check_schema2_fields`]) — which of the
+/// two is valid for THIS artifact is decided by the store-schema pairing
+/// check in `decode_artifact` (manifest 3 ⇔ store 2, manifest 2 ⇔ store
+/// 1), the only site that sees both schemas. Fail closed on unknown
+/// schemas, non-JSON bytes, unrecognizable kinds, and incomplete
+/// manifests; the unknown-schema check runs first, so an unknown manifest
+/// schema is named before any pairing consideration.
 pub(crate) fn validate_manifest(
     manifest: &[u8],
     trailer_version: u16,
@@ -363,12 +695,15 @@ pub(crate) fn validate_manifest(
                 return Err(TrailerError::InvalidManifestSchema(schema));
             }
         }
-        FORMAT_VERSION_V2 => {
-            if schema != MANIFEST_SCHEMA {
-                return Err(TrailerError::InvalidManifestSchema(schema));
+        FORMAT_VERSION_V2 => match schema {
+            MANIFEST_SCHEMA => {
+                check_schema3_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
             }
-            check_schema2_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
-        }
+            MANIFEST_SCHEMA_V2 => {
+                check_schema2_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
+            }
+            _ => return Err(TrailerError::InvalidManifestSchema(schema)),
+        },
         _ => return Err(TrailerError::InvalidVersion(trailer_version)),
     }
     let kind = value
@@ -392,31 +727,42 @@ pub fn derive(
     let mut listeners = Vec::new();
     walk_document(&root, &mut components, &mut listeners);
     let env_names = scan_env_names(document);
+    let length = document.len() as u64;
     Ok(Manifest {
         manifest_schema: MANIFEST_SCHEMA,
         source_name: source_name.to_string(),
         runtime_version: RUNTIME_VERSION.to_string(),
         kind,
+        artifact_kind: artifact_kind_for(kind).to_string(),
         components,
         env_names,
         listeners,
+        total_embedded_bytes: length,
         embedded_files: vec![EmbeddedFile {
+            asset_class: None,
+            class: ManifestClass::Public,
             digest: blake3::hash(document.as_bytes()).to_hex().to_string(),
             kind: StoreEntryKind::from(kind),
-            length: document.len() as u64,
-            path: source_name.to_string(),
+            length,
+            path: Some(source_name.to_string()),
         }],
     })
 }
 
-/// Derive the schema-2 manifest for a built virtual store (multidoc
-/// Task 1.2): operational fields are scanned from every route/job
+/// Derive the schema-3 manifest for a built virtual store (r2embed Task
+/// 2.2): operational fields are scanned from every route/job
 /// document in source-plan order (`route_documents` carries `(logical
 /// path, normalized text)` pairs) AND from every embedded
 /// config/include/profile entry in canonical store order, and
-/// `embedded_files` mirrors the store entries — canonical path order,
-/// kinds, lengths, and BLAKE3 content digests — so trailer decode's
-/// manifest/store agreement holds by construction.
+/// `embedded_files` mirrors the store entries — the SAME canonical order
+/// as the store index, so registry verification can match manifest
+/// entries to store entries by position. Every entry carries its kind,
+/// byte length, and BLAKE3 content digest (the same digest rule for
+/// assets and documents); asset entries additionally carry their
+/// `asset_class` name and secret-material `class`, and secret-class
+/// entries (exactly the private-key family, bd rc-p823t) withhold their
+/// logical path. The manifest also records the `total_embedded_bytes`
+/// aggregate and the top-level `artifact_kind`.
 pub fn derive_for_store(
     store: &super::store::VirtualDocumentStore,
     kind: TrailerKind,
@@ -479,6 +825,7 @@ pub fn derive_for_store(
         }
     }
     let mut embedded_files = Vec::with_capacity(store.index.entries.len());
+    let mut total_embedded_bytes = 0u64;
     for entry in &store.index.entries {
         let range = entry.offset as usize..(entry.offset + entry.length) as usize;
         let bytes = store.content.get(range).ok_or_else(|| {
@@ -487,11 +834,26 @@ pub fn derive_for_store(
                 entry.path
             ))
         })?;
+        let class = if is_secret_class(entry.asset_class.as_deref()) {
+            ManifestClass::Secret
+        } else {
+            ManifestClass::Public
+        };
+        // Secret-class entries withhold their logical path from the
+        // operator-facing manifest; the store index retains it for the
+        // runtime substitution table.
+        let path = match class {
+            ManifestClass::Secret => None,
+            ManifestClass::Public => Some(entry.path.clone()),
+        };
+        total_embedded_bytes = total_embedded_bytes.saturating_add(entry.length);
         embedded_files.push(EmbeddedFile {
+            asset_class: entry.asset_class.clone(),
+            class,
             digest: blake3::hash(bytes).to_hex().to_string(),
             kind: entry.kind,
             length: entry.length,
-            path: entry.path.clone(),
+            path,
         });
     }
     Ok(Manifest {
@@ -499,10 +861,12 @@ pub fn derive_for_store(
         source_name: store.index.entry_point.clone(),
         runtime_version: RUNTIME_VERSION.to_string(),
         kind,
+        artifact_kind: artifact_kind_for(kind).to_string(),
         components,
         env_names,
         listeners,
         embedded_files,
+        total_embedded_bytes,
     })
 }
 
@@ -812,10 +1176,12 @@ mcp:
     assert_eq!(
         manifest.embedded_files,
         vec![EmbeddedFile {
+            asset_class: None,
+            class: ManifestClass::Public,
             digest: blake3::hash(document.as_bytes()).to_hex().to_string(),
             kind: StoreEntryKind::Route,
             length: document.len() as u64,
-            path: "routes/app.yaml".to_string(),
+            path: Some("routes/app.yaml".to_string()),
         }]
     );
 
@@ -842,15 +1208,18 @@ mcp:
     assert_eq!(
         json,
         format!(
-            "{{\"components\":[\"timer\",\"kafka\",\"file\",\"direct\"],\
-\"embedded_files\":[{{\"digest\":\"{}\",\"kind\":\"route\",\"length\":{},\
+            "{{\"artifact_kind\":\"server\",\
+\"components\":[\"timer\",\"kafka\",\"file\",\"direct\"],\
+\"embedded_files\":[{{\"asset_class\":null,\"class\":\"public\",\"digest\":\"{}\",\"kind\":\"route\",\"length\":{},\
 \"path\":\"routes/app.yaml\"}}],\
 \"env_names\":[\"INPUT\",\"MCP_PORT\"],\"kind\":\"route\",\
 \"listeners\":[\"0.0.0.0:8080\",\"127.0.0.1:${{env:MCP_PORT}}\"],\
 \"manifest_schema\":{MANIFEST_SCHEMA},\
 \"runtime_version\":\"{RUNTIME_VERSION}\",\
-\"source_name\":\"routes/app.yaml\"}}",
+\"source_name\":\"routes/app.yaml\",\
+\"total_embedded_bytes\":{}}}",
             blake3::hash(document.as_bytes()).to_hex(),
+            document.len(),
             document.len()
         )
     );
@@ -870,6 +1239,325 @@ mcp:
     assert!(
         !json.contains("OUT_DIR"),
         "defaulted env tokens must not appear in the manifest"
+    );
+}
+
+/// r2embed Task 2.2: the schema-3 manifest records every asset entry's
+/// `asset_class`, secret-material `class` (secret = exactly the
+/// private-key family), byte length, and BLAKE3 digest over the exact
+/// embedded bytes, plus the aggregate `total_embedded_bytes` and the
+/// top-level `artifact_kind` (`server` for a route compile, `job` for a
+/// job compile).
+#[test]
+fn manifest_schema3_records_class_kind_digest_and_total() {
+    use super::store::{StoreAsset, StoreDocument, VirtualDocumentStore};
+
+    let route_text =
+        "routes:\n- id: a\n  from: timer:a\n  steps:\n    - to: 'xslt:tls/transform.xslt'\n";
+    let cert = b"-----BEGIN CERTIFICATE-----\nroute-leg\n".to_vec();
+    let key = b"-----BEGIN PRIVATE KEY-----\nroute-leg\n".to_vec();
+    let data = b"static-bytes".to_vec();
+    let documents = [StoreDocument {
+        path: "routes/app.yaml".to_string(),
+        kind: StoreEntryKind::Route,
+        bytes: route_text.as_bytes().to_vec(),
+    }];
+    let assets = [
+        StoreAsset {
+            bytes: cert.clone(),
+            class: Some("certificate".to_string()),
+            path: "tls/server.crt".to_string(),
+        },
+        StoreAsset {
+            bytes: key.clone(),
+            class: Some("private key".to_string()),
+            path: "tls/server.key".to_string(),
+        },
+        StoreAsset {
+            bytes: data.clone(),
+            class: Some("static directory".to_string()),
+            path: "www/data.txt".to_string(),
+        },
+    ];
+    let store = VirtualDocumentStore::build_with_assets(
+        "routes/app.yaml",
+        &documents,
+        &assets,
+        &[],
+        &["routes/app.yaml".to_string()],
+        &[],
+    )
+    .expect("valid asset store builds");
+
+    let manifest = derive_for_store(
+        &store,
+        TrailerKind::Route,
+        &[("routes/app.yaml".to_string(), route_text.to_string())],
+    )
+    .expect("store manifest must derive");
+
+    assert_eq!(manifest.manifest_schema, MANIFEST_SCHEMA);
+    assert_eq!(manifest.artifact_kind, "server");
+
+    // Every entry mirrors its store entry by position: the length matches
+    // and the digest is the BLAKE3 of the exact embedded bytes,
+    // independently recomputed here from the store content.
+    let total: u64 = manifest.embedded_files.iter().map(|f| f.length).sum();
+    assert_eq!(manifest.total_embedded_bytes, total);
+    assert_eq!(manifest.embedded_files.len(), store.index.entries.len());
+    for (file, entry) in manifest.embedded_files.iter().zip(&store.index.entries) {
+        assert_eq!(file.length, entry.length, "length mirrors {entry:?}");
+        let range = entry.offset as usize..(entry.offset + entry.length) as usize;
+        let bytes = store.content.get(range).expect("entry range in bounds");
+        assert_eq!(
+            file.digest,
+            blake3::hash(bytes).to_hex().to_string(),
+            "digest of the exact embedded bytes for {entry:?}"
+        );
+    }
+
+    // The private-key asset is the secret class with its path withheld.
+    let secret = manifest
+        .embedded_files
+        .iter()
+        .find(|f| f.class == ManifestClass::Secret)
+        .expect("the private-key asset must be class secret");
+    assert_eq!(secret.asset_class.as_deref(), Some("private key"));
+    assert_eq!(secret.path, None, "secret entries withhold their path");
+    assert_eq!(secret.length, key.len() as u64);
+    assert_eq!(secret.digest, blake3::hash(&key).to_hex().to_string());
+
+    // Public assets keep class public, their asset class name, and path.
+    let cert_file = manifest
+        .embedded_files
+        .iter()
+        .find(|f| f.asset_class.as_deref() == Some("certificate"))
+        .expect("the certificate asset must be listed");
+    assert_eq!(cert_file.class, ManifestClass::Public);
+    assert_eq!(cert_file.path.as_deref(), Some("assets/tls/server.crt"));
+    assert_eq!(cert_file.digest, blake3::hash(&cert).to_hex().to_string());
+
+    // Documents are implicitly public with a null asset class.
+    let doc = manifest
+        .embedded_files
+        .iter()
+        .find(|f| f.kind == StoreEntryKind::Route)
+        .expect("the route document must be listed");
+    assert_eq!(doc.class, ManifestClass::Public);
+    assert_eq!(doc.asset_class, None);
+    assert_eq!(doc.path.as_deref(), Some("routes/app.yaml"));
+
+    // The job-kind leg: artifact_kind is `job`.
+    let job_text = "args:\n  v:\n    default: x\nexecute:\n  mode: one-shot\n  timeout: 60s\n  send:\n    to: direct:a\n    body: \"x\"\nroutes:\n- id: j\n  from: direct:lit\n  steps:\n    - set_body:\n        value: \"lit\"\n";
+    let job_documents = [StoreDocument {
+        path: "jobs/nightly.job.yaml".to_string(),
+        kind: StoreEntryKind::Job,
+        bytes: job_text.as_bytes().to_vec(),
+    }];
+    let job_store = VirtualDocumentStore::build_with_assets(
+        "jobs/nightly.job.yaml",
+        &job_documents,
+        &[],
+        &[],
+        &["jobs/nightly.job.yaml".to_string()],
+        &[],
+    )
+    .expect("valid job store builds");
+    let job_manifest = derive_for_store(
+        &job_store,
+        TrailerKind::Job,
+        &[("jobs/nightly.job.yaml".to_string(), job_text.to_string())],
+    )
+    .expect("job manifest must derive");
+    assert_eq!(job_manifest.artifact_kind, "job");
+    assert_eq!(job_manifest.manifest_schema, MANIFEST_SCHEMA);
+    let job_total: u64 = job_manifest.embedded_files.iter().map(|f| f.length).sum();
+    assert_eq!(job_manifest.total_embedded_bytes, job_total);
+}
+
+/// r2embed Task 2.2 (sealed ruling bd rc-p823t): manifest entries for
+/// secret-class assets expose ONLY the classification fields, byte length,
+/// and BLAKE3 digest — the logical path is withheld and no key material
+/// appears in the manifest body (the exact bytes `--manifest` prints).
+#[test]
+fn secret_manifest_entries_expose_digest_and_length_only() {
+    use super::store::{StoreAsset, StoreDocument, VirtualDocumentStore};
+
+    let route_text = "routes:\n- id: a\n  from: timer:a\n  steps:\n    - to: direct:a\n";
+    let key = b"-----BEGIN PRIVATE KEY-----\nSECRET-KEY-MATERIAL\n".to_vec();
+    let documents = [StoreDocument {
+        path: "routes/app.yaml".to_string(),
+        kind: StoreEntryKind::Route,
+        bytes: route_text.as_bytes().to_vec(),
+    }];
+    let assets = [StoreAsset {
+        bytes: key.clone(),
+        class: Some("private key".to_string()),
+        path: "tls/server.key".to_string(),
+    }];
+    let store = VirtualDocumentStore::build_with_assets(
+        "routes/app.yaml",
+        &documents,
+        &assets,
+        &[],
+        &["routes/app.yaml".to_string()],
+        &[],
+    )
+    .expect("valid asset store builds");
+
+    let manifest = derive_for_store(
+        &store,
+        TrailerKind::Route,
+        &[("routes/app.yaml".to_string(), route_text.to_string())],
+    )
+    .expect("store manifest must derive");
+
+    let secret = manifest
+        .embedded_files
+        .iter()
+        .find(|f| f.class == ManifestClass::Secret)
+        .expect("the private-key asset must be class secret");
+    assert_eq!(secret.path, None, "the logical path is withheld");
+    assert_eq!(secret.length, key.len() as u64);
+    assert_eq!(secret.digest, blake3::hash(&key).to_hex().to_string());
+
+    // The canonical body — the exact bytes `--manifest` prints — carries
+    // class, length, and digest only: neither the logical path nor any
+    // key material appears anywhere.
+    let json = manifest.to_canonical_json();
+    assert!(
+        json.contains(r#""class":"secret""#),
+        "class exposed: {json}"
+    );
+    assert!(
+        !json.contains("server.key"),
+        "the logical path must be withheld: {json}"
+    );
+    assert!(
+        !json.contains("SECRET-KEY-MATERIAL"),
+        "key material must never appear: {json}"
+    );
+    assert!(
+        !json.contains("BEGIN PRIVATE KEY"),
+        "key material must never appear: {json}"
+    );
+}
+
+/// r2embed Task 2.2: the manifest reader is trailer-version aware and the
+/// v2 pairing is enforced in both directions — the R1-era pair (store 1 +
+/// manifest 2) decodes with null asset classes, an unknown manifest schema
+/// fails with the unknown-schema diagnostic (never a pairing error), and
+/// BOTH mismatched pairings (store 2 + manifest 2, store 1 + manifest 3)
+/// fail closed with the pairing diagnostic. The pairing check itself runs
+/// in `decode_artifact` after the store decode; the cases are exercised
+/// end-to-end here through `decode_artifact`.
+#[test]
+fn manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired() {
+    use super::store::{StoreDocument, VirtualDocumentStore};
+    use super::trailer::{self, DecodedArtifact, TrailerV2};
+
+    let route_text = "routes:\n- id: r\n  from: direct:r\n";
+    let content = route_text.as_bytes().to_vec();
+    let digest = blake3::hash(&content).to_hex().to_string();
+    let length = content.len();
+
+    // Schema-1 index (R1 era): document-only shape, no asset classes, no
+    // substitution table.
+    let v1_index = format!(
+        "{{\"config_references\":[],\"entry_point\":\"app.yaml\",\
+\"entries\":[{{\"kind\":\"route\",\"length\":{length},\"offset\":0,\"path\":\"app.yaml\"}}],\
+\"source_plan\":{{\"references\":[\"app.yaml\"]}},\
+\"store_schema\":1}}"
+    );
+    // Schema-2 manifest (R1 era): the 8 operational fields and 4-field
+    // entries only.
+    let schema2_manifest = format!(
+        "{{\"components\":[],\
+\"embedded_files\":[{{\"digest\":\"{digest}\",\"kind\":\"route\",\"length\":{length},\"path\":\"app.yaml\"}}],\
+\"env_names\":[],\"kind\":\"route\",\"listeners\":[],\"manifest_schema\":2,\
+\"runtime_version\":\"{rt}\",\"source_name\":\"app.yaml\"}}",
+        rt = RUNTIME_VERSION
+    );
+    // Schema-3 manifest: the full paired form for a store-2 index.
+    let schema3_manifest = format!(
+        "{{\"artifact_kind\":\"server\",\"components\":[],\
+\"embedded_files\":[{{\"asset_class\":null,\"class\":\"public\",\"digest\":\"{digest}\",\"kind\":\"route\",\"length\":{length},\"path\":\"app.yaml\"}}],\
+\"env_names\":[],\"kind\":\"route\",\"listeners\":[],\"manifest_schema\":3,\
+\"runtime_version\":\"{rt}\",\"source_name\":\"app.yaml\",\"total_embedded_bytes\":{length}}}",
+        rt = RUNTIME_VERSION
+    );
+
+    // A real store-2 store for the paired and unknown-schema cases.
+    let store = VirtualDocumentStore::build(
+        "app.yaml",
+        &[StoreDocument {
+            path: "app.yaml".to_string(),
+            kind: StoreEntryKind::Route,
+            bytes: content.clone(),
+        }],
+        &[],
+        &["app.yaml".to_string()],
+    )
+    .expect("store builds");
+    let store2_index = store.index.encode_canonical().expect("index encodes");
+
+    let decode = |index: &[u8], manifest: &str| {
+        trailer::decode_artifact(&trailer::encode_v2(&TrailerV2 {
+            kind: TrailerKind::Route,
+            content: content.clone(),
+            index: index.to_vec(),
+            manifest: manifest.as_bytes().to_vec(),
+        }))
+    };
+
+    // 1. The R1-era pair (store 1 + manifest 2) still decodes; its
+    // entries carry null asset classes and implicitly public class.
+    let decoded = decode(v1_index.as_bytes(), &schema2_manifest)
+        .expect("the R1 pair must decode")
+        .expect("terminal magic must mark the trailer present");
+    let DecodedArtifact::V2(v2) = decoded else {
+        panic!("the R1 pair must decode as DecodedArtifact::V2");
+    };
+    let parsed = Manifest::from_canonical_json(&v2.manifest).expect("manifest must validate");
+    assert_eq!(parsed.embedded_files[0].asset_class, None);
+    assert_eq!(parsed.embedded_files[0].class, ManifestClass::Public);
+    assert_eq!(parsed.embedded_files[0].path.as_deref(), Some("app.yaml"));
+
+    // 2. Unknown manifest schema (4): the unknown-schema diagnostic runs
+    // FIRST — never a pairing error — even against a store-2 index.
+    let schema4 = schema3_manifest.replacen("\"manifest_schema\":3", "\"manifest_schema\":4", 1);
+    assert!(
+        matches!(
+            decode(&store2_index, &schema4),
+            Err(TrailerError::InvalidManifestSchema(4))
+        ),
+        "schema 4 must fail with the unknown-schema diagnostic"
+    );
+
+    // 3. store 2 + manifest 2: the un-paired legacy pairing fails closed.
+    assert!(
+        matches!(
+            decode(&store2_index, &schema2_manifest),
+            Err(TrailerError::InvalidSchemaPairing {
+                store_schema: 2,
+                manifest_schema: 2,
+                required_manifest_schema: 3,
+            })
+        ),
+        "store 2 with manifest 2 must fail the pairing check"
+    );
+
+    // 4. The reverse pair, manifest 3 with store 1, fails closed too.
+    assert!(
+        matches!(
+            decode(v1_index.as_bytes(), &schema3_manifest),
+            Err(TrailerError::InvalidSchemaPairing {
+                store_schema: 1,
+                manifest_schema: 3,
+                required_manifest_schema: 2,
+            })
+        ),
+        "store 1 with manifest 3 must fail the pairing check"
     );
 }
 
@@ -1128,7 +1816,7 @@ mod tests {
             "env_names": [],
             "kind": "route",
             "listeners": [],
-            "manifest_schema": MANIFEST_SCHEMA,
+            "manifest_schema": MANIFEST_SCHEMA_V2,
             "runtime_version": RUNTIME_VERSION,
             "source_name": "routes/a.yaml",
         })
@@ -1214,14 +1902,21 @@ mod tests {
             ));
         }
 
-        // Unknown document kind.
+        // Unknown kind (asset is known since r2embed Task 1.2 — schema-2
+        // manifests mirror the schema-2 store's typed asset entries).
         let mut value = schema2_json();
         value["embedded_files"][0]["path"] = serde_json::json!("routes/a.yaml");
         value["embedded_files"][0]["kind"] = serde_json::json!("asset");
+        assert!(
+            parse(&value).is_ok(),
+            "asset entries mirror store entries since r2embed Task 1.2"
+        );
+        let mut value = schema2_json();
+        value["embedded_files"][0]["kind"] = serde_json::json!("galaxy");
         assert!(matches!(
             parse(&value),
             Err(CompileError::InvalidDocument(reason))
-                if reason.contains("unknown kind \"asset\"")
+                if reason.contains("unknown kind \"galaxy\"")
         ));
 
         // Wrong `length` type.

@@ -71,6 +71,26 @@ it stays in the featureless closure via `camel-config` → `camel-redis-repo`
 (out-of-zone deferral); camel-cli's own redis edge is now optional.
 _Avoid_: bundle flags, component toggles
 
+**Asset registry**:
+The process-global, read-only map of `assets/<logical-path>` to bytes in
+the `asset_registry` module (`AssetRegistry::global()`, the
+`TlsReloadRegistry::global()` singleton pattern). The compiled-artifact
+runtime (camel-cli `compile::runtime`) populates it exactly once before
+boot from positionally paired store and manifest entries, verifying kind,
+length, and BLAKE3 digest for every pair; population is all-or-nothing —
+any verification failure leaves the registry unpopulated — and no
+mutation API exists after it. Registry entries carry their `kind` as a
+`String`, so this crate gains no dependency edge toward camel-dsl, and
+the map also holds document entries (benign; positional pairing requires
+the full lists). The registry's own digest-mismatch rejection is
+defense-in-depth: the decode layer's manifest/store agreement owns the
+integrity check. Normal `camel run` never populates the registry — it
+stays empty outside artifacts, so nothing leaks ambiently. Static-file
+asset classes are the memory-served consumers; the registry never writes
+to the filesystem.
+_Avoid_: asset cache, embedded file store, virtual store (the store is
+the camel-dsl model; the registry is the runtime lookup)
+
 **security boot wiring**:
 The `security_boot` module: the pre-route wiring shared by `camel run` and
 the integration harness (ADR-0069 section 10). The ungated installers —
@@ -119,6 +139,10 @@ not-wasm rejections name camel-bundles as the crate owner.
 
 ## Related decisions
 
+- [ADR-0075](../../docs/adr/0075-self-contained-executable-artifact-format.md) —
+  the self-contained executable artifact format (R2 amendment). The R2
+  asset registry and the empty-outside-artifacts guarantee are defined in
+  the amendment's registry paragraph.
 - [ADR-0069](../../docs/adr/0069-integration-tier-testing-contract.md) —
   the integration-tier testing contract. Section 10 defines this crate, the
   `BootHandle`, the enumerated boot boundary, and the shared security
