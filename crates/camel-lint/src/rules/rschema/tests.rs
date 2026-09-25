@@ -709,6 +709,58 @@ mcp:
 }
 
 #[test]
+fn rschema_mcp_tls_blank_both_paths_two_leaves_rejected() {
+    // BOTH TLS path fields blank: the pattern de-collapse must emit one
+    // leaf error PER field (2 total), each anchored on its own raw token.
+    // Pins that dedup (first-occurrence order; corpus set-semantics
+    // collapse to one (code,severity) tuple) does not over-collapse
+    // ACROSS fields at unit level. Mixed blank shapes (`""` cert,
+    // `"   "` key) make each anchored token unambiguous, and rule
+    // emission order (jsonschema traversal) puts cert_path first in
+    // both serde_json map configs.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      tls:
+        cert_path: \"\"
+        key_path: \"   \"
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        2,
+        "expected exactly two diagnostics (one per blank TLS path field); got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let spans: Vec<&str> = rschema.iter().map(|d| slice(source, &d.span)).collect();
+    assert_eq!(
+        spans[0], "\"\"",
+        "first leaf must anchor on the blank cert_path token"
+    );
+    assert_eq!(
+        spans[1], "\"   \"",
+        "second leaf must anchor on the blank key_path token"
+    );
+    assert_ne!(
+        rschema[0].span, rschema[1].span,
+        "the two leaf spans must be distinct"
+    );
+    for d in &rschema {
+        assert!(
+            d.message.contains("does not match"),
+            "pattern violation message must say `does not match`; got: {}",
+            d.message
+        );
+    }
+}
+
+#[test]
 fn rschema_mcp_blank_bind_empty_rejected() {
     // rc-sghtz: ROUTE_SCHEMA carries `\S` patterns on the MCP server
     // `name`/`bind` fields, so a blank `bind` (empty string) is a pattern
