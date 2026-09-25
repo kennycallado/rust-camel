@@ -2046,6 +2046,7 @@ dependencies = [
  "camel-component-log",
  "camel-config",
  "camel-core",
+ "camel-language-api",
  "futures",
  "http-body-util",
  "opentelemetry",

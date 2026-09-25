@@ -41,6 +41,7 @@ async fn ensure_runtime_fn(
     module_path: PathBuf,
     config: crate::config::WasmConfig,
     registry: Arc<dyn ComponentContext>,
+    observability: Arc<dyn camel_component_api::RuntimeObservability>,
     runtime_store: Arc<std::sync::Mutex<Option<Arc<WasmRuntime>>>>,
     state_store: crate::state_store::StateStore,
 ) -> Result<Arc<WasmRuntime>, CamelError> {
@@ -54,7 +55,7 @@ async fn ensure_runtime_fn(
     let runtime = Arc::new(WasmRuntime::new(&module_path, config).await?);
 
     runtime
-        .call_init_once(registry, HashMap::new(), state_store)
+        .call_init_once(registry, observability, HashMap::new(), state_store)
         .await?;
 
     {
@@ -207,6 +208,7 @@ impl Service<Exchange> for WasmProducer {
                     module_path.clone(),
                     config,
                     registry,
+                    Arc::clone(&observability),
                     runtime_store,
                     state_store,
                 )
@@ -240,6 +242,7 @@ impl Service<Exchange> for WasmProducer {
                 let result = runtime
                     .process_streaming_exchange(
                         registry2,
+                        Arc::clone(&observability),
                         exchange.properties.clone(),
                         state_store2,
                         exchange,

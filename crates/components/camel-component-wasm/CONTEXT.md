@@ -31,6 +31,11 @@ Authorization-policy and security-policy guests use
 functions. The host gives them only the `http-listener` resource defined by the
 source WIT world.
 
+Guest-initiated `camel_call` / `camel_poll` thread the producer's
+`RuntimeObservability` handle into the dynamically created endpoints and
+producers, so telemetry on that path flows through the real pipeline handle;
+worlds where the call is capability-denied carry a documented NoOp handle.
+
 `StateStore` enforces configurable limits on key count (default 256),
 key byte length (default 1024), and value byte length (default 65536).
 `set_property_impl` enforces key and value byte limits. Over-limit calls are

@@ -10,7 +10,7 @@ use wasmtime::{AsContextMut, Config, Engine, Store};
 use wasmtime_wasi::WasiCtxBuilder;
 
 use camel_api::{Body, Exchange};
-use camel_component_api::ComponentContext;
+use camel_component_api::{ComponentContext, RuntimeObservability};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -24,6 +24,11 @@ pub struct WasmHostState {
     pub wasi: wasmtime_wasi::WasiCtx,
     pub properties: HashMap<String, Value>,
     pub registry: Arc<dyn ComponentContext>,
+    /// Observability handle threaded from the owning producer (constructor
+    /// injection). Guest `camel_call`/`camel_poll` forward it to dynamically
+    /// created endpoints/producers. Worlds where camel_call is
+    /// capability-denied store a documented NoOp handle instead.
+    pub observability: Arc<dyn RuntimeObservability>,
     pub call_depth: Arc<std::sync::atomic::AtomicUsize>,
     pub limits: wasmtime::StoreLimits,
     pub state_store: crate::state_store::StateStore,
@@ -131,6 +136,7 @@ impl WasmRuntime {
     #[allow(clippy::too_many_arguments)] // 3 new R4-L5 caps + existing 5
     pub fn create_host_state(
         registry: Arc<dyn ComponentContext>,
+        observability: Arc<dyn RuntimeObservability>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
         max_memory_bytes: u64,
@@ -154,6 +160,7 @@ impl WasmRuntime {
             wasi: WasiCtxBuilder::new().build(),
             properties,
             registry,
+            observability,
             call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             limits,
             state_store,
@@ -172,11 +179,13 @@ impl WasmRuntime {
     pub async fn call_init_once(
         &self,
         registry: Arc<dyn ComponentContext>,
+        observability: Arc<dyn RuntimeObservability>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
     ) -> Result<(), WasmError> {
         let host_state = Self::create_host_state(
             registry,
+            observability,
             properties,
             state_store,
             self.config.max_memory_bytes,
@@ -222,12 +231,14 @@ impl WasmRuntime {
     pub async fn call_process(
         &self,
         registry: Arc<dyn ComponentContext>,
+        observability: Arc<dyn RuntimeObservability>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
         exchange: WasmExchange,
     ) -> Result<WasmExchange, WasmError> {
         let host_state = Self::create_host_state(
             registry,
+            observability,
             properties,
             state_store,
             self.config.max_memory_bytes,
@@ -297,6 +308,7 @@ impl WasmRuntime {
     pub async fn process_streaming_exchange(
         &self,
         registry: Arc<dyn ComponentContext>,
+        observability: Arc<dyn RuntimeObservability>,
         properties: HashMap<String, Value>,
         state_store: crate::state_store::StateStore,
         exchange: Exchange,
@@ -307,6 +319,7 @@ impl WasmRuntime {
     ) -> Result<StreamingResult, WasmError> {
         let host_state = Self::create_host_state(
             registry,
+            observability,
             properties,
             state_store,
             self.config.max_memory_bytes,
@@ -540,6 +553,7 @@ mod tests {
             wasi: WasiCtxBuilder::new().build(),
             properties: props,
             registry,
+            observability: Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             limits: wasmtime::StoreLimits::default(),
             state_store: crate::state_store::StateStore::new(),
@@ -559,6 +573,7 @@ mod tests {
         let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = WasmRuntime::create_host_state(
             registry,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             HashMap::new(),
             crate::state_store::StateStore::new(),
             0,
@@ -592,6 +607,7 @@ mod tests {
         let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = WasmRuntime::create_host_state(
             registry,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             HashMap::new(),
             crate::state_store::StateStore::new(),
             0, // max_memory_bytes = 0 (no memory cap)
@@ -649,6 +665,7 @@ mod tests {
         let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = WasmRuntime::create_host_state(
             registry,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             HashMap::new(),
             crate::state_store::StateStore::new(),
             64 * 1024, // 64 KiB cap
@@ -698,6 +715,7 @@ mod tests {
         // Cap = 1 page initial + 1 page growable = 2 pages = 128 KiB.
         let host_state = WasmRuntime::create_host_state(
             registry,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             HashMap::new(),
             crate::state_store::StateStore::new(),
             128 * 1024,
@@ -728,6 +746,7 @@ mod tests {
         let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let state = WasmRuntime::create_host_state(
             registry,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             HashMap::new(),
             crate::state_store::StateStore::new(),
             0,
@@ -748,6 +767,7 @@ mod tests {
         let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = WasmRuntime::create_host_state(
             registry,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             HashMap::new(),
             crate::state_store::StateStore::new(),
             0,
@@ -773,6 +793,7 @@ mod tests {
         let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = WasmRuntime::create_host_state(
             registry,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             HashMap::new(),
             crate::state_store::StateStore::new(),
             1024, // 1 KiB cap; threaded through create_host_state
@@ -795,6 +816,7 @@ mod tests {
         let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let state = WasmRuntime::create_host_state(
             registry,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             HashMap::new(),
             crate::state_store::StateStore::new(),
             50 * 1024 * 1024, // 50 MiB — exercises the builder path
@@ -813,6 +835,7 @@ mod tests {
         let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let state = WasmRuntime::create_host_state(
             registry,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             HashMap::new(),
             crate::state_store::StateStore::new(),
             50 * 1024 * 1024,
@@ -886,6 +909,7 @@ mod tests {
         let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = WasmRuntime::create_host_state(
             registry,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             HashMap::new(),
             crate::state_store::StateStore::new(),
             0, // no memory cap — this test is about timeout, not memory

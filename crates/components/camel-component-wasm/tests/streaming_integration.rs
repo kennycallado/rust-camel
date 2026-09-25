@@ -69,6 +69,7 @@ async fn process_streaming(
     no_progress_timeout: Duration,
 ) -> Result<WasmExchange, WasmError> {
     let registry = Arc::new(camel_component_api::NoOpComponentContext);
+    let observability = Arc::new(camel_component_api::test_support::NoopRuntimeObservability);
     let state_store = StateStore::new();
     let properties: HashMap<String, serde_json::Value> = HashMap::new();
     let sem = Arc::new(tokio::sync::Semaphore::new(1));
@@ -76,6 +77,7 @@ async fn process_streaming(
     runtime
         .process_streaming_exchange(
             registry,
+            observability,
             properties,
             state_store,
             exchange,

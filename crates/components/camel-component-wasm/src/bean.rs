@@ -307,6 +307,7 @@ mod tests {
         let registry = Arc::new(camel_component_api::NoOpComponentContext);
         let host_state = crate::runtime::WasmRuntime::create_host_state(
             registry,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             HashMap::new(),
             crate::state_store::StateStore::new(),
             0,

@@ -34,6 +34,10 @@ fn make_registry() -> Arc<dyn ComponentContext> {
     Arc::new(camel_component_api::NoOpComponentContext)
 }
 
+fn make_observability() -> Arc<dyn camel_component_api::RuntimeObservability> {
+    Arc::new(camel_component_api::test_support::NoopRuntimeObservability)
+}
+
 fn make_exchange() -> WasmExchange {
     WasmExchange {
         input: WasmMessage {
@@ -66,7 +70,13 @@ async fn bench_instantiation_cost() {
     // Warm up
     let exchange = make_exchange();
     runtime
-        .call_process(make_registry(), HashMap::new(), StateStore::new(), exchange)
+        .call_process(
+            make_registry(),
+            make_observability(),
+            HashMap::new(),
+            StateStore::new(),
+            exchange,
+        )
         .await
         .unwrap();
 
@@ -76,7 +86,13 @@ async fn bench_instantiation_cost() {
     for _ in 0..iterations {
         let exchange = make_exchange();
         runtime
-            .call_process(make_registry(), HashMap::new(), StateStore::new(), exchange)
+            .call_process(
+                make_registry(),
+                make_observability(),
+                HashMap::new(),
+                StateStore::new(),
+                exchange,
+            )
             .await
             .unwrap();
     }

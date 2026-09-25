@@ -121,6 +121,8 @@ impl WasmPluginContext {
         {
             let host_state = WasmRuntime::create_host_state(
                 registry,
+                // camel_call is capability-denied in this world so the handle is unreachable.
+                Arc::new(camel_component_api::NoOpComponentContext),
                 HashMap::new(),
                 ctx.state_store.clone(),
                 ctx.config.max_memory_bytes,
@@ -192,6 +194,12 @@ impl WasmPluginContext {
         let methods = {
             let host_state = WasmRuntime::create_host_state(
                 registry,
+                // camel_call is denied only by default here: the bean world
+                // honors `allow_call_schemes` (empty = deny all). With a
+                // non-empty allowlist guests reach `run_async_call` and get a
+                // NoOp observability handle — residual rc-zakf defect,
+                // bd rc-igvrl, pending the bean-factory observability seam.
+                Arc::new(camel_component_api::NoOpComponentContext),
                 HashMap::new(),
                 ctx.state_store.clone(),
                 ctx.config.max_memory_bytes,
@@ -253,6 +261,12 @@ impl WasmPluginContext {
     pub fn create_store(&self, properties: HashMap<String, Value>) -> Store<WasmHostState> {
         let host_state = WasmRuntime::create_host_state(
             self.registry.clone(),
+            // camel_call is unconditionally denied in the authz/security
+            // worlds and denied-by-default (allowlist-gated) in the bean
+            // world; an opened bean allowlist currently serves NoOp
+            // observability (bd rc-igvrl) until the bean-factory seam
+            // threads a real handle.
+            Arc::new(camel_component_api::NoOpComponentContext),
             properties,
             self.state_store.clone(),
             self.config.max_memory_bytes,

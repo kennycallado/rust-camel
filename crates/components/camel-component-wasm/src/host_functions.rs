@@ -79,6 +79,7 @@ pub fn add_to_linker(linker: &mut Linker<WasmHostState>) -> Result<(), wasmtime:
 
 async fn run_async_call(
     registry: std::sync::Arc<dyn camel_component_api::ComponentContext>,
+    observability: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
     uri: String,
     payload: String,
 ) -> Result<String, crate::bindings::camel::plugin::types::WasmError> {
@@ -100,19 +101,15 @@ async fn run_async_call(
         ))
     })?;
 
-    let endpoint = component
-        .create_endpoint(&uri, &camel_component_api::NoOpComponentContext)
-        .map_err(|e| {
-            crate::bindings::camel::plugin::types::WasmError::ProcessorError(format!(
-                "create_endpoint failed: {}",
-                e
-            ))
-        })?;
+    let endpoint = component.create_endpoint(&uri, &*registry).map_err(|e| {
+        crate::bindings::camel::plugin::types::WasmError::ProcessorError(format!(
+            "create_endpoint failed: {}",
+            e
+        ))
+    })?;
 
-    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
-        std::sync::Arc::new(camel_component_api::NoOpComponentContext);
     let producer = endpoint
-        .create_producer(rt, &camel_api::ProducerContext::new())
+        .create_producer(observability, &camel_api::ProducerContext::new())
         .map_err(|e| {
             crate::bindings::camel::plugin::types::WasmError::ProcessorError(format!(
                 "create_producer failed: {}",
@@ -156,6 +153,10 @@ async fn run_async_call(
 
 async fn run_async_poll(
     registry: std::sync::Arc<dyn camel_component_api::ComponentContext>,
+    // The handle is accepted for signature symmetry with `run_async_call`;
+    // `polling_consumer()` takes no rt handle, so only the create_endpoint
+    // context fix applies on this path.
+    _observability: std::sync::Arc<dyn camel_component_api::RuntimeObservability>,
     uri: String,
     timeout_ms: u32,
 ) -> Result<String, crate::bindings::camel::plugin::types::WasmError> {
@@ -176,14 +177,12 @@ async fn run_async_poll(
         ))
     })?;
 
-    let endpoint = component
-        .create_endpoint(&uri, &camel_component_api::NoOpComponentContext)
-        .map_err(|e| {
-            crate::bindings::camel::plugin::types::WasmError::ProcessorError(format!(
-                "create_endpoint failed: {}",
-                e
-            ))
-        })?;
+    let endpoint = component.create_endpoint(&uri, &*registry).map_err(|e| {
+        crate::bindings::camel::plugin::types::WasmError::ProcessorError(format!(
+            "create_endpoint failed: {}",
+            e
+        ))
+    })?;
 
     let mut poller = endpoint.polling_consumer().ok_or_else(|| {
         crate::bindings::camel::plugin::types::WasmError::ProcessorError(format!(
@@ -440,9 +439,11 @@ impl WasmHostState {
             );
         }
 
-        // Snapshot the registry (cloned Arc — cheap) for the async work
-        // so we don't borrow `store` across the await.
+        // Snapshot the registry (cloned Arc — cheap) and the producer's
+        // observability handle for the async work so we don't borrow
+        // `store` across the await.
         let registry = store.with(|mut view| view.get().registry.clone());
+        let observability = store.with(|mut view| view.get().observability.clone());
 
         // Recursion guard. The RAII `DepthGuard` decrements on drop, so
         // even if the `run_async_call` future is cancelled mid-await the
@@ -463,7 +464,7 @@ impl WasmHostState {
             }
         };
 
-        run_async_call(registry, uri, payload).await
+        run_async_call(registry, observability, uri, payload).await
     }
 
     pub(crate) async fn camel_poll_impl(
@@ -484,6 +485,7 @@ impl WasmHostState {
 
         // Recursion guard (RAII — see camel_call_impl for rationale).
         let registry = store.with(|mut view| view.get().registry.clone());
+        let observability = store.with(|mut view| view.get().observability.clone());
         let call_depth = store.with(|mut view| view.get().call_depth.clone());
         let _depth_guard = match DepthGuard::new(call_depth.as_ref()) {
             Some(g) => g,
@@ -496,7 +498,7 @@ impl WasmHostState {
             }
         };
 
-        run_async_poll(registry, uri, timeout_ms).await
+        run_async_poll(registry, observability, uri, timeout_ms).await
     }
 
     pub(crate) fn get_property_impl(&self, key: String) -> Option<String> {
@@ -645,6 +647,7 @@ mod tests {
             wasi: wasmtime_wasi::WasiCtxBuilder::new().build(),
             properties: HashMap::new(),
             registry: Arc::new(camel_component_api::NoOpComponentContext),
+            observability: Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
             call_depth: Arc::new(std::sync::atomic::AtomicUsize::new(call_depth)),
             limits: wasmtime::StoreLimits::default(),
             state_store: crate::state_store::StateStore::new(),
@@ -921,5 +924,307 @@ mod tests {
         if let Some(v) = val {
             assert!(v.is_object(), "JSON value must be parsed as object");
         }
+    }
+
+    // ── run_async_call / run_async_poll observability threading ──────────
+    //
+    // The fakes below prove two things about the guest host-function path:
+    // (a) the rt handle handed to dynamically created producers IS the
+    // threaded `RuntimeObservability` (Arc pointer identity), and (b) the
+    // context passed to `create_endpoint` IS the live registry (an emission
+    // through its `metrics()` reaches the recording collector — the old
+    // `NoOpComponentContext` hard-code routed it to `NoOpMetrics`, which
+    // silently drops it).
+
+    /// Slot where the fake endpoint captures the rt handle received by
+    /// `create_producer`.
+    type CapturedRt = std::sync::Mutex<Option<Arc<dyn camel_component_api::RuntimeObservability>>>;
+
+    /// Recorded counter: `(family name, label pairs)`.
+    type RecordedCounter = (String, Vec<(String, String)>);
+
+    /// Recording `MetricsCollector` capturing every `record_counter` call as
+    /// `(family name, label pairs)` (pattern: `RecMetrics` in camel-core
+    /// `context_tests.rs`).
+    #[derive(Default)]
+    struct RecMetrics {
+        counters: std::sync::Mutex<Vec<RecordedCounter>>,
+    }
+
+    impl RecMetrics {
+        fn contains(&self, name: &str, labels: &[(&str, &str)]) -> bool {
+            let want: Vec<(String, String)> = labels
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect();
+            self.counters
+                .lock()
+                .expect("counters lock")
+                .iter()
+                .any(|(n, l)| n == name && *l == want)
+        }
+    }
+
+    impl camel_api::MetricsCollector for RecMetrics {
+        fn record_exchange_duration(&self, _: &str, _: std::time::Duration) {}
+        fn increment_errors(&self, _: &str, _: &str) {}
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+        fn record_counter(&self, name: &str, _value: f64, labels: &[(&str, &str)]) {
+            self.counters.lock().expect("counters lock").push((
+                name.to_string(),
+                labels
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                    .collect(),
+            ));
+        }
+    }
+
+    /// Fake `Component` for scheme `fake`: `create_endpoint` emits a
+    /// live-context counter and hands out a fake endpoint that captures the
+    /// rt passed to `create_producer`.
+    struct FakeComponent {
+        captured_rt: Arc<CapturedRt>,
+    }
+
+    impl camel_component_api::Component for FakeComponent {
+        fn scheme(&self) -> &str {
+            "fake"
+        }
+
+        fn create_endpoint(
+            &self,
+            _uri: &str,
+            ctx: &dyn camel_component_api::ComponentContext,
+        ) -> Result<Box<dyn camel_component_api::Endpoint>, camel_api::CamelError> {
+            // Live-context proof: this emission must reach the recording
+            // collector; through `NoOpMetrics` it would be dropped.
+            ctx.metrics().record_counter("wasmguest:test:ctx", 1.0, &[]);
+            Ok(Box::new(FakeEndpoint {
+                captured_rt: Arc::clone(&self.captured_rt),
+            }))
+        }
+    }
+
+    struct FakeEndpoint {
+        captured_rt: Arc<CapturedRt>,
+    }
+
+    impl camel_component_api::Endpoint for FakeEndpoint {
+        fn uri(&self) -> &str {
+            "fake:dest"
+        }
+
+        fn create_consumer(
+            &self,
+            _rt: Arc<dyn camel_component_api::RuntimeObservability>,
+        ) -> Result<Box<dyn camel_component_api::Consumer>, camel_api::CamelError> {
+            Err(camel_api::CamelError::EndpointCreationFailed(
+                "fake endpoint exposes no consumer".into(),
+            ))
+        }
+
+        fn create_producer(
+            &self,
+            rt: Arc<dyn camel_component_api::RuntimeObservability>,
+            _ctx: &camel_api::ProducerContext,
+        ) -> Result<camel_api::BoxProcessor, camel_api::CamelError> {
+            *self.captured_rt.lock().expect("captured_rt lock") = Some(Arc::clone(&rt));
+            Ok(tower::util::BoxCloneSyncService::new(FakeProducer { rt }))
+        }
+
+        fn polling_consumer(&self) -> Option<Box<dyn camel_component_api::PollingConsumer>> {
+            Some(Box::new(FakePoller))
+        }
+    }
+
+    /// Fake producer: emits a counter through the captured rt's metrics and
+    /// echoes the input Text body as the response.
+    #[derive(Clone)]
+    struct FakeProducer {
+        rt: Arc<dyn camel_component_api::RuntimeObservability>,
+    }
+
+    impl tower::Service<camel_api::Exchange> for FakeProducer {
+        type Response = camel_api::Exchange;
+        type Error = camel_api::CamelError;
+        type Future = std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<camel_api::Exchange, camel_api::CamelError>>
+                    + Send,
+            >,
+        >;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, mut exchange: camel_api::Exchange) -> Self::Future {
+            let rt = Arc::clone(&self.rt);
+            Box::pin(async move {
+                rt.metrics()
+                    .record_counter("wasmguest:test:invoke", 1.0, &[("route", "test")]);
+                let echoed = match &exchange.input.body {
+                    camel_api::Body::Text(s) => s.clone(),
+                    _ => String::new(),
+                };
+                exchange.output = Some(camel_api::Message::new(camel_api::Body::Text(echoed)));
+                Ok(exchange)
+            })
+        }
+    }
+
+    /// Fake poller: hands out one Text exchange immediately, well within any
+    /// reasonable poll timeout.
+    struct FakePoller;
+
+    #[async_trait::async_trait]
+    impl camel_component_api::PollingConsumer for FakePoller {
+        async fn receive(
+            &mut self,
+            _timeout: std::time::Duration,
+        ) -> Result<Option<camel_api::Exchange>, camel_api::CamelError> {
+            Ok(Some(camel_api::Exchange::new(camel_api::Message::new(
+                camel_api::Body::Text("polled-payload".to_string()),
+            ))))
+        }
+    }
+
+    /// Fake `ComponentContext`: records metrics into `RecMetrics` and
+    /// resolves the fake component under scheme `fake`. The same Arc serves
+    /// as both the registry (`Arc<dyn ComponentContext>`) and the
+    /// observability handle (`Arc<dyn RuntimeObservability>` via the
+    /// blanket impl) — one owner, two handles, no new acquisition seam.
+    struct FakeCtx {
+        metrics: Arc<RecMetrics>,
+        component: Arc<FakeComponent>,
+    }
+
+    impl camel_component_api::ComponentContext for FakeCtx {
+        fn resolve_component(
+            &self,
+            scheme: &str,
+        ) -> Option<Arc<dyn camel_component_api::Component>> {
+            if scheme == "fake" {
+                Some(Arc::clone(&self.component) as Arc<dyn camel_component_api::Component>)
+            } else {
+                None
+            }
+        }
+
+        fn resolve_language(&self, _name: &str) -> Option<Arc<dyn camel_language_api::Language>> {
+            None
+        }
+
+        fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+            Arc::clone(&self.metrics) as Arc<dyn camel_api::MetricsCollector>
+        }
+
+        fn platform_service(&self) -> Arc<dyn camel_api::PlatformService> {
+            Arc::new(camel_api::NoopPlatformService::default())
+        }
+
+        fn register_route_health_check(
+            &self,
+            _route_id: &str,
+            _check: Arc<dyn camel_api::AsyncHealthCheck>,
+        ) {
+        }
+
+        fn unregister_route_health_check(&self, _route_id: &str) {}
+    }
+
+    fn fake_registry() -> (Arc<FakeCtx>, Arc<CapturedRt>, Arc<RecMetrics>) {
+        let metrics = Arc::new(RecMetrics::default());
+        let captured_rt: Arc<CapturedRt> = Arc::new(std::sync::Mutex::new(None));
+        let component = Arc::new(FakeComponent {
+            captured_rt: Arc::clone(&captured_rt),
+        });
+        let ctx = Arc::new(FakeCtx {
+            metrics: Arc::clone(&metrics),
+            component,
+        });
+        (ctx, captured_rt, metrics)
+    }
+
+    #[tokio::test]
+    async fn guest_call_threads_observability_to_dynamic_producer() {
+        let (ctx, captured_rt, metrics) = fake_registry();
+        let registry: Arc<dyn camel_component_api::ComponentContext> =
+            Arc::clone(&ctx) as Arc<dyn camel_component_api::ComponentContext>;
+        let observability: Arc<dyn camel_component_api::RuntimeObservability> =
+            Arc::clone(&ctx) as Arc<dyn camel_component_api::RuntimeObservability>;
+
+        let result = run_async_call(
+            registry,
+            Arc::clone(&observability),
+            "fake:dest".to_string(),
+            "{\"ok\":true}".to_string(),
+        )
+        .await
+        .expect("guest call must succeed");
+
+        assert_eq!(result, "{\"ok\":true}", "producer must echo the payload");
+
+        let captured = captured_rt
+            .lock()
+            .expect("captured_rt lock")
+            .clone()
+            .expect("create_producer must capture the rt handle");
+        assert!(
+            Arc::ptr_eq(&captured, &observability),
+            "dynamic producer must receive the threaded observability handle"
+        );
+        assert!(
+            metrics.contains("wasmguest:test:invoke", &[("route", "test")]),
+            "counter emitted through the threaded handle must reach the recording collector"
+        );
+    }
+
+    #[tokio::test]
+    async fn guest_call_passes_live_context_to_create_endpoint() {
+        let (ctx, _captured_rt, metrics) = fake_registry();
+        let registry: Arc<dyn camel_component_api::ComponentContext> =
+            Arc::clone(&ctx) as Arc<dyn camel_component_api::ComponentContext>;
+        let observability: Arc<dyn camel_component_api::RuntimeObservability> =
+            Arc::clone(&ctx) as Arc<dyn camel_component_api::RuntimeObservability>;
+
+        run_async_call(
+            registry,
+            observability,
+            "fake:dest".to_string(),
+            "{\"ok\":true}".to_string(),
+        )
+        .await
+        .expect("guest call must succeed");
+
+        assert!(
+            metrics.contains("wasmguest:test:ctx", &[]),
+            "create_endpoint must receive the live registry context, not NoOp"
+        );
+    }
+
+    #[tokio::test]
+    async fn guest_poll_passes_live_context_to_create_endpoint() {
+        let (ctx, _captured_rt, metrics) = fake_registry();
+        let registry: Arc<dyn camel_component_api::ComponentContext> =
+            Arc::clone(&ctx) as Arc<dyn camel_component_api::ComponentContext>;
+        let observability: Arc<dyn camel_component_api::RuntimeObservability> =
+            Arc::clone(&ctx) as Arc<dyn camel_component_api::RuntimeObservability>;
+
+        let result = run_async_poll(registry, observability, "fake:dest".to_string(), 100)
+            .await
+            .expect("poll must succeed");
+
+        assert_eq!(result, "polled-payload", "poll result shape unchanged");
+        assert!(
+            metrics.contains("wasmguest:test:ctx", &[]),
+            "poll-path create_endpoint must receive the live registry context"
+        );
     }
 }
