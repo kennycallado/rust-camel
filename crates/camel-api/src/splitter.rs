@@ -371,6 +371,11 @@ pub fn split_body_lines() -> SplitExpression {
 
 /// Split a JSON array body into one fragment per element.
 ///
+/// Fragment typing is element-driven: string elements produce [`Body::Text`]
+/// fragments carrying the raw string (so `${body}` renders it unquoted);
+/// number, boolean, object, nested-array, and null elements produce
+/// [`Body::Json`] fragments.
+///
 /// Empty bodies and empty arrays pass through with zero fragments. Non-array
 /// JSON and wrong-type bodies return a [`CamelError::TypeConversionFailed`]
 /// naming the received body type and the expected `json (array)` input.
@@ -394,7 +399,10 @@ pub fn split_body_json_array() -> SplitExpression {
         };
         Ok(arr
             .iter()
-            .map(|val| fragment_exchange(exchange, Body::Json(val.clone())))
+            .map(|val| match val {
+                serde_json::Value::String(s) => fragment_exchange(exchange, Body::Text(s.clone())),
+                other => fragment_exchange(exchange, Body::Json(other.clone())),
+            })
             .collect())
     })
 }
@@ -462,28 +470,45 @@ mod tests {
     }
 
     #[test]
-    fn split_body_json_array_string_elements_stay_json() {
-        // Pins CURRENT behavior: string elements are emitted as
-        // Body::Json(Value::String), not coerced to Body::Text.
-        // A separate bd issue tracks changing this; keep both green.
-        let ex = Exchange::new(Message::new(serde_json::json!(["a", "b"])));
+    fn split_body_json_array_string_elements_become_text() {
+        // The leading empty-string element pins the accepted delta from
+        // mission 251 (bd rc-etf0q): an empty element yields an empty
+        // `Body::Text`, not a quoted `""` JSON string.
+        let ex = Exchange::new(Message::new(serde_json::json!(["", "a", "b"])));
 
         let fragments = split_body_json_array()(&ex).unwrap();
-        assert_eq!(fragments.len(), 2);
+        assert_eq!(fragments.len(), 3);
+        assert!(
+            matches!(&fragments[0].input.body, Body::Text(s) if s.is_empty()),
+            "fragment 0 must be Body::Text(\"\"), got {:?}",
+            fragments[0].input.body
+        );
+        assert!(matches!(&fragments[1].input.body, Body::Text(s) if s == "a"));
+        assert!(matches!(&fragments[2].input.body, Body::Text(s) if s == "b"));
+        // No fragment body carries a literal quote character: string elements
+        // are raw text, so `${body}` renders them unquoted.
         for frag in &fragments {
+            let text = match &frag.input.body {
+                Body::Text(s) => s.as_str(),
+                other => panic!("expected Body::Text fragment, got {other:?}"),
+            };
             assert!(
-                matches!(&frag.input.body, Body::Json(serde_json::Value::String(_))),
-                "expected Body::Json(Value::String), got {:?}",
-                frag.input.body
-            );
-            assert!(
-                !matches!(&frag.input.body, Body::Text(_)),
-                "fragment body must not be Body::Text, got {:?}",
-                frag.input.body
+                !text.contains('"'),
+                "fragment body must not carry a quote character, got {text:?}"
             );
         }
-        assert!(matches!(&fragments[0].input.body, Body::Json(v) if *v == serde_json::json!("a")));
-        assert!(matches!(&fragments[1].input.body, Body::Json(v) if *v == serde_json::json!("b")));
+    }
+
+    #[test]
+    fn test_split_body_json_array_non_string_elements_stay_json() {
+        let ex = Exchange::new(Message::new(serde_json::json!([1, {"k": "v"}, null])));
+
+        let fragments = split_body_json_array()(&ex).unwrap();
+        assert_eq!(fragments.len(), 3);
+        assert!(matches!(&fragments[0].input.body, Body::Json(v) if *v == serde_json::json!(1)));
+        assert!(matches!(&fragments[1].input.body, Body::Json(v)
+                if *v == serde_json::json!({"k": "v"})));
+        assert!(matches!(&fragments[2].input.body, Body::Json(v) if v.is_null()));
     }
 
     #[test]
