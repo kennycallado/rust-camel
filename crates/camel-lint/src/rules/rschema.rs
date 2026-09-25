@@ -234,7 +234,8 @@ impl Rule for RSchemaRule {
                 //
                 // 2. PATTERN de-collapse — the schema's only pattern
                 //    keywords are the two MCP TLS path fields (rc-n3t73)
-                //    and the four MCP name/bind fields (rc-sghtz) —
+                //    and the four MCP name/bind fields (rc-sghtz,
+                //    anchored charset / IP-literal shape) —
                 //    reporting each nested, strictly-deeper pattern
                 //    error on its own leaf.
                 //

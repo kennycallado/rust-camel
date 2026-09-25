@@ -910,6 +910,278 @@ mcp:
 }
 
 #[test]
+fn rschema_mcp_name_charset_server_rejected() {
+    // rc-vh9dt: the server `name` pattern is the anchored runtime
+    // charset `^[A-Za-z0-9._-]+$`, so `café` is a pattern violation.
+    // Exactly one Error anchored on the raw name token; the valid
+    // `bind` value stays diagnostic-free (charset stays lowering-owned
+    // at load — this is the schema-side mirror only).
+    let source = "\
+mcp:
+  - server:
+      name: café
+      bind: 127.0.0.1:9100
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly one diagnostic for the charset-violating name; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert_eq!(
+        d.severity,
+        Severity::Error,
+        "charset violation must be an Error"
+    );
+    let raw = slice(source, &d.span);
+    assert_eq!(raw, "café", "span must anchor on the raw name token");
+    assert!(
+        d.message.contains("does not match"),
+        "pattern violation message must say `does not match`; got: {}",
+        d.message
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|d| slice(source, &d.span).contains("127.0.0.1:9100")),
+        "the valid `bind` value must stay diagnostic-free; got: {:?}",
+        diags
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_name_charset_tool_name_rejected() {
+    // rc-vh9dt sweep: the tool `name` carries the same anchored
+    // charset, so `a/b` breaks the pattern (`/` would split the lowered
+    // `mcp:<server>/tool/<name>` segment) even with a fully valid
+    // server. The single diagnostic anchors on the raw tool-name token.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+    tools:
+      - name: a/b
+        input_schema:
+          type: object
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly one diagnostic for the charset-violating tool name; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert_eq!(
+        d.severity,
+        Severity::Error,
+        "charset violation must be an Error"
+    );
+    let raw = slice(source, &d.span);
+    assert_eq!(raw, "a/b", "span must anchor on the raw tool-name token");
+    assert!(
+        d.message.contains("does not match"),
+        "pattern violation message must say `does not match`; got: {}",
+        d.message
+    );
+    assert!(
+        !rschema
+            .iter()
+            .any(|d| slice(source, &d.span).contains("crm")
+                || slice(source, &d.span).contains("127.0.0.1:9100")),
+        "the server fields must stay diagnostic-free; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_name_charset_valid_separators_clean() {
+    // rc-vh9dt: every char of `[A-Za-z0-9._-]` is legal, including the
+    // separator classes (`-`, `_`, `.`): a fully valid mcp document
+    // mixing all three kinds yields ZERO R-SCHEMA diagnostics.
+    let source = "\
+mcp:
+  - server:
+      name: crm-api_v2.prod
+      bind: 127.0.0.1:9100
+    tools:
+      - name: lookup_v2
+        input_schema:
+          type: object
+    resources:
+      - name: customers.list
+        uri: crm://customers
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.is_empty(),
+        "charset-compliant separator names must lint clean; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_bind_hostname_rejected() {
+    // rc-38iiz: the server `bind` pattern is the anchored IP-literal
+    // `SocketAddr` shape, so a hostname bind is a pattern violation.
+    // Exactly one Error anchored on the raw unquoted bind token; the
+    // valid `name` value stays diagnostic-free (the runtime rejects the
+    // hostname at consumer start with "not an IP:port literal (hostnames
+    // are not allowed)", so the lint-side Error is agreed real-defect
+    // semantics).
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: localhost:9100
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly one diagnostic for the hostname bind; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert_eq!(
+        d.severity,
+        Severity::Error,
+        "bind grammar violation must be an Error"
+    );
+    let raw = slice(source, &d.span);
+    assert_eq!(
+        raw, "localhost:9100",
+        "span must anchor on the raw bind token"
+    );
+    assert!(
+        d.message.contains("does not match"),
+        "pattern violation message must say `does not match`; got: {}",
+        d.message
+    );
+    assert!(
+        !diags.iter().any(|d| slice(source, &d.span).contains("crm")),
+        "the valid `name` value must stay diagnostic-free; got: {:?}",
+        diags
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_bind_portless_rejected() {
+    // rc-38iiz sweep: a portless address breaks the `IP-literal:port`
+    // shape even though it is non-blank. The quoted token anchors raw
+    // (quotes included), mirroring the rc-sghtz blank-bind harness; the
+    // valid `name` value stays diagnostic-free.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: \"127.0.0.1\"
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert_eq!(
+        rschema.len(),
+        1,
+        "expected exactly one diagnostic for the portless bind; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+    let d = rschema[0];
+    assert_eq!(
+        d.severity,
+        Severity::Error,
+        "bind grammar violation must be an Error"
+    );
+    let raw = slice(source, &d.span);
+    assert_eq!(
+        raw, "\"127.0.0.1\"",
+        "span must anchor on the raw quoted bind token"
+    );
+    assert!(
+        d.message.contains("does not match"),
+        "pattern violation message must say `does not match`; got: {}",
+        d.message
+    );
+    assert!(
+        !diags.iter().any(|d| slice(source, &d.span).contains("crm")),
+        "the valid `name` value must stay diagnostic-free; got: {:?}",
+        diags
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_mcp_bind_valid_v4_v6_clean() {
+    // rc-38iiz: dotted-quad v4 and bracketed v6 literals both match the
+    // anchored shape — each doc yields ZERO R-SCHEMA diagnostics. The
+    // pattern is shape-exact in the no-false-positive direction: every
+    // string the runtime `SocketAddr` parse accepts lints clean too.
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+";
+    let diags = analyze(source);
+    assert!(
+        rschema_only(&diags).is_empty(),
+        "valid v4 bind must lint clean; got: {:?}",
+        diags
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+
+    let source = "\
+mcp:
+  - server:
+      name: crm
+      bind: \"[::1]:9100\"
+";
+    let diags = analyze(source);
+    assert!(
+        rschema_only(&diags).is_empty(),
+        "valid v6 bind must lint clean; got: {:?}",
+        diags
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn rschema_mcp_blank_values_keep_nonblank_clean() {
     // Non-blank values stay out of the blank class: a fully valid mcp
     // document (server name+bind, one tool, one resource) yields ZERO

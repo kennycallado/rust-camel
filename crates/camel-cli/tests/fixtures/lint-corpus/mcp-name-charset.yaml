@@ -1,0 +1,16 @@
+# Corpus fixture (rc-vh9dt): negative witness — server name `café` and
+# tool name `a/b` must FAIL R-SCHEMA. Violating sibling of
+# mixed-routes-rest-mcp.yaml (rc-ysvjl): that file proves the mcp form
+# lints CLEAN, this one proves names outside the anchored charset
+# `[A-Za-z0-9._-]+` are rejected by the route schema (the runtime
+# rejects both at lowering via validate_mcp_name, so the lint-side
+# Errors are agreed real defects, hence baselined). R-URI walk skips
+# the mcp subtree; no other rule fires on an mcp-only document.
+mcp:
+  - server:
+      name: café
+      bind: 127.0.0.1:9100
+    tools:
+      - name: a/b
+        input_schema:
+          type: object

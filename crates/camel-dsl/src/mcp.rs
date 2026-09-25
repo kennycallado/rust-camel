@@ -75,11 +75,30 @@ where
     non_blank_verbatim(deserializer, "name")
 }
 
+/// Deserialize the MCP server `bind` — two layers (design.md D3):
+///
+/// 1. Blank rejection (bd rc-sghtz): a blank-after-trim value fails, the
+///    verbatim string is kept (never trimmed).
+/// 2. `SocketAddr` grammar mirror (bd rc-38iiz): the runtime consumer
+///    parses the identical string with `std::net::SocketAddr::from_str`
+///    (camel-component-mcp `config.rs`), so the load side runs the same
+///    predicate and rejects non-literals (hostnames, portless addresses,
+///    padded values) with the runtime's own message text — zero drift by
+///    construction. This moves the padded-bind fate to load: same verdict
+///    the consumer start gave, earlier.
+///
+/// Returns the ORIGINAL untrimmed string on success.
 fn deserialize_mcp_bind<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    non_blank_verbatim(deserializer, "bind")
+    let value = non_blank_verbatim(deserializer, "bind")?;
+    if value.parse::<std::net::SocketAddr>().is_err() {
+        return Err(serde::de::Error::custom(format!(
+            "bind '{value}' is not an IP:port literal (hostnames are not allowed)"
+        )));
+    }
+    Ok(value)
 }
 
 /// TLS certificate and private-key paths declared by an MCP DSL server.
@@ -135,11 +154,14 @@ pub struct RouteDslMcp {
 #[serde(deny_unknown_fields)]
 pub struct RouteDslMcpServer {
     /// Name of the server (referenced by lowered `mcp:<name>/...` routes).
-    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"\S")))]
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"^[A-Za-z0-9._-]+$")))]
     #[serde(deserialize_with = "deserialize_mcp_name")]
     pub name: String,
     /// Streamable-HTTP listen address (IP:port literal).
-    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"\S")))]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(regex(pattern = r"^((\d{1,3}\.){3}\d{1,3}|\[[0-9A-Fa-f:.]+\]):\d{1,5}$"))
+    )]
     #[serde(deserialize_with = "deserialize_mcp_bind")]
     pub bind: String,
     /// Optional TLS configuration.
@@ -169,7 +191,7 @@ pub struct RouteDslMcpServer {
 #[serde(deny_unknown_fields)]
 pub struct RouteDslMcpTool {
     /// Tool name (referenced by the lowered `mcp:<server>/tool/<name>` route).
-    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"\S")))]
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"^[A-Za-z0-9._-]+$")))]
     #[serde(deserialize_with = "deserialize_mcp_name")]
     pub name: String,
     /// Input JSON Schema for the tool's arguments.
@@ -182,7 +204,7 @@ pub struct RouteDslMcpTool {
 #[serde(deny_unknown_fields)]
 pub struct RouteDslMcpResource {
     /// Resource name (referenced by the lowered `mcp:<server>/resource/<name>` route).
-    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"\S")))]
+    #[cfg_attr(feature = "schema", schemars(regex(pattern = r"^[A-Za-z0-9._-]+$")))]
     #[serde(deserialize_with = "deserialize_mcp_name")]
     pub name: String,
     /// The MCP resource URI (operator config, e.g. `crm://customers`).
@@ -863,22 +885,95 @@ mcp:
     }
 
     #[test]
-    fn non_blank_padded_values_load_verbatim() {
-        // Padded non-blank values must parse AND keep their raw bytes: the
-        // runtime (`SocketAddr` parse, `validate_mcp_name` charset) consumes
-        // the verbatim string, so trimming at deserialize would silently
-        // accept values the runtime rejects today.
+    fn padded_name_loads_verbatim_and_padded_bind_rejected_at_load() {
+        // Two fates, split by field (design.md D4):
+        // - Padded NAME still loads verbatim (rc-sghtz): the runtime
+        //   charset consumes the raw string, so trimming at deserialize
+        //   would silently accept values lowering rejects.
+        // - Padded BIND moved fate in rc-38iiz: the load side now runs
+        //   the runtime's own `SocketAddr` parse, so `" 127.0.0.1:9100 "`
+        //   fails at DSL load with the runtime's message — same verdict
+        //   consumer start used to give, earlier.
         let yaml = r#"
 mcp:
   - server:
       name: " crm "
-      bind: " 127.0.0.1:9100 "
+      bind: 127.0.0.1:9100
 "#;
         let parsed: RouteDslRoutes =
-            serde_yml::from_str(yaml).expect("padded non-blank values must still parse");
-        let mcp = &parsed.mcp[0];
-        assert_eq!(mcp.server.name, " crm ");
-        assert_eq!(mcp.server.bind, " 127.0.0.1:9100 ");
+            serde_yml::from_str(yaml).expect("padded non-blank name must still parse");
+        assert_eq!(parsed.mcp[0].server.name, " crm ");
+
+        let yaml = r#"
+mcp:
+  - server:
+      name: crm
+      bind: " 127.0.0.1:9100 "
+"#;
+        let err = serde_yml::from_str::<RouteDslRoutes>(yaml)
+            .err()
+            .expect("padded bind must be rejected at load (rc-38iiz fate move)");
+        assert!(
+            err.to_string().contains("not an IP:port literal"),
+            "error must carry the runtime's message, got: {err}"
+        );
+    }
+
+    // ── Bind grammar mirror at load (bd rc-38iiz) ──
+
+    #[test]
+    fn bind_grammar_hostname_rejected_at_load() {
+        // The runtime consumer rejects hostname binds (`SocketAddr` parse
+        // in config.rs `validate_server_policy`); the load side runs the
+        // same predicate with the runtime's message — exact mirror, zero
+        // drift.
+        let yaml = r#"
+mcp:
+  - server:
+      name: crm
+      bind: localhost:9100
+"#;
+        let err = serde_yml::from_str::<RouteDslRoutes>(yaml)
+            .err()
+            .expect("hostname bind must be rejected at load");
+        assert!(
+            err.to_string().contains("not an IP:port literal"),
+            "error must carry the runtime's message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn bind_grammar_portless_rejected_at_load() {
+        // A portless address is not a `SocketAddr` literal — same
+        // rejection shape as the hostname case.
+        let yaml = r#"
+mcp:
+  - server:
+      name: crm
+      bind: "127.0.0.1"
+"#;
+        let err = serde_yml::from_str::<RouteDslRoutes>(yaml)
+            .err()
+            .expect("portless bind must be rejected at load");
+        assert!(
+            err.to_string().contains("not an IP:port literal"),
+            "error must carry the runtime's message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn bind_v6_literal_loads_verbatim() {
+        // Bracketed IPv6 literals are valid `SocketAddr` strings and must
+        // load byte-equal (verbatim contract unchanged for valid binds).
+        let yaml = r#"
+mcp:
+  - server:
+      name: crm
+      bind: "[::1]:9100"
+"#;
+        let parsed: RouteDslRoutes =
+            serde_yml::from_str(yaml).expect("bracketed v6 literal must parse");
+        assert_eq!(parsed.mcp[0].server.bind, "[::1]:9100");
     }
 
     #[test]

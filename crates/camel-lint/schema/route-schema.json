@@ -1634,7 +1634,7 @@
       "properties": {
         "name": {
           "description": "Resource name (referenced by the lowered `mcp:<server>/resource/<name>` route).",
-          "pattern": "\\S",
+          "pattern": "^[A-Za-z0-9._-]+$",
           "type": "string"
         },
         "uri": {
@@ -1654,7 +1654,7 @@
       "properties": {
         "bind": {
           "description": "Streamable-HTTP listen address (IP:port literal).",
-          "pattern": "\\S",
+          "pattern": "^((\\d{1,3}\\.){3}\\d{1,3}|\\[[0-9A-Fa-f:.]+\\]):\\d{1,5}$",
           "type": "string"
         },
         "max_resources": {
@@ -1679,7 +1679,7 @@
         },
         "name": {
           "description": "Name of the server (referenced by lowered `mcp:<name>/...` routes).",
-          "pattern": "\\S",
+          "pattern": "^[A-Za-z0-9._-]+$",
           "type": "string"
         },
         "security_policy": {
@@ -1741,7 +1741,7 @@
         },
         "name": {
           "description": "Tool name (referenced by the lowered `mcp:<server>/tool/<name>` route).",
-          "pattern": "\\S",
+          "pattern": "^[A-Za-z0-9._-]+$",
           "type": "string"
         }
       },

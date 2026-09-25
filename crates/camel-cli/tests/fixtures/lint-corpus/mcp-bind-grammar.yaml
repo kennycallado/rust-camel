@@ -1,0 +1,14 @@
+# Corpus fixture (rc-38iiz): negative witness — server bind
+# `localhost:9100` must FAIL R-SCHEMA. Violating sibling of
+# mixed-routes-rest-mcp.yaml (rc-ysvjl): that file proves the mcp form
+# lints CLEAN, this one proves binds outside the anchored IP-literal
+# SocketAddr shape are rejected by the route schema. The runtime rejects
+# the same value at consumer start ("not an IP:port literal (hostnames
+# are not allowed)") and the DSL load side rejects it too (same
+# predicate), so the lint-side Error is agreed real defect, hence
+# baselined. R-URI walk skips the mcp subtree; no other rule fires on
+# an mcp-only document.
+mcp:
+  - server:
+      name: crm
+      bind: localhost:9100
