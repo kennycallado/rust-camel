@@ -575,6 +575,7 @@ async fn spawn_server(
     let dispatch: DispatchTable = Arc::new(RwLock::new(HashMap::new()));
     let path_configs = Arc::new(DashMap::new());
     let path_policies = Arc::new(DashMap::new());
+    let registries: Arc<DashMap<String, Arc<WsConnectionRegistry>>> = Arc::default();
     let server_error = new_atomic_false();
     // Per-server death signal, cancelled by `monitor_ws_server_task`
     // (rc-nxml4): shared-transport death must fail every hosted route.
@@ -587,6 +588,7 @@ async fn spawn_server(
         dispatch: Arc::clone(&dispatch),
         path_configs: Arc::clone(&path_configs),
         path_policies: Arc::clone(&path_policies),
+        registries: Arc::clone(&registries),
         server_error: Arc::clone(&server_error),
         runtime: Arc::clone(&runtime),
         route_id: route_id.clone(),
@@ -770,6 +772,12 @@ pub struct WsAppState {
     pub dispatch: DispatchTable,
     pub path_configs: Arc<DashMap<String, WsPathConfig>>,
     pub path_policies: Arc<DashMap<String, camel_component_api::SecurityContext>>,
+    /// Per-server owned map, path → connection registry, symmetric with
+    /// `dispatch`/`path_configs`. The accept path (`ws_handler`) resolves
+    /// here so a connection can only register into its own server's
+    /// registry (rc-9xzlw) — never into another server's via the
+    /// process-global map.
+    pub registries: Arc<DashMap<String, Arc<WsConnectionRegistry>>>,
     pub server_error: Arc<AtomicBool>,
     /// Observable runtime for ADR-0012 (e) metric and (g) health calls.
     pub runtime: Arc<dyn RuntimeObservability>,
@@ -1074,14 +1082,13 @@ async fn ws_handler(
     let (mut sink, mut stream) = socket.split();
     let (out_tx, mut out_rx) = mpsc::channel::<WsMessage>(32);
 
-    let registry = global_registries();
-    let mut registry_key = None;
-    for entry in registry.iter() {
-        if entry.key().2 == path {
-            entry.value().insert(connection_key.clone(), out_tx.clone());
-            registry_key = Some(entry.key().clone());
-            break;
-        }
+    // Server-scoped resolution (rc-9xzlw): a connection registers only
+    // into its own server's registry. No entry → writer-only, matching
+    // the old no-match behavior of the process-global path scan.
+    let registry: Option<Arc<WsConnectionRegistry>> =
+        state.registries.get(&path).map(|e| Arc::clone(e.value()));
+    if let Some(registry) = &registry {
+        registry.insert(connection_key.clone(), out_tx.clone());
     }
 
     // Clone for writer closure and subsequent tracing (WS-009)
@@ -1110,9 +1117,8 @@ async fn ws_handler(
     );
 
     let mut over_limit = false;
-    if let Some(key) = &registry_key
-        && let Some(entry) = registry.get(key)
-        && entry.len() > path_config.max_connections as usize
+    if let Some(registry) = &registry
+        && registry.len() > path_config.max_connections as usize
     {
         over_limit = true;
     }
@@ -1125,10 +1131,8 @@ async fn ws_handler(
             })),
             "max-connections-close",
         );
-        if let Some(key) = registry_key.clone()
-            && let Some(entry) = registry.get(&key)
-        {
-            entry.remove(&connection_key);
+        if let Some(registry) = &registry {
+            registry.remove(&connection_key);
         }
         drop(out_tx);
         let _ = writer.await;
@@ -1330,10 +1334,8 @@ async fn ws_handler(
         task.abort();
     }
 
-    if let Some(key) = registry_key
-        && let Some(entry) = registry.get(&key)
-    {
-        entry.remove(&connection_key);
+    if let Some(registry) = &registry {
+        registry.remove(&connection_key);
     }
     drop(out_tx);
     let _ = writer.await;
@@ -1666,6 +1668,17 @@ impl WsConsumer {
         server_exited: CancellationToken,
     ) -> Result<(), CamelError> {
         let (env_tx, mut env_rx) = mpsc::channel::<ExchangeEnvelope>(64);
+
+        // Insert into the server-scoped map BEFORE the dispatch entry:
+        // an accept landing in the inter-insert window finds no dispatch
+        // entry and is cleanly rejected, instead of being admitted
+        // unregistered (writer-only, never receiving a stop-close). The
+        // server-scoped map also precedes the process-global one: the
+        // accept path resolves its registry from this map (rc-9xzlw).
+        state
+            .registries
+            .insert(self.cfg.inner.path.clone(), Arc::clone(&self.registry));
+
         {
             let mut table = state.dispatch.write().await;
             table.insert(self.cfg.inner.path.clone(), env_tx);
@@ -1884,6 +1897,7 @@ impl Consumer for WsConsumer {
             let mut table = state.dispatch.write().await;
             table.remove(&self.cfg.inner.path);
             state.path_configs.remove(&self.cfg.inner.path);
+            state.registries.remove(&self.cfg.inner.path);
         }
 
         if let Some(key) = self.registry_key.take() {
@@ -2928,12 +2942,11 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
-        // Unique path: ws_handler inserts connections into the process-wide
-        // GLOBAL_CONNECTION_REGISTRIES by PATH ONLY (host+port ignored), so
-        // two concurrent servers serving "/echo" would cross-close each
-        // other's clients on consumer.stop() (rc-qynxs). This test runs
-        // lock-free, so its served path must not collide with the "/echo"
-        // global-semantics test (`GLOBAL_DEFAULT_TEST_LOCK`).
+        // Unique path keeps this lock-free test independent of the "/echo"
+        // global-semantics tests (`GLOBAL_DEFAULT_TEST_LOCK`). Registration
+        // itself is server-scoped since rc-9xzlw (each server's WsAppState
+        // owns its path → registry map), so same-path servers can no longer
+        // cross-close each other's clients.
         let uri = format!("ws://127.0.0.1:{port}/echo-shared");
         let component_ctx = NoOpComponentContext;
         let endpoint = WsComponent::new()
@@ -3018,16 +3031,194 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accept_registers_into_owning_server_registry_only() {
+        // rc-9xzlw: ws_handler previously registered accepted connections
+        // into the process-wide GLOBAL_CONNECTION_REGISTRIES by PATH ONLY,
+        // so two servers serving the same path cross-registered each
+        // other's connections and consumer.stop() on one closed the
+        // other's clients. Post-fix contract: registration and close must
+        // target the registry keyed by the OWNING server's full (host,
+        // port, path) triple. Lock-free: isolated ServerRegistry instances
+        // and the unique "/echo-cross" path.
+        let reg_a = Arc::new(ServerRegistry::new());
+        let reg_b = Arc::new(ServerRegistry::new());
+        let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port_a = listener_a.local_addr().unwrap().port();
+        let port_b = listener_b.local_addr().unwrap().port();
+        assert_ne!(port_a, port_b, "ephemeral ports must yield distinct keys");
+        let uri_a = format!("ws://127.0.0.1:{port_a}/echo-cross");
+        let uri_b = format!("ws://127.0.0.1:{port_b}/echo-cross");
+        let component_ctx = NoOpComponentContext;
+        let endpoint_a = WsComponent::new()
+            .create_endpoint(&uri_a, &component_ctx)
+            .unwrap();
+        let endpoint_b = WsComponent::new()
+            .create_endpoint(&uri_b, &component_ctx)
+            .unwrap();
+
+        let mut consumer_a = WsConsumer::with_server_registry(
+            WsEndpointConfig::from_uri(&uri_a).unwrap().server_config(),
+            rt(),
+            Arc::clone(&reg_a),
+        );
+        let mut consumer_b = WsConsumer::with_server_registry(
+            WsEndpointConfig::from_uri(&uri_b).unwrap().server_config(),
+            rt(),
+            Arc::clone(&reg_b),
+        );
+
+        let (route_tx_a, route_rx_a) = mpsc::channel(16);
+        let ctx_a = ConsumerContext::new(
+            route_tx_a,
+            CancellationToken::new(),
+            "ws-echo-cross-a".to_string(),
+        );
+        consumer_a
+            .start_with_listener(ctx_a, listener_a)
+            .await
+            .unwrap();
+
+        let (route_tx_b, mut route_rx_b) = mpsc::channel(16);
+        let ctx_b = ConsumerContext::new(
+            route_tx_b,
+            CancellationToken::new(),
+            "ws-echo-cross-b".to_string(),
+        );
+        consumer_b
+            .start_with_listener(ctx_b, listener_b)
+            .await
+            .unwrap();
+
+        // Both servers registered their OWN full-triple key before any
+        // client connects.
+        let key_a = ("127.0.0.1".to_string(), port_a, "/echo-cross".to_string());
+        let key_b = ("127.0.0.1".to_string(), port_b, "/echo-cross".to_string());
+        let registries = global_registries();
+        assert!(
+            registries.contains_key(&key_a),
+            "server A full-triple key must be present after start"
+        );
+        assert!(
+            registries.contains_key(&key_b),
+            "server B full-triple key must be present after start"
+        );
+
+        let producer_a = endpoint_a
+            .create_producer(rt(), &ProducerContext::default())
+            .unwrap();
+        let producer_b = endpoint_b
+            .create_producer(rt(), &ProducerContext::default())
+            .unwrap();
+        let route_task_a = spawn_echo_route(route_rx_a, producer_a);
+        // Consumer B's single route channel must serve two echoes ("b"
+        // during the membership leg, "still-here" after A stops), so echo
+        // twice with the same body as spawn_echo_route.
+        let route_task_b = tokio::spawn(async move {
+            for _ in 0..2 {
+                let envelope = tokio::time::timeout(Duration::from_secs(2), route_rx_b.recv())
+                    .await
+                    .expect("consumer B echo envelope within 2s")
+                    .expect("consumer B route channel open");
+                let payload = envelope
+                    .exchange
+                    .input
+                    .body
+                    .as_text()
+                    .unwrap_or_default()
+                    .to_string();
+                let key = envelope
+                    .exchange
+                    .input
+                    .header("CamelWsConnectionKey")
+                    .and_then(|v| v.as_str())
+                    .unwrap()
+                    .to_string();
+                let mut response = Exchange::new(CamelMessage::new(CamelBody::Text(payload)));
+                response
+                    .input
+                    .set_header("CamelWsConnectionKey", serde_json::Value::String(key));
+                producer_b.clone().oneshot(response).await.unwrap();
+            }
+        });
+
+        // Act 1 (membership leg): one client per server, each echoes.
+        let mut client_a = connect_until_ready(&uri_a).await;
+        client_a
+            .send(ClientMessage::Text("a".into()))
+            .await
+            .unwrap();
+        // recv_client_text bounds itself internally (2s), so no outer
+        // timeout here — a double wrap would make Elapsed vs helper panic
+        // nondeterministic.
+        let echoed_a = recv_client_text(&mut client_a).await;
+        assert_eq!(echoed_a, "a");
+
+        let mut client_b = connect_until_ready(&uri_b).await;
+        client_b
+            .send(ClientMessage::Text("b".into()))
+            .await
+            .unwrap();
+        let echoed_b = recv_client_text(&mut client_b).await;
+        assert_eq!(echoed_b, "b");
+
+        // Assert 1: each connection lives only in its own server's registry.
+        let registries = global_registries();
+        let len_a = registries.get(&key_a).expect("key A present").len();
+        let len_b = registries.get(&key_b).expect("key B present").len();
+        assert_eq!(
+            len_a, 1,
+            "server A registry must hold exactly client A (got {len_a})"
+        );
+        assert_eq!(
+            len_b, 1,
+            "server B registry must hold exactly client B (got {len_b})"
+        );
+
+        // Act 2 (stop-isolation leg): stopping A must not touch B.
+        consumer_a.stop().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), route_task_a)
+            .await
+            .expect("route task A exits within 2s")
+            .unwrap();
+
+        client_b
+            .send(ClientMessage::Text("still-here".into()))
+            .await
+            .unwrap();
+        let echoed_still = recv_client_text(&mut client_b).await;
+        assert_eq!(echoed_still, "still-here");
+
+        // Client A must observe a Close frame or stream error within 2s.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match client_a.next().await {
+                    Some(Ok(ClientMessage::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(ClientMessage::Ping(_))) | Some(Ok(ClientMessage::Pong(_))) => continue,
+                    Some(Ok(_)) => continue,
+                }
+            }
+        })
+        .await
+        .expect("client A must see close/error within 2s of consumer A stop");
+
+        consumer_b.stop().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), route_task_b)
+            .await
+            .expect("route task B exits within 2s")
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn consumer_injection_uses_provided_registry() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let port = addr.port();
-        // Unique path: ws_handler inserts connections into the process-wide
-        // GLOBAL_CONNECTION_REGISTRIES by PATH ONLY (host+port ignored), so
-        // two concurrent servers serving "/echo" would cross-close each
-        // other's clients on consumer.stop() (rc-qynxs). This test runs
-        // lock-free, so its served path must not collide with the "/echo"
-        // global-semantics test (`GLOBAL_DEFAULT_TEST_LOCK`).
+        // Unique path keeps this lock-free test independent of the "/echo"
+        // global-semantics tests (`GLOBAL_DEFAULT_TEST_LOCK`). Registration
+        // itself is server-scoped since rc-9xzlw (each server's WsAppState
+        // owns its path → registry map), so same-path servers can no longer
+        // cross-close each other's clients.
         let uri = format!("ws://127.0.0.1:{port}/echo-seam-inject");
         let reg = Arc::new(ServerRegistry::new());
         let mut consumer = WsConsumer::with_server_registry(
@@ -4726,6 +4917,7 @@ mod tests {
             dispatch: Arc::new(RwLock::new(HashMap::new())),
             path_configs: Arc::new(DashMap::new()),
             path_policies: Arc::new(DashMap::new()),
+            registries: Arc::default(),
             server_error: new_atomic_false(),
             runtime: test_rt(),
             route_id: "test-route".into(),
@@ -4743,6 +4935,7 @@ mod tests {
             dispatch: Arc::new(RwLock::new(HashMap::new())),
             path_configs: Arc::new(DashMap::new()),
             path_policies: Arc::new(DashMap::new()),
+            registries: Arc::default(),
             server_error: new_atomic_false(),
             runtime: test_rt(),
             route_id: "test-route".into(),

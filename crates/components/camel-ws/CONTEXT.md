@@ -15,7 +15,11 @@ the last Consumer stops. Paths can register and deregister independently on one 
 
 **`WsConnectionRegistry`**:
 Per-path registry of active WebSocket connections. Producers use it for targeted or broadcast
-delivery.
+delivery. The accept path resolves a connection's registry from the accepting
+server's owned per-path map on `WsAppState`, so a connection can only register
+into its own server's registry (server-scoped). `GLOBAL_CONNECTION_REGISTRIES`
+remains the producer-facing full-triple `(host, port, path)` index written by
+consumer start/stop.
 
  **`dispatch_handler`**:
 Inbound upgrade handler. It checks path and origin, then runs the unified transport auth kernel
@@ -35,8 +39,9 @@ so a handler registered by an isolated server is not visible to the global.
 Production paths still resolve to the process-global instance — the consumer default
 uses `ServerRegistry::global_arc()` (same allocation as `global()`), and the runtime
 reload bus reads `TlsReloadRegistry::global()`.
-`GLOBAL_CONNECTION_REGISTRIES` is a separate global and keeps its path-only matching
-(bd rc-qynxs); this seam does not change it.
+`GLOBAL_CONNECTION_REGISTRIES` is a separate global kept as the producer-facing
+exact-key full-triple `(host, port, path)` index; accept-path resolution is
+server-scoped `WsAppState` state (bd rc-9xzlw), so this seam is unchanged.
 
 ## Client-consumer role
 

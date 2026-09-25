@@ -131,6 +131,7 @@ fn make_app_state(
             dispatch,
             path_configs,
             path_policies,
+            registries: Arc::default(),
             server_error: Arc::new(AtomicBool::new(false)),
             runtime: Arc::new(NoopRuntimeObservability),
             route_id: "ws-cred-test-route".to_string(),
