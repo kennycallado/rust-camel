@@ -1,0 +1,9767 @@
+//! camel-http integration test harness, extracted verbatim from lib.rs.
+//! Pure move (mission 272, bd rc-ax1vl): one-level dedent, no other edits.
+
+use camel_component_api::test_support::NoopRuntimeObservability;
+
+#[test]
+fn test_metadata_authmethod_enum_covers_runtime_vocab() {
+    // The lint's R-URI-known kind check validates `authMethod` values
+    // against the metadata Enum variants; the runtime accepts `none`
+    // (case-insensitive, parse_auth_from_params → HttpAuth::None), so
+    // the variant list must cover it or camel lint false-positives on
+    // runtime-legal routes (rc-68q6 review finding).
+    use camel_api::component_metadata::OptionKind;
+    let meta = super::HttpEndpointConfig::metadata();
+    let auth = meta
+        .uri_options
+        .iter()
+        .find(|o| o.name == "authMethod")
+        .expect("authMethod option must exist");
+    let OptionKind::Enum(variants) = &auth.kind else {
+        panic!("authMethod kind must be Enum; got {:?}", auth.kind);
+    };
+    for value in ["None", "Basic", "Bearer"] {
+        assert!(
+            variants.iter().any(|v| v.eq_ignore_ascii_case(value)),
+            "metadata authMethod variants must cover runtime-accepted `{value}`; got {variants:?}"
+        );
+    }
+}
+
+// Producer/consumer tests drive the component-ops facade on every
+// call (dashboard-observability 4.3), so even non-observability tests
+// must supply a collector-returning runtime — Noop everywhere.
+fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(NoopRuntimeObservability)
+}
+fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(NoopRuntimeObservability)
+}
+fn noop_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
+    std::sync::Arc::new(NoopRuntimeObservability)
+}
+
+use super::*;
+use crate::config::TlsConfig;
+use crate::rest_match::PathSegment;
+use crate::tls_harness::*;
+use camel_component_api::{Message, NoOpComponentContext};
+use std::sync::Arc;
+use std::time::Duration;
+
+fn test_producer_ctx() -> ProducerContext {
+    ProducerContext::new()
+}
+
+// -----------------------------------------------------------------------
+// Security: credential redaction (audit 2026-08-31, finding F3-1)
+// -----------------------------------------------------------------------
+
+/// ADR-0076: bare `host` log fields route through the canonical
+/// [`camel_api::redact::redact_host`] (bd rc-8bxeo promoted the
+/// crate-local twin — `redact_url_for_diagnostics` never opens an
+/// authority window on a base-less string). Thin local pin — the
+/// full matrix lives in camel-api's
+/// `redact_host_masks_userinfo_keeps_clean_hosts`.
+#[test]
+fn canonical_redact_host_pinned() {
+    assert_eq!(
+        camel_api::redact::redact_host("host.example:8080"),
+        "host.example:8080"
+    );
+    assert_eq!(camel_api::redact::redact_host("a@b@c"), "***@c");
+}
+
+#[test]
+fn redact_url_drops_oauth2_fragment_access_token() {
+    let redacted = redact_url_for_diagnostics("https://app.example/cb#access_token=SECRET&state=x");
+    assert!(
+        !redacted.contains("SECRET"),
+        "fragment access token leaked: {redacted}"
+    );
+    assert!(
+        !redacted.contains("access_token"),
+        "fragment key leaked: {redacted}"
+    );
+    assert!(
+        redacted.ends_with("#[redacted]"),
+        "fragment must be replaced with the sentinel: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_drops_oauth2_fragment_id_token() {
+    let redacted =
+        redact_url_for_diagnostics("https://app.example/cb#id_token=eyJhbG.SECRET.SIG&state=y");
+    assert!(
+        !redacted.contains("eyJhbG"),
+        "id token payload leaked: {redacted}"
+    );
+    assert!(
+        !redacted.contains("id_token"),
+        "id token key leaked: {redacted}"
+    );
+    assert!(
+        !redacted.contains("SECRET"),
+        "id token signature leaked: {redacted}"
+    );
+    assert!(
+        redacted.ends_with("#[redacted]"),
+        "fragment must be replaced with the sentinel: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_drops_generic_fragment_kv() {
+    let redacted = redact_url_for_diagnostics("https://h.example/p/session#session=abc123");
+    assert!(
+        !redacted.contains("abc123"),
+        "fragment value leaked: {redacted}"
+    );
+    assert!(
+        !redacted.contains("session="),
+        "fragment key leaked: {redacted}"
+    );
+    assert!(
+        redacted.contains("#[redacted]"),
+        "fragment must be replaced with the sentinel: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_query_and_fragment_sentinels_compose() {
+    let redacted = redact_url_for_diagnostics("https://h.example/p?a=1#access_token=x");
+    assert_eq!(
+        redacted, "https://h.example/p?[redacted]#[redacted]",
+        "query and fragment sentinels must compose: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_drops_benign_fragment_too() {
+    // Fragments never reach the wire, so nothing in them is diagnostic:
+    // strictest-wins drops benign fragments too.
+    let redacted = redact_url_for_diagnostics("https://h.example/docs#section-3");
+    assert_eq!(
+        redacted, "https://h.example/docs#[redacted]",
+        "benign fragment must still be dropped: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_unparseable_fragment_credentials_dropped() {
+    let raw = "ht tps://app.example/cb#access_token=SECRET";
+    assert!(
+        url::Url::parse(raw).is_err(),
+        "fixture must be unparseable: {raw}"
+    );
+    let redacted = redact_url_for_diagnostics(raw);
+    assert!(
+        !redacted.contains("SECRET"),
+        "unparseable fragment token leaked: {redacted}"
+    );
+    assert!(
+        !redacted.contains("access_token"),
+        "unparseable fragment bytes leaked: {redacted}"
+    );
+    assert!(
+        redacted.contains("#[redacted]"),
+        "unparseable fragment must end in the sentinel: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_double_slash_evader_sentinel() {
+    // url::Url::parse accepts this (empty host allowed for non-special
+    // schemes), parking userinfo-shaped bytes in the opaque path.
+    let redacted = redact_url_for_diagnostics("scheme:////user:pass@evil/");
+    assert_eq!(
+        redacted, "[redacted]",
+        "double-slash evader must fail closed: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_triple_slash_evader_sentinel() {
+    let redacted = redact_url_for_diagnostics("scheme:///user:pass@evil/");
+    assert_eq!(
+        redacted, "[redacted]",
+        "triple-slash evader must fail closed: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_bare_protocol_relative_userinfo_sentinel() {
+    let redacted = redact_url_for_diagnostics("//user:pass@evil");
+    assert_eq!(
+        redacted, "[redacted]",
+        "protocol-relative userinfo must fail closed: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_empty_host_userinfo_sentinel() {
+    // url::Url::parse rejects this with EmptyHost; the failure arm must
+    // fail closed without panicking on the empty host.
+    let redacted = redact_url_for_diagnostics("scheme://user@");
+    assert_eq!(
+        redacted, "[redacted]",
+        "empty-host userinfo must fail closed: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_unparseable_slash_run_evader_sentinel() {
+    // Unlike `scheme:////user:pass@evil/` (parses Ok, host=None, and
+    // hits the parsed-arm guard), the space in the scheme forces the
+    // parse to fail, driving the failure arm's slash-run skip directly.
+    let raw = "schem e:////user:pass@evil/";
+    assert!(
+        url::Url::parse(raw).is_err(),
+        "fixture must be unparseable: {raw}"
+    );
+    let redacted = redact_url_for_diagnostics(raw);
+    assert_eq!(
+        redacted, "[redacted]",
+        "unparseable slash-run evader must fail closed: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_unparseable_later_window_userinfo_sentinel() {
+    // The first `//` window ("ho st") carries no `@`, but a later
+    // `//user:pass@evil/` window does. The scan must consider every
+    // `//` window, not just the first, or the credentials echo.
+    let raw = "http://ho st/a//user:pass@evil/";
+    assert!(
+        url::Url::parse(raw).is_err(),
+        "fixture must be unparseable: {raw}"
+    );
+    let redacted = redact_url_for_diagnostics(raw);
+    assert_eq!(
+        redacted, "[redacted]",
+        "userinfo in a later // window must fail closed: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_parsed_later_window_userinfo_masked() {
+    // rust-url accepts this with host `h` and parks the userinfo bytes
+    // in the path, so the accessor mask never fires. The parsed arm
+    // must apply the same window-masking surgery as the string-based
+    // redactors or the later window renders verbatim.
+    let redacted = redact_url_for_diagnostics("https://h//user:pass@evil/");
+    assert!(
+        !redacted.contains("user:pass"),
+        "parsed later-window userinfo leaked: {redacted}"
+    );
+    assert!(
+        redacted.contains("h//***@evil/"),
+        "later window must be masked in place: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_parsed_window_mask_idempotent_with_real_userinfo() {
+    // Real userinfo is masked by the accessor step; the window surgery
+    // on the rendered string must not double-mask it (`***@h` stays),
+    // and the later `x@y` path window must still be masked.
+    let redacted = redact_url_for_diagnostics("https://user:pass@h//x@y/");
+    assert!(
+        redacted.contains("***@h"),
+        "accessor mask must survive the window surgery: {redacted}"
+    );
+    assert!(
+        !redacted.contains("user:pass"),
+        "real userinfo leaked: {redacted}"
+    );
+    assert!(
+        !redacted.contains("x@y"),
+        "later path window leaked: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_backslash_authority_ruling() {
+    // Probe outcome: url::Url::parse accepts this input. http is a
+    // special scheme, so backslashes normalize to slashes and the
+    // credentials land in real userinfo
+    // (`http://user:pass@evil/path`). The parsed arm must mask them
+    // like any other userinfo.
+    let redacted = redact_url_for_diagnostics("http:\\\\user:pass@evil\\path");
+    assert!(
+        redacted.contains("***@"),
+        "backslash authority must be userinfo-masked: {redacted}"
+    );
+    assert!(
+        !redacted.contains("user:pass"),
+        "backslash authority must not leak credentials: {redacted}"
+    );
+}
+
+#[test]
+fn non_special_backslash_authority_masked() {
+    // Non-special scheme: the url crate does not normalize the
+    // backslashes, so the string carries no `//` run — the
+    // scheme-prefixed backslash window must still suppress the
+    // credentials.
+    let redacted = redact_url_for_diagnostics("foo:\\user:pass@evil/");
+    assert!(
+        !redacted.contains("user:pass"),
+        "non-special backslash authority leaked: {redacted}"
+    );
+    assert!(
+        !redacted.contains("pass"),
+        "non-special backslash authority leaked a credential byte: {redacted}"
+    );
+    // Clean sibling stays visible (spec scenario's second given).
+    assert_eq!(
+        redact_url_for_diagnostics("foo:\\clean/path"),
+        "foo:\\clean/path"
+    );
+}
+
+#[test]
+fn one_char_scheme_credential_content_masked() {
+    // Single backslash after the one-character scheme `x:` with
+    // credential-shaped window content (`:` before the last `@`).
+    let redacted = redact_url_for_diagnostics("x:\\user:pass@evil");
+    assert!(
+        !redacted.contains("user:pass"),
+        "one-char-scheme backslash authority leaked: {redacted}"
+    );
+    assert!(
+        !redacted.contains("pass"),
+        "one-char-scheme backslash authority leaked a credential byte: {redacted}"
+    );
+}
+
+#[test]
+fn drive_and_unc_inputs_stay_visible() {
+    // Drive path: single backslash after a one-character scheme, no
+    // `:` in the candidate window — no qualifying backslash window.
+    // The parse-success arm lowercases the scheme (`C:` → `c:`); the
+    // diagnostic content must stay visible with no sentinel and no
+    // mask (spec scenario: query-redaction/cap rules only).
+    let drive = redact_url_for_diagnostics("C:\\Users\\x@corp\\file");
+    assert!(
+        !drive.contains("[redacted]"),
+        "drive path must not be sentineled: {drive}"
+    );
+    assert!(
+        !drive.contains("***"),
+        "drive path must not be masked: {drive}"
+    );
+    assert!(
+        drive.contains("x@corp"),
+        "drive path keeps its at-sign content visible: {drive}"
+    );
+    // UNC path: no scheme prefix before the backslash run; the
+    // unparseable arm renders it byte-identically.
+    let unc = redact_url_for_diagnostics("\\\\server\\x@y");
+    assert_eq!(unc, "\\\\server\\x@y");
+    assert!(
+        !unc.contains("[redacted]"),
+        "UNC path must not be sentineled: {unc}"
+    );
+}
+
+#[test]
+fn redact_url_masks_userinfo_and_query() {
+    let redacted =
+        redact_url_for_diagnostics("http://user:secretpass@internal.example/api?token=abc123");
+    assert!(
+        !redacted.contains("secretpass"),
+        "password must be masked: {redacted}"
+    );
+    assert!(
+        !redacted.contains("token=abc123"),
+        "query must be masked: {redacted}"
+    );
+    assert!(
+        !redacted.contains("user@"),
+        "username must be masked: {redacted}"
+    );
+    assert!(
+        redacted.contains("internal.example"),
+        "host stays visible: {redacted}"
+    );
+    assert!(redacted.contains("[redacted]"), "query marked: {redacted}");
+}
+
+#[test]
+fn redact_url_keeps_clean_urls_visible() {
+    let redacted = redact_url_for_diagnostics("https://api.example.com/v1/items");
+    assert_eq!(redacted, "https://api.example.com/v1/items");
+}
+
+#[test]
+fn redact_url_masks_password_only_userinfo() {
+    let redacted = redact_url_for_diagnostics("http://:pwsecret@host.example/");
+    assert!(
+        !redacted.contains("pwsecret"),
+        "password-only userinfo leaked: {redacted}"
+    );
+    assert_eq!(redacted, "http://***@host.example/");
+
+    let redacted = redact_url_for_diagnostics("http://user:pw2@host.example/api");
+    assert!(!redacted.contains("pw2"), "password leaked: {redacted}");
+    assert_eq!(redacted, "http://***@host.example/api");
+
+    let redacted = redact_url_for_diagnostics("http://host.example/api");
+    assert_eq!(redacted, "http://host.example/api");
+}
+
+#[test]
+fn redact_url_truncates_unparseable() {
+    let long = "x".repeat(1000);
+    let redacted = redact_url_for_diagnostics(&long);
+    assert_eq!(redacted.len(), 256, "unparseable URL must be truncated");
+}
+
+/// e_gpt stage-4: the 256-byte cap must not split an appended sentinel.
+/// The base is truncated at `256 - sentinel_len` BEFORE the sentinel is
+/// appended, so the sentinel always renders intact and the total stays
+/// ≤ 256. Both arms (parsed and unparseable) are exercised.
+#[test]
+fn redact_url_keeps_sentinels_intact_under_256_cap() {
+    // Parsed arm: base (scheme+host+path) is 250 bytes, so byte 256
+    // lands inside the appended `?[redacted]` (starts at 250) pre-fix.
+    let parsed = format!("https://example.com/{}?x=1", "a".repeat(230));
+    assert!(
+        url::Url::parse(&parsed).is_ok(),
+        "fixture must parse: {parsed}"
+    );
+    let redacted = redact_url_for_diagnostics(&parsed);
+    assert!(redacted.len() <= 256, "len={}", redacted.len());
+    assert!(
+        redacted.ends_with("?[redacted]"),
+        "parsed-arm sentinel must render intact: {redacted}"
+    );
+
+    // Unparseable arm: base is 249 bytes, so byte 256 lands inside the
+    // appended `?[redacted]` (starts at 249) pre-fix.
+    let unparseable = format!("http://{} ?x=1", "a".repeat(240));
+    assert!(
+        url::Url::parse(&unparseable).is_err(),
+        "fixture must not parse: {unparseable}"
+    );
+    let redacted = redact_url_for_diagnostics(&unparseable);
+    assert!(redacted.len() <= 256, "len={}", redacted.len());
+    assert!(
+        redacted.ends_with("?[redacted]"),
+        "unparseable-arm sentinel must render intact: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_suppresses_unparseable_authority_credentials() {
+    let fixtures = [
+        "http://u:secretpw@/x",
+        "http://u:secretpw@host:99999/x",
+        "http://u:secretpw@host:99999",
+        "//u:secretpw@h/x",
+    ];
+    for fixture in fixtures {
+        assert!(
+            url::Url::parse(fixture).is_err(),
+            "fixture must be unparseable: {fixture}"
+        );
+        let redacted = redact_url_for_diagnostics(fixture);
+        assert_eq!(
+            redacted, "[redacted]",
+            "credential-bearing authority must be suppressed: {fixture}"
+        );
+    }
+}
+
+#[test]
+fn redact_url_bd_repro_never_leaks_credentials() {
+    let redacted = redact_url_for_diagnostics("http://user:pa%ss@host/path");
+    assert!(
+        !redacted.contains("user:pa%ss"),
+        "bd rc-2i5c5 repro leaked userinfo: {redacted}"
+    );
+    assert!(
+        !redacted.contains("pa%ss"),
+        "bd rc-2i5c5 repro leaked password: {redacted}"
+    );
+}
+
+#[test]
+fn redact_url_unparseable_query_redacted_short_and_long() {
+    let short = "http://host:99999/path?token=shortsecret";
+    assert!(
+        url::Url::parse(short).is_err(),
+        "fixture must be unparseable: {short}"
+    );
+    let redacted = redact_url_for_diagnostics(short);
+    assert_eq!(
+        redacted, "http://host:99999/path?[redacted]",
+        "short unparseable query must end with the suffix: {redacted}"
+    );
+
+    let mut long = String::from("http://host:99999/");
+    long.push_str(&"a".repeat(300));
+    long.push_str("?token=longsecret");
+    assert!(
+        url::Url::parse(&long).is_err(),
+        "fixture must be unparseable: {long}"
+    );
+    let redacted = redact_url_for_diagnostics(&long);
+    assert!(
+        !redacted.contains("longsecret"),
+        "long unparseable query leaked a query byte: {redacted}"
+    );
+    assert!(
+        redacted.len() <= 256,
+        "long unparseable query must be capped: {} bytes",
+        redacted.len()
+    );
+}
+
+#[test]
+fn redact_url_unparseable_sentinels_compose_both() {
+    // Compose-both rule: one sentinel per distinct introducer found in
+    // the raw string, in first-occurrence order.
+    let raw = "ht tp://h.example/p?a=1#tok=x";
+    assert!(
+        url::Url::parse(raw).is_err(),
+        "fixture must be unparseable: {raw}"
+    );
+    assert_eq!(
+        redact_url_for_diagnostics(raw),
+        "ht tp://h.example/p?[redacted]#[redacted]",
+        "query and fragment sentinels must compose: {raw}"
+    );
+}
+
+#[test]
+fn redact_url_unparseable_sentinels_compose_fragment_first() {
+    let raw = "ht tp://h.example/p#tok=x?a=1";
+    assert!(
+        url::Url::parse(raw).is_err(),
+        "fixture must be unparseable: {raw}"
+    );
+    assert_eq!(
+        redact_url_for_diagnostics(raw),
+        "ht tp://h.example/p#[redacted]?[redacted]",
+        "sentinels must follow the introducers' first-occurrence order: {raw}"
+    );
+}
+
+#[test]
+fn redact_url_unparseable_utf8_straddle_no_panic() {
+    let fixture = format!("a{}", "é".repeat(200));
+    let redacted = redact_url_for_diagnostics(&fixture);
+    assert!(
+        redacted.len() <= 256,
+        "straddle fixture must be capped: {} bytes",
+        redacted.len()
+    );
+    assert!(
+        redacted.len() >= 253,
+        "straddle fixture must not over-truncate: {} bytes",
+        redacted.len()
+    );
+    assert!(
+        fixture.is_char_boundary(redacted.len()),
+        "cut must land on a UTF-8 char boundary: {} bytes",
+        redacted.len()
+    );
+}
+
+#[test]
+fn redact_url_at_sign_outside_authority_window_visible() {
+    let at_sign_in_path = "http://host:99999/x@y";
+    assert!(
+        url::Url::parse(at_sign_in_path).is_err(),
+        "fixture must be unparseable: {at_sign_in_path}"
+    );
+    assert_eq!(
+        redact_url_for_diagnostics(at_sign_in_path),
+        at_sign_in_path,
+        "at-sign in path must not be suppressed"
+    );
+    // mailto parses as a cannot-be-a-base URL (no is_err precondition).
+    assert_eq!(
+        redact_url_for_diagnostics("mailto:user@example.com"),
+        "mailto:user@example.com",
+        "at-sign in mailto must round-trip byte-identically"
+    );
+}
+
+#[test]
+fn parse_success_fragment_composes() {
+    // Parsed arm: the fragment stays on the rendered URL and the
+    // canonical redactor drops it and appends the sentinel.
+    assert_eq!(
+        redact_url_for_diagnostics("https://h/p#access_token=x"),
+        "https://h/p#[redacted]"
+    );
+    // A `?` inside the fragment composes both sentinels, in
+    // first-occurrence order (# before ?).
+    assert_eq!(
+        redact_url_for_diagnostics("https://h/cb#f?state=x"),
+        "https://h/cb#[redacted]?[redacted]"
+    );
+}
+
+#[test]
+fn err_arm_delegation_pin() {
+    // Unparseable (port 99999) with userinfo in the authority window:
+    // the Err arm delegates wholesale to the fail-closed canonical
+    // redactor — nothing of the URL is rendered.
+    assert_eq!(
+        redact_url_for_diagnostics("http://u:secretpw@host:99999/x"),
+        "[redacted]"
+    );
+    // Cross-surface fixture: same unparseable port without userinfo —
+    // drop at `?`, append the query sentinel.
+    assert_eq!(
+        redact_url_for_diagnostics("http://h:99999/p?token=secret"),
+        "http://h:99999/p?[redacted]"
+    );
+}
+
+#[test]
+fn truncate_error_body_caps_attacker_body() {
+    let big = vec![b'A'; 10 * 1024 * 1024];
+    let truncated = truncate_error_body(&big);
+    assert!(
+        truncated.len() <= MAX_ERROR_RESPONSE_BODY_BYTES + 20,
+        "body must be capped near {} bytes, got {}",
+        MAX_ERROR_RESPONSE_BODY_BYTES,
+        truncated.len()
+    );
+    assert!(truncated.ends_with("...[truncated]"));
+}
+
+#[test]
+fn truncate_error_body_keeps_small_body() {
+    assert_eq!(truncate_error_body(b"boom"), "boom");
+}
+
+#[test]
+fn test_http_config_defaults() {
+    let config = HttpEndpointConfig::from_uri("http://localhost:8080/api").unwrap();
+    assert_eq!(config.base_url, "http://localhost:8080/api");
+    assert!(config.http_method.is_none());
+    assert!(config.throw_exception_on_failure);
+    assert_eq!(config.ok_status_code_range, (200, 299));
+    assert!(config.response_timeout.is_none());
+    assert!(matches!(config.auth, HttpAuth::None));
+    assert!(!config.bridge_endpoint);
+    assert!(!config.connection_close);
+}
+
+#[test]
+fn test_http_config_scheme() {
+    // UriConfig trait method returns "http" as primary scheme
+    assert_eq!(HttpEndpointConfig::scheme(), "http");
+}
+
+#[test]
+fn test_http_config_from_components() {
+    // Test from_components directly (trait method)
+    let components = camel_component_api::UriComponents {
+        scheme: "https".to_string(),
+        path: "//api.example.com/v1".to_string(),
+        params: std::collections::HashMap::from([("httpMethod".to_string(), "POST".to_string())]),
+        raw_query: None,
+    };
+    let config = HttpEndpointConfig::from_components(components).unwrap();
+    assert_eq!(config.base_url, "https://api.example.com/v1");
+    assert_eq!(config.http_method, Some("POST".to_string()));
+}
+
+#[test]
+fn test_http_config_with_options() {
+    let config = HttpEndpointConfig::from_uri(
+        "https://api.example.com/v1?httpMethod=PUT&throwExceptionOnFailure=false&followRedirects=true&connectTimeout=5000&responseTimeout=10000"
+    ).unwrap();
+    assert_eq!(config.base_url, "https://api.example.com/v1");
+    assert_eq!(config.http_method, Some("PUT".to_string()));
+    assert!(!config.throw_exception_on_failure);
+    assert_eq!(config.response_timeout, Some(Duration::from_millis(10000)));
+}
+
+#[test]
+fn test_http_endpoint_config_auth_and_headers_options() {
+    let config = HttpEndpointConfig::from_uri(
+        "http://localhost/api?authMethod=Basic&authUsername=u&authPassword=p&userAgent=camel-test&bridgeEndpoint=true&connectionClose=true&skipRequestHeaders=Authorization,X-Secret&skipResponseHeaders=Set-Cookie",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        config.auth,
+        HttpAuth::Basic { username, password } if username == "u" && password == "p"
+    ));
+    assert_eq!(config.user_agent.as_deref(), Some("camel-test"));
+    assert!(config.bridge_endpoint);
+    assert!(config.connection_close);
+    assert_eq!(
+        config.skip_request_headers,
+        vec!["authorization".to_string(), "x-secret".to_string()]
+    );
+    assert_eq!(config.skip_response_headers, vec!["set-cookie".to_string()]);
+}
+
+#[test]
+fn test_http_endpoint_config_bearer_auth() {
+    let config =
+        HttpEndpointConfig::from_uri("http://localhost/api?authMethod=Bearer&authBearerToken=t")
+            .unwrap();
+    assert!(matches!(
+        config.auth,
+        HttpAuth::Bearer { token } if token == "t"
+    ));
+}
+
+#[test]
+fn rejects_cookie_handling_inmemory() {
+    let result = HttpEndpointConfig::from_uri("http://localhost/api?cookieHandling=InMemory");
+    match result {
+        Err(CamelError::InvalidUri(msg)) => {
+            assert!(
+                msg.contains("cookieHandling is not supported"),
+                "expected rejection message, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidUri error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn rejects_cookie_handling_disabled() {
+    let result = HttpEndpointConfig::from_uri("http://localhost/api?cookieHandling=Disabled");
+    match result {
+        Err(CamelError::InvalidUri(msg)) => {
+            assert!(
+                msg.contains("cookieHandling is not supported"),
+                "expected rejection message, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidUri error, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_from_uri_with_defaults_applies_config_when_uri_param_absent() {
+    let config = HttpConfig::default()
+        .with_response_timeout_ms(999)
+        .with_allow_internal(true)
+        .with_blocked_hosts(vec!["evil.com".to_string()])
+        .with_max_body_size(12345);
+    let endpoint =
+        HttpEndpointConfig::from_uri_with_defaults("http://example.com/api", &config).unwrap();
+    assert_eq!(endpoint.response_timeout, Some(Duration::from_millis(999)));
+    assert!(endpoint.allow_internal);
+    assert_eq!(endpoint.blocked_hosts, vec!["evil.com".to_string()]);
+    assert_eq!(endpoint.max_body_size, 12345);
+}
+
+#[test]
+fn test_from_uri_with_defaults_uri_overrides_config() {
+    let config = HttpConfig::default()
+        .with_response_timeout_ms(999)
+        .with_allow_internal(true)
+        .with_blocked_hosts(vec!["evil.com".to_string()])
+        .with_max_body_size(12345);
+    let endpoint = HttpEndpointConfig::from_uri_with_defaults(
+        "http://example.com/api?responseTimeout=500&allowInternal=false&blockedHosts=bad.net&maxBodySize=99",
+        &config,
+    )
+    .unwrap();
+    assert_eq!(endpoint.response_timeout, Some(Duration::from_millis(500)));
+    assert!(!endpoint.allow_internal);
+    assert_eq!(endpoint.blocked_hosts, vec!["bad.net".to_string()]);
+    assert_eq!(endpoint.max_body_size, 99);
+}
+
+#[test]
+fn test_http_config_ok_status_range() {
+    let config =
+        HttpEndpointConfig::from_uri("http://localhost/api?okStatusCodeRange=200-204").unwrap();
+    assert_eq!(config.ok_status_code_range, (200, 204));
+}
+
+#[test]
+fn test_http_config_wrong_scheme() {
+    let result = HttpEndpointConfig::from_uri("file:/tmp");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_http_component_scheme() {
+    let component = HttpComponent::new();
+    assert_eq!(component.scheme(), "http");
+}
+
+// -----------------------------------------------------------------------
+// tls.strict — fail-closed knob (audit 2026-08-31 R3 / rc-ayrwk).
+// Default stays permissive (F2-7 warns); strict fails endpoint creation
+// on any CA/mTLS load failure.
+// -----------------------------------------------------------------------
+
+#[test]
+fn tls_strict_defaults_false_on_deserialize() {
+    let tls: TlsConfig = serde_json::from_value(serde_json::json!({
+        "enabled": true
+    }))
+    .unwrap();
+    assert!(!tls.strict, "absent strict must default to false");
+}
+
+fn strict_config(ca_path: Option<&str>, strict: bool) -> HttpConfig {
+    HttpConfig {
+        tls: Some(TlsConfig {
+            enabled: true,
+            strict,
+            ca_cert_path: ca_path.map(|p| p.to_string()),
+            ..TlsConfig::default()
+        }),
+        ..HttpConfig::default()
+    }
+}
+
+#[test]
+fn strict_tls_missing_ca_fails_endpoint_creation() {
+    let component = HttpComponent::with_config(strict_config(Some("/nonexistent/ca.pem"), true));
+    let err = component
+        .create_endpoint("http://localhost/api", &NoOpComponentContext)
+        .err()
+        .expect("strict + missing CA must fail endpoint creation");
+    assert!(
+        err.to_string().contains("tls.strict"),
+        "must name the strict knob: {err}"
+    );
+    assert!(
+        err.to_string().contains("unreadable"),
+        "must name the failure class: {err}"
+    );
+}
+
+#[test]
+fn strict_tls_unparseable_ca_fails_endpoint_creation() {
+    let path = camel_component_api::test_support::tls::write_pem_tmp(
+        "strict-bad-ca.pem",
+        "not a certificate",
+    );
+    let component = HttpComponent::with_config(strict_config(Some(path.to_str().unwrap()), true));
+    let err = component
+        .create_endpoint("http://localhost/api", &NoOpComponentContext)
+        .err()
+        .expect("strict + unparseable CA must fail endpoint creation");
+    assert!(
+        err.to_string()
+            .contains("no parseable PEM CERTIFICATE section"),
+        "must name the failure class: {err}"
+    );
+}
+
+#[test]
+fn strict_tls_der_file_rejected_not_certified() {
+    // e_glm stage-4 finding 1: a DER-looking file (first byte 0x30 =
+    // ASCII '0') must NOT pass strict — the rustls backend never
+    // enforces lone-DER bundles, so certifying one would certify an
+    // unenforced config.
+    let path = camel_component_api::test_support::tls::write_pem_tmp(
+        "strict-der-ca.pem",
+        "00garbage-bytes",
+    );
+    let component = HttpComponent::with_config(strict_config(Some(path.to_str().unwrap()), true));
+    let err = component
+        .create_endpoint("http://localhost/api", &NoOpComponentContext)
+        .err()
+        .expect("strict + DER file must fail endpoint creation");
+    assert!(
+        err.to_string().contains("convert to PEM"),
+        "must tell the operator to convert: {err}"
+    );
+}
+
+#[test]
+fn strict_tls_half_mtls_pair_rejected() {
+    // e_glm stage-4 finding 2: cert XOR key must fail under strict,
+    // not silently degrade to non-mTLS.
+    let cfg = strict_mtls_config(Some("/any/cert.pem"), None);
+    let component = HttpComponent::with_config(cfg);
+    let err = component
+        .create_endpoint("http://localhost/api", &NoOpComponentContext)
+        .err()
+        .expect("strict + half mTLS pair must fail endpoint creation");
+    assert!(
+        err.to_string().contains("BOTH"),
+        "must name the pair requirement: {err}"
+    );
+}
+
+#[test]
+fn strict_tls_valid_material_allows_endpoint_creation() {
+    let (ca, _cert, _key) = camel_component_api::test_support::tls::gen_server_cert();
+    let path = camel_component_api::test_support::tls::write_pem_tmp("strict-ok-ca.pem", &ca);
+    let component = HttpComponent::with_config(strict_config(Some(path.to_str().unwrap()), true));
+    assert!(
+        component
+            .create_endpoint("http://localhost/api", &NoOpComponentContext)
+            .is_ok(),
+        "valid CA under strict must create the endpoint"
+    );
+}
+
+#[test]
+fn permissive_missing_ca_keeps_back_compat() {
+    // strict absent (false): the F2-7 warn-and-fallback behavior stays;
+    // endpoint creation succeeds.
+    let component = HttpComponent::with_config(strict_config(Some("/nonexistent/ca.pem"), false));
+    assert!(
+        component
+            .create_endpoint("http://localhost/api", &NoOpComponentContext)
+            .is_ok(),
+        "permissive mode must keep the back-compat fallback"
+    );
+}
+
+fn strict_mtls_config(cert_path: Option<&str>, key_path: Option<&str>) -> HttpConfig {
+    HttpConfig {
+        tls: Some(TlsConfig {
+            enabled: true,
+            strict: true,
+            client_cert_path: cert_path.map(|p| p.to_string()),
+            client_key_path: key_path.map(|p| p.to_string()),
+            ..TlsConfig::default()
+        }),
+        ..HttpConfig::default()
+    }
+}
+
+#[test]
+fn strict_tls_missing_mtls_cert_fails_endpoint_creation() {
+    // Key present, cert file missing: a half-readable mTLS pair must
+    // fail creation under strict, not silently drop the identity.
+    let (_ca, _cert, key) = camel_component_api::test_support::tls::gen_server_cert();
+    let key_path =
+        camel_component_api::test_support::tls::write_pem_tmp("strict-mtls-key.pem", &key);
+    let component = HttpComponent::with_config(strict_mtls_config(
+        Some("/nonexistent/cert.pem"),
+        Some(key_path.to_str().unwrap()),
+    ));
+    let err = component
+        .create_endpoint("http://localhost/api", &NoOpComponentContext)
+        .err()
+        .expect("strict + unreadable mTLS pair must fail endpoint creation");
+    assert!(
+        err.to_string().contains("tls.strict"),
+        "must name the strict knob: {err}"
+    );
+    assert!(
+        err.to_string().contains("unreadable"),
+        "must name the failure class: {err}"
+    );
+}
+
+#[test]
+fn strict_tls_valid_mtls_pair_allows_endpoint_creation() {
+    let (_ca, cert, key) = camel_component_api::test_support::tls::gen_server_cert();
+    let cert_path =
+        camel_component_api::test_support::tls::write_pem_tmp("strict-mtls-cert.pem", &cert);
+    let key_path =
+        camel_component_api::test_support::tls::write_pem_tmp("strict-mtls-key2.pem", &key);
+    let component = HttpComponent::with_config(strict_mtls_config(
+        Some(cert_path.to_str().unwrap()),
+        Some(key_path.to_str().unwrap()),
+    ));
+    assert!(
+        component
+            .create_endpoint("http://localhost/api", &NoOpComponentContext)
+            .is_ok(),
+        "valid mTLS pair under strict must create the endpoint"
+    );
+}
+
+#[test]
+fn test_https_component_scheme() {
+    let component = HttpsComponent::new();
+    assert_eq!(component.scheme(), "https");
+}
+
+#[test]
+fn test_http_endpoint_creates_consumer() {
+    let component = HttpComponent::new();
+    let ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint("http://0.0.0.0:19100/test", &ctx)
+        .unwrap();
+    assert!(endpoint.create_consumer(rt()).is_ok());
+}
+
+#[test]
+fn test_https_endpoint_creates_consumer_errors_without_tls() {
+    let component = HttpsComponent::new();
+    let ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint("https://0.0.0.0:8443/test", &ctx)
+        .unwrap();
+    // https:// without tlsCert/tlsKey must fail (scheme enforcement)
+    assert!(endpoint.create_consumer(rt()).is_err());
+}
+
+#[test]
+fn test_http_endpoint_creates_producer() {
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint("http://localhost/api", &endpoint_ctx)
+        .unwrap();
+    assert!(endpoint.create_producer(rt(), &ctx).is_ok());
+}
+
+// -----------------------------------------------------------------------
+// Producer tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_producer_with_token_provider() {
+    use camel_auth::oauth2::TokenProvider;
+    use tower::ServiceExt;
+
+    let captured_auth: Arc<std::sync::Mutex<Option<String>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let captured_clone = Arc::clone(&captured_auth);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let _handle = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 8192];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let auth = request
+                .lines()
+                .find(|l| l.to_lowercase().starts_with("authorization:"))
+                .map(|l| {
+                    l.split(':')
+                        .nth(1)
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default()
+                });
+            *captured_clone.lock().unwrap() = auth;
+            let body = r#"{"echo":"ok"}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+        }
+    });
+
+    #[derive(Debug)]
+    struct StaticProvider;
+    #[async_trait::async_trait]
+    impl TokenProvider for StaticProvider {
+        async fn get_token(&self) -> Result<String, camel_auth::types::AuthError> {
+            Ok("injected-token".into())
+        }
+    }
+
+    let uri = format!("http://127.0.0.1:{}/api?allowInternal=true", port);
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component.create_endpoint(&uri, &endpoint_ctx).unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::new("hello"));
+
+    let layer = BearerTokenLayer::new(Arc::new(StaticProvider));
+    let mut layered = layer.layer(producer);
+    let result = layered.ready().await.unwrap().call(exchange).await;
+    assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let auth = captured_auth.lock().unwrap().take();
+    assert_eq!(auth.as_deref(), Some("Bearer injected-token"));
+}
+
+async fn start_test_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+
+    let handle = tokio::spawn(async move {
+        loop {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+
+                    let method = request.split_whitespace().next().unwrap_or("GET");
+
+                    let body = format!(r#"{{"method":"{}","echo":"ok"}}"#, method);
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Custom: test-value\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        }
+    });
+
+    (url, handle)
+}
+
+async fn start_status_server(status: u16) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+
+    let handle = tokio::spawn(async move {
+        loop {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let status = status;
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+
+                    let status_text = match status {
+                        404 => "Not Found",
+                        500 => "Internal Server Error",
+                        _ => "Error",
+                    };
+                    let body = "error body";
+                    let response = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",
+                        status,
+                        status_text,
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        }
+    });
+
+    (url, handle)
+}
+
+async fn start_request_capturing_server() -> (
+    String,
+    Arc<std::sync::Mutex<Option<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}");
+    let captured: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+    let captured_clone = Arc::clone(&captured);
+    let handle = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 16384];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            if request.contains("\r\n\r\n") {
+                *captured_clone.lock().unwrap() = Some(request);
+            }
+            let body = r#"{"echo":"ok"}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+        }
+    });
+    (url, captured, handle)
+}
+
+#[tokio::test]
+async fn test_http_producer_get_request() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_test_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}/api/test?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await.unwrap();
+
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+
+    assert!(!result.input.body.is_empty());
+}
+
+#[tokio::test]
+async fn producer_excludes_host_and_framing() {
+    use tower::ServiceExt;
+
+    let (url, captured, _handle) = start_request_capturing_server().await;
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}/api/test?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header("Host", "localhost");
+    exchange.input.set_header("Content-Length", "42");
+    exchange.input.set_header("Connection", "keep-alive");
+    exchange.input.set_header("Upgrade", "h2c");
+
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let request = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("no outbound request captured");
+    let lower = request.to_ascii_lowercase();
+    assert!(
+        !lower.contains("\r\nhost: localhost"),
+        "forwarded Host: localhost must be stripped\n{request}"
+    );
+    assert!(
+        !lower.contains("content-length: 42"),
+        "exchange Content-Length must not be copied\n{request}"
+    );
+    assert!(
+        !lower.lines().any(|l| l.starts_with("connection:")),
+        "Connection header must not be forwarded\n{request}"
+    );
+    assert!(
+        !lower.lines().any(|l| l.starts_with("upgrade:")),
+        "Upgrade header must not be forwarded\n{request}"
+    );
+    let host_header = lower
+        .lines()
+        .find(|l| l.starts_with("host:"))
+        .map(|l| l.split_once(':').map(|(_, v)| v).unwrap_or("").trim())
+        .expect("outbound Host header must be set by reqwest");
+    assert!(
+        host_header.starts_with("127.0.0.1:"),
+        "outbound Host '{host_header}' must match the capture-server address"
+    );
+}
+
+#[tokio::test]
+async fn producer_forwards_request_only_headers() {
+    use tower::ServiceExt;
+
+    let (url, captured, _handle) = start_request_capturing_server().await;
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}/api/test?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header("Accept", "application/json");
+    exchange.input.set_header("User-Agent", "myclient/1.0");
+
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let request = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("no outbound request captured");
+    let lower = request.to_ascii_lowercase();
+    assert!(
+        lower.contains("accept: application/json"),
+        "request-only Accept header must be forwarded\n{request}"
+    );
+    assert!(
+        lower.contains("user-agent: myclient/1.0"),
+        "request-only User-Agent header must be forwarded\n{request}"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Configured-header construction failures are surfaced, never silent
+// (rc-jbs1v)
+// -----------------------------------------------------------------------
+
+/// Build an endpoint whose URI parses normally but whose `user_agent`
+/// and `auth` are then overridden programmatically, so CRLF-bearing
+/// test values never pass through URI parsing.
+fn endpoint_with_config_overrides(
+    base_url: &str,
+    user_agent: Option<String>,
+    auth: HttpAuth,
+) -> HttpEndpoint {
+    let uri = format!("{base_url}/api/test?allowInternal=true");
+    let mut config = HttpEndpointConfig::from_uri(&uri).expect("producer endpoint config parses");
+    config.user_agent = user_agent;
+    config.auth = auth;
+    HttpEndpoint {
+        uri: uri.clone(),
+        config,
+        server_config: HttpServerConfig::from_uri(&uri).expect("server config parses"),
+        client: plain_http_test_client(),
+        pinned_cache: Arc::new(PinnedClientCache::new(
+            PINNED_CLIENT_TTL,
+            PINNED_CLIENT_MAX_ENTRIES,
+        )),
+        http_config: HttpConfig::default(),
+    }
+}
+
+/// A configured user-agent / bearer token that fails `HeaderValue`
+/// construction must be dropped with a DEBUG record (name + reason
+/// only, never the value — ADR-0051) and reach the wire absent, while
+/// a valid config passes through unchanged.
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn producer_invalid_configured_headers_surfaced() {
+    use tower::ServiceExt;
+
+    let (bad_url, bad_captured, _bad_handle) = start_request_capturing_server().await;
+    let (ok_url, ok_captured, _ok_handle) = start_request_capturing_server().await;
+    let ctx = test_producer_ctx();
+
+    let bad_producer = endpoint_with_config_overrides(
+        &bad_url,
+        Some("bad\r\nua".to_string()),
+        HttpAuth::Bearer {
+            token: "tok\r\nen".to_string(),
+        },
+    )
+    .create_producer(rt(), &ctx)
+    .unwrap();
+    let ok_producer = endpoint_with_config_overrides(
+        &ok_url,
+        Some("httpsweep-ok/1".to_string()),
+        HttpAuth::Bearer {
+            token: "valid-token".to_string(),
+        },
+    )
+    .create_producer(rt(), &ctx)
+    .unwrap();
+
+    let bad_exchange = Exchange::new(Message::default());
+    let ok_exchange = Exchange::new(Message::default());
+    let bad_cid = bad_exchange.correlation_id().to_string();
+    let ok_cid = ok_exchange.correlation_id().to_string();
+
+    let bad_result = bad_producer.oneshot(bad_exchange).await;
+    assert!(
+        bad_result.is_ok(),
+        "invalid-config producer call failed: {bad_result:?}"
+    );
+    let ok_result = ok_producer.oneshot(ok_exchange).await;
+    assert!(
+        ok_result.is_ok(),
+        "valid-config producer call failed: {ok_result:?}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let bad_request = bad_captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("no outbound request captured");
+    let ok_request = ok_captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("no outbound request captured");
+
+    // Invalid config: neither header reaches the wire. Value-absence,
+    // not "any UA" — reqwest may inject a default user-agent.
+    let bad_lower = bad_request.to_ascii_lowercase();
+    assert!(
+        !bad_lower.lines().any(|l| l.starts_with("authorization:")),
+        "invalid Bearer token must not reach the wire\n{bad_request}"
+    );
+    assert!(
+        !bad_request.contains("bad\r\nua"),
+        "invalid configured user-agent must not reach the wire\n{bad_request}"
+    );
+
+    logs_assert(|lines: &[&str]| {
+        let drops: Vec<&&str> = lines
+            .iter()
+            .filter(|l| {
+                l.contains("outbound header dropped")
+                    && l.contains(&format!("correlation_id={bad_cid}"))
+            })
+            .collect();
+        if drops.len() != 2 {
+            return Err(format!(
+                "expected exactly 2 drop records for {bad_cid}, found {}",
+                drops.len()
+            ));
+        }
+        let has_ua = drops.iter().any(|l| l.contains("header=user-agent"));
+        let has_auth = drops.iter().any(|l| l.contains("header=authorization"));
+        let reason_ok = drops
+            .iter()
+            .all(|l| l.contains("outbound header dropped: invalid header value"));
+        match (has_ua, has_auth, reason_ok) {
+            (true, true, true) => Ok(()),
+            _ => Err(format!(
+                "drop records mismatched: user-agent={has_ua} \
+                 authorization={has_auth} reason-ok={reason_ok}"
+            )),
+        }
+    });
+    logs_assert(|lines: &[&str]| {
+        if lines
+            .iter()
+            .any(|l| l.contains("bad\r\nua") || l.contains("tok\r\nen"))
+        {
+            Err("sentinel CRLF values leaked into logs".to_string())
+        } else {
+            Ok(())
+        }
+    });
+
+    // Valid config: both headers reach the wire exactly as configured,
+    // with zero drop records.
+    let ok_lower = ok_request.to_ascii_lowercase();
+    assert!(
+        ok_lower.contains("user-agent: httpsweep-ok/1"),
+        "valid configured user-agent must reach the wire\n{ok_request}"
+    );
+    assert!(
+        ok_lower.contains("authorization: bearer valid-token"),
+        "valid Bearer token must reach the wire\n{ok_request}"
+    );
+    logs_assert(|lines: &[&str]| {
+        let hits = lines
+            .iter()
+            .filter(|l| {
+                l.contains("outbound header dropped")
+                    && l.contains(&format!("correlation_id={ok_cid}"))
+            })
+            .count();
+        match hits {
+            0 => Ok(()),
+            n => Err(format!("expected no drop records for {ok_cid}, found {n}")),
+        }
+    });
+}
+
+#[tokio::test]
+async fn producer_honours_skip_request_headers() {
+    use tower::ServiceExt;
+
+    let (url, captured, _handle) = start_request_capturing_server().await;
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}/api/test?allowInternal=true&skipRequestHeaders=Authorization"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header("Authorization", "Bearer x");
+
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let request = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("no outbound request captured");
+    assert!(
+        !request.to_ascii_lowercase().contains("authorization"),
+        "Authorization must be stripped by skipRequestHeaders\n{request}"
+    );
+}
+
+#[tokio::test]
+async fn producer_stringifies_scalar_header_values_on_wire() {
+    use tower::ServiceExt;
+
+    let (url, captured, _handle) = start_request_capturing_server().await;
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}/api/test?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header("X-Retries", serde_json::json!(3));
+    exchange
+        .input
+        .set_header("X-Enabled", serde_json::json!(true));
+    exchange
+        .input
+        .set_header("X-Obj", serde_json::json!({"a": 1}));
+
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let request = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("no outbound request captured");
+    let lower = request.to_ascii_lowercase();
+    assert!(
+        lower.contains("x-retries: 3"),
+        "numeric header must reach the wire stringified\n{request}"
+    );
+    assert!(
+        lower.contains("x-enabled: true"),
+        "bool header must reach the wire stringified\n{request}"
+    );
+    assert!(
+        !lower.contains("x-obj:"),
+        "object header has no single-value form and must not reach the wire\n{request}"
+    );
+}
+
+#[tokio::test]
+async fn test_http_producer_post_with_body() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_test_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}/api/data?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::new("request body"));
+    let result = producer.oneshot(exchange).await.unwrap();
+
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn test_http_producer_method_from_header() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_test_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}/api?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpMethod",
+        serde_json::Value::String("DELETE".to_string()),
+    );
+
+    let result = producer.oneshot(exchange).await.unwrap();
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn test_http_producer_forced_method() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_test_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}/api?httpMethod=PUT&allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await.unwrap();
+
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn test_http_producer_throw_exception_on_failure() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_status_server(404).await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}/not-found?allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_err());
+
+    match result.unwrap_err() {
+        CamelError::HttpOperationFailed { status_code, .. } => {
+            assert_eq!(status_code, 404);
+        }
+        e => panic!("Expected HttpOperationFailed, got: {e}"),
+    }
+}
+
+#[tokio::test]
+async fn test_http_producer_no_throw_on_failure() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_status_server(500).await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}/error?throwExceptionOnFailure=false&allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await.unwrap();
+
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 500);
+}
+
+#[tokio::test]
+async fn test_http_producer_uri_override() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_test_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            "http://localhost:1/does-not-exist?allowInternal=true",
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String(format!("{url}/api")),
+    );
+
+    let result = producer.oneshot(exchange).await.unwrap();
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn test_http_producer_response_headers_mapped() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_test_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}/api?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await.unwrap();
+
+    assert!(
+        result.input.header("Content-Type").is_some(),
+        "Response should have Content-Type header"
+    );
+    assert!(result.input.header("CamelHttpResponseText").is_some());
+}
+
+// -----------------------------------------------------------------------
+// Bug fix tests: Client configuration per-endpoint
+// -----------------------------------------------------------------------
+
+async fn start_redirect_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+
+    let handle = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
+
+                    // Check if this is a request to /final
+                    if request.contains("GET /final") {
+                        let body = r#"{"status":"final"}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    } else {
+                        // Redirect to /final
+                        // Connection: close stops the client pooling the
+                        // connection the server drops right after this
+                        // response (pooled-race, rc-u3aw class).
+                        let response = "HTTP/1.1 302 Found\r\nLocation: /final\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    }
+                });
+            }
+        }
+    });
+
+    (url, handle)
+}
+
+struct CapturedRequest {
+    method: String,
+    path: String,
+    body: Vec<u8>,
+    content_length: Option<String>,
+    transfer_encoding: Option<String>,
+}
+
+/// Parse a request head plus its Content-Length-driven body from a freshly
+/// accepted connection. Returns `None` if the client closes before sending
+/// a complete request head. Does NOT read until EOF/shutdown (reqwest pools
+/// keep-alive connections and never sends FIN) and does NOT rely on a
+/// single fixed-size read (a segmented small body would flake).
+async fn capture_request(stream: &mut tokio::net::TcpStream) -> Option<CapturedRequest> {
+    use tokio::io::AsyncReadExt;
+
+    // Read the request head (up to and including the terminating CRLF CRLF).
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let head_end: usize;
+    loop {
+        let n = stream.read(&mut chunk).await.unwrap_or(0);
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            head_end = pos + 4;
+            break;
+        }
+    }
+
+    // Parse the request head.
+    let head = String::from_utf8_lossy(&buf[..head_end]);
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next().unwrap_or("");
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let path = parts.next().unwrap_or("").to_string();
+
+    let mut content_length: Option<String> = None;
+    let mut transfer_encoding: Option<String> = None;
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            let name = name.trim().to_ascii_lowercase();
+            let value = value.trim().to_string();
+            if name == "content-length" {
+                content_length = Some(value);
+            } else if name == "transfer-encoding" {
+                transfer_encoding = Some(value);
+            }
+        }
+    }
+
+    // Content-Length-driven exact read. A missing header means a 0-length body.
+    let body_len: usize = content_length
+        .as_deref()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    let mut body: Vec<u8> = buf[head_end..].to_vec();
+    while body.len() < body_len {
+        let n = stream.read(&mut chunk).await.unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    body.truncate(body_len);
+
+    Some(CapturedRequest {
+        method,
+        path,
+        body,
+        content_length,
+        transfer_encoding,
+    })
+}
+
+/// A raw-TCP capture server. Each connection parses the request head, then
+/// performs a Content-Length-driven exact read of the body (see
+/// [`capture_request`]). Each connection is dropped after the response so
+/// every hop opens a fresh connection.
+async fn start_capture_server() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<Vec<CapturedRequest>>>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+
+    let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_return = Arc::clone(&captured);
+
+    let handle = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        loop {
+            // Per-iteration deadline (lintwiden D4.2, idle-relay
+            // re-arm): every caller drops the returned handle, so
+            // this accept loop is a detached server for the test
+            // process's lifetime and quiet gaps between client
+            // requests are normal — a lapsed deadline re-arms (as
+            // does a transient accept error, prior behavior).
+            // Process exit reaps the task.
+            if let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
+            {
+                let captured = Arc::clone(&captured);
+                tokio::spawn(async move {
+                    // Per-connection deadline (lintwiden D4.2): a client
+                    // that connects but never completes a request must
+                    // not pin the handler task — drop the connection.
+                    let Some(req) =
+                        tokio::time::timeout(Duration::from_secs(10), capture_request(&mut stream))
+                            .await
+                            .ok()
+                            .flatten()
+                    else {
+                        return;
+                    };
+                    captured.lock().unwrap().push(req);
+
+                    // 200 OK with Content-Length: 0 and no body, then drop
+                    // the stream so the client opens a fresh connection.
+                    let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        }
+    });
+
+    (url, handle, captured_for_return)
+}
+
+/// A raw-TCP capture server whose `/hop307` and `/hop308` paths answer with
+/// `307 Temporary Redirect` / `308 Permanent Redirect` to `/final`, and
+/// whose `/final` path answers `200 OK` with an empty body. Every hop
+/// records a `CapturedRequest` (Content-Length-driven exact read) and drops
+/// the connection after responding so each hop is a fresh connection.
+async fn start_redirect_capture_server() -> (
+    String,
+    tokio::task::JoinHandle<()>,
+    Arc<Mutex<Vec<CapturedRequest>>>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+
+    let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_return = Arc::clone(&captured);
+
+    let handle = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        loop {
+            // Per-iteration deadline (lintwiden D4.2, idle-relay
+            // re-arm): every caller drops the returned handle, so
+            // this accept loop is a detached server for the test
+            // process's lifetime and quiet gaps between client
+            // requests are normal — a lapsed deadline re-arms (as
+            // does a transient accept error, prior behavior).
+            // Process exit reaps the task.
+            if let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
+            {
+                let captured = Arc::clone(&captured);
+                tokio::spawn(async move {
+                    // Per-connection deadline (lintwiden D4.2): a client
+                    // that connects but never completes a request must
+                    // not pin the handler task — drop the connection.
+                    let Some(req) =
+                        tokio::time::timeout(Duration::from_secs(10), capture_request(&mut stream))
+                            .await
+                            .ok()
+                            .flatten()
+                    else {
+                        return;
+                    };
+                    let path = req.path.clone();
+                    captured.lock().unwrap().push(req);
+
+                    let (status_line, location) = match path.as_str() {
+                        "/hop307" => ("HTTP/1.1 307 Temporary Redirect", Some("/final")),
+                        "/hop308" => ("HTTP/1.1 308 Permanent Redirect", Some("/final")),
+                        "/final" => ("HTTP/1.1 200 OK", None),
+                        _ => ("HTTP/1.1 404 Not Found", None),
+                    };
+
+                    let response = match location {
+                        // Connection: close stops the client pooling the
+                        // connection this handler drops right after the
+                        // response (pooled-race, rc-u3aw class).
+                        Some(loc) => format!(
+                            "{status_line}\r\nLocation: {loc}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                        ),
+                        None => format!("{status_line}\r\nContent-Length: 0\r\n\r\n"),
+                    };
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        }
+    });
+
+    (url, handle, captured_for_return)
+}
+
+#[tokio::test]
+async fn test_get_with_body_sends_no_body_and_no_framing_headers() {
+    use tower::ServiceExt;
+
+    let (url, _handle, captured) = start_capture_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default());
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}?httpMethod=GET&allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.body = Body::Bytes(bytes::Bytes::from_static(b"payload"));
+
+    let result = producer.oneshot(exchange).await.unwrap();
+
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1, "expected exactly one captured request");
+    let req = &captured[0];
+    assert_eq!(req.method, "GET");
+    // `httpMethod`/`allowInternal` are URI options, not request-target
+    // query params, so the origin-form target is just "/".
+    assert_eq!(req.path, "/");
+    assert!(req.body.is_empty(), "GET must not carry a body");
+    assert!(
+        req.content_length.is_none(),
+        "suppressed request must not carry Content-Length"
+    );
+    assert!(
+        req.transfer_encoding.is_none(),
+        "suppressed request must not carry Transfer-Encoding"
+    );
+
+    // The exchange body is consumed by the producer (std::mem::take).
+    assert!(
+        result.input.body.is_empty(),
+        "exchange body must be consumed"
+    );
+}
+
+#[tokio::test]
+async fn test_head_with_body_suppressed_via_header() {
+    use tower::ServiceExt;
+
+    let (url, _handle, captured) = start_capture_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default());
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpMethod",
+        serde_json::Value::String("HEAD".to_string()),
+    );
+    exchange.input.body = Body::Bytes(bytes::Bytes::from_static(b"payload"));
+
+    let result = producer.oneshot(exchange).await.unwrap();
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    let req = &captured[0];
+    assert_eq!(req.method, "HEAD");
+    assert!(req.body.is_empty(), "HEAD must not carry a body");
+}
+
+#[tokio::test]
+async fn test_delete_options_trace_with_body_suppressed() {
+    use tower::ServiceExt;
+
+    let (url, _handle, captured) = start_capture_server().await;
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::with_config(HttpConfig::default());
+    let endpoint_ctx = NoOpComponentContext;
+
+    for method in ["DELETE", "OPTIONS", "TRACE"] {
+        let endpoint = component
+            .create_endpoint(
+                &format!("{url}?httpMethod={method}&allowInternal=true"),
+                &endpoint_ctx,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.body = Body::Bytes(bytes::Bytes::from_static(b"payload"));
+
+        let result = producer.oneshot(exchange).await.unwrap();
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200, "method {method} should succeed");
+    }
+
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 3, "expected three captured requests");
+    for method in ["DELETE", "OPTIONS", "TRACE"] {
+        let req = captured
+            .iter()
+            .find(|r| r.method == method)
+            .unwrap_or_else(|| panic!("missing captured request for {method}"));
+        assert!(req.body.is_empty(), "{} must not carry a body", req.method);
+    }
+}
+
+#[tokio::test]
+async fn test_post_put_patch_with_body_still_sent() {
+    use tower::ServiceExt;
+
+    let (url, _handle, captured) = start_capture_server().await;
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::with_config(HttpConfig::default());
+    let endpoint_ctx = NoOpComponentContext;
+
+    for method in ["POST", "PUT", "PATCH"] {
+        let endpoint = component
+            .create_endpoint(
+                &format!("{url}?httpMethod={method}&allowInternal=true"),
+                &endpoint_ctx,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let payload = format!("body-for-{method}");
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.body = Body::Bytes(bytes::Bytes::from(payload.as_bytes().to_vec()));
+
+        let result = producer.oneshot(exchange).await.unwrap();
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200, "method {method} should succeed");
+    }
+
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 3, "expected three captured requests");
+    for method in ["POST", "PUT", "PATCH"] {
+        let req = captured
+            .iter()
+            .find(|r| r.method == method)
+            .unwrap_or_else(|| panic!("missing captured request for {method}"));
+        let expected = format!("body-for-{method}");
+        assert!(!req.body.is_empty(), "{method} must still carry its body");
+        assert_eq!(req.body, expected.as_bytes(), "{method} body mismatch");
+    }
+}
+
+/// A GET with a stream body must not attach the stream: the entity-enclosing
+/// gate drops the stream (mem::take) before the request is built, leaving
+/// the exchange body Empty instead of a partially-consumed Body::Stream.
+#[tokio::test]
+async fn test_stream_body_under_get_not_attached() {
+    use tower::ServiceExt;
+
+    let (url, _handle, captured) = start_capture_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default());
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}?httpMethod=GET&allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let chunks: Vec<Result<bytes::Bytes, CamelError>> =
+        vec![Ok(bytes::Bytes::from_static(b"stream-body"))];
+    let stream = Box::pin(futures::stream::iter(chunks));
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.body = Body::Stream(StreamBody {
+        stream: Arc::new(tokio::sync::Mutex::new(Some(stream))),
+        metadata: StreamMetadata::default(),
+    });
+
+    let result = producer.oneshot(exchange).await.unwrap();
+
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1, "expected exactly one captured request");
+    assert!(
+        captured[0].body.is_empty(),
+        "GET must not carry a stream body"
+    );
+    assert!(
+        captured[0].transfer_encoding.is_none(),
+        "suppressed request must not carry Transfer-Encoding"
+    );
+    assert!(
+        captured[0].content_length.is_none(),
+        "suppressed request must not carry Content-Length"
+    );
+    assert!(
+        result.input.body.is_empty(),
+        "exchange body must be consumed to Empty, not left as a stream"
+    );
+}
+
+/// A suppressed body must never be replayed across 307/308 redirect hops:
+/// the gate empties `materialized_body` before the redirect loop runs, so
+/// neither the first hop nor the final hop carries the body.
+#[tokio::test]
+async fn test_redirect_hops_never_replay_suppressed_body() {
+    use tower::ServiceExt;
+
+    let (url, _handle, captured) = start_redirect_capture_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
+    let endpoint_ctx = NoOpComponentContext;
+
+    for path in ["/hop307", "/hop308"] {
+        let endpoint = component
+            .create_endpoint(
+                &format!("{url}{path}?httpMethod=GET&allowInternal=true"),
+                &endpoint_ctx,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::default());
+        exchange.input.body = Body::Bytes(bytes::Bytes::from_static(b"payload"));
+
+        let result = producer.oneshot(exchange).await.unwrap();
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(
+            status, 200,
+            "redirect chain for {path} should end at /final"
+        );
+    }
+
+    // Two chains (307 and 308), each with two hops (redirect + final).
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 4, "expected 2 chains × 2 hops");
+    for req in captured.iter() {
+        assert!(
+            req.body.is_empty(),
+            "hop {} {} must not carry a body",
+            req.method,
+            req.path
+        );
+    }
+}
+
+/// The warn! emitted on a suppressed body renders three distinguishable
+/// substrings in the log line (tracing-subscriber default field format):
+///   - the message:       "dropping request body ..."
+///   - `method = %method_str`            → `method=GET`
+///   - `correlation_id = %exchange.correlation_id()` → `correlation_id=<uuid>`
+/// The closure matches all three so exactly one warn per suppressed
+/// request is required (the "HTTP request" debug! also carries
+/// `method=GET` and the same `correlation_id=`, but not the message).
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn test_suppressed_body_logs_exactly_one_warn() {
+    use tower::ServiceExt;
+
+    let (url, _handle, _captured) = start_capture_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default());
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}?httpMethod=GET&allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.body = Body::Bytes(bytes::Bytes::from_static(b"payload"));
+    let correlation_id = exchange.correlation_id().to_string();
+
+    let result = producer.oneshot(exchange).await.unwrap();
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+
+    logs_assert(|lines: &[&str]| {
+        let hits = lines
+            .iter()
+            .filter(|l| {
+                l.contains("dropping request body")
+                    && l.contains("method=GET")
+                    && l.contains(&format!("correlation_id={correlation_id}"))
+            })
+            .count();
+        match hits {
+            1 => Ok(()),
+            n => Err(format!("expected exactly one body-drop warn, found {n}")),
+        }
+    });
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn test_empty_body_get_emits_no_warn() {
+    use tower::ServiceExt;
+
+    let (url, _handle, _captured) = start_capture_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default());
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}?httpMethod=GET&allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await.unwrap();
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+
+    logs_assert(|lines: &[&str]| {
+        let hits = lines
+            .iter()
+            .filter(|l| l.contains("dropping request body"))
+            .count();
+        match hits {
+            0 => Ok(()),
+            n => Err(format!("expected no body-drop warn, found {n}")),
+        }
+    });
+}
+
+#[tokio::test]
+async fn test_follow_redirects_false_does_not_follow() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_redirect_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default().with_follow_redirects(false));
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}?throwExceptionOnFailure=false&allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await.unwrap();
+
+    // Should get 302, NOT follow redirect to 200
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(
+        status, 302,
+        "Should NOT follow redirect when followRedirects=false"
+    );
+}
+
+#[tokio::test]
+async fn test_follow_redirects_true_follows_redirect() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_redirect_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await.unwrap();
+
+    // Should follow redirect and get 200
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(
+        status, 200,
+        "Should follow redirect when followRedirects=true"
+    );
+}
+
+/// Integration test: with allowInternal=true, redirects to private IPs are followed.
+/// This verifies the manual redirect loop executes correctly.
+#[tokio::test]
+async fn test_redirect_to_private_ip_is_ssrf_blocked() {
+    use tower::ServiceExt;
+
+    // Use the existing redirect server which redirects to /final on the same server
+    let (url, _handle) = start_redirect_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await;
+
+    // With allowInternal=true, the redirect should succeed
+    assert!(
+        result.is_ok(),
+        "Redirect should succeed with allowInternal=true, got: {:?}",
+        result
+    );
+    let exchange = result.unwrap();
+    let status = exchange
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200, "Should follow redirect to /final");
+}
+
+/// With allowInternal=true, redirects to private IPs should be followed.
+#[tokio::test]
+async fn test_redirect_to_private_ip_allowed_when_configured() {
+    use tower::ServiceExt;
+
+    // Start a server that redirects to /final on the same server (127.0.0.1)
+    let (url, _handle) = start_redirect_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await.unwrap();
+
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(
+        status, 200,
+        "Should follow redirect to private IP when allowInternal=true"
+    );
+}
+
+/// Integration test: with allowInternal=false (default), a redirect to a
+/// private/metadata IP must be blocked by the SSRF guard — NOT followed.
+#[tokio::test]
+async fn test_redirect_to_private_ip_blocked_when_ssrf_guard_active() {
+    use tower::ServiceExt;
+
+    // Server that redirects to the AWS metadata endpoint (link-local private IP)
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+
+    let handle = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    // Always redirect to the metadata endpoint
+                    let response = "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\n\r\n";
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        }
+    });
+
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
+    let endpoint_ctx = NoOpComponentContext;
+    // allowInternal=false is the default — do NOT set it
+    let endpoint = component.create_endpoint(&url, &endpoint_ctx).unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await;
+
+    // Must be an error — SSRF guard blocks the redirect target
+    assert!(
+        result.is_err(),
+        "Redirect to private IP 169.254.169.254 must be blocked when allowInternal=false"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("blocked IP")
+            || err.contains("private IP")
+            || err.contains("SSRF")
+            || err.contains("not allowed"),
+        "Error should mention SSRF/IP blocking, got: {err}"
+    );
+
+    handle.abort();
+}
+
+/// Integration test: exceeding maxRedirects produces a clear error.
+#[tokio::test]
+async fn test_too_many_redirects_returns_error() {
+    use tower::ServiceExt;
+
+    // Server that always redirects to itself (infinite loop)
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+
+    let handle = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    // Always redirect to /loop
+                    // Connection: close stops the client pooling the
+                    // connection the server drops right after this
+                    // response (pooled-race, rc-u3aw).
+                    let response = "HTTP/1.1 302 Found\r\nLocation: /loop\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        }
+    });
+
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}?allowInternal=true&maxRedirects=2"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await;
+
+    // With the fix, exceeding max redirects returns the redirect response
+    // as-is instead of erroring. The 302 redirect response is returned
+    // after followRedirects exhausts the allowed redirect count (2).
+    // Disable throwExceptionOnFailure to inspect the raw response status.
+    //
+    // Old behavior: Err("Too many redirects (max 2)")
+    // New behavior: Ok(ex) with CamelHttpResponseCode = 302
+    match result {
+        Err(e) => {
+            // If throw_exception_on_failure is on, we get HttpOperationFailed
+            let msg = e.to_string();
+            assert!(
+                msg.contains("HTTP operation failed") || msg.contains("302"),
+                "expected redirect-after-exhaustion error, got: {msg}"
+            );
+        }
+        Ok(ex) => {
+            let response_code = ex
+                .input
+                .header("CamelHttpResponseCode")
+                .and_then(|v| v.as_u64());
+            assert_eq!(
+                response_code,
+                Some(302),
+                "expected 302 after exhausting redirects"
+            );
+        }
+    }
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_query_params_forwarded_to_http_request() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_test_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    // apiKey is NOT a Camel option, should be forwarded as query param
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}/api?apiKey=secret123&httpMethod=GET&allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await.unwrap();
+
+    // The test server returns the request info in response
+    // We just verify it succeeds (the query param was sent)
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+}
+
+#[test]
+fn test_non_camel_query_params_are_forwarded() {
+    // Authored pairs ride raw_query (the sole carrier); query_params is
+    // programmatic-only (http-query-wire-fidelity).
+    let config = HttpEndpointConfig::from_uri(
+        "http://example.com/api?apiKey=secret123&httpMethod=GET&token=abc456",
+    )
+    .unwrap();
+
+    // apiKey and token are NOT camel-http options: the authored bytes
+    // (including the interleaved httpMethod) ride raw_query verbatim.
+    assert_eq!(
+        config.raw_query.as_deref(),
+        Some("apiKey=secret123&httpMethod=GET&token=abc456")
+    );
+    assert!(config.query_params.is_empty());
+}
+
+#[test]
+fn test_authored_query_bytes_survive_resolve_url() {
+    let config =
+        HttpEndpointConfig::from_uri("http://example.com/api?q=hello%20world&tag=a+b").unwrap();
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // Authored bytes ride verbatim: `%20` stays `%20` (never re-encoded
+    // to `+` or double-encoded) and `+` stays `+`.
+    assert!(url.contains("q=hello%20world"), "url was: {url}");
+    assert!(url.contains("tag=a+b"), "url was: {url}");
+}
+
+// -----------------------------------------------------------------------
+// Timeout tests (HTTP-004)
+// -----------------------------------------------------------------------
+
+async fn start_slow_server(delay_ms: u64) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://127.0.0.1:{}", addr.port());
+
+    let handle = tokio::spawn(async move {
+        loop {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let delay = delay_ms;
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    // Send headers immediately (no Content-Length → chunked)
+                    let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n";
+                    let _ = stream.write_all(headers.as_bytes()).await;
+                    // Delay before sending body chunk
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    let body = r#"{"status":"slow"}"#;
+                    let chunk = format!("{:x}\r\n{}\r\n0\r\n\r\n", body.len(), body);
+                    let _ = stream.write_all(chunk.as_bytes()).await;
+                });
+            }
+        }
+    });
+
+    (url, handle)
+}
+
+#[tokio::test]
+async fn test_http_producer_timeout() {
+    use tower::ServiceExt;
+
+    // Server delays 500ms, client timeout is 100ms → should timeout
+    let (url, _handle) = start_slow_server(500).await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(
+        HttpConfig::default()
+            .with_read_timeout_ms(100)
+            .with_response_timeout_ms(30_000), // generous response timeout
+    );
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}/slow?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await;
+
+    assert!(result.is_err(), "Expected timeout error, got: {:?}", result);
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("Read timeout") || err.contains("timeout"),
+        "Error should mention timeout, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_http_producer_no_timeout_when_fast() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_test_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default().with_read_timeout_ms(5_000));
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("{url}/api?allowInternal=true"), &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await.unwrap();
+
+    let status = result
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+}
+
+// -----------------------------------------------------------------------
+// SSRF Protection tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_producer_blocks_metadata_endpoint() {
+    use tower::ServiceExt;
+
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint("http://example.com/api?allowInternal=false", &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://169.254.169.254/latest/meta-data/".to_string()),
+    );
+
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_err(), "Should block AWS metadata endpoint");
+
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("Private IP"),
+        "Error should mention private IP blocking, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_ssrf_config_defaults() {
+    let config = HttpEndpointConfig::from_uri("http://example.com/api").unwrap();
+    assert!(
+        !config.allow_internal,
+        "Private IPs should be blocked by default"
+    );
+    assert!(
+        config.blocked_hosts.is_empty(),
+        "Blocked hosts should be empty by default"
+    );
+}
+
+#[test]
+fn test_ssrf_config_allow_internal() {
+    let config = HttpEndpointConfig::from_uri("http://example.com/api?allowInternal=true").unwrap();
+    assert!(
+        config.allow_internal,
+        "Private IPs should be allowed when explicitly set"
+    );
+}
+
+#[test]
+fn test_uri_option_allow_cleartext_parses() {
+    let config = HttpEndpointConfig::from_uri("http://example.com/?allowCleartext=true").unwrap();
+    assert!(
+        config.allow_cleartext,
+        "allowCleartext=true must parse into the endpoint config"
+    );
+
+    let plain = HttpEndpointConfig::from_uri("http://example.com/").unwrap();
+    assert!(
+        !plain.allow_cleartext,
+        "cleartext consent must default to false"
+    );
+
+    let err =
+        HttpEndpointConfig::from_uri("http://example.com/?allowCleartext=banana").unwrap_err();
+    assert!(
+        matches!(&err, CamelError::InvalidUri(msg) if msg.contains("allowCleartext")),
+        "bad allowCleartext value must yield InvalidUri naming the option, got: {err:?}"
+    );
+}
+
+/// ADR-0081: a CamelHttpUri override to a public cleartext target is
+/// gated by the endpoint's `allowCleartext` consent — override URLs go
+/// through the same `validate_url_for_ssrf` as the base URL.
+#[test]
+fn test_camel_http_uri_override_public_cleartext_follows_endpoint_flags() {
+    let endpoint = HttpEndpointConfig::from_uri("http://localhost/?allowCleartext=false").unwrap();
+    let err = crate::ssrf::validate_url_for_ssrf("http://93.184.216.34/exfil", &endpoint)
+        .expect_err("public cleartext override must be rejected without consent");
+    assert!(
+        err.to_string().contains("allowCleartext"),
+        "error must name the remedy, got: {err}"
+    );
+
+    let endpoint = HttpEndpointConfig::from_uri("http://localhost/?allowCleartext=true").unwrap();
+    assert!(
+        crate::ssrf::validate_url_for_ssrf("http://93.184.216.34/exfil", &endpoint).is_ok(),
+        "endpoint consent must admit a public cleartext override"
+    );
+}
+
+#[test]
+fn test_ssrf_config_blocked_hosts() {
+    let config =
+        HttpEndpointConfig::from_uri("http://example.com/api?blockedHosts=evil.com,malware.net")
+            .unwrap();
+    assert_eq!(config.blocked_hosts, vec!["evil.com", "malware.net"]);
+}
+
+#[tokio::test]
+async fn test_http_producer_blocks_localhost() {
+    use tower::ServiceExt;
+
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint("http://example.com/api", &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://localhost:8080/internal".to_string()),
+    );
+
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_err(), "Should block localhost");
+}
+
+#[tokio::test]
+async fn test_http_producer_blocks_loopback_ip() {
+    use tower::ServiceExt;
+
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint("http://example.com/api", &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://127.0.0.1:8080/internal".to_string()),
+    );
+
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_err(), "Should block loopback IP");
+}
+
+#[tokio::test]
+async fn test_http_producer_allows_private_ip_when_enabled() {
+    use tower::ServiceExt;
+
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    // With allowInternal=true, the validation should pass
+    // (actual connection will fail, but that's expected)
+    let endpoint = component
+        .create_endpoint("http://192.168.1.1/api?allowInternal=true", &endpoint_ctx)
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+
+    // The request will fail because we can't connect, but it should NOT fail
+    // due to SSRF protection
+    let result = producer.oneshot(exchange).await;
+    // We expect connection error, not SSRF error
+    if let Err(ref e) = result {
+        let err_str = e.to_string();
+        assert!(
+            !err_str.contains("Private IP") && !err_str.contains("not allowed"),
+            "Should not be SSRF error, got: {}",
+            err_str
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// HttpServerConfig tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_http_server_config_parse() {
+    let cfg = HttpServerConfig::from_uri("http://0.0.0.0:8080/orders").unwrap();
+    assert_eq!(cfg.host, "0.0.0.0");
+    assert_eq!(cfg.port, 8080);
+    assert_eq!(cfg.path, "/orders");
+    assert_eq!(cfg.max_inflight_requests, 1024);
+}
+
+#[test]
+fn test_http_server_config_scheme() {
+    // UriConfig trait method returns "http" as primary scheme
+    assert_eq!(HttpServerConfig::scheme(), "http");
+}
+
+#[test]
+fn test_http_server_config_from_components() {
+    // Test from_components directly (trait method)
+    let components = camel_component_api::UriComponents {
+        scheme: "https".to_string(),
+        path: "//0.0.0.0:8443/api".to_string(),
+        params: std::collections::HashMap::from([
+            ("maxRequestBody".to_string(), "5242880".to_string()),
+            ("maxInflightRequests".to_string(), "7".to_string()),
+        ]),
+        raw_query: None,
+    };
+    let cfg = HttpServerConfig::from_components(components).unwrap();
+    assert_eq!(cfg.host, "0.0.0.0");
+    assert_eq!(cfg.port, 8443);
+    assert_eq!(cfg.path, "/api");
+    assert_eq!(cfg.max_request_body, 5242880);
+    assert_eq!(cfg.max_inflight_requests, 7);
+}
+
+#[test]
+fn test_http_server_config_default_path() {
+    let cfg = HttpServerConfig::from_uri("http://0.0.0.0:3000").unwrap();
+    assert_eq!(cfg.path, "/");
+}
+
+#[test]
+fn test_http_server_config_wrong_scheme() {
+    assert!(HttpServerConfig::from_uri("file:/tmp").is_err());
+}
+
+#[test]
+fn test_http_server_config_invalid_port() {
+    assert!(HttpServerConfig::from_uri("http://localhost:abc/path").is_err());
+}
+
+#[test]
+fn test_http_server_config_default_port_by_scheme() {
+    // HTTP without explicit port should default to 80
+    let cfg_http = HttpServerConfig::from_uri("http://0.0.0.0/orders").unwrap();
+    assert_eq!(cfg_http.port, 80);
+
+    // HTTPS without explicit port should default to 443
+    let cfg_https = HttpServerConfig::from_uri("https://0.0.0.0/orders").unwrap();
+    assert_eq!(cfg_https.port, 443);
+}
+
+#[test]
+fn test_request_envelope_and_reply_are_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<RequestEnvelope>();
+    assert_send::<HttpReply>();
+}
+
+// -----------------------------------------------------------------------
+// ServerRegistry tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_server_registry_global_is_singleton() {
+    let r1 = ServerRegistry::global();
+    let r2 = ServerRegistry::global();
+    assert!(std::ptr::eq(r1 as *const _, r2 as *const _));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_concurrent_get_or_spawn_returns_same_registry() {
+    let _guard = lock_registry_test_mutex();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let results: Arc<std::sync::Mutex<Vec<HttpRouteRegistry>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let results = results.clone();
+        handles.push(tokio::spawn(async move {
+            let registry = ServerRegistry::global()
+                .get_or_spawn(
+                    "127.0.0.1",
+                    port,
+                    2 * 1024 * 1024,
+                    10 * 1024 * 1024,
+                    1024,
+                    test_rt(),
+                    "test-route".into(),
+                    None,
+                )
+                .await
+                .unwrap();
+            results.lock().unwrap().push(registry);
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    let registries = results.lock().unwrap();
+    assert_eq!(registries.len(), 4);
+    for i in 1..registries.len() {
+        assert!(
+            Arc::ptr_eq(&registries[0].inner, &registries[i].inner),
+            "all concurrent callers should get same route registry"
+        );
+    }
+}
+
+#[test]
+fn test_server_registry_distinguishes_host_and_port() {
+    let _guard = lock_registry_test_mutex();
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let registry = ServerRegistry::global();
+        // Use two distinct host values with same configured port key.
+        // Port 0 is acceptable here because the registry key uses the configured
+        // tuple, not the OS-assigned ephemeral port.
+        let d1 = registry
+            .get_or_spawn(
+                "127.0.0.1",
+                0,
+                1024 * 1024,
+                10 * 1024 * 1024,
+                1024,
+                test_rt(),
+                "test-route-1".into(),
+                None,
+            )
+            .await;
+        let d2 = registry
+            .get_or_spawn(
+                "0.0.0.0",
+                0,
+                1024 * 1024,
+                10 * 1024 * 1024,
+                1024,
+                test_rt(),
+                "test-route-2".into(),
+                None,
+            )
+            .await;
+        assert!(d1.is_ok());
+        assert!(d2.is_ok());
+        assert!(!Arc::ptr_eq(&d1.unwrap().inner, &d2.unwrap().inner));
+    });
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_shared_server_max_request_body_policy_is_deterministic() {
+    let _guard = lock_registry_test_mutex();
+    let registry = ServerRegistry::global();
+    // First registration: maxRequestBody = 1 MB
+    let d1 = registry
+        .get_or_spawn(
+            "127.0.0.1",
+            9991,
+            1024 * 1024,
+            10 * 1024 * 1024,
+            1024,
+            test_rt(),
+            "test-route".into(),
+            None,
+        )
+        .await;
+    assert!(d1.is_ok());
+
+    // Second registration on same (host,port): maxRequestBody = 2 MB
+    // Expected: explicit EndpointCreationFailed about incompatible maxRequestBody
+    let d2 = registry
+        .get_or_spawn(
+            "127.0.0.1",
+            9991,
+            2 * 1024 * 1024,
+            10 * 1024 * 1024,
+            1024,
+            test_rt(),
+            "test-route-2".into(),
+            None,
+        )
+        .await;
+    assert!(d2.is_err());
+    let err = d2.unwrap_err();
+    assert!(
+        err.to_string().contains("maxRequestBody") || err.to_string().contains("incompatible"),
+        "Expected incompatible maxRequestBody error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_server_registry_reset_clears_entries() {
+    let _guard = lock_registry_test_mutex();
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        // Register something on a unique port
+        let d1 = ServerRegistry::global()
+            .get_or_spawn(
+                "127.0.0.1",
+                9992,
+                1024 * 1024,
+                10 * 1024 * 1024,
+                1024,
+                test_rt(),
+                "test-route".into(),
+                None,
+            )
+            .await;
+        assert!(d1.is_ok());
+
+        // Verify entry exists
+        let guard = ServerRegistry::global().inner.lock().expect("lock");
+        assert!(guard.entries.contains_key(&("127.0.0.1".to_string(), 9992)));
+        drop(guard);
+
+        // Reset
+        ServerRegistry::reset();
+
+        // Verify cleared
+        let guard = ServerRegistry::global().inner.lock().expect("lock");
+        assert!(
+            guard.entries.is_empty(),
+            "registry should be empty after reset, has {} entries",
+            guard.entries.len()
+        );
+    });
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn registry_rejects_tls_on_plain_port() {
+    // httpflake: this reset previously ran WITHOUT the registry test
+    // mutex, so it could wipe another test's freshly staged entry
+    // mid-window (traced 2026-09-14) — spec law: every reset caller
+    // holds REGISTRY_TEST_MUTEX.
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+    let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+
+    // First route: plain HTTP
+    let _r1 = ServerRegistry::global()
+        .get_or_spawn(
+            "127.0.0.1",
+            0,
+            1024,
+            1024,
+            16,
+            Arc::clone(&rt),
+            "route-1".into(),
+            None, // plain
+        )
+        .await;
+
+    // Second route: TLS on same port → must fail
+    let result = ServerRegistry::global()
+        .get_or_spawn(
+            "127.0.0.1",
+            0,
+            1024,
+            1024,
+            16,
+            Arc::clone(&rt),
+            "route-2".into(),
+            Some(crate::config::ServerTlsConfig {
+                cert_path: "/x.pem".into(),
+                key_path: "/y.pem".into(),
+            }),
+        )
+        .await;
+    assert!(result.is_err(), "must reject TLS on plain port");
+}
+
+// -----------------------------------------------------------------------
+// D-L10: HTTP server is process-lifetime — it survives consumer
+// unregister (no refcount; dead servers are evicted on next spawn)
+// -----------------------------------------------------------------------
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_unregister_last_http_route_keeps_server_alive() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+    let registry = ServerRegistry::global();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener); // Release — ServerRegistry will rebind
+    let rt = test_rt();
+
+    // Register 2 routes on the same (host, port) — OnceCell returns the
+    // same ServerHandle.
+    let _r1 = registry
+        .get_or_spawn(
+            "127.0.0.1",
+            port,
+            1024 * 1024,
+            10 * 1024 * 1024,
+            16,
+            rt.clone(),
+            "test-route-1".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    let _r2 = registry
+        .get_or_spawn(
+            "127.0.0.1",
+            port,
+            1024 * 1024,
+            10 * 1024 * 1024,
+            16,
+            rt,
+            "test-route-2".into(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let key = ("127.0.0.1".to_string(), port);
+    let cell = {
+        let guard = registry.inner.lock().expect("lock");
+        guard.entries.get(&key).expect("entry should exist").clone()
+    };
+
+    // Unregister first route -> monitor still alive (count = 1).
+    registry.unregister("127.0.0.1", port).await;
+    {
+        let handle = cell
+            .get()
+            .expect("handle should still exist after first unregister");
+        assert!(
+            !handle.monitor_task.is_finished(),
+            "monitor task should still be alive after first unregister"
+        );
+    }
+
+    // Unregister second route -> server stays alive (process-lifetime).
+    registry.unregister("127.0.0.1", port).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    {
+        let handle = cell
+            .get()
+            .expect("handle should still exist after last unregister");
+        assert!(
+            !handle.monitor_task.is_finished(),
+            "monitor task should still be alive — server is process-lifetime"
+        );
+    }
+
+    // Entry stays in registry for potential restart.
+    {
+        let guard = registry.inner.lock().expect("lock");
+        assert!(
+            guard.entries.contains_key(&key),
+            "entry should remain in registry — server kept alive for restart"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// Staged listeners (itest-bound-ports Task 1)
+// -----------------------------------------------------------------------
+
+/// CLONE-FIXTURE: bind a std listener on `127.0.0.1:0`, retain a blocking
+/// std clone (`probe`) so the port stays reserved, and hand the original
+/// socket to tokio as a non-blocking listener. `tokio::net::TcpListener`
+/// has no `try_clone`, so clones come from the std handle.
+async fn clone_fixture_listener() -> (
+    tokio::net::TcpListener,
+    std::net::TcpListener,
+    std::net::SocketAddr,
+) {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind std listener");
+    let probe = l.try_clone().expect("clone probe");
+    l.set_nonblocking(true).expect("set_nonblocking");
+    let listener = tokio::net::TcpListener::from_std(l).expect("from_std");
+    let addr = listener.local_addr().expect("local_addr");
+    (listener, probe, addr)
+}
+
+/// Default-limit constants the existing registry tests in this file use.
+fn staged_limits() -> (usize, usize, usize) {
+    (1024 * 1024, 10 * 1024 * 1024, 1024)
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn staged_listener_first_spawn_serves_without_second_bind() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+    let registry = ServerRegistry::global();
+    let (listener, _probe, addr) = clone_fixture_listener().await;
+    let port = addr.port();
+    registry
+        .stage_listener(listener)
+        .await
+        .expect("stage listener");
+
+    let (max_req, max_res, max_inflight) = staged_limits();
+    let routes = registry
+        .get_or_spawn(
+            "127.0.0.1",
+            port,
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "staged-first-spawn".into(),
+            None,
+        )
+        .await
+        .expect("spawn from staged listener must succeed");
+
+    assert_eq!(
+        registry.bound_addr("127.0.0.1", port),
+        Some(addr),
+        "served socket must be the staged listener's addr"
+    );
+    // The probe clone shares the socket, so service is proven by an HTTP
+    // response, not by accepting on the probe.
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/__staged_probe__"))
+        .await
+        .expect("http request against staged listener must connect");
+    assert!(
+        resp.status().as_u16() >= 200,
+        "any status proves the staged socket serves"
+    );
+    drop(routes);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn staged_entry_reused_by_second_caller() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+    let registry = ServerRegistry::global();
+    let (listener, _probe, addr) = clone_fixture_listener().await;
+    let port = addr.port();
+    registry
+        .stage_listener(listener)
+        .await
+        .expect("stage listener");
+
+    let (max_req, max_res, max_inflight) = staged_limits();
+    let first = registry
+        .get_or_spawn(
+            "127.0.0.1",
+            port,
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "staged-reuse-1".into(),
+            None,
+        )
+        .await
+        .expect("first spawn from staged listener");
+    let second = registry
+        .get_or_spawn(
+            "127.0.0.1",
+            port,
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "staged-reuse-2".into(),
+            None,
+        )
+        .await
+        .expect("second caller must reuse the entry");
+    assert_eq!(
+        registry.bound_addr("127.0.0.1", port),
+        Some(addr),
+        "entry reused — bound addr unchanged, no second bind"
+    );
+    drop(first);
+    drop(second);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn staged_race_two_callers_single_resolver() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+    let registry = ServerRegistry::global();
+    let (listener, _probe, addr) = clone_fixture_listener().await;
+    let port = addr.port();
+    registry
+        .stage_listener(listener)
+        .await
+        .expect("stage listener");
+
+    // Two racing callers for the exact staged key: the staged listener
+    // must be consumed by the single cell-init winner and served to
+    // both — never leave the winner binding a port the loser still
+    // holds (EADDRINUSE).
+    let (max_req, max_res, max_inflight) = staged_limits();
+    let (first, second) = tokio::join!(
+        registry.get_or_spawn(
+            "127.0.0.1",
+            port,
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "staged-race-1".into(),
+            None,
+        ),
+        registry.get_or_spawn(
+            "127.0.0.1",
+            port,
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "staged-race-2".into(),
+            None,
+        ),
+    );
+    let first = first.expect("first racing caller must succeed");
+    let second = second.expect("second racing caller must succeed");
+    assert_eq!(
+        registry.bound_addr("127.0.0.1", port),
+        Some(addr),
+        "single entry must be served from the staged socket — no EADDRINUSE path"
+    );
+    drop(first);
+    drop(second);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn unstaged_spawn_binds_legacy() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+    let registry = ServerRegistry::global();
+    // Fresh port P2: reserve then release — the legacy path rebinds.
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+    let port = probe.local_addr().expect("local addr").port();
+    drop(probe);
+
+    let (max_req, max_res, max_inflight) = staged_limits();
+    registry
+        .get_or_spawn(
+            "127.0.0.1",
+            port,
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "legacy-bind".into(),
+            None,
+        )
+        .await
+        .expect("legacy bind spawn");
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/__legacy_probe__"))
+        .await
+        .expect("connect to freshly bound port must succeed");
+    assert!(resp.status().as_u16() >= 200);
+    assert_eq!(
+        registry.bound_addr("127.0.0.1", port),
+        Some(std::net::SocketAddr::from(([127, 0, 0, 1], port))),
+        "bound addr must be the legacy bound (host, port)"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn wrong_host_staged_port_fails_deterministically() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+    let registry = ServerRegistry::global();
+    let (listener, _probe, addr) = clone_fixture_listener().await;
+    let port = addr.port();
+    registry
+        .stage_listener(listener)
+        .await
+        .expect("stage listener under 127.0.0.1");
+
+    let (max_req, max_res, max_inflight) = staged_limits();
+    let err = registry
+        .get_or_spawn(
+            "localhost",
+            port,
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "conflict-probe".into(),
+            None,
+        )
+        .await
+        .expect_err("wrong host on staged port must fail deterministically");
+    assert!(
+        err.to_string().contains("staged listener conflict on port"),
+        "unexpected error: {err}"
+    );
+
+    // Slot untouched by the failed call: the correct host now consumes it.
+    registry
+        .get_or_spawn(
+            "127.0.0.1",
+            port,
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "conflict-after".into(),
+            None,
+        )
+        .await
+        .expect("correct host must serve the staged listener");
+    assert_eq!(
+        registry.bound_addr("127.0.0.1", port),
+        Some(addr),
+        "staged slot must be untouched by the conflicting call"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn duplicate_stage_same_key_rejected() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+    let registry = ServerRegistry::global();
+    let (listener, probe, addr) = clone_fixture_listener().await;
+    registry
+        .stage_listener(listener)
+        .await
+        .expect("stage listener A");
+
+    // Second tokio handle to the SAME socket: clone the std probe handle.
+    let dup = probe.try_clone().expect("clone2");
+    dup.set_nonblocking(true).expect("set_nonblocking2");
+    let b = tokio::net::TcpListener::from_std(dup).expect("from_std2");
+
+    let err = registry
+        .stage_listener(b)
+        .await
+        .expect_err("duplicate stage must be rejected");
+    assert!(
+        err.to_string().contains("listener already staged"),
+        "unexpected error: {err}"
+    );
+
+    let (max_req, max_res, max_inflight) = staged_limits();
+    registry
+        .get_or_spawn(
+            "127.0.0.1",
+            addr.port(),
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "dup-stage-after".into(),
+            None,
+        )
+        .await
+        .expect("spawn from first staged listener");
+    assert_eq!(
+        registry.bound_addr("127.0.0.1", addr.port()),
+        Some(addr),
+        "first staged listener retained"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn distinct_keys_stage_independently() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+    let registry = ServerRegistry::global();
+    let (l1, _p1, addr1) = clone_fixture_listener().await;
+    let (l2, _p2, addr2) = clone_fixture_listener().await;
+    registry.stage_listener(l1).await.expect("stage P1");
+    registry.stage_listener(l2).await.expect("stage P2");
+
+    let (max_req, max_res, max_inflight) = staged_limits();
+    registry
+        .get_or_spawn(
+            "127.0.0.1",
+            addr1.port(),
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "distinct-1".into(),
+            None,
+        )
+        .await
+        .expect("spawn P1");
+    registry
+        .get_or_spawn(
+            "127.0.0.1",
+            addr2.port(),
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "distinct-2".into(),
+            None,
+        )
+        .await
+        .expect("spawn P2");
+    assert_eq!(
+        registry.bound_addr("127.0.0.1", addr1.port()),
+        Some(addr1),
+        "P1 bound addr must be its own listener"
+    );
+    assert_eq!(
+        registry.bound_addr("127.0.0.1", addr2.port()),
+        Some(addr2),
+        "P2 bound addr must be its own listener"
+    );
+    let r1 = reqwest::get(format!("http://127.0.0.1:{}/__distinct__", addr1.port()))
+        .await
+        .expect("connect P1");
+    assert!(r1.status().as_u16() >= 200);
+    let r2 = reqwest::get(format!("http://127.0.0.1:{}/__distinct__", addr2.port()))
+        .await
+        .expect("connect P2");
+    assert!(r2.status().as_u16() >= 200);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tls_prebound_listener_served() {
+    use camel_component_api::test_support::tls;
+
+    // Install rustls crypto provider (aws-lc-rs — matches the existing
+    // TLS registry tests).
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+    let registry = ServerRegistry::global();
+    let (listener, _probe, addr) = clone_fixture_listener().await;
+    let port = addr.port();
+
+    let (ca_pem, cert_pem, key_pem) = tls::gen_server_cert();
+    let cert_path = tls::write_pem_tmp("http-staged-tls-cert.pem", &cert_pem);
+    let key_path = tls::write_pem_tmp("http-staged-tls-key.pem", &key_pem);
+    let ca_path = tls::write_pem_tmp("http-staged-tls-ca.pem", &ca_pem);
+
+    let (max_req, max_res, max_inflight) = staged_limits();
+    let routes = registry
+        .get_or_spawn_with_listener(
+            listener,
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "staged-tls".into(),
+            Some(crate::config::ServerTlsConfig {
+                cert_path: cert_path.to_string_lossy().into_owned(),
+                key_path: key_path.to_string_lossy().into_owned(),
+            }),
+        )
+        .await
+        .expect("spawn TLS server from pre-bound listener");
+
+    // Client with CA cert — REAL verification (no danger_accept_invalid),
+    // same helper pattern as the existing TLS registry tests.
+    let ca_bytes = std::fs::read(&ca_path).expect("read ca pem");
+    let client = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(&ca_bytes).expect("parse ca pem"))
+        .build()
+        .expect("build tls client");
+
+    let resp = client
+        .get(format!("https://127.0.0.1:{port}/__staged_tls__"))
+        .send()
+        .await
+        .expect("TLS handshake + request must succeed");
+    assert_eq!(resp.status().as_u16(), 404, "unknown path 404s through TLS");
+    assert_eq!(
+        registry.bound_addr("127.0.0.1", port),
+        Some(addr),
+        "bound addr equals the pre-bound listener addr"
+    );
+    drop(routes);
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn with_listener_direct_spawn_keyed_by_actual_addr() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+    let registry = ServerRegistry::global();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind un-staged listener");
+    let addr = listener.local_addr().expect("local addr");
+    let port = addr.port();
+
+    let (max_req, max_res, max_inflight) = staged_limits();
+    registry
+        .get_or_spawn_with_listener(
+            listener,
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "with-listener".into(),
+            None,
+        )
+        .await
+        .expect("direct spawn from un-staged listener");
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/__with_listener__"))
+        .await
+        .expect("connect on actual port");
+    assert!(resp.status().as_u16() >= 200);
+    assert_eq!(
+        registry.bound_addr("127.0.0.1", port),
+        Some(addr),
+        "registry key is the listener's actual port"
+    );
+
+    registry
+        .get_or_spawn(
+            "127.0.0.1",
+            port,
+            max_req,
+            max_res,
+            max_inflight,
+            test_rt(),
+            "with-listener-reuse".into(),
+            None,
+        )
+        .await
+        .expect("legacy caller must reuse the entry");
+    assert_eq!(
+        registry.bound_addr("127.0.0.1", port),
+        Some(addr),
+        "entry reused — no second bind"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Axum dispatch handler tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_dispatch_handler_returns_404_for_unknown_path() {
+    let registry = HttpRouteRegistry::new();
+    // Nothing registered in route registry
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(run_axum_server(
+        listener,
+        registry,
+        2 * 1024 * 1024,
+        10 * 1024 * 1024,
+        Arc::new(tokio::sync::Semaphore::new(1024)),
+        test_rt(),
+        "test-route".into(),
+    ));
+
+    // Wait for server to start
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/unknown"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
+// -----------------------------------------------------------------------
+// HttpConsumer tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_consumer_start_registers_path() {
+    use camel_component_api::ConsumerContext;
+
+    // Get an OS-assigned free port
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener); // Release port — ServerRegistry will rebind it
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        path: "/ping".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 10 * 1024 * 1024,
+        max_inflight_requests: 1024,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+    tokio::spawn(async move {
+        consumer.start(ctx).await.unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+    let resp_future = client
+        .post(format!("http://127.0.0.1:{port}/ping"))
+        .body("hello world")
+        .send();
+
+    let (http_result, _) = tokio::join!(resp_future, async {
+        if let Some(mut envelope) = rx.recv().await {
+            // Set a custom status code
+            envelope.exchange.input.set_header(
+                "CamelHttpResponseCode",
+                serde_json::Value::Number(201.into()),
+            );
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 201);
+
+    token.cancel();
+}
+
+/// rc-nftni (drainclaim): the raw-sender dispatch path mints a claim at
+/// the acceptance dequeue and carries it on the envelope. Exact totals:
+/// 1 while the envelope is held, 0 after release. No wall-clock sleeps —
+/// readiness is the startup signal, the recv IS the barrier.
+#[tokio::test]
+async fn http_consumer_raw_dispatch_carries_in_flight_claim() {
+    use camel_component_api::ConsumerContext;
+    use camel_component_api::StartupSignal;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        path: "/claim".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 10 * 1024 * 1024,
+        max_inflight_requests: 1024,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let counter = std::sync::Arc::new(camel_api::InFlightGauge::new());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let (signal, startup_rx) = StartupSignal::pair();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-claim-route".to_string())
+        .with_startup(signal)
+        .with_in_flight_counter(std::sync::Arc::clone(&counter));
+
+    tokio::spawn(async move {
+        consumer.start(ctx).await.unwrap();
+    });
+
+    // Deterministic readiness: the consumer marks ready only after the
+    // listener is bound and the path registered.
+    tokio::time::timeout(std::time::Duration::from_secs(5), startup_rx.await_ready())
+        .await
+        .expect("startup must resolve within 5s")
+        .expect("startup must be Ok");
+
+    let client = plain_http_test_client();
+    let (http_result, claim) = tokio::join!(
+        client
+            .post(format!("http://127.0.0.1:{port}/claim"))
+            .body("hello")
+            .send(),
+        async {
+            let mut envelope = rx.recv().await.expect("envelope must arrive");
+            let claim = envelope
+                .in_flight_claim
+                .take()
+                .expect("raw dispatch must carry an acceptance-minted claim");
+            assert_eq!(
+                counter.total(),
+                1,
+                "exact total: the acceptance mint is the only live claim"
+            );
+            // Materialized reply body: echoing the request's Stream body
+            // back would tie the response to the request-body stream
+            // (not what this test exercises).
+            let reply_tx = envelope.reply_tx.take().expect("reply channel must be set");
+            let reply_exchange = Exchange::new(camel_component_api::Message::new(
+                camel_component_api::Body::Text("done".to_string()),
+            ));
+            reply_tx
+                .send(Ok(reply_exchange))
+                .expect("reply must be taken");
+            claim
+        },
+    );
+
+    let resp = http_result.expect("http roundtrip must complete");
+    assert_eq!(resp.status().as_u16(), 200);
+
+    drop(claim);
+    assert_eq!(
+        counter.total(),
+        0,
+        "release exactly once when the holder drops"
+    );
+    token.cancel();
+}
+
+/// rc-3y6j: the RequestEnvelope channel capacity must mirror the
+/// dispatcher's inflight semaphore so the semaphore stays the single
+/// backpressure point. Zero maps to 1 because `mpsc::channel(0)` panics.
+#[test]
+fn test_envelope_channel_capacity_follows_max_inflight() {
+    assert_eq!(envelope_channel_capacity(0), 1);
+    assert_eq!(envelope_channel_capacity(1), 1);
+    assert_eq!(envelope_channel_capacity(7), 7);
+    assert_eq!(envelope_channel_capacity(64), 64);
+    assert_eq!(envelope_channel_capacity(1024), 1024);
+}
+
+/// rc-3y6j: `maxInflightRequests=0` is a representable reject-everything
+/// configuration. Consumer start must not panic on it (the channel guard)
+/// and every request must get 503 from the empty semaphore.
+#[tokio::test]
+async fn test_http_consumer_start_with_zero_max_inflight_rejects_503() {
+    use camel_component_api::ConsumerContext;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        path: "/ping".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 10 * 1024 * 1024,
+        max_inflight_requests: 0,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+    let start_handle = tokio::spawn(async move {
+        consumer.start(ctx).await.unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/ping"))
+        .body("hello world")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 503);
+
+    token.cancel();
+    let _ = start_handle.await;
+}
+
+// -----------------------------------------------------------------------
+// maxInflightRequests upper bound (bd rc-ns3yc — mirror of the grpc
+// consumer_concurrency_limit fix, commit 101327e5)
+// -----------------------------------------------------------------------
+
+/// bd rc-ns3yc: `L-1` and `L` are accepted unchanged, `L+1` is rejected
+/// with a typed config error naming the parameter, the configured value,
+/// and the limit, and `0` stays a representable reject-everything value
+/// (no `.max(1)` normalization — rc-3y6j). A semaphore of exactly L
+/// permits must construct without panicking: the accepted bound is
+/// exactly the primitive's bound.
+#[test]
+fn test_max_inflight_requests_limit_boundary() {
+    let l = tokio::sync::Semaphore::MAX_PERMITS;
+    assert_eq!(max_inflight_requests_limit(l - 1).unwrap(), l - 1);
+    assert_eq!(max_inflight_requests_limit(l).unwrap(), l);
+    assert_eq!(max_inflight_requests_limit(0).unwrap(), 0);
+    match max_inflight_requests_limit(l + 1) {
+        Err(CamelError::Config(msg)) => {
+            assert!(msg.contains("maxInflightRequests"), "message was: {msg}");
+            assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+            assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+        }
+        other => panic!("expected CamelError::Config, got: {other:?}"),
+    }
+    let _ = tokio::sync::Semaphore::new(l);
+}
+
+/// bd rc-ns3yc: the accepted upper bound is exactly
+/// `tokio::sync::Semaphore::MAX_PERMITS`; URI parse must accept L
+/// unchanged. Boundary-regression guard (green before and after the
+/// fix — red-first is not definable for an accepted value).
+#[test]
+fn test_parse_http_uri_max_inflight_at_limit_accepted() {
+    let l = tokio::sync::Semaphore::MAX_PERMITS;
+    let uri = format!("http://localhost:8080/api?maxInflightRequests={l}");
+    let cfg = HttpServerConfig::from_uri(&uri).unwrap();
+    assert_eq!(cfg.max_inflight_requests, l);
+}
+
+/// bd rc-ns3yc: values above `tokio::sync::Semaphore::MAX_PERMITS` are
+/// rejected at parse with a typed config error naming the parameter,
+/// the configured value, and the limit.
+#[test]
+fn test_parse_http_uri_max_inflight_above_limit_rejected() {
+    let l = tokio::sync::Semaphore::MAX_PERMITS;
+    let uri = format!("http://localhost:8080/api?maxInflightRequests={}", l + 1);
+    match HttpServerConfig::from_uri(&uri) {
+        Err(CamelError::Config(msg)) => {
+            assert!(msg.contains("maxInflightRequests"), "message was: {msg}");
+            assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+            assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+        }
+        other => panic!("expected CamelError::Config, got: {other:?}"),
+    }
+}
+
+/// bd rc-ns3yc: an oversized maxInflightRequests must be rejected at
+/// create_consumer even when the endpoint's HttpServerConfig was
+/// constructed directly (not via URI parse). Mirrors the
+/// https_consumer_without_tls_cert_errors direct-endpoint fixture.
+#[test]
+fn test_create_consumer_rejects_oversized_max_inflight() {
+    let l = tokio::sync::Semaphore::MAX_PERMITS;
+    let endpoint = HttpEndpoint {
+        uri: "http://0.0.0.0:8080/api".to_string(),
+        config: HttpEndpointConfig::from_uri("http://0.0.0.0:8080/api").unwrap(),
+        server_config: HttpServerConfig {
+            scheme: "http".to_string(),
+            host: "0.0.0.0".to_string(),
+            port: 8080,
+            path: "/api".to_string(),
+            max_request_body: 2 * 1024 * 1024,
+            max_response_body: 10 * 1024 * 1024,
+            max_inflight_requests: l + 1,
+            method: None,
+            tls_config: None,
+        },
+        client: plain_http_test_client(),
+        pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
+            PINNED_CLIENT_TTL,
+            PINNED_CLIENT_MAX_ENTRIES,
+        )),
+        http_config: HttpConfig::default(),
+    };
+    match endpoint.create_consumer(rt()) {
+        Err(CamelError::Config(msg)) => {
+            assert!(msg.contains("maxInflightRequests"), "message was: {msg}");
+            assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+            assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+        }
+        Err(other) => panic!("expected CamelError::Config, got: {other:?}"),
+        Ok(_) => panic!("expected error, got Ok"),
+    }
+}
+
+/// bd rc-ns3yc: `start` must reject an oversized maxInflightRequests
+/// BEFORE shared-server registry interaction, listener binding,
+/// envelope-channel construction, or semaphore construction — a typed
+/// config error, no panic. Mirrors the
+/// test_http_consumer_start_with_zero_max_inflight_rejects_503 fixture.
+#[tokio::test]
+async fn test_http_consumer_start_rejects_oversized_before_spawn() {
+    use camel_component_api::ConsumerContext;
+
+    let l = tokio::sync::Semaphore::MAX_PERMITS;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        path: "/ping".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 10 * 1024 * 1024,
+        max_inflight_requests: l + 1,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+    match consumer.start(ctx).await {
+        Err(CamelError::Config(msg)) => {
+            assert!(msg.contains("maxInflightRequests"), "message was: {msg}");
+            assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+            assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+        }
+        other => panic!("expected CamelError::Config, got: {other:?}"),
+    }
+    token.cancel();
+}
+
+/// bd rc-ns3yc: defense-in-depth — `spawn_entry` must reject an
+/// oversized max_inflight_requests before any listener side effect and
+/// before `tokio::sync::Semaphore::new` is reached (which would panic).
+#[tokio::test]
+async fn test_spawn_entry_rejects_oversized_before_semaphore() {
+    let l = tokio::sync::Semaphore::MAX_PERMITS;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let key: ServerKey = (addr.ip().to_string(), addr.port());
+
+    let result = spawn_entry(
+        key,
+        ListenerSource::Staged(listener),
+        1,
+        1,
+        l + 1,
+        test_rt(),
+        "route-test".into(),
+        None,
+    )
+    .await;
+
+    match result {
+        Err(CamelError::Config(msg)) => {
+            assert!(msg.contains("maxInflightRequests"), "message was: {msg}");
+            assert!(msg.contains(&format!("{}", l + 1)), "message was: {msg}");
+            assert!(msg.contains(&format!("{l}")), "message was: {msg}");
+        }
+        Err(other) => panic!("expected CamelError::Config, got: {other:?}"),
+        Ok(_) => panic!("expected CamelError::Config, got Ok"),
+    }
+}
+
+/// rc-w1u9: HttpConsumer MUST declare Explicit startup_mode so the runtime
+/// waits for the listener bind before publishing RouteStarted.
+#[test]
+fn test_http_consumer_startup_mode_is_explicit() {
+    use camel_component_api::ConsumerStartupMode;
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        path: "/x".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 10 * 1024 * 1024,
+        max_inflight_requests: 1024,
+        method: None,
+        tls_config: None,
+    };
+    let consumer = HttpConsumer::new(consumer_cfg, test_rt());
+    assert_eq!(
+        consumer.startup_mode(),
+        ConsumerStartupMode::Explicit,
+        "HttpConsumer must opt into Explicit startup"
+    );
+}
+
+/// rc-w1u9: HttpConsumer::start() MUST call ctx.mark_ready() AFTER bind
+/// + route registration. The StartupSignal resolves Ok only when that
+/// happens. Verified here by injecting our own signal pair into the
+/// ConsumerContext and asserting the receiver resolves within a bounded
+/// window even before any HTTP request is made.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_http_consumer_emits_mark_ready_after_bind() {
+    use camel_component_api::{ConsumerContext, StartupSignal};
+
+    let _guard = lock_registry_test_mutex();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        path: "/ready-probe".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 10 * 1024 * 1024,
+        max_inflight_requests: 1024,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "ready-probe-route".to_string());
+
+    // Inject our own startup signal so we can observe mark_ready.
+    let (signal, startup_rx) = StartupSignal::pair();
+    let ctx = ctx.with_startup(signal);
+
+    // Spawn start() — it MUST call mark_ready once the listener is bound
+    // and the path is registered.
+    tokio::spawn(async move {
+        let _ = consumer.start(ctx).await;
+    });
+
+    // The receiver MUST resolve Ok within a bounded window — proving
+    // mark_ready was called by start(). A short timeout catches the
+    // regression where mark_ready is never called (the old behaviour
+    // would hang the receiver forever, which is exactly the rc-w1u9 bug).
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), startup_rx.await_ready())
+        .await
+        .expect("HttpConsumer must call ctx.mark_ready() after bind (rc-w1u9)");
+    assert!(result.is_ok(), "mark_ready must resolve Ok after bind");
+
+    // Cancellation tears down the spawned start() loop.
+    token.cancel();
+}
+
+// -----------------------------------------------------------------------
+// Shared-server death supervision (rc-szmob / ADR-0007)
+// -----------------------------------------------------------------------
+
+/// RuntimeObservability stub that records every `increment_errors`
+/// `(route_id, label)` pair so tests can assert error counters.
+#[derive(Default, Clone)]
+struct ErrorRecordingRuntime {
+    errors: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+impl camel_api::MetricsCollector for ErrorRecordingRuntime {
+    fn record_exchange_duration(&self, _route_id: &str, _duration: std::time::Duration) {}
+    fn increment_errors(&self, route_id: &str, error_type: &str) {
+        self.errors
+            .lock()
+            .expect("error recorder lock")
+            .push((route_id.to_string(), error_type.to_string()));
+    }
+    fn increment_exchanges(&self, _route_id: &str) {}
+    fn set_queue_depth(&self, _queue: &str, _depth: usize) {}
+    fn record_circuit_breaker_change(&self, _route_id: &str, _from: &str, _to: &str) {}
+}
+
+impl camel_component_api::HealthCheckRegistry for ErrorRecordingRuntime {
+    fn force_unhealthy_for_route(&self, _route_id: &str, _name: &str, _reason: &str) {}
+}
+
+impl camel_component_api::RuntimeObservability for ErrorRecordingRuntime {
+    fn metrics(&self) -> std::sync::Arc<dyn camel_api::MetricsCollector> {
+        std::sync::Arc::new(self.clone())
+    }
+    fn health(&self) -> std::sync::Arc<dyn camel_component_api::HealthCheckRegistry> {
+        std::sync::Arc::new(self.clone())
+    }
+}
+
+/// rc-szmob (ADR-0007 parity): when the shared Axum server task for a
+/// host:port dies, EVERY HttpConsumer hosted on that port must fail its
+/// `start()` with an Err — that Err is the signal camel-core's consumer
+/// watcher turns into a per-route CrashNotification → FailRoute →
+/// supervision backoff restart. Before the fix the consumers hung in
+/// `Running` forever (zombie routes): neither `ctx.cancelled()` nor
+/// `env_rx.recv()` fires when the server task dies, because the envelope
+/// senders live in the (still-alive) registry, not in the dead task.
+///
+/// Deterministic by construction: readiness is awaited via the injected
+/// StartupSignal (no sleeps), the server is killed via its AbortHandle
+/// (real JoinError → monitor's unexpected-exit branch), and consumer
+/// resolution is bounded by a timeout — on unmodified behavior the
+/// timeout trips, which is exactly the zombie this test pins down.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn shared_server_death_fails_every_hosted_consumer() {
+    use camel_component_api::{ConsumerContext, StartupSignal};
+
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+
+    // Reserve a port, release it, let get_or_spawn bind it.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let rt = ErrorRecordingRuntime::default();
+
+    let make_consumer = |path: &str| {
+        HttpConsumer::new(
+            HttpServerConfig {
+                scheme: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port,
+                path: path.to_string(),
+                max_request_body: 2 * 1024 * 1024,
+                max_response_body: 10 * 1024 * 1024,
+                max_inflight_requests: 16,
+                method: None,
+                tls_config: None,
+            },
+            std::sync::Arc::new(rt.clone()),
+        )
+    };
+
+    let spawn_consumer = |path: &str, route_id: &str| {
+        let mut consumer = make_consumer(path);
+        let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token, route_id.to_string());
+        let (signal, startup_rx) = StartupSignal::pair();
+        let ctx = ctx.with_startup(signal);
+        let task = tokio::spawn(async move { consumer.start(ctx).await });
+        (task, startup_rx)
+    };
+
+    // Two routes hosted on the SAME shared server (same host:port).
+    let (task_a, ready_a) = spawn_consumer("/zombie-a", "zombie-route-a");
+    let (task_b, ready_b) = spawn_consumer("/zombie-b", "zombie-route-b");
+
+    // Both consumers registered and the server is up (bounded, no sleeps).
+    for (name, ready) in [("a", ready_a), ("b", ready_b)] {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), ready.await_ready())
+            .await
+            .unwrap_or_else(|_| panic!("consumer {name} never became ready"));
+        assert!(
+            result.is_ok(),
+            "consumer {name} readiness must resolve Ok (bind + registration complete)"
+        );
+    }
+
+    // Kill the shared server task: abort → JoinError → the monitor's
+    // unexpected-exit branch. This is the real crash path (no mock).
+    {
+        let registry = ServerRegistry::global();
+        let guard = registry.inner.lock().expect("ServerRegistry lock");
+        let cell = guard
+            .entries
+            .get(&("127.0.0.1".to_string(), port))
+            .expect("shared server entry must exist");
+        let handle = cell.get().expect("server handle must be initialized");
+        handle.server_abort.abort();
+    }
+
+    // THE assertion: both hosted consumers must fail (bounded). On the
+    // zombie bug they never resolve and this timeout trips.
+    let outcome_a = tokio::time::timeout(std::time::Duration::from_secs(2), task_a)
+        .await
+        .expect("ZOMBIE: consumer-a still running after shared server death (rc-szmob)");
+    let outcome_b = tokio::time::timeout(std::time::Duration::from_secs(2), task_b)
+        .await
+        .expect("ZOMBIE: consumer-b still running after shared server death (rc-szmob)");
+
+    let err_a = outcome_a
+        .expect("consumer-a task must join")
+        .expect_err("consumer-a start() must return Err when the shared server dies");
+    let err_b = outcome_b
+        .expect("consumer-b task must join")
+        .expect_err("consumer-b start() must return Err when the shared server dies");
+
+    // The error must identify the dead shared transport (it flows into the
+    // CrashNotification message camel-core records against the route).
+    for (name, err) in [("a", &err_a), ("b", &err_b)] {
+        assert!(
+            err.to_string().contains("127.0.0.1") && err.to_string().contains(&port.to_string()),
+            "consumer-{name} error must name the dead shared server, got: {err}"
+        );
+    }
+
+    // Error counter regression guard: the monitor still records
+    // `e:http:server-task-exited` for the route that spawned the server.
+    let recorded = rt.errors.lock().expect("error recorder lock").clone();
+    assert!(
+        recorded
+            .iter()
+            .any(|(route, label)| label == "e:http:server-task-exited"
+                && route == "zombie-route-a"),
+        "expected e:http:server-task-exited for the spawning route, got: {recorded:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_http_consumer_returns_503_when_inflight_limit_reached() {
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        path: "/saturation".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 10 * 1024 * 1024,
+        max_inflight_requests: 1,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let (first_seen_tx, first_seen_rx) = tokio::sync::oneshot::channel::<()>();
+    let (unblock_first_tx, unblock_first_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        let mut first_seen_tx = Some(first_seen_tx);
+        let mut unblock_first_rx = Some(unblock_first_rx);
+
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    if let Some(tx) = first_seen_tx.take() {
+                        let _ = tx.send(());
+                        if let Some(rx_unblock) = unblock_first_rx.take() {
+                            // Deadline-bound like the recv above: a
+                            // parked first exchange fails loudly
+                            // instead of hanging the pipeline task.
+                            let _ = tokio::time::timeout(Duration::from_secs(2), rx_unblock)
+                                .await
+                                .expect("first exchange unblock within 2s");
+                        }
+                    }
+
+                    if let Some(reply_tx) = envelope.reply_tx {
+                        let _ = reply_tx.send(Ok(envelope.exchange));
+                    }
+                }
+                // Channel closed: drainer ends.
+                Ok(None) => break, // closed: drain complete
+                // Stalled: drainer ends.
+                Err(_) => break, // stalled: drainer ends
+            }
+        }
+    });
+
+    let client = plain_http_test_client();
+    let first_req = {
+        let client = client.clone();
+        async move {
+            client
+                .get(format!("http://127.0.0.1:{port}/saturation"))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    let first_handle = tokio::spawn(first_req);
+    first_seen_rx.await.unwrap();
+
+    let second_resp = client
+        .get(format!("http://127.0.0.1:{port}/saturation"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(second_resp.status().as_u16(), 503);
+
+    let _ = unblock_first_tx.send(());
+    let first_resp = first_handle.await.unwrap();
+    assert_eq!(first_resp.status().as_u16(), 200);
+
+    token.cancel();
+}
+
+/// Audit 2026-08-31, F2-1: a chunked (no Content-Length) request body must
+/// still be capped — the byte limit travels with the stream, so any
+/// downstream materialization fails closed past `max_request_body`.
+#[tokio::test]
+async fn test_http_consumer_chunked_body_is_capped() {
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        path: "/chunked-cap".to_string(),
+        max_request_body: 1024, // tiny cap for the test
+        max_response_body: 10 * 1024 * 1024,
+        max_inflight_requests: 16,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Chunked body: reqwest streams it without Content-Length.
+    let chunks: Vec<Result<bytes::Bytes, std::io::Error>> = (0..8)
+        .map(|_| Ok(bytes::Bytes::from(vec![b'A'; 512])))
+        .collect();
+    let stream_body = reqwest::Body::wrap_stream(futures::stream::iter(chunks));
+
+    let client = plain_http_test_client();
+    let send_fut = client
+        .post(format!("http://127.0.0.1:{port}/chunked-cap"))
+        .body(stream_body)
+        .send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            // The route materializes the body — the cap must fire.
+            let materialized = envelope
+                .exchange
+                .input
+                .body
+                .clone()
+                .into_bytes(64 * 1024)
+                .await;
+            assert!(
+                materialized.is_err(),
+                "materializing a 4 KiB chunked body under a 1 KiB cap must fail"
+            );
+            let err = materialized.unwrap_err().to_string();
+            assert!(
+                err.contains("limit") || err.contains("exceeds"),
+                "error should mention the limit: {err}"
+            );
+            if let Some(reply_tx) = envelope.reply_tx {
+                envelope.exchange.input.body =
+                    camel_component_api::Body::Text("handled".to_string());
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    token.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_http_consumer_enforces_max_response_body_for_bytes() {
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+    let _guard = lock_registry_test_mutex();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        path: "/limit-bytes".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 16,
+        max_inflight_requests: 1024,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+    let send_fut = client
+        .get(format!("http://127.0.0.1:{port}/limit-bytes"))
+        .send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            envelope.exchange.input.body =
+                camel_component_api::Body::Bytes(bytes::Bytes::from(vec![b'x'; 32]));
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 500);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "Response body exceeds configured limit");
+    token.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_http_consumer_enforces_max_response_body_for_json() {
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+    let _guard = lock_registry_test_mutex();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        path: "/limit-json".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 16,
+        max_inflight_requests: 1024,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+    let send_fut = client
+        .get(format!("http://127.0.0.1:{port}/limit-json"))
+        .send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            envelope.exchange.input.body = camel_component_api::Body::Json(
+                serde_json::json!({"message":"this response is bigger than sixteen"}),
+            );
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 500);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "Response body exceeds configured limit");
+    token.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_http_consumer_enforces_max_response_body_for_xml() {
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+    let _guard = lock_registry_test_mutex();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        path: "/limit-xml".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 16,
+        max_inflight_requests: 1024,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+    let send_fut = client
+        .get(format!("http://127.0.0.1:{port}/limit-xml"))
+        .send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            envelope.exchange.input.body =
+                camel_component_api::Body::Xml("<root><value>way-too-large</value></root>".into());
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 500);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "Response body exceeds configured limit");
+    token.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_http_consumer_does_not_enforce_max_response_body_for_stream() {
+    use camel_component_api::{
+        CamelError, ConsumerContext, ExchangeEnvelope, StreamBody, StreamMetadata,
+    };
+    use futures::stream;
+
+    let _guard = lock_registry_test_mutex();
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "0.0.0.0".to_string(),
+        port,
+        path: "/limit-stream".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 16,
+        max_inflight_requests: 1024,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+    let send_fut = client
+        .get(format!("http://127.0.0.1:{port}/limit-stream"))
+        .send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            let chunks: Vec<Result<bytes::Bytes, CamelError>> =
+                vec![Ok(bytes::Bytes::from(vec![b'x'; 32]))];
+            let stream = Box::pin(stream::iter(chunks));
+            envelope.exchange.input.body = camel_component_api::Body::Stream(StreamBody {
+                stream: Arc::new(tokio::sync::Mutex::new(Some(stream))),
+                metadata: StreamMetadata {
+                    size_hint: Some(32),
+                    content_type: Some("application/octet-stream".into()),
+                    origin: None,
+                },
+            });
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.bytes().await.unwrap();
+    assert_eq!(body.len(), 32);
+    token.cancel();
+}
+
+// -----------------------------------------------------------------------
+// Integration tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_integration_single_consumer_round_trip() {
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+    // Spawns an HTTP consumer on the global ServerRegistry
+    // (HttpConsumer::start → get_or_spawn). Serialize against the other
+    // registry tests so parallel runs do not race on shared global state.
+    let _guard = lock_registry_test_mutex();
+
+    // Get an OS-assigned free port (ephemeral)
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener); // Release — ServerRegistry will rebind
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("http://127.0.0.1:{port}/echo"), &endpoint_ctx)
+        .unwrap();
+    let mut consumer = endpoint.create_consumer(rt()).unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+    let send_fut = client
+        .post(format!("http://127.0.0.1:{port}/echo"))
+        .header("Content-Type", "text/plain")
+        .body("ping")
+        .send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            assert_eq!(
+                envelope.exchange.input.header("CamelHttpMethod"),
+                Some(&serde_json::Value::String("POST".into()))
+            );
+            assert_eq!(
+                envelope.exchange.input.header("CamelHttpPath"),
+                Some(&serde_json::Value::String("/echo".into()))
+            );
+            envelope.exchange.input.body = camel_component_api::Body::Text("pong".to_string());
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "pong");
+
+    token.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_integration_two_consumers_shared_port() {
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+    let _guard = lock_registry_test_mutex();
+
+    // Get an OS-assigned free port (ephemeral)
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+
+    // Consumer A: /hello
+    let endpoint_a = component
+        .create_endpoint(&format!("http://127.0.0.1:{port}/hello"), &endpoint_ctx)
+        .unwrap();
+    let mut consumer_a = endpoint_a.create_consumer(rt()).unwrap();
+
+    // Consumer B: /world
+    let endpoint_b = component
+        .create_endpoint(&format!("http://127.0.0.1:{port}/world"), &endpoint_ctx)
+        .unwrap();
+    let mut consumer_b = endpoint_b.create_consumer(rt()).unwrap();
+
+    let (tx_a, mut rx_a) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token_a = tokio_util::sync::CancellationToken::new();
+    let ctx_a = ConsumerContext::new(tx_a, token_a.clone(), "http-test-route-a".to_string());
+
+    let (tx_b, mut rx_b) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token_b = tokio_util::sync::CancellationToken::new();
+    let ctx_b = ConsumerContext::new(tx_b, token_b.clone(), "http-test-route-b".to_string());
+
+    tokio::spawn(async move { consumer_a.start(ctx_a).await.unwrap() });
+    tokio::spawn(async move { consumer_b.start(ctx_b).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+
+    // Request to /hello
+    let fut_hello = client.get(format!("http://127.0.0.1:{port}/hello")).send();
+    let (resp_hello, _) = tokio::join!(fut_hello, async {
+        if let Some(mut envelope) = rx_a.recv().await {
+            envelope.exchange.input.body =
+                camel_component_api::Body::Text("hello-response".to_string());
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    // Request to /world
+    let fut_world = client.get(format!("http://127.0.0.1:{port}/world")).send();
+    let (resp_world, _) = tokio::join!(fut_world, async {
+        if let Some(mut envelope) = rx_b.recv().await {
+            envelope.exchange.input.body =
+                camel_component_api::Body::Text("world-response".to_string());
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let body_a = resp_hello.unwrap().text().await.unwrap();
+    let body_b = resp_world.unwrap().text().await.unwrap();
+
+    assert_eq!(body_a, "hello-response");
+    assert_eq!(body_b, "world-response");
+
+    token_a.cancel();
+    token_b.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_integration_unregistered_path_returns_404() {
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+    let _guard = lock_registry_test_mutex();
+
+    // Get an OS-assigned free port (ephemeral)
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("http://127.0.0.1:{port}/registered"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let mut consumer = endpoint.create_consumer(rt()).unwrap();
+
+    let (tx, _rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+
+    // Wait until the server is actually accepting connections (CI runners can be slow).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("HTTP server did not start within 5s on port {port}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let client = plain_http_test_client();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/not-there"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 404);
+
+    token.cancel();
+}
+
+#[test]
+fn test_http_consumer_declares_concurrent() {
+    use camel_component_api::ConcurrencyModel;
+
+    let config = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port: 19999,
+        path: "/test".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 10 * 1024 * 1024,
+        max_inflight_requests: 1024,
+        method: None,
+        tls_config: None,
+    };
+    let consumer = HttpConsumer::new(config, test_rt());
+    assert_eq!(
+        consumer.concurrency_model(),
+        ConcurrencyModel::Concurrent { max: None }
+    );
+}
+
+#[test]
+fn server_config_parses_tls_cert_and_key() {
+    let cfg = HttpServerConfig::from_uri(
+        "https://0.0.0.0:8443/api?tlsCert=/a/cert.pem&tlsKey=/a/key.pem",
+    )
+    .unwrap();
+    assert_eq!(cfg.tls_config.as_ref().unwrap().cert_path, "/a/cert.pem");
+    assert_eq!(cfg.tls_config.as_ref().unwrap().key_path, "/a/key.pem");
+}
+
+#[test]
+fn server_config_no_tls_when_params_absent() {
+    let cfg = HttpServerConfig::from_uri("http://0.0.0.0:8080/api").unwrap();
+    assert!(cfg.tls_config.is_none());
+}
+
+// -----------------------------------------------------------------------
+// HttpReplyBody streaming tests
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_http_reply_body_stream_variant_exists() {
+    use bytes::Bytes;
+    use camel_component_api::CamelError;
+    use futures::stream;
+
+    let chunks: Vec<Result<Bytes, CamelError>> =
+        vec![Ok(Bytes::from("hello")), Ok(Bytes::from(" world"))];
+    let stream = Box::pin(stream::iter(chunks));
+    let reply_body = HttpReplyBody::Stream(stream);
+    // Si compila y el match funciona, el test pasa
+    match reply_body {
+        HttpReplyBody::Stream(_) => {}
+        HttpReplyBody::Bytes(_) => panic!("expected Stream variant"),
+    }
+}
+
+// -----------------------------------------------------------------------
+// OpenTelemetry propagation tests (only compiled with "otel" feature)
+// -----------------------------------------------------------------------
+
+#[cfg(feature = "otel")]
+mod otel_tests {
+    use super::*;
+    use camel_component_api::Message;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn test_producer_injects_traceparent_header() {
+        let (url, _handle) = start_test_server_with_header_capture().await;
+        let ctx = test_producer_ctx();
+
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api?allowInternal=true"), &endpoint_ctx)
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        // Create exchange with an OTel context by extracting from a traceparent header
+        let mut exchange = Exchange::new(Message::default());
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "traceparent".to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        camel_otel::extract_into_exchange(&mut exchange, &headers);
+
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        // Verify request succeeded
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+
+        // The test server echoes back the received traceparent header
+        let traceparent = result.input.header("X-Received-Traceparent");
+        assert!(
+            traceparent.is_some(),
+            "traceparent header should have been sent"
+        );
+
+        let traceparent_str = traceparent.unwrap().as_str().unwrap();
+        // Verify format: version-traceid-spanid-flags
+        let parts: Vec<&str> = traceparent_str.split('-').collect();
+        assert_eq!(parts.len(), 4, "traceparent should have 4 parts");
+        assert_eq!(parts[0], "00", "version should be 00");
+        assert_eq!(
+            parts[1], "4bf92f3577b34da6a3ce929d0e0e4736",
+            "trace-id should match"
+        );
+        assert_eq!(parts[2], "00f067aa0ba902b7", "span-id should match");
+        assert_eq!(parts[3], "01", "flags should be 01 (sampled)");
+    }
+
+    #[tokio::test]
+    async fn test_consumer_extracts_traceparent_header() {
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        // Get an OS-assigned free port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("http://127.0.0.1:{port}/trace"), &endpoint_ctx)
+            .unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Send request with traceparent header
+        let client = plain_http_test_client();
+        let send_fut = client
+            .post(format!("http://127.0.0.1:{port}/trace"))
+            .header(
+                "traceparent",
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            )
+            .body("test")
+            .send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(envelope) = rx.recv().await {
+                // Verify the exchange has a valid OTel context by re-injecting it
+                // and checking the traceparent matches
+                let mut injected_headers = std::collections::HashMap::new();
+                camel_otel::inject_from_exchange(&envelope.exchange, &mut injected_headers);
+
+                assert!(
+                    injected_headers.contains_key("traceparent"),
+                    "Exchange should have traceparent after extraction"
+                );
+
+                let traceparent = injected_headers.get("traceparent").unwrap();
+                let parts: Vec<&str> = traceparent.split('-').collect();
+                assert_eq!(parts.len(), 4, "traceparent should have 4 parts");
+                assert_eq!(
+                    parts[1], "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "Trace ID should match the original traceparent header"
+                );
+
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_consumer_extracts_mixed_case_traceparent_header() {
+        use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+        // Get an OS-assigned free port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("http://127.0.0.1:{port}/trace"), &endpoint_ctx)
+            .unwrap();
+        let mut consumer = endpoint.create_consumer(rt()).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = tokio_util::sync::CancellationToken::new();
+        let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+        tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Send request with MIXED-CASE TraceParent header (not lowercase)
+        let client = plain_http_test_client();
+        let send_fut = client
+            .post(format!("http://127.0.0.1:{port}/trace"))
+            .header(
+                "TraceParent",
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            )
+            .body("test")
+            .send();
+
+        let (http_result, _) = tokio::join!(send_fut, async {
+            if let Some(envelope) = rx.recv().await {
+                // Verify the exchange has a valid OTel context by re-injecting it
+                // and checking the traceparent matches
+                let mut injected_headers = HashMap::new();
+                camel_otel::inject_from_exchange(&envelope.exchange, &mut injected_headers);
+
+                assert!(
+                    injected_headers.contains_key("traceparent"),
+                    "Exchange should have traceparent after extraction from mixed-case header"
+                );
+
+                let traceparent = injected_headers.get("traceparent").unwrap();
+                let parts: Vec<&str> = traceparent.split('-').collect();
+                assert_eq!(parts.len(), 4, "traceparent should have 4 parts");
+                assert_eq!(
+                    parts[1], "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "Trace ID should match the original mixed-case TraceParent header"
+                );
+
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+        });
+
+        let resp = http_result.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        token.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_producer_no_trace_context_no_crash() {
+        let (url, _handle) = start_test_server().await;
+        let ctx = test_producer_ctx();
+
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("{url}/api?allowInternal=true"), &endpoint_ctx)
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        // Create exchange with default (empty) otel_context - no trace context
+        let exchange = Exchange::new(Message::default());
+
+        // Should succeed without panic
+        let result = producer.oneshot(exchange).await.unwrap();
+
+        // Verify request succeeded
+        let status = result
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64())
+            .unwrap();
+        assert_eq!(status, 200);
+    }
+
+    /// Test server that captures and echoes back the traceparent header
+    async fn start_test_server_with_header_capture() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        let handle = tokio::spawn(async move {
+            loop {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                        let mut buf = vec![0u8; 8192];
+                        let n = stream.read(&mut buf).await.unwrap_or(0);
+                        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+
+                        // Extract traceparent header from request
+                        let traceparent = request
+                            .lines()
+                            .find(|line| line.to_lowercase().starts_with("traceparent:"))
+                            .map(|line| {
+                                line.split(':')
+                                    .nth(1)
+                                    .map(|s| s.trim().to_string())
+                                    .unwrap_or_default()
+                            })
+                            .unwrap_or_default();
+
+                        let body = format!(r#"{{"echo":"ok","traceparent":"{}"}}"#, traceparent);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Received-Traceparent: {}\r\n\r\n{}",
+                            body.len(),
+                            traceparent,
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    });
+                }
+            }
+        });
+
+        (url, handle)
+    }
+}
+
+// -----------------------------------------------------------------------
+// Response streaming tests (Eje A - Task 2)
+// -----------------------------------------------------------------------
+
+// -----------------------------------------------------------------------
+// Request streaming tests (Eje B - Task 3)
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_request_body_arrives_as_stream() {
+    use camel_component_api::Body;
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("http://127.0.0.1:{port}/upload"), &endpoint_ctx)
+        .unwrap();
+    let mut consumer = endpoint.create_consumer(rt()).unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+    let send_fut = client
+        .post(format!("http://127.0.0.1:{port}/upload"))
+        .body("hello streaming world")
+        .send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            // Body must be Body::Stream, not Body::Text or Body::Bytes
+            assert!(
+                matches!(envelope.exchange.input.body, Body::Stream(_)),
+                "expected Body::Stream, got discriminant {:?}",
+                std::mem::discriminant(&envelope.exchange.input.body)
+            );
+            // Materialize to verify content
+            let bytes = envelope
+                .exchange
+                .input
+                .body
+                .into_bytes(1024 * 1024)
+                .await
+                .unwrap();
+            assert_eq!(&bytes[..], b"hello streaming world");
+
+            envelope.exchange.input.body = camel_component_api::Body::Empty;
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    token.cancel();
+}
+
+// -----------------------------------------------------------------------
+// Response streaming tests (Eje A - Task 2)
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_streaming_response_chunked() {
+    use bytes::Bytes;
+    use camel_component_api::Body;
+    use camel_component_api::CamelError;
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+    use camel_component_api::{StreamBody, StreamMetadata};
+    use futures::stream;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("http://127.0.0.1:{port}/stream"), &endpoint_ctx)
+        .unwrap();
+    let mut consumer = endpoint.create_consumer(rt()).unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+    let send_fut = client.get(format!("http://127.0.0.1:{port}/stream")).send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            // Respond with Body::Stream
+            let chunks: Vec<Result<Bytes, CamelError>> =
+                vec![Ok(Bytes::from("chunk1")), Ok(Bytes::from("chunk2"))];
+            let stream = Box::pin(stream::iter(chunks));
+            envelope.exchange.input.body = Body::Stream(StreamBody {
+                stream: Arc::new(Mutex::new(Some(stream))),
+                metadata: StreamMetadata::default(),
+            });
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "chunk1chunk2");
+
+    token.cancel();
+}
+
+// -----------------------------------------------------------------------
+// 413 Content-Length limit test (Task 4)
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_413_when_content_length_exceeds_limit() {
+    use camel_component_api::ConsumerContext;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    // maxRequestBody=100 — any request declaring more than 100 bytes must get 413
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("http://127.0.0.1:{port}/upload?maxRequestBody=100"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let mut consumer = endpoint.create_consumer(rt()).unwrap();
+
+    let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/upload"))
+        .header("Content-Length", "1000") // declares 1000 bytes, limit is 100
+        .body("x".repeat(1000))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 413);
+
+    token.cancel();
+}
+
+/// Chunked upload without Content-Length header must NOT be rejected by maxRequestBody.
+/// The spec says: "If there is no Content-Length, the limit does not apply at the
+/// consumer level — the route is responsible."
+#[tokio::test]
+async fn test_chunked_upload_without_content_length_bypasses_limit() {
+    use bytes::Bytes;
+    use camel_component_api::Body;
+    use camel_component_api::ConsumerContext;
+    use futures::stream;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    // maxRequestBody=10 — very small limit; chunked uploads have no Content-Length
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("http://127.0.0.1:{port}/upload?maxRequestBody=10"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let mut consumer = endpoint.create_consumer(rt()).unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+
+    // Use wrap_stream so reqwest sends chunked transfer encoding WITHOUT a
+    // Content-Length header. 100 bytes exceeds the 10-byte maxRequestBody limit,
+    // but since there's no Content-Length the 413 check must NOT fire.
+    let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
+        Ok(Bytes::from("y".repeat(50))),
+        Ok(Bytes::from("y".repeat(50))),
+    ];
+    let stream_body = reqwest::Body::wrap_stream(stream::iter(chunks));
+    let send_fut = client
+        .post(format!("http://127.0.0.1:{port}/upload"))
+        .body(stream_body)
+        .send();
+
+    let consumer_fut = async {
+        // Use timeout to avoid deadlock if the handler rejects before enqueueing
+        match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
+            Ok(Some(mut envelope)) => {
+                assert!(
+                    matches!(envelope.exchange.input.body, Body::Stream(_)),
+                    "expected Body::Stream"
+                );
+                envelope.exchange.input.body = camel_component_api::Body::Empty;
+                if let Some(reply_tx) = envelope.reply_tx {
+                    let _ = reply_tx.send(Ok(envelope.exchange));
+                }
+            }
+            Ok(None) => panic!("consumer channel closed unexpectedly"),
+            Err(_) => {
+                // Timeout: the request was rejected before reaching the consumer.
+                // The HTTP response will carry the real status code (we check below).
+            }
+        }
+    };
+
+    let (http_result, _) = tokio::join!(send_fut, consumer_fut);
+
+    let resp = http_result.unwrap();
+    // Audit 2026-08-31 (F2-1): the request is no longer rejected at the door
+    // (no Content-Length to pre-check), but the byte cap now travels with the
+    // stream: ANY materialization past maxRequestBody fails closed. This test
+    // does not consume the body, so the request still completes with 200 —
+    // enforcement happens at consumption time (see
+    // test_http_consumer_chunked_body_is_capped).
+    assert_ne!(
+        resp.status().as_u16(),
+        413,
+        "chunked upload has no Content-Length to pre-check"
+    );
+    assert_eq!(resp.status().as_u16(), 200);
+
+    token.cancel();
+}
+
+#[test]
+fn test_is_private_ip_ranges() {
+    use camel_api::is_ssrf_blocked_ip;
+    assert!(is_ssrf_blocked_ip(&"10.0.0.1".parse().unwrap())); // allow-unwrap
+    assert!(is_ssrf_blocked_ip(&"172.16.1.10".parse().unwrap())); // allow-unwrap
+    assert!(is_ssrf_blocked_ip(&"192.168.1.1".parse().unwrap())); // allow-unwrap
+    assert!(is_ssrf_blocked_ip(&"127.0.0.1".parse().unwrap())); // allow-unwrap
+    assert!(is_ssrf_blocked_ip(&"169.254.1.1".parse().unwrap())); // allow-unwrap
+    assert!(is_ssrf_blocked_ip(&"0.1.2.3".parse().unwrap())); // allow-unwrap
+
+    assert!(is_ssrf_blocked_ip(&"::1".parse().unwrap())); // allow-unwrap
+    assert!(is_ssrf_blocked_ip(&"fc00::1".parse().unwrap())); // allow-unwrap
+    assert!(is_ssrf_blocked_ip(&"fd12::1".parse().unwrap())); // allow-unwrap
+    assert!(is_ssrf_blocked_ip(&"fe80::1".parse().unwrap())); // allow-unwrap
+    // ::ffff:0:0/96 (IPv4-mapped): only blocked if the mapped IPv4 is blocked
+    assert!(is_ssrf_blocked_ip(&"::ffff:10.0.0.1".parse().unwrap())); // allow-unwrap
+    assert!(is_ssrf_blocked_ip(&"::ffff:192.168.1.1".parse().unwrap())); // allow-unwrap
+    assert!(is_ssrf_blocked_ip(&"::ffff:127.0.0.1".parse().unwrap())); // allow-unwrap
+
+    assert!(!is_ssrf_blocked_ip(&"8.8.8.8".parse().unwrap())); // allow-unwrap
+    assert!(!is_ssrf_blocked_ip(&"::ffff:8.8.8.8".parse().unwrap())); // allow-unwrap — public IPv4-mapped
+    assert!(!is_ssrf_blocked_ip(
+        &"2001:4860:4860::8888".parse().unwrap()
+    )); // allow-unwrap
+}
+
+#[test]
+fn test_title_case_header() {
+    assert_eq!(title_case_header("content-type"), "Content-Type");
+    assert_eq!(title_case_header("authorization"), "Authorization");
+    assert_eq!(title_case_header("x-custom-header"), "X-Custom-Header");
+    assert_eq!(title_case_header("host"), "Host");
+    assert_eq!(title_case_header("x-b3-traceid"), "X-B3-Traceid");
+    assert_eq!(title_case_header("single"), "Single");
+    assert_eq!(title_case_header(""), "");
+}
+
+#[test]
+fn test_resolve_url_combines_path_and_query_sources() {
+    let cfg = HttpEndpointConfig::from_uri("http://example.com/base?foo=bar").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpPath",
+        serde_json::Value::String("next".to_string()),
+    );
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    assert!(url.starts_with("http://example.com/base/next?"));
+    assert!(url.contains("foo=bar"));
+
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://other.test/root".to_string()),
+    );
+    exchange.input.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String("a=1&b=2".to_string()),
+    );
+
+    let override_url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    assert_eq!(override_url, "http://other.test/root/next?a=1&b=2");
+}
+
+fn exchange_with_path_and_query(path: &str, query: &str) -> Exchange {
+    let mut exchange = Exchange::new(Message::default());
+    exchange
+        .input
+        .set_header("CamelHttpPath", serde_json::Value::String(path.to_string()));
+    exchange.input.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String(query.to_string()),
+    );
+    exchange
+}
+
+#[test]
+fn resolve_url_bridge_endpoint_true_ignores_exchange_path() {
+    let mut cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
+    cfg.bridge_endpoint = true;
+    cfg.query_params
+        .push(("token".to_string(), "secret".to_string()));
+    let exchange = exchange_with_path_and_query("/foo", "dropme=1");
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    // Verbatim assembly: the old round-trip normalized the empty base
+    // path to `/` (`http://x/?token=secret`); authored bytes end-to-end
+    // no longer insert it.
+    assert_eq!(url, "http://x?token=secret");
+    assert!(!url.contains("/foo"));
+    assert!(!url.contains("dropme"));
+}
+
+#[test]
+fn resolve_url_bridge_endpoint_false_merges_path() {
+    let mut cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
+    cfg.bridge_endpoint = false;
+    let exchange = exchange_with_path_and_query("/foo", "dropme=1");
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    assert!(url.contains("/foo"), "url should contain /foo: {url}");
+    assert!(
+        url.contains("dropme=1"),
+        "url should contain dropme=1: {url}"
+    );
+}
+
+#[test]
+fn resolve_url_bridge_endpoint_true_keeps_base_when_no_query_params() {
+    let mut cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
+    cfg.bridge_endpoint = true;
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpPath",
+        serde_json::Value::String("/foo".to_string()),
+    );
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    assert_eq!(url, "http://x");
+    assert!(!url.contains("/foo"));
+}
+
+#[test]
+fn resolve_url_bridge_endpoint_true_ignores_camel_http_uri() {
+    let mut cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
+    cfg.bridge_endpoint = true;
+    // query_params stays empty ([])
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://dest/explicit".to_string()),
+    );
+    exchange.input.set_header(
+        "CamelHttpPath",
+        serde_json::Value::String("/foo".to_string()),
+    );
+    exchange.input.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String("x=1".to_string()),
+    );
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    // Under bridgeEndpoint=true ALL exchange URL headers (CamelHttpUri,
+    // CamelHttpPath, CamelHttpQuery) are ignored; the endpoint base URL
+    // wins verbatim.
+    assert_eq!(url, "http://x");
+}
+
+#[test]
+fn bridge_programmatic_params_use_percent20() {
+    let mut cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
+    cfg.bridge_endpoint = true;
+    cfg.query_params = vec![("b".to_string(), "x y".to_string())];
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+    // `%20 never +` is global for programmatic values — the bridge arm
+    // uses the same encoder as the non-bridge path. Bridging
+    // semantics (what gets bridged, precedence) are unchanged.
+    assert_eq!(url, "http://x?b=x%20y");
+    assert!(!url.contains('+'));
+}
+
+#[test]
+fn bridge_arm_carries_authored_raw_query() {
+    let cfg = HttpEndpointConfig::from_uri("http://h/p?a=1&bridgeEndpoint=true").unwrap();
+    // bridgeEndpoint is consumed as an endpoint option; a=1 is the
+    // authored leftover riding raw_query.
+    let exchange = exchange_with_path_and_query("/ignored", "dropme=1");
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+    // Authored leftovers ride under bridging (Apache Camel semantics):
+    // query is a=1 in authored bytes; exchange path/query stay ignored.
+    assert_eq!(url, "http://h/p?a=1");
+    assert!(!url.contains("dropme"), "exchange query leaked: {url}");
+    assert!(!url.contains("/ignored"), "exchange path leaked: {url}");
+}
+
+// -----------------------------------------------------------------------
+// Bridge arm verbatim assembly (Papal Direction A): the bridged base is
+// never round-tripped through `url::Url` normalization — authored bytes
+// end-to-end, identical assembly to every other resolve_url arm.
+// -----------------------------------------------------------------------
+
+#[test]
+fn resolve_url_bridge_preserves_dot_segments() {
+    let mut cfg = HttpEndpointConfig::from_uri("http://h/a/../b").unwrap();
+    cfg.bridge_endpoint = true;
+    cfg.query_params.push(("k".to_string(), "1".to_string()));
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+    // Dot segments are authored bytes; the old round-trip collapsed
+    // them (`/a/../b` → `/b`). Verbatim keeps them.
+    assert_eq!(url, "http://h/a/../b?k=1");
+}
+
+#[test]
+fn resolve_url_bridge_preserves_default_port() {
+    let mut cfg = HttpEndpointConfig::from_uri("http://h:80/p").unwrap();
+    cfg.bridge_endpoint = true;
+    cfg.query_params.push(("k".to_string(), "1".to_string()));
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+    // The old round-trip stripped the default port `:80`. Verbatim
+    // keeps it.
+    assert_eq!(url, "http://h:80/p?k=1");
+}
+
+#[test]
+fn resolve_url_bridge_preserves_scheme_and_host_case() {
+    let mut cfg = HttpEndpointConfig::from_uri("http://ExAMPLE.COM/p").unwrap();
+    cfg.bridge_endpoint = true;
+    cfg.query_params.push(("k".to_string(), "1".to_string()));
+    // `from_uri`'s scheme validation is case-sensitive, so the scheme
+    // case is applied on the stored base directly — the resolve path
+    // must carry whatever bytes the operator authored.
+    cfg.base_url = "HTTP://ExAMPLE.COM/p".to_string();
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+    // The old round-trip lowercased scheme and host. Verbatim keeps
+    // both authored.
+    assert_eq!(url, "HTTP://ExAMPLE.COM/p?k=1");
+}
+
+#[test]
+fn resolve_url_bridge_no_query_emits_base_verbatim() {
+    let mut cfg = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+    cfg.bridge_endpoint = true;
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+    // No resolved query: exactly the authored base — no synthetic `/`,
+    // no dangling `?`.
+    assert_eq!(url, "http://h/p");
+}
+
+#[test]
+fn resolve_url_bridge_and_non_bridge_byte_identical() {
+    // (a) Bridged arm: the effective query comes from programmatic
+    // query_params.
+    let mut bridged = HttpEndpointConfig::from_uri("http://H:80/a/../b").unwrap();
+    bridged.bridge_endpoint = true;
+    bridged
+        .query_params
+        .push(("k".to_string(), "1".to_string()));
+    let bridge_url =
+        HttpProducer::resolve_url(&Exchange::new(Message::default()), &bridged).unwrap();
+
+    // (b) Non-bridge CamelHttpQuery composition path: same effective
+    // query riding the exchange header.
+    let plain = HttpEndpointConfig::from_uri("http://H:80/a/../b").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String("k=1".to_string()),
+    );
+    let plain_url = HttpProducer::resolve_url(&exchange, &plain).unwrap();
+
+    assert_eq!(bridge_url, plain_url);
+    assert_eq!(bridge_url, "http://H:80/a/../b?k=1");
+}
+
+#[test]
+fn resolve_url_bridge_preserves_ipv6_authority_verbatim() {
+    let mut cfg = HttpEndpointConfig::from_uri("http://[::1]:8080/p").unwrap();
+    cfg.bridge_endpoint = true;
+    cfg.query_params.push(("k".to_string(), "1".to_string()));
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+    assert_eq!(url, "http://[::1]:8080/p?k=1");
+}
+
+#[test]
+fn resolve_url_bridge_empty_base_path_keeps_no_synthetic_slash() {
+    let cfg = HttpEndpointConfig::from_uri("http://h?x=1&bridgeEndpoint=true").unwrap();
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+    // Authored query on an empty base path: the old round-trip
+    // inserted a synthetic `/` (`http://h/?x=1`); verbatim does not.
+    assert_eq!(url, "http://h?x=1");
+}
+
+// -----------------------------------------------------------------------
+// Raw-preserving outbound query serialization (http-query-wire-fidelity)
+// -----------------------------------------------------------------------
+
+#[test]
+fn resolve_url_preserves_authored_query_order_and_bytes() {
+    let config =
+        HttpEndpointConfig::from_uri("http://h/p?a=1&b=x,y&c=t:1&connectTimeout=5000").unwrap();
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // Authored order, authored separators, no %2C/%3A re-encoding,
+    // consumed option (connectTimeout) removed.
+    assert_eq!(url, "http://h/p?a=1&b=x,y&c=t:1");
+}
+
+#[test]
+fn resolve_url_consumes_encoded_option_key() {
+    let config = HttpEndpointConfig::from_uri("http://h/p?connect%54imeout=5000&a=1").unwrap();
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // The raw filter matches the decoded key, not the encoded bytes.
+    assert_eq!(url, "http://h/p?a=1");
+}
+
+#[test]
+fn resolve_url_all_options_consumed_drops_query() {
+    let config = HttpEndpointConfig::from_uri("http://h/p?connectTimeout=5000").unwrap();
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // A non-empty query whose every pair was consumed drops the query
+    // component entirely — no dangling `?`.
+    assert_eq!(url, "http://h/p");
+    assert!(!url.contains('?'));
+}
+
+#[test]
+fn resolve_url_preserves_empty_query_marker() {
+    let config = HttpEndpointConfig::from_uri("http://h/p?").unwrap();
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // A bare `?` marker is preserved distinctly, never conflated with
+    // an all-consumed query.
+    assert_eq!(url, "http://h/p?");
+}
+
+#[test]
+fn resolve_url_raw_wrapper_not_re_encoded() {
+    let config = HttpEndpointConfig::from_uri("http://h/p?token=RAW(abc)").unwrap();
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // RAW(...) wrapper bytes survive exactly as authored (rc-g4isv).
+    assert_eq!(url, "http://h/p?token=RAW(abc)");
+    assert!(!url.contains("%28"), "RAW( wrapper re-encoded: {url}");
+}
+
+#[test]
+fn resolve_url_camel_http_query_composes_verbatim_span() {
+    let config = HttpEndpointConfig::from_uri("http://h/p?x=1").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String("userFilter=a%2Cb".to_string()),
+    );
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // Policy change (ADR-0071): the header no longer replaces the
+    // endpoint query — it composes, the endpoint winning collisions.
+    // The header span bytes still ride verbatim: `a%2Cb` is carried
+    // as-authored, never re-encoded (no %252C).
+    assert_eq!(url, "http://h/p?x=1&userFilter=a%2Cb");
+    assert!(!url.contains("%252C"), "header bytes re-encoded: {url}");
+}
+
+// -----------------------------------------------------------------------
+// Outbound query composition (http-contract-surface, ADR-0071)
+// -----------------------------------------------------------------------
+
+#[test]
+fn header_composes_with_endpoint_query() {
+    let config = HttpEndpointConfig::from_uri("http://upstream/api?apiKey=secret&lang=en").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String("lang=es&page=2".to_string()),
+    );
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // Higher precedence (endpoint) wins collisions: `lang` stays `en`;
+    // the header appends only its absent keys.
+    assert_eq!(url, "http://upstream/api?apiKey=secret&lang=en&page=2");
+}
+
+#[test]
+fn header_alone_still_rides() {
+    let config = HttpEndpointConfig::from_uri("http://upstream/api").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String("page=2".to_string()),
+    );
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // No endpoint query: the header pairs are the whole query.
+    assert_eq!(url, "http://upstream/api?page=2");
+}
+
+#[test]
+fn empty_reflected_query_leaves_endpoint_query_intact() {
+    let config = HttpEndpointConfig::from_uri("http://upstream/api?apiKey=secret").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    // The consumer installs an empty CamelHttpQuery on requests that
+    // arrived without a query string.
+    exchange
+        .input
+        .set_header("CamelHttpQuery", serde_json::Value::String(String::new()));
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // No second `?` marker, no dropped endpoint pair.
+    assert_eq!(url, "http://upstream/api?apiKey=secret");
+    assert!(!url.ends_with('?'), "dangling '?' marker: {url}");
+}
+
+#[test]
+fn forbidden_byte_in_header_query_errors() {
+    let config = HttpEndpointConfig::from_uri("http://upstream/api").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String("q=ab<cd".to_string()),
+    );
+
+    let err = HttpProducer::resolve_url(&exchange, &config)
+        .unwrap_err()
+        .to_string();
+
+    // Fail loud naming the forbidden byte (`<` = 0x3C); a resolve
+    // error means no URL is emitted, never a re-encoded one.
+    assert!(err.contains("0x3C"), "error must name the byte: {err}");
+}
+
+#[test]
+fn override_uri_with_query_plus_header_query() {
+    let config = HttpEndpointConfig::from_uri("http://upstream/api").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://host/api?a=1".to_string()),
+    );
+    exchange.input.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String("a=2&b=3".to_string()),
+    );
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // Pair-level merge with a single `?`: the override's `a=1` wins
+    // the collision, the header appends `b=3` — no `?a=1?a=2` concat.
+    assert_eq!(url, "http://host/api?a=1&b=3");
+}
+
+#[test]
+fn path_applies_before_query_composition() {
+    let config = HttpEndpointConfig::from_uri("http://upstream/api").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://host/api?a=1".to_string()),
+    );
+    exchange.input.set_header(
+        "CamelHttpPath",
+        serde_json::Value::String("/extra".to_string()),
+    );
+    exchange.input.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String("b=2".to_string()),
+    );
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // CamelHttpPath applies to the override base without its query,
+    // then the query composes.
+    assert_eq!(url, "http://host/api/extra?a=1&b=2");
+}
+
+#[test]
+fn plain_proxy_reflection_composes() {
+    let config = HttpEndpointConfig::from_uri("http://upstream/api?apiKey=secret").unwrap();
+    // Headers as the consumer installs them from the wire.
+    let exchange = exchange_with_path_and_query("/in/extra", "page=2");
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // Reflection rides by default and composes: the operator pair is
+    // not replaced (rc-k3pir parity).
+    assert_eq!(url, "http://upstream/api/in/extra?apiKey=secret&page=2");
+}
+
+#[test]
+fn bridge_endpoint_ignores_url_headers() {
+    let cfg = HttpEndpointConfig::from_uri("http://h/p?a=1&bridgeEndpoint=true").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://evil.test/x".to_string()),
+    );
+    exchange.input.set_header(
+        "CamelHttpPath",
+        serde_json::Value::String("/foo".to_string()),
+    );
+    exchange.input.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String("z=9".to_string()),
+    );
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+
+    // All three URL headers ignored; the endpoint base plus its own
+    // (consumed-option-filtered) query is sent, exactly as before.
+    assert_eq!(url, "http://h/p?a=1");
+    assert!(!url.contains("evil"), "override leaked: {url}");
+    assert!(!url.contains("z=9"), "header query leaked: {url}");
+    assert!(!url.contains("/foo"), "header path leaked: {url}");
+}
+
+#[test]
+fn resolve_url_programmatic_params_use_percent20_deterministic() {
+    let mut config = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+    config.query_params = vec![
+        ("b".to_string(), "x y".to_string()),
+        ("a".to_string(), "1".to_string()),
+    ];
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // Declaration order (not lexical), minimal RFC-3986 encoding,
+    // `%20` — never `+` — for spaces.
+    assert_eq!(url, "http://h/p?b=x%20y&a=1");
+    assert!(!url.contains('+'));
+}
+
+#[test]
+fn resolve_url_authored_and_programmatic_merge() {
+    let mut config = HttpEndpointConfig::from_uri("http://h/p?a=1&c=t:1").unwrap();
+    config.query_params = vec![
+        ("b".to_string(), "2".to_string()),
+        ("a".to_string(), "9".to_string()),
+    ];
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &config).unwrap();
+
+    // Programmatic `b` appended (absent from raw); programmatic `a=9`
+    // ignored (authored key wins); no duplication.
+    assert_eq!(url, "http://h/p?a=1&c=t:1&b=2");
+}
+
+#[test]
+fn from_uri_no_longer_fills_query_params_from_uri() {
+    let config = HttpEndpointConfig::from_uri("http://h/p?a=1&connectTimeout=5000").unwrap();
+
+    // Authored pairs live in raw_query ONLY (provenance pin).
+    assert!(
+        config.query_params.is_empty(),
+        "query_params is programmatic-only: {:?}",
+        config.query_params
+    );
+    assert_eq!(config.raw_query.as_deref(), Some("a=1&connectTimeout=5000"));
+}
+
+#[test]
+fn resolve_url_forbidden_raw_byte_errors() {
+    let mut config = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+    config.raw_query = Some("a=x y".to_string());
+    let exchange = Exchange::new(Message::default());
+
+    let err = HttpProducer::resolve_url(&exchange, &config)
+        .expect_err("literal space in raw query must error");
+
+    // The error names the forbidden byte; no output string is produced.
+    assert!(
+        err.to_string().contains("0x20"),
+        "error must name the forbidden byte: {err}"
+    );
+}
+
+/// rc-m4xk1: the override URI's own query is span-validated at resolve
+/// time — a forbidden byte in the override arm errors naming the byte,
+/// instead of riding verbatim to a reqwest send error.
+#[test]
+fn resolve_url_override_query_forbidden_byte_errors() {
+    let config = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://h2/p?a=x y".to_string()),
+    );
+
+    let err = HttpProducer::resolve_url(&exchange, &config)
+        .expect_err("literal space in the override URI's query must error");
+
+    assert!(
+        err.to_string().contains("0x20"),
+        "error must name the forbidden byte from the override query: {err}"
+    );
+}
+
+/// rc-m4xk1 pin: decoded-key collision — a header pair whose key decodes
+/// to a key already present in the higher-precedence query (here
+/// `%61=2`, decoding to `a`) is dropped by the shared decoded-key
+/// matching; the higher-precedence authored span rides verbatim.
+#[test]
+fn merge_header_query_decoded_key_collision_drops_header_pair() {
+    let merged = merge_header_query(Some("a=1"), "%61=2")
+        .expect("decoded-key collision must not be a parse error");
+    assert_eq!(
+        merged.as_deref(),
+        Some("a=1"),
+        "the higher-precedence span wins and the colliding header pair is dropped"
+    );
+}
+
+/// rc-m4xk1 pin: duplicate keys within ONE header query are not
+/// deduplicated — both spans ride verbatim in authored order.
+#[test]
+fn merge_header_query_duplicate_keys_within_header_ride_verbatim() {
+    let merged = merge_header_query(None, "k=1&k=2")
+        .expect("duplicate header keys must not be a parse error");
+    assert_eq!(
+        merged.as_deref(),
+        Some("k=1&k=2"),
+        "intra-header duplicate keys ride verbatim"
+    );
+}
+
+/// rc-dhkeo: the Debug surface masks userinfo-style bytes in
+/// `base_url` and leaves a userinfo-free base untouched, byte-for-byte.
+/// rc-yvjp3 (ADR-0076 strictest-wins): `base_url` routes through the
+/// canonical `camel_api::redact::redact_url` — query and fragment bytes
+/// now drop behind their sentinels and later `//user:pass@` windows
+/// mask too, dimensions the former byte-preserving local variant kept.
+#[test]
+fn endpoint_config_debug_masks_base_url_userinfo() {
+    let mut config = HttpEndpointConfig::from_uri("http://h.example/p").unwrap();
+    config.base_url = "http://user:pass@h.example/p".to_string();
+    let rendered = format!("{config:?}");
+    assert!(
+        rendered.contains("***@h.example"),
+        "userinfo must render masked: {rendered}"
+    );
+    assert!(
+        !rendered.contains("user:pass"),
+        "no credentials in Debug output: {rendered}"
+    );
+
+    let plain = HttpEndpointConfig::from_uri("http://h.example/p").unwrap();
+    let rendered_plain = format!("{plain:?}");
+    assert!(
+        rendered_plain.contains("http://h.example/p"),
+        "a base without userinfo renders unchanged: {rendered_plain}"
+    );
+}
+
+/// rc-yvjp3 convergence: an authored query and fragment on `base_url`
+/// render as sentinels, never as raw bytes (strictest-wins over the
+/// former byte-preserving variant), and the rendered value is
+/// byte-identical to the canonical helper.
+#[test]
+fn endpoint_config_debug_base_url_converges_on_canonical_redact() {
+    let mut config = HttpEndpointConfig::from_uri("http://h.example/p").unwrap();
+
+    config.base_url = "http://h.example/p?token=secret#access_token=x".to_string();
+    let rendered = format!("{config:?}");
+    assert!(
+        rendered.contains("base_url: \"http://h.example/p?[redacted]#[redacted]\""),
+        "query and fragment must render as composed sentinels: {rendered}"
+    );
+    assert!(
+        !rendered.contains("token=secret") && !rendered.contains("access_token"),
+        "query/fragment credential bytes must not render: {rendered}"
+    );
+
+    config.base_url = "http://h.example//u2:p2@evil/".to_string();
+    let rendered = format!("{config:?}");
+    assert!(
+        rendered.contains("base_url: \"http://h.example//***@evil/\""),
+        "later //window userinfo must mask (canonical window rule): {rendered}"
+    );
+    assert!(
+        !rendered.contains("u2:p2"),
+        "later-window credentials must not render: {rendered}"
+    );
+
+    // Cross-surface identity: the Debug field is byte-identical to the
+    // canonical helper output for the same input.
+    config.base_url = "http://user:pass@h.example/p?token=x".to_string();
+    let canonical = camel_api::redact::redact_url(&config.base_url);
+    assert_eq!(canonical, "http://***@h.example/p?[redacted]");
+    let rendered = format!("{config:?}");
+    assert!(
+        rendered.contains(&format!("base_url: \"{canonical}\"")),
+        "Debug base_url must equal canonical redact_url output: {rendered}"
+    );
+}
+
+/// rc-nmupb: authored apostrophe (0x27) is RFC 3986 pchar-legal, but
+/// reqwest's WHATWG parser re-encodes it as `%27` in every http/https
+/// query — the raw byte can never ride the wire verbatim. Resolve
+/// rejects it naming the byte; the authored `%27` escape is the
+/// wire-faithful form and rides verbatim.
+#[test]
+fn resolve_url_authored_apostrophe_rejected_percent_escape_rides() {
+    let mut config = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+
+    config.raw_query = Some("q=it's".to_string());
+    let exchange = Exchange::new(Message::default());
+    let err = HttpProducer::resolve_url(&exchange, &config)
+        .expect_err("authored apostrophe must be rejected, not silently %27-normalized");
+    assert!(
+        err.to_string().contains("0x27"),
+        "error must name the apostrophe byte: {err}"
+    );
+
+    config.raw_query = Some("q=it%27s".to_string());
+    let url =
+        HttpProducer::resolve_url(&exchange, &config).expect("authored %27 escape is wire-legal");
+    assert!(
+        url.contains("q=it%27s"),
+        "the authored escape must ride byte-for-byte: {url}"
+    );
+
+    // The rest of reqwest's WHATWG special-query set shares the same
+    // rationale and is rejected alongside (`"` and backtick are not
+    // RFC 3986 query-legal bytes; `<`/`>` likewise).
+    for &byte in b"\"`<>" {
+        config.raw_query = Some(format!("k={}x", byte as char));
+        let err = HttpProducer::resolve_url(&exchange, &config)
+            .expect_err("WHATWG special-query byte must be rejected");
+        assert!(
+            err.to_string().contains(&format!("0x{byte:02X}")),
+            "error must name byte 0x{byte:02X}: {err}"
+        );
+    }
+}
+
+#[test]
+fn armed_fence_rejects_unknown_host_redacted() {
+    let cfg =
+        HttpEndpointConfig::from_uri("http://x?allowedUriHosts=api.internal:8443,cdn.example.com")
+            .unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://user:pass@evil.example.com/x?token=s3cret".to_string()),
+    );
+
+    let err = HttpProducer::resolve_url(&exchange, &cfg)
+        .expect_err("override host outside the fence must fail resolution");
+
+    let message = err.to_string();
+    assert!(!message.contains("pass"), "userinfo leaked: {message}");
+    assert!(!message.contains("s3cret"), "query leaked: {message}");
+}
+
+#[test]
+fn armed_fence_rejects_unparseable_override_redacted() {
+    let cfg =
+        HttpEndpointConfig::from_uri("http://x?allowedUriHosts=api.internal:8443,cdn.example.com")
+            .unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://u:fencesecret@evil.example.com:99999/x".to_string()),
+    );
+
+    let err = HttpProducer::resolve_url(&exchange, &cfg)
+        .expect_err("unparseable override outside the fence must fail resolution");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("allowedUriHosts fence"),
+        "fence must be named: {message}"
+    );
+    assert!(
+        message.contains("[redacted]"),
+        "suppression sentinel missing: {message}"
+    );
+    assert!(
+        !message.contains("evil.example.com"),
+        "host leaked: fail-closed arm must render only the sentinel: {message}"
+    );
+    assert!(
+        !message.contains("fencesecret"),
+        "password leaked: {message}"
+    );
+    assert!(!message.contains("u:"), "userinfo leaked: {message}");
+}
+
+#[test]
+fn armed_fence_rejects_password_only_userinfo_redacted() {
+    let cfg =
+        HttpEndpointConfig::from_uri("http://x?allowedUriHosts=api.internal:8443,cdn.example.com")
+            .unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String(
+            "http://:passwordonly@evil.example.com/x?token=querysecret".to_string(),
+        ),
+    );
+
+    let err = HttpProducer::resolve_url(&exchange, &cfg)
+        .expect_err("password-only override outside the fence must fail resolution");
+
+    let message = err.to_string();
+    assert!(
+        !message.contains("passwordonly"),
+        "password-only userinfo leaked: {message}"
+    );
+    assert!(!message.contains("querysecret"), "query leaked: {message}");
+    assert!(
+        message.contains("http://***@evil.example.com/x?[redacted]"),
+        "masked shape missing: {message}"
+    );
+}
+
+#[test]
+fn armed_fence_allows_listed_host() {
+    let cfg =
+        HttpEndpointConfig::from_uri("http://x?allowedUriHosts=api.internal:8443,cdn.example.com")
+            .unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://cdn.example.com/x".to_string()),
+    );
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    assert_eq!(url, "http://cdn.example.com/x");
+}
+
+#[test]
+fn host_only_entry_permits_any_port() {
+    let cfg = HttpEndpointConfig::from_uri("http://x?allowedUriHosts=cdn.example.com").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://cdn.example.com:9443/x".to_string()),
+    );
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    assert_eq!(url, "http://cdn.example.com:9443/x");
+}
+
+#[test]
+fn unarmed_endpoint_unchanged() {
+    let cfg = HttpEndpointConfig::from_uri("http://x").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://any.example.com/path".to_string()),
+    );
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    assert_eq!(url, "http://any.example.com/path");
+}
+
+#[test]
+fn empty_allowlist_fails_endpoint_creation() {
+    assert!(HttpEndpointConfig::from_uri("http://x?allowedUriHosts=,,").is_err());
+}
+
+#[test]
+fn malformed_entry_fails_endpoint_creation() {
+    assert!(HttpEndpointConfig::from_uri("http://x?allowedUriHosts=not a host!").is_err());
+}
+
+#[test]
+fn fence_entry_with_path_fails_creation() {
+    // A trailing path is a typo'd entry: silently narrowing it to the
+    // hostname would widen or skew the fence. Reject loudly.
+    assert!(HttpEndpointConfig::from_uri("http://x?allowedUriHosts=api.internal:8443/v2").is_err());
+}
+
+#[test]
+fn fence_entry_with_userinfo_fails_creation() {
+    assert!(HttpEndpointConfig::from_uri("http://x?allowedUriHosts=user@cdn.example.com").is_err());
+}
+
+#[test]
+fn ipv6_fence_entry_allows_bracketed_host() {
+    let cfg = HttpEndpointConfig::from_uri("http://x?allowedUriHosts=[::1]:8443").unwrap();
+    // The textual host forms differ; both parse to the same bracketed
+    // canonical host (`[::1]`) that the entry stores, so both ride.
+    for uri in ["http://[::1]:8443/x", "http://[0:0:0:0:0:0:0:1]:8443/x"] {
+        let mut exchange = Exchange::new(Message::default());
+        exchange
+            .input
+            .set_header("CamelHttpUri", serde_json::Value::String(uri.to_string()));
+        let url = HttpProducer::resolve_url(&exchange, &cfg)
+            .unwrap_or_else(|e| panic!("override {uri} must be honored: {e}"));
+        assert_eq!(url, uri, "bracketed IPv6 override not honored");
+    }
+}
+
+#[test]
+fn dns_case_insensitive_fence_match() {
+    // The entry is stored ASCII-lowercased, so the mixed-case option
+    // matches the lowercase override host.
+    let cfg = HttpEndpointConfig::from_uri("http://x?allowedUriHosts=CDN.Example.COM").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://cdn.example.com/x".to_string()),
+    );
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    assert_eq!(url, "http://cdn.example.com/x");
+}
+
+#[test]
+fn fence_allowed_override_query_merges_with_header() {
+    // Fence pass plus full composition: the override URI query is the
+    // higher-precedence source, the header pair appends.
+    let cfg = HttpEndpointConfig::from_uri("http://x?allowedUriHosts=host.example&k=v").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://host.example/api?a=1".to_string()),
+    );
+    exchange.input.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String("b=2".to_string()),
+    );
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    assert_eq!(url, "http://host.example/api?a=1&b=2");
+}
+
+#[test]
+fn empty_header_with_armed_fence_leaves_no_query() {
+    let cfg = HttpEndpointConfig::from_uri("http://x?allowedUriHosts=host.example").unwrap();
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String("http://host.example/api".to_string()),
+    );
+    exchange
+        .input
+        .set_header("CamelHttpQuery", serde_json::Value::String(String::new()));
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    assert_eq!(url, "http://host.example/api");
+    assert!(!url.contains('?'), "query marker leaked: {url}");
+}
+
+#[test]
+fn fence_option_is_consumed() {
+    // A raw query on the base URI plus the fence option; no override
+    // header. The option is consumed at parse time and must never
+    // appear in the outbound query.
+    let cfg =
+        HttpEndpointConfig::from_uri("http://h/p?x=1&allowedUriHosts=cdn.example.com").unwrap();
+    let exchange = Exchange::new(Message::default());
+
+    let url = HttpProducer::resolve_url(&exchange, &cfg).unwrap();
+    assert!(!url.contains("allowedUriHosts"), "option leaked: {url}");
+    assert!(url.contains("x=1"), "authored query lost: {url}");
+}
+
+#[tokio::test]
+async fn resolve_url_malformed_base_url_errors_no_panic() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_test_server().await;
+    let mut config = HttpEndpointConfig::from_uri("http://[::1:bad").unwrap();
+    config.allow_internal = true; // test server binds 127.0.0.1
+    let producer = HttpProducer {
+        config: Arc::new(config),
+        client: build_client(&HttpConfig::default(), None).expect("client must build"), // allow-unwrap(test)
+        pinned_cache: Arc::new(PinnedClientCache::new(
+            PINNED_CLIENT_TTL,
+            PINNED_CLIENT_MAX_ENTRIES,
+        )),
+        http_config: Arc::new(HttpConfig::default()),
+        runtime: rt(),
+    };
+
+    // First call: malformed base URL propagates as an error through the
+    // real producer path — no panic, no poisoned state (rc-ph7z2).
+    let first = producer
+        .clone()
+        .oneshot(Exchange::new(Message::default()))
+        .await;
+    let err = first.expect_err("malformed base URL must error, not panic");
+    assert!(
+        err.to_string().to_lowercase().contains("url"),
+        "error must name the malformed URL: {err}"
+    );
+
+    // Second call through the SAME producer succeeds — the failure
+    // left no poisoned state.
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpUri",
+        serde_json::Value::String(format!("{url}/api")),
+    );
+    let response = producer
+        .oneshot(exchange)
+        .await
+        .expect("valid request through same producer must succeed");
+    let status = response
+        .input
+        .header("CamelHttpResponseCode")
+        .and_then(|v| v.as_u64())
+        .unwrap();
+    assert_eq!(status, 200);
+}
+
+#[test]
+fn resolve_url_bridge_malformed_base_errors_no_panic() {
+    let mut cfg = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+    cfg.bridge_endpoint = true;
+    cfg.query_params.push(("k".to_string(), "1".to_string()));
+    // `from_uri` rejects the malformed authority, so the base is set on
+    // the stored config directly (same build shape as the scheme-case
+    // test). The bridge arm's validation-only parse (rc-ph7z2) must
+    // surface it as an error — no panic.
+    cfg.base_url = "http://[::1:bad".to_string();
+    let exchange = Exchange::new(Message::default());
+
+    let err = HttpProducer::resolve_url(&exchange, &cfg)
+        .expect_err("malformed bridge base URL must error");
+    assert!(
+        err.to_string().contains("invalid base URL"),
+        "error must name the invalid base URL: {err}"
+    );
+}
+
+#[test]
+fn test_http_producer_helpers_status_and_size_boundaries() {
+    assert!(HttpProducer::is_ok_status(200, (200, 299)));
+    assert!(HttpProducer::is_ok_status(299, (200, 299)));
+    assert!(!HttpProducer::is_ok_status(199, (200, 299)));
+    assert!(!HttpProducer::is_ok_status(300, (200, 299)));
+
+    assert!(!exceeds_max_response_body(10, 10));
+    assert!(exceeds_max_response_body(11, 10));
+}
+
+// -----------------------------------------------------------------------
+// Content-Type inference tests
+// -----------------------------------------------------------------------
+
+#[allow(clippy::await_holding_lock)]
+async fn setup_consumer_on_free_port(
+    path: &str,
+) -> (
+    u16,
+    tokio::sync::mpsc::Receiver<camel_component_api::ExchangeEnvelope>,
+    tokio_util::sync::CancellationToken,
+) {
+    use camel_component_api::ConsumerContext;
+
+    // ADR-0070 staged-listener law: bind, KEEP the socket, and stage it
+    // in the ServerRegistry; the consumer's `get_or_spawn` consumes the
+    // staged listener, so the port never returns to the ephemeral pool
+    // between probe and serve (no bind-read-drop race).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    // Hold the registry test mutex across the whole stage→spawn→ready
+    // window so a concurrent `ServerRegistry::reset()` cannot evict the
+    // staged listener between staging and readiness. The guard covers
+    // stage_listener, the consumer spawn, the readiness poll and the
+    // tail-yield loop; it releases when this helper returns.
+    // Poison-recovering acquire: a failed sibling test must not
+    // cascade — the mutex guards test serialization only, no
+    // structural invariant, so recovery via into_inner is safe.
+    let _registry_guard = lock_registry_test_mutex();
+
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        path: path.to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 10 * 1024 * 1024,
+        max_inflight_requests: 1024,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+
+    // Readiness without a fixed wall-clock sleep: poll the registry
+    // entry live (1ms doubling backoff, 10s deadline), then yield so
+    // the spawned `start()` completes route registration (that tail
+    // path has no pending timers — only the registry lock — so
+    // scheduler yields order it deterministically behind this loop).
+    wait_for_registry_ready("127.0.0.1", port).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    (port, rx, token)
+}
+
+/// Poll `ServerRegistry::bound_addr(host, port)` until the entry
+/// appears: 1ms backoff doubling per iteration, capped at 64ms, with
+/// a 10s deadline. Panics with a hint naming the likely causes when
+/// the deadline fires.
+async fn wait_for_registry_ready(host: &str, port: u16) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut backoff = std::time::Duration::from_millis(1);
+    while ServerRegistry::global().bound_addr(host, port).is_none() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "consumer server did not become ready on port {port} — registry entry absent (concurrent reset or starvation)"
+        );
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(std::time::Duration::from_millis(64));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "registry entry absent (concurrent reset or starvation)")]
+async fn readiness_deadline_fires_loud_with_hint() {
+    // start_paused: the backoff sleeps and the 10s deadline run on
+    // the mocked clock (tokio test-util dev-feature), so the loud
+    // path costs no wall time.
+    // Poll a key no writer can produce. Registry keys come from
+    // either the listener's resolved IP string (staged path) or the
+    // caller-provided host verbatim (legacy get_or_spawn path), so a
+    // synthetic host literal that no test passes is unreachable on
+    // BOTH paths. Binding and HOLDING the listener (never dropped,
+    // never staged) additionally keeps its port out of the ephemeral
+    // pool, so no concurrent test can register that port either.
+    // (Earlier drafts polled 127.0.0.2 — rejected: macOS exposes only
+    // 127.0.0.1 and the bind fails there, rc-dwmd; and "localhost" —
+    // rejected: the legacy host-verbatim path could produce it.)
+    let held = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = held.local_addr().unwrap().port();
+    wait_for_registry_ready("httpflake-unreachable-host", port).await;
+}
+
+// -----------------------------------------------------------------------
+// Readiness vs concurrent registry reset (httpflake, regression RED)
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn readiness_survives_concurrent_registry_reset() {
+    let contended = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // Hammer thread: loop legal resets, counting a contention only
+    // when its try-lock on the registry test mutex reports WouldBlock
+    // (someone else held it). Poison is a sibling's panic, not
+    // contention: recover through the poison-recovering helper
+    // without counting it. The guard is dropped at each iteration
+    // end.
+    let contended_hammer = std::sync::Arc::clone(&contended);
+    let stop_hammer = std::sync::Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        while !stop_hammer.load(std::sync::atomic::Ordering::Relaxed) {
+            let _guard = match REGISTRY_TEST_MUTEX.try_lock() {
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    contended_hammer.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    lock_registry_test_mutex()
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => lock_registry_test_mutex(),
+                Ok(guard) => guard,
+            };
+            ServerRegistry::reset();
+        }
+    });
+
+    // Drop guard: even if a setup panics, stop the hammer and join it so
+    // the thread never outlives the test.
+    struct StopHammerOnDrop {
+        handle: Option<std::thread::JoinHandle<()>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl Drop for StopHammerOnDrop {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+    let _hammer_guard = StopHammerOnDrop {
+        handle: Some(handle),
+        stop,
+    };
+
+    // Always at least 25 setups on fresh ephemeral ports; continue past
+    // 25 only until one contended reset is observed; hard cap 50.
+    let mut setups = 0;
+    loop {
+        setups += 1;
+        let (_port, rx, token) = setup_consumer_on_free_port("/reset-hammer").await;
+        drop(rx);
+        token.cancel();
+        if (setups >= 25 && contended.load(std::sync::atomic::Ordering::SeqCst) >= 1)
+            || setups >= 50
+        {
+            break;
+        }
+    }
+
+    let contended_hits = contended.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        contended_hits >= 1,
+        "expected at least one contended registry reset across {setups} setups, got {contended_hits}"
+    );
+}
+
+#[tokio::test]
+async fn test_content_type_inferred_for_json_body() {
+    let (port, mut rx, token) = setup_consumer_on_free_port("/json").await;
+
+    let client = plain_http_test_client();
+    let send_fut = client.get(format!("http://127.0.0.1:{port}/json")).send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            envelope.exchange.input.body =
+                camel_component_api::Body::Json(serde_json::json!({"message": "hello"}));
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .expect("Content-Type header should be present");
+    assert_eq!(ct, "application/json");
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, r#"{"message":"hello"}"#);
+
+    token.cancel();
+}
+
+#[tokio::test]
+async fn test_content_type_inferred_for_text_body() {
+    let (port, mut rx, token) = setup_consumer_on_free_port("/text").await;
+
+    // build_client (not bare plain_http_test_client()): CA-store test
+    // windows are process-visible and Client::new() panics when the
+    // native store loads zero roots; the crate builder falls back to
+    // webpki roots instead.
+    let client = build_client(&HttpConfig::default(), None).expect("client must build"); // allow-unwrap(test)
+    let send_fut = client.get(format!("http://127.0.0.1:{port}/text")).send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            envelope.exchange.input.body =
+                camel_component_api::Body::Text("plain text response".to_string());
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .expect("Content-Type header should be present");
+    assert_eq!(ct, "text/plain; charset=utf-8");
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "plain text response");
+
+    token.cancel();
+}
+
+#[tokio::test]
+async fn test_content_type_inferred_for_xml_body() {
+    let (port, mut rx, token) = setup_consumer_on_free_port("/xml").await;
+
+    let client = plain_http_test_client();
+    let send_fut = client.get(format!("http://127.0.0.1:{port}/xml")).send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            envelope.exchange.input.body =
+                camel_component_api::Body::Xml("<root><item>value</item></root>".to_string());
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .expect("Content-Type header should be present");
+    assert_eq!(ct, "application/xml");
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "<root><item>value</item></root>");
+
+    token.cancel();
+}
+
+#[tokio::test]
+async fn test_no_content_type_for_empty_body() {
+    let (port, mut rx, token) = setup_consumer_on_free_port("/empty").await;
+
+    let client = plain_http_test_client();
+    let send_fut = client.get(format!("http://127.0.0.1:{port}/empty")).send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            envelope.exchange.input.body = camel_component_api::Body::Empty;
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(
+        resp.headers().get("content-type").is_none(),
+        "Empty body should not set Content-Type"
+    );
+
+    token.cancel();
+}
+
+#[tokio::test]
+async fn test_no_content_type_for_raw_bytes_body() {
+    let (port, mut rx, token) = setup_consumer_on_free_port("/bytes").await;
+
+    let client = plain_http_test_client();
+    let send_fut = client.get(format!("http://127.0.0.1:{port}/bytes")).send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            envelope.exchange.input.body =
+                camel_component_api::Body::Bytes(bytes::Bytes::from_static(b"\x00\x01\x02"));
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    assert!(
+        resp.headers().get("content-type").is_none(),
+        "Raw Bytes body should not set Content-Type"
+    );
+
+    token.cancel();
+}
+
+#[tokio::test]
+async fn test_content_type_from_stream_metadata() {
+    use camel_component_api::{StreamBody, StreamMetadata};
+    use futures::stream;
+
+    let (port, mut rx, token) = setup_consumer_on_free_port("/stream-ct").await;
+
+    let client = plain_http_test_client();
+    let send_fut = client
+        .get(format!("http://127.0.0.1:{port}/stream-ct"))
+        .send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            let chunks: Vec<Result<bytes::Bytes, CamelError>> =
+                vec![Ok(bytes::Bytes::from("audio data"))];
+            let stream = Box::pin(stream::iter(chunks));
+            envelope.exchange.input.body = camel_component_api::Body::Stream(StreamBody {
+                stream: Arc::new(tokio::sync::Mutex::new(Some(stream))),
+                metadata: StreamMetadata {
+                    size_hint: None,
+                    content_type: Some("audio/mpeg".to_string()),
+                    origin: None,
+                },
+            });
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .expect("Content-Type header should be present");
+    assert_eq!(ct, "audio/mpeg");
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "audio data");
+
+    token.cancel();
+}
+
+#[tokio::test]
+async fn test_user_content_type_overrides_inferred() {
+    let (port, mut rx, token) = setup_consumer_on_free_port("/override-ct").await;
+
+    let client = plain_http_test_client();
+    let send_fut = client
+        .get(format!("http://127.0.0.1:{port}/override-ct"))
+        .send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            envelope.exchange.input.body =
+                camel_component_api::Body::Json(serde_json::json!({"ok": true}));
+            envelope.exchange.input.set_header(
+                "Content-Type",
+                serde_json::Value::String("text/html".to_string()),
+            );
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .expect("Content-Type header should be present");
+    assert_eq!(
+        ct, "text/html",
+        "User-set Content-Type should take precedence over inferred type"
+    );
+
+    token.cancel();
+}
+
+#[tokio::test]
+async fn test_user_content_type_with_bytes_body() {
+    let (port, mut rx, token) = setup_consumer_on_free_port("/bytes-ct").await;
+
+    let client = plain_http_test_client();
+    let send_fut = client
+        .get(format!("http://127.0.0.1:{port}/bytes-ct"))
+        .send();
+
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            envelope.exchange.input.body =
+                camel_component_api::Body::Bytes(bytes::Bytes::from_static(b"{\"ok\":true}"));
+            envelope.exchange.input.set_header(
+                "Content-Type",
+                serde_json::Value::String("application/json".to_string()),
+            );
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .expect("Content-Type header should be present for Bytes body with user header");
+    assert_eq!(
+        ct, "application/json",
+        "User Content-Type should be sent for Bytes body"
+    );
+
+    token.cancel();
+}
+
+// -----------------------------------------------------------------------
+// Server monitor tests (GRL-005)
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn monitor_task_silent_on_clean_exit() {
+    let handle: tokio::task::JoinHandle<()> = tokio::spawn(async {});
+    let server_exited = tokio_util::sync::CancellationToken::new();
+    // Clean exit should complete without panicking or logging errors
+    monitor_axum_task(
+        handle,
+        "127.0.0.1:0".to_string(),
+        noop_rt(),
+        "test-monitor".into(),
+        server_exited.clone(),
+    )
+    .await;
+    // rc-szmob: a clean exit must NOT fail hosted consumers — route
+    // stops own their termination (no CrashNotification storm on
+    // graceful process shutdown).
+    assert!(
+        !server_exited.is_cancelled(),
+        "clean server exit must not cancel server_exited"
+    );
+}
+
+#[tokio::test]
+async fn monitor_task_handles_panicked_task() {
+    let handle: tokio::task::JoinHandle<()> = tokio::spawn(async {
+        panic!("simulated server crash");
+    });
+    let server_exited = tokio_util::sync::CancellationToken::new();
+    // Should complete without panicking even though the inner task panicked
+    monitor_axum_task(
+        handle,
+        "127.0.0.1:9999".to_string(),
+        noop_rt(),
+        "test-monitor".into(),
+        server_exited.clone(),
+    )
+    .await;
+    // rc-szmob: unexpected exit must cancel the token so every hosted
+    // consumer fails and supervision engages (ADR-0007).
+    assert!(
+        server_exited.is_cancelled(),
+        "crashed server must cancel server_exited"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Credential redaction tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn http_auth_basic_debug_redacts_password() {
+    let auth = HttpAuth::Basic {
+        username: "admin".to_string(),
+        password: "hunter2".to_string(),
+    };
+    let debug = format!("{:?}", auth);
+    assert!(
+        !debug.contains("hunter2"),
+        "password must be redacted: {debug}"
+    );
+    assert!(debug.contains("admin"), "username should appear: {debug}");
+}
+
+#[test]
+fn http_auth_bearer_debug_redacts_token() {
+    let auth = HttpAuth::Bearer {
+        token: "eyJhbGciOiJIUzI1NiJ9.secret".to_string(),
+    };
+    let debug = format!("{:?}", auth);
+    assert!(
+        !debug.contains("eyJhbGci"),
+        "token must be redacted: {debug}"
+    );
+}
+
+#[test]
+fn http_auth_none_debug_shows_variant() {
+    let debug = format!("{:?}", HttpAuth::None);
+    assert!(
+        debug.contains("None"),
+        "None variant should appear: {debug}"
+    );
+}
+
+#[test]
+fn http_endpoint_config_debug_redacts_auth_credentials() {
+    let config = HttpEndpointConfig::from_uri(
+        "http://localhost/api?authMethod=Basic&authUsername=admin&authPassword=secret123",
+    )
+    .unwrap();
+    let debug = format!("{:?}", config);
+    assert!(
+        !debug.contains("secret123"),
+        "password must be redacted in HttpEndpointConfig debug: {debug}"
+    );
+}
+
+#[test]
+fn debug_lists_all_public_fields() {
+    let config = HttpEndpointConfig::from_uri("http://h/p").unwrap();
+    let debug = format!("{:?}", config);
+    for field in [
+        "base_url",
+        "http_method",
+        "throw_exception_on_failure",
+        "ok_status_code_range",
+        "response_timeout",
+        "query_params",
+        "raw_query",
+        "allow_internal",
+        "allow_cleartext",
+        "blocked_hosts",
+        "max_body_size",
+        "read_timeout_ms",
+        "max_response_bytes",
+        "auth",
+        "token_provider",
+        "user_agent",
+        "bridge_endpoint",
+        "connection_close",
+        "skip_request_headers",
+        "skip_response_headers",
+        "follow_redirects",
+        "max_redirects",
+    ] {
+        assert!(
+            debug.contains(field),
+            "Debug output missing field '{field}': {debug}"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------
+// Static file serving tests (Task 5)
+// -----------------------------------------------------------------------
+
+use crate::registry::{HttpRouteRegistry, MountMode, StaticMount};
+use tower_http::services::ServeDir;
+
+fn make_test_registry() -> HttpRouteRegistry {
+    HttpRouteRegistry::new()
+}
+
+fn make_test_state(registry: HttpRouteRegistry) -> AppState {
+    AppState {
+        registry,
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 10 * 1024 * 1024,
+        inflight: Arc::new(tokio::sync::Semaphore::new(1024)),
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_static_file_serving_serves_file_contents() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+
+    // Create temp dir with test files
+    let temp_dir = std::env::temp_dir().join(format!("http_static_test_{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    std::fs::write(temp_dir.join("hello.txt"), "Hello, static world!").unwrap();
+    std::fs::write(temp_dir.join("style.css"), "body { color: red; }").unwrap();
+
+    let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+
+    let registry = make_test_registry();
+    let serve_dir = ServeDir::new(&canonical_dir)
+        .precompressed_gzip()
+        .precompressed_br()
+        .append_index_html_on_directories(true);
+
+    let mount = StaticMount {
+        mount_path: "/".to_string(),
+        mode: MountMode::Static,
+        dir: canonical_dir.clone(),
+        cache_control: "public, max-age=3600".to_string(),
+        error_pages: std::collections::HashMap::new(),
+        serve_dir,
+    };
+    registry.register_static_mount(mount).await.unwrap();
+
+    let state = make_test_state(registry);
+
+    // Test serving hello.txt
+    let req = Request::builder()
+        .uri("/hello.txt")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/hello.txt").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"Hello, static world!");
+
+    // Test serving style.css
+    let req = Request::builder()
+        .uri("/style.css")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/style.css").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"body { color: red; }");
+
+    // Test 404 for non-existent file
+    let req = Request::builder()
+        .uri("/missing.txt")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/missing.txt").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Cleanup
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_spa_fallback_serves_index_for_unknown_paths() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+
+    let temp_dir = std::env::temp_dir().join(format!("http_spa_test_{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    std::fs::write(temp_dir.join("index.html"), "<h1>SPA App</h1>").unwrap();
+    std::fs::write(temp_dir.join("app.js"), "console.log('app')").unwrap();
+
+    let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+
+    let registry = make_test_registry();
+    let serve_dir = ServeDir::new(&canonical_dir)
+        .precompressed_gzip()
+        .precompressed_br()
+        .append_index_html_on_directories(true);
+
+    let mount = StaticMount {
+        mount_path: "/".to_string(),
+        mode: MountMode::Spa,
+        dir: canonical_dir.clone(),
+        cache_control: "public, max-age=0".to_string(),
+        error_pages: std::collections::HashMap::new(),
+        serve_dir,
+    };
+    // Register as SPA mount
+    registry.register_static_mount(mount).await.unwrap();
+
+    let state = make_test_state(registry);
+
+    // SPA fallback: GET /dashboard with Accept: text/html → index.html
+    let req = Request::builder()
+        .method("GET")
+        .uri("/dashboard")
+        .header("Accept", "text/html")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/dashboard").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"<h1>SPA App</h1>");
+
+    // Static file still works: GET /app.js
+    let req = Request::builder()
+        .method("GET")
+        .uri("/app.js")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/app.js").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"console.log('app')");
+
+    // No SPA fallback for JSON accept → 404
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/data")
+        .header("Accept", "application/json")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/api/data").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // No SPA fallback for file extensions → 404
+    let req = Request::builder()
+        .method("GET")
+        .uri("/style.css")
+        .header("Accept", "text/html")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/style.css").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // Cleanup
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+// Regression for rc-zoai: a conditional GET (If-None-Match / If-Modified-Since)
+// whose validator matches MUST return 304 Not Modified, not 404. The bug was
+// dispatch_static's L92 gate `if resp.status().is_success()` discarding
+// ServeDir's legitimate 304 and falling through to the generic 404. The fix
+// adds `|| resp.status() == StatusCode::NOT_MODIFIED` to that gate (and the
+// matching gate in serve_via_serve_dir so the 304 keeps its Cache-Control).
+#[allow(clippy::await_holding_lock)]
+async fn run_conditional_get_returns_304(mode: MountMode) {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "http_cond_get_{}_{}",
+        if mode == MountMode::Spa {
+            "spa"
+        } else {
+            "static"
+        },
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    std::fs::write(temp_dir.join("index.html"), "<h1>Home</h1>").unwrap();
+
+    let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+
+    let registry = make_test_registry();
+    let serve_dir = ServeDir::new(&canonical_dir)
+        .precompressed_gzip()
+        .precompressed_br()
+        .append_index_html_on_directories(true);
+
+    let mount = StaticMount {
+        mount_path: "/".to_string(),
+        mode,
+        dir: canonical_dir.clone(),
+        cache_control: "public, max-age=3600".to_string(),
+        error_pages: std::collections::HashMap::new(),
+        serve_dir,
+    };
+    registry.register_static_mount(mount).await.unwrap();
+
+    let state = make_test_state(registry);
+
+    // 1st request: normal GET → 200, capture validators.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/index.html")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/index.html").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "first GET should return 200, got {}",
+        resp.status()
+    );
+    // Cache-Control must be attached on 200 (sanity for serve_via_serve_dir).
+    assert!(
+        resp.headers().contains_key(http::header::CACHE_CONTROL),
+        "200 response missing Cache-Control"
+    );
+    let etag = resp
+        .headers()
+        .get(http::header::ETAG)
+        .expect("ServeDir must emit ETag on 200 for If-None-Match coverage")
+        .clone();
+    let last_modified = resp
+        .headers()
+        .get(http::header::LAST_MODIFIED)
+        .expect("ServeDir must emit Last-Modified on 200 for If-Modified-Since coverage")
+        .clone();
+    // Consume the body so the response is fully drained.
+    let _ = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+
+    // 2nd request: If-None-Match with the captured ETag → 304.
+    // Unconditional: ETag presence is required (asserted above) so this
+    // sub-test cannot silently skip on a ServeDir etag_method change.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/index.html")
+        .header(http::header::IF_NONE_MATCH, etag.clone())
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/index.html").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_MODIFIED,
+        "If-None-Match with matching ETag should return 304, got {}",
+        resp.status()
+    );
+    // RFC 7232 §4.1: 304 SHOULD include Cache-Control (the serve_via_serve_dir fix).
+    assert!(
+        resp.headers().contains_key(http::header::CACHE_CONTROL),
+        "304 (If-None-Match) missing Cache-Control"
+    );
+    // RFC 7232 §4.1: 304 SHOULD carry the validators forward. Assert the
+    // response parts rebuild in serve_via_serve_dir preserves them.
+    assert_eq!(
+        resp.headers().get(http::header::ETAG),
+        Some(&etag),
+        "304 (If-None-Match) must echo the ETag validator"
+    );
+    assert_eq!(
+        resp.headers().get(http::header::LAST_MODIFIED),
+        Some(&last_modified),
+        "304 (If-None-Match) must carry Last-Modified"
+    );
+
+    // 3rd request: If-Modified-Since with the captured Last-Modified → 304.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/index.html")
+        .header(http::header::IF_MODIFIED_SINCE, last_modified.clone())
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/index.html").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_MODIFIED,
+        "If-Modified-Since with matching timestamp should return 304, got {}",
+        resp.status()
+    );
+    assert!(
+        resp.headers().contains_key(http::header::CACHE_CONTROL),
+        "304 (If-Modified-Since) missing Cache-Control"
+    );
+    assert_eq!(
+        resp.headers().get(http::header::ETAG),
+        Some(&etag),
+        "304 (If-Modified-Since) must carry the ETag validator"
+    );
+    assert_eq!(
+        resp.headers().get(http::header::LAST_MODIFIED),
+        Some(&last_modified),
+        "304 (If-Modified-Since) must echo Last-Modified"
+    );
+
+    // Negative control: a PAST If-Modified-Since (before the file's mtime)
+    // MUST return 200 — proving the 304 path is validator-aware, not a
+    // blanket "always 304" regression. A future date would correctly yield
+    // 304 since the file's mtime precedes it; that is RFC-correct 304
+    // behaviour, not a negative control.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/index.html")
+        .header(
+            http::header::IF_MODIFIED_SINCE,
+            "Wed, 21 Oct 2000 07:28:00 GMT",
+        )
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/index.html").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "past If-Modified-Since should return 200 (file modified after it), got {}",
+        resp.status()
+    );
+
+    // Cleanup
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[tokio::test]
+async fn test_conditional_get_returns_304_static_mode() {
+    run_conditional_get_returns_304(MountMode::Static).await;
+}
+
+#[tokio::test]
+async fn test_conditional_get_returns_304_spa_mode() {
+    run_conditional_get_returns_304(MountMode::Spa).await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_error_page_mapping_serves_custom_404() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+
+    let temp_dir = std::env::temp_dir().join(format!("http_error_test_{}", std::process::id()));
+    let errors_dir = temp_dir.join("errors");
+    std::fs::create_dir_all(&errors_dir).unwrap();
+    std::fs::write(temp_dir.join("index.html"), "<h1>Home</h1>").unwrap();
+    std::fs::write(errors_dir.join("404.html"), "<h1>Custom 404</h1>").unwrap();
+
+    let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+    let canonical_404 = std::fs::canonicalize(errors_dir.join("404.html")).unwrap();
+
+    let registry = make_test_registry();
+    let serve_dir = ServeDir::new(&canonical_dir)
+        .precompressed_gzip()
+        .precompressed_br()
+        .append_index_html_on_directories(true);
+
+    let mut error_pages = std::collections::HashMap::new();
+    error_pages.insert(404, canonical_404);
+
+    let mount = StaticMount {
+        mount_path: "/".to_string(),
+        mode: MountMode::Static,
+        dir: canonical_dir.clone(),
+        cache_control: "public, max-age=0".to_string(),
+        error_pages,
+        serve_dir,
+    };
+    registry.register_static_mount(mount).await.unwrap();
+
+    let state = make_test_state(registry);
+
+    // Request non-existent file → custom 404 page
+    let req = Request::builder()
+        .method("GET")
+        .uri("/missing.html")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/missing.html").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"<h1>Custom 404</h1>");
+
+    // Existing file still works
+    let req = Request::builder()
+        .method("GET")
+        .uri("/index.html")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/index.html").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"<h1>Home</h1>");
+
+    // Cleanup
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[tokio::test]
+async fn http_consumer_returns_body_and_code_on_stop() {
+    use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, Message};
+    use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline_with_handler};
+    use tower::ServiceExt;
+
+    // Pipeline: set_body("nope") + set CamelHttpResponseCode=409 + Stop.
+    let set_body_step = CompiledStep::Process {
+        kind_hint: camel_api::SpanKindHint::Internal,
+        processor: BoxProcessor::from_fn(|mut ex: Exchange| {
+            ex.input.body = Body::Text("nope".into());
+            Box::pin(async move { Ok(ex) })
+        }),
+        body_contract: None,
+        lifecycle: None,
+        label: None,
+        to_uri: None,
+    };
+    let set_status_step = CompiledStep::Process {
+        kind_hint: camel_api::SpanKindHint::Internal,
+        processor: BoxProcessor::from_fn(|mut ex: Exchange| {
+            ex.input.set_header(
+                "CamelHttpResponseCode",
+                serde_json::Value::Number(409.into()),
+            );
+            Box::pin(async move { Ok(ex) })
+        }),
+        body_contract: None,
+        lifecycle: None,
+        label: None,
+        to_uri: None,
+    };
+    let pipeline = compose_pipeline_with_handler(
+        vec![set_body_step, set_status_step, CompiledStep::Stop],
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
+
+    let ex = Exchange::new(Message::default());
+    let result = pipeline.oneshot(ex).await;
+    assert!(result.is_ok(), "Stop must arrive as Ok (Bug B fix)");
+    let returned = result.unwrap();
+    assert_eq!(returned.input.body.as_text(), Some("nope"));
+    assert_eq!(
+        returned
+            .input
+            .header("CamelHttpResponseCode")
+            .and_then(|v| v.as_u64()),
+        Some(409)
+    );
+}
+
+#[tokio::test]
+async fn http_consumer_returns_200_when_body_empty_on_stop() {
+    // After ADR-0024: Stop with no body + no status header produces 200 (same as
+    // a normal completion with no body). The 204 default is gone — users who
+    // want 204 set CamelHttpResponseCode=204 explicitly.
+    //
+    // This test stays at the pipeline level (consistent with the test above).
+    // E2E coverage of the full HTTP dispatch path is in
+    // crates/camel-test/tests/integration_test.rs.
+    use camel_api::{Exchange, Message};
+    use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline_with_handler};
+    use tower::ServiceExt;
+
+    let pipeline = compose_pipeline_with_handler(
+        vec![CompiledStep::Stop],
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
+    let ex = Exchange::new(Message::default());
+    let result = pipeline.oneshot(ex).await;
+    assert!(result.is_ok(), "Stop with empty body arrives as Ok");
+    // Body is default (empty); no CamelHttpResponseCode header was set.
+    // The HTTP reply finaliser (tested at E2E) maps this to status=200 + empty body.
+}
+
+// -----------------------------------------------------------------------
+// Task 5: Method-aware REST dispatch tests
+// -----------------------------------------------------------------------
+
+/// Spins up an axum server on a free port with a fresh registry.
+/// Returns the port plus the registry so the caller can register
+/// REST endpoints directly.
+async fn spawn_test_server() -> (u16, HttpRouteRegistry) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let registry = HttpRouteRegistry::new();
+    tokio::spawn(run_axum_server(
+        listener,
+        registry.clone(),
+        2 * 1024 * 1024,
+        10 * 1024 * 1024,
+        Arc::new(tokio::sync::Semaphore::new(1024)),
+        test_rt(),
+        "test-route".into(),
+    ));
+    // Give the server a moment to start accepting.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    (port, registry)
+}
+
+/// Helper for REST integration tests: spawns a responder task that
+/// reads from `rx`, writes a fixed `(status, body)` back via the
+/// envelope's reply channel, and returns once the test request is
+/// satisfied.
+fn spawn_responder(
+    mut rx: tokio::sync::mpsc::Receiver<RequestEnvelope>,
+    status: u16,
+    body: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // Per-iteration deadline (lintwiden D4.2): the recv wait is
+        // bounded; a stall panics the task (surfaced at the join)
+        // instead of parking it. Channel close still ends silently.
+        match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+            Ok(Some(envelope)) => {
+                let _ = envelope.reply_tx.send(HttpReply {
+                    status,
+                    headers: vec![],
+                    body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
+                });
+            }
+            Ok(None) => {}
+            Err(_) => panic!("spawn_responder: no request arrived within 10s"),
+        }
+    })
+}
+
+#[tokio::test]
+async fn method_aware_dispatch_same_path_different_verbs() {
+    let (port, registry) = spawn_test_server().await;
+
+    // Register two REST endpoints on the same path with different
+    // methods. This is the core scenario REST DSL needs to support:
+    // GET /users (list) and POST /users (create) must not overwrite
+    // each other.
+    let (get_tx, get_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+    registry
+        .register_rest_endpoint(
+            "GET".into(),
+            vec![PathSegment::Literal("users".into())],
+            get_tx,
+        )
+        .await;
+
+    let (post_tx, post_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+    registry
+        .register_rest_endpoint(
+            "POST".into(),
+            vec![PathSegment::Literal("users".into())],
+            post_tx,
+        )
+        .await;
+
+    let get_handle = spawn_responder(get_rx, 200, "list".into());
+    let post_handle = spawn_responder(post_rx, 201, "create".into());
+
+    let client = plain_http_test_client();
+
+    // GET /users → list route
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/users"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "list");
+
+    // POST /users → create route
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/users"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "create");
+
+    let (get_joined, post_joined) = tokio::join!(get_handle, post_handle);
+    get_joined.expect("get responder task must not stall");
+    post_joined.expect("post responder task must not stall");
+}
+
+#[tokio::test]
+async fn method_aware_dispatch_templated_path_extracts_params() {
+    let (port, registry) = spawn_test_server().await;
+
+    // Register GET /users/{id} as a templated endpoint. The
+    // dispatcher should match `/users/42` against the template and
+    // attach `id=42` to the envelope's path_params.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+    registry
+        .register_rest_endpoint(
+            "GET".into(),
+            vec![
+                PathSegment::Literal("users".into()),
+                PathSegment::Param("id".into()),
+            ],
+            tx,
+        )
+        .await;
+
+    // Spawn a responder that echoes the captured id back in the body
+    // so the test can verify the param was set.
+    let handle = tokio::spawn(async move {
+        match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            Ok(Some(envelope)) => {
+                let id = envelope.path_params.get("id").cloned().unwrap_or_default();
+                let _ = envelope.reply_tx.send(HttpReply {
+                    status: 200,
+                    headers: vec![],
+                    body: HttpReplyBody::Bytes(bytes::Bytes::from(format!("id={id}"))),
+                });
+            }
+            // Channel closed: task ends as today.
+            Ok(None) => {}
+            // Stalled: responder ends.
+            Err(_) => {}
+        }
+    });
+
+    let client = plain_http_test_client();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/users/42"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "id=42");
+
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn method_aware_dispatch_unmatched_method_falls_through() {
+    // If no REST endpoint matches the method, dispatch must fall
+    // through to the legacy api_routes lookup or static mounts. With
+    // nothing else registered, the request gets 404 from static
+    // dispatch.
+    let (port, _registry) = spawn_test_server().await;
+
+    // Register only GET /users; a DELETE /users request has no match.
+    let (get_tx, get_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+    _registry
+        .register_rest_endpoint(
+            "GET".into(),
+            vec![PathSegment::Literal("users".into())],
+            get_tx,
+        )
+        .await;
+
+    // Drain the GET channel in the background so the consumer side
+    // doesn't block (we don't expect any envelopes here).
+    let drain = tokio::spawn(async move {
+        let mut get_rx = get_rx;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), get_rx.recv()).await {
+                Ok(Some(_)) => continue,
+                Ok(None) => break, // closed: drain complete
+                Err(_) => break,   // stalled: drainer ends
+            }
+        }
+    });
+
+    let client = plain_http_test_client();
+    let resp = client
+        .delete(format!("http://127.0.0.1:{port}/users"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 404);
+
+    drop(drain);
+}
+
+#[tokio::test]
+async fn regression_legacy_exact_api_route_still_works() {
+    // A `http:` route registered without an `httpMethod=` URI param
+    // lands in the legacy api_routes registry. The dispatcher must
+    // still find it via exact path lookup. This guards against
+    // regressions introduced by the new REST-aware dispatch.
+    let (port, registry) = spawn_test_server().await;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+    registry.register_api_route("/legacy/path".into(), tx).await;
+
+    let handle = tokio::spawn(async move {
+        match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            Ok(Some(envelope)) => {
+                let _ = envelope.reply_tx.send(HttpReply {
+                    status: 200,
+                    headers: vec![],
+                    body: HttpReplyBody::Bytes(bytes::Bytes::from("legacy ok")),
+                });
+            }
+            // Channel closed: task ends as today.
+            Ok(None) => {}
+            // Stalled: responder ends.
+            Err(_) => {}
+        }
+    });
+
+    let client = plain_http_test_client();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/legacy/path"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "legacy ok");
+
+    let _ = handle.await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn regression_static_mount_still_works() {
+    // Verify that static file serving still works after the
+    // dispatch refactor. We register a temp-dir mount and request
+    // a file from it; the static dispatcher should serve it.
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+
+    let temp_dir = std::env::temp_dir().join(format!("http_regress_{}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir).unwrap();
+    std::fs::write(temp_dir.join("regress.txt"), "static works").unwrap();
+    let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+
+    let registry = make_test_registry();
+    let serve_dir = ServeDir::new(&canonical_dir)
+        .precompressed_gzip()
+        .precompressed_br()
+        .append_index_html_on_directories(true);
+    let mount = StaticMount {
+        mount_path: "/".to_string(),
+        mode: MountMode::Static,
+        dir: canonical_dir.clone(),
+        cache_control: "public, max-age=3600".to_string(),
+        error_pages: std::collections::HashMap::new(),
+        serve_dir,
+    };
+    registry.register_static_mount(mount).await.unwrap();
+
+    let state = make_test_state(registry);
+    let req = Request::builder()
+        .uri("/regress.txt")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/regress.txt").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"static works");
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+// -----------------------------------------------------------------------
+// Review I4: dispatch-layer regression coverage for C1/C2/C3 + the
+// templated from-URI round-trip. These exercise the real axum dispatch
+// path (register → HTTP request → reply) so a regression in any of the
+// three critical fixes surfaces as a test failure rather than a silent
+// production 404/500.
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn deregister_one_method_keeps_sibling_verbs() {
+    // Review C1: stopping the GET /users consumer must NOT tear down the
+    // live POST /users endpoint. Register both, deregister GET only,
+    // then verify POST still dispatches.
+    let (port, registry) = spawn_test_server().await;
+
+    let (get_tx, get_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+    registry
+        .register_rest_endpoint(
+            "GET".into(),
+            vec![PathSegment::Literal("users".into())],
+            get_tx,
+        )
+        .await;
+
+    let (post_tx, post_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+    registry
+        .register_rest_endpoint(
+            "POST".into(),
+            vec![PathSegment::Literal("users".into())],
+            post_tx,
+        )
+        .await;
+
+    // Drain GET in the background (no requests expected after deregister).
+    let drain = tokio::spawn(async move {
+        let mut get_rx = get_rx;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), get_rx.recv()).await {
+                Ok(Some(_)) => continue,
+                Ok(None) => break, // closed: drain complete
+                Err(_) => break,   // stalled: drainer ends
+            }
+        }
+    });
+
+    // Deregister ONLY the GET endpoint — the C1 bug used to drop POST too.
+    registry.unregister_rest_endpoint("GET", "/users").await;
+    drop(drain);
+
+    let post_handle = spawn_responder(post_rx, 201, "create".into());
+
+    let client = plain_http_test_client();
+    // POST /users must still reach its consumer after GET was removed.
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/users"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201);
+    assert_eq!(resp.text().await.unwrap(), "create");
+
+    post_handle
+        .await
+        .expect("post responder task must not stall");
+}
+
+#[tokio::test]
+async fn dispatch_exact_legacy_beats_rest_template() {
+    // Review C2: an exact legacy API route (`GET /api/users`, no
+    // httpMethod) must win over a templated REST route
+    // (`GET /api/{resource}`) for the request `/api/users`, per spec
+    // §7.2 / ADR-0009 precedence (exact → templated → static → SPA).
+    let (port, registry) = spawn_test_server().await;
+
+    // Exact legacy route.
+    let (exact_tx, exact_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+    registry
+        .register_api_route("/api/users".into(), exact_tx)
+        .await;
+    let exact_handle = spawn_responder(exact_rx, 200, "exact".into());
+
+    // Templated REST route that would ALSO match /api/users.
+    let (tpl_tx, tpl_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+    registry
+        .register_rest_endpoint(
+            "GET".into(),
+            vec![
+                PathSegment::Literal("api".into()),
+                PathSegment::Param("resource".into()),
+            ],
+            tpl_tx,
+        )
+        .await;
+    // The templated handler must NOT receive the /api/users request. If
+    // it does, it replies "template-leak" so a future assertion could
+    // catch it. We do NOT await this task: the exact-match branch wins
+    // and the templated channel never receives, so awaiting would block
+    // until the test runtime tears down.
+    let _tpl_drain = tokio::spawn(async move {
+        let mut tpl_rx = tpl_rx;
+        match tokio::time::timeout(Duration::from_secs(2), tpl_rx.recv()).await {
+            Ok(Some(env)) => {
+                let _ = env.reply_tx.send(HttpReply {
+                    status: 200,
+                    headers: vec![],
+                    body: HttpReplyBody::Bytes(bytes::Bytes::from("template-leak")),
+                });
+            }
+            // Channel closed: task ends as today.
+            Ok(None) => {}
+            // Stalled: responder ends.
+            Err(_) => {}
+        }
+    });
+
+    let client = plain_http_test_client();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/api/users"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    // Exact-match handler answered — not the templated one.
+    assert_eq!(resp.text().await.unwrap(), "exact");
+
+    exact_handle
+        .await
+        .expect("exact responder task must not stall");
+}
+
+#[tokio::test]
+async fn ambiguous_rest_templates_return_500_not_silent_404() {
+    // Review C3: two equal-specificity templates that both match one
+    // request are an ambiguous registration. At runtime this must
+    // surface as a loud 500 (with a warn! log), NOT a silent fall-through
+    // to 404. Compile-time rejection is covered in camel-dsl rest tests.
+    let (port, registry) = spawn_test_server().await;
+
+    let (a_tx, _a_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+    registry
+        .register_rest_endpoint(
+            "GET".into(),
+            vec![
+                PathSegment::Literal("users".into()),
+                PathSegment::Param("id".into()),
+            ],
+            a_tx,
+        )
+        .await;
+
+    let (b_tx, _b_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+    registry
+        .register_rest_endpoint(
+            "GET".into(),
+            vec![
+                PathSegment::Literal("users".into()),
+                PathSegment::Param("name".into()),
+            ],
+            b_tx,
+        )
+        .await;
+
+    let client = plain_http_test_client();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/users/42"))
+        .send()
+        .await
+        .unwrap();
+    // Ambiguous → 500 (previously a silent 404).
+    assert_eq!(resp.status().as_u16(), 500);
+}
+
+#[test]
+fn from_uri_round_trips_templated_path_with_http_method() {
+    // Review I4: a REST-lowered from-URI like
+    // `http://0.0.0.0:8080/users/{id}?httpMethod=GET` must round-trip
+    // through HttpServerConfig::from_uri, preserving the templated path
+    // and the (uppercased) method. This is the binding the DSL lowering
+    // emits and the consumer reads; it was previously unasserted.
+    use crate::UriConfig;
+    let cfg = HttpServerConfig::from_uri("http://0.0.0.0:8080/users/{id}?httpMethod=GET").unwrap();
+    assert_eq!(cfg.host, "0.0.0.0");
+    assert_eq!(cfg.port, 8080);
+    assert_eq!(cfg.path, "/users/{id}");
+    assert_eq!(cfg.method.as_deref(), Some("GET"));
+
+    // Lower-case httpMethod is uppercased (review I5).
+    let cfg_lc = HttpServerConfig::from_uri("http://0.0.0.0:8080/orders?httpMethod=post").unwrap();
+    assert_eq!(cfg_lc.method.as_deref(), Some("POST"));
+    assert_eq!(cfg_lc.path, "/orders");
+}
+
+// -----------------------------------------------------------------------
+// rc-1dk4: TypeConversionFailed → 400 Bad Request
+// -----------------------------------------------------------------------
+
+#[test]
+fn type_conversion_failed_maps_to_400() {
+    let reply = pipeline_error_to_reply(
+        CamelError::TypeConversionFailed("invalid JSON at line 1".to_string()),
+        "/api/users",
+    );
+    assert_eq!(reply.status, 400);
+    // Exactly one Content-Type header, application/json
+    let json_ct = reply
+        .headers
+        .iter()
+        .filter(|(k, v)| k == "Content-Type" && v == "application/json")
+        .count();
+    assert_eq!(json_ct, 1);
+    // Body must be structured error JSON with the expected fields
+    let body = match &reply.body {
+        HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        _ => panic!("expected bytes body"),
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
+    assert_eq!(parsed["error"], "bad_request");
+    assert_eq!(parsed["message"], "invalid JSON at line 1");
+}
+
+#[test]
+fn other_error_still_maps_to_500() {
+    let reply = pipeline_error_to_reply(CamelError::RouteError("boom".to_string()), "/api/users");
+    assert_eq!(reply.status, 500);
+}
+
+#[test]
+fn unauthenticated_maps_to_401() {
+    let reply = pipeline_error_to_reply(
+        CamelError::Unauthenticated("no token".to_string()),
+        "/api/users",
+    );
+    assert_eq!(reply.status, 401);
+}
+
+#[test]
+fn unauthorized_maps_to_403() {
+    let reply = pipeline_error_to_reply(
+        CamelError::Unauthorized("forbidden".to_string()),
+        "/api/users",
+    );
+    assert_eq!(reply.status, 403);
+}
+
+#[test]
+fn validation_error_maps_to_400() {
+    let reply = pipeline_error_to_reply(
+        CamelError::ValidationError("body does not match schema".to_string()),
+        "/api/users",
+    );
+    assert_eq!(reply.status, 400);
+    let json_ct = reply
+        .headers
+        .iter()
+        .filter(|(k, v)| k == "Content-Type" && v == "application/json")
+        .count();
+    assert_eq!(json_ct, 1);
+    let body = match &reply.body {
+        HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        _ => panic!("expected bytes body"),
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
+    assert_eq!(parsed["error"], "validation_error");
+    assert_eq!(parsed["message"], "body does not match schema");
+}
+
+// -----------------------------------------------------------------------
+// rc-hlb1q: media negotiation errors → 415 / 406
+// -----------------------------------------------------------------------
+
+#[test]
+fn finalizer_maps_unsupported_media_type() {
+    let reply = pipeline_error_to_reply(
+        CamelError::UnsupportedMediaType {
+            consumed: "text/plain".to_string(),
+            declared: "application/json".to_string(),
+        },
+        "/x",
+    );
+    assert_eq!(reply.status, 415);
+    let json_ct = reply
+        .headers
+        .iter()
+        .filter(|(k, v)| k == "Content-Type" && v == "application/json")
+        .count();
+    assert_eq!(json_ct, 1);
+    let body = match &reply.body {
+        HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        _ => panic!("expected bytes body"),
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
+    assert_eq!(parsed["error"], "unsupported_media_type");
+    assert_eq!(
+        parsed["message"],
+        "consumed text/plain, declared application/json"
+    );
+}
+
+#[test]
+fn finalizer_maps_not_acceptable() {
+    let reply = pipeline_error_to_reply(
+        CamelError::NotAcceptable {
+            accept: "application/xml".to_string(),
+            produced: "application/json".to_string(),
+        },
+        "/x",
+    );
+    assert_eq!(reply.status, 406);
+    let json_ct = reply
+        .headers
+        .iter()
+        .filter(|(k, v)| k == "Content-Type" && v == "application/json")
+        .count();
+    assert_eq!(json_ct, 1);
+    let body = match &reply.body {
+        HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        _ => panic!("expected bytes body"),
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
+    assert_eq!(parsed["error"], "not_acceptable");
+    assert_eq!(
+        parsed["message"],
+        "accept application/xml, produced application/json"
+    );
+}
+
+#[test]
+fn json_error_reply_preserves_empty_message() {
+    let reply = json_error_reply(400, "bad_request", "".to_string());
+    assert_eq!(reply.status, 400);
+    let json_ct = reply
+        .headers
+        .iter()
+        .filter(|(k, v)| k == "Content-Type" && v == "application/json")
+        .count();
+    assert_eq!(json_ct, 1);
+    let body = match &reply.body {
+        HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        _ => panic!("expected bytes body"),
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
+    assert_eq!(parsed["error"], "bad_request");
+    assert_eq!(parsed["message"], "");
+}
+
+#[test]
+fn https_consumer_without_tls_cert_errors() {
+    let endpoint = HttpEndpoint {
+        uri: "https://0.0.0.0:8443/api".to_string(),
+        config: HttpEndpointConfig::from_uri("https://0.0.0.0:8443/api").unwrap(),
+        server_config: HttpServerConfig::from_uri("https://0.0.0.0:8443/api").unwrap(),
+        client: plain_http_test_client(),
+        pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
+            PINNED_CLIENT_TTL,
+            PINNED_CLIENT_MAX_ENTRIES,
+        )),
+        http_config: HttpConfig::default(),
+    };
+    let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+    let result = endpoint.create_consumer(rt);
+    assert!(result.is_err(), "expected error for https without tls cert");
+    if let Err(e) = result {
+        let msg = e.to_string();
+        assert!(msg.contains("tlsCert"), "error must mention tlsCert: {msg}");
+    }
+}
+
+#[test]
+fn http_consumer_with_tls_config_errors() {
+    let endpoint = HttpEndpoint {
+        uri: "http://0.0.0.0:8080/api".to_string(),
+        config: HttpEndpointConfig::from_uri("http://0.0.0.0:8080/api").unwrap(),
+        server_config: HttpServerConfig::from_uri(
+            "http://0.0.0.0:8080/api?tlsCert=/x.pem&tlsKey=/y.pem",
+        )
+        .unwrap(),
+        client: plain_http_test_client(),
+        pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
+            PINNED_CLIENT_TTL,
+            PINNED_CLIENT_MAX_ENTRIES,
+        )),
+        http_config: HttpConfig::default(),
+    };
+    let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+    let result = endpoint.create_consumer(rt);
+    assert!(result.is_err(), "expected error for http with tls config");
+    if let Err(e) = result {
+        let msg = e.to_string();
+        assert!(msg.contains("https"), "error must mention https: {msg}");
+    }
+}
+
+#[test]
+fn https_consumer_with_partial_tls_cert_only_errors() {
+    // tlsCert without tlsKey → tls_config is None at parse time
+    // → create_consumer sees https:// + no TLS → must error
+    let server_config =
+        HttpServerConfig::from_uri("https://0.0.0.0:8443/api?tlsCert=/x.pem").unwrap();
+    assert!(
+        server_config.tls_config.is_none(),
+        "partial tlsCert must not create ServerTlsConfig"
+    );
+    let endpoint = HttpEndpoint {
+        uri: "https://0.0.0.0:8443/api?tlsCert=/x.pem".to_string(),
+        config: HttpEndpointConfig::from_uri("https://0.0.0.0:8443/api?tlsCert=/x.pem").unwrap(),
+        server_config,
+        client: plain_http_test_client(),
+        pinned_cache: std::sync::Arc::new(PinnedClientCache::new(
+            PINNED_CLIENT_TTL,
+            PINNED_CLIENT_MAX_ENTRIES,
+        )),
+        http_config: HttpConfig::default(),
+    };
+    let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+    let result = endpoint.create_consumer(rt);
+    assert!(
+        result.is_err(),
+        "must error: https:// requires both tlsCert and tlsKey"
+    );
+}
+
+#[test]
+fn load_tls_config_parses_valid_pem() {
+    // Install rustls crypto provider (aws-lc-rs — matches reqwest/hyper-rustls tree)
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+    use camel_component_api::test_support::tls;
+    let (_, cert_pem, key_pem) = tls::gen_server_cert();
+    let cert_path = tls::write_pem_tmp("http-load-cert.pem", &cert_pem);
+    let key_path = tls::write_pem_tmp("http-load-key.pem", &key_pem);
+
+    let config = load_tls_config(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
+    assert!(config.is_ok(), "must parse valid PEM: {:?}", config.err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn consumer_tls_handshake_roundtrip() {
+    use camel_component_api::test_support::tls;
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+    // Install rustls crypto provider (aws-lc-rs)
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // Serialize against global ServerRegistry singleton
+    let _guard = lock_registry_test_mutex();
+
+    // Generate CA + server cert
+    let (ca_pem, cert_pem, key_pem) = tls::gen_server_cert();
+    let cert_path = tls::write_pem_tmp("http-tls-handshake-cert.pem", &cert_pem);
+    let key_path = tls::write_pem_tmp("http-tls-handshake-key.pem", &key_pem);
+    let ca_path = tls::write_pem_tmp("http-tls-handshake-ca.pem", &ca_pem);
+
+    // Get ephemeral port
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    ServerRegistry::reset();
+
+    // Create real HttpComponent + endpoint with TLS URI
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let uri = format!(
+        "https://127.0.0.1:{port}/test?tlsCert={}&tlsKey={}",
+        cert_path.to_string_lossy(),
+        key_path.to_string_lossy(),
+    );
+    let endpoint = component
+        .create_endpoint(&uri, &endpoint_ctx)
+        .expect("create TLS endpoint");
+    let mut consumer = endpoint.create_consumer(rt()).expect("create consumer");
+
+    // Start consumer — this calls get_or_spawn with tls_config
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "tls-handshake-test".to_string());
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+
+    // Give server time to start
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Client with CA cert — REAL verification (no danger_accept_invalid)
+    let ca_bytes = std::fs::read(&ca_path).unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(&ca_bytes).unwrap())
+        .build()
+        .unwrap();
+
+    let send_fut = client
+        .post(format!("https://localhost:{port}/test"))
+        .body("ping")
+        .send();
+
+    // Handler: receive envelope, reply 200 with "pong" body
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            envelope.exchange.input.body = camel_component_api::Body::Text("pong".to_string());
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.expect("TLS handshake + request must succeed");
+
+    assert_eq!(resp.status().as_u16(), 200, "must get 200 through TLS");
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "pong");
+
+    token.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn consumer_tls_rejects_client_without_ca() {
+    use camel_component_api::test_support::tls;
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+    let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // Serialize against global ServerRegistry singleton
+    let _guard = lock_registry_test_mutex();
+
+    let (_, cert_pem, key_pem) = tls::gen_server_cert();
+    let cert_path = tls::write_pem_tmp("http-neg-cert.pem", &cert_pem);
+    let key_path = tls::write_pem_tmp("http-neg-key.pem", &key_pem);
+
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+
+    ServerRegistry::reset();
+
+    // Spawn TLS server via real HttpComponent path
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let uri = format!(
+        "https://127.0.0.1:{port}/test?tlsCert={}&tlsKey={}",
+        cert_path.to_string_lossy(),
+        key_path.to_string_lossy(),
+    );
+    let endpoint = component.create_endpoint(&uri, &endpoint_ctx).unwrap();
+    let mut consumer = endpoint.create_consumer(rt()).unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "tls-neg-test".to_string());
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Client WITHOUT CA cert — must fail TLS verification
+    let client = plain_http_test_client();
+
+    let result = client
+        .get(format!("https://localhost:{port}/test"))
+        .send()
+        .await;
+
+    assert!(
+        result.is_err(),
+        "must reject without CA — proves real verification"
+    );
+
+    token.cancel();
+}
+
+#[test]
+fn server_config_partial_tls_cert_without_key() {
+    // Parse URI with only tlsCert (no tlsKey)
+    let cfg = HttpServerConfig::from_uri("https://0.0.0.0:8443/api?tlsCert=/x.pem").unwrap();
+    // Partial params → tls_config must be None
+    assert!(cfg.tls_config.is_none());
+}
+
+#[test]
+fn endpoint_uri_options_count_parity() {
+    // Mirror struct must stay in sync with bespoke from_components parser.
+    assert_eq!(
+        HttpEndpointConfig::uri_options().len(),
+        23,
+        "HttpEndpointUriConfig #[uri_param] count drifted from parser"
+    );
+}
+
+fn make_headers(pairs: &[(&str, &str)]) -> HashMap<String, serde_json::Value> {
+    pairs
+        .iter()
+        .map(|(k, v)| {
+            (
+                (*k).to_string(),
+                serde_json::Value::String((*v).to_string()),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn response_emits_cache_control_via_pragma_warning() {
+    let headers = make_headers(&[
+        ("Cache-Control", "public, max-age=3600"),
+        ("Via", "1.1 myproxy"),
+        ("Pragma", "no-cache"),
+        ("Warning", "199 misc"),
+    ]);
+    let selected = select_response_headers(&headers, None, None);
+    let names: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
+    for expected in ["Cache-Control", "Via", "Pragma", "Warning"] {
+        assert!(
+            names.contains(&expected),
+            "{expected} should pass through to the response"
+        );
+    }
+}
+
+#[test]
+fn response_excludes_request_only_and_server_owned() {
+    let headers = make_headers(&[
+        ("User-Agent", "x"),
+        ("Accept", "*/*"),
+        ("Date", "Thu, 01 Jan 2026 00:00:00 GMT"),
+    ]);
+    let selected = select_response_headers(&headers, None, None);
+    let names: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
+    for excluded in ["User-Agent", "Accept", "Date"] {
+        assert!(
+            !names.contains(&excluded),
+            "{excluded} should NOT appear in the response"
+        );
+    }
+}
+
+#[test]
+fn response_re_derives_content_type() {
+    let headers = make_headers(&[("Content-Type", "text/plain")]);
+    let selected = select_response_headers(&headers, Some("application/json".into()), None);
+    let ct_entries: Vec<&str> = selected
+        .iter()
+        .filter(|(k, _)| k == "Content-Type")
+        .map(|(_, v)| v.as_str())
+        .collect();
+    assert_eq!(
+        ct_entries,
+        ["application/json"],
+        "exactly one Content-Type entry, re-derived from user_content_type"
+    );
+}
+
+#[test]
+fn response_excludes_camel_headers() {
+    let headers = make_headers(&[("CamelHttpPath", "/foo"), ("Cache-Control", "public")]);
+    let selected = select_response_headers(&headers, None, None);
+    let names: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
+    assert!(
+        !names.contains(&"CamelHttpPath"),
+        "Camel-namespace headers must be excluded"
+    );
+    assert!(
+        names.contains(&"Cache-Control"),
+        "Cache-Control must pass through"
+    );
+}
+
+#[test]
+fn response_stringifies_scalar_header_values() {
+    let mut headers = make_headers(&[("X-Label", "keep")]);
+    headers.insert("X-Retries".to_string(), serde_json::json!(3));
+    headers.insert("X-Ratio".to_string(), serde_json::json!(3.5));
+    headers.insert("X-Enabled".to_string(), serde_json::json!(true));
+    let selected = select_response_headers(&headers, None, None);
+    let get = |name: &str| -> Option<&str> {
+        selected
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    };
+    assert_eq!(
+        get("X-Retries"),
+        Some("3"),
+        "integer header must be stringified"
+    );
+    assert_eq!(
+        get("X-Ratio"),
+        Some("3.5"),
+        "float header must be stringified"
+    );
+    assert_eq!(
+        get("X-Enabled"),
+        Some("true"),
+        "bool header must be stringified"
+    );
+    assert_eq!(
+        get("X-Label"),
+        Some("keep"),
+        "string header must pass through"
+    );
+}
+
+#[test]
+fn response_drops_null_and_structured_header_values() {
+    let mut headers = make_headers(&[("X-Keep", "yes")]);
+    headers.insert("X-Null".to_string(), serde_json::Value::Null);
+    headers.insert("X-Obj".to_string(), serde_json::json!({"a": 1}));
+    headers.insert("X-Arr".to_string(), serde_json::json!([1, 2]));
+    let selected = select_response_headers(&headers, None, None);
+    let names: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
+    for dropped in ["X-Null", "X-Obj", "X-Arr"] {
+        assert!(
+            !names.contains(&dropped),
+            "{dropped} must not be emitted: no single-value form"
+        );
+    }
+    assert!(names.contains(&"X-Keep"), "scalar headers must survive");
+}
+
+#[test]
+fn response_stringifies_scalars_despite_excluded_names() {
+    // Excluded names stay excluded regardless of value type: the policy
+    // filter runs before stringification, so numeric values cannot smuggle
+    // content-length or server-owned headers into the reply.
+    let mut headers = HashMap::new();
+    headers.insert("Content-Length".to_string(), serde_json::json!(999));
+    headers.insert("Date".to_string(), serde_json::json!(12345));
+    let selected = select_response_headers(&headers, None, None);
+    let names: Vec<&str> = selected.iter().map(|(k, _)| k.as_str()).collect();
+    assert!(
+        !names.contains(&"Content-Length"),
+        "content-length is re-derived by the server"
+    );
+    assert!(!names.contains(&"Date"), "date is server-owned");
+}
+
+#[test]
+fn outbound_stringifies_scalar_header_values() {
+    let mut headers = make_headers(&[("X-Label", "keep")]);
+    headers.insert("X-Retries".to_string(), serde_json::json!(3));
+    headers.insert("X-Ratio".to_string(), serde_json::json!(3.5));
+    headers.insert("X-Enabled".to_string(), serde_json::json!(true));
+    let outbound = select_outbound_headers(&headers, &[], &[]);
+    // HeaderName construction lowercases; lookups compare case-blind.
+    let get = |name: &str| -> Option<String> {
+        outbound
+            .accepted
+            .iter()
+            .find(|(k, _)| k.as_str().eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.to_str().unwrap().to_string())
+    };
+    assert_eq!(
+        get("X-Retries").as_deref(),
+        Some("3"),
+        "integer header must be stringified"
+    );
+    assert_eq!(
+        get("X-Ratio").as_deref(),
+        Some("3.5"),
+        "float header must be stringified"
+    );
+    assert_eq!(
+        get("X-Enabled").as_deref(),
+        Some("true"),
+        "bool header must be stringified"
+    );
+    assert_eq!(
+        get("X-Label").as_deref(),
+        Some("keep"),
+        "string header must pass through"
+    );
+    assert!(outbound.drops.is_empty(), "scalar headers must not drop");
+}
+
+#[test]
+fn outbound_drops_null_and_structured_header_values() {
+    let mut headers = make_headers(&[("X-Keep", "yes")]);
+    headers.insert("X-Null".to_string(), serde_json::Value::Null);
+    headers.insert("X-Obj".to_string(), serde_json::json!({"a": 1}));
+    headers.insert("X-Arr".to_string(), serde_json::json!([1, 2]));
+    let outbound = select_outbound_headers(&headers, &[], &[]);
+    let has = |name: &str| {
+        outbound
+            .accepted
+            .iter()
+            .any(|(k, _)| k.as_str().eq_ignore_ascii_case(name))
+    };
+    assert!(has("X-Keep"), "scalar headers must survive");
+    for (name, kind) in [("X-Null", "null"), ("X-Obj", "object"), ("X-Arr", "array")] {
+        let dropped = outbound
+            .drops
+            .iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} must have a drop record: {:?}", outbound.drops));
+        assert_eq!(
+            dropped.reason, "no scalar string form",
+            "{name} drop reason must name the value kind absence"
+        );
+        assert_eq!(dropped.value_kind, Some(kind), "{name} kind recorded");
+    }
+}
+
+#[test]
+fn outbound_stringifies_scalars_despite_excluded_names() {
+    // Excluded names stay excluded regardless of value type: the policy
+    // filter runs before stringification, so numeric values cannot smuggle
+    // hop-by-hop or client-derived headers onto the wire.
+    let mut headers = HashMap::new();
+    headers.insert("Transfer-Encoding".to_string(), serde_json::json!(7));
+    headers.insert("Host".to_string(), serde_json::json!(12345));
+    headers.insert("X-Ok".to_string(), serde_json::json!(7));
+    let outbound = select_outbound_headers(&headers, &[], &[]);
+    let has = |name: &str| {
+        outbound
+            .accepted
+            .iter()
+            .any(|(k, _)| k.as_str().eq_ignore_ascii_case(name))
+    };
+    assert!(
+        !has("Transfer-Encoding"),
+        "hop-by-hop header must stay excluded"
+    );
+    assert!(!has("Host"), "host is destination-derived");
+    assert!(has("X-Ok"), "non-excluded scalar must be stringified");
+    assert!(
+        outbound
+            .drops
+            .iter()
+            .any(|d| d.name == "Transfer-Encoding" && d.reason == "outbound emission policy"),
+        "policy drop must be recorded before coercion"
+    );
+}
+
+#[test]
+fn outbound_drops_invalid_names_values_and_skip_config() {
+    let mut headers = make_headers(&[("X-Good", "fine")]);
+    headers.insert("X Bad Name".to_string(), serde_json::json!("v"));
+    headers.insert(
+        "X-Control-Value".to_string(),
+        serde_json::json!("line1\nline2"),
+    );
+    headers.insert("X-Secret".to_string(), serde_json::json!("s3cr3t"));
+    headers.insert("CamelHttpQuery".to_string(), serde_json::json!("q=1"));
+    let skip = vec!["x-secret".to_string()];
+    let outbound = select_outbound_headers(&headers, &skip, &[]);
+    let has = |name: &str| {
+        outbound
+            .accepted
+            .iter()
+            .any(|(k, _)| k.as_str().eq_ignore_ascii_case(name))
+    };
+    assert!(has("X-Good"), "valid header must survive");
+    assert!(!has("X Bad Name"), "invalid header name must drop");
+    assert!(!has("X-Control-Value"), "control-char value must drop");
+    assert!(!has("X-Secret"), "skipped header must drop");
+    assert!(!has("CamelHttpQuery"), "Camel-namespace header must drop");
+    let reason = |n: &str| {
+        outbound
+            .drops
+            .iter()
+            .find(|d| d.name == n)
+            .map(|d| d.reason)
+    };
+    assert_eq!(reason("X Bad Name"), Some("invalid header name"));
+    assert_eq!(reason("X-Control-Value"), Some("invalid header value"));
+    assert_eq!(reason("X-Secret"), Some("skip_request_headers"));
+    assert_eq!(reason("CamelHttpQuery"), Some("Camel namespace"));
+}
+
+#[test]
+fn constructed_header_invalid_value_returns_drop_record() {
+    let result = constructed_header("user-agent", "bad\r\ns3nt1nel");
+    let Err(record) = result else {
+        panic!("invalid value must produce a drop record");
+    };
+    assert_eq!(record.reason, "invalid header value");
+    assert_eq!(record.name, "user-agent");
+    assert!(record.value_kind.is_none());
+    let debug = format!("{record:?}");
+    assert!(
+        !debug.contains("bad\r\n") && !debug.contains("s3nt1nel"),
+        "drop record debug must not leak the value"
+    );
+}
+
+#[test]
+fn constructed_header_invalid_name_returns_drop_record() {
+    let result = constructed_header("bad name", "ok");
+    let Err(record) = result else {
+        panic!("invalid name must produce a drop record");
+    };
+    assert_eq!(record.reason, "invalid header name");
+    assert_eq!(record.name, "bad name");
+    let debug = format!("{record:?}");
+    assert!(
+        !debug.contains("ok"),
+        "drop record debug must not leak the value"
+    );
+}
+
+#[test]
+fn constructed_header_valid_pair_roundtrip() {
+    let result = constructed_header("authorization", "Bearer abc123");
+    let Ok((name, val)) = result else {
+        panic!("valid pair must construct");
+    };
+    assert_eq!(name.as_str(), "authorization");
+    let Ok(roundtrip) = val.to_str() else {
+        panic!("valid value must roundtrip to str");
+    };
+    assert_eq!(roundtrip, "Bearer abc123");
+}
+
+// -----------------------------------------------------------------------
+// Bridge proxy end-to-end integration tests (Task 4.1)
+// Fully local + deterministic: raw TCP / in-process consumer / reqwest
+// to 127.0.0.1. No public CDN, no httpbin, no network egress.
+// -----------------------------------------------------------------------
+
+/// Destination server that captures the outbound request line and the
+/// `Host:` header the producer actually sent on the wire. Returns
+/// `(host_value, request_line)` so a bridge-proxy test can assert that
+/// the producer derived `Host` from the destination (not the exchange)
+/// and honoured bridging semantics for the path.
+async fn start_host_capturing_destination() -> (
+    String,
+    Arc<std::sync::Mutex<Option<(String, String)>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}");
+    let captured: Arc<std::sync::Mutex<Option<(String, String)>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let captured_clone = Arc::clone(&captured);
+    let handle = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 16384];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            if request.contains("\r\n\r\n") {
+                let request_line = request.lines().next().unwrap_or("").to_string();
+                let host_value = request
+                    .lines()
+                    .find(|l| l.to_lowercase().starts_with("host:"))
+                    .and_then(|l| l.split_once(':'))
+                    .map(|(_, v)| v.trim().to_string())
+                    .unwrap_or_default();
+                *captured_clone.lock().unwrap() = Some((host_value, request_line));
+            }
+            let body = r#"{"echo":"ok"}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes()).await;
+        }
+    });
+    (url, captured, handle)
+}
+
+/// A bridging producer must derive `Host` from the destination URL and
+/// ignore the exchange `CamelHttpPath`, matching Apache Camel bridging
+/// semantics. The wire-level proof is the raw `Host:` header and request
+/// line captured at the destination TCP socket.
+#[tokio::test]
+async fn bridge_proxy_outbound_host_matches_destination() {
+    use tower::ServiceExt;
+
+    let (url, captured, _handle) = start_host_capturing_destination().await;
+    // The Host header reqwest derives for http://127.0.0.1:{port} is the
+    // authority, scheme-stripped: "127.0.0.1:{port}".
+    let expected_host = url.strip_prefix("http://").unwrap();
+
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}?bridgeEndpoint=true&allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    // Exchange carries a stale Host and a CamelHttpPath that bridging
+    // must drop.
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header("Host", "localhost");
+    exchange.input.set_header("CamelHttpPath", "/foo");
+
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (host_value, request_line) = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("destination capture mutex empty — producer did not reach the destination");
+
+    assert_ne!(
+        host_value, "localhost",
+        "bridge producer must not forward the exchange Host: localhost"
+    );
+    assert_eq!(
+        host_value, expected_host,
+        "Host must be derived from the destination authority (no scheme)"
+    );
+    assert!(
+        !request_line.contains("/foo"),
+        "bridge_endpoint must drop CamelHttpPath; request line was: {request_line}"
+    );
+}
+
+/// A response header set by the route (`Cache-Control`) must survive to
+/// the wire. The assertion is on the reqwest HTTP response — not an
+/// in-process HttpReply struct — so it proves the consumer's reply
+/// finaliser emitted the header over the socket.
+#[tokio::test]
+async fn bridge_proxy_route_set_response_header_survives() {
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(&format!("http://127.0.0.1:{port}/cache"), &endpoint_ctx)
+        .unwrap();
+    let mut consumer = endpoint.create_consumer(rt()).unwrap();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "http-test-route".to_string());
+
+    tokio::spawn(async move { consumer.start(ctx).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = plain_http_test_client();
+    let send_fut = client.get(format!("http://127.0.0.1:{port}/cache")).send();
+
+    // Route sets Cache-Control on the outbound reply (exchange.input is
+    // the message the reply finaliser reads — see select_response_headers
+    // at the dispatch site).
+    let (http_result, _) = tokio::join!(send_fut, async {
+        if let Some(mut envelope) = rx.recv().await {
+            envelope
+                .exchange
+                .input
+                .set_header("Cache-Control", "public, max-age=3600");
+            if let Some(reply_tx) = envelope.reply_tx {
+                let _ = reply_tx.send(Ok(envelope.exchange));
+            }
+        }
+    });
+
+    let resp = http_result.unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let cache_control = resp.headers().get("cache-control");
+    assert!(
+        cache_control.is_some(),
+        "Cache-Control header must survive to the wire response"
+    );
+    assert_eq!(
+        cache_control.unwrap().to_str().unwrap(),
+        "public, max-age=3600"
+    );
+
+    token.cancel();
+}
+
+// -----------------------------------------------------------------------
+// credential-sources task 2.3: credential values stay out of diagnostics
+// -----------------------------------------------------------------------
+//
+// camel-http has no request access log (design.md "Redaction sinks",
+// ADR-0051). The only diagnostic sink on the failed-auth path is
+// `pipeline_error_to_reply`, which renders the (generic) error message and
+// the *configured* route path — never the request URI, query string, or
+// extracted credential. These tests pin that redact-by-construction
+// contract: a sentinel credential presented in a declared source must not
+// appear in the reply body nor in any tracing record emitted while the
+// request is handled.
+//
+// Capture scope: `#[traced_test]` installs a per-crate env filter
+// (`camel_component_http=trace`), so records from OTHER targets
+// (`camel_auth`, `camel_processor`, etc.) are NOT captured here. The
+// redaction contract for those crates is guarded by their own tests.
+// Revisit this capture scope if camel-auth ever logs on the auth path.
+use camel_api::security_policy::CredentialSource;
+use camel_auth::credential_source::extract_token_from_exchange;
+use camel_auth::native_auth::NativeCredentialStore;
+use camel_auth::{StaticTokenAuthenticator, TokenAuthenticator};
+
+// Sentinel credential values — test fixtures only, not real secrets.
+const SENTINEL_QRY_42: &str = "SENTINEL_QRY_42"; // allow-secret
+const SENTINEL_CKY_7: &str = "SENTINEL_CKY_7"; // allow-secret
+const SENTINEL_BAD_1: &str = "SENTINEL_BAD_1"; // allow-secret
+
+/// Build the exchange the consumer would build for a request envelope:
+/// standard Camel HTTP headers plus title-cased forwarded request headers.
+fn envelope_to_exchange(envelope: &RequestEnvelope) -> Exchange {
+    let mut msg = Message::default();
+    msg.set_header(
+        "CamelHttpMethod",
+        serde_json::Value::String(envelope.method.clone()),
+    );
+    msg.set_header(
+        "CamelHttpPath",
+        serde_json::Value::String(envelope.path.clone()),
+    );
+    msg.set_header(
+        "CamelHttpQuery",
+        serde_json::Value::String(envelope.query.clone()),
+    );
+    for (k, v) in &envelope.headers {
+        if let Ok(val_str) = v.to_str() {
+            msg.set_header(
+                title_case_header(k.as_str()),
+                serde_json::Value::String(val_str.to_string()),
+            );
+        }
+    }
+    Exchange::new(msg)
+}
+
+/// Register a route whose responder authenticates each request against an
+/// empty native store, so every presented credential fails lookup with
+/// `Unauthenticated` (401). Restores the pre-AuthContext `RolePolicy`
+/// authentication step (extract per `sources` → authenticate → deny) so the
+/// credential-extraction redaction contract is exercised on a real
+/// authentication failure.
+async fn spawn_failing_auth_route(
+    registry: &HttpRouteRegistry,
+    path: &str,
+    sources: Vec<CredentialSource>,
+) {
+    let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(
+        NativeCredentialStore::try_new(vec![]).unwrap(),
+    ));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
+    registry.register_api_route(path.to_string(), tx).await;
+    let path_owned = path.to_string();
+    tokio::spawn(async move {
+        loop {
+            // Per-iteration deadline (lintwiden D4.2): each recv
+            // await is bounded; a stall panics the task instead of
+            // parking it. Channel close still ends the loop.
+            match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    let exchange = envelope_to_exchange(&envelope);
+                    let reply_tx = envelope.reply_tx;
+                    // Per-request deadline (lintwiden D4.2): a wedged
+                    // authenticator must fail the request instead of
+                    // pinning the route task.
+                    let reply = match extract_token_from_exchange(&exchange, &sources)
+                        .map(|extracted| extracted.token)
+                    {
+                        Some(token) => {
+                            match tokio::time::timeout(
+                                Duration::from_secs(10),
+                                authenticator.authenticate_bearer(&token),
+                            )
+                            .await
+                            {
+                                Ok(Ok(_)) => HttpReply {
+                                    status: 200,
+                                    headers: vec![],
+                                    body: HttpReplyBody::Bytes(bytes::Bytes::from("ok")),
+                                },
+                                Ok(Err(e)) => pipeline_error_to_reply(e, &path_owned),
+                                Err(_) => pipeline_error_to_reply(
+                                    CamelError::ProcessorError(
+                                        "authenticator stalled beyond 10s".into(),
+                                    ),
+                                    &path_owned,
+                                ),
+                            }
+                        }
+                        None => pipeline_error_to_reply(
+                            CamelError::Unauthenticated("no credential in any source".into()),
+                            &path_owned,
+                        ),
+                    };
+                    let _ = reply_tx.send(reply);
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    panic!("spawn_failing_auth_route: no request arrived within 10s")
+                }
+            }
+        }
+    });
+}
+
+/// Whether any tracing record captured so far (process-wide) contains
+/// `needle`. `#[traced_test]` installs a global subscriber writing to a
+/// shared buffer, so logs from spawned request-handling tasks are included.
+fn captured_logs_contain(needle: &str) -> bool {
+    let buf = tracing_test::internal::global_buf().lock().unwrap();
+    String::from_utf8_lossy(&buf).contains(needle)
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn error_context_redacts_query_sentinel() {
+    let (port, registry) = spawn_test_server().await;
+    spawn_failing_auth_route(
+        &registry,
+        "/secure-query",
+        vec![CredentialSource::QueryParam {
+            param: "token".to_string(),
+        }],
+    )
+    .await;
+
+    let client = plain_http_test_client();
+    let resp = client
+        // allow-secret: `token` is the declared query-source param name, not a credential
+        .get(format!(
+            "http://127.0.0.1:{port}/secure-query?token={SENTINEL_QRY_42}"
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 401);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "Unauthorized");
+    assert!(
+        !body.contains(SENTINEL_QRY_42),
+        "reply body must not contain the query credential"
+    );
+    assert!(
+        !captured_logs_contain(SENTINEL_QRY_42),
+        "no tracing record during request handling may render the query credential"
+    );
+    // Permanent positive control: the failed-auth warn! must be captured.
+    // If the per-crate env filter ever stops matching, this fails loudly
+    // instead of letting the sentinel assertions pass vacuously.
+    assert!(
+        captured_logs_contain("Authentication failed"),
+        "positive control: the failed-auth warn! must be captured by the test subscriber"
+    );
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn error_context_redacts_cookie_sentinel() {
+    let (port, registry) = spawn_test_server().await;
+    spawn_failing_auth_route(
+        &registry,
+        "/secure-cookie",
+        vec![CredentialSource::Cookie {
+            name: "session".to_string(),
+        }],
+    )
+    .await;
+
+    let client = plain_http_test_client();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/secure-cookie"))
+        .header("Cookie", format!("session={SENTINEL_CKY_7}"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 401);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "Unauthorized");
+    assert!(
+        !body.contains(SENTINEL_CKY_7),
+        "reply body must not contain the cookie credential"
+    );
+    assert!(
+        !captured_logs_contain(SENTINEL_CKY_7),
+        "no tracing record during request handling may render the cookie credential"
+    );
+}
+
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn error_reply_no_credential_value() {
+    let (port, registry) = spawn_test_server().await;
+    spawn_failing_auth_route(
+        &registry,
+        "/secure-bad",
+        vec![CredentialSource::Cookie {
+            name: "session".to_string(),
+        }],
+    )
+    .await;
+
+    let client = plain_http_test_client();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/secure-bad"))
+        .header("Cookie", format!("session={SENTINEL_BAD_1}"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status().as_u16(), 401);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, "Unauthorized");
+    assert!(
+        !body.contains(SENTINEL_BAD_1),
+        "reply body must not contain the credential value"
+    );
+    assert!(
+        !captured_logs_contain(SENTINEL_BAD_1),
+        "error logs must not render the credential value"
+    );
+}
+
+// -----------------------------------------------------------------------
+// Pinned-client-cache producer-path behavioral tests
+// (openspec/changes/http-pinned-client-cache — scenarios: producers share
+// the endpoint cache, hostname requests build one client while the entry
+// stays retrievable, IP-literal requests bypass the cache)
+// -----------------------------------------------------------------------
+
+/// Local responder that accepts any number of HTTP/1.1 connections on an
+/// ephemeral 127.0.0.1 port and answers each with a fixed 200 response.
+/// Unlike [`start_host_capturing_destination`], which serves exactly one
+/// connection, this loop keeps accepting so cache-reuse tests can drive
+/// several requests through one destination. Returns
+/// `(base_url, JoinHandle)`.
+async fn spawn_multi_accept_200() -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral 127.0.0.1 listener");
+    let port = listener.local_addr().expect("local addr").port();
+    let base_url = format!("http://localhost:{port}");
+    let handle = tokio::spawn(async move {
+        while let Ok((mut conn, _)) = listener.accept().await {
+            let _ = conn
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await;
+            let _ = conn.shutdown().await;
+        }
+    });
+    (base_url, handle)
+}
+
+/// rc-0li3: local HTTPS responder — the TLS twin of
+/// [`spawn_multi_accept_200`]. Accepts any number of TLS connections on
+/// an ephemeral 127.0.0.1 port and answers each with a fixed 200. The
+/// certificate comes from `camel_component_api::test_support`
+/// (SANs: localhost, 127.0.0.1, ::1); clients run with
+/// `tls.insecure = true`.
+async fn spawn_tls_multi_accept_200() -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::AsyncWriteExt;
+
+    let (_ca_pem, cert_pem, key_pem) = camel_component_api::test_support::tls::gen_server_cert();
+    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
+        .collect::<Result<_, _>>()
+        .expect("parse server cert pem");
+    let key = rustls_pemfile::private_key(&mut key_pem.as_bytes())
+        .expect("parse server key pem")
+        .expect("server key present");
+    // Explicit provider: the process default is ambiguous when multiple
+    // crates pull rustls feature sets; the graph enables aws-lc-rs.
+    let provider = std::sync::Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
+    let tls_cfg = tokio_rustls::rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("safe default protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .expect("build rustls server config");
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls_cfg));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral 127.0.0.1 listener");
+    let port = listener.local_addr().expect("local addr").port();
+    let base_url = format!("https://localhost:{port}");
+    let handle = tokio::spawn(async move {
+        while let Ok((conn, _)) = listener.accept().await {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                if let Ok(mut tls) = acceptor.accept(conn).await {
+                    let _ = tls
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                        .await;
+                    let _ = tls.shutdown().await;
+                }
+            });
+        }
+    });
+    (base_url, handle)
+}
+
+/// Port of a [`spawn_multi_accept_200`] base URL, for tests that must
+/// target a different authority (the 127.0.0.1 literal) on the same
+/// listener.
+fn responder_port(base_url: &str) -> u16 {
+    url::Url::parse(base_url)
+        .expect("responder base URL parses")
+        .port()
+        .expect("responder base URL carries an explicit port")
+}
+
+/// Build an endpoint literal whose outbound config points at
+/// `base_url` (with `allowInternal=true` so the SSRF resolver permits
+/// loopback) and whose pinned-client cache is the caller-owned Arc, so
+/// build counts stay observable across producers.
+fn endpoint_with_shared_cache(
+    base_url: &str,
+    pinned_cache: &Arc<PinnedClientCache>,
+) -> HttpEndpoint {
+    let uri = format!("{base_url}?allowInternal=true");
+    HttpEndpoint {
+        uri: uri.clone(),
+        config: HttpEndpointConfig::from_uri(&uri).expect("producer endpoint config parses"),
+        server_config: HttpServerConfig::from_uri(&uri).expect("server config parses"),
+        client: plain_http_test_client(),
+        pinned_cache: Arc::clone(pinned_cache),
+        http_config: HttpConfig::default(),
+    }
+}
+
+#[tokio::test]
+async fn producers_share_endpoint_cache() {
+    use tower::ServiceExt;
+
+    let (base_url, _handle) = spawn_multi_accept_200().await;
+    let pinned_cache = Arc::new(PinnedClientCache::new(
+        PINNED_CLIENT_TTL,
+        PINNED_CLIENT_MAX_ENTRIES,
+    ));
+
+    let ctx = test_producer_ctx();
+    let endpoint = endpoint_with_shared_cache(&format!("{base_url}/"), &pinned_cache);
+    let producer_a = endpoint.create_producer(rt(), &ctx);
+    let producer_b = endpoint.create_producer(rt(), &ctx);
+
+    // Each producer sends one exchange whose resolved URL is the
+    // endpoint's localhost base URL (a domain name → pinned-client path).
+    for producer in [producer_a, producer_b] {
+        let producer = producer.expect("create producer");
+        let exchange = Exchange::new(Message::default());
+        let reply = producer.oneshot(exchange).await;
+        assert!(reply.is_ok(), "producer call failed: {:?}", reply);
+    }
+
+    assert_eq!(
+        pinned_cache.build_count(),
+        1,
+        "both producers must hit the same shared cache entry; a second \
+         build means sharing is broken"
+    );
+}
+
+#[tokio::test]
+async fn producer_repeated_hostname_requests_build_one_client() {
+    use tower::ServiceExt;
+
+    let (base_url, _handle) = spawn_multi_accept_200().await;
+    let pinned_cache = Arc::new(PinnedClientCache::new(
+        PINNED_CLIENT_TTL,
+        PINNED_CLIENT_MAX_ENTRIES,
+    ));
+    let ctx = test_producer_ctx();
+    let endpoint = endpoint_with_shared_cache(&format!("{base_url}/"), &pinned_cache);
+    let producer = endpoint
+        .create_producer(rt(), &ctx)
+        .expect("create producer");
+
+    // Two sequential hostname requests — the cached pinned client stays
+    // retrievable between them, so no second build may happen.
+    for i in 0..2 {
+        let exchange = Exchange::new(Message::default());
+        let reply = producer.clone().oneshot(exchange).await;
+        assert!(reply.is_ok(), "request {i} failed: {:?}", reply);
+    }
+
+    assert_eq!(
+        pinned_cache.build_count(),
+        1,
+        "repeated hostname requests must reuse the one pinned client; \
+         0 builds means the producer bypassed the cache, more than 1 \
+         means the entry was dropped"
+    );
+}
+
+#[tokio::test]
+async fn ip_literal_request_never_enters_cache() {
+    use tower::ServiceExt;
+
+    let (base_url, _handle) = spawn_multi_accept_200().await;
+    let pinned_cache = Arc::new(PinnedClientCache::new(
+        PINNED_CLIENT_TTL,
+        PINNED_CLIENT_MAX_ENTRIES,
+    ));
+
+    let ctx = test_producer_ctx();
+    let destination = format!("http://127.0.0.1:{}/ping", responder_port(&base_url));
+    let endpoint = endpoint_with_shared_cache(&destination, &pinned_cache);
+    let producer = endpoint
+        .create_producer(rt(), &ctx)
+        .expect("create producer");
+
+    let exchange = Exchange::new(Message::default());
+    let reply = producer.oneshot(exchange).await;
+    assert!(reply.is_ok(), "producer call failed: {:?}", reply);
+
+    assert_eq!(
+        pinned_cache.build_count(),
+        0,
+        "an IP-literal URL must use the shared unpinned client and \
+         never enter the pinned cache"
+    );
+}
+
+#[tokio::test]
+async fn test_component_endpoints_share_pinned_cache() {
+    use tower::ServiceExt;
+
+    let component = HttpComponent::new();
+    let (base_url, _handle) = spawn_multi_accept_200().await;
+    let baseline = component.pinned_cache.build_count();
+
+    let ctx = test_producer_ctx();
+    let endpoint_ctx = NoOpComponentContext;
+    for uri in [
+        format!("{base_url}/a?allowInternal=true&k=a"),
+        format!("{base_url}/b?allowInternal=true&k=b"),
+    ] {
+        let endpoint = component
+            .create_endpoint(&uri, &endpoint_ctx)
+            .expect("create endpoint");
+        let producer = endpoint
+            .create_producer(rt(), &ctx)
+            .expect("create producer");
+        let exchange = Exchange::new(Message::default());
+        let reply = producer.oneshot(exchange).await;
+        assert!(reply.is_ok(), "producer call failed: {:?}", reply);
+    }
+
+    assert_eq!(
+        component.pinned_cache.build_count() - baseline,
+        1,
+        "endpoints created by one component must share its pinned cache; \
+         0 builds means the endpoints bypassed it, more than 1 means \
+         per-endpoint caches came back"
+    );
+}
+
+#[tokio::test]
+async fn test_dynamic_resolution_sequence_hits_shared_cache() {
+    use tower::ServiceExt;
+
+    let component = HttpComponent::new();
+    let (base_url, _handle) = spawn_multi_accept_200().await;
+    let baseline = component.pinned_cache.build_count();
+
+    let ctx = test_producer_ctx();
+    let endpoint_ctx = NoOpComponentContext;
+    for i in 0..3 {
+        let endpoint = component
+            .create_endpoint(
+                &format!("{base_url}/r{i}?allowInternal=true&k={i}"),
+                &endpoint_ctx,
+            )
+            .expect("create endpoint");
+        let producer = endpoint
+            .create_producer(rt(), &ctx)
+            .expect("create producer");
+        let exchange = Exchange::new(Message::default());
+        let reply = producer.oneshot(exchange).await;
+        assert!(reply.is_ok(), "request {i} failed: {:?}", reply);
+    }
+
+    assert_eq!(
+        component.pinned_cache.build_count() - baseline,
+        1,
+        "a dynamic-resolution sequence (fresh endpoint+producer per URI) \
+         must reuse the component's one pinned cache entry; 0 builds \
+         means the endpoints bypassed it, more than 1 means \
+         per-endpoint caches came back"
+    );
+}
+
+/// rc-0li3: BEHAVIORAL https sharing pin — two https endpoints created
+/// through one `HttpsComponent` drive real TLS requests through the
+/// component's single pinned cache. A regression that reintroduces
+/// per-endpoint `PinnedClientCache::new` inside
+/// `HttpsComponent::create_endpoint` leaves the component cache at
+/// delta 0 and fails this test (the structural ptr_eq test cannot see
+/// that).
+#[tokio::test]
+async fn test_https_component_endpoints_share_pinned_cache_behaviorally() {
+    use tower::ServiceExt;
+
+    let http_config = HttpConfig {
+        tls: Some(crate::config::TlsConfig {
+            enabled: true,
+            insecure: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let component = HttpsComponent::with_config(http_config);
+    let (base_url, _handle) = spawn_tls_multi_accept_200().await;
+    let baseline = component.pinned_cache.build_count();
+
+    let ctx = test_producer_ctx();
+    let endpoint_ctx = NoOpComponentContext;
+    for uri in [
+        format!("{base_url}/a?allowInternal=true&k=a"),
+        format!("{base_url}/b?allowInternal=true&k=b"),
+    ] {
+        let endpoint = component
+            .create_endpoint(&uri, &endpoint_ctx)
+            .expect("create https endpoint");
+        let producer = endpoint
+            .create_producer(rt(), &ctx)
+            .expect("create producer");
+        let exchange = Exchange::new(Message::default());
+        let reply = producer.oneshot(exchange).await;
+        assert!(reply.is_ok(), "https request failed: {reply:?}");
+    }
+
+    assert_eq!(
+        component.pinned_cache.build_count() - baseline,
+        1,
+        "endpoints of one HttpsComponent must share its pinned cache over \
+         real https requests; 0 builds means the endpoints bypassed it \
+         (per-endpoint cache regression), more than 1 means \
+         per-endpoint caches came back"
+    );
+}
+
+#[test]
+fn test_https_component_owns_distinct_cache() {
+    let http = HttpComponent::new();
+    let https = HttpsComponent::new();
+
+    assert!(
+        !Arc::ptr_eq(&http.pinned_cache, &https.pinned_cache),
+        "http and https components must each own their own pinned cache"
+    );
+
+    let endpoint_ctx = NoOpComponentContext;
+    let _ = http
+        .create_endpoint("http://localhost:1/?allowInternal=true", &endpoint_ctx)
+        .expect("http endpoint");
+    let _ = https
+        .create_endpoint("https://localhost:1/?allowInternal=true", &endpoint_ctx)
+        .expect("https endpoint");
+
+    assert_eq!(
+        http.pinned_cache.build_count(),
+        0,
+        "endpoint creation must not build a pinned client"
+    );
+    assert_eq!(
+        https.pinned_cache.build_count(),
+        0,
+        "endpoint creation must not build a pinned client"
+    );
+}
+
+#[test]
+fn test_component_constructor_builds_one_unpinned_client() {
+    let baseline = build_client_call_count();
+
+    let _http = HttpComponent::new();
+    assert_eq!(
+        build_client_call_count() - baseline,
+        1,
+        "HttpComponent::new() must build exactly one shared unpinned client"
+    );
+
+    let _https = HttpsComponent::new();
+    assert_eq!(
+        build_client_call_count() - baseline,
+        2,
+        "HttpsComponent::new() must build exactly one more shared unpinned client"
+    );
+}
+
+#[test]
+fn test_component_endpoints_share_unpinned_client() {
+    let component = HttpComponent::new();
+    let baseline = build_client_call_count();
+
+    let endpoint_ctx = NoOpComponentContext;
+    for uri in [
+        "http://localhost:1/a?allowInternal=true",
+        "http://localhost:1/b?allowInternal=true",
+    ] {
+        let _endpoint = component
+            .create_endpoint(uri, &endpoint_ctx)
+            .expect("create endpoint");
+    }
+
+    assert_eq!(
+        build_client_call_count() - baseline,
+        0,
+        "create_endpoint must clone the component's shared unpinned client, \
+         never build a fresh one"
+    );
+}
+
+#[test]
+fn test_dynamic_resolution_adds_no_unpinned_client_builds() {
+    let component = HttpComponent::new();
+    let baseline = build_client_call_count();
+
+    let ctx = test_producer_ctx();
+    let endpoint_ctx = NoOpComponentContext;
+    for i in 0..3 {
+        let endpoint = component
+            .create_endpoint(
+                &format!("http://localhost:1/r{i}?allowInternal=true&k={i}"),
+                &endpoint_ctx,
+            )
+            .expect("create endpoint");
+        let _producer = endpoint
+            .create_producer(rt(), &ctx)
+            .expect("create producer");
+    }
+
+    assert_eq!(
+        build_client_call_count() - baseline,
+        0,
+        "a dynamic-resolution sequence (fresh endpoint+producer per URI) \
+         must reuse the component's shared unpinned client and build \
+         no additional clients"
+    );
+}
