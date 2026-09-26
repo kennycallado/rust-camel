@@ -214,131 +214,131 @@ bytes v1.12.1
 calendrical_calculations feature "default"
 calendrical_calculations v0.2.4
 camel-api feature "default"
-camel-api v0.49.0
+camel-api v0.54.0
 camel-auth feature "default"
-camel-auth v0.49.0
+camel-auth v0.54.0
 camel-bean feature "default"
-camel-bean v0.49.0
+camel-bean v0.54.0
 camel-bean-macros feature "default"
-camel-bean-macros v0.49.0 (proc-macro)
+camel-bean-macros v0.54.0 (proc-macro)
 camel-bridge feature "default"
-camel-bridge v0.49.0
-camel-bundles v0.49.0
-camel-cli v0.49.0
+camel-bridge v0.54.0
+camel-bundles v0.54.0
+camel-cli v0.54.0
 camel-component-api feature "default"
-camel-component-api v0.49.0
+camel-component-api v0.54.0
 camel-component-controlbus feature "default"
-camel-component-controlbus v0.49.0
+camel-component-controlbus v0.54.0
 camel-component-cron feature "default"
-camel-component-cron v0.49.0
+camel-component-cron v0.54.0
 camel-component-cxf feature "default"
-camel-component-cxf v0.49.0
+camel-component-cxf v0.54.0
 camel-component-direct feature "default"
-camel-component-direct v0.49.0
+camel-component-direct v0.54.0
 camel-component-file feature "default"
-camel-component-file v0.49.0
+camel-component-file v0.54.0
 camel-component-grpc feature "default"
-camel-component-grpc v0.49.0
+camel-component-grpc v0.54.0
 camel-component-http feature "default"
-camel-component-http v0.49.0
+camel-component-http v0.54.0
 camel-component-jms feature "default"
-camel-component-jms v0.49.0
+camel-component-jms v0.54.0
 camel-component-keycloak feature "default"
-camel-component-keycloak v0.49.0
+camel-component-keycloak v0.54.0
 camel-component-llm feature "default"
 camel-component-llm feature "mock"
-camel-component-llm v0.49.0
+camel-component-llm v0.54.0
 camel-component-log feature "default"
-camel-component-log v0.49.0
+camel-component-log v0.54.0
 camel-component-mcp feature "default"
-camel-component-mcp v0.49.0
+camel-component-mcp v0.54.0
 camel-component-mock feature "default"
-camel-component-mock v0.49.0
+camel-component-mock v0.54.0
 camel-component-mqtt feature "default"
 camel-component-mqtt feature "tls"
-camel-component-mqtt v0.49.0
+camel-component-mqtt v0.54.0
 camel-component-opensearch feature "default"
-camel-component-opensearch v0.49.0
+camel-component-opensearch v0.54.0
 camel-component-redis feature "default"
 camel-component-redis feature "sentinel"
-camel-component-redis v0.49.0
+camel-component-redis v0.54.0
 camel-component-seda feature "default"
-camel-component-seda v0.49.0
+camel-component-seda v0.54.0
 camel-component-sql feature "default"
 camel-component-sql feature "mysql"
 camel-component-sql feature "postgres"
 camel-component-sql feature "sqlite"
-camel-component-sql v0.49.0
+camel-component-sql v0.54.0
 camel-component-stream feature "default"
-camel-component-stream v0.49.0
+camel-component-stream v0.54.0
 camel-component-timer feature "default"
-camel-component-timer v0.49.0
+camel-component-timer v0.54.0
 camel-component-validator feature "default"
-camel-component-validator v0.49.0
+camel-component-validator v0.54.0
 camel-component-wasm feature "default"
-camel-component-wasm v0.49.0
+camel-component-wasm v0.54.0
 camel-component-ws feature "default"
-camel-component-ws v0.49.0
+camel-component-ws v0.54.0
 camel-config feature "default"
 camel-config feature "otel"
-camel-config v0.49.0
+camel-config v0.54.0
 camel-core feature "default"
 camel-core feature "export-internal-adapters"
-camel-core v0.49.0
+camel-core v0.54.0
 camel-dataformat-protobuf feature "default"
-camel-dataformat-protobuf v0.49.0
+camel-dataformat-protobuf v0.54.0
 camel-dsl feature "default"
-camel-dsl v0.49.0
+camel-dsl v0.54.0
 camel-endpoint feature "default"
-camel-endpoint v0.49.0
+camel-endpoint v0.54.0
 camel-endpoint-macros feature "default"
-camel-endpoint-macros v0.49.0 (proc-macro)
+camel-endpoint-macros v0.54.0 (proc-macro)
 camel-health feature "default"
-camel-health v0.49.0
+camel-health v0.54.0
 camel-integration-test feature "default"
-camel-integration-test v0.49.0
+camel-integration-test v0.54.0
 camel-language-api feature "default"
-camel-language-api v0.49.0
+camel-language-api v0.54.0
 camel-language-js feature "default"
-camel-language-js v0.49.0
+camel-language-js v0.54.0
 camel-language-jsonpath feature "default"
-camel-language-jsonpath v0.49.0
+camel-language-jsonpath v0.54.0
 camel-language-minijinja feature "default"
-camel-language-minijinja v0.49.0
+camel-language-minijinja v0.54.0
 camel-language-rhai feature "default"
-camel-language-rhai v0.49.0
+camel-language-rhai v0.54.0
 camel-language-simple feature "default"
-camel-language-simple v0.49.0
+camel-language-simple v0.54.0
 camel-language-xpath feature "default"
-camel-language-xpath v0.49.0
+camel-language-xpath v0.54.0
 camel-lint feature "default"
-camel-lint v0.49.0
+camel-lint v0.54.0
 camel-lsp feature "default"
-camel-lsp v0.49.0
+camel-lsp v0.54.0
 camel-master feature "default"
-camel-master v0.49.0
+camel-master v0.54.0
 camel-matchers feature "default"
-camel-matchers v0.49.0
+camel-matchers v0.54.0
 camel-otel feature "default"
-camel-otel v0.49.0
+camel-otel v0.54.0
 camel-platform-kubernetes feature "default"
-camel-platform-kubernetes v0.49.0
+camel-platform-kubernetes v0.54.0
 camel-processor feature "default"
-camel-processor v0.49.0
+camel-processor v0.54.0
 camel-prometheus feature "default"
-camel-prometheus v0.49.0
+camel-prometheus v0.54.0
 camel-proto-compiler feature "default"
-camel-proto-compiler v0.49.0
+camel-proto-compiler v0.54.0
 camel-redis-repo feature "default"
-camel-redis-repo v0.49.0
+camel-redis-repo v0.54.0
 camel-template feature "default"
-camel-template v0.49.0
+camel-template v0.54.0
 camel-wit feature "default"
-camel-wit v0.49.0
+camel-wit v0.54.0
 camel-xj feature "default"
-camel-xj v0.49.0
+camel-xj v0.54.0
 camel-xslt feature "default"
-camel-xslt v0.49.0
+camel-xslt v0.54.0
 cap-fs-ext feature "cap-std"
 cap-fs-ext feature "default"
 cap-fs-ext feature "std"
@@ -539,6 +539,12 @@ csv feature "default"
 csv v1.4.0
 csv-core feature "default"
 csv-core v0.1.13
+curve25519-dalek feature "alloc"
+curve25519-dalek feature "digest"
+curve25519-dalek feature "precomputed-tables"
+curve25519-dalek v4.1.3
+curve25519-dalek-derive feature "default"
+curve25519-dalek-derive v0.1.1 (proc-macro)
 darling feature "default"
 darling feature "suggestions"
 darling v0.23.0
@@ -618,6 +624,18 @@ dynify feature "macros"
 dynify v0.1.2
 dynify-macros feature "default"
 dynify-macros v0.1.2 (proc-macro)
+ed25519 feature "alloc"
+ed25519 feature "std"
+ed25519 v2.2.3
+ed25519-dalek feature "alloc"
+ed25519-dalek feature "default"
+ed25519-dalek feature "digest"
+ed25519-dalek feature "fast"
+ed25519-dalek feature "hazmat"
+ed25519-dalek feature "signature"
+ed25519-dalek feature "std"
+ed25519-dalek feature "zeroize"
+ed25519-dalek v2.2.0
 educe feature "Clone"
 educe feature "Debug"
 educe feature "Hash"
