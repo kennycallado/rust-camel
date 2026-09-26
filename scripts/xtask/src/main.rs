@@ -12,6 +12,8 @@ mod lint_unbounded_wait;
 mod mutants;
 mod scan_state;
 
+use xtask::archive;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -238,6 +240,15 @@ enum Commands {
         /// Emit survivor JSON lines on stdout (child output goes to stderr)
         #[arg(long)]
         json: bool,
+    },
+    /// Archive an OpenSpec change, pre-syncing scenario rename/drop
+    /// directives into the canonical specs first (archengine design §3).
+    Archive {
+        /// Change name under openspec/changes/
+        change: String,
+        /// Run the guard matrix and print verdicts without writing anything
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -734,6 +745,13 @@ fn main() {
             if let Err(msg) = mutants::run(&root, &args) {
                 eprintln!("error: {msg}");
                 std::process::exit(1);
+            }
+        }
+        Commands::Archive { change, check } => {
+            let workspace_root = workspace_root_or_exit();
+            let code = archive::run(&workspace_root, &change, check);
+            if code != 0 {
+                std::process::exit(code);
             }
         }
     }

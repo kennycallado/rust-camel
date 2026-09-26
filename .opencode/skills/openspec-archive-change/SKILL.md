@@ -69,6 +69,22 @@ Archive a completed change in the experimental workflow.
 
    If user chooses sync, use Task tool (subagent_type: "general-purpose", prompt: "Use Skill tool to invoke openspec-sync-specs for change '<name>'. Delta spec analysis: <include the analyzed delta spec summary>"). Proceed to archive regardless of choice.
 
+   **Renaming or dropping scenarios (directive required):** Upstream archive refuses a MODIFIED block that renames or drops a scenario. When that is intended, the delta author adds an `openspec-scenario-ops` directive comment inside that MODIFIED requirement block:
+
+   ```
+   <!-- openspec-scenario-ops
+   renamed: Old scenario header -> New scenario header
+   dropped: Some scenario | one-line justification (required)
+   -->
+   ```
+
+   - Drops require a non-empty justification; no silent drops.
+   - No directive = strict superset behavior (today's semantics, nothing changes).
+   - `cargo xtask archive <change> --check` verifies directives without writing.
+   - The wrapper still runs ALL upstream validation (MODIFIED∩REMOVED conflict etc. still enforced).
+
+   Archive such changes through `cargo xtask archive <change>` (NOT raw `openspec archive`): the wrapper validates the directives and pre-syncs the canon before exec'ing the engine.
+
 5. **Perform the archive**
 
    Create an `archive` directory under `planningHome.changesDir` if it doesn't exist:
