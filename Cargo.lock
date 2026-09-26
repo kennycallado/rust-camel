@@ -1418,6 +1418,7 @@ dependencies = [
  "chrono",
  "clap",
  "config",
+ "ed25519-dalek",
  "glob",
  "humantime",
  "include_dir",
@@ -4304,6 +4305,7 @@ dependencies = [
  "ed25519",
  "serde",
  "sha2 0.10.9",
+ "signature",
  "subtle",
  "zeroize",
 ]

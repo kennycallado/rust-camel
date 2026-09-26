@@ -282,10 +282,29 @@ Extension boundaries sit on the store, not on new formats. R2 (deploy-time
 asset embedding, landed) added asset entries and the substitution table to
 the store; R3 (multi-entry
 artifacts) may extend entry-point cardinality using the same store without
-changing R1 runtime semantics. Compression (R6), signing (R4), and
-cross-target compilation (R7) stay deferred as roadmap milestones, not
-permanent non-goals; component-crate byte seams are additive
-per-consumer follow-ups.
+changing R1 runtime semantics. Compression (R6) and cross-target
+compilation (R7) stay deferred as roadmap milestones, not permanent
+non-goals; component-crate byte seams are additive per-consumer
+follow-ups.
+
+R4 artifact signing landed in the `r4sign` change (ADR-0083). `camel compile
+--sign` emits a detached 148-byte `CAMELSG1` envelope beside the artifact;
+the key source is `--signing-key <PATH>` or `CAMEL_COMPILE_SIGNING_KEY`
+(arg wins, stray variable without `--sign` rejects). The signature is
+Ed25519ph over the complete final artifact bytes — the same stream
+`write_artifact` already produces, hashed once with no re-read — and the
+envelope is written after the artifact rename via tmp+rename at mode 0644;
+an envelope failure removes the artifact and exits 2. A signed manifest
+moves to schema 4 with a mandatory `signing` block (algorithm, `blake3:`
+key fingerprint, `required`); unsigned compiles stay schema 3
+byte-identical, and store schema 2 pairs with manifest schema 3 or 4.
+`compile::signature` owns the codec. At boot, a present envelope is
+verified (parse → algorithm → fingerprint → signature) before dispatch,
+any mismatch exits 2, and a required-but-absent envelope exits 2; an
+unsigned artifact without an envelope boots without signature hashing. The
+pre-sanctioned `--verify` artifact argument runs the same chain without
+booting, prints algorithm and fingerprint on exit 0, and is exclusive with
+every other artifact argument.
 
 ## Build profiles
 

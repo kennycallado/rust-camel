@@ -444,6 +444,34 @@ fn compile_full(
     cmd.output().expect("spawn `camel compile`")
 }
 
+/// r4sign Task 1.3: compile with the signing flags — `--sign` with
+/// `--signing-key <seed>` plus `--require-signature` when `require` is
+/// set. `seed` is a runtime-written synthetic 32-byte key file.
+fn compile_signed(dir: &Path, doc: &str, artifact: &str, seed: &Path, require: bool) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_camel"));
+    cmd.env_clear()
+        .current_dir(dir)
+        .args(["compile", doc, "-o", artifact, "--sign", "--signing-key"])
+        .arg(seed);
+    if require {
+        cmd.arg("--require-signature");
+    }
+    cmd.output().expect("spawn `camel compile --sign`")
+}
+
+/// The detached signature envelope path of `artifact`: the artifact
+/// path with `.sig` appended — the same lookup rule the runtime uses.
+fn sig_path_of(artifact: &Path) -> PathBuf {
+    let mut name = artifact.as_os_str().to_owned();
+    name.push(".sig");
+    PathBuf::from(name)
+}
+
+/// The synthetic fixture signing seed (r4sign Task 1.3): 32 pattern
+/// bytes written to a runtime key file — obviously non-secret, never
+/// committed key material, never real material.
+const FIXTURE_SEED: [u8; 32] = *b"r4sign-fixture-seed-00000000000\0";
+
 /// Distinct documents compiled once per test process. `camel compile`
 /// copies the full ~287 MB `camel` binary into every artifact, so
 /// compiling per test would write gigabytes under parallel execution and
@@ -493,19 +521,26 @@ struct Fixture {
     /// `TYPED_DEFAULT_ARG_DOC` artifact (typed default coerces at
     /// startup, jobtyped Task 5).
     typed_arg: PathBuf,
+    /// r4sign Task 1.3: `JOB_DOC` artifact compiled with `--sign` and
+    /// the runtime-written synthetic seed; the detached envelope sits
+    /// at `<signed_job>.sig`.
+    signed_job: PathBuf,
+    /// r4sign Task 1.3: `JOB_DOC` artifact compiled with `--sign
+    /// --require-signature`; its manifest marks the signature required.
+    signed_required_job: PathBuf,
 }
 
 static FIXTURE: OnceLock<Fixture> = OnceLock::new();
 
 /// Free space the fixture root must have before the suite starts
-/// compiling: thirteen artifact writes at the current ~287 MB binary
-/// (~3.7 GiB — the twelve fixture compiles plus the accepted loose
-/// compile) plus the transient whole-artifact copies (the three
-/// mutation tests hold up to one copy each in parallel). Bump this
-/// when the suite gains artifacts or the binary grows past what the
-/// headroom covers.
+/// compiling: fifteen artifact writes at the current ~287 MB binary
+/// (~4.3 GiB — the fourteen fixture compiles including the two r4sign
+/// signed twins, plus the accepted loose compile) plus the transient
+/// whole-artifact copies (the mutation tests hold up to one copy each
+/// in parallel). Bump this when the suite gains artifacts or the binary
+/// grows past what the headroom covers.
 #[cfg_attr(not(unix), allow(dead_code))]
-const REQUIRED_ROOT_FREE: u64 = 6 << 30;
+const REQUIRED_ROOT_FREE: u64 = 8 << 30;
 
 /// The cargo target directory of this workspace: the fallback fixture
 /// root when the OS temp directory does not have [`REQUIRED_ROOT_FREE`]
@@ -828,6 +863,47 @@ fn fixture() -> &'static Fixture {
             &[],
         );
         let typed_arg = compile_one("typed.job.yaml", TYPED_DEFAULT_ARG_DOC, "typed.bin", &[]);
+        // r4sign Task 1.3: the signed twins. The synthetic seed file is
+        // written at runtime and both compiles emit the detached
+        // 148-byte envelope beside the artifact.
+        let seed_path = dir.join("fixture-signing.key");
+        std::fs::write(&seed_path, FIXTURE_SEED).expect("write synthetic signing seed");
+        let signed_job = {
+            std::fs::write(dir.join("signed.job.yaml"), JOB_DOC).expect("write document");
+            let output =
+                compile_signed(&dir, "signed.job.yaml", "signed-job.bin", &seed_path, false);
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "signed compile must succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let sig = sig_path_of(&dir.join("signed-job.bin"));
+            assert_eq!(
+                std::fs::metadata(&sig).expect("envelope exists").len(),
+                148,
+                "the detached envelope is exactly 148 bytes"
+            );
+            dir.join("signed-job.bin")
+        };
+        let signed_required_job = {
+            std::fs::write(dir.join("signed-req.job.yaml"), JOB_DOC).expect("write document");
+            let output = compile_signed(
+                &dir,
+                "signed-req.job.yaml",
+                "signed-req.bin",
+                &seed_path,
+                true,
+            );
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "signed --require-signature compile must succeed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(sig_path_of(&dir.join("signed-req.bin")).is_file());
+            dir.join("signed-req.bin")
+        };
         Fixture {
             route,
             job,
@@ -841,6 +917,8 @@ fn fixture() -> &'static Fixture {
             multi_job_n,
             multi_job_bad,
             typed_arg,
+            signed_job,
+            signed_required_job,
         }
     })
 }
@@ -863,6 +941,39 @@ fn deploy_artifact(artifact: &Path) -> (tempfile::TempDir, PathBuf) {
         std::fs::copy(artifact, &target).expect("copy artifact");
     }
     (deploy_dir, target)
+}
+
+/// Deploy a signed fixture artifact WITH its detached envelope (r4sign
+/// Task 1.3): the artifact hardlinks zero-copy exactly like
+/// [`deploy_artifact`] and the 148-byte envelope is COPIED beside it
+/// under the runtime's `<artifact>.sig` lookup rule. The envelope copy
+/// is mutable: tests that alter the envelope overwrite their own copy,
+/// never the shared fixture.
+fn deploy_signed(artifact: &Path) -> (tempfile::TempDir, PathBuf) {
+    let (deploy, target) = deploy_artifact(artifact);
+    std::fs::copy(sig_path_of(artifact), sig_path_of(&target)).expect("copy envelope");
+    (deploy, target)
+}
+
+/// Tamper-on-COPY discipline (r4sign Task 1.3): copy the deployed
+/// artifact to `name` with one byte flipped at `offset`, copy the
+/// envelope beside it, and make the copy executable. The shared fixture
+/// and its hardlinked deploys are never mutated.
+fn deploy_flipped_copy(
+    deploy: &tempfile::TempDir,
+    artifact: &Path,
+    name: &str,
+    offset: usize,
+) -> PathBuf {
+    let mut bytes = std::fs::read(artifact).expect("read artifact bytes");
+    assert!(offset < bytes.len(), "flip offset inside the artifact");
+    bytes[offset] ^= 0xFF;
+    let path = deploy.path().join(name);
+    std::fs::write(&path, bytes).expect("write tampered copy");
+    #[cfg(unix)]
+    make_executable(&path);
+    std::fs::copy(sig_path_of(artifact), sig_path_of(&path)).expect("copy envelope to the copy");
+    path
 }
 
 /// Harness-child branch: decode the artifact named by [`CHILD_ENV`], parse
@@ -2932,6 +3043,396 @@ fn compiled_runtime_rejects_invalid_store_before_boot() {
         assert!(
             !combined.contains("context started"),
             "{label} must boot zero routes: {combined}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// r4sign Task 1.3: run-side verification. Every case below drives the REAL
+// self-detect entry — the artifact binary itself — because the signature
+// chain lives in `self_detect_artifact`, before the arg dispatch. The
+// tamper cases follow the tamper-on-COPY discipline: the shared fixture
+// and its hardlinked deploys are never mutated.
+// ---------------------------------------------------------------------------
+
+/// A signed artifact boots and completes exactly as its unsigned twin:
+/// the same exit code, the same job outcome and reply, and no signature
+/// diagnostic anywhere (the valid envelope verifies silently).
+#[test]
+fn signed_artifact_boots_with_valid_envelope() {
+    let (unsigned_deploy, unsigned_artifact) = deploy_artifact(&fixture().job);
+    let (unsigned_code, _, _) = common::run_binary(
+        unsigned_deploy.path(),
+        &unsigned_artifact,
+        &["--report", "unsigned-report.json"],
+        &[],
+    );
+    assert_eq!(
+        unsigned_code, 0,
+        "the unsigned twin must complete (fixture sanity)"
+    );
+
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let (code, stdout, stderr) =
+        common::run_binary(deploy.path(), &artifact, &["--report", "report.json"], &[]);
+    assert_eq!(
+        code, unsigned_code,
+        "signed artifact must exit exactly like its unsigned twin;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(deploy.path().join("report.json"))
+            .expect("signed artifact must write its report"),
+    )
+    .expect("report is JSON");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert_eq!(
+        report["reply"]["body"], "job-done",
+        "the embedded route must run unchanged: {report}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        !all.contains("signature"),
+        "a valid envelope verifies silently: {all}"
+    );
+}
+
+/// End of the executable image inside artifact bytes: everything
+/// before the appended trailer (leading magic + content + index +
+/// manifest + footer). The v2 footer carries the three section lengths
+/// as little-endian `u64`s at offsets 12/20/28.
+fn exe_body_end(bytes: &[u8]) -> usize {
+    let footer = bytes.len() - trailer::FOOTER_LEN_V2;
+    let section_len = |at: usize| {
+        u64::from_le_bytes(
+            bytes[footer + at..footer + at + 8]
+                .try_into()
+                .expect("footer window"),
+        ) as usize
+    };
+    footer - 8 - section_len(12) - section_len(20) - section_len(28)
+}
+
+/// One flipped byte in the executable body (outside the trailer
+/// checksum domain) breaks only the detached signature: the trailer
+/// decodes, the envelope verifies against the streamed bytes, and the
+/// artifact exits 2 naming the signature failure — no boot.
+///
+/// The flip lands on the LAST image byte (section-header-table
+/// metadata the ELF loader never reads): a low offset such as 1000
+/// sits inside `.dynsym`, where one flipped byte kills exec itself
+/// (exit 127) before any verification code can run.
+#[test]
+fn tampered_exe_body_fails_closed() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let bytes = std::fs::read(&artifact).expect("artifact bytes");
+    let flip = exe_body_end(&bytes) - 1;
+    let tampered = deploy_flipped_copy(&deploy, &artifact, "tampered-body.bin", flip);
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &tampered, &[], &[]);
+    assert_eq!(
+        code, 2,
+        "tampered body must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("signature"),
+        "the diagnostic must name the signature failure: {combined}"
+    );
+    assert!(
+        !combined.contains("context started"),
+        "no boot after tampering: {combined}"
+    );
+}
+
+/// One flipped byte inside the trailer's manifest span breaks the
+/// trailer checksum before any signature step: exit 2 with the trailer
+/// integrity diagnostic, no boot.
+#[test]
+fn tampered_trailer_span_fails_closed() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let len = std::fs::metadata(&artifact).expect("artifact size").len() as usize;
+    // The manifest is the last section before the v2 footer, so its
+    // final byte sits directly in front of the footer window.
+    let tampered = deploy_flipped_copy(
+        &deploy,
+        &artifact,
+        "tampered-trailer.bin",
+        len - trailer::FOOTER_LEN_V2 - 1,
+    );
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &tampered, &[], &[]);
+    assert_eq!(
+        code, 2,
+        "tampered trailer must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("integrity error"),
+        "the diagnostic must be the trailer integrity error: {combined}"
+    );
+    assert!(
+        !combined.contains("context started"),
+        "no boot after tampering: {combined}"
+    );
+}
+
+/// An envelope re-created under a SECOND key over the same (untampered)
+/// artifact digest fails closed: the envelope is well-formed but its
+/// verifying key does not match the manifest fingerprint — exit 2
+/// naming the fingerprint mismatch, no boot.
+#[test]
+fn wrong_key_envelope_fails_closed() {
+    use camel_cli::compile::signature;
+    use ed25519_dalek::{Digest as _, Sha512, SigningKey};
+
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let bytes = std::fs::read(&artifact).expect("artifact bytes");
+    let digest: [u8; 64] = Sha512::digest(&bytes).into();
+    // Second synthetic key: 32 obvious pattern bytes, never key material.
+    let second_key = SigningKey::from_bytes(b"r4sign-second-key-0000000000000\0");
+    // The deployed envelope is a copy: overwriting it never touches the
+    // shared fixture.
+    std::fs::write(
+        sig_path_of(&artifact),
+        signature::encode_envelope(&second_key, &digest),
+    )
+    .expect("write wrong-key envelope");
+
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &[], &[]);
+    assert_eq!(
+        code, 2,
+        "wrong-key envelope must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("fingerprint"),
+        "the diagnostic must name the fingerprint mismatch: {combined}"
+    );
+    assert!(
+        !combined.contains("context started"),
+        "no boot on fingerprint mismatch: {combined}"
+    );
+}
+
+/// An envelope truncated by one byte fails closed with the ENVELOPE
+/// diagnostic — distinguishable from a signature failure — and no boot.
+#[test]
+fn corrupt_envelope_fails_closed() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let sig = sig_path_of(&artifact);
+    let mut bytes = std::fs::read(&sig).expect("envelope bytes");
+    assert_eq!(bytes.len(), 148, "fixture envelope is intact");
+    bytes.pop();
+    std::fs::write(&sig, bytes).expect("write truncated envelope");
+
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &[], &[]);
+    assert_eq!(
+        code, 2,
+        "truncated envelope must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("envelope"),
+        "the diagnostic must name the envelope step: {combined}"
+    );
+    assert!(
+        !combined.contains("context started"),
+        "no boot on corrupt envelope: {combined}"
+    );
+}
+
+/// A `--sign --require-signature` artifact whose envelope was removed
+/// refuses to boot: exit 2 naming the missing REQUIRED signature.
+#[test]
+fn required_signature_missing_envelope_fails_closed() {
+    let (deploy, artifact) = deploy_artifact(&fixture().signed_required_job);
+    assert!(
+        !sig_path_of(&artifact).exists(),
+        "the required twin deploys without its envelope"
+    );
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &[], &[]);
+    assert_eq!(
+        code, 2,
+        "missing required signature must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("required") && combined.contains("signature"),
+        "the diagnostic must name the required signature: {combined}"
+    );
+    assert!(
+        !combined.contains("context started"),
+        "no boot without the required envelope: {combined}"
+    );
+}
+
+/// An envelope that cannot be READ at runtime (here: `.sig` is a
+/// directory) fails closed with a named diagnostic, never boots.
+#[test]
+fn envelope_io_error_fails_closed() {
+    // `.sig` exists but is a directory: the read fails mid-verify and
+    // the artifact must fail closed with a named diagnostic (r_glm
+    // holistic finding: the IO-error arm of the verify chain had no
+    // battery coverage).
+    let (deploy, artifact) = deploy_artifact(&fixture().signed_job);
+    std::fs::create_dir_all(sig_path_of(&artifact)).expect("create .sig dir");
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &[], &[]);
+    assert_eq!(
+        code, 2,
+        "unreadable envelope must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("signature verification") || combined.contains("envelope"),
+        "the diagnostic must name the verification step: {combined}"
+    );
+    assert!(
+        !combined.contains("context started"),
+        "no boot with an unreadable envelope: {combined}"
+    );
+}
+
+/// An unsigned artifact with ANY envelope beside it fails closed as an
+/// unpaired envelope: the schema-3 manifest carries no signing block,
+/// so no envelope may be present — exit 2, no boot.
+#[test]
+fn unsigned_with_stray_envelope_fails_closed() {
+    let (deploy, artifact) = deploy_artifact(&fixture().job);
+    std::fs::write(sig_path_of(&artifact), b"stray").expect("write stray envelope");
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &[], &[]);
+    assert_eq!(
+        code, 2,
+        "stray envelope on an unsigned artifact must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("unpaired"),
+        "the diagnostic must name the unpaired envelope: {combined}"
+    );
+    assert!(
+        !combined.contains("context started"),
+        "no boot on a stray envelope: {combined}"
+    );
+}
+
+/// An unsigned artifact without an envelope still boots: the v1
+/// compatibility regression guard — no signature step, zero hashing.
+#[test]
+fn unsigned_without_envelope_still_runs() {
+    let (deploy, artifact) = deploy_artifact(&fixture().job);
+    assert!(
+        !sig_path_of(&artifact).exists(),
+        "no envelope beside the unsigned twin"
+    );
+    let (code, stdout, stderr) =
+        common::run_binary(deploy.path(), &artifact, &["--report", "report.json"], &[]);
+    assert_eq!(
+        code, 0,
+        "unsigned artifact must boot unchanged;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(deploy.path().join("report.json"))
+            .expect("report must be written"),
+    )
+    .expect("report is JSON");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    let all = format!("{stdout}{stderr}");
+    assert!(!all.contains("signature"), "no signature step: {all}");
+}
+
+/// `--verify` on a required-signature artifact whose envelope is absent
+/// exits 2 with the diagnostic naming the requirement (r_glm task-1.3
+/// finding: the required arm of the verify-only wording was untested).
+#[test]
+fn verify_on_required_missing_envelope_names_the_requirement() {
+    let (deploy, artifact) = deploy_artifact(&fixture().signed_required_job);
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &["--verify"], &[]);
+    assert_eq!(
+        code, 2,
+        "--verify on required-without-envelope must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("required") && combined.contains("signature"),
+        "the verify-only diagnostic must name the required signature: {combined}"
+    );
+}
+
+/// `--verify` runs the verification chain without booting: on the
+/// signed fixture it exits 0 printing the algorithm and the manifest's
+/// key fingerprint; on an unsigned artifact it exits 2 naming the
+/// missing envelope.
+#[test]
+fn verify_flag_roundtrip_and_output() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &["--verify"], &[]);
+    assert_eq!(
+        code, 0,
+        "--verify on a signed artifact must succeed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("algorithm: ed25519ph"),
+        "stdout must name the algorithm: {stdout}"
+    );
+    assert!(!stderr.contains("context started"), "no boot: {stderr}");
+
+    // The printed fingerprint is exactly the manifest signing block's.
+    let (manifest_code, manifest_out, _) =
+        common::run_binary(deploy.path(), &artifact, &["--manifest"], &[]);
+    assert_eq!(manifest_code, 0, "--manifest must still work when signed");
+    let manifest: serde_json::Value =
+        serde_json::from_str(manifest_out.trim()).expect("stdout is manifest JSON");
+    let fingerprint = manifest["signing"]["key_fingerprint"]
+        .as_str()
+        .expect("signed manifest records the key fingerprint");
+    assert!(
+        stdout.contains(fingerprint),
+        "--verify must print the manifest fingerprint {fingerprint}: {stdout}"
+    );
+
+    // Unsigned side: no envelope → exit 2 naming its absence.
+    let (unsigned_deploy, unsigned_artifact) = deploy_artifact(&fixture().route);
+    let (unsigned_code, _, unsigned_stderr) = common::run_binary(
+        unsigned_deploy.path(),
+        &unsigned_artifact,
+        &["--verify"],
+        &[],
+    );
+    assert_eq!(
+        unsigned_code, 2,
+        "--verify without an envelope must exit 2;\nstderr:\n{unsigned_stderr}"
+    );
+    assert!(
+        unsigned_stderr.contains("no signature envelope present"),
+        "the diagnostic must name the missing envelope: {unsigned_stderr}"
+    );
+}
+
+/// `--verify` stays exclusive with the other artifact flags: combined
+/// with `--manifest` (either order) it exits 2 with the
+/// duplicate-exclusive diagnostic and prints no manifest.
+#[test]
+fn verify_stays_exclusive() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    for argv in [
+        vec!["--verify", "--manifest"],
+        vec!["--manifest", "--verify"],
+    ] {
+        let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &argv, &[]);
+        assert_eq!(
+            code, 2,
+            "argv {argv:?} must exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        let combined = format!("{stdout}{stderr}");
+        assert!(
+            combined.contains("mutually exclusive"),
+            "argv {argv:?} must carry the duplicate-exclusive diagnostic: {combined}"
+        );
+        assert!(
+            !stdout.contains("manifest_schema"),
+            "argv {argv:?} must not print the manifest: {stdout}"
+        );
+        assert!(
+            !combined.contains("context started"),
+            "argv {argv:?} must not boot: {combined}"
         );
     }
 }

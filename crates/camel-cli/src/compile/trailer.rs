@@ -31,14 +31,16 @@
 //! unsupported version named. A v2 decode applies
 //! the strict version-matched manifest rules (schema 3 — the asset-aware
 //! form with `asset_class`, the secret-material `class`, null paths for
-//! secret-class entries, `total_embedded_bytes`, and `artifact_kind` — or
-//! the R1-era schema 2, each with typed required fields, no unknown
-//! fields, and canonical embedded digests; the schema-less legacy form
-//! only in v1), validates the
+//! secret-class entries, `total_embedded_bytes`, and `artifact_kind` —
+//! schema 4 (r4sign) — the schema-3 fields plus the mandatory `signing`
+//! block — or the R1-era schema 2, each with typed required fields, no
+//! unknown fields, and canonical embedded digests; the schema-less legacy
+//! form only in v1), validates the
 //! content/index sections through the canonical
 //! [`VirtualDocumentStore`] decoder, enforces the schema pairing
-//! (manifest 3 ⇔ store 2, manifest 2 ⇔ store 1 — only when both schemas
-//! are known values, so unknown-schema diagnostics are named first) and
+//! (manifest 3 or 4 ⇔ store 2, manifest 2 ⇔ store 1 — only when both
+//! schemas are known values, so unknown-schema diagnostics are named
+//! first) and
 //! the typed reference
 //! invariants (entry point, configuration references, and source plan must
 //! agree with the artifact kind), and enforces manifest/store agreement
@@ -164,16 +166,16 @@ pub enum TrailerError {
     InvalidManifestFields(String),
     /// Manifest declares a `manifest_schema` the reader does not support.
     InvalidManifestSchema(u64),
-    /// Manifest schema is not the required pair of the store index schema
-    /// (store 2 ⇔ manifest 3, store 1 ⇔ manifest 2). Checked only when
-    /// both schemas are known values.
+    /// Manifest schema is not an accepted pair of the store index schema
+    /// (store 2 pairs with manifest 3 or 4; store 1 ⇔ manifest 2).
+    /// Checked only when both schemas are known values.
     InvalidSchemaPairing {
         /// The decoded store index schema.
         store_schema: u64,
         /// The declared manifest schema.
         manifest_schema: u64,
-        /// The manifest schema the store schema requires.
-        required_manifest_schema: u64,
+        /// The manifest schemas the store schema accepts.
+        accepted_manifest_schemas: &'static [u64],
     },
     /// Embedded store content or index is invalid.
     InvalidStore(String),
@@ -207,12 +209,12 @@ impl fmt::Display for TrailerError {
             Self::InvalidSchemaPairing {
                 store_schema,
                 manifest_schema,
-                required_manifest_schema,
+                accepted_manifest_schemas,
             } => write!(
                 f,
-                "manifest schema {manifest_schema} is not the pair of store schema \
-                 {store_schema}: store schema {store_schema} requires manifest schema \
-                 {required_manifest_schema}"
+                "manifest schema {manifest_schema} is not a pair of store schema \
+                 {store_schema}: store schema {store_schema} requires manifest schema {}",
+                schema_set(accepted_manifest_schemas)
             ),
             Self::InvalidStore(reason) => write!(f, "embedded store is invalid: {reason}"),
         }
@@ -600,23 +602,24 @@ fn decode_v2_marked(bytes: &[u8]) -> Result<TrailerV2, TrailerError> {
     })
 }
 
-/// Enforce the v2 schema pairing (r2embed Task 2.2, design "nit a"):
-/// `manifest_schema: 3` is valid only with `store_schema: 2`, and
-/// `manifest_schema: 2` (the R1-era form) only with `store_schema: 1`,
+/// Enforce the v2 schema pairing (r2embed Task 2.2, design "nit a";
+/// widened by r4sign Task 1.2): `manifest_schema: 3` (unsigned) or
+/// `manifest_schema: 4` (signed) is valid only with `store_schema: 2`,
+/// and `manifest_schema: 2` (the R1-era form) only with `store_schema: 1`,
 /// because the substitution table and asset classes only exist when both
 /// halves evolve together. Runs AFTER `StoreIndex::decode`, so an unknown
 /// store schema is already named by its own decoder ("unsupported store
 /// schema N"); an unknown manifest schema was already named by
 /// `validate_manifest` before the store decode. This check therefore only
 /// ever sees known schema values, and rejects the mismatched pairs in
-/// both directions.
+/// both directions, with the error carrying the accepted schema set.
 fn enforce_schema_pairing(index: &StoreIndex, manifest: &[u8]) -> Result<(), TrailerError> {
     let value: serde_json::Value =
         serde_json::from_slice(manifest).map_err(|_| TrailerError::InvalidManifest)?;
     let schema = manifest::manifest_schema_of(&value).map_err(|_| TrailerError::InvalidManifest)?;
-    let required = match index.store_schema {
-        1 => manifest::MANIFEST_SCHEMA_V2,
-        2 => manifest::MANIFEST_SCHEMA,
+    let accepted: &'static [u64] = match index.store_schema {
+        1 => &[manifest::MANIFEST_SCHEMA_V2],
+        2 => &[manifest::MANIFEST_SCHEMA, manifest::MANIFEST_SCHEMA_V4],
         // Unreachable through `decode_v2_marked` (the store decoder fails
         // closed on any other schema first); kept fail-closed for defense
         // in depth so a hand-routed index cannot bypass the pairing.
@@ -626,14 +629,23 @@ fn enforce_schema_pairing(index: &StoreIndex, manifest: &[u8]) -> Result<(), Tra
             )));
         }
     };
-    if schema != required {
+    if !accepted.contains(&schema) {
         return Err(TrailerError::InvalidSchemaPairing {
             store_schema: index.store_schema,
             manifest_schema: schema,
-            required_manifest_schema: required,
+            accepted_manifest_schemas: accepted,
         });
     }
     Ok(())
+}
+
+/// Human-readable schema-set list for the pairing diagnostic: `3 or 4`.
+fn schema_set(schemas: &[u64]) -> String {
+    schemas
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
 
 /// Enforce v2 manifest/store agreement: the manifest `source_name`
@@ -1521,6 +1533,7 @@ fn sample_manifest(documents: &[StoreDocument], index: &StoreIndex) -> Manifest 
         listeners: vec![],
         embedded_files,
         total_embedded_bytes,
+        signing: None,
     }
 }
 
@@ -1965,6 +1978,7 @@ fn v2_manifest_store_disagreement_fails_closed() {
                 path: Some(entry.path.clone()),
             })
             .collect(),
+        signing: None,
     };
     let encoded = encode_v2(&TrailerV2 {
         kind: TrailerKind::Route,

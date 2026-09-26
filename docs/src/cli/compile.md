@@ -14,8 +14,10 @@ Authority: [ADR-0075](../adr/0075-self-contained-executable-artifact-format.md) 
 camel compile routes.yaml -o my-routes
 camel compile jobs/report.job.yaml -o nightly-report
 camel compile routes.yaml -o my-routes --config Camel.toml --profile production
+camel compile routes.yaml -o my-routes --sign --signing-key key.bin
 ./my-routes                      # run the artifact
 ./my-routes --manifest           # print the embedded manifest, no boot
+./my-routes --verify             # verify the signature envelope, no boot
 ```
 
 | Flag | Description |
@@ -25,6 +27,9 @@ camel compile routes.yaml -o my-routes --config Camel.toml --profile production
 | `--target <TRIPLE>` | Requested target triple. v2 accepts the native Linux triple only. |
 | `--config <CONFIG>` | Explicit `Camel.toml` to resolve and embed (ordered includes, selected profiles, route patterns). Its directory becomes the confinement root. Without this flag, no configuration is embedded and none is discovered. |
 | `--profile <NAME>` | Configuration profile to select. Repeatable, order preserved. Requires `--config`. |
+| `--sign` | Sign the complete final artifact bytes and write `<ARTIFACT>.sig` beside the artifact. |
+| `--signing-key <PATH>` | File with the 32-byte Ed25519 seed. Requires `--sign`. The `CAMEL_COMPILE_SIGNING_KEY` environment variable is the fallback; the flag wins when both are present. |
+| `--require-signature` | Record in the signed manifest that boot must verify an envelope. Requires `--sign`. |
 
 Flag definitions live in `crates/camel-cli/src/commands/compile.rs`.
 
@@ -50,12 +55,34 @@ The encoded image is `CAMELTR1 || content || index || manifest || footer`:
 
 - **Content.** The normalized bytes of every embedded document.
 - **Index.** The canonical store index: one entry per document with its path, kind (`route`, `job`, `config`, `include`, `profile`), byte range, and references. The entry point names the `route` or `job` entry of the artifact's own kind.
-- **Manifest.** A canonical JSON manifest (schema 2): artifact kind, entry-point name, runtime version, the component schemes used, the `${env:}` names without defaults, the listener endpoints, and one `embedded_files` entry per document with a BLAKE3 content digest.
+- **Manifest.** A canonical JSON manifest (schema 3; a signed artifact carries schema 4): artifact kind, entry-point name, runtime version, the component schemes used, the `${env:}` names without defaults, the listener endpoints, and one `embedded_files` entry per document with a BLAKE3 content digest.
 - **Footer.** 76 bytes: the `CAMELTR1` magic, format version 2, kind, flags, section lengths, and a BLAKE3 checksum over the domain-separated sections.
 
 Legacy v1 artifacts carry one document in a 68-byte footer format. The version-aware reader accepts both.
 
 The write is atomic. Both the executable copy and the trailer go to a sibling `<output>.tmp` first, then the complete file is renamed onto the output path. A rejected or failed compile never truncates an existing artifact.
+
+## Signing artifacts
+
+`--sign` writes a detached signature envelope beside the artifact: `<ARTIFACT>.sig`, exactly 148 bytes. The envelope carries the public key, the signature, and a BLAKE3 envelope checksum. It never carries key material.
+
+The signature is Ed25519ph (RFC 8032 prehash). It covers the complete final artifact bytes: the executable copy plus the trailer. The compiler hashes that stream once while it writes the artifact, so signing does not re-read or buffer the artifact. Verification streams the artifact the same way.
+
+The key file holds exactly 32 bytes: an Ed25519 seed. Supply it with `--signing-key <PATH>` or the `CAMEL_COMPILE_SIGNING_KEY` environment variable. The flag wins when both are present. `--sign` with no key source exits 2. Compile still rejects every other `CAMEL_*` variable, and rejects a stray `CAMEL_COMPILE_SIGNING_KEY` when `--sign` is absent.
+
+A signed compile moves the manifest to schema 4 and adds a `signing` block: the algorithm (`ed25519ph`), the `key_fingerprint` (`blake3:` plus 64 lowercase hex characters over the 32-byte public key), and a `required` boolean. Unsigned compiles stay schema 3 and stay byte-identical. The private seed never appears in the artifact, the envelope, the manifest, or a log.
+
+`--require-signature` sets `required: true`. At boot, a required signature that is absent exits 2. Without the flag, a present envelope is still verified at boot, but an unsigned artifact without an envelope still boots.
+
+Verify an artifact without booting:
+
+```console
+./my-routes --verify
+```
+
+Exit 0 prints two lines: `algorithm: ed25519ph` and `key_fingerprint: blake3:<hex>`. Any failure exits 2 and names the failing step: envelope, fingerprint, or signature. `--verify` is exclusive with every other artifact argument.
+
+**Pinning a producer.** Compare the printed `key_fingerprint` with a known value from the producer. A verified envelope proves that the artifact bytes were signed by the holder of the private key whose public key hashes to the manifest fingerprint. The format carries no trust store, so pinning is an operator comparison. Third-party key pinning and key management are deferred. Authority: [ADR-0083](../adr/0083-artifact-signing-envelope.md).
 
 ## Running an artifact
 
@@ -69,6 +96,7 @@ The artifact argument surface is deliberately narrow:
 | `--help` | Print artifact help and exit 0, without booting. |
 | `--version` | Print version information and exit 0, without booting. |
 | `--manifest` | Print the embedded manifest JSON and exit 0, without booting. |
+| `--verify` | Verify the signature envelope and exit 0, without booting. Exclusive with every other artifact argument. |
 | `--report <FILE>` | Write the run report to this path. |
 
 `--arg` is unsupported and rejected as unknown. A job artifact resolves its declared arguments from the embedded declarations alone: declaration defaults apply, and a required argument without a default fails before boot with exit code 2.

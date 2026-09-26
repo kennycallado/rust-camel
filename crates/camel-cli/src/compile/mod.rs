@@ -16,6 +16,8 @@
 //!   from `camel-dsl`.
 //! - [`materialize`] — confined per-boot materialization of
 //!   substitution-targeted assets (r2embed Task 3.2).
+//! - [`signature`] — detached Ed25519ph signature envelope sidecar for
+//!   signed artifacts (r4sign).
 //!
 //! The artifact embeds authoring text, never `RouteDefinition` or compiled
 //! steps: DSL stays responsible for parsing and interpolation, runtime for
@@ -25,6 +27,7 @@ pub mod manifest;
 pub mod materialize;
 pub mod policy;
 pub mod runtime;
+pub mod signature;
 pub mod sources;
 pub mod store;
 pub mod trailer;

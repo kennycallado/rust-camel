@@ -3,7 +3,7 @@
 //!
 //! [`run_embedded_document`] takes a validated [`EmbeddedRequest`] — a
 //! v1 single-document trailer or a v2 decoded
-//! [`VirtualDocumentStore`](super::store::VirtualDocumentStore) plus
+//! [`VirtualDocumentStore`] plus
 //! the parsed artifact arguments — and runs it through the EXISTING
 //! lifecycles:
 //!
@@ -43,8 +43,12 @@
 //! [`self_detect_artifact`] is the binary entry point (Task 2.3): the
 //! `camel` main calls it BEFORE Clap parses anything, so a self-contained
 //! artifact consumes its own argv surface (`--report`, `--help`,
-//! `--version`, `--manifest`) while a trailer-free image falls through to
-//! the normal CLI unchanged.
+//! `--version`, `--manifest`, and the r4sign `--verify`) while a
+//! trailer-free image falls through to the normal CLI unchanged. A
+//! valid trailer additionally runs boot verification (r4sign Task 1.3)
+//! before any dispatch: a present detached envelope verifies against
+//! the streamed artifact bytes, and a schema-4 manifest whose signature
+//! is required refuses to boot without it.
 //!
 //! Exit codes: 0 graceful completion / job Completed; 1 job pipeline
 //! failure (route runs end either in graceful completion or a boot-class
@@ -59,8 +63,11 @@ use std::process::ExitCode;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Serialize;
 
+use ed25519_dalek::{Digest as _, Sha512};
+
 use super::CompileError;
 use super::manifest;
+use super::signature;
 use super::store::{
     SubstitutionContext, SubstitutionEntry, SubstitutionSpan, VirtualDocumentStore,
 };
@@ -75,11 +82,12 @@ const IDLE_NOTE: &str = "compiled artifact running (hot-reload disabled). Press 
 
 /// Parsed artifact argument surface.
 ///
-/// The exclusive modes (`--help`, `--version`, `--manifest`) print and
-/// exit 0 without booting; `--report <path>` pairs with a run. The
-/// surface is deliberately narrow: dynamic declared-argument flags are
-/// unsupported (rejected as unknown) — declared arguments resolve from
-/// the embedded declarations alone (jobargs Task 3.2).
+/// The exclusive modes (`--help`, `--version`, `--manifest`, `--verify`)
+/// print or verify and exit 0 (verify: exit 2 on failure) without
+/// booting; `--report <path>` pairs with a run. The surface is
+/// deliberately narrow: dynamic declared-argument flags are unsupported
+/// (rejected as unknown) — declared arguments resolve from the embedded
+/// declarations alone (jobargs Task 3.2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArtifactArgs {
     /// `--report <path>`: where the run writes its report.
@@ -90,6 +98,9 @@ pub struct ArtifactArgs {
     pub version: bool,
     /// `--manifest`: print the operational manifest and exit 0.
     pub manifest: bool,
+    /// `--verify` (r4sign Task 1.3): verify the detached signature
+    /// envelope and exit 0, or fail closed with exit 2 — no boot.
+    pub verify: bool,
 }
 
 impl ArtifactArgs {
@@ -103,6 +114,8 @@ impl ArtifactArgs {
             Some("--version")
         } else if self.manifest {
             Some("--manifest")
+        } else if self.verify {
+            Some("--verify")
         } else {
             None
         }
@@ -146,9 +159,9 @@ impl std::error::Error for ArtifactArgError {}
 
 impl ArtifactArgs {
     /// Parse the artifact argv (no program name). Accepts `--report
-    /// <path>`, `--help`, `--version`, and `--manifest`; rejects
-    /// duplicates, exclusive combinations, missing report values,
-    /// unknown flags, and positional arguments.
+    /// <path>`, `--help`, `--version`, `--manifest`, and `--verify`;
+    /// rejects duplicates, exclusive combinations, missing report
+    /// values, unknown flags, and positional arguments.
     pub fn parse(args: &[String]) -> Result<Self, ArtifactArgError> {
         let mut parsed = Self::default();
         let mut idx = 0;
@@ -172,10 +185,11 @@ impl ArtifactArgs {
                     parsed.report = Some(PathBuf::from(value));
                     idx += 2;
                 }
-                "--help" | "--version" | "--manifest" => {
+                "--help" | "--version" | "--manifest" | "--verify" => {
                     let flag: &'static str = match arg {
                         "--help" => "--help",
                         "--version" => "--version",
+                        "--verify" => "--verify",
                         _ => "--manifest",
                     };
                     if let Some(prev) = parsed.first_set() {
@@ -188,6 +202,7 @@ impl ArtifactArgs {
                     match flag {
                         "--help" => parsed.help = true,
                         "--version" => parsed.version = true,
+                        "--verify" => parsed.verify = true,
                         _ => parsed.manifest = true,
                     }
                     idx += 1;
@@ -717,11 +732,12 @@ fn prepare_embedded_assets(
 ///   checksum invalid) → fail closed: an integrity diagnostic on stderr
 ///   and exit 2, never a fall-through;
 /// - valid trailer → the artifact argv (`std::args` minus the program
-///   name) is parsed with [`ArtifactArgs::parse`] (misuse exits 2 naming
-///   the argument), the payload decodes into an [`EmbeddedRequest`], and
-///   the request dispatches through [`run_embedded_document_code`]:
-///   `--help`, `--version`, and `--manifest` print and exit 0 without
-///   booting.
+///   name) is parsed with [`ArtifactArgs::parse`] FIRST (misuse exits 2
+///   naming the argument), then routed (r4sign Task 1.3): `--verify`
+///   runs the verify-only chain and never reaches the boot-verification
+///   path; every other invocation runs boot verification BEFORE its
+///   normal dispatch, so the artifact is SHA-512-streamed at most once
+///   per invocation.
 ///
 /// Version dispatch (multidoc Task 2.2): a v1 artifact feeds the
 /// single-document runtime (default in-memory config, embedded-text
@@ -750,6 +766,10 @@ pub async fn self_detect_artifact() -> Option<i32> {
             return Some(EXIT_REJECTION);
         }
     };
+    // Arguments parse FIRST (r4sign Task 1.3): the route decision
+    // precedes every signature step, so `--verify` never reaches the
+    // boot-verification path and every other invocation verifies before
+    // its dispatch — at most one artifact SHA-512 stream per invocation.
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = match ArtifactArgs::parse(&argv) {
         Ok(args) => args,
@@ -758,6 +778,16 @@ pub async fn self_detect_artifact() -> Option<i32> {
             return Some(EXIT_REJECTION);
         }
     };
+    let manifest = match artifact_manifest(&decoded) {
+        Ok(manifest) => manifest,
+        Err(()) => return Some(EXIT_REJECTION),
+    };
+    if args.verify {
+        return Some(run_verify_only(&exe, &manifest));
+    }
+    if let Some(code) = verify_for_boot(&exe, &manifest) {
+        return Some(code);
+    }
     let request = match decoded {
         trailer::DecodedArtifact::V1(v1) => EmbeddedRequest::from_trailer(v1, args),
         trailer::DecodedArtifact::V2(v2) => EmbeddedRequest::from_v2(v2, args),
@@ -768,6 +798,185 @@ pub async fn self_detect_artifact() -> Option<i32> {
             eprintln!("compiled artifact integrity error: {e}");
             Some(EXIT_REJECTION)
         }
+    }
+}
+
+/// Parse the decoded artifact's manifest into the typed
+/// [`manifest::Manifest`] the signing decisions read (schema and
+/// signing block). `decode_artifact` has already validated the manifest
+/// bytes per trailer version, so a failure here is defensive and fails
+/// closed with the integrity diagnostic already on stderr.
+fn artifact_manifest(decoded: &trailer::DecodedArtifact) -> Result<manifest::Manifest, ()> {
+    let bytes = match decoded {
+        trailer::DecodedArtifact::V1(v1) => &v1.manifest,
+        trailer::DecodedArtifact::V2(v2) => &v2.manifest,
+    };
+    manifest::Manifest::from_canonical_json(bytes).map_err(|e| {
+        eprintln!("compiled artifact integrity error: {e}");
+    })
+}
+
+/// The detached signature envelope path of `exe`: the artifact path
+/// with `.sig` appended.
+fn envelope_path(exe: &Path) -> PathBuf {
+    let mut name = exe.as_os_str().to_owned();
+    name.push(".sig");
+    PathBuf::from(name)
+}
+
+/// Stream `artifact` through `Sha512` exactly once and return the
+/// finalized 64-byte Ed25519ph prehash. Flat memory: `io::copy` feeds
+/// the file through the hasher in bounded chunks — the artifact is
+/// never buffered.
+fn stream_sha512(artifact: &Path) -> std::io::Result<[u8; 64]> {
+    let mut file = std::fs::File::open(artifact)?;
+    let mut hasher = Sha512::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(hasher.finalize().into())
+}
+
+/// Whether the manifest marks a boot without the envelope unacceptable:
+/// exactly the schema-4 manifests — the only schema that carries a
+/// signing block — whose required bit is set. The decision keys on
+/// `manifest_schema == MANIFEST_SCHEMA_V4`, never on the signing
+/// block's presence: the lenient legacy parse never populates `signing`
+/// for a schema other than 4, so keying on the schema keeps the
+/// decision total.
+fn requires_signature(manifest: &manifest::Manifest) -> bool {
+    manifest.manifest_schema == manifest::MANIFEST_SCHEMA_V4
+        && manifest.signing.as_ref().is_some_and(|s| s.required)
+}
+
+/// Verify a PRESENT envelope against the artifact and the manifest
+/// signing block — the shared chain of the `--verify` surface and boot
+/// verification (r4sign Task 1.3): the unpaired-schema check first
+/// (keyed on `manifest_schema == MANIFEST_SCHEMA_V4`), then one
+/// artifact stream through [`stream_sha512`], then
+/// [`signature::verify_envelope`] with the manifest's fingerprint and
+/// algorithm. Every failure has already printed its exit-2 diagnostic
+/// naming the failing step on stderr.
+fn verify_envelope_bytes(
+    envelope: &[u8],
+    exe: &Path,
+    manifest: &manifest::Manifest,
+) -> Result<signature::VerifiedEnvelope, ()> {
+    if manifest.manifest_schema != manifest::MANIFEST_SCHEMA_V4 {
+        eprintln!(
+            "compiled artifact signature verification failed: unpaired signature envelope: \
+             the manifest (schema {}) carries no signing block; remove the stray envelope \
+             or recompile with --sign",
+            manifest.manifest_schema
+        );
+        return Err(());
+    }
+    let Some(signing) = &manifest.signing else {
+        // Unreachable: the schema check above gates on the only schema
+        // whose validated form must carry the signing block. Kept
+        // total instead of panicking.
+        eprintln!(
+            "compiled artifact signature verification failed: the manifest carries no \
+             signing block"
+        );
+        return Err(());
+    };
+    let digest = stream_sha512(exe).map_err(|e| {
+        eprintln!(
+            "compiled artifact signature verification failed: the artifact could not be \
+             read for verification: {e}"
+        );
+    })?;
+    signature::verify_envelope(
+        envelope,
+        &digest,
+        &signing.key_fingerprint,
+        &signing.algorithm,
+    )
+    .map_err(|e| {
+        eprintln!("compiled artifact signature verification failed: {e}");
+    })
+}
+
+/// The `--verify` chain (r4sign Task 1.3, no boot): read the detached
+/// envelope at `<exe>.sig` and verify it against the artifact, then
+/// print the verified identity and exit 0; any failure — missing
+/// envelope (the diagnostic names a required signature too), unreadable
+/// envelope, unpaired envelope, or a named verification step — exits 2
+/// with the diagnostic on stderr.
+fn run_verify_only(exe: &Path, manifest: &manifest::Manifest) -> i32 {
+    let sig = envelope_path(exe);
+    let envelope = match std::fs::read(&sig) {
+        Ok(envelope) => envelope,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if requires_signature(manifest) {
+                eprintln!(
+                    "compiled artifact signature verification failed: no signature envelope \
+                     present at {}; the manifest marks the signature required",
+                    sig.display()
+                );
+            } else {
+                eprintln!(
+                    "compiled artifact signature verification failed: no signature envelope \
+                     present at {}",
+                    sig.display()
+                );
+            }
+            return EXIT_REJECTION;
+        }
+        Err(e) => {
+            eprintln!(
+                "compiled artifact signature verification failed: the signature envelope at \
+                 {} could not be read: {e}",
+                sig.display()
+            );
+            return EXIT_REJECTION;
+        }
+    };
+    let verified = match verify_envelope_bytes(&envelope, exe, manifest) {
+        Ok(verified) => verified,
+        Err(()) => return EXIT_REJECTION,
+    };
+    println!("algorithm: {}", verified.algorithm_name);
+    println!("key_fingerprint: {}", verified.fingerprint);
+    0
+}
+
+/// Boot verification for every non-`--verify` invocation, including the
+/// bare boot (r4sign Task 1.3): a missing envelope refuses the boot
+/// only when the manifest marks the signature required — otherwise the
+/// artifact proceeds with ZERO hashing (v1 compatibility). A present
+/// envelope runs the shared verification chain before the dispatch; any
+/// failure exits 2 with the named step on stderr and no boot.
+///
+/// Returns `Some(EXIT_REJECTION)` when the boot must not proceed.
+fn verify_for_boot(exe: &Path, manifest: &manifest::Manifest) -> Option<i32> {
+    let sig = envelope_path(exe);
+    let envelope = match std::fs::read(&sig) {
+        Ok(envelope) => envelope,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if requires_signature(manifest) {
+                eprintln!(
+                    "compiled artifact boot refused: the manifest marks the signature \
+                     required, but no signature envelope is present at {}",
+                    sig.display()
+                );
+                return Some(EXIT_REJECTION);
+            }
+            // No envelope and no requirement: boot unchanged, v1
+            // compatible — zero hashing.
+            return None;
+        }
+        Err(e) => {
+            eprintln!(
+                "compiled artifact signature verification failed: the signature envelope at \
+                 {} could not be read: {e}",
+                sig.display()
+            );
+            return Some(EXIT_REJECTION);
+        }
+    };
+    match verify_envelope_bytes(&envelope, exe, manifest) {
+        Ok(_) => None,
+        Err(()) => Some(EXIT_REJECTION),
     }
 }
 
@@ -850,6 +1059,7 @@ fn print_artifact_usage() {
     println!("camel compiled artifact usage:");
     println!("  --report <path>  write the run report to <path>");
     println!("  --manifest       print the operational manifest and exit");
+    println!("  --verify         verify the detached signature envelope and exit");
     println!("  --version        print the runtime version and exit");
     println!("  --help           print this usage and exit");
 }
@@ -1028,6 +1238,11 @@ mod tests {
                 .manifest
         );
         assert!(
+            ArtifactArgs::parse(&argv(&["--verify"]))
+                .expect("verify")
+                .verify
+        );
+        assert!(
             ArtifactArgs::parse(&argv(&[]))
                 .expect("bare run")
                 .report
@@ -1066,6 +1281,41 @@ mod tests {
         assert_eq!(
             ArtifactArgs::parse(&argv(&["routes.yaml"])),
             Err(ArtifactArgError::Positional("routes.yaml".to_string()))
+        );
+    }
+
+    /// `--verify` (r4sign Task 1.3) stays exclusive with every other
+    /// artifact flag, in either order, and rejects as a duplicate of
+    /// itself.
+    #[test]
+    fn artifact_args_verify_stays_exclusive() {
+        assert_eq!(
+            ArtifactArgs::parse(&argv(&["--verify", "--manifest"])),
+            Err(ArtifactArgError::Exclusive("--verify", "--manifest"))
+        );
+        assert_eq!(
+            ArtifactArgs::parse(&argv(&["--manifest", "--verify"])),
+            Err(ArtifactArgError::Exclusive("--manifest", "--verify"))
+        );
+        assert_eq!(
+            ArtifactArgs::parse(&argv(&["--verify", "--report", "r"])),
+            Err(ArtifactArgError::Exclusive("--verify", "--report"))
+        );
+        assert_eq!(
+            ArtifactArgs::parse(&argv(&["--report", "r", "--verify"])),
+            Err(ArtifactArgError::Exclusive("--report", "--verify"))
+        );
+        assert_eq!(
+            ArtifactArgs::parse(&argv(&["--verify", "--help"])),
+            Err(ArtifactArgError::Exclusive("--verify", "--help"))
+        );
+        assert_eq!(
+            ArtifactArgs::parse(&argv(&["--verify", "--version"])),
+            Err(ArtifactArgError::Exclusive("--verify", "--version"))
+        );
+        assert_eq!(
+            ArtifactArgs::parse(&argv(&["--verify", "--verify"])),
+            Err(ArtifactArgError::Duplicate("--verify"))
         );
     }
 

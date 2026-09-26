@@ -173,6 +173,10 @@ tokio-stream = "0.1"
 dashmap = "6"
 indexmap = "2"
 blake3 = "1"
+# Artifact signing envelope (r4sign). `digest` is required: ed25519-dalek
+# 2.2 gates the prehashed (Ed25519ph) API behind it — `hazmat` alone is an
+# empty feature and the crate defaults do not include `digest`.
+ed25519-dalek = { version = "2.2", features = ["hazmat", "digest"] }
 filetime = "0.2"
 # Held at 0.20: testcontainers 0.27 (required by testcontainers-modules 0.15) needs bollard ^0.20;
 # bollard 0.21 pins bollard-stubs =1.53 which collides. Cluster moves together or not at all.

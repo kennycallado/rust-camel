@@ -8,11 +8,13 @@
 //! artifact is decoded through `decode_artifact` and, since r2embed
 //! Task 1.1 / Task 2.2, carries `store_schema: 2` with `manifest_schema: 3`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use camel_cli::compile::signature;
 use camel_cli::compile::store::{StoreIndex, VirtualDocumentStore};
 use camel_cli::compile::trailer::{self, DecodedArtifact, TrailerKind, TrailerV2};
+use ed25519_dalek::SigningKey;
 
 /// A minimal supported single-route document.
 const ROUTE_DOC: &str = "\
@@ -1560,5 +1562,484 @@ fn compile_repeated_profile_flag_is_deduplicated() {
             .count(),
         1,
         "the profile fragment must be referenced exactly once"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// r4sign Task 1.2: compile-side signing. A signed compile emits the
+// detached `CAMELSG1` envelope at `<artifact>.sig` and a schema-4
+// manifest whose signing block records the algorithm, the `blake3:` key
+// fingerprint, and the required bit — never any key material. Every
+// signing-input violation is a named exit-2 rejection with no artifact
+// left behind. Seed files are synthetic pattern bytes written at
+// runtime; no committed key material exists.
+// ---------------------------------------------------------------------------
+
+/// Compile invocation with extra trailing arguments and injected
+/// environment entries (the `CAMEL_COMPILE_SIGNING_KEY` signing input).
+/// The environment is otherwise cleared, as in every other battery test.
+fn compile_with(
+    dir: &Path,
+    doc: &str,
+    artifact: &str,
+    extra_args: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_camel"));
+    cmd.env_clear().current_dir(dir);
+    cmd.arg("compile").arg(doc).arg("-o").arg(artifact);
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+    for (name, value) in env {
+        cmd.env(name, value);
+    }
+    cmd.output().expect("spawn `camel compile`")
+}
+
+/// Write a 32-byte synthetic-pattern ed25519 seed file (never real key
+/// material) and return its path.
+fn write_seed(dir: &Path, name: &str, byte: u8) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, [byte; 32]).expect("write seed file");
+    path
+}
+
+/// Signing key derived from a [`write_seed`] pattern byte.
+fn seed_key(byte: u8) -> SigningKey {
+    SigningKey::from_bytes(&[byte; 32])
+}
+
+#[test]
+fn sign_emits_envelope_alongside_artifact() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("app.yaml"), ROUTE_DOC).expect("write document");
+    write_seed(dir.path(), "seed.key", 0x52);
+
+    let output = compile_with(
+        dir.path(),
+        "app.yaml",
+        "app.bin",
+        &["--sign", "--signing-key", "seed.key"],
+        &[],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "signed compile must succeed: {}",
+        stderr_of(&output)
+    );
+
+    let artifact = dir.path().join("app.bin");
+    assert!(artifact.is_file(), "artifact must exist after exit 0");
+    let sig_bytes = std::fs::read(dir.path().join("app.bin.sig"))
+        .expect(".sig envelope must exist beside the artifact");
+    assert_eq!(
+        sig_bytes.len(),
+        signature::ENVELOPE_LEN,
+        "envelope must be exactly 148 bytes"
+    );
+    assert_eq!(&sig_bytes[..8], b"CAMELSG1", "leading magic");
+    assert_eq!(
+        &sig_bytes[sig_bytes.len() - 8..],
+        b"CAMELSG1",
+        "terminal magic"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(dir.path().join("app.bin.sig"))
+            .expect(".sig metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o644, "envelope mode must be 0644");
+    }
+}
+
+#[test]
+fn signed_manifest_records_fingerprint_only() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("app.yaml"), ROUTE_DOC).expect("write document");
+    write_seed(dir.path(), "seed.key", 0x52);
+
+    let output = compile_with(
+        dir.path(),
+        "app.yaml",
+        "app.bin",
+        &["--sign", "--signing-key", "seed.key"],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+
+    let expected_fingerprint = signature::fingerprint(&seed_key(0x52).verifying_key().to_bytes());
+
+    let bytes = std::fs::read(dir.path().join("app.bin")).expect("artifact exists");
+    let (_, _, manifest) = decode_v2(&bytes);
+    assert_eq!(
+        manifest["manifest_schema"], 4,
+        "signed compiles emit manifest schema 4: {manifest}"
+    );
+    assert_eq!(manifest["signing"]["algorithm"], "ed25519ph", "{manifest}");
+    assert_eq!(
+        manifest["signing"]["key_fingerprint"], expected_fingerprint,
+        "manifest records the blake3: fingerprint: {manifest}"
+    );
+    assert_eq!(manifest["signing"]["required"], false, "{manifest}");
+
+    // `--manifest` prints the signing block without booting.
+    let manifest_out = Command::new(dir.path().join("app.bin"))
+        .env_clear()
+        .arg("--manifest")
+        .output()
+        .expect("spawn artifact --manifest");
+    assert_eq!(
+        manifest_out.status.code(),
+        Some(0),
+        "{}",
+        stderr_of(&manifest_out)
+    );
+    let manifest_text = String::from_utf8_lossy(&manifest_out.stdout).into_owned();
+    assert!(
+        manifest_text.contains(r#""manifest_schema":4"#),
+        "manifest output carries schema 4: {manifest_text}"
+    );
+    assert!(
+        manifest_text.contains("ed25519ph"),
+        "manifest output names the algorithm: {manifest_text}"
+    );
+    assert!(
+        manifest_text.contains(&expected_fingerprint),
+        "manifest output names the fingerprint: {manifest_text}"
+    );
+
+    // No seed material anywhere: neither the hex form nor the raw
+    // 32-byte pattern appears in the artifact, the envelope, or the
+    // manifest output.
+    let seed_hex = "52".repeat(32);
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains(&seed_hex),
+        "seed hex must not appear in the artifact"
+    );
+    assert!(
+        !bytes.windows(32).any(|w| w == [0x52u8; 32]),
+        "raw seed bytes must not appear in the artifact"
+    );
+    let sig_bytes = std::fs::read(dir.path().join("app.bin.sig")).expect(".sig exists");
+    assert!(
+        !String::from_utf8_lossy(&sig_bytes).contains(&seed_hex),
+        "seed hex must not appear in the envelope"
+    );
+    assert!(
+        !manifest_text.contains(&seed_hex),
+        "seed hex must not appear in the manifest output"
+    );
+}
+
+#[test]
+fn unsigned_compile_stays_byte_identical() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("app.yaml"), ROUTE_DOC).expect("write document");
+
+    let first = compile(dir.path(), "app.yaml", "app1.bin", None);
+    assert_eq!(first.status.code(), Some(0), "{}", stderr_of(&first));
+    let second = compile(dir.path(), "app.yaml", "app2.bin", None);
+    assert_eq!(second.status.code(), Some(0), "{}", stderr_of(&second));
+
+    let first_bytes = std::fs::read(dir.path().join("app1.bin")).expect("first artifact");
+    let second_bytes = std::fs::read(dir.path().join("app2.bin")).expect("second artifact");
+    assert_eq!(
+        first_bytes, second_bytes,
+        "unsigned compiles must stay byte-identical"
+    );
+    assert!(
+        !dir.path().join("app1.bin.sig").exists(),
+        "unsigned compiles emit no envelope"
+    );
+    assert!(
+        !dir.path().join("app2.bin.sig").exists(),
+        "unsigned compiles emit no envelope"
+    );
+
+    let (_, _, manifest) = decode_v2(&first_bytes);
+    assert_eq!(manifest["manifest_schema"], 3, "{manifest}");
+    assert!(
+        manifest.get("signing").is_none(),
+        "unsigned manifest carries no signing key: {manifest}"
+    );
+}
+
+/// One rejection case: exit 2, the diagnostic names the broken rule, and
+/// neither an artifact nor an envelope (nor an envelope temp) is left
+/// behind.
+fn assert_signing_rejection(dir: &Path, extra_args: &[&str], env: &[(&str, &str)], phrase: &str) {
+    let output = compile_with(dir, "app.yaml", "app.bin", extra_args, env);
+    let stderr = stderr_of(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected a named rejection: {stderr}"
+    );
+    assert!(
+        stderr.contains(phrase),
+        "diagnostic must name the broken rule ({phrase}): {stderr}"
+    );
+    assert!(
+        !dir.join("app.bin").exists(),
+        "no artifact may be left behind: {stderr}"
+    );
+    assert!(
+        !dir.join("app.bin.sig").exists(),
+        "no envelope may be left behind: {stderr}"
+    );
+    assert!(
+        !dir.join("app.bin.sig.tmp").exists(),
+        "no envelope temp may be left behind: {stderr}"
+    );
+}
+
+#[test]
+fn sign_input_validation_rejections() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("app.yaml"), ROUTE_DOC).expect("write document");
+    write_seed(dir.path(), "seed.key", 0x52);
+    std::fs::write(dir.path().join("short.key"), [0x41; 31]).expect("write 31-byte key");
+    std::fs::write(dir.path().join("long.key"), [0x41; 33]).expect("write 33-byte key");
+
+    // --signing-key without --sign.
+    assert_signing_rejection(
+        dir.path(),
+        &["--signing-key", "seed.key"],
+        &[],
+        "--signing-key requires --sign",
+    );
+    // --require-signature without --sign.
+    assert_signing_rejection(
+        dir.path(),
+        &["--require-signature"],
+        &[],
+        "--require-signature requires --sign",
+    );
+    // --sign with neither key source.
+    assert_signing_rejection(
+        dir.path(),
+        &["--sign"],
+        &[],
+        "--sign requires a signing key",
+    );
+    // Key file of 31 bytes: path and size named.
+    assert_signing_rejection(
+        dir.path(),
+        &["--sign", "--signing-key", "short.key"],
+        &[],
+        "is 31 bytes",
+    );
+    assert_signing_rejection(
+        dir.path(),
+        &["--sign", "--signing-key", "short.key"],
+        &[],
+        "short.key",
+    );
+    // Key file of 33 bytes.
+    assert_signing_rejection(
+        dir.path(),
+        &["--sign", "--signing-key", "long.key"],
+        &[],
+        "is 33 bytes",
+    );
+    // Stray signing environment variable without --sign: the variable
+    // and --sign are both named.
+    assert_signing_rejection(
+        dir.path(),
+        &[],
+        &[("CAMEL_COMPILE_SIGNING_KEY", "seed.key")],
+        "CAMEL_COMPILE_SIGNING_KEY",
+    );
+    assert_signing_rejection(
+        dir.path(),
+        &[],
+        &[("CAMEL_COMPILE_SIGNING_KEY", "seed.key")],
+        "--sign",
+    );
+    // The stray variable is still rejected when another CAMEL_* variable
+    // is present too: every other CAMEL_* name rejects as today.
+    let output = compile_with(
+        dir.path(),
+        "app.yaml",
+        "app.bin",
+        &[],
+        &[
+            ("CAMEL_COMPILE_SIGNING_KEY", "seed.key"),
+            ("CAMEL_OTHER_OVERRIDE", "x"),
+        ],
+    );
+    let stderr = stderr_of(&output);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("CAMEL_OTHER_OVERRIDE"),
+        "other CAMEL_* variables keep the clean-environment rejection: {stderr}"
+    );
+}
+
+/// Recompiling unsigned over a previously signed output removes the
+/// stale `<output>.sig` so the fresh schema-3 artifact does not trip
+/// the unpaired-envelope boot failure (r_glm holistic finding).
+#[test]
+fn unsigned_recompile_removes_stale_envelope() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("app.yaml"), ROUTE_DOC).expect("write document");
+    write_seed(dir.path(), "seed.key", 0x52);
+
+    let signed = compile_with(
+        dir.path(),
+        "app.yaml",
+        "app.bin",
+        &["--sign", "--signing-key", "seed.key"],
+        &[],
+    );
+    assert_eq!(
+        signed.status.code(),
+        Some(0),
+        "signed compile must succeed: {}",
+        stderr_of(&signed)
+    );
+    let sig = dir.path().join("app.bin.sig");
+    assert!(sig.exists(), "signed compile emits the envelope");
+
+    let unsigned = compile_with(dir.path(), "app.yaml", "app.bin", &[], &[]);
+    assert_eq!(
+        unsigned.status.code(),
+        Some(0),
+        "unsigned recompile must succeed: {}",
+        stderr_of(&unsigned)
+    );
+    assert!(
+        !sig.exists(),
+        "unsigned recompile must remove the stale envelope"
+    );
+}
+
+#[test]
+fn sign_key_from_env() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("app.yaml"), ROUTE_DOC).expect("write document");
+    write_seed(dir.path(), "seed_a.key", 0x51);
+    write_seed(dir.path(), "seed_b.key", 0x52);
+
+    // Env-only signing works.
+    let output = compile_with(
+        dir.path(),
+        "app.yaml",
+        "env.bin",
+        &["--sign"],
+        &[("CAMEL_COMPILE_SIGNING_KEY", "seed_a.key")],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "env-only signing must succeed: {}",
+        stderr_of(&output)
+    );
+    assert!(
+        dir.path().join("env.bin.sig").is_file(),
+        "env-only signing emits the envelope"
+    );
+
+    // When both sources are present, the argument wins.
+    let output = compile_with(
+        dir.path(),
+        "app.yaml",
+        "both.bin",
+        &["--sign", "--signing-key", "seed_b.key"],
+        &[("CAMEL_COMPILE_SIGNING_KEY", "seed_a.key")],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "arg-over-env signing must succeed: {}",
+        stderr_of(&output)
+    );
+    let bytes = std::fs::read(dir.path().join("both.bin")).expect("artifact exists");
+    let (_, _, manifest) = decode_v2(&bytes);
+    let arg_fingerprint = signature::fingerprint(&seed_key(0x52).verifying_key().to_bytes());
+    let env_fingerprint = signature::fingerprint(&seed_key(0x51).verifying_key().to_bytes());
+    assert_ne!(
+        arg_fingerprint, env_fingerprint,
+        "the two seeds must produce distinct fingerprints"
+    );
+    assert_eq!(
+        manifest["signing"]["key_fingerprint"], arg_fingerprint,
+        "the argument key must win over the environment key: {manifest}"
+    );
+}
+
+#[test]
+fn require_signature_flag_flows_to_manifest() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("app.yaml"), ROUTE_DOC).expect("write document");
+    write_seed(dir.path(), "seed.key", 0x52);
+
+    let output = compile_with(
+        dir.path(),
+        "app.yaml",
+        "required.bin",
+        &["--sign", "--require-signature", "--signing-key", "seed.key"],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    let bytes = std::fs::read(dir.path().join("required.bin")).expect("artifact exists");
+    let (_, _, manifest) = decode_v2(&bytes);
+    assert_eq!(
+        manifest["signing"]["required"], true,
+        "--require-signature must set the required bit: {manifest}"
+    );
+
+    let output = compile_with(
+        dir.path(),
+        "app.yaml",
+        "plain.bin",
+        &["--sign", "--signing-key", "seed.key"],
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr_of(&output));
+    let bytes = std::fs::read(dir.path().join("plain.bin")).expect("artifact exists");
+    let (_, _, manifest) = decode_v2(&bytes);
+    assert_eq!(
+        manifest["signing"]["required"], false,
+        "plain --sign leaves required unset: {manifest}"
+    );
+}
+
+#[test]
+fn envelope_write_failure_removes_artifact() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("app.yaml"), ROUTE_DOC).expect("write document");
+    write_seed(dir.path(), "seed.key", 0x52);
+    // A directory at the envelope path makes the publish rename fail.
+    std::fs::create_dir(dir.path().join("app.bin.sig")).expect("pre-create .sig directory");
+
+    let output = compile_with(
+        dir.path(),
+        "app.yaml",
+        "app.bin",
+        &["--sign", "--signing-key", "seed.key"],
+        &[],
+    );
+    let stderr = stderr_of(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "envelope-write failure must reject the compile: {stderr}"
+    );
+    assert!(
+        stderr.contains("signature envelope"),
+        "diagnostic must name the envelope failure: {stderr}"
+    );
+    assert!(
+        !dir.path().join("app.bin").exists(),
+        "no artifact may survive a failed envelope emission"
+    );
+    assert!(
+        !dir.path().join("app.bin.sig.tmp").exists(),
+        "the envelope temp file must be cleaned up"
     );
 }

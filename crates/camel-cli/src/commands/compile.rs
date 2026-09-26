@@ -9,12 +9,18 @@
 //! asset allowlist ([`crate::compile::policy`]), derives the
 //! schema-2 operational manifest, and only then writes
 //! `<output>.tmp` (executable copy + v2 trailer) and renames it onto the
-//! output path. Every rejection — non-native target, dirty compile
+//! output path. With `--sign` (r4sign) the artifact bytes stream through
+//! a SHA-512 prehash during that write and a detached `CAMELSG1`
+//! Ed25519ph envelope is published to `<output>.sig` afterwards; a
+//! signed manifest uses schema 4 with the signing block.
+//! Every rejection — non-native target, dirty compile
 //! environment, `Camel.toml` in the working directory without
 //! `--config`, invalid UTF-8, aggregate payload over the configured
 //! `--max-payload-bytes` cap, unsupported asset, secret-family asset
 //! without `--embed-secrets`, unresolvable or unconfined source,
-//! duplicate source, unknown profile, unparsable document — exits 2 with a named diagnostic;
+//! duplicate source, unknown profile, unparsable document, invalid
+//! signing input, envelope-emission failure — exits 2 with a named
+//! diagnostic;
 //! failures never delete or truncate a pre-existing output and never
 //! leave a usable partial artifact.
 //!
@@ -32,15 +38,23 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
+use ed25519_dalek::{Digest as _, Sha512, SigningKey};
 
 use crate::compile::manifest;
 use crate::compile::policy;
+use crate::compile::signature;
 use crate::compile::sources::{self, SourceSelection};
 use crate::compile::store::{StoreEntryKind, VirtualDocumentStore};
 use crate::compile::trailer::{self, TrailerKind, TrailerV2};
 
 /// Exit code for every named compile rejection.
 const EXIT_REJECTION: i32 = 2;
+
+/// The single namespaced compile-time environment variable allowed
+/// through the clean-environment guard (r4sign): under `--sign` it
+/// supplies the signing-key path (a signing input, not a configuration
+/// override); its stray presence without `--sign` stays rejected.
+const SIGNING_KEY_ENV: &str = "CAMEL_COMPILE_SIGNING_KEY";
 
 /// CLI args for `camel compile`.
 #[derive(Args, Debug)]
@@ -88,6 +102,25 @@ pub struct CompileArgs {
     /// mode 0700.
     #[arg(long)]
     pub embed_secrets: bool,
+
+    /// Sign the artifact with a detached Ed25519ph envelope written to
+    /// `<output>.sig` (r4sign). The signing key comes from
+    /// `--signing-key` or the `CAMEL_COMPILE_SIGNING_KEY` environment
+    /// variable; the argument wins when both are present. The key is a
+    /// signing input only: no key material enters the artifact, the
+    /// envelope, the manifest, or any output.
+    #[arg(long)]
+    pub sign: bool,
+
+    /// Path of the 32-byte ed25519 seed file used with `--sign`.
+    /// Requires `--sign`.
+    #[arg(long, value_name = "PATH")]
+    pub signing_key: Option<PathBuf>,
+
+    /// Mark the signature required: a compiled artifact started without
+    /// its envelope fails closed at boot. Requires `--sign`.
+    #[arg(long)]
+    pub require_signature: bool,
 }
 
 /// Native target triple of this executable (`<arch>-unknown-linux-<libc>`).
@@ -122,11 +155,22 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
     }
 
     // Clean compile environment: a CAMEL_* override would silently change
-    // what the artifact embeds, so none may be present.
+    // what the artifact embeds, so none may be present. The single
+    // carve-out (r4sign) is `CAMEL_COMPILE_SIGNING_KEY` — a signing
+    // input, not a configuration override — allowed through only under
+    // `--sign` and rejected as a stray variable otherwise.
+    let mut stray_signing_key = false;
     let overrides: Vec<String> = std::env::vars_os()
         .filter_map(|(name, _)| {
             let name = name.to_string_lossy();
-            name.starts_with("CAMEL_").then(|| name.into_owned())
+            if !name.starts_with("CAMEL_") {
+                return None;
+            }
+            if name == SIGNING_KEY_ENV {
+                stray_signing_key = true;
+                return None;
+            }
+            Some(name.into_owned())
         })
         .collect();
     if !overrides.is_empty() {
@@ -136,6 +180,56 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
         );
         return EXIT_REJECTION;
     }
+    if stray_signing_key && !args.sign {
+        eprintln!(
+            "camel compile: stray compile-time environment variable {SIGNING_KEY_ENV} is set but the artifact is not signed; it supplies the --sign signing key, so pass --sign or unset the variable"
+        );
+        return EXIT_REJECTION;
+    }
+
+    // Signing input validation (r4sign Task 1.2): every rule below is a
+    // named rejection that precedes any source resolution and any output
+    // write.
+    if args.signing_key.is_some() && !args.sign {
+        eprintln!("camel compile: --signing-key requires --sign; pass --sign to sign the artifact");
+        return EXIT_REJECTION;
+    }
+    if args.require_signature && !args.sign {
+        eprintln!(
+            "camel compile: --require-signature requires --sign; pass --sign to sign the artifact"
+        );
+        return EXIT_REJECTION;
+    }
+    let signing_key = if args.sign {
+        // The argument wins over the environment when both are present.
+        let key_path = match &args.signing_key {
+            Some(path) => Some(path.clone()),
+            None => std::env::var_os(SIGNING_KEY_ENV).map(PathBuf::from),
+        };
+        let Some(key_path) = key_path else {
+            eprintln!(
+                "camel compile: --sign requires a signing key: pass --signing-key <PATH> or set {SIGNING_KEY_ENV}"
+            );
+            return EXIT_REJECTION;
+        };
+        match signature::load_signing_key(&key_path) {
+            Ok(key) => Some(key),
+            Err(e) => {
+                eprintln!("camel compile: {e}");
+                return EXIT_REJECTION;
+            }
+        }
+    } else {
+        None
+    };
+    // Identity recorded in the schema-4 signing block: the algorithm
+    // name, the BLAKE3 fingerprint of the verifying key (never the seed),
+    // and the required bit from `--require-signature`.
+    let signing_block = signing_key.as_ref().map(|key| manifest::SigningBlock {
+        algorithm: signature::ALGORITHM_NAME_ED25519PH.to_string(),
+        key_fingerprint: signature::fingerprint(&key.verifying_key().to_bytes()),
+        required: args.require_signature,
+    });
 
     // `.job.json` is not a compilable document kind: reject it explicitly
     // instead of silently compiling the file as a route document.
@@ -270,13 +364,20 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
             return EXIT_REJECTION;
         }
     };
-    let operational = match manifest::derive_for_store(&store, kind, &sources.route_documents) {
+    let mut operational = match manifest::derive_for_store(&store, kind, &sources.route_documents) {
         Ok(operational) => operational,
         Err(e) => {
             eprintln!("camel compile: {e}");
             return EXIT_REJECTION;
         }
     };
+    // Signed compiles emit manifest schema 4 with the signing block;
+    // unsigned compiles stay byte-identical schema 3 (the canonical JSON
+    // carries no `signing` field).
+    if let Some(signing) = signing_block {
+        operational.manifest_schema = manifest::MANIFEST_SCHEMA_V4;
+        operational.signing = Some(signing);
+    }
     let index_bytes = match store.index.encode_canonical() {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -307,9 +408,44 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
         index: index_bytes,
         manifest: operational.to_canonical_json().into_bytes(),
     };
-    if let Err(e) = write_artifact(&args.output, &trailer::encode_v2(&artifact), artifact_mode) {
+    // When signing, the exact byte stream written below (executable copy
+    // plus trailer) feeds the SHA-512 prehash digest inside
+    // `write_artifact` — no re-read, no buffering of the artifact.
+    let mut artifact_digest = signing_key.is_some().then(Sha512::default);
+    if let Err(e) = write_artifact(
+        &args.output,
+        &trailer::encode_v2(&artifact),
+        artifact_mode,
+        artifact_digest.as_mut(),
+    ) {
         eprintln!("camel compile: {e}");
         return EXIT_REJECTION;
+    }
+
+    // Envelope emission happens only after the artifact rename
+    // succeeded: the same streamed digest signs the final artifact
+    // bytes. A failure removes the artifact so no signed manifest is
+    // ever published without its envelope.
+    if let (Some(key), Some(hasher)) = (&signing_key, artifact_digest) {
+        let digest: [u8; 64] = hasher.finalize().into();
+        if let Err(e) = write_envelope(&args.output, key, &digest) {
+            if let Err(remove_err) = std::fs::remove_file(&args.output) {
+                eprintln!(
+                    "camel compile: artifact removal after envelope failure also failed: {remove_err}"
+                );
+            }
+            eprintln!("camel compile: {e}");
+            return EXIT_REJECTION;
+        }
+    } else {
+        // Unsigned compile: a stale envelope from a previous signed
+        // compile of the same output would fail closed at boot as an
+        // unpaired envelope — remove it so the fresh unsigned artifact
+        // deploys clean. Absence and removal failure are both benign
+        // here (the artifact itself is complete and valid).
+        let mut stale_name = args.output.as_os_str().to_owned();
+        stale_name.push(".sig");
+        let _ = std::fs::remove_file(Path::new(&stale_name));
     }
     0
 }
@@ -330,7 +466,11 @@ fn document_kind(path: &Path) -> Option<TrailerKind> {
 /// Both are written to the sibling `<output>.tmp` first, flushed to disk,
 /// and only the complete temp file is renamed onto `output`, carrying
 /// `mode` (0755 for secret-free artifacts, 0700 when secret-family
-/// entries are embedded). The temp file is created exclusively, in one
+/// entries are embedded). When `artifact_digest` is `Some` (r4sign), the
+/// exact byte stream written — executable copy plus trailer — also feeds
+/// the SHA-512 prehash digest, so the caller can sign the final artifact
+/// bytes without a re-read and without buffering. The temp file is
+/// created exclusively, in one
 /// `create_new` open, with its final mode — so no window exists where
 /// secret-bearing bytes sit in a readable file before a post-copy chmod,
 /// and a planted symlink at `<output>.tmp` is refused instead of being
@@ -340,7 +480,12 @@ fn document_kind(path: &Path) -> Option<TrailerKind> {
 /// any pre-existing output is left untouched — a rejected or failed
 /// compile never deletes or truncates an existing artifact, and no
 /// partial artifact is ever visible at `output`.
-fn write_artifact(output: &Path, trailer_bytes: &[u8], mode: u32) -> Result<(), String> {
+fn write_artifact(
+    output: &Path,
+    trailer_bytes: &[u8],
+    mode: u32,
+    mut artifact_digest: Option<&mut Sha512>,
+) -> Result<(), String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("cannot locate the current executable: {e}"))?;
     let mut tmp_name = output.as_os_str().to_owned();
@@ -353,7 +498,7 @@ fn write_artifact(output: &Path, trailer_bytes: &[u8], mode: u32) -> Result<(), 
         message
     }
 
-    let write = || -> std::io::Result<()> {
+    let mut write = || -> std::io::Result<()> {
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true);
         // The file is born with its final mode (no post-copy chmod), and
@@ -369,12 +514,23 @@ fn write_artifact(output: &Path, trailer_bytes: &[u8], mode: u32) -> Result<(), 
         let _ = mode;
         let mut out = opts.open(&tmp)?;
         let mut exe_file = std::fs::File::open(&exe)?;
-        std::io::copy(&mut exe_file, &mut out)?;
-        out.write_all(trailer_bytes)?;
         // Flush the complete artifact before the rename (the same
         // temp-then-rename durability convention as the file component's
         // `atomic_write`).
-        out.sync_all()
+        match artifact_digest.as_deref_mut() {
+            // Signing: every written byte also feeds the prehash digest.
+            Some(digest) => {
+                let mut out = HashingWriter { inner: out, digest };
+                std::io::copy(&mut exe_file, &mut out)?;
+                out.write_all(trailer_bytes)?;
+                out.inner.sync_all()
+            }
+            None => {
+                std::io::copy(&mut exe_file, &mut out)?;
+                out.write_all(trailer_bytes)?;
+                out.sync_all()
+            }
+        }
     };
     if let Err(e) = write() {
         return Err(discard(
@@ -386,6 +542,84 @@ fn write_artifact(output: &Path, trailer_bytes: &[u8], mode: u32) -> Result<(), 
         return Err(discard(
             &tmp,
             format!("cannot publish the artifact to '{}': {e}", output.display()),
+        ));
+    }
+    Ok(())
+}
+
+/// Writer adapter feeding every byte written to the artifact also into
+/// the SHA-512 prehash digest (r4sign): the signature covers the exact
+/// final artifact byte stream — no re-read, no buffering.
+struct HashingWriter<'a, W: std::io::Write> {
+    inner: W,
+    digest: &'a mut Sha512,
+}
+
+impl<W: std::io::Write> std::io::Write for HashingWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.digest.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Encode and publish the detached `CAMELSG1` envelope for `key` over
+/// the streamed artifact digest to `<output>.sig` atomically: the
+/// envelope is written to the sibling `<output>.sig.tmp` (created
+/// exclusively with mode 0644, flushed), then renamed onto
+/// `<output>.sig`. On any failure the temp file is removed and an error
+/// naming the envelope step is returned; the caller removes the artifact
+/// so no signed manifest is ever published without its envelope.
+fn write_envelope(
+    output: &Path,
+    key: &SigningKey,
+    message_sha512: &[u8; 64],
+) -> Result<(), String> {
+    let mut sig_name = output.as_os_str().to_owned();
+    sig_name.push(".sig");
+    let sig = PathBuf::from(sig_name);
+    let mut tmp_name = sig.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+
+    /// Remove the temp file this function owns; `sig` is never touched.
+    fn discard(tmp: &Path, message: String) -> String {
+        let _ = std::fs::remove_file(tmp);
+        message
+    }
+
+    let write = || -> std::io::Result<()> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o644);
+        }
+        let mut out = opts.open(&tmp)?;
+        out.write_all(&signature::encode_envelope(key, message_sha512))?;
+        out.sync_all()
+    };
+    if let Err(e) = write() {
+        return Err(discard(
+            &tmp,
+            format!(
+                "cannot write the signature envelope to '{}': {e}",
+                sig.display()
+            ),
+        ));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &sig) {
+        return Err(discard(
+            &tmp,
+            format!(
+                "cannot publish the signature envelope to '{}': {e}",
+                sig.display()
+            ),
         ));
     }
     Ok(())
@@ -415,6 +649,9 @@ mod empty_config_tests {
             profile: Vec::new(),
             max_payload_bytes: None,
             embed_secrets: false,
+            sign: false,
+            signing_key: None,
+            require_signature: false,
         };
         assert_eq!(
             run_compile(&args),
