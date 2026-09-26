@@ -14,7 +14,9 @@
 //! `#[cfg(test)]` module subtrees. Out-of-line `#[cfg(test)] mod X;`
 //! module files are a declared false-negative class: each file parses
 //! standalone, so the cfg attribute on the declaration is not visible
-//! there (same treatment as the rc-eow0s binding-indirection class).
+//! there, and curried multi-level closure calls (`((f())())()`) remain
+//! pruned under the same conservative policy — the residue of bd
+//! rc-eow0s after its shapes 1-2 became detected.
 //! Associated fns (`impl` / trait default methods) stay out of scope at
 //! file level, mirroring the in-body pruning rule. Spawned-closure
 //! pruning is unchanged: a closure whose body runs in its own task
@@ -42,8 +44,9 @@
 //!   inline while the body contains no inner await to unroll — and a
 //!   bare wait-class tail of an async-block body counts as such a tail
 //!   (the outer await polls it inline, bd rc-w4p8l), as does a bare
-//!   `async { .. }.await` base; loop-site classification mirrors the
-//!   same rules;
+//!   `async { .. }.await` base; try-block bodies stay excluded
+//!   (nightly-only shape, conservative); loop-site classification
+//!   mirrors the same rules;
 //! - a `loop` whose body contains an `.await` in test-body scope that
 //!   is not bounded per site (readiness polling / retry loops); only
 //!   classified wait sites count — awaited calls in WAIT_METHODS,
@@ -66,15 +69,18 @@
 //! embedded in macro bodies (`tokio::select!` / `join!` / `try_join!`
 //! arms) are invisible — `syn` exposes a macro call as an opaque token
 //! stream — so a `select!` recv arm is neither flagged nor bounded.
-//! Binding-indirection forms are detected under sole-binding
-//! provenance — a future built by a directly-invoked closure but
-//! let-bound before awaiting (`let f = (|| async { .. })(); f.await`)
+//! Binding-indirection forms are detected under sole-binding and
+//! positional provenance — a future built by a directly-invoked closure
+//! but let-bound before awaiting (`let f = (|| async { .. })(); f.await`)
 //! and a closure let-bound before its direct call (`let c = || { .. };
 //! c()`) are tracked when the name is bound by exactly one pattern in
-//! the fn body; any other pattern occurrence of the name drops it, a
-//! conservative false negative. Curried multi-level calls
-//! (`((f())())()`) stay pruned — both classes are tracked in bd
-//! rc-eow0s. Glob imports
+//! the fn signature and body and the use site lies strictly after the
+//! binding line (locals shadow outer names only from the binding
+//! onward, so earlier same-name uses are provably not the binding); any
+//! other pattern occurrence of the name drops it, a conservative false
+//! negative. Curried multi-level calls (`((f())())()`) stay pruned —
+//! the curried residue is tracked in bd rc-eow0s, shapes 1-2 are
+//! closed. Glob imports
 //! (`use tokio::time::*`) are resolved through candidate-set
 //! expansion (see Resolution).
 //!
@@ -1362,18 +1368,22 @@ fn scan_fn_body(f: &ItemFn, chain: &[Imports], lines: &[&str], findings: &mut Ve
     .visit_block(f.block.as_ref());
 
     // Sole-binding provenance for the binding-indirection maps: count
-    // every pattern-bound ident in the body; a closure-ish binding name
-    // must be its only pattern occurrence to stay tracked.
+    // every pattern-bound ident in the signature and body; a
+    // closure-ish binding name must be its only pattern occurrence to
+    // stay tracked — a same-named parameter already shadows it.
     let mut pat_counts: HashMap<String, usize> = HashMap::new();
     PatIdentCounts {
         counts: &mut pat_counts,
     }
-    .visit_block(f.block.as_ref());
+    .visit_item_fn(f);
 
     // Pass 0: BindingIndirectionCollector — provenance maps for
-    // let-bound IIFE futures and let-bound closures.
-    let mut iife_futures: HashMap<String, (Span, IifeTail)> = HashMap::new();
-    let mut bound_closures: HashMap<String, (Span, bool)> = HashMap::new();
+    // let-bound IIFE futures and let-bound closures. The third tuple
+    // field is the binding's start line: locals shadow outer names
+    // only from the binding onward, so a use at or before that line is
+    // provably not the binding and must neither mark nor report.
+    let mut iife_futures: HashMap<String, (Span, IifeTail, usize)> = HashMap::new();
+    let mut bound_closures: HashMap<String, (Span, bool, usize)> = HashMap::new();
     BindingIndirectionCollector {
         chain,
         body_top: &body_top,
@@ -1519,9 +1529,10 @@ impl Visit<'_> for SpawnCollector<'_> {
     }
 }
 
-/// Pattern-bound ident occurrence counts across a fn body — every
-/// `let` pattern, closure parameter, for-loop pattern, match-arm
-/// pattern, and let-condition mention, nested fn items included.
+/// Pattern-bound ident occurrence counts across a fn signature and
+/// body — every fn parameter, `let` pattern, closure parameter,
+/// for-loop pattern, match-arm pattern, and let-condition mention,
+/// nested fn items included.
 /// Feeds sole-binding provenance: a tracked binding-indirection name
 /// must occur exactly once.
 struct PatIdentCounts<'a> {
@@ -1554,8 +1565,8 @@ struct BindingIndirectionCollector<'a> {
     body_nested: &'a [(Imports, usize)],
     non_terminal_locals: &'a HashSet<String>,
     pat_counts: &'a HashMap<String, usize>,
-    iife_futures: &'a mut HashMap<String, (Span, IifeTail)>,
-    bound_closures: &'a mut HashMap<String, (Span, bool)>,
+    iife_futures: &'a mut HashMap<String, (Span, IifeTail, usize)>,
+    bound_closures: &'a mut HashMap<String, (Span, bool, usize)>,
 }
 
 impl ResolvesPaths for BindingIndirectionCollector<'_> {
@@ -1586,7 +1597,8 @@ impl Visit<'_> for BindingIndirectionCollector<'_> {
                 syn::Expr::Call(c) => {
                     if let syn::Expr::Closure(cl) = strip_parens(&c.func) {
                         let tail = classify_iife_tail(self, c);
-                        self.iife_futures.insert(name, (span_of(cl), tail));
+                        self.iife_futures
+                            .insert(name, (span_of(cl), tail, span_of(local).0.line));
                     }
                 }
                 // `let c = || { .. };` — bound closure. Sync-executable
@@ -1599,7 +1611,8 @@ impl Visit<'_> for BindingIndirectionCollector<'_> {
                             strip_parens(&cl.body),
                             syn::Expr::Async(_) | syn::Expr::TryBlock(_)
                         );
-                    self.bound_closures.insert(name, (span_of(cl), sync_exec));
+                    self.bound_closures
+                        .insert(name, (span_of(cl), sync_exec, span_of(local).0.line));
                 }
                 _ => {}
             }
@@ -1626,23 +1639,30 @@ impl Visit<'_> for BindingIndirectionCollector<'_> {
 /// own prune points which marked closures to unroll.
 struct InlineClosureCollector<'a> {
     marks: &'a mut HashSet<Span>,
-    iife_futures: &'a HashMap<String, (Span, IifeTail)>,
-    bound_closures: &'a HashMap<String, (Span, bool)>,
+    iife_futures: &'a HashMap<String, (Span, IifeTail, usize)>,
+    bound_closures: &'a HashMap<String, (Span, bool, usize)>,
 }
 
 impl Visit<'_> for InlineClosureCollector<'_> {
     fn visit_expr_await(&mut self, e: &syn::ExprAwait) {
-        if let syn::Expr::Call(c) = strip_parens(&e.base)
+        let base = strip_parens(&e.base);
+        let use_line = span_of(e).0.line;
+        if let syn::Expr::Call(c) = base
             && let syn::Expr::Closure(cl) = strip_parens(&c.func)
         {
             self.marks.insert(span_of(cl));
         }
-        match strip_parens(&e.base) {
+        // Binding-driven marks require the use site to lie strictly
+        // after the binding line: a local shadows outer names only
+        // from its binding onward, so an earlier same-name await
+        // targets something else (parameter, import, static).
+        match base {
             // `f.await` on a let-bound IIFE future.
             syn::Expr::Path(pe) if pe.path.segments.len() == 1 => {
-                if let Some((sp, _)) = self
+                if let Some((sp, _, bind_line)) = self
                     .iife_futures
                     .get(&pe.path.segments[0].ident.to_string())
+                    && use_line > *bind_line
                 {
                     self.marks.insert(*sp);
                 }
@@ -1651,9 +1671,10 @@ impl Visit<'_> for InlineClosureCollector<'_> {
             syn::Expr::Call(c) => {
                 if let syn::Expr::Path(pe) = strip_parens(&c.func)
                     && pe.path.segments.len() == 1
-                    && let Some((sp, _)) = self
+                    && let Some((sp, _, bind_line)) = self
                         .bound_closures
                         .get(&pe.path.segments[0].ident.to_string())
+                    && use_line > *bind_line
                 {
                     self.marks.insert(*sp);
                 }
@@ -1675,12 +1696,14 @@ impl Visit<'_> for InlineClosureCollector<'_> {
         }
         // `c()` on a let-bound sync-executable closure executes its
         // body at call time; a future-builder closure called bare gets
-        // no mark here — only its `.await` marks it.
+        // no mark here — only its `.await` marks it. The same
+        // strictly-after-binding positional guard as above applies.
         if let syn::Expr::Path(pe) = strip_parens(&call.func)
             && pe.path.segments.len() == 1
-            && let Some((sp, true)) = self
+            && let Some((sp, true, bind_line)) = self
                 .bound_closures
                 .get(&pe.path.segments[0].ident.to_string())
+            && span_of(call).0.line > *bind_line
         {
             self.marks.insert(*sp);
         }
@@ -2004,12 +2027,13 @@ struct WaitFinder<'a> {
     /// the pass-0 mark collector; marked closures unroll instead of
     /// pruning.
     inline: &'a HashSet<Span>,
-    /// Let-bound IIFE futures by binding name, with the closure span
-    /// and stored tail class (bd rc-eow0s). A WaitTail class makes the
-    /// binding await itself a report site; AsyncBody/Other report
-    /// nothing there — the inline mark unrolls inner sites at their own
-    /// lines instead.
-    iife_futures: &'a HashMap<String, (Span, IifeTail)>,
+    /// Let-bound IIFE futures by binding name, with the closure span,
+    /// stored tail class, and binding line (bd rc-eow0s). A WaitTail
+    /// class makes the binding await itself a report site, but only
+    /// strictly after the binding line — earlier same-name awaits
+    /// target an outer binding; AsyncBody/Other report nothing there —
+    /// the inline mark unrolls inner sites at their own lines instead.
+    iife_futures: &'a HashMap<String, (Span, IifeTail, usize)>,
 }
 
 impl ResolvesPaths for WaitFinder<'_> {
@@ -2156,10 +2180,16 @@ impl Visit<'_> for WaitFinder<'_> {
             syn::Expr::Path(pe) if pe.path.segments.len() == 1 => {
                 // A spawned handle binding, or a let-bound IIFE future
                 // whose stored class is WaitTail: the binding await is
-                // itself the blocking site (bd rc-eow0s).
+                // itself the blocking site (bd rc-eow0s). The IIFE
+                // branch requires the await to lie strictly after the
+                // binding line — earlier same-name awaits target an
+                // outer binding (parameter, import, static).
                 let name = pe.path.segments[0].ident.to_string();
                 if self.spawned.contains(&name)
-                    || matches!(self.iife_futures.get(&name), Some((_, IifeTail::WaitTail)))
+                    || matches!(
+                        self.iife_futures.get(&name),
+                        Some((_, IifeTail::WaitTail, bind_line)) if sp.0.line > *bind_line
+                    )
                 {
                     self.maybe_report(sp);
                 }
@@ -2794,6 +2824,74 @@ mod tests {
         // through the module alias.
         let src = "use tokio::task as task;\n\n#[tokio::test]\nasync fn t() {\n    let f = (|| async { task::spawn_blocking(work()) })();\n    f.await;\n}\n";
         assert_eq!(findings(src), vec![6]);
+    }
+
+    #[test]
+    fn glob_import_wait_tail_let_bound_iife_future_reported() {
+        // Mission-267 glob resolution must also reach the
+        // binding-indirection classification: `spawn` resolves through
+        // the `tokio::task::*` glob to a wait-call target.
+        let src = "use tokio::task::*;\n\n#[tokio::test]\nasync fn t() {\n    let f = (|| async { spawn(work()) })();\n    f.await;\n}\n";
+        assert_eq!(findings(src), vec![6]);
+    }
+
+    // ---- binding provenance (r_glm fix round) ---------------------------
+
+    #[test]
+    fn iife_future_binding_shadowed_by_fn_param_not_reported() {
+        // The fn parameter is a pattern occurrence of `f`, so the
+        // sole-binding guard drops the binding entirely; neither the
+        // pre-binding param await nor the post-binding await reports.
+        let src = "#[cfg(test)]\nmod m {\n    async fn helper(f: F, rx: Rx) {\n        let _ = f.await;\n        let f = (|| async { rx.recv() })();\n        f.await;\n    }\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn iife_future_binding_awaited_before_let_not_reported() {
+        // `g` has exactly one pattern occurrence (the tracked let), so
+        // the map tracks it — but the first await lies at/before the
+        // binding line and targets an outer binding of the same name;
+        // only the post-binding await reports.
+        let src = "#[tokio::test]\nasync fn t() {\n    let _ = g.await;\n    let g = (|| async { rx.recv() })();\n    g.await;\n}\n";
+        assert_eq!(findings(src), vec![5]);
+    }
+
+    #[test]
+    fn iife_future_binding_shadowed_by_for_pattern_not_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    let f = (|| async { rx.recv() })();\n    for f in 0..2 {\n        let _ = f;\n    }\n    f.await;\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn iife_future_binding_shadowed_by_match_arm_not_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    let f = (|| async { rx.recv() })();\n    match n {\n        f => drop(f),\n    }\n    f.await;\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn iife_future_binding_shadowed_by_if_let_not_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    let f = (|| async { rx.recv() })();\n    if let f = n {}\n    f.await;\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn iife_future_binding_shadowed_by_closure_param_not_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    let f = (|| async { rx.recv() })();\n    let k = |f: i32| drop(f);\n    k(1);\n    f.await;\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn iife_future_binding_shadowed_by_nested_fn_param_not_reported() {
+        let src = "#[tokio::test]\nasync fn t() {\n    let f = (|| async { rx.recv() })();\n    fn inner(f: i32) {\n        drop(f);\n    }\n    inner(1);\n    f.await;\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn loop_bare_wait_tail_iife_reported_once() {
+        // The WaitTail flip makes the bare-tail IIFE a loop site; the
+        // loop reports once and the inner await is subsumed.
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        (|| async { rx.recv() })().await;\n    }\n}\n";
+        assert_eq!(findings(src), vec![3]);
     }
 
     // ---- escape hatch ---------------------------------------------------
