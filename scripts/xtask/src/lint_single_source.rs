@@ -1,5 +1,8 @@
 //! Lint: scan component crate source for `UriOption::new` calls outside
-//! `#[cfg(test)]` modules. Enforces the single-source-of-truth invariant
+//! test scopes (`#[cfg(test)]`, `#[test]`, `#[tokio::test]`, `#[rstest]`,
+//! `#[test_case]`, and cfg conjunctions with a direct `test` predicate —
+//! see `crate::scan_state::is_test_attr_line`). Enforces the
+//! single-source-of-truth invariant
 //! established by the `consolidate-uri-metadata` ADR-0041 amendment:
 //! metadata MUST be macro-derived; hand-written `UriOption::new` lists
 //! are forbidden in production code.
@@ -9,7 +12,8 @@ use regex::Regex;
 use std::path::{Component, Path};
 
 /// Scan all `.rs` files under `crates/components/` for `UriOption::new` calls
-/// that fall OUTSIDE `#[cfg(test)]` / `mod tests` blocks.
+/// that fall OUTSIDE test scopes (attribute set per
+/// `crate::scan_state::is_test_attr_line`).
 ///
 /// Uses the same lexical brace-depth tracking as `lint_unwrap` to skip
 /// test-scoped code. Only reports violations in `src/` files (not `tests/`).
@@ -64,6 +68,10 @@ pub fn lint_single_source(workspace_root: &Path) -> Result<Vec<Violation>, Strin
 }
 
 /// Scan a single `.rs` file's content for `UriOption::new` outside test scopes.
+/// Test-scope recognition is the canonical
+/// [`crate::scan_state::is_test_attr_line`]: `#[cfg(test)]`, `#[test]`,
+/// `#[tokio::test]` (with or without args), `#[rstest]`, `#[test_case]`,
+/// and cfg `all`/`any` conjunctions with a direct `test` predicate.
 fn scan_file_for_uri_option_new(src: &str, file_path: &str, uri_re: &Regex) -> Vec<Violation> {
     let lines: Vec<&str> = src.lines().collect();
 
@@ -76,9 +84,7 @@ fn scan_file_for_uri_option_new(src: &str, file_path: &str, uri_re: &Regex) -> V
         let trimmed = raw_line.trim();
 
         // Detect test attributes only when not already inside a test scope.
-        if test_scope_entry_depth.is_none()
-            && (trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[test]"))
-        {
+        if test_scope_entry_depth.is_none() && crate::scan_state::is_test_attr_line(trimmed) {
             pending_test_attr = true;
         }
 
@@ -239,5 +245,100 @@ mod tests {
         let re = Regex::new(r"UriOption::new").unwrap(); // allow-unwrap
         let violations = scan_file_for_uri_option_new(src, "test.rs", &re);
         assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn tokio_test_fn_is_test_scope() {
+        let src = r#"
+            #[tokio::test]
+            async fn checks_uri_option() {
+                let opt = UriOption::new("foo", "desc", OptionKind::String);
+            }
+        "#;
+        let re = Regex::new(r"UriOption::new").unwrap(); // allow-unwrap
+        let violations = scan_file_for_uri_option_new(src, "test.rs", &re);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn tokio_test_fn_with_args_is_test_scope() {
+        let src = r#"
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn checks_uri_option_multi_thread() {
+                let opt = UriOption::new("foo", "desc", OptionKind::String);
+            }
+        "#;
+        let re = Regex::new(r"UriOption::new").unwrap(); // allow-unwrap
+        let violations = scan_file_for_uri_option_new(src, "test.rs", &re);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn rstest_and_test_case_attrs_are_test_scope() {
+        let src = r#"
+            #[rstest]
+            #[rstest(case(1))]
+            fn parameterized_case(case: u32) {
+                let opt = UriOption::new("foo", "desc", OptionKind::String);
+            }
+
+            #[test_case(1)]
+            fn table_case(input: u32) {
+                let opt = UriOption::new("foo", "desc", OptionKind::String);
+            }
+        "#;
+        let re = Regex::new(r"UriOption::new").unwrap(); // allow-unwrap
+        let violations = scan_file_for_uri_option_new(src, "test.rs", &re);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn tokio_attr_inside_test_scope_still_skipped() {
+        let src = r#"
+            #[cfg(test)]
+            mod tests {
+                use super::*;
+
+                #[tokio::test]
+                async fn inner() {
+                    let opt = UriOption::new("foo", "desc", OptionKind::String);
+                }
+            }
+
+            fn prod_after() {}
+        "#;
+        let re = Regex::new(r"UriOption::new").unwrap(); // allow-unwrap
+        let violations = scan_file_for_uri_option_new(src, "test.rs", &re);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn cfg_conjunction_opens_test_scope() {
+        let src = r#"
+            #[cfg(all(test, feature = "llm"))]
+            mod llm_tests {
+                use super::*;
+                let _opt = UriOption::new("llm", "d", OptionKind::String);
+            }
+
+            fn prod() {}
+        "#;
+        let re = Regex::new(r"UriOption::new").unwrap(); // allow-unwrap
+        let violations = scan_file_for_uri_option_new(src, "test.rs", &re);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn tokio_test_attr_wrapped_across_lines_is_test_scope() {
+        let src = r#"
+            #[tokio::test(flavor = "multi_thread",
+                worker_threads = 2)]
+            async fn wrapped_attr_test() {
+                let opt = UriOption::new("foo", "desc", OptionKind::String);
+            }
+        "#;
+        let re = Regex::new(r"UriOption::new").unwrap(); // allow-unwrap
+        let violations = scan_file_for_uri_option_new(src, "test.rs", &re);
+        assert_eq!(violations.len(), 0);
     }
 }

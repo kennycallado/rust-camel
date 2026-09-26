@@ -1191,6 +1191,28 @@ impl Visit<'_> for PatIdents<'_> {
     }
 }
 
+/// Collect (binding name, binding line) pairs from a pattern for
+/// spawned-handle provenance: each ident maps to the EARLIEST start
+/// line among the spawn `let`s that bind it — a second binding of the
+/// same name must not push the line later, or an earlier await of the
+/// first binding would go unreported.
+struct PatIdentLines<'a> {
+    names: &'a mut HashMap<String, usize>,
+    line: usize,
+}
+
+impl Visit<'_> for PatIdentLines<'_> {
+    fn visit_pat(&mut self, pat: &syn::Pat) {
+        if let syn::Pat::Ident(pi) = pat {
+            self.names
+                .entry(pi.ident.to_string())
+                .and_modify(|cur| *cur = (*cur).min(self.line))
+                .or_insert(self.line);
+        }
+        visit::visit_pat(self, pat);
+    }
+}
+
 /// Collect body_nested imports and non_terminal_locals from a test fn body.
 ///
 /// depth=0 means we're in the fn block itself (direct statements).
@@ -1406,8 +1428,17 @@ fn scan_fn_body(f: &ItemFn, chain: &[Imports], lines: &[&str], findings: &mut Ve
     }
     .visit_block(f.block.as_ref());
 
-    // Pass 2: SpawnCollector — find bindings whose initializer spawns
-    let mut spawned = HashSet::new();
+    // Pass 2: SpawnCollector — find bindings whose initializer
+    // spawns. Earliest-binding-line provenance (bd rc-hivh9): each
+    // spawned name maps to the earliest spawn `let`'s start line; the
+    // consumer requires the await strictly after it, so earlier
+    // same-name awaits target an outer binding (parameter, import,
+    // earlier let) and must not report. No sole-binding gate, unlike
+    // pass 0 (bd rc-eow0s): multi-binding names stay tracked so the
+    // collect-and-await idiom (spawn loop → handle vec → drain loop)
+    // keeps reporting — a deliberate asymmetry, conservatism in the
+    // reporting direction here, in the suppressing direction there.
+    let mut spawned = HashMap::new();
     SpawnCollector {
         chain,
         body_top: &body_top,
@@ -1480,12 +1511,20 @@ fn scan_items(
     }
 }
 
+/// Spawned-handle provenance (bd rc-hivh9): `let`-bound spawn results
+/// (`let h = tokio::spawn(..);`, `let h = set.spawn(..);`) by binding
+/// name, mapped to the earliest binding start line. No sole-binding
+/// gate, unlike the pass-0 iife/bound-closure maps: the
+/// collect-and-await idiom is corpus-dominant, so conservatism points
+/// the reporting way — multi-binding names stay tracked and every
+/// strictly-after await reports; only uses at or before the earliest
+/// line are dropped as provably outer.
 struct SpawnCollector<'a> {
     chain: &'a [Imports],
     body_top: &'a Imports,
     body_nested: &'a [(Imports, usize)],
     non_terminal_locals: &'a HashSet<String>,
-    names: &'a mut HashSet<String>,
+    names: &'a mut HashMap<String, usize>,
 }
 
 impl ResolvesPaths for SpawnCollector<'_> {
@@ -1523,7 +1562,14 @@ impl Visit<'_> for SpawnCollector<'_> {
         if let Some(init) = &local.init
             && self.is_spawn_expr(&init.expr)
         {
-            PatIdents { names: self.names }.visit_pat(&local.pat);
+            // PatIdentLines keeps the earliest line per ident, so a
+            // second spawn binding of the same name cannot push the
+            // provenance line past an earlier genuine await.
+            PatIdentLines {
+                names: &mut *self.names,
+                line: span_of(local).0.line,
+            }
+            .visit_pat(&local.pat);
         }
         visit::visit_local(self, local);
     }
@@ -2015,7 +2061,16 @@ struct WaitFinder<'a> {
     body_top: &'a Imports,
     body_nested: &'a [(Imports, usize)],
     non_terminal_locals: &'a HashSet<String>,
-    spawned: &'a HashSet<String>,
+    /// Spawned-handle bindings by name, mapped to the earliest spawn
+    /// binding's start line (bd rc-hivh9). The binding await is a
+    /// report site strictly after that line — uses at or before it
+    /// target an outer binding (parameter, import, earlier let).
+    /// Residual accepted FP: a NON-spawn re-binding of the name after
+    /// the spawn line makes a later await report although it targets
+    /// the re-binding (corpus-zero today; scope-aware binding
+    /// resolution is the eventual cure). No sole-binding gate, unlike
+    /// `iife_futures` — the collect-and-await idiom is corpus-dominant.
+    spawned: &'a HashMap<String, usize>,
     future_regions: &'a [Span],
     /// Spans of already-reported unbounded loops, for subsumption of the
     /// wait findings they contain.
@@ -2180,12 +2235,17 @@ impl Visit<'_> for WaitFinder<'_> {
             syn::Expr::Path(pe) if pe.path.segments.len() == 1 => {
                 // A spawned handle binding, or a let-bound IIFE future
                 // whose stored class is WaitTail: the binding await is
-                // itself the blocking site (bd rc-eow0s). The IIFE
-                // branch requires the await to lie strictly after the
-                // binding line — earlier same-name awaits target an
-                // outer binding (parameter, import, static).
+                // itself the blocking site (bd rc-eow0s, rc-hivh9).
+                // Both require the await to lie strictly after the
+                // binding line (earliest, for spawned handles) —
+                // earlier same-name awaits target an outer binding
+                // (parameter, import, static).
                 let name = pe.path.segments[0].ident.to_string();
-                if self.spawned.contains(&name)
+                let spawned_hit = matches!(
+                    self.spawned.get(&name),
+                    Some(&bind_line) if sp.0.line > bind_line
+                );
+                if spawned_hit
                     || matches!(
                         self.iife_futures.get(&name),
                         Some((_, IifeTail::WaitTail, bind_line)) if sp.0.line > *bind_line
@@ -2306,6 +2366,69 @@ mod tests {
         let src =
             "#[tokio::test]\nasync fn t() {\n    let h = set.spawn(t1);\n    let r = h.await;\n}\n";
         assert_eq!(findings(src), vec![4]);
+    }
+
+    #[test]
+    fn spawned_handle_pre_binding_await_not_reported() {
+        // bd rc-hivh9: the param await precedes the spawn binding, so
+        // it targets the outer parameter — without binding-line
+        // provenance it false-positives.
+        let src = "#[tokio::test]\nasync fn t(s: tokio::task::JoinHandle<()>) {\n    let _ = s.await;\n    let s = tokio::spawn(work());\n    s.await;\n}\n";
+        let f = findings(src);
+        assert!(!f.contains(&3), "pre-binding param await reported: {f:?}");
+    }
+
+    #[test]
+    fn spawned_handle_await_reports_after_binding() {
+        // Control for the provenance guards: a sole spawn binding
+        // awaited strictly after its binding line still reports.
+        let src =
+            "#[tokio::test]\nasync fn t() {\n    let h = tokio::spawn(work());\n    h.await;\n}\n";
+        assert_eq!(findings(src), vec![4]);
+    }
+
+    #[test]
+    fn spawned_await_before_binding_not_reported() {
+        // A same-named outer `let` shadowed by a later spawn binding:
+        // the await strictly precedes the earliest spawn binding line,
+        // so it targets the outer handle and must not report
+        // (strictly-after guard, bd rc-hivh9 FP class). Only the
+        // before-shape is pinned here — a same-line await cannot coexist
+        // with its binding under rustfmt.
+        let src = "#[tokio::test]\nasync fn t() {\n    let s = handle;\n    s.await;\n    let s = tokio::spawn(work());\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn spawned_post_binding_await_reports_despite_param_shadow() {
+        // bd rc-hivh9 fix round: the trailing `s.await` targets the
+        // spawn binding (post-binding, earliest line 4), so it reports
+        // even though the parameter shadows the name earlier — unlike
+        // the iife/bound-closure maps there is no sole-binding gate;
+        // conservatism points the reporting way on purpose.
+        let src = "#[tokio::test]\nasync fn t(s: tokio::task::JoinHandle<()>) {\n    let _ = s.await;\n    let s = tokio::spawn(work());\n    s.await;\n}\n";
+        let f = findings(src);
+        assert!(
+            f.contains(&5),
+            "post-binding spawn await not reported: {f:?}"
+        );
+    }
+
+    #[test]
+    fn loop_collect_await_still_reported() {
+        // The corpus-dominant idiom: spawn in a loop, collect handles,
+        // await in a second loop whose for pattern re-binds the name.
+        // The re-binding must not silence the post-binding await.
+        let src = "#[tokio::test]\nasync fn t() {\n    let mut handles = Vec::new();\n    for _ in 0..3 {\n        let handle = tokio::spawn(async { work().await; });\n        handles.push(handle);\n    }\n    for handle in handles {\n        handle.await;\n    }\n}\n";
+        assert_eq!(findings(src), vec![9]);
+    }
+
+    #[test]
+    fn spawned_two_sequential_same_name_awaits_both_reported() {
+        // A second spawn binding of the same name must not push the
+        // earliest binding line later: both post-binding awaits report.
+        let src = "#[tokio::test]\nasync fn t() {\n    let h = tokio::spawn(a());\n    h.await;\n    let h = tokio::spawn(b());\n    h.await;\n}\n";
+        assert_eq!(findings(src), vec![4, 6]);
     }
 
     #[test]

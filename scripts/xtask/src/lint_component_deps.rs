@@ -1,5 +1,8 @@
 //! Lint: scan component crate source for `camel_core::` references outside
-//! `#[cfg(test)]` modules. Enforces the hexagonal-architecture invariant:
+//! test scopes (`#[cfg(test)]`, `#[test]`, `#[tokio::test]`, `#[rstest]`,
+//! `#[test_case]`, and cfg conjunctions with a direct `test` predicate —
+//! see `crate::scan_state::is_test_attr_line`). Enforces the
+//! hexagonal-architecture invariant:
 //! components (adapters) must depend on ports (`camel-component-api`), never
 //! on concrete adapter types from `camel-core`.
 //!
@@ -14,7 +17,8 @@ use regex::Regex;
 use std::path::{Component, Path};
 
 /// Scan all `.rs` files under `crates/components/` for `camel_core::`
-/// references that fall OUTSIDE `#[cfg(test)]` / `#[test]` blocks.
+/// references that fall OUTSIDE test scopes (attribute set per
+/// `crate::scan_state::is_test_attr_line`).
 ///
 /// Uses the same lexical brace-depth tracking as `lint_single_source` to
 /// skip test-scoped code. Comment lines are also skipped.
@@ -66,6 +70,10 @@ pub fn lint_component_deps(workspace_root: &Path) -> Result<Vec<Violation>, Stri
 }
 
 /// Scan a single `.rs` file's content for `camel_core::` outside test scopes.
+/// Test-scope recognition is the canonical
+/// [`crate::scan_state::is_test_attr_line`]: `#[cfg(test)]`, `#[test]`,
+/// `#[tokio::test]` (with or without args), `#[rstest]`, `#[test_case]`,
+/// and cfg `all`/`any` conjunctions with a direct `test` predicate.
 fn scan_file_for_camel_core_deps(src: &str, file_path: &str, re: &Regex) -> Vec<Violation> {
     let lines: Vec<&str> = src.lines().collect();
 
@@ -77,9 +85,7 @@ fn scan_file_for_camel_core_deps(src: &str, file_path: &str, re: &Regex) -> Vec<
     for (line_idx, raw_line) in lines.iter().enumerate() {
         let trimmed = raw_line.trim();
 
-        if test_scope_entry_depth.is_none()
-            && (trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("#[test]"))
-        {
+        if test_scope_entry_depth.is_none() && crate::scan_state::is_test_attr_line(trimmed) {
             pending_test_attr = true;
         }
 
@@ -204,6 +210,100 @@ mod tests {
             use camel_component_api::Component;
             fn do_stuff() {
                 let x = 42;
+            }
+        "#;
+        let re = Regex::new(r"\bcamel_core::").unwrap(); // allow-unwrap
+        let violations = scan_file_for_camel_core_deps(src, "test.rs", &re);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn tokio_test_fn_is_test_scope() {
+        let src = r#"
+            #[tokio::test]
+            async fn fetches_registry() {
+                let r: camel_core::Registry = camel_core::Registry::new();
+            }
+        "#;
+        let re = Regex::new(r"\bcamel_core::").unwrap(); // allow-unwrap
+        let violations = scan_file_for_camel_core_deps(src, "test.rs", &re);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn tokio_test_fn_with_args_is_test_scope() {
+        let src = r#"
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn fetches_registry_multi_thread() {
+                let _r = camel_core::Registry::new();
+            }
+        "#;
+        let re = Regex::new(r"\bcamel_core::").unwrap(); // allow-unwrap
+        let violations = scan_file_for_camel_core_deps(src, "test.rs", &re);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn rstest_and_test_case_attrs_are_test_scope() {
+        let src = r#"
+            #[rstest]
+            #[rstest(case(1))]
+            fn parameterized_case(case: u32) {
+                let _r = camel_core::Registry::new();
+            }
+
+            #[test_case(1)]
+            fn table_case(input: u32) {
+                let _r = camel_core::Registry::new();
+            }
+        "#;
+        let re = Regex::new(r"\bcamel_core::").unwrap(); // allow-unwrap
+        let violations = scan_file_for_camel_core_deps(src, "test.rs", &re);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn tokio_attr_inside_test_scope_still_skipped() {
+        let src = r#"
+            #[cfg(test)]
+            mod tests {
+                use super::*;
+
+                #[tokio::test]
+                async fn inner() {
+                    let _r = camel_core::Registry::new();
+                }
+            }
+
+            fn prod_after() {}
+        "#;
+        let re = Regex::new(r"\bcamel_core::").unwrap(); // allow-unwrap
+        let violations = scan_file_for_camel_core_deps(src, "test.rs", &re);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn cfg_conjunction_opens_test_scope() {
+        let src = r#"
+            #[cfg(all(test, feature = "llm"))]
+            mod llm_tests {
+                use camel_core::Registry;
+            }
+
+            fn prod() {}
+        "#;
+        let re = Regex::new(r"\bcamel_core::").unwrap(); // allow-unwrap
+        let violations = scan_file_for_camel_core_deps(src, "test.rs", &re);
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn tokio_test_attr_wrapped_across_lines_is_test_scope() {
+        let src = r#"
+            #[tokio::test(flavor = "multi_thread",
+                worker_threads = 2)]
+            async fn wrapped_attr_test() {
+                let _r = camel_core::Registry::new();
             }
         "#;
         let re = Regex::new(r"\bcamel_core::").unwrap(); // allow-unwrap

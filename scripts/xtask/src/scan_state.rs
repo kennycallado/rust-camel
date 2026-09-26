@@ -139,15 +139,23 @@ pub fn scan_line(line: &str, state: &mut ScanState, on_brace: &mut impl FnMut(Br
 }
 
 /// True for attribute lines that open a test scope: `#[cfg(test)]`,
-/// `#[test]`, `#[tokio::test]`, and `#[cfg(all(...))]` / `#[cfg(any(...))]`
+/// `#[test]`, the attribute-form test markers `#[tokio::test]`, `#[rstest]`,
+/// and `#[test_case]` (with or without argument lists — prefix match, so
+/// `#[tokio::test(flavor = "multi_thread")]` counts), and
+/// `#[cfg(all(...))]` / `#[cfg(any(...))]`
 /// conjunctions whose DIRECT predicate list contains `test` (e.g.
 /// `#[cfg(all(test, feature = "llm"))]`, used by camel-component-api).
 /// Nested predicates do not count: `#[cfg(not(test))]` compiles its body
-/// in non-test builds and stays production scope.
+/// in non-test builds and stays production scope. `#[test]` keeps its
+/// closing bracket so lookalikes such as `#[test_x]` are not swept in;
+/// the `#[tokio::test` / `#[test_case` prefixes deliberately over-match
+/// hypothetical lookalikes (no such real attributes exist).
 pub fn is_test_attr_line(trimmed: &str) -> bool {
     trimmed.starts_with("#[cfg(test)]")
         || trimmed.starts_with("#[test]")
-        || trimmed.starts_with("#[tokio::test]")
+        || trimmed.starts_with("#[tokio::test")
+        || trimmed.starts_with("#[rstest")
+        || trimmed.starts_with("#[test_case")
         || cfg_conjunction_has_direct_test_predicate(trimmed)
 }
 
@@ -428,5 +436,56 @@ mod tests {
         // inside the test scope (the pre-scan `entering` capture).
         let flags = scope_flags("#[test]\nfn t() { prod_code(); }\nfn prod() {}\n");
         assert_eq!(flags, vec![true, true, false]);
+    }
+
+    #[test]
+    fn test_attr_line_covers_paren_tokio_rstest_test_case() {
+        // rc-s0yxi: the attribute-form test markers open test scope with or
+        // without argument lists — 679 `#[tokio::test(` paren-forms exist
+        // in-tree and were invisible to the exact `#[tokio::test]` match.
+        assert!(is_test_attr_line("#[tokio::test]"));
+        assert!(is_test_attr_line(
+            "#[tokio::test(flavor = \"multi_thread\", worker_threads = 2)]"
+        ));
+        assert!(is_test_attr_line("#[rstest]"));
+        assert!(is_test_attr_line("#[rstest(case(1))]"));
+        assert!(is_test_attr_line("#[test_case]"));
+        assert!(is_test_attr_line("#[test_case(1)]"));
+    }
+
+    #[test]
+    fn test_attr_line_rejects_lookalikes() {
+        // `#[test]` keeps its closing bracket so `#[test_x]`-style user
+        // attributes are not swept in; a cfg conjunction without a direct
+        // `test` predicate stays production scope.
+        assert!(!is_test_attr_line("#[test_x]"));
+        assert!(!is_test_attr_line("#[cfg(not(test))]"));
+        assert!(!is_test_attr_line("#[cfg(feature = \"llm\")]"));
+        assert!(!is_test_attr_line("fn prod() {}"));
+    }
+
+    #[test]
+    fn test_attr_line_prefix_overmatch_is_deliberate() {
+        // The `#[tokio::test` / `#[test_case` prefixes over-match
+        // hypothetical lookalikes (no such real attributes exist); the
+        // cost is only a skipped line class, the reverse would miss real
+        // test fns. Pinned here so the tradeoff stays visible.
+        assert!(is_test_attr_line("#[tokio::testify]"));
+        assert!(is_test_attr_line("#[test_casey]"));
+    }
+
+    #[test]
+    fn test_attr_line_cfg_conjunction_positives() {
+        assert!(is_test_attr_line("#[cfg(all(test, feature = \"llm\"))]"));
+        assert!(is_test_attr_line("#[cfg(any(test, feature = \"llm\"))]"));
+        // `test` must be a DIRECT top-level predicate: nested inside
+        // `any(...)` (behind another feature) does not count, matching the
+        // documented `cfg_conjunction_has_direct_test_predicate` semantics.
+        assert!(!is_test_attr_line(
+            "#[cfg(all(feature = \"x\", any(test, unix)))]"
+        ));
+        // `not(test)` and `test` nested behind `not` do not.
+        assert!(!is_test_attr_line("#[cfg(not(test))]"));
+        assert!(!is_test_attr_line("#[cfg(all(not(test), unix))]"));
     }
 }
