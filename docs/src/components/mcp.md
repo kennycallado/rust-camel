@@ -6,16 +6,16 @@ The `mcp:` DSL block declares a server catalog. It lowers each tool to an `mcp:<
 
 ```yaml
 mcp:
-  server:
-    name: crm
-    bind: 127.0.0.1:9100
-    security_policy: { roles: [mcp-client] }
-  tools:
-    - name: lookup
-      input_schema: { type: object, properties: { id: { type: string } }, required: [id] }
-  resources:
-    - name: customers
-      uri: crm://customers
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      security_policy: { roles: [mcp-client] }
+    tools:
+      - name: lookup
+        input_schema: { type: object, properties: { id: { type: string } }, required: [id] }
+    resources:
+      - name: customers
+        uri: crm://customers
 ```
 
 ## URI
@@ -45,6 +45,10 @@ principal before the pipeline. Catalog caps (`max_tools`, `max_resources`,
 default 128 each) reject surplus registrations at start.
 
 Remote hosts that announce a protocol version other than `2026-07-28` get a `-32022` rejection and one `warn!` record per event. The server reads no `Mcp-Session-Id` header.
+
+### Tool and resource behavior (steps/to passthrough)
+
+A tool or resource declared without `to` or `steps` keeps the identity pipeline: a `tools/call` returns its own arguments (v1 behavior). An opt-in `to` or `steps` — not both — lowers onto the consumer route through the same step machinery routes and rest use. Declaring both fails lowering with a named error.
 
 ## Client (Producer)
 

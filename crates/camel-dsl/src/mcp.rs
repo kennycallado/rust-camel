@@ -21,7 +21,7 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-use crate::route_ast::{RouteDslRoute, RouteDslSecurityPolicy};
+use crate::route_ast::{RouteDslRoute, RouteDslSecurityPolicy, RouteDslStep, ToStep};
 
 fn non_empty_path<'de, D>(deserializer: D, field: &'static str) -> Result<String, D::Error>
 where
@@ -196,6 +196,12 @@ pub struct RouteDslMcpTool {
     pub name: String,
     /// Input JSON Schema for the tool's arguments.
     pub input_schema: serde_json::Value,
+    /// Endpoint URI to route the tool call to (e.g. `direct:out`).
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Child sub-pipeline steps.
+    #[serde(default)]
+    pub steps: Vec<RouteDslStep>,
 }
 
 /// A single MCP resource declaration, carrying its MCP resource URI.
@@ -209,6 +215,12 @@ pub struct RouteDslMcpResource {
     pub name: String,
     /// The MCP resource URI (operator config, e.g. `crm://customers`).
     pub uri: String,
+    /// Endpoint URI to route the resource read to (e.g. `direct:mirror`).
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Child sub-pipeline steps.
+    #[serde(default)]
+    pub steps: Vec<RouteDslStep>,
 }
 
 /// Validate an MCP server/tool/resource name against the closed charset
@@ -233,6 +245,29 @@ fn validate_mcp_name(kind: &str, name: &str) -> Result<(), CamelError> {
              a '?' truncates the lowered URI and can shadow the schema param; a '/' \
              breaks the <server>/<kind>/<name> segment shape"
         )))
+    }
+}
+
+/// Resolve the effective pipeline steps for an MCP tool/resource: `to` is
+/// the single-endpoint shorthand, expanded to one `To` step exactly like
+/// rest's `lower_operation` does; `steps` is the explicit pipeline and is
+/// carried verbatim (no forking or wrapping). Declaring both is a lowering
+/// error; neither is the identity default (an empty pipeline).
+fn effective_steps(
+    kind: &str,
+    name: &str,
+    to: &Option<String>,
+    steps: &[RouteDslStep],
+) -> Result<Vec<RouteDslStep>, CamelError> {
+    match (to.as_ref(), steps.is_empty()) {
+        (Some(_), false) => Err(CamelError::RouteError(format!(
+            "mcp {kind} '{name}' cannot have both 'to' and 'steps'"
+        ))),
+        (Some(to), true) => Ok(vec![RouteDslStep::To(ToStep {
+            to: to.clone(),
+            parameters: BTreeMap::new(),
+        })]),
+        (None, _) => Ok(steps.to_vec()),
     }
 }
 
@@ -319,6 +354,7 @@ pub fn lower_all_mcp_to_routes(blocks: &[RouteDslMcp]) -> Result<Vec<RouteDslRou
                 &format!("mcp-{}-tool-{}", block.server.name, tool.name),
                 from,
                 security_policy.clone(),
+                effective_steps("tool", &tool.name, &tool.to, &tool.steps)?,
             ));
         }
         for resource in &block.resources {
@@ -332,6 +368,7 @@ pub fn lower_all_mcp_to_routes(blocks: &[RouteDslMcp]) -> Result<Vec<RouteDslRou
                 &format!("mcp-{}-resource-{}", block.server.name, resource.name),
                 from,
                 security_policy.clone(),
+                effective_steps("resource", &resource.name, &resource.to, &resource.steps)?,
             ));
         }
     }
@@ -354,21 +391,22 @@ pub fn expand_mcp_into(
     Ok(())
 }
 
-/// Build a consumer-shaped `RouteDslRoute` with no processing steps — the MCP
-/// consumer registers the tool/resource on the shared listener and submits the
-/// tool call/read into the route pipeline as the route's input. The block's
-/// server `security_policy` (when present) rides on every lowered route so
-/// enforcement is route-level, not block-level.
+/// Build a consumer-shaped `RouteDslRoute` carrying the effective pipeline
+/// steps — the MCP consumer registers the tool/resource on the shared
+/// listener and submits the tool call/read into the route pipeline as the
+/// route's input. The block's server `security_policy` (when present) rides
+/// on every lowered route so enforcement is route-level, not block-level.
 fn consumer_route(
     id: &str,
     from: String,
     security_policy: Option<RouteDslSecurityPolicy>,
+    steps: Vec<RouteDslStep>,
 ) -> RouteDslRoute {
     RouteDslRoute {
         id: id.to_string(),
         from,
         parameters: BTreeMap::new(),
-        steps: Vec::new(),
+        steps,
         auto_startup: true,
         startup_order: 0,
         sequential: false,
@@ -388,7 +426,7 @@ mod tests {
     use noyalib::compat::serde_yaml as serde_yml;
 
     use super::*;
-    use crate::route_ast::{RouteDslRoute, RouteDslRoutes};
+    use crate::route_ast::{RouteDslRoute, RouteDslRoutes, SetHeaderData, SetHeaderStep};
 
     #[test]
     fn parse_mcp_block_from_yaml() {
@@ -588,6 +626,8 @@ mcp:
         block.tools = vec![RouteDslMcpTool {
             name: "lookup".to_string(),
             input_schema: schema.clone(),
+            to: None,
+            steps: Vec::new(),
         }];
 
         let routes = lower_all_mcp_to_routes(&[block]).unwrap();
@@ -631,6 +671,8 @@ mcp:
         block.tools = vec![RouteDslMcpTool {
             name: "lookup".to_string(),
             input_schema: serde_json::json!({ "type": "object" }),
+            to: None,
+            steps: Vec::new(),
         }];
 
         let routes = lower_all_mcp_to_routes(&[block]).unwrap();
@@ -681,6 +723,8 @@ mcp:
         block.resources = vec![RouteDslMcpResource {
             name: "customers".to_string(),
             uri: "crm://customers".to_string(),
+            to: None,
+            steps: Vec::new(),
         }];
 
         let routes = lower_all_mcp_to_routes(&[block]).unwrap();
@@ -718,6 +762,8 @@ mcp:
         block.tools = vec![RouteDslMcpTool {
             name: "bad?name".to_string(),
             input_schema: serde_json::json!({ "type": "object" }),
+            to: None,
+            steps: Vec::new(),
         }];
         let err = lower_all_mcp_to_routes(&[block])
             .err()
@@ -740,6 +786,8 @@ mcp:
         block.tools = vec![RouteDslMcpTool {
             name: "lookup".to_string(),
             input_schema: schema.clone(),
+            to: None,
+            steps: Vec::new(),
         }];
 
         let routes = lower_all_mcp_to_routes(&[block]).unwrap();
@@ -763,10 +811,14 @@ mcp:
         block.tools = vec![RouteDslMcpTool {
             name: "lookup".to_string(),
             input_schema: serde_json::json!({ "type": "object" }),
+            to: None,
+            steps: Vec::new(),
         }];
         block.resources = vec![RouteDslMcpResource {
             name: "customers".to_string(),
             uri: "crm://customers".to_string(),
+            to: None,
+            steps: Vec::new(),
         }];
 
         expand_mcp_into(&mut routes, &[block]).unwrap();
@@ -814,10 +866,14 @@ mcp:
         block.tools = vec![RouteDslMcpTool {
             name: "lookup".to_string(),
             input_schema: serde_json::json!({ "type": "object" }),
+            to: None,
+            steps: Vec::new(),
         }];
         block.resources = vec![RouteDslMcpResource {
             name: "customers".to_string(),
             uri: "crm://customers".to_string(),
+            to: None,
+            steps: Vec::new(),
         }];
 
         let routes = lower_all_mcp_to_routes(&[block]).unwrap();
@@ -1011,6 +1067,8 @@ mcp:
         block.tools = vec![RouteDslMcpTool {
             name: "lookup".to_string(),
             input_schema: serde_json::json!({ "type": "object" }),
+            to: None,
+            steps: Vec::new(),
         }];
         let err = lower_all_mcp_to_routes(&[block])
             .err()
@@ -1042,6 +1100,8 @@ mcp:
             block.tools = vec![RouteDslMcpTool {
                 name: "lookup".to_string(),
                 input_schema: schema,
+                to: None,
+                steps: Vec::new(),
             }];
             let err = lower_all_mcp_to_routes(&[block])
                 .err()
@@ -1095,6 +1155,8 @@ mcp:
         block.tools = vec![RouteDslMcpTool {
             name: "lookup".to_string(),
             input_schema: serde_json::json!({}),
+            to: None,
+            steps: Vec::new(),
         }];
         let routes = lower_all_mcp_to_routes(&[block]).expect("empty object schema must lower");
         assert_eq!(routes.len(), 1);
@@ -1118,6 +1180,8 @@ mcp:
             block.tools = vec![RouteDslMcpTool {
                 name: name.to_string(),
                 input_schema: serde_json::json!({ "type": "object" }),
+                to: None,
+                steps: Vec::new(),
             }];
             let err = lower_all_mcp_to_routes(&[block])
                 .err()
@@ -1140,6 +1204,8 @@ mcp:
         block.tools = vec![RouteDslMcpTool {
             name: "lookup".to_string(),
             input_schema: serde_json::json!({ "type": "object" }),
+            to: None,
+            steps: Vec::new(),
         }];
         let err = lower_all_mcp_to_routes(&[block])
             .err()
@@ -1154,6 +1220,8 @@ mcp:
         block.resources = vec![RouteDslMcpResource {
             name: "bad?name".to_string(),
             uri: "crm://x".to_string(),
+            to: None,
+            steps: Vec::new(),
         }];
         let err = lower_all_mcp_to_routes(&[block])
             .err()
@@ -1162,6 +1230,220 @@ mcp:
         assert!(
             msg.contains("resource") && msg.contains("bad?name"),
             "error must name the resource kind and the offending value, got: {msg}"
+        );
+    }
+
+    // ── Opt-in `to`/`steps` passthrough (Task 1.1, bd rc-23y2) ──
+
+    #[test]
+    fn tool_with_steps_lowers_to_pipeline() {
+        let mut block = make_block();
+        block.tools = vec![RouteDslMcpTool {
+            name: "lookup".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            to: None,
+            steps: vec![RouteDslStep::To(ToStep {
+                to: "log:audit".into(),
+                parameters: BTreeMap::new(),
+            })],
+        }];
+
+        let routes = lower_all_mcp_to_routes(&[block]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].id, "mcp-crm-tool-lookup");
+        assert!(
+            routes[0].from.starts_with("mcp:crm/tool/lookup?schema="),
+            "tool route must be present, got: {}",
+            routes[0].from
+        );
+        assert_eq!(routes[0].steps.len(), 1);
+        match &routes[0].steps[0] {
+            RouteDslStep::To(step) => assert_eq!(step.to, "log:audit"),
+            other => panic!("expected a single To step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_with_to_shorthand_lowers_single_to_step() {
+        let mut block = make_block();
+        block.tools = vec![RouteDslMcpTool {
+            name: "lookup".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            to: Some("direct:out".into()),
+            steps: Vec::new(),
+        }];
+
+        let routes = lower_all_mcp_to_routes(&[block]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].steps.len(), 1);
+        match &routes[0].steps[0] {
+            RouteDslStep::To(step) => {
+                assert_eq!(step.to, "direct:out");
+                assert!(step.parameters.is_empty());
+            }
+            other => panic!("expected a single To step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resource_with_to_shorthand_lowers_single_to_step() {
+        let mut block = make_block();
+        block.resources = vec![RouteDslMcpResource {
+            name: "customers".to_string(),
+            uri: "crm://customers".to_string(),
+            to: Some("direct:mirror".into()),
+            steps: Vec::new(),
+        }];
+
+        let routes = lower_all_mcp_to_routes(&[block]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].id, "mcp-crm-resource-customers");
+        assert_eq!(routes[0].steps.len(), 1);
+        match &routes[0].steps[0] {
+            RouteDslStep::To(step) => assert_eq!(step.to, "direct:mirror"),
+            other => panic!("expected a single To step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resource_with_steps_lowers_to_pipeline() {
+        // `SetHeaderData` derives no `Default`, so every optional field is
+        // populated explicitly — only `key` is required.
+        let mut block = make_block();
+        block.resources = vec![RouteDslMcpResource {
+            name: "customers".to_string(),
+            uri: "crm://customers".to_string(),
+            to: None,
+            steps: vec![RouteDslStep::SetHeader(SetHeaderStep {
+                set_header: SetHeaderData {
+                    key: "X-Source".to_string(),
+                    value: Some(serde_json::json!("mcp")),
+                    language: None,
+                    source: None,
+                    simple: None,
+                    rhai: None,
+                    jsonpath: None,
+                    xpath: None,
+                },
+            })],
+        }];
+
+        let routes = lower_all_mcp_to_routes(&[block]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].id, "mcp-crm-resource-customers");
+        assert_eq!(routes[0].steps.len(), 1);
+        match &routes[0].steps[0] {
+            RouteDslStep::SetHeader(step) => {
+                assert_eq!(step.set_header.key, "X-Source");
+                assert_eq!(step.set_header.value, Some(serde_json::json!("mcp")));
+            }
+            other => panic!("expected a SetHeader step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn identity_default_steps_empty_without_to_or_steps() {
+        // Neither `to` nor `steps` declared: the identity default — lowered
+        // routes carry the exact pre-change from-URIs and empty pipelines.
+        let mut block = make_block();
+        block.tools = vec![RouteDslMcpTool {
+            name: "lookup".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            to: None,
+            steps: Vec::new(),
+        }];
+        block.resources = vec![RouteDslMcpResource {
+            name: "customers".to_string(),
+            uri: "crm://customers".to_string(),
+            to: None,
+            steps: Vec::new(),
+        }];
+
+        let routes = lower_all_mcp_to_routes(&[block]).unwrap();
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].id, "mcp-crm-tool-lookup");
+        assert_eq!(
+            routes[0].from,
+            "mcp:crm/tool/lookup?schema=%7B%22type%22%3A%22object%22%7D\
+             &mcp.declared.bind=127%2E0%2E0%2E1%3A9100"
+        );
+        assert!(routes[0].steps.is_empty());
+        assert_eq!(routes[1].id, "mcp-crm-resource-customers");
+        assert_eq!(
+            routes[1].from,
+            "mcp:crm/resource/customers?uri=crm%3A%2F%2Fcustomers\
+             &mcp.declared.bind=127%2E0%2E0%2E1%3A9100"
+        );
+        assert!(routes[1].steps.is_empty());
+    }
+
+    #[test]
+    fn tool_to_and_steps_both_rejected_at_lowering() {
+        let mut block = make_block();
+        block.tools = vec![RouteDslMcpTool {
+            name: "lookup".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            to: Some("direct:out".into()),
+            steps: vec![RouteDslStep::To(ToStep {
+                to: "log:audit".into(),
+                parameters: BTreeMap::new(),
+            })],
+        }];
+        let err = lower_all_mcp_to_routes(&[block])
+            .err()
+            .expect("tool with both 'to' and 'steps' must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot have both 'to' and 'steps'") && msg.contains("lookup"),
+            "error must name the conflict and the tool, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resource_to_and_steps_both_rejected_at_lowering() {
+        let mut block = make_block();
+        block.resources = vec![RouteDslMcpResource {
+            name: "customers".to_string(),
+            uri: "crm://customers".to_string(),
+            to: Some("direct:mirror".into()),
+            steps: vec![RouteDslStep::To(ToStep {
+                to: "direct:mirror".into(),
+                parameters: BTreeMap::new(),
+            })],
+        }];
+        let err = lower_all_mcp_to_routes(&[block])
+            .err()
+            .expect("resource with both 'to' and 'steps' must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot have both 'to' and 'steps'") && msg.contains("customers"),
+            "error must name the conflict and the resource, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn invalid_step_shape_rejected_at_document_load() {
+        // Witness test (green before AND after implementation): malformed
+        // step shapes are load-owned — the shared untagged `RouteDslStep`
+        // serde rejects them at document load with the parser's
+        // location-carrying error. Rejection is the contract; the exact
+        // message text is not pinned.
+        let yaml = r#"
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+    tools:
+      - name: lookup
+        input_schema:
+          type: object
+        steps:
+          - bogus_step: {}
+"#;
+        let result = serde_yml::from_str::<RouteDslRoutes>(yaml);
+        assert!(
+            result.is_err(),
+            "a step shape with no RouteDslStep variant must be rejected at load"
         );
     }
 }

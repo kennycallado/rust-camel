@@ -199,20 +199,21 @@ to an `mcp:<server>/tool/<name>` consumer route and each resource to an
 
 ```yaml
 mcp:
-  server:
-    name: crm
-    bind: 127.0.0.1:9100
-    security_policy: { roles: [mcp-client] }
-  tools:
-    - name: lookup
-      input_schema:
-        type: object
-        properties:
-          id: { type: string }
-        required: [id]
-  resources:
-    - name: customers
-      uri: crm://customers
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      security_policy: { roles: [mcp-client] }
+    tools:
+      - name: lookup
+        input_schema:
+          type: object
+          properties:
+            id: { type: string }
+          required: [id]
+        to: log:audit
+    resources:
+      - name: customers
+        uri: crm://customers
 ```
 
 The input schema and resource URI travel percent-encoded on the lowered
@@ -227,8 +228,14 @@ declared by both sides with different values fails consumer start, while
 a key declared by one side only takes that side's value. The
 block's server `security_policy` propagates to every lowered tool and
 resource route, where the route-level `SecurityPolicy` enforces it per
-request. The block is a step-less catalog declaration; tool and resource
-behavior lives in explicit routes that consume from the lowered `mcp:` URIs.
+request. A declaration without `to` or `steps` keeps the identity
+pipeline: a `tools/call` returns its own arguments (v1 behavior).
+
+An opt-in `to` or `steps` — not both — lowers onto the consumer route
+through the same step machinery the route and rest surfaces use: `to` is
+the single-endpoint shorthand, `steps` the explicit pipeline. Declaring
+both is rejected at lowering with a `RouteError` naming the tool or
+resource.
 
 ## Installation
 Add to your `Cargo.toml`:

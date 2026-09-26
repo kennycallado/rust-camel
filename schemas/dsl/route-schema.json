@@ -1637,6 +1637,21 @@
           "pattern": "^[A-Za-z0-9._-]+$",
           "type": "string"
         },
+        "steps": {
+          "description": "Child sub-pipeline steps.",
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        },
+        "to": {
+          "default": null,
+          "description": "Endpoint URI to route the resource read to (e.g. `direct:mirror`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "uri": {
           "description": "The MCP resource URI (operator config, e.g. `crm://customers`).",
           "type": "string"
@@ -1743,6 +1758,21 @@
           "description": "Tool name (referenced by the lowered `mcp:<server>/tool/<name>` route).",
           "pattern": "^[A-Za-z0-9._-]+$",
           "type": "string"
+        },
+        "steps": {
+          "description": "Child sub-pipeline steps.",
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        },
+        "to": {
+          "default": null,
+          "description": "Endpoint URI to route the tool call to (e.g. `direct:out`).",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

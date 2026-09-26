@@ -29,13 +29,15 @@ Consumer (server role):
 - `mcp:<server>/resource/<name>?uri=<mcp-uri>` — serves `resources/read` for
   `<uri>`; `resources/list` projects the registered URIs.
 
-A `mcp:` DSL block lowers each tool/resource to a step-less consumer route.
-The `rest:` → `http:` analogue is partial: the block is a catalog declaration
-(names, schemas, resource URIs), not a behavior spec — its lowered routes
-carry no processing steps, so a bare `tools/call` echoes its arguments. Real
-tool and resource behavior is expressed by explicit routes whose `from:` is an
-`mcp:` URI and that attach their own steps; steps passthrough inside the block
-is a tracked limitation (bd rc-23y2).
+A `mcp:` DSL block lowers each tool/resource to a consumer route. The
+`rest:` → `http:` analogue now holds: the block is a catalog declaration
+(names, schemas, resource URIs) plus an optional behavior spec — without
+`to`/`steps` the lowered route keeps the identity pipeline (a bare
+`tools/call` echoes its arguments); with `to` or `steps` that pipeline
+lowers onto the consumer route, and declaring both fails at lowering
+(bd rc-23y2). Real tool and resource behavior is equally expressed by
+explicit routes whose `from:` is an `mcp:` URI and that attach their own
+steps.
 
 ## Config keys
 
