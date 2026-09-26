@@ -191,20 +191,15 @@ impl Rule for RSchemaRule {
         for err in validator.iter_errors(&instance) {
             let instance_path = err.instance_path().as_str();
             match err.kind() {
-                // The offending key is NOT in instance_path (which points at
-                // the parent object): resolve each key's span by appending it
-                // to the parent's path.
                 ValidationErrorKind::AdditionalProperties { unexpected } => {
-                    let parent = instance_path_to_noyalib(instance_path, envelope_depth);
-                    for key in unexpected {
-                        let key_path = if parent.is_empty() {
-                            key.clone()
-                        } else {
-                            format!("{parent}.{key}")
-                        };
-                        let span = crate::document::key_span_for(&parsed, &key_path);
-                        diagnostics.push(diagnostic_for(span, diagnostic_message(&err)));
-                    }
+                    push_additional_properties_diagnostics(
+                        &err,
+                        instance_path,
+                        unexpected,
+                        envelope_depth,
+                        &parsed,
+                        &mut diagnostics,
+                    );
                 }
                 // A failed anyOf surfaces as ONE collapsed error at the
                 // branch node, burying the offending leaf (pre-existing
@@ -353,25 +348,14 @@ impl Rule for RSchemaRule {
                             if let ValidationErrorKind::AdditionalProperties { unexpected } =
                                 nested.kind()
                             {
-                                // Mirror the top-level arm: the
-                                // offending key is NOT in instance_path
-                                // (which points at the parent object);
-                                // resolve each key's span by appending
-                                // it to the parent's path.
-                                let parent = instance_path_to_noyalib(
+                                push_additional_properties_diagnostics(
+                                    nested,
                                     nested.instance_path().as_str(),
+                                    unexpected,
                                     envelope_depth,
+                                    &parsed,
+                                    &mut diagnostics,
                                 );
-                                for key in unexpected {
-                                    let key_path = if parent.is_empty() {
-                                        key.clone()
-                                    } else {
-                                        format!("{parent}.{key}")
-                                    };
-                                    let span = crate::document::key_span_for(&parsed, &key_path);
-                                    diagnostics
-                                        .push(diagnostic_for(span, diagnostic_message(nested)));
-                                }
                             } else {
                                 let noya_path = instance_path_to_noyalib(
                                     nested.instance_path().as_str(),
@@ -665,6 +649,33 @@ fn collect_sibling_errors<'a>(
                 out.push(nested);
             }
         }
+    }
+}
+
+/// Emit one diagnostic per offending key of an `additionalProperties`
+/// failure.
+///
+/// The offending key is NOT in `instance_path` (which points at the
+/// parent object): resolve each key's span by appending it to the
+/// parent's noyalib path. Shared by the top-level arm and the sibling
+/// emission of the anyOf de-collapse — both anchor identically.
+fn push_additional_properties_diagnostics(
+    err: &ValidationError<'_>,
+    instance_path: &str,
+    unexpected: &[String],
+    envelope_depth: usize,
+    parsed: &cst::Document,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let parent = instance_path_to_noyalib(instance_path, envelope_depth);
+    for key in unexpected {
+        let key_path = if parent.is_empty() {
+            key.clone()
+        } else {
+            format!("{parent}.{key}")
+        };
+        let span = crate::document::key_span_for(parsed, &key_path);
+        diagnostics.push(diagnostic_for(span, diagnostic_message(err)));
     }
 }
 
