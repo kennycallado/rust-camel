@@ -8,7 +8,9 @@
 //
 // Established in Tier C Task C2 (`rc-d0pu.3`).
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::time::Duration;
 
 use camel_api::{CamelError, Lifecycle, RuntimeCommandBus};
@@ -22,12 +24,22 @@ use crate::lifecycle::application::runtime_bus::RuntimeBus;
 use crate::startup_validation::{ConfigCheck, run_startup_validation};
 
 static CONTEXT_COMMAND_SEQ: AtomicU64 = AtomicU64::new(0);
+static CONTEXT_BOOT_NONCE: OnceLock<u128> = OnceLock::new();
+
+fn context_boot_nonce() -> u128 {
+    *CONTEXT_BOOT_NONCE
+        .get_or_init(|| match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_nanos(),
+            Err(_) => 0,
+        })
+}
 
 /// Generate a deterministic-ish command ID for context-issued runtime
 /// commands. Lifted verbatim from `CamelContext::next_context_command_id`.
 pub(crate) fn next_context_command_id(op: &str, route_id: &str) -> String {
+    let boot_nonce = context_boot_nonce();
     let seq = CONTEXT_COMMAND_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("context:{op}:{route_id}:{seq}")
+    format!("context:{op}:{route_id}:{boot_nonce}:{seq}")
 }
 
 /// Start all routes and lifecycle services.
@@ -277,6 +289,24 @@ mod start_context_gate {
     use super::*;
     use crate::lifecycle::CohortActivationGate;
     use crate::{CamelContext, RouteDefinition};
+
+    #[test]
+    fn next_context_command_id_includes_boot_nonce_segment() {
+        let id = next_context_command_id("start", "gate-r1");
+        let mut parts = id.split(':');
+        assert_eq!(parts.next(), Some("context"));
+        assert_eq!(parts.next(), Some("start"));
+        assert_eq!(parts.next(), Some("gate-r1"));
+        assert!(parts
+            .next()
+            .and_then(|segment| segment.parse::<u128>().ok())
+            .is_some());
+        assert!(parts
+            .next()
+            .and_then(|segment| segment.parse::<u64>().ok())
+            .is_some());
+        assert!(parts.next().is_none());
+    }
 
     /// Lifecycle service that records the cohort gate level each time
     /// `start()` runs — that moment sits after `reset_cohort` and before
