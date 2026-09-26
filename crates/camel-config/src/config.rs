@@ -3010,6 +3010,26 @@ fn build_from_toml_value_inner(
     );
 
     if has_profile_structure {
+        // gh#52 / rc-zbyyv: the strict selection below keeps ONLY the walked
+        // sections — a root-level CamelConfig key would be silently discarded.
+        // Fail loud, naming the key(s) and the accepted shapes.
+        if let toml::Value::Table(ref table) = config_value {
+            let discarded: Vec<&str> = table
+                .keys()
+                .map(String::as_str)
+                .filter(|k| KNOWN_TOP_LEVEL_KEYS.contains(k))
+                .collect();
+            if !discarded.is_empty() {
+                return Err(ConfigError::Message(format!(
+                    "top-level key(s) {} would be silently discarded by profile \
+                     selection: when a [default] or selected profile section is \
+                     present, config keys must live inside [default] (overlaid by \
+                     the selected profile section) — move the key(s) there, or \
+                     remove the profile sections to use a flat document",
+                    discarded.join(", ")
+                )));
+            }
+        }
         apply_profile(&mut config_value, profile)?;
     } else {
         // Flat config — no profile sections, keep as-is

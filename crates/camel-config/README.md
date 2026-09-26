@@ -122,6 +122,8 @@ allow_internal = true  # Allow internal services in dev
 - **`[<profile>.components.<name>]`** - Profile-specific component overrides
 - **`[beans.<name>]`** - WASM bean plugin registrations
 
+When a document has profile sections, every config key must live inside `[default]` or a `[<profile>]` section; root-level config keys are valid only in flat (profile-less) documents, and mixing the two is rejected at load time; only `include` may stay at the root beside profile sections.
+
 ## Core Fields
 
 | Field | Type | Default | Description |

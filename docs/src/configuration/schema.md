@@ -16,7 +16,7 @@ A fuller file adds supervision, tracing, and shared component defaults. Profiles
 
 ## Top-level fields
 
-The fields below live directly under `[default]`. They are the spine of the file. Every other section in this page is optional.
+The fields below live directly under `[default]`. They are the spine of the file. Every other section in this page is optional. When a document uses profile sections, every config key lives inside `[default]` or a `[<profile>]` section. Root-level config keys are valid only in flat (profile-less) documents; mixing the two is rejected at load time; only `include` may stay at the root beside profile sections.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

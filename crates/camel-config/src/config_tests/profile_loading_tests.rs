@@ -435,3 +435,164 @@ timeout_ms = 9999
         "ambient CAMEL_PROFILE must not leak into the sealed config"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Profile-structured documents reject discarded root-level config keys
+// (cfgdrop / rc-zbyyv): with profile structure present, the strict selection
+// keeps ONLY the walked sections, so a root-level KNOWN_TOP_LEVEL_KEYS entry
+// would be silently discarded — the loader must fail loud instead.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn root_known_table_beside_default_is_rejected() {
+    let _guard = super::env_lock();
+    let file = write_temp_config(
+        r#"
+[default]
+log_level = "info"
+
+[runtime_journal]
+path = "j.db"
+"#,
+    );
+
+    let err = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect_err("root-level runtime_journal beside [default] must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("runtime_journal"), "must name the key: {msg}");
+    assert!(
+        msg.contains("[default]"),
+        "must name the accepted shape: {msg}"
+    );
+    assert!(
+        msg.contains("flat document"),
+        "must name the flat alternative: {msg}"
+    );
+}
+
+#[test]
+fn root_known_scalar_beside_default_is_rejected() {
+    let _guard = super::env_lock();
+    let file = write_temp_config(
+        r#"
+log_level = "DEBUG"
+
+[default]
+watch = true
+"#,
+    );
+
+    let err = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect_err("root-level log_level beside [default] must be rejected");
+    assert!(
+        err.to_string().contains("log_level"),
+        "must name the scalar key class too"
+    );
+}
+
+#[test]
+fn root_known_table_with_selected_profile_and_no_default_is_rejected() {
+    // Restores CAMEL_PROFILE even if the assertion below panics.
+    struct UnsetCamelProfile;
+    impl Drop for UnsetCamelProfile {
+        fn drop(&mut self) {
+            super::unset_env("CAMEL_PROFILE");
+        }
+    }
+
+    let _guard = super::env_lock();
+    let file = write_temp_config(
+        r#"
+[prod]
+log_level = "warn"
+
+[runtime_journal]
+path = "j.db"
+"#,
+    );
+
+    super::set_env("CAMEL_PROFILE", "prod");
+    let _restore = UnsetCamelProfile;
+
+    let err = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect_err("root-level runtime_journal beside a selected [prod] must be rejected");
+    assert!(
+        err.to_string().contains("runtime_journal"),
+        "must name the discarded key"
+    );
+}
+
+#[test]
+fn nested_journal_under_default_still_loads() {
+    let _guard = super::env_lock();
+    let file = write_temp_config(
+        r#"
+[default]
+[default.runtime_journal]
+path = "j.db"
+durability = "eventual"
+"#,
+    );
+
+    let cfg = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect("nested journal under [default] must keep loading");
+    let journal = cfg
+        .runtime_journal
+        .expect("runtime_journal should be present");
+    assert_eq!(journal.path, std::path::PathBuf::from("j.db"));
+    assert_eq!(journal.durability, super::JournalDurability::Eventual);
+}
+
+#[test]
+fn flat_document_root_journal_still_loads() {
+    let _guard = super::env_lock();
+    let file = write_temp_config(
+        r#"
+[runtime_journal]
+path = "j.db"
+"#,
+    );
+
+    let cfg = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect("flat document with root journal must keep loading unchanged");
+    let journal = cfg
+        .runtime_journal
+        .expect("runtime_journal should be present");
+    assert_eq!(journal.path, std::path::PathBuf::from("j.db"));
+}
+
+#[test]
+fn flat_include_beside_default_main_still_loads() {
+    // The legal carve-out: root-level `include` beside a profile section is
+    // not a discarded config key (it is extracted before profile selection),
+    // and the flat fragment's content applies at its documented priority
+    // (includes merge lowest-priority-first; the root file wins on conflicts).
+    let _guard = super::env_lock();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(
+        dir.path().join("Camel.toml"),
+        "include = [\"conf/flat.toml\"]\n\n[default]\ntimeout_ms = 7000\n",
+    )
+    .expect("write main config");
+    std::fs::create_dir(dir.path().join("conf")).expect("create conf dir");
+    std::fs::write(
+        dir.path().join("conf/flat.toml"),
+        "watch = true\nlog_level = \"DEBUG\"\n",
+    )
+    .expect("write flat include");
+
+    let main_path = dir.path().join("Camel.toml");
+    let cfg = CamelConfig::from_file_with_profile(main_path.to_str().unwrap(), None)
+        .expect("root-level include beside [default] must keep loading");
+
+    assert_eq!(
+        cfg.timeout_ms, 7000,
+        "root/[default] value must win over include content"
+    );
+    assert!(cfg.watch, "flat include content must apply (watch)");
+    assert_eq!(
+        cfg.log_level, "DEBUG",
+        "flat include content must apply (log_level)"
+    );
+}

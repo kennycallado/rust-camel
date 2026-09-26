@@ -509,9 +509,14 @@ timeout_ms = 1000
     );
 }
 
-/// Case (h): section-level `routes` replacing top-level `routes`.
+/// Case (h): root config keys beside a `[default]` section are
+/// rejected at load time; the cfgdrop error Display is locked
+/// byte-for-byte. (Was a silent-discard resolution lock for section
+/// `routes` replacing top-level `routes`; that live
+/// section-over-section replacement semantic stays locked by the
+/// profile deep-merge case.)
 #[test]
-fn parity_section_routes_replace_toplevel() {
+fn parity_root_keys_beside_default_rejected_error_locked() {
     let _guard = env_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     write_fixture(
@@ -528,15 +533,10 @@ timeout_ms = 6000
 "#,
     );
 
-    let cfg = CamelConfig::from_file(&config_path(dir.path())).expect("section overlay loads");
-    lock_json_golden(
-        "case_08.json",
-        &[
-            ("timeout_ms", serde_json::json!(cfg.timeout_ms)),
-            ("routes", serde_json::json!(cfg.routes)),
-            ("watch", serde_json::json!(cfg.watch)),
-        ],
-    );
+    let err = CamelConfig::from_file(&config_path(dir.path()))
+        .expect_err("root config keys beside [default] must be rejected");
+    let display = err.to_string();
+    lock_text_golden("case_08_error.txt", &display);
 }
 
 /// Case (i): top-level `include = 42` (invalid type) fails with the
