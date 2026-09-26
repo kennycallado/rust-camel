@@ -134,6 +134,19 @@ pub enum SourceError {
     /// `MalformedVirtualConfig` backstop rejects the selection at
     /// compile time.
     IncludeOnlyProfiles { names: Vec<String> },
+    /// The selected `--config` document has profile structure and
+    /// carries root-level `CamelConfig` keys (other than the `routes`
+    /// pattern accumulator, which keeps its documented overlay role)
+    /// that strict profile selection would silently discard. The
+    /// compile mirror of camel-config's root-key discard guard.
+    RootKeysDiscarded(Vec<String>),
+    /// The selected `--config` document has profile structure and
+    /// carries root-level TABLES whose names misspell known
+    /// `CamelConfig` keys (per the shared
+    /// `camel_config::root_key_policy::near_miss_root_table`
+    /// predicate) — the same tables the loader rejects naming the
+    /// probable intended key. Pairs are `(table, intended)`.
+    RootTableMisspelling(Vec<(String, String)>),
     /// The configuration or an include is not valid TOML (or a required
     /// field has the wrong shape).
     InvalidConfig(String),
@@ -286,6 +299,31 @@ impl fmt::Display for SourceError {
                  profile section into the configuration document",
                 names.join(", ")
             ),
+            Self::RootKeysDiscarded(keys) => write!(
+                f,
+                "configuration key(s) {} sit at the top level of a profile-structured document \
+                 and would be silently discarded by profile selection: move each key under \
+                 [default] (overlaid by the selected profile section), or remove the profile \
+                 sections to use a flat document",
+                keys.join(", ")
+            ),
+            Self::RootTableMisspelling(pairs) => {
+                let names: Vec<&str> = pairs.iter().map(|(name, _)| name.as_str()).collect();
+                let misspellings: Vec<String> = pairs
+                    .iter()
+                    .map(|(name, target)| {
+                        format!("'{name}' looks like a misspelling of '{target}'")
+                    })
+                    .collect();
+                write!(
+                    f,
+                    "top-level table(s) {} would be silently discarded by profile selection: \
+                     {} — move the table under [default] (overlaid by the selected profile \
+                     section), or remove the profile sections to use a flat document",
+                    names.join(", "),
+                    misspellings.join("; ")
+                )
+            }
             Self::InvalidConfig(reason) => write!(f, "invalid configuration: {reason}"),
             Self::InvalidDocument(reason) => write!(f, "invalid document: {reason}"),
             Self::UnsupportedRouteSource(reason) => write!(f, "unsupported route source: {reason}"),
@@ -743,6 +781,34 @@ pub fn resolve(
         // before any output exists; recorded R2 deferrals).
         policy::reject_config_assets(&config_logical, &config, &selection.profiles)
             .map_err(SourceError::Policy)?;
+
+        // cfgdrop2 Task 2.1: compile mirror of camel-config's
+        // root-key discard guard. When the document has profile
+        // structure, root-level CamelConfig keys (except the `routes`
+        // pattern accumulator, whose overlay walk below is untouched)
+        // would be silently dropped by strict profile selection, and
+        // root tables that misspell a known key would vanish the same
+        // way — reject both here exactly as the loader rejects them at
+        // boot, so one document gets one disposition on both front
+        // doors. Without `--config` this block is never reached.
+        if camel_dsl::config_semantics::has_profile_structure(&config, &selection.profiles)
+            && let toml::Value::Table(ref table) = config
+        {
+            let classes = camel_config::root_key_policy::classify_root_entries(
+                table.iter().map(|(k, v)| (k.as_str(), v)),
+            );
+            if !classes.discarded_keys.is_empty() {
+                return Err(SourceError::RootKeysDiscarded(classes.discarded_keys));
+            }
+            if !classes.misspelled_tables.is_empty() {
+                let near_miss = classes
+                    .misspelled_tables
+                    .into_iter()
+                    .map(|(name, target)| (name, target.to_string()))
+                    .collect();
+                return Err(SourceError::RootTableMisspelling(near_miss));
+            }
+        }
 
         // Ordered include walk in canonical order, collected by
         // `camel_dsl::config_semantics::include_declarations`: top-level,

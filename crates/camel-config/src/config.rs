@@ -10,6 +10,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::env_int_probe::{ConfigSeg, ProvenanceSet, deserialize_with_probe};
+use crate::root_key_policy;
 
 #[derive(Clone, Deserialize)]
 pub struct CamelConfig {
@@ -2920,40 +2921,6 @@ fn include_base_dir(path: &str) -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-/// Top-level CamelConfig keys recognized by serde deserialization, used to
-/// tell real config sections apart from profile-like tables (`[<name>]`) when
-/// warning about an unset `CAMEL_PROFILE` (rc-cflo).
-///
-/// MUST mirror [`CamelConfig`]'s serde field names. Structural keys with their
-/// own consumers (`default` for profiles, `include` for file composition) are
-/// excluded at the check site instead. The
-/// `config_ergonomics_tests::known_top_level_keys_*` tripwires guard drift:
-/// a name here that stops being a real field fails `_extra`; a new CamelConfig
-/// field missing from this list makes its section warn like an unselected
-/// profile.
-const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
-    "routes",
-    "watch",
-    "runtime_journal",
-    "idempotent_repo",
-    "cache_repo",
-    "log_level",
-    "timeout_ms",
-    "drain_timeout_ms",
-    "watch_debounce_ms",
-    "components",
-    "observability",
-    "supervision",
-    "platform",
-    "stream_caching",
-    "beans",
-    "languages",
-    "security",
-    "binds",
-    "datasources",
-    "jobs",
-];
-
 /// Core config builder. Accepts a pre-parsed (and `include`-stripped) `toml::Value`
 /// so callers do not need to re-parse the content.
 fn build_from_toml_value_inner(
@@ -2984,7 +2951,10 @@ fn build_from_toml_value_inner(
                 v.is_table()
                     && k.as_str() != "default"
                     && k.as_str() != "include"
-                    && !KNOWN_TOP_LEVEL_KEYS.contains(&k.as_str())
+                    && !root_key_policy::is_known_top_level_key(k)
+                    // cfgdrop2: near-miss names hard-error in the
+                    // profile-structure guard below; do not double-report.
+                    && root_key_policy::near_miss_root_table(k).is_none()
             })
             .map(|(k, _)| k.as_str())
             .collect();
@@ -3012,25 +2982,63 @@ fn build_from_toml_value_inner(
     if has_profile_structure {
         // gh#52 / rc-zbyyv: the strict selection below keeps ONLY the walked
         // sections — a root-level CamelConfig key would be silently discarded.
-        // Fail loud, naming the key(s) and the accepted shapes.
+        // Fail loud, naming the key(s) and the accepted shapes. cfgdrop2:
+        // root-level `routes` is exempt (compile-identical overlay below),
+        // and root TABLES that merely misspell a known key are rejected too,
+        // naming the probable intended key.
         if let toml::Value::Table(ref table) = config_value {
-            let discarded: Vec<&str> = table
-                .keys()
-                .map(String::as_str)
-                .filter(|k| KNOWN_TOP_LEVEL_KEYS.contains(k))
-                .collect();
-            if !discarded.is_empty() {
+            let classes =
+                root_key_policy::classify_root_entries(table.iter().map(|(k, v)| (k.as_str(), v)));
+            if !classes.discarded_keys.is_empty() {
                 return Err(ConfigError::Message(format!(
                     "top-level key(s) {} would be silently discarded by profile \
                      selection: when a [default] or selected profile section is \
                      present, config keys must live inside [default] (overlaid by \
                      the selected profile section) — move the key(s) there, or \
                      remove the profile sections to use a flat document",
-                    discarded.join(", ")
+                    classes.discarded_keys.join(", ")
+                )));
+            }
+            if !classes.misspelled_tables.is_empty() {
+                let names: Vec<&str> = classes
+                    .misspelled_tables
+                    .iter()
+                    .map(|(n, _)| n.as_str())
+                    .collect();
+                let pairs: Vec<String> = classes
+                    .misspelled_tables
+                    .iter()
+                    .map(|(name, target)| {
+                        format!("'{name}' looks like a misspelling of '{target}'")
+                    })
+                    .collect();
+                return Err(ConfigError::Message(format!(
+                    "top-level table(s) {} would be silently discarded by profile \
+                     selection: {} — move the table under [default] (overlaid by \
+                     the selected profile section), or remove the profile sections \
+                     to use a flat document",
+                    names.join(", "),
+                    pairs.join("; ")
                 )));
             }
         }
+        // cfgdrop2 routes overlay: root `routes` is the base pattern list.
+        // Lift it out before selection; after selection reinsert it ONLY if
+        // no walked section declared `routes` — `merge_toml_values` array
+        // replacement already makes any declaring section win, so this
+        // mirrors `compile::sources`' documented accumulation exactly.
+        let root_routes = if let toml::Value::Table(ref mut table) = config_value {
+            table.remove(root_key_policy::ROOT_ROUTES_KEY)
+        } else {
+            None
+        };
         apply_profile(&mut config_value, profile)?;
+        if let Some(routes) = root_routes
+            && let toml::Value::Table(ref mut table) = config_value
+            && !table.contains_key(root_key_policy::ROOT_ROUTES_KEY)
+        {
+            table.insert(root_key_policy::ROOT_ROUTES_KEY.to_string(), routes);
+        }
     } else {
         // Flat config — no profile sections, keep as-is
         apply_profile_lenient(&mut config_value, profile);

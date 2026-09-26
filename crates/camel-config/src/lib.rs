@@ -11,6 +11,7 @@ pub(crate) mod filter;
 pub(crate) mod include;
 pub mod json;
 pub mod properties;
+pub mod root_key_policy;
 pub mod wasm_limits;
 pub mod yaml;
 

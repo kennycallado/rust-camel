@@ -515,6 +515,10 @@ timeout_ms = 1000
 /// `routes` replacing top-level `routes`; that live
 /// section-over-section replacement semantic stays locked by the
 /// profile deep-merge case.)
+///
+/// cfgdrop2 regenerated this lock: root-level `routes` is now exempt
+/// from the reject (compile-identical overlay), so the error names only
+/// the still-rejected keys (`timeout_ms`, `watch`).
 #[test]
 fn parity_root_keys_beside_default_rejected_error_locked() {
     let _guard = env_lock();

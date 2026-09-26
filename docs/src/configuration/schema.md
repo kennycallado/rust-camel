@@ -16,7 +16,7 @@ A fuller file adds supervision, tracing, and shared component defaults. Profiles
 
 ## Top-level fields
 
-The fields below live directly under `[default]`. They are the spine of the file. Every other section in this page is optional. When a document uses profile sections, every config key lives inside `[default]` or a `[<profile>]` section. Root-level config keys are valid only in flat (profile-less) documents; mixing the two is rejected at load time; only `include` may stay at the root beside profile sections.
+The fields below live directly under `[default]`. They are the spine of the file. Every other section in this page is optional. When a document uses profile sections, every config key lives inside `[default]` or a `[<profile>]` section. Root-level config keys are valid only in flat (profile-less) documents; mixing the two is rejected at load time. Two exceptions apply beside profile sections: `include` may stay at the root, and a root-level `routes` array is accepted as the base pattern list — `[default]`, then the selected profile section, replaces that list when they declare their own `routes`; a section that declares none leaves the root list in place. A root-level table whose name misspells a known config key (for example `[obsevrability]` instead of `[observability]`) is rejected too, with the probable intended key named in the error.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

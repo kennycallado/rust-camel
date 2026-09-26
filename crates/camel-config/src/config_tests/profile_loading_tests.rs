@@ -596,3 +596,255 @@ fn flat_include_beside_default_main_still_loads() {
         "flat include content must apply (log_level)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Root `routes` overlay + near-miss root-table reject (cfgdrop2): root
+// `routes` beside profile structure is EXEMPT from the cfgdrop reject and
+// takes effect via the compile-identical overlay (lifted before
+// apply_profile, reinserted after selection only when no walked section
+// declared `routes`); root TABLES whose names are within Levenshtein
+// distance 2 of a known key are rejected instead of silently dropped.
+// ---------------------------------------------------------------------------
+
+/// Restores `CAMEL_PROFILE` to absent even if the test panics mid-assert.
+struct UnsetCamelProfileOnDrop;
+impl Drop for UnsetCamelProfileOnDrop {
+    fn drop(&mut self) {
+        super::unset_env("CAMEL_PROFILE");
+    }
+}
+
+#[test]
+fn root_routes_beside_default_survives_selection() {
+    let _guard = super::env_lock();
+    super::unset_env("CAMEL_PROFILE");
+    let file = write_temp_config(
+        r#"
+routes = ["r/*.yaml"]
+
+[default]
+log_level = "info"
+"#,
+    );
+
+    let cfg = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect("root routes beside [default] is the documented exception");
+    assert_eq!(
+        cfg.routes,
+        vec!["r/*.yaml"],
+        "root routes must survive selection when no section declares routes"
+    );
+    assert_eq!(cfg.log_level, "info", "[default] value must apply");
+}
+
+#[test]
+fn root_routes_replaced_by_default_section_routes() {
+    let _guard = super::env_lock();
+    super::unset_env("CAMEL_PROFILE");
+    let file = write_temp_config(
+        r#"
+routes = ["a/*.yaml"]
+
+[default]
+routes = ["b/*.yaml"]
+"#,
+    );
+
+    let cfg = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect("root routes beside [default] is the documented exception");
+    assert_eq!(
+        cfg.routes,
+        vec!["b/*.yaml"],
+        "a section that declares routes replaces the root list (array replacement)"
+    );
+}
+
+#[test]
+fn root_routes_replaced_by_selected_profile_routes() {
+    let _guard = super::env_lock();
+    super::unset_env("CAMEL_PROFILE");
+    let file = write_temp_config(
+        r#"
+routes = ["a/*.yaml"]
+
+[default]
+routes = ["b/*.yaml"]
+
+[prod]
+routes = ["c/*.yaml"]
+"#,
+    );
+
+    super::set_env("CAMEL_PROFILE", "prod");
+    let _restore = UnsetCamelProfileOnDrop;
+
+    let cfg = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect("root routes beside profile sections is the documented exception");
+    assert_eq!(
+        cfg.routes,
+        vec!["c/*.yaml"],
+        "the selected profile section wins over [default] and root routes"
+    );
+}
+
+#[test]
+fn root_routes_beside_selected_profile_only_survives() {
+    let _guard = super::env_lock();
+    super::unset_env("CAMEL_PROFILE");
+    let file = write_temp_config(
+        r#"
+routes = ["a/*.yaml"]
+
+[prod]
+log_level = "warn"
+"#,
+    );
+
+    super::set_env("CAMEL_PROFILE", "prod");
+    let _restore = UnsetCamelProfileOnDrop;
+
+    let cfg = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect("root routes beside [prod] with no [default] is the documented exception");
+    assert_eq!(
+        cfg.routes,
+        vec!["a/*.yaml"],
+        "root routes must survive reinsert when the selected section declares no routes"
+    );
+    assert_eq!(cfg.log_level, "warn", "[prod] value must apply");
+}
+
+#[test]
+fn root_routes_with_other_known_keys_error_names_only_those() {
+    let _guard = super::env_lock();
+    super::unset_env("CAMEL_PROFILE");
+    let file = write_temp_config(
+        r#"
+routes = ["r/*.yaml"]
+timeout_ms = 5
+watch = true
+
+[default]
+log_level = "info"
+"#,
+    );
+
+    let err = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect_err("non-routes root keys beside [default] must stay rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("timeout_ms"), "must name timeout_ms: {msg}");
+    assert!(msg.contains("watch"), "must name watch: {msg}");
+    assert!(
+        !msg.contains("routes,") && !msg.contains(", routes"),
+        "routes is exempt — the error must not list it as discarded: {msg}"
+    );
+}
+
+#[test]
+fn near_miss_table_beside_selected_profile_is_rejected() {
+    let _guard = super::env_lock();
+    super::unset_env("CAMEL_PROFILE");
+    let file = write_temp_config(
+        r#"
+[prod]
+log_level = "warn"
+
+[obsevrability]
+sampled = false
+"#,
+    );
+
+    super::set_env("CAMEL_PROFILE", "prod");
+    let _restore = UnsetCamelProfileOnDrop;
+
+    let err = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect_err("near-miss root table beside a selected profile must be rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("obsevrability"), "must name the table: {msg}");
+    assert!(
+        msg.contains("observability"),
+        "must name the probable intended key: {msg}"
+    );
+    assert!(msg.contains("misspelling"), "must say misspelling: {msg}");
+    assert!(
+        msg.contains("[default]"),
+        "must name the accepted shape: {msg}"
+    );
+}
+
+#[test]
+fn near_miss_table_without_profile_is_rejected_not_warned() {
+    use crate::config::log_capture::capture_warns;
+
+    let _guard = super::env_lock();
+    super::unset_env("CAMEL_PROFILE");
+    let tree: toml::Value = toml::from_str(
+        r#"
+[default]
+x = 1
+
+[runtime_jounal]
+path = "j.db"
+"#,
+    )
+    .expect("fixture must parse");
+
+    let (result, warns) = capture_warns(|| {
+        build_from_toml_value_inner(tree, None, false, Vec::new(), &ambient_lookup())
+    });
+
+    let err =
+        result.expect_err("near-miss root table beside [default] must be rejected, not warned");
+    let msg = err.to_string();
+    assert!(msg.contains("runtime_jounal"), "must name the table: {msg}");
+    assert!(
+        msg.contains("runtime_journal"),
+        "must name the probable intended key: {msg}"
+    );
+    assert!(
+        !warns.iter().any(|w| w.contains("runtime_jounal")),
+        "rc-cflo warn must not double-report a near-miss name, got {warns:?}"
+    );
+}
+
+#[test]
+fn far_table_beside_active_profile_stays_silent() {
+    // Negative lock: plausible profile names far from any known key keep
+    // unselected-profile semantics — never rejected, never near-missed.
+    let _guard = super::env_lock();
+    super::unset_env("CAMEL_PROFILE");
+    let file = write_temp_config(
+        r#"
+[default]
+x = 1
+
+[staging]
+y = 2
+
+[prod]
+z = 3
+"#,
+    );
+
+    super::set_env("CAMEL_PROFILE", "prod");
+    let _restore = UnsetCamelProfileOnDrop;
+
+    CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect("[staging] beside an active [prod] stays silently unselected (load = Ok)");
+}
+
+#[test]
+fn flat_document_near_miss_table_stays_lenient() {
+    // Negative lock: the near-miss discriminator never fires on flat
+    // documents — unknown root tables land in _extra per flat leniency.
+    let _guard = super::env_lock();
+    super::unset_env("CAMEL_PROFILE");
+    let file = write_temp_config(
+        r#"
+[obsevrability]
+sampled = false
+"#,
+    );
+
+    CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
+        .expect("flat document with a near-miss table stays lenient (no profile structure)");
+}
