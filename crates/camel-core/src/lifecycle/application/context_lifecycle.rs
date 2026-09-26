@@ -30,7 +30,11 @@ fn context_boot_nonce() -> u128 {
     *CONTEXT_BOOT_NONCE
         .get_or_init(|| match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(duration) => duration.as_nanos(),
-            Err(_) => 0,
+            Err(err) => {
+                // Clock is before the Unix epoch; keep nonce non-constant
+                // across boots by mixing in process identity.
+                (err.duration().as_nanos() << 32) | u128::from(std::process::id())
+            }
         })
 }
 
