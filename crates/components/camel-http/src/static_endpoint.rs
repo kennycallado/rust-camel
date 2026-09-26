@@ -346,9 +346,15 @@ mod tests {
         ServerRegistry::reset();
 
         let dir = std::env::temp_dir();
+        // ADR-0070 staged-listener law: stage the pre-bound listener; the
+        // consumer's get_or_spawn consumes it, so the port never returns to
+        // the ephemeral pool between probe and serve (no bind-read-drop race).
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        ServerRegistry::global()
+            .stage_listener(listener)
+            .await
+            .expect("stage consumer test listener");
 
         let config = HttpStaticConfig {
             dir,
@@ -408,10 +414,15 @@ mod tests {
         let dir = std::env::temp_dir();
         let canonical_dir = std::fs::canonicalize(&dir).unwrap();
 
-        // Bind to a free port first
+        // ADR-0070 staged-listener law: stage the pre-bound listener; the
+        // consumer's get_or_spawn consumes it, so the port never returns to
+        // the ephemeral pool between probe and serve (no bind-read-drop race).
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        ServerRegistry::global()
+            .stage_listener(listener)
+            .await
+            .expect("stage consumer test listener");
 
         let config = HttpStaticConfig {
             dir: dir.clone(),
@@ -473,10 +484,15 @@ mod tests {
         let dir = std::env::temp_dir();
         let canonical_dir = std::fs::canonicalize(&dir).unwrap();
 
-        // Bind to a free port
+        // ADR-0070 staged-listener law: stage the pre-bound listener; the
+        // consumer's get_or_spawn consumes it, so the port never returns to
+        // the ephemeral pool between probe and serve (no bind-read-drop race).
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        ServerRegistry::global()
+            .stage_listener(listener)
+            .await
+            .expect("stage consumer test listener");
 
         // Get registry
         let registry = ServerRegistry::global()

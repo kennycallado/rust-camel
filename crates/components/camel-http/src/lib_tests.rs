@@ -3043,9 +3043,15 @@ fn test_server_registry_global_is_singleton() {
 #[tokio::test]
 async fn test_concurrent_get_or_spawn_returns_same_registry() {
     let _guard = lock_registry_test_mutex();
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // first get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let results: Arc<std::sync::Mutex<Vec<HttpRouteRegistry>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -3261,9 +3267,15 @@ async fn test_unregister_last_http_route_keeps_server_alive() {
     ServerRegistry::reset();
     let registry = ServerRegistry::global();
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // first get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener); // Release — ServerRegistry will rebind
+    registry
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
     let rt = test_rt();
 
     // Register 2 routes on the same (host, port) — OnceCell returns the
@@ -3852,10 +3864,15 @@ async fn test_dispatch_handler_returns_404_for_unknown_path() {
 async fn test_http_consumer_start_registers_path() {
     use camel_component_api::ConsumerContext;
 
-    // Get an OS-assigned free port
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener); // Release port — ServerRegistry will rebind it
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let consumer_cfg = HttpServerConfig {
         scheme: "http".to_string(),
@@ -3914,9 +3931,15 @@ async fn http_consumer_raw_dispatch_carries_in_flight_claim() {
     use camel_component_api::ConsumerContext;
     use camel_component_api::StartupSignal;
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let consumer_cfg = HttpServerConfig {
         scheme: "http".to_string(),
@@ -4012,9 +4035,15 @@ fn test_envelope_channel_capacity_follows_max_inflight() {
 async fn test_http_consumer_start_with_zero_max_inflight_rejects_503() {
     use camel_component_api::ConsumerContext;
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let consumer_cfg = HttpServerConfig {
         scheme: "http".to_string(),
@@ -4158,9 +4187,15 @@ async fn test_http_consumer_start_rejects_oversized_before_spawn() {
     use camel_component_api::ConsumerContext;
 
     let l = tokio::sync::Semaphore::MAX_PERMITS;
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let consumer_cfg = HttpServerConfig {
         scheme: "http".to_string(),
@@ -4259,9 +4294,15 @@ async fn test_http_consumer_emits_mark_ready_after_bind() {
 
     let _guard = lock_registry_test_mutex();
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let consumer_cfg = HttpServerConfig {
         scheme: "http".to_string(),
@@ -4362,10 +4403,15 @@ async fn shared_server_death_fails_every_hosted_consumer() {
     let _guard = lock_registry_test_mutex();
     ServerRegistry::reset();
 
-    // Reserve a port, release it, let get_or_spawn bind it.
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let rt = ErrorRecordingRuntime::default();
 
@@ -4466,9 +4512,15 @@ async fn shared_server_death_fails_every_hosted_consumer() {
 async fn test_http_consumer_returns_503_when_inflight_limit_reached() {
     use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let consumer_cfg = HttpServerConfig {
         scheme: "http".to_string(),
@@ -4560,9 +4612,15 @@ async fn test_http_consumer_returns_503_when_inflight_limit_reached() {
 async fn test_http_consumer_chunked_body_is_capped() {
     use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let consumer_cfg = HttpServerConfig {
         scheme: "http".to_string(),
@@ -4635,9 +4693,15 @@ async fn test_http_consumer_enforces_max_response_body_for_bytes() {
 
     let _guard = lock_registry_test_mutex();
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let consumer_cfg = HttpServerConfig {
         scheme: "http".to_string(),
@@ -4687,9 +4751,15 @@ async fn test_http_consumer_enforces_max_response_body_for_json() {
 
     let _guard = lock_registry_test_mutex();
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let consumer_cfg = HttpServerConfig {
         scheme: "http".to_string(),
@@ -4740,9 +4810,15 @@ async fn test_http_consumer_enforces_max_response_body_for_xml() {
 
     let _guard = lock_registry_test_mutex();
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let consumer_cfg = HttpServerConfig {
         scheme: "http".to_string(),
@@ -4795,9 +4871,15 @@ async fn test_http_consumer_does_not_enforce_max_response_body_for_stream() {
 
     let _guard = lock_registry_test_mutex();
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let consumer_cfg = HttpServerConfig {
         scheme: "http".to_string(),
@@ -4864,9 +4946,15 @@ async fn test_integration_single_consumer_round_trip() {
     let _guard = lock_registry_test_mutex();
 
     // Get an OS-assigned free port (ephemeral)
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener); // Release — ServerRegistry will rebind
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let component = HttpComponent::new();
     let endpoint_ctx = NoOpComponentContext;
@@ -4921,10 +5009,15 @@ async fn test_integration_two_consumers_shared_port() {
 
     let _guard = lock_registry_test_mutex();
 
-    // Get an OS-assigned free port (ephemeral)
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let component = HttpComponent::new();
     let endpoint_ctx = NoOpComponentContext;
@@ -4996,10 +5089,15 @@ async fn test_integration_unregistered_path_returns_404() {
 
     let _guard = lock_registry_test_mutex();
 
-    // Get an OS-assigned free port (ephemeral)
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let component = HttpComponent::new();
     let endpoint_ctx = NoOpComponentContext;
@@ -5167,10 +5265,15 @@ mod otel_tests {
     async fn test_consumer_extracts_traceparent_header() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
-        // Get an OS-assigned free port
+        // ADR-0070 staged-listener law: stage the pre-bound listener; the
+        // consumer's get_or_spawn consumes it, so the port never returns to
+        // the ephemeral pool between probe and serve (no bind-read-drop race).
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        ServerRegistry::global()
+            .stage_listener(listener)
+            .await
+            .expect("stage consumer test listener");
 
         let component = HttpComponent::new();
         let endpoint_ctx = NoOpComponentContext;
@@ -5233,10 +5336,15 @@ mod otel_tests {
     async fn test_consumer_extracts_mixed_case_traceparent_header() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
-        // Get an OS-assigned free port
+        // ADR-0070 staged-listener law: stage the pre-bound listener; the
+        // consumer's get_or_spawn consumes it, so the port never returns to
+        // the ephemeral pool between probe and serve (no bind-read-drop race).
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        drop(listener);
+        ServerRegistry::global()
+            .stage_listener(listener)
+            .await
+            .expect("stage consumer test listener");
 
         let component = HttpComponent::new();
         let endpoint_ctx = NoOpComponentContext;
@@ -5379,9 +5487,15 @@ async fn test_request_body_arrives_as_stream() {
     use camel_component_api::Body;
     use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let component = HttpComponent::new();
     let endpoint_ctx = NoOpComponentContext;
@@ -5449,9 +5563,15 @@ async fn test_streaming_response_chunked() {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let component = HttpComponent::new();
     let endpoint_ctx = NoOpComponentContext;
@@ -5502,9 +5622,15 @@ async fn test_streaming_response_chunked() {
 async fn test_413_when_content_length_exceeds_limit() {
     use camel_component_api::ConsumerContext;
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     // maxRequestBody=100 — any request declaring more than 100 bytes must get 413
     let component = HttpComponent::new();
@@ -5548,9 +5674,15 @@ async fn test_chunked_upload_without_content_length_bypasses_limit() {
     use camel_component_api::ConsumerContext;
     use futures::stream;
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     // maxRequestBody=10 — very small limit; chunked uploads have no Content-Length
     let component = HttpComponent::new();
@@ -8405,12 +8537,17 @@ async fn consumer_tls_handshake_roundtrip() {
     let key_path = tls::write_pem_tmp("http-tls-handshake-key.pem", &key_pem);
     let ca_path = tls::write_pem_tmp("http-tls-handshake-ca.pem", &ca_pem);
 
-    // Get ephemeral port
-    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
-
     ServerRegistry::reset();
+
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     // Create real HttpComponent + endpoint with TLS URI
     let component = HttpComponent::new();
@@ -8480,11 +8617,17 @@ async fn consumer_tls_rejects_client_without_ca() {
     let cert_path = tls::write_pem_tmp("http-neg-cert.pem", &cert_pem);
     let key_path = tls::write_pem_tmp("http-neg-key.pem", &key_pem);
 
-    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
-
     ServerRegistry::reset();
+
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     // Spawn TLS server via real HttpComponent path
     let component = HttpComponent::new();
@@ -8973,9 +9116,15 @@ async fn bridge_proxy_outbound_host_matches_destination() {
 async fn bridge_proxy_route_set_response_header_survives() {
     use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
+    // ADR-0070 staged-listener law: stage the pre-bound listener; the
+    // consumer's get_or_spawn consumes it, so the port never returns to
+    // the ephemeral pool between probe and serve (no bind-read-drop race).
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
 
     let component = HttpComponent::new();
     let endpoint_ctx = NoOpComponentContext;
