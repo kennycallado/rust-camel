@@ -13,6 +13,8 @@ use camel_api::{
     SplitExpression, Value,
 };
 
+use crate::splitter::{CAMEL_SPLIT_COMPLETE, CAMEL_SPLIT_INDEX, CAMEL_SPLIT_SIZE};
+
 // ── aggregate_completed (SplitSegment helper) ─────────────────────────
 
 /// Aggregate completed fragment outputs into a single Exchange.
@@ -136,13 +138,23 @@ impl camel_api::OutcomePipeline for SplitSegment {
             let original = exchange;
             // A typed error from the split expression fails loud as
             // `Failed`, carrying the original error untouched.
-            let fragments = match splitter(&original) {
+            let mut fragments = match splitter(&original) {
                 Ok(fragments) => fragments,
                 Err(err) => return PipelineOutcome::Failed(err),
             };
 
             if fragments.is_empty() {
                 return PipelineOutcome::Completed(original);
+            }
+
+            // Stamp split metadata on each fragment — exact parity with
+            // `SplitterService::call`, so downstream consumers observe the
+            // same `CamelSplit*` properties on either split path.
+            let total = fragments.len();
+            for (i, frag) in fragments.iter_mut().enumerate() {
+                frag.set_property(CAMEL_SPLIT_INDEX, Value::from(i as u64));
+                frag.set_property(CAMEL_SPLIT_SIZE, Value::from(total as u64));
+                frag.set_property(CAMEL_SPLIT_COMPLETE, Value::Bool(i == total - 1));
             }
 
             if parallel {
@@ -1116,5 +1128,134 @@ mod tests {
             0,
             "body segment must record zero invocations when the split expression errors"
         );
+    }
+    // ── Tests 11-13: fragment metadata stamping ────────────────────────
+
+    /// Helper: OutcomePipeline body that captures the split metadata
+    /// properties (index, size, complete) from each fragment exchange
+    /// into a shared buffer.
+    #[derive(Clone)]
+    struct MetadataCaptureBody {
+        triples: Arc<std::sync::Mutex<Vec<(u64, u64, bool)>>>,
+    }
+    impl camel_api::OutcomePipeline for MetadataCaptureBody {
+        fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+            Box::new(self.clone())
+        }
+        fn run<'a>(
+            &'a mut self,
+            exchange: Exchange,
+        ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+            let triples = Arc::clone(&self.triples);
+            Box::pin(async move {
+                let index = exchange
+                    .property(crate::splitter::CAMEL_SPLIT_INDEX)
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(u64::MAX);
+                let size = exchange
+                    .property(crate::splitter::CAMEL_SPLIT_SIZE)
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(u64::MAX);
+                let complete = exchange
+                    .property(crate::splitter::CAMEL_SPLIT_COMPLETE)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                triples.lock().unwrap().push((index, size, complete));
+                PipelineOutcome::Completed(exchange)
+            })
+        }
+    }
+
+    /// Custom splitter producing `n` fragments with distinguishable bodies.
+    fn n_fragment_splitter(n: u64) -> SplitExpression {
+        Arc::new(move |ex: &Exchange| {
+            Ok((0..n)
+                .map(|i| {
+                    let mut frag = ex.clone();
+                    frag.input.body = Body::Text(format!("frag-{i}"));
+                    frag
+                })
+                .collect())
+        })
+    }
+
+    #[tokio::test]
+    async fn sequential_split_stamps_fragment_metadata() {
+        let triples = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let mut seg = SplitSegment {
+            splitter: n_fragment_splitter(3),
+            body: OutcomeSegment::new(Box::new(MetadataCaptureBody {
+                triples: Arc::clone(&triples),
+            })),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let ex = Exchange::new(Message::new("test"));
+        let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+        assert!(
+            matches!(result, PipelineOutcome::Completed(_)),
+            "Expected Completed, got {result:?}"
+        );
+
+        assert_eq!(
+            *triples.lock().unwrap(),
+            vec![(0, 3, false), (1, 3, false), (2, 3, true)]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parallel_split_stamps_fragment_metadata() {
+        let triples = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let mut seg = SplitSegment {
+            splitter: n_fragment_splitter(3),
+            body: OutcomeSegment::new(Box::new(MetadataCaptureBody {
+                triples: Arc::clone(&triples),
+            })),
+            parallel: true,
+            parallel_limit: None,
+            stop_on_exception: true,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let ex = Exchange::new(Message::new("test"));
+        let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+        assert!(
+            matches!(result, PipelineOutcome::Completed(_)),
+            "Expected Completed, got {result:?}"
+        );
+
+        let mut got = triples.lock().unwrap().clone();
+        got.sort_by_key(|(idx, _, _)| *idx);
+        assert_eq!(got, vec![(0, 3, false), (1, 3, false), (2, 3, true)]);
+    }
+
+    #[tokio::test]
+    async fn single_fragment_is_complete() {
+        let triples = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let mut seg = SplitSegment {
+            splitter: n_fragment_splitter(1),
+            body: OutcomeSegment::new(Box::new(MetadataCaptureBody {
+                triples: Arc::clone(&triples),
+            })),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let ex = Exchange::new(Message::new("test"));
+        let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+        assert!(
+            matches!(result, PipelineOutcome::Completed(_)),
+            "Expected Completed, got {result:?}"
+        );
+
+        assert_eq!(*triples.lock().unwrap(), vec![(0, 1, true)]);
     }
 }

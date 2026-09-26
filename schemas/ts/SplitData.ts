@@ -3,4 +3,4 @@ import type { RouteDslStep } from "./RouteDslStep";
 import type { SplitExpressionYaml } from "./SplitExpressionYaml";
 import type { StreamConfigYaml } from "./StreamConfigYaml";
 
-export type SplitData = { expression: SplitExpressionYaml | null, aggregation: string, parallel: boolean, parallel_limit: number | null, stop_on_exception: boolean, steps: Array<RouteDslStep>, streaming: boolean, stream: StreamConfigYaml | null, };
+export type SplitData = { expression: SplitExpressionYaml | null, aggregation: string, parallel: boolean, parallel_limit: number | null, trace_item_threshold: number | null, stop_on_exception: boolean, steps: Array<RouteDslStep>, streaming: boolean, stream: StreamConfigYaml | null, };

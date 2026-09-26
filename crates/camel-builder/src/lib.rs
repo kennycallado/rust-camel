@@ -1097,6 +1097,9 @@ fn canonicalize_step(step: BuilderStep) -> Result<CanonicalStepSpec, CamelError>
             aggregation,
             parallel,
             parallel_limit,
+            // The programmatic language-split builder has no knob source;
+            // the default applies at wrap time (asymmetry deferred).
+            trace_item_threshold: _,
             stop_on_exception,
             steps,
         } => Ok(CanonicalStepSpec::Split {
@@ -1104,6 +1107,7 @@ fn canonicalize_step(step: BuilderStep) -> Result<CanonicalStepSpec, CamelError>
             aggregation: canonicalize_split_aggregation(aggregation)?,
             parallel,
             parallel_limit,
+            trace_item_threshold: None,
             stop_on_exception,
             steps: canonicalize_steps(steps)?,
         }),

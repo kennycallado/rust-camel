@@ -753,6 +753,7 @@ async fn register_route_accepts_advanced_canonical_steps() {
                 aggregation: CanonicalSplitAggregationSpec::CollectAll,
                 parallel: false,
                 parallel_limit: None,
+                trace_item_threshold: None,
                 stop_on_exception: true,
                 steps: vec![CanonicalStepSpec::To {
                     uri: "mock:split".to_string(),

@@ -657,6 +657,7 @@ mod tests {
                 aggregation: AggregationStrategy::Original,
                 parallel: false,
                 parallel_limit: None,
+                trace_item_threshold: None,
                 stop_on_exception: true,
                 steps: vec![BuilderStep::To("exec:echo".to_string())],
             }],

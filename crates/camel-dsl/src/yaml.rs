@@ -1156,6 +1156,7 @@ pub(crate) fn route_step_to_declarative_step(
                 aggregation,
                 parallel: split.parallel,
                 parallel_limit: split.parallel_limit,
+                trace_item_threshold: split.trace_item_threshold,
                 stop_on_exception: split.stop_on_exception,
                 steps,
             }))
@@ -3892,6 +3893,54 @@ routes:
 "#;
         let defs = parse_yaml(yaml).unwrap();
         assert_eq!(defs.len(), 1);
+    }
+
+    #[test]
+    fn split_trace_item_threshold_parses() {
+        let with_key: crate::route_ast::SplitStep = serde_yml::from_str(
+            r#"
+split:
+  expression:
+    jsonpath: "$.items[*]"
+  trace_item_threshold: 5
+  steps:
+    - to: "log:info"
+"#,
+        )
+        .unwrap();
+        assert_eq!(with_key.split.trace_item_threshold, Some(5));
+
+        let without_key: crate::route_ast::SplitStep = serde_yml::from_str(
+            r#"
+split:
+  expression:
+    jsonpath: "$.items[*]"
+  steps:
+    - to: "log:info"
+"#,
+        )
+        .unwrap();
+        assert_eq!(without_key.split.trace_item_threshold, None);
+
+        let yaml = r#"
+routes:
+  - id: "threshold-split"
+    from: "direct:start"
+    steps:
+      - split:
+          expression:
+            jsonpath: "$.items[*]"
+          trace_item_threshold: 5
+          steps:
+            - to: "log:info"
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        match &routes[0].steps[0] {
+            DeclarativeStep::Split(def) => {
+                assert_eq!(def.trace_item_threshold, Some(5));
+            }
+            other => panic!("expected Split, got {:?}", other.kind()),
+        }
     }
 
     #[test]

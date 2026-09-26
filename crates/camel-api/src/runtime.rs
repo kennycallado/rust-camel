@@ -140,6 +140,9 @@ pub enum CanonicalStepSpec {
         aggregation: CanonicalSplitAggregationSpec,
         parallel: bool,
         parallel_limit: Option<usize>,
+        /// Threshold above which split fragments start new traces (0 = off).
+        /// Absent means the runtime default applies.
+        trace_item_threshold: Option<usize>,
         stop_on_exception: bool,
         steps: Vec<CanonicalStepSpec>,
     },
@@ -828,6 +831,7 @@ mod tests {
             aggregation: CanonicalSplitAggregationSpec::CollectAll,
             parallel: true,
             parallel_limit: Some(0),
+            trace_item_threshold: None,
             stop_on_exception: false,
             steps: vec![CanonicalStepSpec::To {
                 uri: "log:ok".to_string(),

@@ -207,6 +207,9 @@ impl StreamSplitConfig {
     }
 }
 
+/// Default threshold above which split fragments start new traces (0 = off).
+pub const DEFAULT_TRACE_ITEM_THRESHOLD: usize = 100;
+
 /// Configuration for the Splitter EIP.
 #[derive(Clone)]
 pub struct SplitterConfig {
@@ -230,6 +233,8 @@ pub struct SplitterConfig {
     /// processing; this cap rejects a split that would explode memory.
     /// Default 100_000. For unbounded/lazy input use `StreamingSplitter`.
     pub max_fragments: usize,
+    /// Threshold above which split fragments start new traces (0 = off).
+    pub trace_item_threshold: usize,
 }
 
 impl std::fmt::Debug for SplitterConfig {
@@ -241,6 +246,7 @@ impl std::fmt::Debug for SplitterConfig {
             .field("parallel_limit", &self.parallel_limit)
             .field("stop_on_exception", &self.stop_on_exception)
             .field("max_fragments", &self.max_fragments)
+            .field("trace_item_threshold", &self.trace_item_threshold)
             .finish()
     }
 }
@@ -255,6 +261,7 @@ impl SplitterConfig {
             parallel_limit: None,
             stop_on_exception: true,
             max_fragments: 100_000,
+            trace_item_threshold: DEFAULT_TRACE_ITEM_THRESHOLD,
         }
     }
 
@@ -288,6 +295,12 @@ impl SplitterConfig {
     /// Set the maximum number of fragments the eager splitter will materialize.
     pub fn max_fragments(mut self, max: usize) -> Self {
         self.max_fragments = max;
+        self
+    }
+
+    /// Set the threshold above which split fragments start new traces (0 = off).
+    pub fn trace_item_threshold(mut self, threshold: usize) -> Self {
+        self.trace_item_threshold = threshold;
         self
     }
 
@@ -828,5 +841,65 @@ mod tests {
             trace_ids.iter().all(|&id| id == trace_id),
             "All fragments should have the same trace ID"
         );
+    }
+
+    #[test]
+    fn trace_item_threshold_defaults_to_100() {
+        let config = SplitterConfig::new(split_body_lines());
+        assert_eq!(config.trace_item_threshold, 100);
+    }
+
+    #[test]
+    fn trace_item_threshold_builder_sets_value() {
+        let config = SplitterConfig::new(split_body_lines()).trace_item_threshold(0);
+        assert_eq!(config.trace_item_threshold, 0);
+
+        let config = SplitterConfig::new(split_body_lines()).trace_item_threshold(7);
+        assert_eq!(config.trace_item_threshold, 7);
+    }
+
+    #[test]
+    fn canonical_split_spec_carries_trace_item_threshold() {
+        use crate::runtime::{CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec};
+
+        let with_threshold = crate::runtime::CanonicalStepSpec::Split {
+            expression: CanonicalSplitExpressionSpec::BodyLines,
+            aggregation: CanonicalSplitAggregationSpec::CollectAll,
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            trace_item_threshold: Some(5),
+            steps: Vec::new(),
+        };
+        let without_threshold = crate::runtime::CanonicalStepSpec::Split {
+            expression: CanonicalSplitExpressionSpec::BodyLines,
+            aggregation: CanonicalSplitAggregationSpec::CollectAll,
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            trace_item_threshold: None,
+            steps: Vec::new(),
+        };
+
+        // Mirror the derive(PartialEq)/destructure path `parallel_limit` uses.
+        let crate::runtime::CanonicalStepSpec::Split {
+            trace_item_threshold,
+            ..
+        } = &with_threshold
+        else {
+            unreachable!()
+        };
+        assert_eq!(trace_item_threshold, &Some(5));
+
+        let crate::runtime::CanonicalStepSpec::Split {
+            trace_item_threshold,
+            ..
+        } = &without_threshold
+        else {
+            unreachable!()
+        };
+        assert_eq!(trace_item_threshold, &None);
+
+        assert_ne!(with_threshold, without_threshold);
     }
 }

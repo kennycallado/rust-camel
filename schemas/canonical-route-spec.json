@@ -453,6 +453,15 @@
                 },
                 "stop_on_exception": {
                   "type": "boolean"
+                },
+                "trace_item_threshold": {
+                  "description": "Threshold above which split fragments start new traces (0 = off).\nAbsent means the runtime default applies.",
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint",
+                  "minimum": 0
                 }
               },
               "required": [

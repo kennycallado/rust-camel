@@ -24,13 +24,17 @@
 use async_trait::async_trait;
 use camel_api::redact::redact_url;
 use camel_api::{CamelError, Lifecycle, MetricsCollector, ServiceStatus};
+use opentelemetry::Context;
 use opentelemetry::KeyValue;
 use opentelemetry::global;
+use opentelemetry::trace::{Link, SpanKind, TraceContextExt, TraceId};
 use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::resource::Resource;
-use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+use opentelemetry_sdk::trace::{
+    Sampler, SamplingDecision, SamplingResult, SdkTracerProvider, ShouldSample,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
@@ -83,6 +87,56 @@ pub struct OtelService {
     test_span_exporter: Option<opentelemetry_sdk::trace::InMemorySpanExporter>,
     #[cfg(test)]
     test_log_exporter: Option<opentelemetry_sdk::logs::InMemoryLogExporter>,
+}
+
+/// Root-sampler wrapper: a parentless span whose builder carries
+/// links inherits the first link's sampling flag (OTEL sampler-links
+/// guidance). Parented decisions never reach this sampler (it sits
+/// inside `Sampler::ParentBased`'s root slot); parentless spans
+/// without links delegate to the inner root sampler unchanged.
+#[derive(Clone, Debug)]
+struct LinkAwareSampler {
+    inner: Sampler,
+}
+
+impl ShouldSample for LinkAwareSampler {
+    fn should_sample(
+        &self,
+        parent_context: Option<&Context>,
+        trace_id: TraceId,
+        name: &str,
+        span_kind: &SpanKind,
+        attributes: &[KeyValue],
+        links: &[Link],
+    ) -> SamplingResult {
+        match links.first() {
+            Some(link) => {
+                let decision = if link.span_context.is_sampled() {
+                    SamplingDecision::RecordAndSample
+                } else {
+                    SamplingDecision::Drop
+                };
+                // Mirror the SDK's own samplers: no extra attributes,
+                // parent trace state passed through unmodified.
+                let trace_state = parent_context
+                    .map(|cx| cx.span().span_context().trace_state().clone())
+                    .unwrap_or_default();
+                SamplingResult {
+                    decision,
+                    attributes: Vec::new(),
+                    trace_state,
+                }
+            }
+            None => self.inner.should_sample(
+                parent_context,
+                trace_id,
+                name,
+                span_kind,
+                attributes,
+                links,
+            ),
+        }
+    }
 }
 
 impl OtelService {
@@ -320,13 +374,21 @@ impl OtelService {
     /// Convert `OtelSampler` to a parent-based SDK sampler.
     ///
     /// Children inherit the parent sampling decision; an unsampled parent
-    /// records nothing.
+    /// records nothing. The root delegate is link-aware: a parentless span
+    /// built with links follows the first link's sampling flag (splittrace
+    /// per-item root spans).
     fn to_sdk_sampler(sampler: &OtelSampler) -> Sampler {
         match sampler {
-            OtelSampler::AlwaysOn => Sampler::ParentBased(Box::new(Sampler::AlwaysOn)),
-            OtelSampler::AlwaysOff => Sampler::ParentBased(Box::new(Sampler::AlwaysOff)),
+            OtelSampler::AlwaysOn => Sampler::ParentBased(Box::new(LinkAwareSampler {
+                inner: Sampler::AlwaysOn,
+            })),
+            OtelSampler::AlwaysOff => Sampler::ParentBased(Box::new(LinkAwareSampler {
+                inner: Sampler::AlwaysOff,
+            })),
             OtelSampler::TraceIdRatioBased(ratio) => {
-                Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(*ratio)))
+                Sampler::ParentBased(Box::new(LinkAwareSampler {
+                    inner: Sampler::TraceIdRatioBased(*ratio),
+                }))
             }
         }
     }

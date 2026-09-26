@@ -383,6 +383,7 @@ pub struct SplitStepDef {
     pub aggregation: SplitAggregationDef,
     pub parallel: bool,
     pub parallel_limit: Option<usize>,
+    pub trace_item_threshold: Option<usize>,
     pub stop_on_exception: bool,
     pub steps: Vec<DeclarativeStep>,
 }

@@ -257,6 +257,7 @@ Split the body into fragments and process each.
 | `aggregation` | string | no | `last_wins` | Aggregation strategy |
 | `parallel` | bool | no | `false` | Process fragments in parallel |
 | `parallel_limit` | integer | no | — | Max parallel fragments |
+| `trace_item_threshold` | integer | no | `100` | Above this fragment count, each fragment starts a new trace root span linked to the split segment span. `0` disables (legacy always-nested). |
 | `stop_on_exception` | bool | no | `true` | Stop on first error |
 | `streaming` | bool | no | `false` | Stream the split. `stream` applies only when this is `true`. |
 | `stream.format` | string | no | `auto` | Stream record format: `ndjson`, `lines`, `chunks`, `zip`, `tar`, `tar.gz`, or `auto`. |

@@ -116,6 +116,9 @@ pub enum BuilderStep {
         aggregation: camel_api::splitter::AggregationStrategy,
         parallel: bool,
         parallel_limit: Option<usize>,
+        /// Threshold above which split fragments start new traces (None =
+        /// `DEFAULT_TRACE_ITEM_THRESHOLD` applies at compile time).
+        trace_item_threshold: Option<usize>,
         stop_on_exception: bool,
         steps: Vec<BuilderStep>,
     },
@@ -939,6 +942,7 @@ mod tests {
                 aggregation: AggregationStrategy::Original,
                 parallel: false,
                 parallel_limit: None,
+                trace_item_threshold: None,
                 stop_on_exception: true,
                 steps: vec![BuilderStep::Stop],
             }
@@ -1366,11 +1370,12 @@ mod tests {
                     aggregation: AggregationStrategy::Original,
                     parallel: false,
                     parallel_limit: Some(2),
+                    trace_item_threshold: None,
                     stop_on_exception: true,
                     steps: vec![BuilderStep::Stop],
                 }
             ),
-            "DeclarativeSplit { expression: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, aggregation: Original, parallel: false, parallel_limit: Some(2), stop_on_exception: true, steps: [Stop] }"
+            "DeclarativeSplit { expression: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, aggregation: Original, parallel: false, parallel_limit: Some(2), trace_item_threshold: None, stop_on_exception: true, steps: [Stop] }"
         );
 
         assert_eq!(
@@ -1383,7 +1388,7 @@ mod tests {
                     steps: vec![BuilderStep::Stop],
                 }
             ),
-            "Split { config: SplitterConfig { expression: \"<split-expression>\", aggregation: LastWins, parallel: false, parallel_limit: None, stop_on_exception: true, max_fragments: 100000 }, steps: [Stop] }"
+            "Split { config: SplitterConfig { expression: \"<split-expression>\", aggregation: LastWins, parallel: false, parallel_limit: None, stop_on_exception: true, max_fragments: 100000, trace_item_threshold: 100 }, steps: [Stop] }"
         );
 
         assert_eq!(
@@ -1731,6 +1736,7 @@ mod tests {
                 aggregation: AggregationStrategy::Original,
                 parallel: false,
                 parallel_limit: Some(2),
+                trace_item_threshold: None,
                 stop_on_exception: true,
                 steps: vec![BuilderStep::Stop],
             },

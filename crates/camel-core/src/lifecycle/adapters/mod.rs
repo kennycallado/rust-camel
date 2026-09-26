@@ -25,8 +25,11 @@ pub(crate) mod route_staging;
 pub mod route_types;
 pub(crate) mod runtime_event_record;
 pub mod runtime_execution;
+#[cfg(test)]
+mod split_trace_restart_tests;
 pub(crate) mod step_compilers;
 pub(crate) mod step_resolution;
+pub(crate) mod trace_restart;
 // supervising_route_controller lives in lifecycle/application/ after Task 7
 
 pub(crate) use composite_step_lifecycle::CompositeStepLifecycle;

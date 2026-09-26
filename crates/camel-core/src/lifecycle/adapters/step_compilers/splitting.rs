@@ -106,6 +106,18 @@ impl StepCompiler for SplittingCompiler {
             BuilderStep::Split { config, steps } => {
                 let (sub_segments, lifecycles) = ctx.compile_children_segments(steps, registry)?;
                 let body_segment = compose_outcome_segment(sub_segments);
+                // Per-item trace restart above the fragment threshold
+                // (splittrace 2.1); threshold 0 keeps the legacy
+                // always-nested shape.
+                let body_segment = if config.trace_item_threshold >= 1 {
+                    crate::lifecycle::adapters::trace_restart::TraceRestartBody::wrap(
+                        body_segment,
+                        Arc::from(ctx.route_id.unwrap_or_default()),
+                        config.trace_item_threshold,
+                    )
+                } else {
+                    body_segment
+                };
                 let split_segment = camel_processor::SplitSegment {
                     splitter: config.expression,
                     body: body_segment,
@@ -128,6 +140,7 @@ impl StepCompiler for SplittingCompiler {
                 aggregation,
                 parallel,
                 parallel_limit,
+                trace_item_threshold,
                 stop_on_exception,
                 steps,
             } => {
@@ -166,6 +179,20 @@ impl StepCompiler for SplittingCompiler {
 
                 let (sub_segments, lifecycles) = ctx.compile_children_segments(steps, registry)?;
                 let body_segment = compose_outcome_segment(sub_segments);
+                // Per-item trace restart above the fragment threshold
+                // (splittrace 2.1); threshold 0 keeps the legacy
+                // always-nested shape.
+                let trace_item_threshold = trace_item_threshold
+                    .unwrap_or(camel_api::splitter::DEFAULT_TRACE_ITEM_THRESHOLD);
+                let body_segment = if trace_item_threshold >= 1 {
+                    crate::lifecycle::adapters::trace_restart::TraceRestartBody::wrap(
+                        body_segment,
+                        Arc::from(ctx.route_id.unwrap_or_default()),
+                        trace_item_threshold,
+                    )
+                } else {
+                    body_segment
+                };
                 let split_segment = camel_processor::SplitSegment {
                     splitter: split_fn,
                     body: body_segment,
@@ -728,6 +755,7 @@ mod tests {
             aggregation: camel_api::splitter::AggregationStrategy::LastWins,
             parallel: false,
             parallel_limit: None,
+            trace_item_threshold: None,
             stop_on_exception: false,
             steps: vec![BuilderStep::Processor(OpaqueProcessor(
                 BoxProcessor::from_fn(move |ex: Exchange| {

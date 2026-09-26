@@ -5,7 +5,12 @@ import type { CanonicalSplitExpressionSpec } from "./CanonicalSplitExpressionSpe
 import type { CanonicalWhenSpec } from "./CanonicalWhenSpec";
 import type { LanguageExpressionDef } from "./LanguageExpressionDef";
 
-export type CanonicalStepSpec = { "step": "to", "config": { uri: string, } } | { "step": "log", "config": { message: string, } } | { "step": "wire_tap", "config": { uri: string, } } | { "step": "script", "config": { expression: LanguageExpressionDef, } } | { "step": "filter", "config": { predicate: LanguageExpressionDef, steps: Array<CanonicalStepSpec>, } } | { "step": "choice", "config": { whens: Array<CanonicalWhenSpec>, otherwise: Array<CanonicalStepSpec> | null, } } | { "step": "split", "config": { expression: CanonicalSplitExpressionSpec, aggregation: CanonicalSplitAggregationSpec, parallel: boolean, parallel_limit: number | null, stop_on_exception: boolean, steps: Array<CanonicalStepSpec>, } } | { "step": "aggregate", "config": CanonicalAggregateSpec } | { "step": "stop" } | { "step": "delay", "config": { delay_ms: number, dynamic_header: string | null, } } | { "step": "cache", "config": { repository: string | null, key: string, ttl: string | null, max_entry_bytes: number | null, 
+export type CanonicalStepSpec = { "step": "to", "config": { uri: string, } } | { "step": "log", "config": { message: string, } } | { "step": "wire_tap", "config": { uri: string, } } | { "step": "script", "config": { expression: LanguageExpressionDef, } } | { "step": "filter", "config": { predicate: LanguageExpressionDef, steps: Array<CanonicalStepSpec>, } } | { "step": "choice", "config": { whens: Array<CanonicalWhenSpec>, otherwise: Array<CanonicalStepSpec> | null, } } | { "step": "split", "config": { expression: CanonicalSplitExpressionSpec, aggregation: CanonicalSplitAggregationSpec, parallel: boolean, parallel_limit: number | null, 
+/**
+ * Threshold above which split fragments start new traces (0 = off).
+ * Absent means the runtime default applies.
+ */
+trace_item_threshold: number | null, stop_on_exception: boolean, steps: Array<CanonicalStepSpec>, } } | { "step": "aggregate", "config": CanonicalAggregateSpec } | { "step": "stop" } | { "step": "delay", "config": { delay_ms: number, dynamic_header: string | null, } } | { "step": "cache", "config": { repository: string | null, key: string, ttl: string | null, max_entry_bytes: number | null, 
 /**
  * Coalesce concurrent misses on the same key into a single `on_miss`
  * run. Absent/null means `false`.

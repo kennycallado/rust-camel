@@ -328,6 +328,7 @@ fn resolve_steps_covers_declarative_and_eip_variants() {
             aggregation: AggregationStrategy::Original,
             parallel: false,
             parallel_limit: Some(2),
+            trace_item_threshold: None,
             stop_on_exception: true,
             steps: vec![BuilderStep::Stop],
         },

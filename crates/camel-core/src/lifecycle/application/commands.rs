@@ -6,8 +6,8 @@ use camel_api::{
     aggregator::AggregationStrategy as CanonicalAggregateStrategy,
     circuit_breaker::CircuitBreakerConfig,
     splitter::{
-        AggregationStrategy as CanonicalSplitAggregation, SplitterConfig, split_body_json_array,
-        split_body_lines,
+        AggregationStrategy as CanonicalSplitAggregation, DEFAULT_TRACE_ITEM_THRESHOLD,
+        SplitterConfig, split_body_json_array, split_body_lines,
     },
 };
 use camel_api::{CamelError, RuntimeCommand, RuntimeCommandResult};
@@ -1034,6 +1034,7 @@ fn canonical_step_to_builder_step(
             aggregation,
             parallel,
             parallel_limit,
+            trace_item_threshold,
             stop_on_exception,
             steps,
         } => {
@@ -1057,7 +1058,10 @@ fn canonical_step_to_builder_step(
                     let mut config = SplitterConfig::new(split_body_lines())
                         .aggregation(aggregation)
                         .parallel(parallel)
-                        .stop_on_exception(stop_on_exception);
+                        .stop_on_exception(stop_on_exception)
+                        .trace_item_threshold(
+                            trace_item_threshold.unwrap_or(DEFAULT_TRACE_ITEM_THRESHOLD),
+                        );
                     if let Some(limit) = parallel_limit {
                         config = config.parallel_limit(limit);
                     }
@@ -1067,7 +1071,10 @@ fn canonical_step_to_builder_step(
                     let mut config = SplitterConfig::new(split_body_json_array())
                         .aggregation(aggregation)
                         .parallel(parallel)
-                        .stop_on_exception(stop_on_exception);
+                        .stop_on_exception(stop_on_exception)
+                        .trace_item_threshold(
+                            trace_item_threshold.unwrap_or(DEFAULT_TRACE_ITEM_THRESHOLD),
+                        );
                     if let Some(limit) = parallel_limit {
                         config = config.parallel_limit(limit);
                     }
@@ -1079,6 +1086,7 @@ fn canonical_step_to_builder_step(
                         aggregation,
                         parallel,
                         parallel_limit,
+                        trace_item_threshold,
                         stop_on_exception,
                         steps,
                     })

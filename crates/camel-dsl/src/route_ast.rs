@@ -931,6 +931,8 @@ pub struct SplitData {
     pub parallel: bool,
     #[serde(default)]
     pub parallel_limit: Option<usize>,
+    #[serde(default)]
+    pub trace_item_threshold: Option<usize>,
     #[serde(default = "default_true")]
     pub stop_on_exception: bool,
     #[serde(default)]

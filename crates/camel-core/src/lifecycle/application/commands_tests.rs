@@ -609,6 +609,7 @@ fn canonical_step_conversion_covers_common_variants() {
         aggregation: CanonicalSplitAggregationSpec::CollectAll,
         parallel: true,
         parallel_limit: Some(4),
+        trace_item_threshold: None,
         stop_on_exception: true,
         steps: vec![CanonicalStepSpec::Stop],
     })
@@ -623,6 +624,7 @@ fn canonical_step_conversion_covers_common_variants() {
         aggregation: CanonicalSplitAggregationSpec::Original,
         parallel: false,
         parallel_limit: None,
+        trace_item_threshold: None,
         stop_on_exception: false,
         steps: vec![CanonicalStepSpec::Stop],
     })

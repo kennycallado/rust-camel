@@ -2977,6 +2977,15 @@
         "streaming": {
           "default": false,
           "type": "boolean"
+        },
+        "trace_item_threshold": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "type": "object"

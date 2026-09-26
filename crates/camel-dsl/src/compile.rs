@@ -10,8 +10,8 @@ use camel_api::body_converter::BodyType;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
 use camel_api::splitter::{
-    AggregationStrategy as SplitAggregation, SplitterConfig, split_body_json_array,
-    split_body_lines,
+    AggregationStrategy as SplitAggregation, DEFAULT_TRACE_ITEM_THRESHOLD, SplitterConfig,
+    split_body_json_array, split_body_lines,
 };
 use camel_api::{
     BoxProcessor, CamelError, CanonicalConcurrencySpec, CanonicalFieldLoss, CanonicalLossReport,
@@ -514,6 +514,7 @@ pub fn compile_canonical_step(
             aggregation,
             parallel,
             parallel_limit,
+            trace_item_threshold,
             stop_on_exception,
             steps,
         } => compile_canonical_split(
@@ -521,6 +522,7 @@ pub fn compile_canonical_step(
             aggregation,
             parallel,
             parallel_limit,
+            trace_item_threshold,
             stop_on_exception,
             steps,
             stream_cache_threshold,
@@ -592,11 +594,13 @@ fn compile_canonical_steps(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compile_canonical_split(
     expression: CanonicalSplitExpressionSpec,
     aggregation: CanonicalSplitAggregationSpec,
     parallel: bool,
     parallel_limit: Option<usize>,
+    trace_item_threshold: Option<usize>,
     stop_on_exception: bool,
     steps: Vec<CanonicalStepSpec>,
     stream_cache_threshold: usize,
@@ -623,6 +627,8 @@ fn compile_canonical_split(
             } else {
                 config
             };
+            let config = config
+                .trace_item_threshold(trace_item_threshold.unwrap_or(DEFAULT_TRACE_ITEM_THRESHOLD));
             Ok(BuilderStep::Split {
                 config,
                 steps: compiled_steps,
@@ -638,6 +644,8 @@ fn compile_canonical_split(
             } else {
                 config
             };
+            let config = config
+                .trace_item_threshold(trace_item_threshold.unwrap_or(DEFAULT_TRACE_ITEM_THRESHOLD));
             Ok(BuilderStep::Split {
                 config,
                 steps: compiled_steps,
@@ -648,6 +656,7 @@ fn compile_canonical_split(
             aggregation,
             parallel,
             parallel_limit,
+            trace_item_threshold,
             stop_on_exception,
             steps: compiled_steps,
         }),
@@ -1714,6 +1723,7 @@ fn compile_split_step_to_canonical(def: SplitStepDef) -> Result<CanonicalStepSpe
         aggregation,
         parallel: def.parallel,
         parallel_limit: def.parallel_limit,
+        trace_item_threshold: def.trace_item_threshold,
         stop_on_exception: def.stop_on_exception,
         steps: compile_declarative_steps_to_canonical(def.steps)?,
     })
@@ -1830,6 +1840,10 @@ fn compile_split_step(
             } else {
                 config
             };
+            let config = config.trace_item_threshold(
+                def.trace_item_threshold
+                    .unwrap_or(DEFAULT_TRACE_ITEM_THRESHOLD),
+            );
             Ok(BuilderStep::Split {
                 config,
                 steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
@@ -1845,6 +1859,10 @@ fn compile_split_step(
             } else {
                 config
             };
+            let config = config.trace_item_threshold(
+                def.trace_item_threshold
+                    .unwrap_or(DEFAULT_TRACE_ITEM_THRESHOLD),
+            );
             Ok(BuilderStep::Split {
                 config,
                 steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
@@ -1855,6 +1873,7 @@ fn compile_split_step(
             aggregation,
             parallel: def.parallel,
             parallel_limit: def.parallel_limit,
+            trace_item_threshold: def.trace_item_threshold,
             stop_on_exception: def.stop_on_exception,
             steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
         }),
@@ -3645,6 +3664,7 @@ mod tests {
                 aggregation: SplitAggregationDef::LastWins,
                 parallel: false,
                 parallel_limit: None,
+                trace_item_threshold: None,
                 stop_on_exception: false,
                 steps: vec![]
             })),
@@ -4611,6 +4631,7 @@ mod tests {
             aggregation: SplitAggregationDef::LastWins,
             parallel: false,
             parallel_limit: None,
+            trace_item_threshold: None,
             stop_on_exception: false,
             steps: vec![],
         });
@@ -4624,6 +4645,7 @@ mod tests {
             aggregation: SplitAggregationDef::CollectAll,
             parallel: true,
             parallel_limit: Some(4),
+            trace_item_threshold: None,
             stop_on_exception: true,
             steps: vec![],
         });
@@ -4637,6 +4659,7 @@ mod tests {
             aggregation: SplitAggregationDef::Original,
             parallel: false,
             parallel_limit: None,
+            trace_item_threshold: None,
             stop_on_exception: false,
             steps: vec![],
         });
@@ -4903,6 +4926,7 @@ mod tests {
                 aggregation: CanonicalSplitAggregationSpec::CollectAll,
                 parallel: false,
                 parallel_limit: None,
+                trace_item_threshold: None,
                 stop_on_exception: false,
                 steps: vec![CanonicalStepSpec::To {
                     uri: "log:line".into(),
@@ -4922,6 +4946,7 @@ mod tests {
                 aggregation: CanonicalSplitAggregationSpec::Original,
                 parallel: false,
                 parallel_limit: None,
+                trace_item_threshold: None,
                 stop_on_exception: false,
                 steps: vec![CanonicalStepSpec::Stop],
             },
@@ -4964,6 +4989,116 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(step, BuilderStep::CacheStats { .. }));
+    }
+
+    #[test]
+    fn split_trace_item_threshold_default_is_100() {
+        use camel_api::runtime::{
+            CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
+        };
+
+        let threshold = camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD;
+        let step = compile_canonical_step(
+            CanonicalStepSpec::Split {
+                expression: CanonicalSplitExpressionSpec::BodyLines,
+                aggregation: CanonicalSplitAggregationSpec::CollectAll,
+                parallel: false,
+                parallel_limit: None,
+                trace_item_threshold: None,
+                stop_on_exception: false,
+                steps: vec![],
+            },
+            threshold,
+        )
+        .unwrap();
+        match step {
+            BuilderStep::Split { config, .. } => {
+                assert_eq!(config.trace_item_threshold, 100);
+            }
+            _ => panic!("expected BuilderStep::Split"),
+        }
+    }
+
+    #[test]
+    fn split_trace_item_threshold_zero_is_threaded() {
+        use camel_api::runtime::{
+            CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
+        };
+
+        let threshold = camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD;
+        let step = compile_canonical_step(
+            CanonicalStepSpec::Split {
+                expression: CanonicalSplitExpressionSpec::BodyLines,
+                aggregation: CanonicalSplitAggregationSpec::CollectAll,
+                parallel: false,
+                parallel_limit: None,
+                trace_item_threshold: Some(0),
+                stop_on_exception: false,
+                steps: vec![],
+            },
+            threshold,
+        )
+        .unwrap();
+        match step {
+            BuilderStep::Split { config, .. } => {
+                assert_eq!(config.trace_item_threshold, 0);
+            }
+            _ => panic!("expected BuilderStep::Split"),
+        }
+    }
+
+    #[test]
+    fn declarative_language_split_threads_trace_threshold() {
+        use camel_api::runtime::{
+            CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
+        };
+
+        let threshold = camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD;
+        let expression = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${body.items}".into(),
+        };
+        let step = compile_canonical_step(
+            CanonicalStepSpec::Split {
+                expression: CanonicalSplitExpressionSpec::Language(expression.clone()),
+                aggregation: CanonicalSplitAggregationSpec::Original,
+                parallel: false,
+                parallel_limit: None,
+                trace_item_threshold: Some(4),
+                stop_on_exception: false,
+                steps: vec![],
+            },
+            threshold,
+        )
+        .unwrap();
+        match step {
+            BuilderStep::DeclarativeSplit {
+                trace_item_threshold,
+                ..
+            } => assert_eq!(trace_item_threshold, Some(4)),
+            _ => panic!("expected BuilderStep::DeclarativeSplit"),
+        }
+
+        let step = compile_canonical_step(
+            CanonicalStepSpec::Split {
+                expression: CanonicalSplitExpressionSpec::Language(expression),
+                aggregation: CanonicalSplitAggregationSpec::Original,
+                parallel: false,
+                parallel_limit: None,
+                trace_item_threshold: None,
+                stop_on_exception: false,
+                steps: vec![],
+            },
+            threshold,
+        )
+        .unwrap();
+        match step {
+            BuilderStep::DeclarativeSplit {
+                trace_item_threshold,
+                ..
+            } => assert_eq!(trace_item_threshold, None),
+            _ => panic!("expected BuilderStep::DeclarativeSplit"),
+        }
     }
 
     // --- DSL-level validation tests (DSL-001, DSL-002, DSL-004) ---
@@ -5731,6 +5866,7 @@ mod tests {
                     aggregation: SplitAggregationDef::LastWins,
                     parallel: false,
                     parallel_limit: None,
+                    trace_item_threshold: None,
                     stop_on_exception: false,
                     steps: vec![],
                 })],
