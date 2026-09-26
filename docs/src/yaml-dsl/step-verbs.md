@@ -971,7 +971,7 @@ The `mcp` key declares an MCP server catalog (ADR-0060). Each tool lowers to an 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `server` | object | no | Server declaration: `name`, `bind`, `security_policy` |
-| `tools` | list | no | Tool declarations: `name`, `input_schema` |
+| `tools` | list | no | Tool declarations: `name`, `input_schema` (the `input_schema` must be a JSON object — lowering rejects other JSON shapes at parse time, naming the tool and the offending kind, bd rc-ap58) |
 | `resources` | list | no | Resource declarations: `name`, `uri` |
 
 ```yaml

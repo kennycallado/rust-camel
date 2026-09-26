@@ -236,6 +236,30 @@ fn validate_mcp_name(kind: &str, name: &str) -> Result<(), CamelError> {
     }
 }
 
+/// Validate a tool's `input_schema` shape with the consumer's own predicate
+/// (bd rc-ap58). The runtime rejects a decoded `schema` parameter that is
+/// not a JSON object (`camel-component-mcp/src/endpoint.rs`,
+/// `!input_schema.is_object()`); lowering runs the identical predicate so
+/// the failure moves to parse time with the same verdict — and NO stricter
+/// grammar: any JSON object passes, exactly what the consumer accepts.
+fn validate_tool_input_schema(
+    tool_name: &str,
+    schema: &serde_json::Value,
+) -> Result<(), CamelError> {
+    let kind = match schema {
+        serde_json::Value::Object(_) => return Ok(()),
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Null => "null",
+    };
+    Err(CamelError::RouteError(format!(
+        "mcp tool '{tool_name}' input_schema is invalid: must be a JSON object, \
+         got a JSON {kind}"
+    )))
+}
+
 /// Build the `mcp.declared.*` endpoint-parameter suffix carrying the block's
 /// listener declaration (`bind`/`tls`/caps) — the DSL lowering channel the
 /// consumer start merges into the TOML server config (spec: MCP listener
@@ -284,6 +308,7 @@ pub fn lower_all_mcp_to_routes(blocks: &[RouteDslMcp]) -> Result<Vec<RouteDslRou
         let declared = declared_params(&block.server);
         for tool in &block.tools {
             validate_mcp_name("tool", &tool.name)?;
+            validate_tool_input_schema(&tool.name, &tool.input_schema)?;
             let schema =
                 utf8_percent_encode(&tool.input_schema.to_string(), NON_ALPHANUMERIC).to_string();
             let from = format!(
@@ -994,6 +1019,149 @@ mcp:
         assert!(
             msg.contains("name") && msg.contains("invalid"),
             "lowering error must name the invalid value, got: {msg}"
+        );
+    }
+
+    // ── input_schema object-ness at lowering (bd rc-ap58) ──
+
+    #[test]
+    fn input_schema_non_object_kinds_rejected_at_lowering() {
+        // Every non-object JSON kind must fail at lowering with an error
+        // naming the tool, the object requirement and the actual kind —
+        // the same predicate the consumer applies at start (endpoint.rs
+        // `is_object`), applied earlier (bd rc-ap58).
+        let cases = vec![
+            (serde_json::json!("not an object"), "string"),
+            (serde_json::json!([1, 2]), "array"),
+            (serde_json::json!(7), "number"),
+            (serde_json::json!(true), "boolean"),
+            (serde_json::json!(null), "null"),
+        ];
+        for (schema, kind) in cases {
+            let mut block = make_block();
+            block.tools = vec![RouteDslMcpTool {
+                name: "lookup".to_string(),
+                input_schema: schema,
+            }];
+            let err = lower_all_mcp_to_routes(&[block])
+                .err()
+                .unwrap_or_else(|| panic!("{kind} input_schema must be rejected at lowering"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("lookup")
+                    && msg.contains("must be a JSON object")
+                    && msg.contains(kind),
+                "error must name the tool, the object requirement and the kind '{kind}', got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_schema_rejection_is_lowering_owned_at_load() {
+        // Load stays permissive: a non-object input_schema deserializes
+        // verbatim into the AST; the rejection is lowering-owned (bd
+        // rc-ap58, design.md D1).
+        let yaml = r#"
+mcp:
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+    tools:
+      - name: lookup
+        input_schema: "not an object"
+"#;
+        let parsed: RouteDslRoutes =
+            serde_yml::from_str(yaml).expect("non-object input_schema must load verbatim");
+        assert_eq!(
+            parsed.mcp[0].tools[0].input_schema,
+            serde_json::Value::String("not an object".to_string())
+        );
+        let err = lower_all_mcp_to_routes(&parsed.mcp)
+            .err()
+            .expect("non-object input_schema must be rejected at lowering");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("lookup"),
+            "lowering error must name the tool, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn input_schema_empty_object_still_lowers() {
+        // The predicate is `is_object()` exactly (design.md D2): an EMPTY
+        // object is still an object and must lower like any other schema
+        // the consumer would accept — no stricter grammar.
+        let mut block = make_block();
+        block.tools = vec![RouteDslMcpTool {
+            name: "lookup".to_string(),
+            input_schema: serde_json::json!({}),
+        }];
+        let routes = lower_all_mcp_to_routes(&[block]).expect("empty object schema must lower");
+        assert_eq!(routes.len(), 1);
+        assert!(
+            routes[0].from.starts_with("mcp:crm/tool/lookup?schema="),
+            "tool route must be present, got: {}",
+            routes[0].from
+        );
+    }
+
+    // ── Charset-class witnesses for the landed mcpchars behavior ──
+
+    #[test]
+    fn slash_hash_percent_tool_names_rejected_at_lowering() {
+        // Witness tests for the mcpchars charset classes (bd rc-ap58):
+        // '/' breaks the <server>/<kind>/<name> segment shape, '#' and '%'
+        // corrupt the lowered URI's query part. The charset behavior is
+        // already in place; these are the missing DSL unit tests.
+        for name in ["a/b", "a#b", "a%b"] {
+            let mut block = make_block();
+            block.tools = vec![RouteDslMcpTool {
+                name: name.to_string(),
+                input_schema: serde_json::json!({ "type": "object" }),
+            }];
+            let err = lower_all_mcp_to_routes(&[block])
+                .err()
+                .unwrap_or_else(|| panic!("tool name '{name}' must be rejected at lowering"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains(name) && msg.contains("is invalid"),
+                "error must name the offending name '{name}' and say 'is invalid', got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_and_resource_name_charset_rejected_at_lowering() {
+        // Charset validation covers all three name kinds at lowering —
+        // the server name lands in every lowered route prefix and the
+        // resource name lands in the resource route path (bd rc-ap58).
+        let mut block = make_block();
+        block.server.name = "bad/name".to_string();
+        block.tools = vec![RouteDslMcpTool {
+            name: "lookup".to_string(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        }];
+        let err = lower_all_mcp_to_routes(&[block])
+            .err()
+            .expect("invalid server name must be rejected at lowering");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("server") && msg.contains("bad/name"),
+            "error must name the server kind and the offending value, got: {msg}"
+        );
+
+        let mut block = make_block();
+        block.resources = vec![RouteDslMcpResource {
+            name: "bad?name".to_string(),
+            uri: "crm://x".to_string(),
+        }];
+        let err = lower_all_mcp_to_routes(&[block])
+            .err()
+            .expect("invalid resource name must be rejected at lowering");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("resource") && msg.contains("bad?name"),
+            "error must name the resource kind and the offending value, got: {msg}"
         );
     }
 }
