@@ -43,7 +43,7 @@ pub struct RuntimeBus {
     execution: Option<Arc<dyn RuntimeExecutionPort>>,
     health_registry: Option<Arc<dyn HealthCheckRegistryTrait>>,
     metrics: Option<Arc<dyn MetricsCollector>>,
-    journal_recovered_once: OnceCell<()>,
+    journal_recovered_once: OnceCell<u64>,
 }
 
 impl RuntimeBus {
@@ -167,10 +167,18 @@ impl RuntimeBus {
         self.journal_recovered_once
             .get_or_try_init(|| async {
                 uow.recover_from_journal().await?;
-                Ok::<(), CamelError>(())
+                let nonce = uow.recovered_boot_nonce().await?;
+                Ok::<u64, CamelError>(nonce)
             })
             .await?;
         Ok(())
+    }
+
+    /// Journal-derived boot nonce from the recovered durable dedup store.
+    /// Yields `0` before journal recovery ran or when no unit-of-work is
+    /// installed (no durable journal support).
+    pub(crate) fn boot_nonce(&self) -> u64 {
+        self.journal_recovered_once.get().copied().unwrap_or(0)
     }
 }
 

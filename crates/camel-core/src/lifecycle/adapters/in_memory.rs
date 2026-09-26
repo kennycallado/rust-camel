@@ -412,6 +412,42 @@ impl CommandDedupPort for InMemoryRuntimeStore {
     }
 }
 
+/// Journal-derived boot nonce from the recorded command IDs of the durable
+/// dedup store: `1 + max(P)` where `P` collects, for every recorded command
+/// ID whose final two `':'`-separated segments both parse as `u64`, its
+/// penultimate segment. Tail scanning (right-to-left via `rsplit`) needs no
+/// prefix or segment-count parsing, so legacy IDs written for routes whose
+/// route IDs contain colons are covered by construction.
+///
+/// No qualifying recorded ID yields `Ok(0)`. A penultimate value of
+/// `u64::MAX` (only reachable via an adversarial recorded command ID)
+/// exhausts the deterministic nonce space and fails closed: the error names
+/// the offending recorded ID and instructs the operator to clean or rotate
+/// the journal.
+fn derive_boot_nonce<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<u64, DomainError> {
+    let mut max_penultimate: Option<(u64, &str)> = None;
+    for id in ids {
+        let mut segments = id.rsplit(':');
+        let (Some(last), Some(penultimate)) = (segments.next(), segments.next()) else {
+            continue;
+        };
+        let (Ok(_), Ok(nonce_seg)) = (last.parse::<u64>(), penultimate.parse::<u64>()) else {
+            continue;
+        };
+        if max_penultimate.as_ref().is_none_or(|&(m, _)| nonce_seg > m) {
+            max_penultimate = Some((nonce_seg, id));
+        }
+    }
+
+    match max_penultimate {
+        None => Ok(0),
+        Some((u64::MAX, offending)) => Err(DomainError::InvalidState(format!(
+            "deterministic boot nonce space exhausted by recorded command ID '{offending}'; clean or rotate the journal"
+        ))),
+        Some((m, _)) => Ok(m + 1),
+    }
+}
+
 #[async_trait]
 impl RuntimeUnitOfWorkPort for InMemoryRuntimeStore {
     async fn persist_upsert(
@@ -506,6 +542,12 @@ impl RuntimeUnitOfWorkPort for InMemoryRuntimeStore {
             guard.seen.insert(command_id);
         }
         Ok(())
+    }
+
+    async fn recovered_boot_nonce(&self) -> Result<u64, DomainError> {
+        let guard = self.inner.lock().await;
+        // After replay, `seen` holds exactly the replayed durable command IDs.
+        derive_boot_nonce(guard.seen.iter().map(String::as_str))
     }
 }
 
@@ -753,6 +795,52 @@ mod tests {
         // not adoptable — a fresh registration proceeds as first-time.
         assert!(store.load("replay-r4").await.unwrap().is_none());
         assert!(!store.take_recovered("replay-r4").await.unwrap());
+    }
+
+    #[test]
+    fn derive_boot_nonce_empty_is_zero() {
+        assert_eq!(derive_boot_nonce([]), Ok(0));
+    }
+
+    #[test]
+    fn derive_boot_nonce_strictly_above_recorded_penultimates() {
+        let ids = [
+            "context:start:r:7:0",
+            "context:start:r:3:5",
+            "context:stop:r:7:1",
+        ];
+        // 1 + max penultimate 7
+        assert_eq!(derive_boot_nonce(ids), Ok(8));
+    }
+
+    #[test]
+    fn derive_boot_nonce_ignores_non_numeric_tails() {
+        // Legacy four-segment IDs whose final-two rule fails: `hello`/`0`
+        // (`hello` does not parse) and a lone trailing segment.
+        let ids = ["context:start:hello:0", "context:start:foo"];
+        assert_eq!(derive_boot_nonce(ids), Ok(0));
+    }
+
+    #[test]
+    fn derive_boot_nonce_legacy_colon_route_is_forbidden() {
+        // Legacy write for route `foo:0`: the tail scan collects penultimate
+        // `0`, so the derived nonce must be strictly above it — never `Ok(0)`.
+        assert_eq!(derive_boot_nonce(["context:start:foo:0:0"]), Ok(1));
+    }
+
+    #[test]
+    fn derive_boot_nonce_max_penultimate_fails_closed() {
+        let offending = "context:start:r:18446744073709551615:0";
+        let err = derive_boot_nonce([offending]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(offending),
+            "error must name the offending recorded ID verbatim: {msg}"
+        );
+        assert!(
+            msg.contains("clean or rotate the journal"),
+            "error must instruct the operator to clean or rotate the journal: {msg}"
+        );
     }
 
     /// Task 3.1 follow-up (holistic review): journal recovery seeds the

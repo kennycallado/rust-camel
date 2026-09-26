@@ -125,6 +125,22 @@ pub trait RuntimeUnitOfWorkPort: Send + Sync {
     async fn recover_from_journal(&self) -> Result<(), DomainError> {
         Ok(())
     }
+
+    /// Journal-derived boot nonce, meaningful only after
+    /// `recover_from_journal`.
+    ///
+    /// The nonce scopes context command IDs per boot against the durable
+    /// dedup store so re-issued process-local command IDs are never
+    /// suppressed as duplicates of an earlier boot's recorded IDs. The
+    /// default `Ok(0)` applies to stores without durable journal support.
+    ///
+    /// `Err` means the deterministic nonce space is exhausted (an
+    /// adversarial recorded command ID): the error message names the
+    /// offending recorded ID and instructs the operator to clean or rotate
+    /// the journal.
+    async fn recovered_boot_nonce(&self) -> Result<u64, DomainError> {
+        Ok(0)
+    }
 }
 
 #[async_trait]

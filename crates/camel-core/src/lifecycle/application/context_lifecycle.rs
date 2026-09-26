@@ -11,7 +11,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use camel_api::{CamelError, Lifecycle, RuntimeCommandBus};
+use camel_api::{CamelError, Lifecycle, RuntimeCommandBus, RuntimeCommandResult, RuntimeQueryBus};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -23,11 +23,51 @@ use crate::startup_validation::{ConfigCheck, run_startup_validation};
 
 static CONTEXT_COMMAND_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Generate a deterministic-ish command ID for context-issued runtime
-/// commands. Lifted verbatim from `CamelContext::next_context_command_id`.
-pub(crate) fn next_context_command_id(op: &str, route_id: &str) -> String {
+/// Generate a context-issued runtime command ID with the five-segment shape
+/// `context:{op}:{route_id}:{boot_nonce}:{seq}`.
+///
+/// `boot_nonce` is the journal-derived boot nonce (`RuntimeBus::boot_nonce`)
+/// and scopes IDs per boot against the durable dedup store, so a command ID
+/// re-issued by a later boot is never suppressed as a duplicate of an
+/// earlier boot's recorded ID. `seq` still comes from `CONTEXT_COMMAND_SEQ`
+/// and provides uniqueness within a boot. Deterministic — no wall clock.
+pub(crate) fn next_context_command_id(boot_nonce: u64, op: &str, route_id: &str) -> String {
     let seq = CONTEXT_COMMAND_SEQ.fetch_add(1, Ordering::Relaxed);
-    format!("context:{op}:{route_id}:{seq}")
+    format!("context:{op}:{route_id}:{boot_nonce}:{seq}")
+}
+
+/// No-silence guard, suppression half (gh#52): emit a WARN for every
+/// StartRoute whose `RuntimeCommandResult` was classified as a duplicate
+/// by command dedup — the exact gh#52 bug signature, where the route
+/// stayed dark with no signal at any log level. WARN only: the boot
+/// still proceeds; the boot-unique command IDs are the primary fix.
+pub(crate) fn warn_suppressed_starts(results: &[(String, String, RuntimeCommandResult)]) {
+    for (route_id, command_id, result) in results {
+        if matches!(result, RuntimeCommandResult::Duplicate { .. }) {
+            warn!(
+                route_id = %route_id,
+                command_id = %command_id,
+                "StartRoute suppressed as duplicate command"
+            );
+        }
+    }
+}
+
+/// No-silence guard, sweep half (gh#52): emit a WARN for every
+/// auto-startup route that is not in the `Started` state after the start
+/// sequence. `auto_startup = false` routes never appear here — the caller
+/// sweeps only `auto_startup_route_ids()` — and genuine start failures
+/// already fail the boot with an error before this runs.
+pub(crate) fn warn_non_started_routes(statuses: &[(String, String)]) {
+    for (route_id, status) in statuses {
+        if status != "Started" {
+            warn!(
+                route_id = %route_id,
+                status = %status,
+                "auto-startup route not Started after start sequence"
+            );
+        }
+    }
 }
 
 /// Start all routes and lifecycle services.
@@ -107,17 +147,56 @@ pub(crate) async fn start_context(
             .map_err(|e| CamelError::RouteError(format!("boot reconciliation failed: {e}")))?;
 
         // Then start routes via runtime command bus (aggregate-first),
-        // preserving route controller startup ordering metadata.
+        // preserving route controller startup ordering metadata. Each
+        // result is collected so the gh#52 no-silence guard below can
+        // name any route whose start was suppressed as a duplicate.
         let route_ids = route_controller.auto_startup_route_ids().await?;
-        for route_id in route_ids {
-            runtime
+        let mut start_results: Vec<(String, String, RuntimeCommandResult)> = Vec::new();
+        for route_id in &route_ids {
+            let command_id = next_context_command_id(runtime.boot_nonce(), "start", route_id);
+            let result = runtime
                 .execute(camel_api::RuntimeCommand::StartRoute {
                     route_id: route_id.clone(),
-                    command_id: next_context_command_id("start", &route_id),
+                    command_id: command_id.clone(),
                     causation_id: None,
                 })
                 .await?;
+            start_results.push((route_id.clone(), command_id, result));
         }
+
+        // gh#52 no-silence guard: a `Duplicate` classification means the
+        // route's StartRoute was suppressed by command dedup — surface it
+        // at WARN instead of letting the route fail silently.
+        warn_suppressed_starts(&start_results);
+
+        // Belt-and-braces sweep: after the start loop, every auto-startup
+        // route must be in the `Started` state. The sweep never fails the
+        // boot — a query error or unexpected response shape is warned and
+        // skipped; only the not-Started condition is reported onward.
+        let mut statuses: Vec<(String, String)> = Vec::new();
+        for route_id in &route_ids {
+            match runtime
+                .ask(camel_api::RuntimeQuery::GetRouteStatus {
+                    route_id: route_id.clone(),
+                })
+                .await
+            {
+                Ok(camel_api::RuntimeQueryResult::RouteStatus { status, .. }) => {
+                    statuses.push((route_id.clone(), status));
+                }
+                Ok(unexpected) => warn!(
+                    route_id = %route_id,
+                    error = ?unexpected,
+                    "auto-startup route status unavailable after start sequence"
+                ),
+                Err(e) => warn!(
+                    route_id = %route_id,
+                    error = %e,
+                    "auto-startup route status unavailable after start sequence"
+                ),
+            }
+        }
+        warn_non_started_routes(&statuses);
 
         info!("CamelContext started");
         Ok(())
@@ -166,7 +245,7 @@ pub(crate) async fn stop_context(
         if let Err(err) = runtime
             .execute(camel_api::RuntimeCommand::StopRoute {
                 route_id: route_id.clone(),
-                command_id: next_context_command_id("stop", &route_id),
+                command_id: next_context_command_id(runtime.boot_nonce(), "stop", &route_id),
                 causation_id: None,
             })
             .await
@@ -236,7 +315,7 @@ pub(crate) async fn abort_context(
         let _ = runtime
             .execute(camel_api::RuntimeCommand::StopRoute {
                 route_id: route_id.clone(),
-                command_id: next_context_command_id("abort-stop", &route_id),
+                command_id: next_context_command_id(runtime.boot_nonce(), "abort-stop", &route_id),
                 causation_id: None,
             })
             .await;
@@ -508,6 +587,164 @@ mod start_context_gate {
             .expect("second direct send must also succeed");
         arrival.assert_exchange_count(2).await;
 
+        ctx.stop().await.expect("context stop");
+    }
+}
+
+#[cfg(test)]
+mod warn_guard_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::{CamelContext, RouteDefinition};
+
+    /// `MakeWriter` that appends formatted events to a shared `Vec<u8>`
+    /// sink so tests can assert on captured WARN output.
+    #[derive(Clone)]
+    struct CapturingWriter {
+        sink: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.sink.lock().expect("sink lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = CapturingWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Install a bare registry as the process-global tracing default,
+    /// once per test binary. Guards these tests against callsite-interest
+    /// poisoning: `tracing` caches each callsite's `Interest` process-wide
+    /// from its FIRST macro execution. A `warn!` callsite evaluated under
+    /// no subscriber caches `Interest::never`, and a later thread-local
+    /// `set_default` capture then silently drops its events. The global
+    /// registry heals prior poison and floors future rebuilds at
+    /// `sometimes` (fix pattern: c3853198; bd rc-img5).
+    fn ensure_global_tracing_default() {
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+    }
+
+    /// Install a thread-local WARN-capturing subscriber for the calling
+    /// test; returns the sink and the guard (which must stay alive for
+    /// the test's scope). `set_default` is thread-local, so concurrent
+    /// tests neither pollute each other nor need a global subscriber.
+    fn capture_warns() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+        ensure_global_tracing_default();
+        let sink = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(CapturingWriter {
+                sink: Arc::clone(&sink),
+            })
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        (sink, guard)
+    }
+
+    fn captured(sink: &Mutex<Vec<u8>>) -> String {
+        String::from_utf8(sink.lock().expect("sink lock").clone()).expect("utf8 capture")
+    }
+
+    #[test]
+    fn warn_suppressed_starts_names_route_and_command() {
+        let (sink, _guard) = capture_warns();
+        warn_suppressed_starts(&[(
+            "r1".to_string(),
+            "context:start:r1:0:0".to_string(),
+            RuntimeCommandResult::Duplicate {
+                command_id: "context:start:r1:0:0".to_string(),
+            },
+        )]);
+        let out = captured(&sink);
+        assert!(out.contains("r1"), "route id must be named, got: {out}");
+        assert!(
+            out.contains("context:start:r1:0:0"),
+            "suppressed command id must be named, got: {out}"
+        );
+    }
+
+    #[test]
+    fn warn_suppressed_starts_silent_on_accepted() {
+        let (sink, _guard) = capture_warns();
+        warn_suppressed_starts(&[(
+            "r1".to_string(),
+            "context:start:r1:0:0".to_string(),
+            RuntimeCommandResult::Accepted,
+        )]);
+        let out = captured(&sink);
+        assert!(
+            !out.contains("StartRoute suppressed as duplicate command"),
+            "Accepted start must not warn, got: {out}"
+        );
+    }
+
+    #[test]
+    fn warn_non_started_routes_names_route() {
+        let (sink, _guard) = capture_warns();
+        warn_non_started_routes(&[("r2".to_string(), "Registered".to_string())]);
+        let out = captured(&sink);
+        assert!(out.contains("r2"), "route id must be named, got: {out}");
+    }
+
+    #[test]
+    fn warn_non_started_routes_silent_on_started() {
+        let (sink, _guard) = capture_warns();
+        warn_non_started_routes(&[("r3".to_string(), "Started".to_string())]);
+        let out = captured(&sink);
+        assert!(
+            !out.contains("auto-startup route not Started"),
+            "Started route must not warn, got: {out}"
+        );
+    }
+
+    #[test]
+    fn warn_guards_silent_when_no_entries() {
+        let (sink, _guard) = capture_warns();
+        warn_suppressed_starts(&[]);
+        warn_non_started_routes(&[]);
+        let out = captured(&sink);
+        assert!(
+            out.trim().is_empty(),
+            "empty input must produce no WARN, got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn warn_silent_for_auto_startup_disabled_route() {
+        let (sink, _guard) = capture_warns();
+        let mut ctx = CamelContext::builder()
+            .build()
+            .await
+            .expect("build context");
+        ctx.register_component(camel_component_timer::TimerComponent::new());
+        ctx.add_route_definition(
+            RouteDefinition::new("timer:warn-lazy?period=3600000", vec![])
+                .with_route_id("warn-lazy")
+                .with_auto_startup(false),
+        )
+        .await
+        .expect("add auto_startup=false route");
+
+        ctx.start().await.expect("context start");
+        let out = captured(&sink);
+        assert!(
+            !out.contains("warn-lazy"),
+            "auto_startup=false route must stay silent through start, got: {out}"
+        );
         ctx.stop().await.expect("context stop");
     }
 }
