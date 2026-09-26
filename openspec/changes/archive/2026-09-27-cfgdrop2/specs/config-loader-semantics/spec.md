@@ -103,7 +103,7 @@ in `camel_dsl::config_semantics` or the include processing pipeline.
   filesystem loader's disposition for the same document (parity
   asserted by a shared-fixture test)
 
-#### Scenario: Compile path and parity goldens stay byte-identical where unchanged
+#### Scenario: Compile path and parity goldens are untouched
 
 - **GIVEN** the compile parity fixtures that mix a root-level
   `routes` key with profile sections
