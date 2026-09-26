@@ -25,7 +25,7 @@
 
 mod common;
 
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1032,6 +1032,28 @@ fn child_guard() {
     }
 }
 
+/// Drop every `CAMEL_*` variable the parent carries from `cmd`'s
+/// environment (r5routesrv Task 1.1): the fleet dev shell exports
+/// bridge-path overrides (`CAMEL_CXF_BRIDGE_BINARY_PATH`,
+/// `CAMEL_XML_BRIDGE_BINARY_PATH`, `CAMEL_JMS_BRIDGE_BINARY_PATH`) and
+/// `camel compile v2` fails closed on any `CAMEL_*` presence. The
+/// compile invocations already build their commands with `env_clear()`;
+/// the harness-child spawns inherit the parent environment, so they
+/// must drop the keys explicitly. [`CHILD_ENV`] itself is exempt — it
+/// names the artifact for the child branch and is set right after.
+fn scrub_camel_env(cmd: &mut Command) {
+    let camel_keys: Vec<std::ffi::OsString> = std::env::vars_os()
+        .map(|(key, _)| key)
+        .filter(|key| {
+            let name = key.to_string_lossy();
+            name.starts_with("CAMEL_") && name != CHILD_ENV
+        })
+        .collect();
+    for key in camel_keys {
+        cmd.env_remove(key);
+    }
+}
+
 /// Spawn the artifact runtime as a harness child that runs to
 /// completion (job sends are self-terminating): `output()` waits and
 /// drains both pipes, so no pipe buffer can deadlock the child. Returns
@@ -1044,6 +1066,7 @@ fn spawn_child_output(
     envs: &[(&str, &str)],
 ) -> (i32, String, String) {
     let mut cmd = Command::new(std::env::current_exe().expect("current test exe"));
+    scrub_camel_env(&mut cmd);
     cmd.env(CHILD_ENV, artifact)
         .envs(envs.iter().copied())
         .current_dir(dir)
@@ -1081,6 +1104,7 @@ fn spawn_child(
     envs: &[(&str, &str)],
 ) -> KillOnDrop {
     let mut cmd = Command::new(std::env::current_exe().expect("current test exe"));
+    scrub_camel_env(&mut cmd);
     cmd.env(CHILD_ENV, artifact)
         .envs(envs.iter().copied())
         .current_dir(dir)
@@ -2053,6 +2077,624 @@ fn route_artifact_manifest_keeps_config_declared_listeners() {
         listeners.contains(&health),
         "route manifest must keep the health listener {health}: {listeners:?}"
     );
+}
+
+// ── r5routesrv: long-running route-server artifact batteries ─────────
+//
+// A compiled ROUTE artifact runs in the deployment posture of
+// `camel run --no-watch`: it binds every listener its embedded
+// documents declare, serves until the first stop signal, drains
+// in-flight listener work inside the configured drain budget, and
+// exits 0 (a second signal during teardown force-exits 1 — Task 1.4,
+// not covered here). The tests below pin that contract end to end on
+// the REST transport, the canonical listener the manifest scanner
+// itself documents.
+
+/// The exact completed-route report JSON: compact, key order
+/// `kind`,`status`,`error` (the `RouteReport` wire shape).
+const COMPLETED_ROUTE_REPORT: &str = r#"{"kind":"route","status":"completed","error":null}"#;
+
+/// The Linux bind-failure text: the loud, retriable signature of the
+/// ADR-0070 port-probe race (another process grabbed the probed port
+/// between the listener drop and the server's bind).
+const BIND_RACE_MARK: &str = "Address already in use";
+
+/// The exact test named by the harness-child spawn of
+/// [`serve_listener_flow`]: the flow re-enters this binary through
+/// [`spawn_child`], whose child branch is selected by `--exact <test>`.
+const SERVE_TEST: &str = "route_server_serves_listener_until_sigterm";
+
+/// Probe a free localhost port by binding `127.0.0.1:0`, reading the
+/// assigned port, and dropping the listener. ADR-0070 SUBPROCESS
+/// EXCEPTION: the spawned artifact cannot receive an in-process staged
+/// listener, so the port is released before the child binds — the same
+/// pattern as `job_coexistence_test::reserve_two_ports`, whose module
+/// header documents the exception. The port-toctou window is closed by
+/// the [`BIND_RACE_MARK`] retry convention (see
+/// [`with_bind_race_retry`]), not by staging.
+fn free_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("probe bind");
+    let port = listener.local_addr().expect("probe addr").port();
+    drop(listener);
+    port
+}
+
+/// One raw HTTP/1.1 GET over a fresh TCP connection: a 5 s read
+/// timeout, `Connection: close`, read to EOF, the status code parsed
+/// from the status line, and the full body String returned; `None` on
+/// any connect/read failure.
+fn http_get(port: u16, path: &str) -> Option<(u16, String)> {
+    use std::io::{Read, Write};
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).ok()?;
+    let response = String::from_utf8_lossy(&bytes).into_owned();
+    let status = response
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse().ok())?;
+    let body = match response.split_once("\r\n\r\n") {
+        Some((_, body)) => body.to_string(),
+        None => response,
+    };
+    Some((status, body))
+}
+
+/// The probe-validated REST listener document: a `direct:ping` back
+/// route answering `pong` plus a `rest:` block exposing `GET /ping`
+/// under the base path `/api` — REQUIRED, the DSL rejects an empty
+/// rest base path — bound on `127.0.0.1:port`.
+fn rest_listener_doc(port: u16) -> String {
+    format!(
+        "\
+routes:
+  - id: ping-route
+    from: direct:ping
+    steps:
+      - set_body: \"pong\"
+rest:
+  - host: 127.0.0.1
+    port: {port}
+    path: /api
+    operations:
+      - method: GET
+        path: /ping
+        to: direct:ping
+"
+    )
+}
+
+/// Run one full listener flow (port pick → doc write → compile →
+/// deploy → spawn → assertions), retrying the ENTIRE flow exactly once
+/// when its failure text carries [`BIND_RACE_MARK`]: the race window
+/// is millisecond-scale and a second collision is not observed in
+/// practice. Any other failure fails the test immediately. Copied
+/// convention from `job_coexistence_test`.
+fn with_bind_race_retry(flow: impl Fn() -> Result<(), String>) {
+    match flow() {
+        Ok(()) => {}
+        Err(e) if e.contains(BIND_RACE_MARK) => {
+            if let Err(retry) = flow() {
+                panic!("listener flow failed on retry after bind race: {retry}");
+            }
+        }
+        Err(e) => panic!("listener flow failed: {e}"),
+    }
+}
+
+/// One per-flow compile+deploy: write `doc` into a fresh source
+/// tempdir on the fixture root, `camel compile` it (the compile
+/// commands build with `env_clear()`, so no `CAMEL_*` override can
+/// leak in), and deploy the artifact into a fresh source-free
+/// directory. The compile is per flow because the listener port is
+/// baked into the embedded document — a fresh port per flow is the
+/// point. `Err` carries the failure text (retried on the bind race by
+/// [`with_bind_race_retry`]).
+fn compile_and_deploy_listener(doc: &str) -> Result<(tempfile::TempDir, PathBuf), String> {
+    let src = tempfile::Builder::new()
+        .prefix("camel-routesrv-src-")
+        .tempdir_in(fixture_root())
+        .map_err(|e| format!("source tempdir: {e}"))?;
+    std::fs::write(src.path().join("rest.yaml"), doc).map_err(|e| format!("write doc: {e}"))?;
+    let output = compile(src.path(), "rest.yaml", "rest.bin", &[]);
+    if output.status.code() != Some(0) {
+        return Err(format!(
+            "rest document must compile: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(deploy_artifact(&src.path().join("rest.bin")))
+}
+
+/// One full serve flow: fresh port → doc → compile → deploy → spawn
+/// with `--report` → boot → HTTP 200 `pong` on the listener → SIGTERM
+/// → exit 0 → the exact completed report → a `--manifest` run listing
+/// `127.0.0.1:<port>` with `artifact_kind` `server`. `Err` carries the
+/// failure text; the [`BIND_RACE_MARK`] signature inside it makes the
+/// caller retry the whole flow once (see [`with_bind_race_retry`]).
+fn serve_listener_flow() -> Result<(), String> {
+    let port = free_port();
+    let (deploy, artifact) = compile_and_deploy_listener(&rest_listener_doc(port))?;
+    let mut child = spawn_child(
+        SERVE_TEST,
+        deploy.path(),
+        &artifact,
+        &["--report", "report.json"],
+        &[],
+    );
+    let drained = spawn_drained(&mut child);
+    if !wait_for_marker(&drained, "context started", Duration::from_secs(60)) {
+        let captured = drained.captured();
+        return Err(format!("artifact never booted:\n{captured}"));
+    }
+    match http_get(port, "/api/ping") {
+        Some((200, body)) if body.contains("pong") => {}
+        other => {
+            return Err(format!(
+                "listener must answer 200 with a `pong` body before the signal, got {other:?}"
+            ));
+        }
+    }
+    // Liveness probe: after a successful serve the process must still
+    // be running — the artifact serves while alive and must not
+    // self-exit after boot (bounded self-exit is the job kind's
+    // contract, not the server's).
+    assert!(
+        child
+            .0
+            .try_wait()
+            .expect("child must be pollable")
+            .is_none(),
+        "server artifact must not self-exit after boot; it serves until signaled:\n{}",
+        drained.captured()
+    );
+    send_signal(&child.0, "-TERM");
+    let code = wait_exit_code(&mut child, Duration::from_secs(30));
+    if code != 0 {
+        return Err(format!(
+            "SIGTERM must shut down the serving artifact gracefully (exit 0), got {code}:\n{}",
+            drained.captured()
+        ));
+    }
+    let report = std::fs::read_to_string(deploy.path().join("report.json"))
+        .map_err(|e| format!("route report must be written: {e}"))?;
+    if report.trim() != COMPLETED_ROUTE_REPORT {
+        return Err(format!(
+            "report must be exactly {COMPLETED_ROUTE_REPORT}, got {report}"
+        ));
+    }
+    // The manifest check (same deployed artifact, `--manifest` never
+    // boots, so no `CAMEL_*` env scrub is needed): run it through the
+    // canonical harness helper.
+    let (mcode, mstdout, mstderr) =
+        common::run_binary(deploy.path(), &artifact, &["--manifest"], &[]);
+    if mcode != 0 {
+        return Err(format!(
+            "--manifest must exit 0;\nstdout:\n{mstdout}\nstderr:\n{mstderr}"
+        ));
+    }
+    let manifest: serde_json::Value = serde_json::from_str(mstdout.trim())
+        .map_err(|e| format!("--manifest stdout is not JSON ({e}):\n{mstdout}"))?;
+    let listener = format!("127.0.0.1:{port}");
+    let listeners: Vec<String> = manifest["listeners"]
+        .as_array()
+        .ok_or_else(|| format!("manifest carries a listeners array: {manifest}"))?
+        .iter()
+        .map(|v| v.as_str().expect("listener string").to_string())
+        .collect();
+    if !listeners.contains(&listener) {
+        return Err(format!("manifest must list {listener}: {listeners:?}"));
+    }
+    if manifest["artifact_kind"] != "server" {
+        return Err(format!(
+            "manifest artifact_kind must be `server`: {manifest}"
+        ));
+    }
+    Ok(())
+}
+
+/// The compiled route artifact serves its declared REST listener until
+/// SIGTERM: HTTP 200 with body `pong` after `context started`, graceful
+/// exit 0 on `kill -TERM` (30 s bound), the report file exactly
+/// `{"kind":"route","status":"completed","error":null}`, and a
+/// `--manifest` run listing `127.0.0.1:<port>` with `artifact_kind`
+/// `server` (openspec r5routesrv, cli-compile "Route artifact serves
+/// its declared listener until SIGTERM").
+#[test]
+fn route_server_serves_listener_until_sigterm() {
+    child_guard();
+    with_bind_race_retry(serve_listener_flow);
+}
+
+/// The exact test named by the harness-child spawn of
+/// [`drain_inflight_flow`] (same re-entry mechanism as [`SERVE_TEST`]).
+const DRAIN_TEST: &str = "route_server_drains_inflight_request";
+
+/// The slow listener document: the same shape as [`rest_listener_doc`]
+/// but the back route is `direct:slow` with the steps `log:
+/// "slow-enter"` (the observable request-entry marker), `delay` of
+/// `delay_ms`, then `set_body: "slow-pong"`; the operation is
+/// `GET /slow` under the same `/api` base, targeting `direct:slow`.
+fn slow_rest_doc(port: u16, delay_ms: u64) -> String {
+    format!(
+        "\
+routes:
+  - id: slow-route
+    from: direct:slow
+    steps:
+      - log: \"slow-enter\"
+      - delay: {delay_ms}
+      - set_body: \"slow-pong\"
+rest:
+  - host: 127.0.0.1
+    port: {port}
+    path: /api
+    operations:
+      - method: GET
+        path: /slow
+        to: direct:slow
+"
+    )
+}
+
+/// Poll the captured buffers for `marker` with a 5 ms step (vs the
+/// 20 ms of [`wait_for_marker`]): the signal tests must observe a boot
+/// or request marker while the window is still open, so marker-
+/// observation staleness has to stay well under the boot stretch or
+/// the request stretch, not just under the process lifetime. Same
+/// contract as `run_signal_test::wait_for_marker_tight`. Returns
+/// `false` when the child dies on its own or the deadline elapses.
+fn wait_for_marker_tight(
+    child: &mut KillOnDrop,
+    drained: &Drained,
+    marker: &str,
+    timeout: Duration,
+) -> bool {
+    let start = Instant::now();
+    loop {
+        if drained.out.lock().expect("stdout lock").contains(marker)
+            || drained.err.lock().expect("stderr lock").contains(marker)
+        {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        if let Ok(Some(_)) = child.0.try_wait() {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// One full drain flow: fresh port → slow doc (3 s delay route) →
+/// compile → deploy → spawn with `--report` → boot → GET `/api/slow`
+/// on a thread → `slow-enter` observed (the request is PROVABLY inside
+/// the delayed step) → SIGTERM mid-delay → the in-flight response
+/// still completes inside the drain budget → exit 0 → the exact
+/// completed report. `Err` carries the failure text; the
+/// [`BIND_RACE_MARK`] signature inside it makes the caller retry the
+/// whole flow once (see [`with_bind_race_retry`]).
+fn drain_inflight_flow() -> Result<(), String> {
+    let port = free_port();
+    let (deploy, artifact) = compile_and_deploy_listener(&slow_rest_doc(port, 3000))?;
+    let mut child = spawn_child(
+        DRAIN_TEST,
+        deploy.path(),
+        &artifact,
+        &["--report", "drain.json"],
+        &[],
+    );
+    let drained = spawn_drained(&mut child);
+    if !wait_for_marker(&drained, "context started", Duration::from_secs(60)) {
+        let captured = drained.captured();
+        return Err(format!("artifact never booted:\n{captured}"));
+    }
+    // Fire the request on a thread; the flow then waits for the
+    // request-entry log, so the signal below lands while the exchange
+    // is inside the delayed step, not merely queued at the listener.
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(http_get(port, "/api/slow"));
+    });
+    if !wait_for_marker_tight(&mut child, &drained, "slow-enter", Duration::from_secs(20)) {
+        let captured = drained.captured();
+        return Err(format!(
+            "request never reached the delayed step (missing `slow-enter`):\n{captured}"
+        ));
+    }
+    // SIGTERM lands immediately after the `slow-enter` marker, i.e.
+    // ≈0 s into the 3 s delay step, so the full 3 s still fit inside
+    // the 10 s default drain budget (`default_drain_timeout_ms` in
+    // camel-config); the response must still be delivered, then exit 0.
+    send_signal(&child.0, "-TERM");
+    match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(Some((200, body))) if body.contains("slow-pong") => {}
+        Ok(other) => {
+            return Err(format!(
+                "in-flight request must complete 200 with a `slow-pong` body \
+                 inside the drain budget, got {other:?}"
+            ));
+        }
+        Err(e) => {
+            return Err(format!("in-flight request never completed within 20s: {e}"));
+        }
+    }
+    let code = wait_exit_code(&mut child, Duration::from_secs(30));
+    if code != 0 {
+        return Err(format!(
+            "the drained shutdown must exit 0, got {code}:\n{}",
+            drained.captured()
+        ));
+    }
+    let report = std::fs::read_to_string(deploy.path().join("drain.json"))
+        .map_err(|e| format!("route report must be written: {e}"))?;
+    if report.trim() != COMPLETED_ROUTE_REPORT {
+        return Err(format!(
+            "report must be exactly {COMPLETED_ROUTE_REPORT}, got {report}"
+        ));
+    }
+    Ok(())
+}
+
+/// The serving artifact with a 3 s listener route, request provably in
+/// flight (the `slow-enter` marker fired) → SIGTERM immediately after
+/// the marker, ≈0 s into the 3 s delay → the in-flight response
+/// `slow-pong` is still delivered inside the 10 s drain budget, and the
+/// process exits 0 (openspec r5routesrv, cli-compile
+/// "First signal drains gracefully and exits 0").
+#[test]
+fn route_server_drains_inflight_request() {
+    child_guard();
+    with_bind_race_retry(drain_inflight_flow);
+}
+
+/// The exact test named by the harness-child spawn of
+/// [`boot_signal_buffered_flow`] (same re-entry mechanism as
+/// [`SERVE_TEST`]).
+const BOOT_SIGNAL_TEST: &str = "route_server_boot_signal_is_buffered";
+
+/// One full boot-buffer flow: fresh port → doc → compile → deploy →
+/// spawn → SIGTERM at the EARLIEST artifact boot marker → boot
+/// completes → graceful shutdown → exit 0. `Err` carries the failure
+/// text; the [`BIND_RACE_MARK`] signature inside it makes the caller
+/// retry the whole flow once (see [`with_bind_race_retry`]).
+fn boot_signal_buffered_flow() -> Result<(), String> {
+    let port = free_port();
+    let (deploy, artifact) = compile_and_deploy_listener(&rest_listener_doc(port))?;
+    let mut child = spawn_child(BOOT_SIGNAL_TEST, deploy.path(), &artifact, &[], &[]);
+    let drained = spawn_drained(&mut child);
+    // The EARLIEST artifact boot marker: the embedded virtual store
+    // load precedes `Starting CamelContext` and the whole component
+    // cascade — mirroring `run_signal_test`'s use of the earliest
+    // CWD-trust marker — so it leaves the whole boot stretch as the
+    // signal-delivery window. The 5 ms poll keeps marker-observation
+    // staleness well under that stretch.
+    if !wait_for_marker_tight(
+        &mut child,
+        &drained,
+        "from the embedded virtual store",
+        Duration::from_secs(30),
+    ) {
+        let captured = drained.captured();
+        return Err(format!("artifact never reached mid-boot:\n{captured}"));
+    }
+    send_signal(&child.0, "-TERM");
+    let code = wait_exit_code(&mut child, Duration::from_secs(90));
+    let captured = drained.captured();
+    if code != 0 {
+        return Err(format!(
+            "a mid-boot SIGTERM must be buffered and shut down gracefully (exit 0); \
+             a default-disposition kill would surface as -1, got {code}:\n{captured}"
+        ));
+    }
+    if !captured.contains("CamelContext started") {
+        return Err(format!(
+            "boot must complete past the marker (missing `CamelContext started`):\n{captured}"
+        ));
+    }
+    if !captured.contains("shutting down") {
+        return Err(format!(
+            "the buffered signal must end in the graceful shutdown \
+             (missing `shutting down`):\n{captured}"
+        ));
+    }
+    Ok(())
+}
+
+/// A compiled route artifact mid-boot (observed at the earliest boot
+/// marker, `from the embedded virtual store`) receives SIGTERM → the
+/// signal is buffered, boot completes (`CamelContext started`), the
+/// graceful shutdown runs (`shutting down`), and the process exits 0
+/// within 90 s — never a default-disposition death (openspec
+/// r5routesrv, cli-compile "Route artifact signal during boot is
+/// buffered").
+#[test]
+fn route_server_boot_signal_is_buffered() {
+    child_guard();
+    with_bind_race_retry(boot_signal_buffered_flow);
+}
+
+/// The exact test named by the harness-child spawn of
+/// [`second_signal_force_exit_flow`] (same re-entry mechanism as
+/// [`SERVE_TEST`]).
+const SECOND_SIGNAL_TEST: &str = "route_server_second_signal_force_exits";
+
+/// One full force-exit flow: fresh port → doc → compile → deploy →
+/// spawn → INT+TERM pair at the EARLIEST boot marker, delivered as ONE
+/// `sh -c` invocation → exit 1 with the `forcing exit` WARN. `Err`
+/// carries the failure text; the [`BIND_RACE_MARK`] signature inside it
+/// makes the caller retry the whole flow once (see
+/// [`with_bind_race_retry`]).
+fn second_signal_force_exit_flow() -> Result<(), String> {
+    let port = free_port();
+    let (deploy, artifact) = compile_and_deploy_listener(&rest_listener_doc(port))?;
+    let mut child = spawn_child(SECOND_SIGNAL_TEST, deploy.path(), &artifact, &[], &[]);
+    let drained = spawn_drained(&mut child);
+    // The EARLIEST artifact boot marker (see [`boot_signal_buffered_flow`]):
+    // the whole boot stretch stays open as the pair-delivery window, and
+    // the 5 ms poll keeps marker-observation staleness well under it.
+    if !wait_for_marker_tight(
+        &mut child,
+        &drained,
+        "from the embedded virtual store",
+        Duration::from_secs(30),
+    ) {
+        let captured = drained.captured();
+        return Err(format!("artifact never reached mid-boot:\n{captured}"));
+    }
+    // The escape-hatch pair as ONE shell invocation: `kill` is a shell
+    // builtin, and two separate spawn(2)s would leave a multi-ms exec
+    // gap that can push the second signal past teardown under load —
+    // the same discipline as
+    // `run_signal_test::second_sigterm_during_teardown_force_exits`.
+    let pair = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "kill -INT {pid}; kill -TERM {pid}",
+            pid = child.id()
+        ))
+        .status()
+        .map_err(|e| format!("spawn signal pair: {e}"))?;
+    if !pair.success() {
+        return Err(format!("signal pair returned non-zero: {pair:?}"));
+    }
+    let code = wait_exit_code(&mut child, Duration::from_secs(90));
+    let captured = drained.captured();
+    if code != 1 {
+        return Err(format!(
+            "the buffered second signal must force-exit 1; exit 0 means \
+             the force-exit arm never fired, -1 means a \
+             default-disposition kill, got {code}:\n{captured}"
+        ));
+    }
+    if !captured.contains("forcing exit") {
+        return Err(format!(
+            "the force exit must log its `forcing exit` WARN:\n{captured}"
+        ));
+    }
+    Ok(())
+}
+
+/// A compiled route artifact mid-boot (observed at the earliest boot
+/// marker) receives an INT+TERM pair buffered during boot → the
+/// shutdown select consumes the first, the force-exit guard polls the
+/// already-queued second during teardown → exit 1 within 90 s with the
+/// `forcing exit` WARN (openspec r5routesrv, cli-compile "Second signal
+/// force-exits during teardown").
+#[test]
+fn route_server_second_signal_force_exits() {
+    child_guard();
+    with_bind_race_retry(second_signal_force_exit_flow);
+}
+
+/// The exact test named by the harness-child spawn of
+/// [`deployment_equivalence_flow`] (same re-entry mechanism as
+/// [`SERVE_TEST`]).
+const EQUIVALENCE_TEST: &str = "route_server_matches_camel_run_deployment_posture";
+
+/// Shared leg assertion for [`deployment_equivalence_flow`]: wait for
+/// `context started`, require HTTP 200 with a `pong` body on the leg's
+/// port, send SIGTERM, and require exit 0 (30 s bound).
+fn serve_once_and_terminate(
+    child: &mut KillOnDrop,
+    drained: &Drained,
+    port: u16,
+    leg: &str,
+) -> Result<(), String> {
+    if !wait_for_marker(drained, "context started", Duration::from_secs(60)) {
+        return Err(format!("{leg} never booted:\n{}", drained.captured()));
+    }
+    match http_get(port, "/api/ping") {
+        Some((200, body)) if body.contains("pong") => {}
+        other => {
+            return Err(format!(
+                "{leg} must answer 200 with a `pong` body before the signal, got {other:?}"
+            ));
+        }
+    }
+    send_signal(&child.0, "-TERM");
+    let code = wait_exit_code(child, Duration::from_secs(30));
+    if code != 0 {
+        return Err(format!(
+            "{leg} must shut down gracefully on SIGTERM (exit 0), got {code}:\n{}",
+            drained.captured()
+        ));
+    }
+    Ok(())
+}
+
+/// One full deployment-equivalence flow: one fixture dir holding two
+/// independently probed listener documents — `rest.yaml` served by the
+/// compiled artifact (leg A), `rest2.yaml` served by
+/// `camel run --routes rest2.yaml --no-watch` (leg B) — and each leg
+/// must serve HTTP 200 `pong` after `context started`, then exit 0 on
+/// SIGTERM. `Err` carries the failure text; the [`BIND_RACE_MARK`]
+/// signature inside it makes the caller retry the whole flow once (see
+/// [`with_bind_race_retry`]).
+fn deployment_equivalence_flow() -> Result<(), String> {
+    // A separate free_port() per leg: camel-http binds without
+    // SO_REUSEADDR and `Connection: close` leaves server-side TIME_WAIT
+    // on the port, so reusing one port across legs risks EADDRINUSE
+    // false-reds; behavioral equivalence does not require byte-identical
+    // documents.
+    let artifact_port = free_port();
+    let run_port = free_port();
+    let dir = tempfile::Builder::new()
+        .prefix("camel-routesrv-equiv-")
+        .tempdir_in(fixture_root())
+        .map_err(|e| format!("fixture tempdir: {e}"))?;
+    std::fs::write(
+        dir.path().join("rest.yaml"),
+        rest_listener_doc(artifact_port),
+    )
+    .map_err(|e| format!("write rest.yaml: {e}"))?;
+    std::fs::write(dir.path().join("rest2.yaml"), rest_listener_doc(run_port))
+        .map_err(|e| format!("write rest2.yaml: {e}"))?;
+
+    // Leg A: the compiled artifact.
+    let output = compile(dir.path(), "rest.yaml", "rest.bin", &[]);
+    if output.status.code() != Some(0) {
+        return Err(format!(
+            "rest.yaml must compile: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let (deploy, artifact) = deploy_artifact(&dir.path().join("rest.bin"));
+    let mut child = spawn_child(EQUIVALENCE_TEST, deploy.path(), &artifact, &[], &[]);
+    let drained = spawn_drained(&mut child);
+    serve_once_and_terminate(&mut child, &drained, artifact_port, "leg A (artifact)")?;
+
+    // Leg B: `camel run` over the same document shape — cwd = the
+    // fixture dir, the parent's `CAMEL_*` keys scrubbed (see
+    // [`scrub_camel_env`]), the canonical `env!("CARGO_BIN_EXE_camel")`
+    // binary path (harness precedent `common::spawn_camel_run`).
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_camel"));
+    scrub_camel_env(&mut cmd);
+    cmd.args(["run", "--routes", "rest2.yaml", "--no-watch"])
+        .current_dir(dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut run_child = KillOnDrop(cmd.spawn().map_err(|e| format!("spawn `camel run`: {e}"))?);
+    let run_drained = spawn_drained(&mut run_child);
+    serve_once_and_terminate(&mut run_child, &run_drained, run_port, "leg B (camel run)")?;
+    Ok(())
+}
+
+/// The same REST listener document deployed as a compiled artifact and
+/// run through `camel run --routes <doc> --no-watch` observe identical
+/// serve + exit behavior: HTTP 200 `pong` after `context started`,
+/// graceful exit 0 on SIGTERM (openspec r5routesrv, cli-compile
+/// "Deployment-equivalence with camel run").
+#[test]
+fn route_server_matches_camel_run_deployment_posture() {
+    child_guard();
+    with_bind_race_retry(deployment_equivalence_flow);
 }
 
 /// Duplicate/exclusive flags, a missing `--report` value, an unknown
@@ -3435,4 +4077,166 @@ fn verify_stays_exclusive() {
             "argv {argv:?} must not boot: {combined}"
         );
     }
+}
+
+/// The job-side fixture of the boundedness battery (openspec r5routesrv
+/// Task 1.6): write `route.yaml` — a `direct:ping` route answering
+/// `pong`; the job-safety allowlist is `{direct, seda, log, mock}`, so
+/// no timer and no rest — plus the one-shot `job.job.yaml` referencing
+/// it through `routeFiles`, into a fresh tempdir on the fixture root.
+/// Returns the tempdir; the compile reads both documents from it.
+fn job_doc_with_direct_route() -> tempfile::TempDir {
+    let dir = tempfile::Builder::new()
+        .prefix("camel-routesrv-job-")
+        .tempdir_in(fixture_root())
+        .expect("job fixture tempdir");
+    std::fs::write(
+        dir.path().join("route.yaml"),
+        "\
+routes:
+  - id: ping-route
+    from: direct:ping
+    steps:
+      - set_body: \"pong\"
+",
+    )
+    .expect("write route.yaml");
+    std::fs::write(
+        dir.path().join("job.job.yaml"),
+        "\
+execute:
+  mode: one-shot
+  send:
+    to: direct:ping
+    body: hi
+  timeout: 10s
+routeFiles:
+  - route.yaml
+",
+    )
+    .expect("write job.job.yaml");
+    dir
+}
+
+/// A compiled job artifact is bounded: with no signal ever sent it
+/// completes the one-shot send by itself, exits 0 within 120 s, its
+/// stdout carries the `"outcome": "Completed"` job report JSON, and its
+/// `--manifest` pins `artifact_kind` `job` with an empty `listeners`
+/// array (openspec r5routesrv, cli-compile "Job artifacts stay
+/// bounded").
+#[test]
+fn job_artifact_exits_without_signal() {
+    child_guard();
+    let dir = job_doc_with_direct_route();
+    let output = compile(dir.path(), "job.job.yaml", "job.bin", &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "job document must compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (deploy, artifact) = deploy_artifact(&dir.path().join("job.bin"));
+    let mut child = spawn_child(
+        "job_artifact_exits_without_signal",
+        deploy.path(),
+        &artifact,
+        &[],
+        &[],
+    );
+    let drained = spawn_drained(&mut child);
+    let code = wait_exit_code(&mut child, Duration::from_secs(120));
+    let stdout = drained.out.lock().expect("stdout lock").clone();
+    assert_eq!(
+        code,
+        0,
+        "the one-shot job must self-exit 0 with no signal ever sent;\n{}",
+        drained.captured()
+    );
+    assert!(
+        stdout.contains("\"outcome\": \"Completed\""),
+        "stdout must carry the Completed job report:\n{stdout}"
+    );
+    // "Never serving" pinned on the manifest (`--manifest` never boots,
+    // so no `CAMEL_*` env scrub is needed): a job artifact declares no
+    // listeners.
+    let (mcode, mstdout, mstderr) =
+        common::run_binary(deploy.path(), &artifact, &["--manifest"], &[]);
+    assert_eq!(
+        mcode, 0,
+        "--manifest exits 0;\nstdout:\n{mstdout}\nstderr:\n{mstderr}"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(mstdout.trim()).expect("--manifest stdout is not JSON");
+    assert_eq!(
+        manifest["artifact_kind"], "job",
+        "manifest artifact_kind must be `job`: {manifest}"
+    );
+    let listeners = manifest["listeners"].as_array();
+    assert!(
+        listeners.is_some_and(|l| l.is_empty()),
+        "a job manifest must carry an empty listeners array: {manifest}"
+    );
+}
+
+/// Envelope verification precedes listener binding (openspec r5routesrv,
+/// cli-compile "Envelope verification precedes listener binding"): a
+/// required-signature artifact whose ENVELOPE bytes are corrupted — the
+/// artifact trailer stays valid, so `decode_artifact` succeeds and boot
+/// verification is the failing step — fails closed with exit 2 naming
+/// signature verification, and the child never binds the declared
+/// listener: the test binds `TcpListener` on the declared port BEFORE
+/// the spawn and holds it across the child's entire execution, so any
+/// bind attempt would surface as [`BIND_RACE_MARK`]. No
+/// [`with_bind_race_retry`] here: the held port is the witness — a bind
+/// diagnostic would be the very failure the test detects, so retrying
+/// would discard it.
+#[test]
+fn envelope_corruption_binds_no_listener() {
+    let port = free_port();
+    let src = tempfile::Builder::new()
+        .prefix("camel-routesrv-sig-")
+        .tempdir_in(fixture_root())
+        .expect("source tempdir");
+    std::fs::write(src.path().join("rest.yaml"), rest_listener_doc(port))
+        .expect("write rest document");
+    let seed_path = src.path().join("fixture-signing.key");
+    std::fs::write(&seed_path, FIXTURE_SEED).expect("write synthetic signing seed");
+    let output = compile_signed(src.path(), "rest.yaml", "rest.bin", &seed_path, true);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "signed compile must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Deploy the artifact WITH its mutable envelope copy and corrupt
+    // ONLY the envelope: one flipped byte near its middle.
+    let (deploy, artifact) = deploy_signed(&src.path().join("rest.bin"));
+    let sig = sig_path_of(&artifact);
+    let mut bytes = std::fs::read(&sig).expect("read envelope bytes");
+    assert!(bytes.len() > 1, "envelope must have a flippable middle");
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xFF;
+    std::fs::write(&sig, bytes).expect("write corrupted envelope");
+
+    // Held-listener witness: bound before the spawn, held across the
+    // child's entire execution — "never bound" is distinguished from
+    // "bound, then closed" because a bind attempt fails loudly.
+    let witness = TcpListener::bind(("127.0.0.1", port)).expect("hold declared listener port");
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &[], &[]);
+    assert_eq!(
+        code, 2,
+        "corrupted envelope must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("compiled artifact signature verification failed"),
+        "the diagnostic must name signature verification:\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        !combined.contains(BIND_RACE_MARK),
+        "the child must never have attempted the listener bind: {combined}"
+    );
+    // Drop the held listener only after the child exit is reaped
+    // (`run_binary` returns post-reap).
+    drop(witness);
 }

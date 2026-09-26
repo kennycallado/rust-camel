@@ -257,7 +257,10 @@ temp; one with a disk-written class exits 2 before boot when
 reuse the existing `camel run` boot, context start, signal shutdown,
 report, and exit handling with watch disabled; job artifacts consume the
 embedded job/config/route entries through the existing job outcome
-lifecycle. Virtual source diagnostics use the `compiled://<logical-path>`
+lifecycle. Listener-bearing route documents bind and serve until the
+first stop signal; in-flight listener work drains within
+`drain_timeout_ms`; a second stop signal during teardown force-exits 1
+(bd rc-zs7au). Virtual source diagnostics use the `compiled://<logical-path>`
 identity. The runtime performs no source or config reads, no globbing, no
 canonicalization, no extraction, and no watch; only deployment-time
 endpoint I/O and `${env:}` resolution run. Stores are validated before

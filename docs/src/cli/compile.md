@@ -105,6 +105,8 @@ A v2 run uses the merged embedded configuration and the ordered source-plan rout
 
 Exit codes for an artifact run: 0 for graceful completion (or a completed job); 1 for a failed job pipeline (job artifacts); 2 for argument misuse, validation, discovery, configuration, boot, or report-write failure.
 
+A route artifact runs like `camel run --no-watch`: it binds every listener its embedded documents and configuration declare and serves until the first SIGINT/SIGTERM. The first signal starts teardown: in-flight work drains within the configured drain budget (`drain_timeout_ms`, default 10 s) and the process exits 0. A second signal during teardown force-exits 1. Job artifacts stay bounded and never serve (bd `rc-zs7au`).
+
 ## TLS in compiled artifacts
 
 The bootable TLS shape is the `https://` URI parameters `tlsCert` and `tlsKey`: the listener parses the materialized PEMs at boot. Route-level `tls:` blocks (document fields) compile, embed, and materialize — the compile-side promise holds — but a route-level `tls:` key is an unknown DSL field at discovery, so an artifact whose route carries one fails at discovery and never boots. A bootable client-CA site does not exist yet, because the `https` listener has no URI-parameter site for one; a listener TLS authoring shape is future work ([ADR-0075](../adr/0075-self-contained-executable-artifact-format.md) R2 amendment, bd `rc-7mzdu`).
