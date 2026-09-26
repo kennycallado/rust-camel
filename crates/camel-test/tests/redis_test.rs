@@ -322,7 +322,7 @@ async fn redis_geo_commands() {
     ] {
         let route = RouteBuilder::from(&format!("direct:{id}"))
             .to(format!("redis://{conn_str}?command={command}"))
-            .route_id(&format!("redis-{id}"))
+            .route_id(format!("redis-{id}"))
             .build()
             .unwrap();
         h.add_route(route).await.unwrap();
