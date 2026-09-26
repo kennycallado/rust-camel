@@ -1191,23 +1191,69 @@ impl Visit<'_> for PatIdents<'_> {
     }
 }
 
-/// Collect (binding name, binding line) pairs from a pattern for
-/// spawned-handle provenance: each ident maps to the EARLIEST start
-/// line among the spawn `let`s that bind it — a second binding of the
-/// same name must not push the line later, or an earlier await of the
-/// first binding would go unreported.
-struct PatIdentLines<'a> {
-    names: &'a mut HashMap<String, usize>,
-    line: usize,
+/// Binding form of a ledger record. The resolution fallback for the
+/// collect-and-await drain idiom applies only to
+/// [`BindingKind::Pattern`] re-bindings (for-loop, match-arm,
+/// let-condition): those re-bind a name through iteration or
+/// destructuring, which is the drain-loop shape. `let` statements and
+/// parameters declare fresh values — an innermost non-spawn binding of
+/// those kinds is an ordinary binding and never falls back to
+/// reporting.
+#[derive(Clone, Copy)]
+enum BindingKind {
+    /// `let` statement binding.
+    Let,
+    /// Fn signature parameter.
+    Param,
+    /// Closure parameter.
+    ClosureParam,
+    /// For-loop, match-arm, or let-condition (`if let` / `while let`)
+    /// pattern binding.
+    Pattern,
 }
 
-impl Visit<'_> for PatIdentLines<'_> {
+/// One binding occurrence in the test fn (bd rc-twowa): a pattern
+/// ident together with the region where it is visible and whether its
+/// initializer spawns. All binding forms are recorded, not just
+/// spawn-initialized lets — fn parameters, closure parameters, for-loop
+/// patterns, match-arm patterns, and let-conditions included — so a
+/// same-name re-binding shadows an outer spawn binding at the use site
+/// instead of being invisible to name-only provenance. `is_spawn` is
+/// only ever true for [`BindingKind::Let`] records (only lets have
+/// initializers).
+struct BindingRecord {
+    name: String,
+    is_spawn: bool,
+    kind: BindingKind,
+    /// Span of the binding occurrence itself (the pattern ident).
+    intro: Span,
+    /// Region where the binding is visible: the enclosing block for
+    /// `let` patterns, the body block for fn/closure parameters,
+    /// for-loop and let-condition bodies, and the arm body for match
+    /// arms.
+    scope: Span,
+}
+
+/// Push one [`BindingRecord`] per `PatIdent` of a pattern. A pattern
+/// such as a tuple or struct destructure binds every ident it mentions
+/// with the same scope and provenance.
+struct PatBindings<'a> {
+    ledger: &'a mut Vec<BindingRecord>,
+    scope: Span,
+    kind: BindingKind,
+    is_spawn: bool,
+}
+
+impl Visit<'_> for PatBindings<'_> {
     fn visit_pat(&mut self, pat: &syn::Pat) {
         if let syn::Pat::Ident(pi) = pat {
-            self.names
-                .entry(pi.ident.to_string())
-                .and_modify(|cur| *cur = (*cur).min(self.line))
-                .or_insert(self.line);
+            self.ledger.push(BindingRecord {
+                name: pi.ident.to_string(),
+                is_spawn: self.is_spawn,
+                kind: self.kind,
+                intro: span_of(&pi.ident),
+                scope: self.scope,
+            });
         }
         visit::visit_pat(self, pat);
     }
@@ -1428,25 +1474,26 @@ fn scan_fn_body(f: &ItemFn, chain: &[Imports], lines: &[&str], findings: &mut Ve
     }
     .visit_block(f.block.as_ref());
 
-    // Pass 2: SpawnCollector — find bindings whose initializer
-    // spawns. Earliest-binding-line provenance (bd rc-hivh9): each
-    // spawned name maps to the earliest spawn `let`'s start line; the
-    // consumer requires the await strictly after it, so earlier
-    // same-name awaits target an outer binding (parameter, import,
-    // earlier let) and must not report. No sole-binding gate, unlike
-    // pass 0 (bd rc-eow0s): multi-binding names stay tracked so the
-    // collect-and-await idiom (spawn loop → handle vec → drain loop)
-    // keeps reporting — a deliberate asymmetry, conservatism in the
-    // reporting direction here, in the suppressing direction there.
-    let mut spawned = HashMap::new();
+    // Pass 2: SpawnCollector — the binding ledger (bd rc-twowa). Every
+    // pattern-bound ident of the signature and body becomes a record
+    // {name, is_spawn, intro, scope}; the consumer resolves an await
+    // site to the innermost visible binding, so a non-spawn re-binding
+    // suppresses only the awaits it lexically dominates. No
+    // sole-binding gate, unlike pass 0 (bd rc-eow0s): multi-binding
+    // names stay tracked so the collect-and-await idiom (spawn loop →
+    // handle vec → drain loop) keeps reporting — a deliberate
+    // asymmetry, conservatism in the reporting direction here, in the
+    // suppressing direction there.
+    let mut ledger: Vec<BindingRecord> = Vec::new();
     SpawnCollector {
         chain,
         body_top: &body_top,
         body_nested: &body_nested,
         non_terminal_locals: &non_terminal_locals,
-        names: &mut spawned,
+        ledger: &mut ledger,
+        blocks: Vec::new(),
     }
-    .visit_block(f.block.as_ref());
+    .collect_fn(f);
 
     // Pass 3: TimeoutCollector — collect deadline regions
     let mut regions = Vec::new();
@@ -1465,7 +1512,7 @@ fn scan_fn_body(f: &ItemFn, chain: &[Imports], lines: &[&str], findings: &mut Ve
         body_top: &body_top,
         body_nested: &body_nested,
         non_terminal_locals: &non_terminal_locals,
-        spawned: &spawned,
+        spawned: &ledger,
         future_regions: &regions,
         loop_spans: Vec::new(),
         lines,
@@ -1511,20 +1558,31 @@ fn scan_items(
     }
 }
 
-/// Spawned-handle provenance (bd rc-hivh9): `let`-bound spawn results
-/// (`let h = tokio::spawn(..);`, `let h = set.spawn(..);`) by binding
-/// name, mapped to the earliest binding start line. No sole-binding
-/// gate, unlike the pass-0 iife/bound-closure maps: the
-/// collect-and-await idiom is corpus-dominant, so conservatism points
-/// the reporting way — multi-binding names stay tracked and every
-/// strictly-after await reports; only uses at or before the earliest
-/// line are dropped as provably outer.
+/// Binding ledger (bd rc-twowa): every pattern-bound ident of the test
+/// fn becomes a [`BindingRecord`] with its visibility scope and spawn
+/// provenance. Collection covers the fn signature (parameters bind for
+/// the body block) and the body: `let` patterns (spawn flag from the
+/// initializer via [`SpawnCollector::is_spawn_expr`]), closure
+/// parameters (scope = closure body), for-loop patterns (scope = loop
+/// body), match-arm patterns (scope = the arm body expression span,
+/// which equals the block span when the body is a block), and
+/// let-conditions of `if`/`while` (scope = then/body block — later
+/// let-chain segments are an accepted approximation). The consumer
+/// ([`spawned_await_reports`]) resolves an await site to the innermost
+/// visible binding instead of matching on a name-only earliest-line
+/// map, so a non-spawn re-binding of a spawned name suppresses only
+/// the awaits it lexically dominates.
 struct SpawnCollector<'a> {
     chain: &'a [Imports],
     body_top: &'a Imports,
     body_nested: &'a [(Imports, usize)],
     non_terminal_locals: &'a HashSet<String>,
-    names: &'a mut HashMap<String, usize>,
+    ledger: &'a mut Vec<BindingRecord>,
+    /// Enclosing-block stack: the top span is the immediately
+    /// enclosing block for `let` bindings (the fn body block is pushed
+    /// by [`SpawnCollector::collect_fn`], nested blocks by the default
+    /// traversal below).
+    blocks: Vec<Span>,
 }
 
 impl ResolvesPaths for SpawnCollector<'_> {
@@ -1543,6 +1601,11 @@ impl ResolvesPaths for SpawnCollector<'_> {
 }
 
 impl SpawnCollector<'_> {
+    /// Approximation: only direct call/method `spawn` initializers are
+    /// spawn-classified — a tuple-structured initializer (`let (a, h) =
+    /// (x, tokio::spawn(b()));`) is not, so the binding awaits are
+    /// suppressed (destructure first, or await the tuple field
+    /// expression, which resolves as a call/await base instead).
     fn is_spawn_expr(&self, e: &syn::Expr) -> bool {
         match strip_parens(e) {
             syn::Expr::Call(c) => {
@@ -1555,23 +1618,135 @@ impl SpawnCollector<'_> {
             _ => false,
         }
     }
+
+    /// Entry point: record the fn parameters (non-spawn, visible for
+    /// the body block), then walk the body with the block stack
+    /// primed. Nested fn items are pruned (mirroring [`WaitFinder`]) —
+    /// separate functions whose lets never enter the ledger; keeping
+    /// them out also closes the Pattern-fallback surface, which checks
+    /// name and binding line only.
+    fn collect_fn(&mut self, f: &ItemFn) {
+        let body_scope = span_of(f.block.as_ref());
+        for input in &f.sig.inputs {
+            if let syn::FnArg::Typed(pt) = input {
+                self.record(&pt.pat, body_scope, BindingKind::Param, false);
+            }
+        }
+        self.visit_block(f.block.as_ref());
+    }
+
+    fn record(&mut self, pat: &syn::Pat, scope: Span, kind: BindingKind, is_spawn: bool) {
+        PatBindings {
+            ledger: &mut *self.ledger,
+            scope,
+            kind,
+            is_spawn,
+        }
+        .visit_pat(pat);
+    }
+
+    /// Record the patterns of every let-condition segment of an
+    /// `if`/`while` condition (a let-chain nests one `ExprLet` per
+    /// segment). Scope is the then/body block; awaits in later chain
+    /// segments resolving to an earlier segment's binding is an
+    /// accepted approximation (nightly-only shape).
+    fn record_cond_binds(&mut self, cond: &syn::Expr, scope: Span) {
+        let mut pats = Vec::new();
+        let_cond_pats(cond, &mut pats);
+        for pat in pats {
+            self.record(pat, scope, BindingKind::Pattern, false);
+        }
+    }
+}
+
+/// Collect the patterns of `ExprLet` nodes reachable in a condition:
+/// the let itself, a let-chain (`&&` of let segments), and grouping.
+fn let_cond_pats<'a>(e: &'a syn::Expr, pats: &mut Vec<&'a syn::Pat>) {
+    match e {
+        syn::Expr::Let(el) => {
+            pats.push(&el.pat);
+            let_cond_pats(&el.expr, pats);
+        }
+        syn::Expr::Binary(b) => {
+            let_cond_pats(&b.left, pats);
+            let_cond_pats(&b.right, pats);
+        }
+        syn::Expr::Paren(p) => let_cond_pats(&p.expr, pats),
+        syn::Expr::Group(g) => let_cond_pats(&g.expr, pats),
+        _ => {}
+    }
 }
 
 impl Visit<'_> for SpawnCollector<'_> {
+    fn visit_item_fn(&mut self, _f: &ItemFn) {
+        // Nested fn items are separate functions, out of scope.
+    }
+
+    fn visit_impl_item_fn(&mut self, _f: &syn::ImplItemFn) {
+        // Associated fns in impl blocks are separate functions, out of scope.
+    }
+
+    fn visit_trait_item_fn(&mut self, _f: &syn::TraitItemFn) {
+        // Trait fns are separate functions, out of scope.
+    }
+
+    fn visit_block(&mut self, block: &syn::Block) {
+        self.blocks.push(span_of(block));
+        visit::visit_block(self, block);
+        self.blocks.pop();
+    }
+
     fn visit_local(&mut self, local: &syn::Local) {
-        if let Some(init) = &local.init
-            && self.is_spawn_expr(&init.expr)
-        {
-            // PatIdentLines keeps the earliest line per ident, so a
-            // second spawn binding of the same name cannot push the
-            // provenance line past an earlier genuine await.
-            PatIdentLines {
-                names: &mut *self.names,
-                line: span_of(local).0.line,
-            }
-            .visit_pat(&local.pat);
+        // The collector only enters through collect_fn's body visit, so
+        // the block stack is never empty here; the guard keeps that
+        // invariant non-panicking.
+        if let Some(scope) = self.blocks.last().copied() {
+            let is_spawn = local
+                .init
+                .as_ref()
+                .is_some_and(|init| self.is_spawn_expr(&init.expr));
+            self.record(&local.pat, scope, BindingKind::Let, is_spawn);
         }
         visit::visit_local(self, local);
+    }
+
+    /// Closure parameters bind for the closure body.
+    fn visit_expr_closure(&mut self, c: &syn::ExprClosure) {
+        let scope = span_of(c.body.as_ref());
+        for arg in &c.inputs {
+            self.record(arg, scope, BindingKind::ClosureParam, false);
+        }
+        visit::visit_expr_closure(self, c);
+    }
+
+    /// A for-loop pattern binds for the loop body only.
+    fn visit_expr_for_loop(&mut self, f: &syn::ExprForLoop) {
+        self.record(&f.pat, span_of(&f.body), BindingKind::Pattern, false);
+        visit::visit_expr_for_loop(self, f);
+    }
+
+    /// A match-arm pattern binds for the arm body; the body expression
+    /// span equals the block span when the arm is a block.
+    fn visit_arm(&mut self, arm: &syn::Arm) {
+        self.record(
+            &arm.pat,
+            span_of(arm.body.as_ref()),
+            BindingKind::Pattern,
+            false,
+        );
+        visit::visit_arm(self, arm);
+    }
+
+    /// `if let` patterns bind for the then-block.
+    fn visit_expr_if(&mut self, e: &syn::ExprIf) {
+        self.record_cond_binds(&e.cond, span_of(&e.then_branch));
+        visit::visit_expr_if(self, e);
+    }
+
+    /// `while let` patterns bind for the loop body.
+    fn visit_expr_while(&mut self, e: &syn::ExprWhile) {
+        self.record_cond_binds(&e.cond, span_of(&e.body));
+        visit::visit_expr_while(self, e);
     }
 }
 
@@ -2056,21 +2231,101 @@ impl Visit<'_> for LoopAwaitCollector<'_> {
     }
 }
 
+/// True when `outer` encloses `inner` with margin on both ends —
+/// equal spans (two bindings in the same block) are not nested.
+fn strictly_contains(outer: Span, inner: Span) -> bool {
+    outer.0 < inner.0 && outer.1 > inner.1
+}
+
+/// Nesting depth of a scope: the number of distinct ledger scopes that
+/// strictly contain it. Derived by containment among the collected
+/// records, so no separate block tree needs to be maintained; two
+/// bindings in the same block share the same depth and fall through to
+/// the source-order tie-break.
+fn scope_depth(ledger: &[BindingRecord], scope: Span) -> usize {
+    let mut levels: Vec<Span> = Vec::new();
+    for rec in ledger {
+        if strictly_contains(rec.scope, scope) && !levels.contains(&rec.scope) {
+            levels.push(rec.scope);
+        }
+    }
+    levels.len()
+}
+
+/// Innermost-wins comparison: deeper scope beats shallower; equal
+/// depth (same block) is tie-broken by the latest intro position — a
+/// re-binding of the name shadows an earlier binding of the same scope
+/// from its intro onward.
+fn innermost_of(ledger: &[BindingRecord], a: &BindingRecord, b: &BindingRecord) -> bool {
+    let (da, db) = (scope_depth(ledger, a.scope), scope_depth(ledger, b.scope));
+    da > db || (da == db && a.intro.0 > b.intro.0)
+}
+
+/// Spawn-ledger resolution at a single-ident await site (bd rc-twowa).
+/// Candidates are the ledger entries of `name` whose scope contains
+/// `site` and whose intro position is at or before the site start —
+/// span ordering, not line numbers, so a one-liner
+/// `for h in hs { h.await; }` binds before the await on the same line.
+/// The innermost candidate (max [`scope_depth`], then latest intro) is
+/// the binding the await targets, mirroring a lexical scope resolver.
+///
+/// Reporting keeps the conservatism direction of the rejected
+/// sole-binding gate (mission 285):
+///
+/// - innermost spawn binding → report;
+/// - innermost non-spawn binding with a spawn binding of the name
+///   lexically enclosing the site → suppress (the re-bind FP class
+///   this resolver kills);
+/// - innermost non-spawn *pattern* re-binding (for/match/if-let/
+///   while-let) with no enclosing spawn binding but a spawn binding
+///   introduced at or before the site → report (the collect-and-await
+///   drain idiom: handles spawned in one block, drained through a
+///   pattern binding in another);
+/// - every other shape (plain non-spawn `let` or parameter innermost,
+///   or no spawn binding of the name at all) → no report.
+fn spawned_await_reports(ledger: &[BindingRecord], name: &str, site: Span) -> bool {
+    let mut chosen: Option<&BindingRecord> = None;
+    for rec in ledger {
+        if rec.name != name || !span_contains(rec.scope, site) || !(rec.intro.0 <= site.0) {
+            continue;
+        }
+        chosen = Some(match chosen {
+            None => rec,
+            Some(cur) if innermost_of(ledger, rec, cur) => rec,
+            Some(cur) => cur,
+        });
+    }
+    let spawn_encloses = ledger
+        .iter()
+        .any(|b| b.is_spawn && b.name == name && span_contains(b.scope, site));
+    let spawn_precedes = ledger
+        .iter()
+        .any(|b| b.is_spawn && b.name == name && b.intro.0 <= site.0);
+    match chosen {
+        Some(c) if c.is_spawn => true,
+        Some(_) if spawn_encloses => false,
+        Some(c) => matches!(c.kind, BindingKind::Pattern) && spawn_precedes,
+        None => spawn_precedes,
+    }
+}
+
 struct WaitFinder<'a> {
     chain: &'a [Imports],
     body_top: &'a Imports,
     body_nested: &'a [(Imports, usize)],
     non_terminal_locals: &'a HashSet<String>,
-    /// Spawned-handle bindings by name, mapped to the earliest spawn
-    /// binding's start line (bd rc-hivh9). The binding await is a
-    /// report site strictly after that line — uses at or before it
-    /// target an outer binding (parameter, import, earlier let).
-    /// Residual accepted FP: a NON-spawn re-binding of the name after
-    /// the spawn line makes a later await report although it targets
-    /// the re-binding (corpus-zero today; scope-aware binding
-    /// resolution is the eventual cure). No sole-binding gate, unlike
-    /// `iife_futures` — the collect-and-await idiom is corpus-dominant.
-    spawned: &'a HashMap<String, usize>,
+    /// Binding ledger for spawned-handle provenance (bd rc-twowa):
+    /// every pattern-bound ident of the signature and body with its
+    /// visibility scope and spawn provenance. An await on a
+    /// single-ident base resolves to the innermost visible binding of
+    /// the name ([`spawned_await_reports`]) — a non-spawn re-binding
+    /// (plain `let`, parameter, for/match/if-let pattern) suppresses
+    /// exactly the awaits it lexically dominates, while the
+    /// collect-and-await idiom (spawn in one block, drain loop with a
+    /// pattern re-bind elsewhere) keeps reporting. No sole-binding
+    /// gate, unlike `iife_futures` — conservatism points the reporting
+    /// way on purpose.
+    spawned: &'a [BindingRecord],
     future_regions: &'a [Span],
     /// Spans of already-reported unbounded loops, for subsumption of the
     /// wait findings they contain.
@@ -2233,18 +2488,15 @@ impl Visit<'_> for WaitFinder<'_> {
                 }
             }
             syn::Expr::Path(pe) if pe.path.segments.len() == 1 => {
-                // A spawned handle binding, or a let-bound IIFE future
-                // whose stored class is WaitTail: the binding await is
-                // itself the blocking site (bd rc-eow0s, rc-hivh9).
-                // Both require the await to lie strictly after the
-                // binding line (earliest, for spawned handles) —
-                // earlier same-name awaits target an outer binding
-                // (parameter, import, static).
+                // A spawned-handle binding (innermost-visible, per the
+                // ledger resolution), or a let-bound IIFE future whose
+                // stored class is WaitTail: the binding await is
+                // itself the blocking site (bd rc-eow0s, rc-twowa).
+                // The IIFE map keeps its strictly-after-binding-line
+                // guard — earlier same-name awaits target an outer
+                // binding (parameter, import, static).
                 let name = pe.path.segments[0].ident.to_string();
-                let spawned_hit = matches!(
-                    self.spawned.get(&name),
-                    Some(&bind_line) if sp.0.line > bind_line
-                );
+                let spawned_hit = spawned_await_reports(self.spawned, &name, sp);
                 if spawned_hit
                     || matches!(
                         self.iife_futures.get(&name),
@@ -2424,11 +2676,80 @@ mod tests {
     }
 
     #[test]
+    fn nested_fn_spawn_binding_not_in_ledger() {
+        // bd rc-twowa (r_glm review): a nested fn's `let h =
+        // tokio::spawn(..)` must not enter the ledger — the
+        // Pattern-fallback rule matches on name and binding line only,
+        // so the record would otherwise feed a rule-3 report at the
+        // outer drain loop.
+        let src = "#[tokio::test]\nasync fn t() {\n    fn inner() {\n        let h = tokio::spawn(a());\n    }\n    for h in non_handles {\n        h.await;\n    }\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
     fn spawned_two_sequential_same_name_awaits_both_reported() {
         // A second spawn binding of the same name must not push the
         // earliest binding line later: both post-binding awaits report.
         let src = "#[tokio::test]\nasync fn t() {\n    let h = tokio::spawn(a());\n    h.await;\n    let h = tokio::spawn(b());\n    h.await;\n}\n";
         assert_eq!(findings(src), vec![4, 6]);
+    }
+
+    #[test]
+    fn spawned_non_spawn_rebind_await_not_reported() {
+        // bd rc-twowa: a NON-spawn re-binding of the name after the
+        // spawn line is the innermost binding at the await — the await
+        // targets `other`, not the spawned handle, so it must not
+        // report (the residual FP the earliest-line map produced).
+        let src = "#[tokio::test]\nasync fn t() {\n    let h = tokio::spawn(a());\n    let h = other;\n    h.await;\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
+    fn spawned_rebind_in_nested_block_outer_await_still_reported() {
+        // Block-aware resolution: the re-bind inside the nested block
+        // suppresses only the await inside that block; the outer await
+        // still resolves to the spawn binding and reports. Line-order
+        // resolution would suppress both.
+        let src = "#[tokio::test]\nasync fn t() {\n    let h = tokio::spawn(a());\n    {\n        let h = other;\n        h.await;\n    }\n    h.await;\n}\n";
+        assert_eq!(findings(src), vec![8]);
+    }
+
+    #[test]
+    fn spawned_match_arm_rebind_not_reported_outer_reported() {
+        // A match-arm pattern re-binds the name for the arm body only:
+        // the arm await resolves to the (non-spawn) arm binding and is
+        // suppressed; the trailing await resolves to the spawn let.
+        let src = "#[tokio::test]\nasync fn t() {\n    let h = tokio::spawn(a());\n    match x {\n        Some(h) => { h.await; }\n        None => {}\n    }\n    h.await;\n}\n";
+        assert_eq!(findings(src), vec![8]);
+    }
+
+    #[test]
+    fn spawned_if_let_rebind_not_reported() {
+        // An `if let` pattern binds for the then-block only: the body
+        // await is suppressed, the trailing await reports.
+        let src = "#[tokio::test]\nasync fn t() {\n    let h = tokio::spawn(a());\n    if let Some(h) = opt {\n        h.await;\n    }\n    h.await;\n}\n";
+        assert_eq!(findings(src), vec![7]);
+    }
+
+    #[test]
+    fn spawned_for_pattern_rebind_not_reported_outer_reported() {
+        // A for-loop pattern binds for the loop body only: the body
+        // await resolves to the (non-spawn) pattern binding and is
+        // suppressed; the trailing await resolves to the spawn let and
+        // reports. The for-loop line is cleanly pinnable: for-loops are
+        // not loop-report sites (only `loop {}` is), so the body line's
+        // absence comes solely from the ledger resolution.
+        let src = "#[tokio::test]\nasync fn t() {\n    let h = tokio::spawn(a());\n    for h in items {\n        h.await;\n    }\n    h.await;\n}\n";
+        assert_eq!(findings(src), vec![7]);
+    }
+
+    #[test]
+    fn spawned_rebind_then_second_spawn_await_reported() {
+        // Multi-rebind chain: the first await resolves to the non-spawn
+        // re-bind (suppressed); the second re-spawn becomes the latest
+        // same-scope binding, so the trailing await reports.
+        let src = "#[tokio::test]\nasync fn t() {\n    let h = tokio::spawn(a());\n    let h = other;\n    h.await;\n    let h = tokio::spawn(b());\n    h.await;\n}\n";
+        assert_eq!(findings(src), vec![7]);
     }
 
     #[test]

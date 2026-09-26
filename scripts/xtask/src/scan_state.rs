@@ -145,6 +145,17 @@ pub fn scan_line(line: &str, state: &mut ScanState, on_brace: &mut impl FnMut(Br
 /// `#[cfg(all(...))]` / `#[cfg(any(...))]`
 /// conjunctions whose DIRECT predicate list contains `test` (e.g.
 /// `#[cfg(all(test, feature = "llm"))]`, used by camel-component-api).
+///
+/// `#[cfg_attr(<predicate-list>, <payload attrs...>)]` also opens test
+/// scope when the predicate list (the first top-level comma segment) has a
+/// direct `test` predicate AND a payload attribute is a test-opener: the
+/// delimited `test` path (so `testify` payloads are not swept in) or the
+/// `tokio::test` / `rstest` / `test_case` prefixes, argument lists
+/// included. A derive payload does NOT count:
+/// `#[cfg_attr(test, derive(Debug))]` only gates the derive — the item
+/// itself still exists in production builds and must stay production
+/// scope, so opening scope there would mask real production violations.
+///
 /// Nested predicates do not count: `#[cfg(not(test))]` compiles its body
 /// in non-test builds and stays production scope. `#[test]` keeps its
 /// closing bracket so lookalikes such as `#[test_x]` are not swept in;
@@ -157,18 +168,31 @@ pub fn is_test_attr_line(trimmed: &str) -> bool {
         || trimmed.starts_with("#[rstest")
         || trimmed.starts_with("#[test_case")
         || cfg_conjunction_has_direct_test_predicate(trimmed)
+        || cfg_attr_has_test_payload(trimmed)
 }
 
-/// `#[cfg(all/any(...))]` where a top-level predicate of the conjunction
-/// is exactly `test`. Nested conjunctions (e.g. `all(test, any(...))`)
-/// still count — the `test` predicate is direct; `not(test)` does not.
+/// `#[cfg(...)]` whose predicate list has a direct top-level `test`
+/// predicate: the bare `test` predicate or an `all(...)` / `any(...)`
+/// conjunction containing it.
 fn cfg_conjunction_has_direct_test_predicate(trimmed: &str) -> bool {
     let Some(rest) = trimmed.strip_prefix("#[cfg(") else {
         return false;
     };
-    let Some(body) = rest
+    cfg_predicate_list_has_direct_test(rest)
+}
+
+/// `test`, or an `all(...)` / `any(...)` conjunction whose top-level
+/// predicate list contains exactly `test`. Nested conjunctions (e.g.
+/// `all(test, any(...))`) still count — the `test` predicate is direct;
+/// `not(test)` does not.
+fn cfg_predicate_list_has_direct_test(pred: &str) -> bool {
+    let pred = pred.trim();
+    if pred == "test" {
+        return true;
+    }
+    let Some(body) = pred
         .strip_prefix("all(")
-        .or_else(|| rest.strip_prefix("any("))
+        .or_else(|| pred.strip_prefix("any("))
     else {
         return false;
     };
@@ -192,10 +216,67 @@ fn cfg_conjunction_has_direct_test_predicate(trimmed: &str) -> bool {
     body[..end].split(',').any(|pred| pred.trim() == "test")
 }
 
+/// `#[cfg_attr(<predicate-list>, <attr>, <attr>, ...)]` where the
+/// predicate list (the FIRST top-level comma segment) has a direct `test`
+/// predicate and a payload attr is a test-opener. Payload attrs may carry
+/// their own paren argument lists (e.g.
+/// `tokio::test(flavor = "multi_thread")`), so the argument list is split
+/// at depth-1 commas only.
+fn cfg_attr_has_test_payload(trimmed: &str) -> bool {
+    let Some(body) = trimmed.strip_prefix("#[cfg_attr(") else {
+        return false;
+    };
+    let mut depth = 1usize;
+    let mut segments: Vec<&str> = Vec::new();
+    let mut start = 0usize;
+    let mut end = body.len();
+    for (i, ch) in body.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
+                }
+            }
+            ',' if depth == 1 => {
+                segments.push(&body[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    segments.push(&body[start..end]);
+    let Some((predicate_list, payload_attrs)) = segments.split_first() else {
+        return false;
+    };
+    cfg_predicate_list_has_direct_test(predicate_list)
+        && payload_attrs
+            .iter()
+            .any(|attr| payload_attr_is_test_opener(attr))
+}
+
+/// True when a `cfg_attr` payload attr is a test-opener, mirroring the
+/// canonical set of [`is_test_attr_line`]: the `test` path must be
+/// delimited (end of segment or a paren argument list) so `testify` /
+/// `test_extra` payloads are not swept in; the marker prefixes match the
+/// same deliberate over-match as the plain attribute forms.
+fn payload_attr_is_test_opener(attr: &str) -> bool {
+    let attr = attr.trim();
+    attr == "test"
+        || attr.starts_with("test(")
+        || attr.starts_with("tokio::test")
+        || attr.starts_with("rstest")
+        || attr.starts_with("test_case")
+}
+
 /// Literal/comment-aware test-scope tracker for the line-based lints
 /// (rc-xkx42 extraction): [`scan_line`] brace counting plus the
 /// pending-test-attribute handshake, previously duplicated verbatim in
-/// `lint_unwrap_src`, `lint_cancel_tokens`, and `lint_log_levels`.
+/// `lint_unwrap_src`, `lint_cancel_tokens`, and `lint_log_levels` —
+/// rc-xkx42 eliminated those copies and all consumers now share this
+/// tracker.
 ///
 /// Feed every line's TRIMMED text to [`TestScopeTracker::line_in_test_scope`]
 /// in file order; it answers whether the line is exempt from
@@ -487,5 +568,49 @@ mod tests {
         // `not(test)` and `test` nested behind `not` do not.
         assert!(!is_test_attr_line("#[cfg(not(test))]"));
         assert!(!is_test_attr_line("#[cfg(all(not(test), unix))]"));
+    }
+
+    #[test]
+    fn test_attr_line_covers_cfg_attr_test_payloads() {
+        // rc-w8nra: `#[cfg_attr(<predicate>, <payload>)]` opens test scope
+        // when the first top-level comma segment (the predicate list) has a
+        // direct `test` predicate AND a payload attribute is a test-opener.
+        assert!(is_test_attr_line("#[cfg_attr(test, test)]"));
+        assert!(is_test_attr_line("#[cfg_attr(test, tokio::test)]"));
+        assert!(is_test_attr_line(
+            "#[cfg_attr(test, tokio::test(flavor = \"multi_thread\", worker_threads = 2))]"
+        ));
+        assert!(is_test_attr_line("#[cfg_attr(test, rstest(case(1)))]"));
+        assert!(is_test_attr_line(
+            "#[cfg_attr(all(test, feature = \"llm\"), tokio::test)]"
+        ));
+        assert!(is_test_attr_line(
+            "#[cfg_attr(any(test, unix), test_case(1))]"
+        ));
+
+        // Load-bearing negatives: a derive payload only gates the derive —
+        // the item itself still exists in production builds. A predicate
+        // without a direct `test` compiles the payload onto a
+        // production-visible item. Payload openers must be delimited, so
+        // `testify` is not swept in.
+        assert!(!is_test_attr_line("#[cfg_attr(test, derive(Debug))]"));
+        assert!(!is_test_attr_line("#[cfg_attr(feature = \"x\", test)]"));
+        assert!(!is_test_attr_line("#[cfg_attr(not(test), test)]"));
+        assert!(!is_test_attr_line(
+            "#[cfg_attr(all(feature = \"x\", any(test, unix)), test)]"
+        ));
+        assert!(!is_test_attr_line("#[cfg_attr(test, testify)]"));
+    }
+
+    #[test]
+    fn tracker_opens_scope_for_cfg_attr_tokio_test() {
+        let flags = scope_flags(
+            "#[cfg_attr(test, tokio::test)]\nasync fn t() { v.unwrap(); }\nfn prod() {}\n",
+        );
+        assert_eq!(flags, vec![true, true, false]);
+
+        // The derive payload leaves the item production-visible: no scope.
+        let flags = scope_flags("#[cfg_attr(test, derive(Debug))]\nstruct S;\nfn prod() {}\n");
+        assert!(flags.iter().all(|f| !f), "got: {flags:?}");
     }
 }

@@ -5125,6 +5125,24 @@ mod tests {
         }
 
         #[test]
+        fn unwrap_inside_cfg_attr_tokio_test_not_reported() {
+            let ws = tmp_workspace(&[(
+                "crates/foo/src/lib.rs",
+                "fn run() {\n    let x = some_result().unwrap();\n}\n\
+                 #[cfg_attr(test, tokio::test(flavor = \"multi_thread\"))]\n\
+                 async fn t() {\n    let y = other().unwrap();\n}\n",
+            )]);
+            let violations = lint_unwrap(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
+            assert!(
+                violations[0].snippet.contains("some_result()"),
+                "only the production unwrap must be reported, got: {:?}",
+                violations[0].snippet
+            );
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
         fn allows_escape_hatch_comment() {
             let ws = tmp_workspace(&[(
                 "crates/foo/src/lib.rs",
@@ -5875,6 +5893,23 @@ fn next_item() {}"#;
             )]);
             let violations = lint_log_levels(&ws).unwrap();
             assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// `#[cfg_attr(test, tokio::test)]` opens test scope like a plain
+        /// `#[tokio::test]` (rc-w8nra): the test's own `error!` is exempt,
+        /// the production one above it is not.
+        #[test]
+        fn error_inside_cfg_attr_tokio_test_not_reported() {
+            let ws = tmp_workspace_log(&[(
+                "crates/foo/src/lib.rs",
+                "fn prod() { error!(\"boom\"); }\n\
+                 #[cfg_attr(test, tokio::test)]\n\
+                 async fn t() { error!(\"in test scope\"); }\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
+            assert!(violations[0].snippet.contains("boom"));
             fs::remove_dir_all(&ws).unwrap();
         }
 

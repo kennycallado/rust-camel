@@ -431,6 +431,25 @@ mod tests {
     /// cfg(test)-inside-cfg(test): the outer scope already excludes the site,
     /// and the tracker must return to production scope only after the OUTER
     /// block closes.
+    /// `#[cfg_attr(test, tokio::test)]` opens test scope like a plain
+    /// `#[tokio::test]` (rc-w8nra): only the production site counts.
+    #[test]
+    fn ignores_tokio_test_in_cfg_attr_form() {
+        let ws = tmp_workspace_tokens(
+            &[(
+                "crates/components/fake-comp/src/consumer.rs",
+                "fn build() {\n    let _ = CancellationToken::new();\n}\n\
+                 #[cfg_attr(test, tokio::test)]\n\
+                 async fn t() {\n    let _ = CancellationToken::new();\n}\n",
+            )],
+            1,
+        );
+        let report = lint_cancel_tokens(&ws).unwrap();
+        assert_eq!(report.sites.len(), 1, "got: {:?}", report.sites);
+        assert_eq!(report.sites[0].line, 2);
+        fs::remove_dir_all(&ws).unwrap();
+    }
+
     #[test]
     fn ignores_nested_cfg_test_blocks() {
         let ws = tmp_workspace_tokens(
