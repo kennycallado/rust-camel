@@ -16,6 +16,7 @@ pub mod error;
 pub(crate) mod executor;
 pub(crate) mod idempotent_repo;
 pub mod keyspace;
+pub(crate) mod payload_store;
 #[cfg(test)]
 pub(crate) mod test_metrics;
 
@@ -30,3 +31,4 @@ pub(crate) use error::to_camel_error;
 pub use idempotent_repo::RedisIdempotentRepository;
 pub(crate) use keyspace::namespaced;
 pub(crate) use keyspace::validate_namespace_token;
+pub use payload_store::RedisPayloadStore;

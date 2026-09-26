@@ -179,10 +179,6 @@ name = "camel-xslt"
 state = "registered"
 
 [[crates]]
-name = "camel-redis-repo"
-state = "registered"
-
-[[crates]]
 name = "camel-language-js"
 state = "registered"
 
@@ -200,6 +196,10 @@ state = "registered"
 
 [[crates]]
 name = "camel-platform-kubernetes"
+state = "registered"
+
+[[crates]]
+name = "camel-redis-repo"
 state = "registered"
 
 [[crates]]

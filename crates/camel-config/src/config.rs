@@ -810,15 +810,18 @@ impl IdempotentRepoConfig {
 /// ```
 /// Payload storage mode for the cache repository: `"inline"` keeps payload
 /// bytes inside the repository entry, `"disk"` offloads payload bodies to
-/// files under `cache_repo.payload_dir`. Disk mode applies to the redb and
-/// redis backends; the memory backend rejects it. Exhaustive by contract
-/// (closed 2-variant set, mirroring `ContentType`'s ADR-0049 exception
-/// note) — not `#[non_exhaustive]`.
+/// files under `cache_repo.payload_dir`, and `"redis"` offloads payload
+/// bytes to Redis entries under the repository's own keyspace. The disk
+/// tier applies to the redb and redis backends; the redis tier applies
+/// only to the redis backend; the memory backend rejects every offload
+/// tier. Exhaustive by contract (closed 3-variant set, mirroring
+/// `ContentType`'s ADR-0049 exception note) — not `#[non_exhaustive]`.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PayloadMode {
     Inline,
     Disk,
+    Redis,
 }
 
 #[derive(Clone, Deserialize, PartialEq)]
@@ -870,24 +873,29 @@ pub struct CacheRepoConfig {
 
     /// Payload storage mode: `"inline"` (default) keeps payload bytes in
     /// the repository entry; `"disk"` offloads payload bodies to files
-    /// under `payload_dir`. Disk mode is rejected on the memory backend.
+    /// under `payload_dir`; `"redis"` offloads payload bytes to Redis
+    /// entries under the repository keyspace. Offload tiers are rejected
+    /// on the memory backend, and the `"redis"` tier only accepts the
+    /// redis backend.
     #[serde(default)]
     pub payload: Option<PayloadMode>,
 
     /// Directory holding offloaded payload files. Required when
-    /// `payload = "disk"`; rejected otherwise and on the memory backend.
-    /// Supports `${env:}` strict interpolation.
+    /// `payload = "disk"`; rejected when `payload = "redis"`, when payload
+    /// is inline/unset, and on the memory backend. Supports `${env:}`
+    /// strict interpolation.
     #[serde(default)]
     pub payload_dir: Option<String>,
 
-    /// How often the offloaded-payload sweep runs when `payload = "disk"`.
-    /// Accepts human-readable durations like "1h", "30m". Must be positive.
+    /// How often the offloaded-payload sweep runs when payload is an
+    /// offload tier (`"disk"` or `"redis"`). Accepts human-readable
+    /// durations like "1h", "30m". Must be positive.
     #[serde(default)]
     pub payload_sweep_interval: Option<String>,
 
-    /// Maximum time an offloaded payload file may outlive its cache entry
-    /// when `payload = "disk"`. Accepts human-readable durations like
-    /// "720h". Must be positive.
+    /// Maximum time an offloaded payload may outlive its cache entry when
+    /// payload is an offload tier (`"disk"` or `"redis"`). Accepts
+    /// human-readable durations like "720h". Must be positive.
     #[serde(default)]
     pub payload_max_ttl: Option<String>,
 
@@ -2107,9 +2115,12 @@ impl CamelConfig {
                             .to_string(),
                     ));
                 }
-                if cache.payload == Some(PayloadMode::Disk) {
+                if matches!(
+                    cache.payload,
+                    Some(PayloadMode::Disk) | Some(PayloadMode::Redis)
+                ) {
                     return Err(CamelError::Config(
-                        "cache_repo.payload = \"disk\" does not apply to the \"memory\" backend"
+                        "cache_repo.payload offload tiers (\"disk\"/\"redis\") do not apply to the \"memory\" backend"
                             .to_string(),
                     ));
                 }
@@ -2200,22 +2211,47 @@ impl CamelConfig {
                     ))
                 })?;
             }
-            // Disk-offload payload matrix (fail-closed), shared by the redb
+            // Payload-offload matrix (fail-closed), shared by the redb
             // and redis backends: the memory branch above has already
             // rejected every payload field, so only the two persistent
-            // backends reach this block.
+            // backends reach this block. The "redis" tier is valid only
+            // on the redis backend and takes no payload_dir; the "disk"
+            // tier keeps its established rules. The duration knobs apply
+            // to both offload tiers.
             if cache.backend != "memory" {
-                if cache.payload == Some(PayloadMode::Disk) {
-                    let dir_empty = match cache.payload_dir.as_deref() {
-                        None => true,
-                        Some(d) => d.is_empty(),
-                    };
-                    if dir_empty {
-                        return Err(CamelError::Config(
-                            "cache_repo.payload_dir must be set when payload = \"disk\""
-                                .to_string(),
-                        ));
+                if cache.payload == Some(PayloadMode::Redis) && cache.backend != "redis" {
+                    return Err(CamelError::Config(format!(
+                        "cache_repo.payload = \"redis\" requires backend = \"redis\", got backend = \"{}\"",
+                        cache.backend
+                    )));
+                }
+                match cache.payload {
+                    Some(PayloadMode::Disk) => {
+                        let dir_empty = match cache.payload_dir.as_deref() {
+                            None => true,
+                            Some(d) => d.is_empty(),
+                        };
+                        if dir_empty {
+                            return Err(CamelError::Config(
+                                "cache_repo.payload_dir must be set when payload = \"disk\""
+                                    .to_string(),
+                            ));
+                        }
                     }
+                    Some(PayloadMode::Redis) => {
+                        if cache.payload_dir.is_some() {
+                            return Err(CamelError::Config(
+                                "cache_repo.payload_dir is inconsistent with payload = \"redis\""
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    Some(PayloadMode::Inline) | None => {}
+                }
+                if matches!(
+                    cache.payload,
+                    Some(PayloadMode::Disk) | Some(PayloadMode::Redis)
+                ) {
                     if let Some(sweep) = cache.payload_sweep_interval.as_deref() {
                         let parsed = humantime::parse_duration(sweep).map_err(|_| {
                             CamelError::Config(format!(
@@ -2255,13 +2291,14 @@ impl CamelConfig {
                     }
                     if cache.payload_sweep_interval.is_some() {
                         return Err(CamelError::Config(
-                            "cache_repo.payload_sweep_interval requires payload = \"disk\""
+                            "cache_repo.payload_sweep_interval requires an offload tier (payload = \"disk\" or \"redis\")"
                                 .to_string(),
                         ));
                     }
                     if cache.payload_max_ttl.is_some() {
                         return Err(CamelError::Config(
-                            "cache_repo.payload_max_ttl requires payload = \"disk\"".to_string(),
+                            "cache_repo.payload_max_ttl requires an offload tier (payload = \"disk\" or \"redis\")"
+                                .to_string(),
                         ));
                     }
                 }
@@ -2804,7 +2841,10 @@ const CSV_ENV_OVERRIDES: &[&str] = &["CAMEL_CACHE_REPO_SENTINEL_NODES"];
 /// "invalid type: integer" on `Option<String>`. The same applies to
 /// leading-zero values (`KEY_PREFIX=007` must not collapse to integer `7`).
 /// `CAMEL_CACHE_REPO_PAYLOAD` is included even though `PayloadMode` is an
-/// enum: it deserializes FROM a string (`"inline"`/`"disk"`), so its raw
+/// enum: it deserializes FROM a string (`"inline"`/`"disk"`/`"redis"` — the
+/// `"redis"` tier is valid only with `backend = "redis"` and without
+/// `payload_dir`, and both offload tiers accept the payload duration
+/// knobs), so its raw
 /// value must pass through un-coerced — [`parse_env_value`]'s string
 /// fallback would cover that only incidentally (valid mode names are never
 /// numeric-like); here the passthrough is the contract. Empty values never

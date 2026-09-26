@@ -27,6 +27,18 @@
 //! sweep interval cannot shrink below 1s (validation floor), so the
 //! budgets must absorb the full second-scale worst case.
 //!
+//! The redis payload tier (`payload = "redis"`) is covered at two
+//! layers. Decorator-level tests build the index and its
+//! `RedisPayloadStore` over one connection via
+//! `connect_with_payload_store` and wrap them in `OffloadRepository`:
+//! round-trip with the payload under its own key while the index row
+//! stays bytes-empty with a `payload_path`, the finite EXAT deadline on
+//! the payload key, and eager predecessor reclaim on overwrite. The
+//! boot-path test boots `payload = "redis"` through `Camel.toml` — the
+//! `context_ext` redis arm → `connect_with_payload_store` →
+//! `wrap_payload_offload` wiring — and round-trips through the
+//! registered repository.
+//!
 //! Each test provisions its own Redis container so keyspaces and blob
 //! directories stay isolated.
 //!
@@ -39,8 +51,12 @@
 mod support;
 use support::install_crypto_provider;
 
-use camel_api::cache::{CacheEntry, ContentType};
+use camel_api::ComponentMetrics;
+use camel_api::cache::{CacheEntry, CacheRepository, ContentType};
+use camel_api::metrics::MetricsHandle;
 use camel_config::CamelConfig;
+use camel_core::cache::OffloadRepository;
+use camel_redis_repo::{RedisCacheRepository, RedisEndpointConfig};
 use redis::AsyncCommands;
 use std::path::Path;
 use std::sync::Arc;
@@ -88,6 +104,24 @@ backend = "redis"
 url = "{url}"
 payload = "disk"
 payload_dir = "{payload_dir}"
+stale_retention = "{stale_retention}"
+{extra}
+"#
+    )
+}
+
+/// A `[default.cache_repo]` TOML block selecting the redis backend at
+/// `url` with `payload = "redis"` offloading into the repository's own
+/// keyspace. No `payload_dir`: validation rejects one on the redis
+/// tier. `extra` carries the optional offload timing fields
+/// (`payload_sweep_interval`, `payload_max_ttl`) as raw TOML lines.
+fn redis_offload_toml(url: &str, stale_retention: &str, extra: &str) -> String {
+    format!(
+        r#"
+[default.cache_repo]
+backend = "redis"
+url = "{url}"
+payload = "redis"
 stale_retention = "{stale_retention}"
 {extra}
 "#
@@ -171,6 +205,61 @@ async fn raw_connection(url: &str) -> redis::aio::MultiplexedConnection {
         .get_multiplexed_async_connection()
         .await
         .expect("raw connection established")
+}
+
+/// Write the redis payload-tier `cache_repo` config and build the context
+/// (eager redis connect and payload-store-paired wrapping included). This
+/// covers the `context_ext` redis arm → `connect_with_payload_store` →
+/// `wrap_payload_offload` wiring end-to-end.
+async fn context_with_redis_offload(
+    url: &str,
+    stale_retention: &str,
+    extra: &str,
+) -> camel_core::CamelContext {
+    install_crypto_provider();
+    // Must precede configure_context: see `shared_log_buffer`.
+    shared_log_buffer();
+    let cfg = load_camel_toml(&redis_offload_toml(url, stale_retention, extra));
+    CamelConfig::configure_context(&cfg)
+        .await
+        .expect("context builds with redis payload-tier cache_repo")
+}
+
+/// Decorator-level harness: index and payload store over ONE connection
+/// (`connect_with_payload_store`), wrapped in `OffloadRepository` — the
+/// same name/`key_prefix` the config path resolves, the suite's 30s
+/// retention, and 60s decorator intervals (sweep cadence, fabricated
+/// max TTL).
+async fn direct_redis_offload_repo(url: &str) -> OffloadRepository {
+    install_crypto_provider();
+    let (repo, store) = RedisCacheRepository::connect_with_payload_store(
+        "redis",
+        // Direct `redis://` endpoint config, bypassing Camel.toml.
+        &RedisEndpointConfig::from_uri(url).expect("redis:// endpoint parses"),
+        "camel:cache",
+        Duration::from_secs(30),
+        // Live suite: lever-off metrics facade, compile-only wiring.
+        ComponentMetrics::new(Arc::new(MetricsHandle::new()), false),
+    )
+    .await
+    .expect("redis cache repository connects with its payload store");
+    OffloadRepository::new(
+        Arc::new(repo),
+        Arc::new(store),
+        Duration::from_secs(30),
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+    )
+}
+
+/// The raw index row for `key` under the suite's namespace
+/// (`{prefix}:{name}:{key}`), decoded as `CacheEntry` JSON.
+async fn raw_index_row(conn: &mut redis::aio::MultiplexedConnection, key: &str) -> CacheEntry {
+    let raw: String = conn
+        .get(format!("camel:cache:redis:{key}"))
+        .await
+        .expect("raw GET returns the index row");
+    serde_json::from_str(&raw).expect("index row is CacheEntry JSON")
 }
 
 // ===========================================================================
@@ -411,4 +500,270 @@ async fn redis_disk_offload_no_ttl_capped() {
     )
     .await
     .expect("blob must be swept from the payload dir");
+}
+
+// ===========================================================================
+// Redis payload tier: index/payload key split with a native EXAT deadline
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_payload_tier_roundtrip_index_split_and_ttl() {
+    let (_container, url) = own_redis().await;
+    let repo = direct_redis_offload_repo(&url).await;
+
+    repo.set(
+        "k",
+        cache_entry(b"hello-tier".to_vec()),
+        Some(Duration::from_secs(60)),
+    )
+    .await
+    .expect("set succeeds");
+
+    // Hydrated get returns the stored bytes.
+    let got = repo
+        .get("k")
+        .await
+        .expect("get succeeds")
+        .expect("entry is present");
+    assert_eq!(
+        got.bytes,
+        b"hello-tier".to_vec(),
+        "hydrated payload must equal the stored one"
+    );
+
+    // The raw index row keeps an empty bytes array and points at the
+    // payload key inside the same namespace.
+    let mut conn = raw_connection(&url).await;
+    let row = raw_index_row(&mut conn, "k").await;
+    assert!(
+        row.bytes.is_empty(),
+        "index row must store no bytes, got {}",
+        row.bytes.len()
+    );
+    let payload_path = row.payload_path.expect("index row must carry payload_path");
+
+    // The payload lives under its own key, bytes verbatim.
+    let payload_key = format!("camel:cache:redis:payload:{payload_path}");
+    let exists: i64 = conn
+        .exists(&payload_key)
+        .await
+        .expect("payload EXISTS reads");
+    assert_eq!(exists, 1, "payload key must exist");
+    let stored: Vec<u8> = conn
+        .get(&payload_key)
+        .await
+        .expect("raw GET returns the payload key");
+    assert_eq!(
+        stored,
+        b"hello-tier".to_vec(),
+        "payload key must hold the raw bytes"
+    );
+
+    // The payload dies at its death epoch — ttl 60s + retention 30s +
+    // sweep 60s ≈ 150s — via native EXAT: TTL is live (> 0, never the
+    // -1 no-expiry sentinel) and bounded.
+    let ttl: i64 = conn.ttl(&payload_key).await.expect("payload TTL reads");
+    assert!(
+        ttl > 0,
+        "payload key must have a live deadline, got TTL {ttl}"
+    );
+    assert!(
+        ttl <= 160,
+        "payload deadline must be the finite death epoch (~150s), got TTL {ttl}"
+    );
+}
+
+// ===========================================================================
+// Redis payload tier: overwrite reclaims the predecessor payload key
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_payload_tier_overwrite_reclaims_predecessor() {
+    let (_container, url) = own_redis().await;
+    let repo = direct_redis_offload_repo(&url).await;
+    let mut conn = raw_connection(&url).await;
+
+    repo.set(
+        "k",
+        cache_entry(b"payload-v1".to_vec()),
+        Some(Duration::from_secs(60)),
+    )
+    .await
+    .expect("first set succeeds");
+    let predecessor = raw_index_row(&mut conn, "k")
+        .await
+        .payload_path
+        .expect("v1 index row carries payload_path");
+
+    repo.set(
+        "k",
+        cache_entry(b"payload-v2".to_vec()),
+        Some(Duration::from_secs(60)),
+    )
+    .await
+    .expect("second set succeeds");
+
+    // The predecessor payload key is reclaimed eagerly at overwrite.
+    let predecessor_key = format!("camel:cache:redis:payload:{predecessor}");
+    let exists: i64 = conn
+        .exists(&predecessor_key)
+        .await
+        .expect("predecessor EXISTS reads");
+    assert_eq!(
+        exists, 0,
+        "overwrite must reclaim the predecessor payload key"
+    );
+
+    // The successor payload key holds v2 under a fresh name.
+    let successor = raw_index_row(&mut conn, "k")
+        .await
+        .payload_path
+        .expect("v2 index row carries payload_path");
+    assert_ne!(
+        successor, predecessor,
+        "overwrite must mint a new payload key"
+    );
+    let stored: Vec<u8> = conn
+        .get(format!("camel:cache:redis:payload:{successor}"))
+        .await
+        .expect("raw GET returns the successor payload key");
+    assert_eq!(
+        stored,
+        b"payload-v2".to_vec(),
+        "successor payload key must hold v2"
+    );
+
+    // The hydrated get returns the successor bytes.
+    let got = repo
+        .get("k")
+        .await
+        .expect("get succeeds")
+        .expect("entry is present");
+    assert_eq!(
+        got.bytes,
+        b"payload-v2".to_vec(),
+        "get must return the successor bytes"
+    );
+}
+
+// ===========================================================================
+// Redis payload tier: invalidate_prefix never crosses the payload namespace
+// ===========================================================================
+
+/// The `payload:` sub-namespace lives inside the index keyspace, so a user
+/// prefix like "p" globs every payload key too ("payload:" itself starts
+/// with "p"). The prefix sweep must delete only index rows under the
+/// prefix ("p-user" here) while the offloaded payload of "k1" — whose key
+/// does NOT start with the prefix — and its blob survive, and the
+/// returned count stays index-scoped.
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_payload_tier_invalidate_prefix_spares_payload_keys() {
+    let (_container, url) = own_redis().await;
+    let repo = direct_redis_offload_repo(&url).await;
+    let mut conn = raw_connection(&url).await;
+
+    repo.set(
+        "k1",
+        cache_entry(b"tiered-payload".to_vec()),
+        Some(Duration::from_secs(60)),
+    )
+    .await
+    .expect("set k1 succeeds");
+    // A user key whose name starts with "p": the legit target of
+    // invalidate_prefix("p").
+    repo.set(
+        "p-user",
+        cache_entry(b"index-only".to_vec()),
+        Some(Duration::from_secs(60)),
+    )
+    .await
+    .expect("set p-user succeeds");
+
+    let removed = repo
+        .invalidate_prefix("p")
+        .await
+        .expect("invalidate_prefix succeeds");
+    assert_eq!(
+        removed, 1,
+        "the count covers only the p-user index row, never payload keys"
+    );
+
+    // The "p-user" index row is gone; k1's payload blob survives (raw
+    // EXISTS on both shapes).
+    let p_row: i64 = conn
+        .exists("camel:cache:redis:p-user")
+        .await
+        .expect("p-user EXISTS reads");
+    assert_eq!(p_row, 0, "invalidate_prefix must drop the p-user index row");
+    let blob = raw_index_row(&mut conn, "k1")
+        .await
+        .payload_path
+        .expect("k1 index row carries payload_path");
+    let payload_exists: i64 = conn
+        .exists(format!("camel:cache:redis:payload:{blob}"))
+        .await
+        .expect("payload EXISTS reads");
+    assert_eq!(
+        payload_exists, 1,
+        "the k1 payload blob must survive the prefix sweep"
+    );
+
+    // The surviving row still hydrates its offloaded bytes.
+    let got = repo
+        .get("k1")
+        .await
+        .expect("get succeeds")
+        .expect("k1 is present");
+    assert_eq!(
+        got.bytes,
+        b"tiered-payload".to_vec(),
+        "get must hydrate the surviving payload"
+    );
+}
+
+// ===========================================================================
+// Redis payload tier: boots through Camel.toml (context_ext redis arm)
+// ===========================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_payload_tier_boots_from_toml() {
+    let (_container, url) = own_redis().await;
+    let ctx = context_with_redis_offload(&url, "30s", "").await;
+
+    let repo = ctx
+        .cache_repository("redis")
+        .expect("redis cache repository registered when payload = redis");
+    assert_eq!(repo.name(), "redis");
+
+    repo.set(
+        "k",
+        cache_entry(b"boot-path-tier".to_vec()),
+        Some(Duration::from_secs(60)),
+    )
+    .await
+    .expect("set succeeds");
+
+    let got = repo
+        .get("k")
+        .await
+        .expect("get succeeds")
+        .expect("entry is present");
+    assert_eq!(
+        got.bytes,
+        b"boot-path-tier".to_vec(),
+        "hydrated payload must equal the stored one"
+    );
+
+    // The raw index row stays bytes-empty and points at the payload.
+    let mut conn = raw_connection(&url).await;
+    let row = raw_index_row(&mut conn, "k").await;
+    assert!(
+        row.bytes.is_empty(),
+        "boot-path index row must store no bytes, got {}",
+        row.bytes.len()
+    );
+    assert!(
+        row.payload_path.is_some(),
+        "boot-path index row must carry payload_path"
+    );
 }

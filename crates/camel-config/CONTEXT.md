@@ -150,6 +150,11 @@ It fails validation instead, e.g. `cache_repo.path does not apply to the "redis"
 The supported pattern: define the complete `[<profile>.cache_repo]` table inside each profile and keep `cache_repo` out of `[default]`.
 A table absent from the base inserts whole at merge, so absence swaps the table instead of deep-merging into it.
 
+**Cache payload tier (`payload`).**
+`enum PayloadMode` (`config.rs:821`) selects the payload location: `"inline"` (default) keeps bytes in the entry, `"disk"` offloads to files under `payload_dir`, and `"redis"` offloads to the repository keyspace (ADR-0065 amendment, bd rc-6b88t).
+The memory backend rejects every offload tier and every payload field inside `CamelConfig::validate` (`config.rs:2123`); the persistent-backend matrix (`config.rs:2222`) requires a non-empty `payload_dir` for `"disk"`, and for `"redis"` requires `backend = "redis"` (the error names the backend) while rejecting `payload_dir` as inconsistent with that tier; both offload tiers require the duration knobs (`payload_sweep_interval`, `payload_max_ttl`) to parse and be at least 1s, and inline mode rejects them.
+Wiring lives in `fn wrap_payload_offload` (`context_ext.rs:365`): the disk branch emits the portability WARN (`context_ext.rs:388`), the redis branch requires the store (a missing store is a config error), the redb branch stays disk-only, and the decorator registers under the bare backend name. The redis arm of context build resolves the endpoint parameters through `fn redis_cache_repo_params` (`context_ext.rs:308`) and opens the index and its store over one multiplexed connection (`context_ext.rs:624`). The redis tier emits no startup WARN: redis is shared by construction. `CAMEL_CACHE_REPO_PAYLOAD` overrides the tier verbatim.
+
 **Route discovery delegation.**
 `discovery.rs` delegates to `camel_dsl` and wraps its error as `DiscoveryError::Dsl`. This
 crate implements no EIPs and no route steps (L7 N/A).

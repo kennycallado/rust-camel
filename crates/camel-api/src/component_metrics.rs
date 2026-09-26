@@ -25,6 +25,11 @@ use crate::metrics::MetricsCollector;
 /// Facade over a [`MetricsCollector`] for uniform component-operation
 /// emission. Construct via `RuntimeObservability::component_metrics()`
 /// or directly in tests.
+///
+/// Cheap to clone: the collector sits behind an `Arc`, so one facade can
+/// be shared across objects built from the same connection (e.g. a
+/// repository and its payload store).
+#[derive(Clone)]
 pub struct ComponentMetrics {
     collector: Arc<dyn MetricsCollector>,
     components_enabled: bool,

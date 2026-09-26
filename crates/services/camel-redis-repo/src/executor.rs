@@ -117,17 +117,31 @@ pub(crate) async fn execute_retry_safe(
 
 /// SCAN-page over every key matching `pattern` and UNLINK it in batches,
 /// returning the total removed-key count.
+pub(crate) async fn scan_unlink_pattern(
+    ex: &Arc<dyn RepoCommandExecutor>,
+    pattern: &str,
+    metrics: &ComponentMetrics,
+    operation: &'static str,
+) -> Result<u64, CamelError> {
+    scan_unlink_pattern_where(ex, pattern, metrics, operation, |_| false).await
+}
+
+/// [`scan_unlink_pattern`] with a skip guard: every scanned key matching
+/// `skip` is left untouched and excluded from the returned count
+/// (`invalidate_prefix` uses this to stay out of the reserved payload
+/// sub-namespace; `clear` keeps the unfiltered walk).
 ///
 /// SCAN iterations restart from a fixed cursor after a retry (cursor-based
 /// iteration may re-visit a key; UNLINK is idempotent), and each UNLINK
 /// batch goes through [`execute_retry_safe`] so a failed batch re-issues
 /// unchanged. `clear`/`invalidate_prefix` scope the pattern so this NEVER
 /// issues FLUSHDB/FLUSHALL.
-pub(crate) async fn scan_unlink_pattern(
+pub(crate) async fn scan_unlink_pattern_where(
     ex: &Arc<dyn RepoCommandExecutor>,
     pattern: &str,
     metrics: &ComponentMetrics,
     operation: &'static str,
+    skip: impl Fn(&str) -> bool,
 ) -> Result<u64, CamelError> {
     const PAGE: usize = 100;
     let mut cursor: u64 = 0;
@@ -143,14 +157,15 @@ pub(crate) async fn scan_unlink_pattern(
         let reply = execute_retry_safe(ex, scan, metrics, operation).await?;
         let (next, keys): (u64, Vec<String>) = from_redis_value(reply)
             .map_err(|e| CamelError::Io(format!("SCAN reply parse: {e}")))?;
-        for batch in keys.chunks(PAGE) {
+        let live: Vec<&String> = keys.iter().filter(|key| !skip(key)).collect();
+        for batch in live.chunks(PAGE) {
             if batch.is_empty() {
                 continue;
             }
             let mut unlink = redis::Cmd::new();
             unlink.arg("UNLINK");
             for key in batch {
-                unlink.arg(key);
+                unlink.arg(key.as_str());
             }
             let reply = execute_retry_safe(ex, unlink, metrics, operation).await?;
             removed += from_redis_value::<u64>(reply)

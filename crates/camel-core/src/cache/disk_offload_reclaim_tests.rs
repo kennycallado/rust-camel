@@ -5,7 +5,11 @@
 
 use super::*;
 use crate::cache::MemoryCacheRepository;
+use crate::cache::offload::{OffloadClock, blake3_128hex, default_offload_clock};
+use crate::cache::{DiskPayloadStore, OffloadRepository};
 use async_trait::async_trait;
+use camel_api::cache::{CacheEntry, CacheRepository, CacheStats, ContentType};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tempfile::tempdir;
@@ -28,13 +32,17 @@ async fn overwrite_reclaims_predecessor_bounds_versions_at_one() {
     // Fixed clock for deterministic death epochs; a huge sweep interval
     // keeps the real-clock background sweeper out of the test's way.
     let clock = fixed_clock(UNIX_EPOCH + Duration::from_secs(1_800_000_000));
-    let repo = DiskOffloadRepository::with_clock(
-        inner,
+    let store = DiskPayloadStore::new(
         dir.path().to_path_buf(),
+        Duration::from_secs(30 * 24 * 3600),
+        CancellationToken::new(),
+    );
+    let repo = OffloadRepository::with_clock(
+        inner,
+        Arc::new(store),
         RETENTION,
         Duration::from_secs(30 * 24 * 3600),
         MAX_TTL,
-        CancellationToken::new(),
         clock,
     );
 

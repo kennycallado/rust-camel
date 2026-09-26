@@ -1,7 +1,8 @@
 # camel-redis-repo
 
 Redis-backed implementations of the `camel-api` repository traits:
-`RedisIdempotentRepository` and `RedisCacheRepository`. Charter: ADR-0063.
+`RedisIdempotentRepository` and `RedisCacheRepository`, plus the camel-core
+`PayloadStore` cache payload port. Charter: ADR-0063.
 
 ## Scope boundary
 
@@ -9,7 +10,8 @@ This crate is a repository service, not a Component. It owns no URI scheme,
 creates no Endpoints, and registers no Consumer or Producer. The Components
 directory charter and its component-specific lints do not apply here.
 
-The crate implements two `camel-api` ports. Route steps resolve the
+The crate implements two `camel-api` ports and the camel-core
+`PayloadStore` port. Route steps resolve the
 repositories by name from `CamelContext` during Exchange processing.
 `camel-config` registers them at context build time when
 `[default.cache_repo]` or `[default.idempotent_repo]` selects
@@ -90,7 +92,36 @@ metacharacters are rejected as `CamelError::Config` before any SCAN runs.
 forbidden: a shared Redis deployment would lose every other tenant's data.
 The step prefix that `cache_invalidate { key_prefix }` passes to
 `invalidate_prefix` is exchange data, so it passes the same charset guard
-before it enters the SCAN pattern (ADR-0032 trust boundary).
+before it enters the SCAN pattern (ADR-0032 trust boundary). The
+`payload:` segment is reserved for payload blobs (ADR-0065):
+`RedisCacheRepository::set_entry` (`src/cache_repo.rs:238`) rejects cache
+keys starting with it, and
+`RedisCacheRepository::invalidate_prefix` (`src/cache_repo.rs:521`)
+skips scanned payload keys, so a user prefix never crosses into the
+payload sub-namespace.
+
+## Cache payload store
+
+The `struct RedisPayloadStore` (`src/payload_store.rs:30`) implements the
+camel-core `PayloadStore` port for the cache offload decorator (ADR-0065,
+amendment bd rc-6b88t). Payload keys live inside the repository namespace.
+`fn payload_key` (`src/payload_store.rs:59`) builds
+`{prefix}:{repo}:payload:{blob-name}`. The `clear()` prefix-scoped `SCAN`
+plus `UNLINK` therefore reclaims payloads eagerly, and the namespace and
+charset guards apply without a second token shape.
+
+`put` issues `SET key bytes EXAT death_epoch_secs`. The epoch conversion
+is checked; an unusable death epoch fails the put before any command is
+issued, so the decorator's inline fallback applies and no payload is
+stored without a deadline. `read` issues `GET`: a nil reply is `Ok(None)`
+(the decorator reports MISS+WARN), and a transport failure is `Err`.
+`unlink` issues `UNLINK`. Native `EXAT` is the only reclamation bound on
+this tier; there is no sweeper.
+
+`RedisCacheRepository::connect_with_payload_store` (`src/cache_repo.rs:157`)
+builds the index and the payload store over ONE multiplexed connection
+(ADR-0063: one connection per repository). The `with_executor` test seam
+builds both from a `FakeRepoExecutor`.
 
 ## Credential redaction
 
@@ -104,6 +135,10 @@ credential-bearing `Debug` output.
   refreshes, so repository logic is unit-tested without a live Redis
   (`src/executor.rs`).
 - `FakeStaticTopology` feeds a fixed address to connection construction.
+- The cache payload store shares the live gate: the tiering suite in
+  `crates/camel-test/tests/cache_payload_offload.rs` covers the redis-tier
+  roundtrip, overwrite reclaim, and TTL under the `integration-tests`
+  feature.
 - Live coverage runs in `crates/camel-test/tests/redis_repositories_test.rs`
   under the `integration-tests` feature (testcontainers, no `#[ignore]`
   attributes, ADR-0054). The suite covers named-user ACL authentication,
@@ -115,7 +150,8 @@ credential-bearing `Debug` output.
 
 ## Dependency boundary
 
-Direct dependencies: `camel-api` (ports and `CamelError`),
+Direct dependencies: `camel-api` (ports and `CamelError`), `camel-core`
+(the `PayloadStore` port),
 `camel-component-redis` (connection seam: `MultiplexedExecutor`,
 `topology_from_config`), and the `redis` crate as the protocol driver. The
 crate sends raw `redis::Cmd` values; no project-owned adapter trait wraps
@@ -126,7 +162,8 @@ redis-rs, following the same posture as `crates/components/camel-redis`
 
 The repositories implement no `Lifecycle` and no `StepLifecycle`. They hold
 no Consumer task and no background task. Reclamation is server-side through
-`EXAT`; there is no sweep loop. Dropping the repository owns connection
+`EXAT` (index entries and cache payload entries); there is no sweep loop.
+Dropping the repository owns connection
 cleanup. ADR-0028's guidance to implement `StepLifecycle` on a backend client
 does not apply: the multiplexed connection carries no timers or queues, so
 no connection lifecycle exists to manage (ADR-0063 Decision 12).

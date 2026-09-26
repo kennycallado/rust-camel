@@ -8,8 +8,14 @@
 use super::*;
 use crate::cache::MemoryCacheRepository;
 use crate::cache::RedbCacheRepository;
+use crate::cache::offload::{
+    OffloadClock, blake3_128hex, content_fingerprint, default_offload_clock,
+};
+use crate::cache::{DiskPayloadStore, OffloadRepository};
+use camel_api::cache::{CacheEntry, CacheRepository, ContentType};
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 /// Standard test tuning: 168h retention, 1h sweep, 24h fabricated TTL.
@@ -38,7 +44,7 @@ pub(super) fn new_repo(
     inner: Arc<MemoryCacheRepository>,
     dir: PathBuf,
     clock: OffloadClock,
-) -> DiskOffloadRepository {
+) -> OffloadRepository {
     new_repo_dyn(inner, dir, clock)
 }
 
@@ -47,16 +53,9 @@ pub(super) fn new_repo_dyn(
     inner: Arc<dyn CacheRepository>,
     dir: PathBuf,
     clock: OffloadClock,
-) -> DiskOffloadRepository {
-    DiskOffloadRepository::with_clock(
-        inner,
-        dir,
-        RETENTION,
-        SWEEP,
-        MAX_TTL,
-        CancellationToken::new(),
-        clock,
-    )
+) -> OffloadRepository {
+    let store = DiskPayloadStore::new(dir, SWEEP, CancellationToken::new());
+    OffloadRepository::with_clock(inner, Arc::new(store), RETENTION, SWEEP, MAX_TTL, clock)
 }
 
 /// All file names currently in `dir`.
@@ -116,7 +115,7 @@ where
 /// `Interest` process-wide from its FIRST macro execution, evaluated
 /// against the executing thread's dispatcher. Subscriber-less sibling
 /// tests in this binary hit the shared offload `warn!` callsites
-/// (`disk_offload.rs:216/239/260/287/300`) first and cache
+/// (the offload decorator and store modules) first and cache
 /// `Interest::never`, so a later thread-local `set_default` capture
 /// silently drops events. The global registry heals prior poison and
 /// floors future rebuilds at `sometimes` (fix pattern: c3853198; bd
@@ -818,13 +817,17 @@ async fn blob_reclaimed_after_death() {
     // Non-zero cadences only: tokio::time::interval panics on zero, and
     // zero-value validation belongs to CacheRepoConfig, not here.
     let token = CancellationToken::new();
-    let repo = DiskOffloadRepository::with_clock(
-        inner,
+    let store = DiskPayloadStore::new(
         dir.path().to_path_buf(),
+        Duration::from_millis(100),
+        token.clone(),
+    );
+    let repo = OffloadRepository::with_clock(
+        inner,
+        Arc::new(store),
         Duration::ZERO,
         Duration::from_millis(100),
         MAX_TTL,
-        token.clone(),
         clock,
     );
 
@@ -910,5 +913,30 @@ async fn set_never_touches_public_stats() {
     assert_eq!(
         stats.misses, 0,
         "internal predecessor capture must not count as misses"
+    );
+}
+
+// Trait contract (ADR-0065): a non-bare payload name is rejected before
+// any path is joined, so a separator or `..` can never escape the payload
+// dir through a write.
+#[tokio::test]
+async fn store_put_rejects_non_bare_name() {
+    use crate::cache::offload::PayloadStore;
+
+    let dir = tempdir().expect("tempdir");
+    let store = DiskPayloadStore::new(dir.path().to_path_buf(), SWEEP, CancellationToken::new());
+
+    let err = store
+        .put("../escape.blob", b"payload-bytes", UNIX_EPOCH)
+        .await
+        .expect_err("a `..` payload name must fail the put");
+
+    assert!(
+        matches!(err, CamelError::Config(_)),
+        "expected CamelError::Config, got: {err:?}"
+    );
+    assert!(
+        dir_names(dir.path()).is_empty(),
+        "the rejected put must not write into the payload dir"
     );
 }

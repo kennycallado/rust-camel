@@ -21,7 +21,8 @@ use camel_otel::{
     OtelConfig, OtelProtocol as OtelProtocolOtel, OtelSampler as OtelSamplerOtel, OtelService,
 };
 use camel_redis_repo::{
-    RedisCacheRepository, RedisEndpointConfig, RedisIdempotentRepository, TopologyKind,
+    RedisCacheRepository, RedisEndpointConfig, RedisIdempotentRepository, RedisPayloadStore,
+    TopologyKind,
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
@@ -300,6 +301,23 @@ fn redis_repo_component_metrics(
     ComponentMetrics::new(metrics, config.observability.metrics.components_enabled())
 }
 
+/// Resolve the connection parameters shared by every redis cache-repo
+/// construction path (plain connect and payload-store-paired connect):
+/// registration name, endpoint, key prefix, and stale retention. One
+/// resolver so the two paths cannot drift.
+fn redis_cache_repo_params(
+    ccfg: &CacheRepoConfig,
+) -> Result<(String, RedisEndpointConfig, String, Duration), CamelError> {
+    let endpoint = redis_endpoint_from_cache_repo(ccfg)?;
+    let stale_retention = parse_stale_retention(ccfg)?;
+    let key_prefix = ccfg
+        .key_prefix
+        .as_deref()
+        .unwrap_or("camel:cache")
+        .to_string();
+    Ok((cache_repo_name(ccfg), endpoint, key_prefix, stale_retention))
+}
+
 /// Build the redis-backed cache repository from a validated `CacheRepoConfig`.
 ///
 /// Mirrors the redb path: stale retention defaults to 7 days when unset and a
@@ -308,23 +326,15 @@ async fn build_redis_cache_repo(
     ccfg: &CacheRepoConfig,
     metrics: ComponentMetrics,
 ) -> Result<RedisCacheRepository, CamelError> {
-    let endpoint = redis_endpoint_from_cache_repo(ccfg)?;
-    let stale_retention = parse_stale_retention(ccfg)?;
-    let key_prefix = ccfg.key_prefix.as_deref().unwrap_or("camel:cache");
-    RedisCacheRepository::connect(
-        &cache_repo_name(ccfg),
-        &endpoint,
-        key_prefix,
-        stale_retention,
-        metrics,
-    )
-    .await
-    .map_err(|e| CamelError::Config(format!("cache_repo: {e}")))
+    let (name, endpoint, key_prefix, stale_retention) = redis_cache_repo_params(ccfg)?;
+    RedisCacheRepository::connect(&name, &endpoint, &key_prefix, stale_retention, metrics)
+        .await
+        .map_err(|e| CamelError::Config(format!("cache_repo: {e}")))
 }
 
 /// Parse `cache_repo.stale_retention` with the 7-day default. Shared by
-/// the redb builder, the redis builder, and the disk-offload wrapper so
-/// the decorator and its inner backend can never disagree on the
+/// the redb builder, the redis builder, and the payload-offload wrapper
+/// so the decorator and its inner backend can never disagree on the
 /// retention window.
 fn parse_stale_retention(ccfg: &CacheRepoConfig) -> Result<Duration, CamelError> {
     match ccfg.stale_retention.as_deref() {
@@ -337,47 +347,78 @@ fn parse_stale_retention(ccfg: &CacheRepoConfig) -> Result<Duration, CamelError>
     }
 }
 
-/// Wrap a built cache backend with [`DiskOffloadRepository`] when the
-/// validated config selects `payload = "disk"`; otherwise return the bare
-/// backend unchanged.
+/// Wrap a built cache backend with an
+/// [`OffloadRepository`](camel_core::cache::OffloadRepository) when the
+/// validated config selects an offload tier — `payload = "disk"` over a
+/// [`DiskPayloadStore`](camel_core::cache::DiskPayloadStore), `payload =
+/// "redis"` over the caller-supplied [`RedisPayloadStore`] — otherwise
+/// return the bare backend unchanged.
 ///
 /// The decorator is registered under the same name the bare backend used
 /// ("persistent"/"redis"), so route references are payload-mode agnostic.
-/// The one startup WARN names the resolved payload directory: consumers
-/// that do not share it cannot read offloaded entries.
-fn wrap_disk_offload(
+/// Per-tier startup WARN policy: the disk tier warns once, naming the
+/// resolved payload directory (consumers that do not share it cannot read
+/// offloaded entries); the redis tier shares the index's keyspace and
+/// connection by construction, so there is no resource a consumer could
+/// fail to share and no WARN is emitted. `redis_store` is required when
+/// the config selects the redis tier; its absence is a config error.
+fn wrap_payload_offload(
     ccfg: &CacheRepoConfig,
     backend: Arc<dyn CacheRepository>,
     shutdown_token: CancellationToken,
+    mut redis_store: Option<RedisPayloadStore>,
 ) -> Result<Arc<dyn CacheRepository>, CamelError> {
-    if ccfg.payload != Some(PayloadMode::Disk) {
-        return Ok(backend);
+    // Exhaustive by contract: PayloadMode is a closed 3-variant set.
+    match ccfg.payload {
+        None | Some(PayloadMode::Inline) => Ok(backend),
+        Some(PayloadMode::Disk) => {
+            // validate() guarantees a non-empty dir for this mode.
+            let dir: std::path::PathBuf = ccfg
+                .payload_dir
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    CamelError::Config(
+                        "cache_repo.payload_dir must be set when payload = \"disk\"".to_string(),
+                    )
+                })?
+                .into();
+            let stale_retention = parse_stale_retention(ccfg)?;
+            let (sweep_interval, payload_max_ttl) = ccfg.payload_durations();
+            warn!(
+                "cache_repo.payload = \"disk\": offloaded entries under '{}' are unreadable by consumers that do not share this directory",
+                dir.display()
+            );
+            let store = Arc::new(camel_core::cache::DiskPayloadStore::new(
+                dir,
+                sweep_interval,
+                shutdown_token,
+            ));
+            Ok(Arc::new(camel_core::cache::OffloadRepository::new(
+                backend,
+                store,
+                stale_retention,
+                sweep_interval,
+                payload_max_ttl,
+            )))
+        }
+        Some(PayloadMode::Redis) => {
+            let store = Arc::new(redis_store.take().ok_or_else(|| {
+                CamelError::Config(
+                    "cache_repo.payload = \"redis\" requires the redis payload store".into(),
+                )
+            })?);
+            let stale_retention = parse_stale_retention(ccfg)?;
+            let (sweep_interval, payload_max_ttl) = ccfg.payload_durations();
+            Ok(Arc::new(camel_core::cache::OffloadRepository::new(
+                backend,
+                store,
+                stale_retention,
+                sweep_interval,
+                payload_max_ttl,
+            )))
+        }
     }
-    // validate() guarantees a non-empty dir for this mode.
-    let dir: std::path::PathBuf = ccfg
-        .payload_dir
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            CamelError::Config(
-                "cache_repo.payload_dir must be set when payload = \"disk\"".to_string(),
-            )
-        })?
-        .into();
-    let stale_retention = parse_stale_retention(ccfg)?;
-    let (sweep_interval, payload_max_ttl) = ccfg.payload_durations();
-    warn!(
-        "cache_repo.payload = \"disk\": offloaded entries under '{}' are unreadable by consumers that do not share this directory",
-        dir.display()
-    );
-    Ok(Arc::new(camel_core::cache::DiskOffloadRepository::new(
-        backend,
-        dir,
-        stale_retention,
-        sweep_interval,
-        payload_max_ttl,
-        shutdown_token,
-    )))
 }
 
 /// Build the redis-backed idempotent repository from a validated
@@ -561,26 +602,51 @@ impl CamelConfig {
         // a RedisCacheRepository under the name "redis". When set with
         // `backend = "memory"` and a custom `max_capacity`, replace the
         // default memory repo. With `payload = "disk"`, the redb/redis repo
-        // is wrapped in a DiskOffloadRepository under the same name; the
-        // memory arm never wraps (validation rejects disk on memory).
+        // is wrapped in an OffloadRepository over a disk payload store
+        // under the same name; the memory arm never wraps (validation
+        // rejects disk on memory).
         if let Some(ref ccfg) = config.cache_repo {
             match ccfg.backend.as_str() {
                 "redb" => {
                     let name = cache_repo_name(ccfg);
                     let bare = build_persistent_cache_repo(ccfg, ctx.shutdown_token()).await?;
-                    let repo = wrap_disk_offload(ccfg, Arc::new(bare), ctx.shutdown_token())?;
+                    // `None` is safe: validate() rejects payload = "redis"
+                    // on the redb backend, so the redis tier is unreachable.
+                    let repo =
+                        wrap_payload_offload(ccfg, Arc::new(bare), ctx.shutdown_token(), None)?;
                     ctx.register_cache_repository(&name, repo).map_err(|e| {
                         CamelError::Config(format!("register cache repository '{name}': {e:?}"))
                     })?;
                 }
                 "redis" => {
                     let name = cache_repo_name(ccfg);
-                    let bare = build_redis_cache_repo(
+                    let metrics = redis_repo_component_metrics(ctx.metrics(), config);
+                    let (bare, redis_store) = if ccfg.payload == Some(PayloadMode::Redis) {
+                        // One multiplexed connection builds both the
+                        // index and its payload store (ADR-0063), from
+                        // the same endpoint/prefix/name/retention the
+                        // plain-connect path resolves.
+                        let (repo_name, endpoint, key_prefix, stale_retention) =
+                            redis_cache_repo_params(ccfg)?;
+                        let (repo, store) = RedisCacheRepository::connect_with_payload_store(
+                            &repo_name,
+                            &endpoint,
+                            &key_prefix,
+                            stale_retention,
+                            metrics,
+                        )
+                        .await
+                        .map_err(|e| CamelError::Config(format!("cache_repo: {e}")))?;
+                        (repo, Some(store))
+                    } else {
+                        (build_redis_cache_repo(ccfg, metrics).await?, None)
+                    };
+                    let repo = wrap_payload_offload(
                         ccfg,
-                        redis_repo_component_metrics(ctx.metrics(), config),
-                    )
-                    .await?;
-                    let repo = wrap_disk_offload(ccfg, Arc::new(bare), ctx.shutdown_token())?;
+                        Arc::new(bare),
+                        ctx.shutdown_token(),
+                        redis_store,
+                    )?;
                     ctx.register_cache_repository(&name, repo).map_err(|e| {
                         CamelError::Config(format!(
                             "cache_repo: register '{name}' cache repository: {e:?}"
@@ -2423,5 +2489,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The redis offload tier is fail-closed: `payload = "redis"` without a
+    /// payload store must be a config error, never a silently un-offloaded
+    /// backend. (Production wiring always builds the store via
+    /// `connect_with_payload_store`; `None` only reaches the wrapper from a
+    /// backend whose validation forbids the redis tier.)
+    #[test]
+    fn wrap_payload_offload_redis_tier_without_store_is_config_error() {
+        let ccfg = CacheRepoConfig {
+            backend: "redis".to_string(),
+            payload: Some(PayloadMode::Redis),
+            ..Default::default()
+        };
+        let backend: Arc<dyn CacheRepository> = Arc::new(
+            camel_core::cache::MemoryCacheRepository::new("wrap-redis-tier", 16),
+        );
+
+        let err = wrap_payload_offload(&ccfg, backend, CancellationToken::new(), None)
+            .expect_err("redis tier without a payload store must fail");
+        assert!(
+            err.to_string().contains("requires the redis payload store"),
+            "error must name the missing redis payload store: {err}"
+        );
+    }
+
+    /// No offload tier (`payload` absent) selects the bare backend: the
+    /// wrapper must return the identical `Arc`, not a decoration or a copy.
+    #[test]
+    fn wrap_payload_offload_inline_returns_bare_backend() {
+        let ccfg = CacheRepoConfig {
+            backend: "redis".to_string(),
+            payload: None,
+            ..Default::default()
+        };
+        let backend: Arc<dyn CacheRepository> = Arc::new(
+            camel_core::cache::MemoryCacheRepository::new("wrap-inline", 16),
+        );
+
+        let out = wrap_payload_offload(&ccfg, Arc::clone(&backend), CancellationToken::new(), None)
+            .expect("payload absent must pass the bare backend through");
+        assert_eq!(
+            Arc::as_ptr(&out) as *const (),
+            Arc::as_ptr(&backend) as *const (),
+            "no offload tier must return the identical backend Arc"
+        );
     }
 }

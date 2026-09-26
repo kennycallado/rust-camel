@@ -1,155 +1,89 @@
-//! Disk-payload offload decorator for [`CacheRepository`] backends.
+//! Disk payload store for the [`crate::cache::offload::OffloadRepository`]
+//! decorator.
 //!
-//! [`DiskOffloadRepository`] wraps any backend (the "index") and moves entry
-//! payloads to content-addressed blob files under a dedicated directory,
-//! storing only a relative file name in the index row. Index rows stay
-//! small; the payload is re-injected on `get`/`peek_stale`.
+//! [`DiskPayloadStore`] holds content-addressed payload blob files under a
+//! dedicated directory, addressed by the blob names the decorator
+//! computes. A background sweeper reclaims dead blobs by their
+//! name-encoded death epoch and stale `.tmp` leftovers by age, exiting
+//! when the context-owned shutdown token fires.
 //!
 //! # Blob lifecycle
 //!
 //! Blob names are `{blake3-128hex(key)}.{death_epoch_secs}.{blake3-128hex(
-//! bytes || content_type-discriminant)}.blob`. The death epoch —
-//! `expires_at + stale_retention + sweep_interval` — is encoded in the name
-//! so the background sweeper can reclaim dead blobs by file name alone,
+//! bytes || content_type-discriminant)}.blob`. The death epoch is encoded
+//! in the name so the sweeper can reclaim dead blobs by file name alone,
 //! without consulting the index.
 //!
 //! # Failure policy
 //!
-//! - A blob write that fails falls back to storing the entry inline in the
-//!   index (WARN + `inner.set` with the original entry): the decorator never
-//!   converts its own file-write failure into a cache-write `Err`.
-//! - A vanished or corrupt blob row degrades to a miss (`Ok(None)` + WARN).
-//! - A blob that exists but cannot be read (e.g. `PermissionDenied`)
-//!   surfaces as `Err` per ADR-0023 Contract C1.
+//! - Writes are tmp-then-rename so a partially written blob is never
+//!   visible under its final name; write failures surface to the
+//!   decorator, whose inline fallback applies.
+//! - A vanished blob reads as `Ok(None)`; a blob that exists but cannot
+//!   be read (e.g. `PermissionDenied`) surfaces as `Err` per ADR-0023
+//!   Contract C1.
+//! - `unlink` counts an already-absent blob as success; `clear` never
+//!   fails — per-blob unlink failures WARN and the scan continues.
 
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use camel_api::CamelError;
-use camel_api::cache::CacheEntry;
-use camel_api::cache::CacheRepository;
-use camel_api::cache::CacheStats;
-use camel_api::cache::ContentType;
 use parking_lot::Mutex;
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-/// Injectable wall clock for death-epoch math and deterministic tests.
-///
-/// Mirrors `ClockFn` in `camel-redis-repo::cache_repo`.
-pub type OffloadClock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
-
-/// The default production clock: [`SystemTime::now`].
-pub fn default_offload_clock() -> OffloadClock {
-    Arc::new(SystemTime::now)
-}
+use crate::cache::offload::{PayloadStore, hasher_128hex, parse_death_epoch, sanitize_blob_name};
 
 /// Max attempts to open a unique tmp file before giving up on a name.
 const TMP_NAME_ATTEMPTS: u32 = 8;
 
-/// [`CacheRepository`] decorator that offloads entry payloads to disk.
+/// [`PayloadStore`] that keeps offloaded payload blobs as files under
+/// `dir`, with a background death-epoch sweeper.
 ///
-/// Wraps any index backend; see the [module docs](self) for the blob
-/// lifecycle and failure policy. `stale_retention`, `sweep_interval`, and
-/// `payload_max_ttl` must be non-zero (the payload intervals at least one
-/// second — the death epoch truncates to whole seconds) — enforced by
-/// `CacheRepoConfig` validation, not here.
-pub struct DiskOffloadRepository {
-    /// Decorated index backend (memory, redb, redis, …).
-    inner: Arc<dyn CacheRepository>,
+/// The sweeper is spawned on construction and aborted on [`Drop`]; its
+/// shutdown token is owned by the sweeper task and never cancelled by
+/// the store. All sweeping runs on the real clock — it must observe
+/// actual file ages (the decorator's injectable test clock never
+/// reaches the store).
+pub struct DiskPayloadStore {
     /// Directory holding offloaded payload blobs.
     dir: PathBuf,
-    /// How long an expired entry stays peekable before reclamation.
-    stale_retention: Duration,
-    /// Background sweep cadence; its length is the death-epoch grace.
-    sweep_interval: Duration,
-    /// Fabricated TTL for entries stored without an explicit one.
-    payload_max_ttl: Duration,
-    /// Wall clock for death-epoch math.
-    clock: OffloadClock,
     /// Background payload sweeper; aborted on Drop.
     sweep_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
-impl DiskOffloadRepository {
-    /// Wrap `inner` with disk payload offload into `dir` (production clock).
+impl DiskPayloadStore {
+    /// Create a store writing blobs into `dir` (production clock).
     ///
     /// The `shutdown_token` stops the background payload sweeper; it is
-    /// owned by the sweeper task and never cancelled by the decorator.
-    pub fn new(
-        inner: Arc<dyn CacheRepository>,
-        dir: PathBuf,
-        stale_retention: Duration,
-        sweep_interval: Duration,
-        payload_max_ttl: Duration,
-        shutdown_token: CancellationToken,
-    ) -> Self {
-        Self::with_clock(
-            inner,
-            dir,
-            stale_retention,
-            sweep_interval,
-            payload_max_ttl,
-            shutdown_token,
-            default_offload_clock(),
-        )
-    }
-
-    /// Test seam: [`Self::new`] with an injected [`OffloadClock`].
-    ///
-    /// The injected clock drives death-epoch math only; the spawned
-    /// sweeper always sweeps on the real clock.
-    pub fn with_clock(
-        inner: Arc<dyn CacheRepository>,
-        dir: PathBuf,
-        stale_retention: Duration,
-        sweep_interval: Duration,
-        payload_max_ttl: Duration,
-        shutdown_token: CancellationToken,
-        clock: OffloadClock,
-    ) -> Self {
-        // The sweeper must observe real file ages, so it never uses the
-        // injected decorator clock. The token moves into the task: the
-        // decorator only aborts the task on Drop, never cancels the
-        // context-owned token.
+    /// owned by the sweeper task and never cancelled by the store.
+    pub fn new(dir: PathBuf, sweep_interval: Duration, shutdown_token: CancellationToken) -> Self {
         let sweep_handle = spawn_sweeper(dir.clone(), sweep_interval, shutdown_token);
         Self {
-            inner,
             dir,
-            stale_retention,
-            sweep_interval,
-            payload_max_ttl,
-            clock,
             sweep_handle: Mutex::new(Some(sweep_handle)),
         }
     }
 
-    /// Write `entry`'s payload to its content-addressed blob file and
-    /// return the final file name.
+    /// Write `bytes` to their content-addressed blob file `dest_name`.
     ///
     /// Tmp-then-rename so a partially written blob is never visible under
     /// its final name. All I/O is async `tokio::fs` (the house file-I/O
     /// style, matching `camel-file`'s `atomic_write`).
-    async fn write_blob(
-        &self,
-        key: &str,
-        entry: &CacheEntry,
-        death_epoch: u64,
-    ) -> std::io::Result<String> {
+    async fn write_blob(&self, dest_name: &str, bytes: &[u8]) -> std::io::Result<()> {
         tokio::fs::create_dir_all(&self.dir).await?;
-        let dest_name = blob_filename(key, death_epoch, entry);
-        let dest_path = self.dir.join(&dest_name);
-        let (mut file, tmp_path) = self.open_tmp_exclusive(key, &dest_name).await?;
+        let dest_path = self.dir.join(dest_name);
+        let (mut file, tmp_path) = self.open_tmp_exclusive(dest_name).await?;
 
         // Best-effort tmp cleanup on failure: a leaked `.tmp` would never
         // be reclaimed by the epoch sweeper.
-        if let Err(e) = file.write_all(&entry.bytes).await {
+        if let Err(e) = file.write_all(bytes).await {
             let _ = tokio::fs::remove_file(&tmp_path).await;
             return Err(e);
         }
@@ -162,27 +96,26 @@ impl DiskOffloadRepository {
             return Err(e);
         }
         self.fsync_dir_best_effort().await;
-        Ok(dest_name)
+        Ok(())
     }
 
     /// Open a unique exclusive tmp file next to `dest_name`, retrying name
     /// collisions with a fresh nonce (bounded by [`TMP_NAME_ATTEMPTS`]).
     ///
-    /// The nonce hashes `key || clock_nanos || attempt_counter`, so retries
-    /// still produce fresh names under a frozen test clock.
+    /// The nonce hashes `dest_name || clock_nanos || attempt_counter`, so
+    /// retries still produce fresh names under a frozen clock.
     async fn open_tmp_exclusive(
         &self,
-        key: &str,
         dest_name: &str,
     ) -> std::io::Result<(tokio::fs::File, PathBuf)> {
-        let clock_nanos = (self.clock)()
+        let clock_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let mut last_collision: Option<std::io::Error> = None;
         for attempt in 0..TMP_NAME_ATTEMPTS {
             let mut hasher = blake3::Hasher::new();
-            hasher.update(key.as_bytes());
+            hasher.update(dest_name.as_bytes());
             hasher.update(&clock_nanos.to_le_bytes());
             hasher.update(&attempt.to_le_bytes());
             let nonce = hasher_128hex(hasher);
@@ -221,64 +154,13 @@ impl DiskOffloadRepository {
         }
     }
 
-    /// Re-inject the offloaded payload into an index row (shared by `get`
-    /// and `peek_stale`).
-    ///
-    /// Rows without `payload_path` pass through untouched (legacy/inline).
-    /// A corrupt path or a vanished blob degrades to a miss; a blob that
-    /// exists but cannot be read surfaces as `Err` (Contract C1).
-    async fn hydrate(
-        &self,
-        key: &str,
-        mut entry: CacheEntry,
-    ) -> Result<Option<CacheEntry>, CamelError> {
-        let Some(raw_path) = entry.payload_path.clone() else {
-            return Ok(Some(entry));
-        };
-        let Some(name) = sanitize_blob_name(&raw_path) else {
-            warn!(
-                key = key,
-                backend = self.inner.name(),
-                payload_path = %raw_path,
-                "corrupt cache row: payload_path must be a bare file name; treating as miss"
-            );
-            return Ok(None);
-        };
-        let blob_path = self.dir.join(name);
-        match tokio::fs::read(&blob_path).await {
-            Ok(bytes) => {
-                entry.bytes = bytes;
-                entry.payload_path = None;
-                Ok(Some(entry))
-            }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                warn!(
-                    key = key,
-                    backend = self.inner.name(),
-                    blob = %blob_path.display(),
-                    "cache payload blob gone; treating as miss"
-                );
-                Ok(None)
-            }
-            Err(e) => Err(CamelError::Io(format!(
-                "cache payload blob read '{}': {e}",
-                blob_path.display()
-            ))),
-        }
-    }
-
     /// Best-effort unlink of every entry of the payload dir.
     ///
     /// Per-file `NotFound` is success (a concurrent sweeper or replica may
     /// have reclaimed the blob already); any other per-file error WARNs
     /// and iteration continues. [`Self::clear`] must never surface its
     /// own unlink failures as `Err`.
-    async fn unlink_payload_dir_best_effort(&self) {
+    async fn clear_payload_dir_best_effort(&self) {
         let mut read_dir = match tokio::fs::read_dir(&self.dir).await {
             Ok(read_dir) => read_dir,
             // No dir = nothing was ever offloaded; nothing to unlink.
@@ -321,277 +203,103 @@ impl DiskOffloadRepository {
             }
         }
     }
-
-    /// Best-effort eager unlink of a key's predecessor blob after a
-    /// successful overwrite (ADR-0065, amendment "bd rc-uteoa").
-    ///
-    /// Row-guided, no directory scan: only the name the pre-swap index
-    /// row carried is eligible, and only when it passes
-    /// [`sanitize_blob_name`], carries a parseable death epoch, and starts
-    /// with the current key's blake3-128 filename prefix — a corrupt row
-    /// naming another key's blob (or a foreign file) is never unlinked.
-    /// `keep_name` is the fresh blob's name on the successful-blob path:
-    /// a same-second identical rewrite reuses the name, and only the
-    /// fresh file owns it, so an equal name skips the reclaim. On the
-    /// inline-fallback path no fresh file owns any name; callers pass
-    /// `None` to disable the equal-name guard. `NotFound` counts as
-    /// reclaimed by someone else; any other unlink failure WARNs once and
-    /// leaves the blob to the sweeper at its death epoch. The function
-    /// never returns `Err`: the reclaim adds no failure mode to `set`.
-    async fn reclaim_predecessor(
-        &self,
-        key: &str,
-        old_name: Option<&str>,
-        keep_name: Option<&str>,
-    ) {
-        let Some(old_name) = old_name else {
-            return;
-        };
-        if keep_name == Some(old_name) {
-            return;
-        }
-        let key_prefix = format!("{}.", blake3_128hex(key.as_bytes()));
-        let eligible = sanitize_blob_name(old_name).is_some()
-            && parse_death_epoch(old_name).is_some()
-            && old_name.starts_with(&key_prefix);
-        if !eligible {
-            return;
-        }
-        match tokio::fs::remove_file(self.dir.join(old_name)).await {
-            Ok(()) => {}
-            // NotFound = a concurrent sweeper or replica won the race.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                warn!(
-                    key = key,
-                    backend = self.inner.name(),
-                    dir = %self.dir.display(),
-                    error = %e,
-                    "eager reclaim of predecessor blob failed; sweeper reclaims it at its death epoch"
-                );
-            }
-        }
-    }
 }
 
 #[async_trait]
-impl CacheRepository for DiskOffloadRepository {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    async fn get(&self, key: &str) -> Result<Option<CacheEntry>, CamelError> {
-        match self.inner.get(key).await? {
-            Some(entry) => self.hydrate(key, entry).await,
-            None => Ok(None),
-        }
-    }
-
-    async fn set(
+impl PayloadStore for DiskPayloadStore {
+    async fn put(
         &self,
-        key: &str,
-        mut entry: CacheEntry,
-        ttl: Option<Duration>,
+        name: &str,
+        bytes: &[u8],
+        _death_epoch: SystemTime,
     ) -> Result<(), CamelError> {
-        let effective_ttl = ttl.unwrap_or(self.payload_max_ttl);
-        // Capture the predecessor's blob name before the index swap so a
-        // successful overwrite can reclaim it eagerly (ADR-0065 amendment,
-        // "bd rc-uteoa"). The SILENT maintenance read keeps the capture off
-        // every counted path — a phantom miss on first write or a phantom
-        // hit on overwrite would distort /ops/cache/stats and
-        // camel_cache_{hits,misses}_total. A failed read only skips the
-        // reclaim — the write proceeds unchanged in every case.
-        let old_name = match self.inner.peek_row_silent(key).await {
-            Ok(Some(row)) => row.payload_path,
-            Ok(None) => None,
-            Err(e) => {
-                warn!(
-                    key = key,
-                    backend = self.inner.name(),
-                    error = %e,
-                    "pre-swap row read failed; skipping eager reclaim"
-                );
-                None
-            }
+        // Trait contract (ADR-0065): a payload name is a bare single path
+        // component. The same sanitize guard `read`/`unlink` apply keeps a
+        // separator or `..` from ever escaping the payload dir through a
+        // write.
+        let name = sanitize_blob_name(name).ok_or_else(|| {
+            CamelError::Config(format!(
+                "cache payload name must be a bare file name, got '{name}'"
+            ))
+        })?;
+        // The death epoch is already encoded in the blob name; the
+        // filename-epoch sweeper owns reclamation, so the deadline needs
+        // no separate storage on the disk tier.
+        self.write_blob(name, bytes).await.map_err(|e| {
+            CamelError::Io(format!(
+                "cache blob write '{}': {e}",
+                self.dir.join(name).display()
+            ))
+        })
+    }
+
+    async fn read(&self, name: &str) -> Result<Option<Vec<u8>>, CamelError> {
+        let Some(name) = sanitize_blob_name(name) else {
+            return Err(CamelError::Io(format!(
+                "cache payload name must be a bare file name, got '{name}'"
+            )));
         };
-        // Death epoch = expiry + retention + sweep grace, saturating in
-        // Duration space (a pre-epoch clock clamps to the Unix epoch),
-        // truncated to whole seconds for the blob filename.
-        let death_epoch = (self.clock)()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .saturating_add(effective_ttl)
-            .saturating_add(self.stale_retention)
-            .saturating_add(self.sweep_interval)
-            .as_secs();
-
-        match self.write_blob(key, &entry, death_epoch).await {
-            Ok(dest_name) => {
-                entry.bytes = Vec::new();
-                // Clone: `dest_name` is still needed for the equal-name
-                // guard after `entry` (carrying the same name) moves into
-                // the inner set.
-                entry.payload_path = Some(dest_name.clone());
-                // The ttl MUST be Some: every inner overwrites
-                // `expires_at` from the ttl argument, so None would wipe
-                // the fabricated expiry. The inner recomputes `expires_at`
-                // from its own clock; the sub-second skew is absorbed by
-                // the death-epoch grace.
-                let result = self.inner.set(key, entry, Some(effective_ttl)).await;
-                // Reclaim only after the inner accepted the swap: on an
-                // error the surviving row may still reference the
-                // predecessor blob.
-                if result.is_ok() {
-                    self.reclaim_predecessor(key, old_name.as_deref(), Some(&dest_name))
-                        .await;
-                }
-                result
+        let blob_path = self.dir.join(name);
+        match tokio::fs::read(&blob_path).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(None)
             }
-            Err(e) => {
-                warn!(
-                    key = key,
-                    backend = self.inner.name(),
-                    dir = %self.dir.display(),
-                    error = %e,
-                    "cache blob write failed; storing entry inline instead"
-                );
-                // Inline fallback with the original, unstripped entry: the
-                // decorator never converts its own file-write failure into
-                // a cache-write error. The CAPPED ttl keeps the spec's
-                // no-TTL semantic (payload_max_ttl) even for degraded rows
-                // — an uncapped inline row would never be reclaimed. The
-                // new row no longer references the predecessor, so the
-                // reclaim runs with the equal-name guard disabled (the
-                // failed write left no fresh file owning that name).
-                let result = self.inner.set(key, entry, Some(effective_ttl)).await;
-                if result.is_ok() {
-                    self.reclaim_predecessor(key, old_name.as_deref(), None)
-                        .await;
-                }
-                result
-            }
+            Err(e) => Err(CamelError::Io(format!(
+                "cache payload blob read '{}': {e}",
+                blob_path.display()
+            ))),
         }
     }
 
-    async fn peek_stale(&self, key: &str) -> Result<Option<CacheEntry>, CamelError> {
-        match self.inner.peek_stale(key).await? {
-            Some(entry) => self.hydrate(key, entry).await,
-            None => Ok(None),
+    async fn unlink(&self, name: &str) -> Result<(), CamelError> {
+        let Some(name) = sanitize_blob_name(name) else {
+            return Err(CamelError::Io(format!(
+                "cache payload name must be a bare file name, got '{name}'"
+            )));
+        };
+        let blob_path = self.dir.join(name);
+        match tokio::fs::remove_file(&blob_path).await {
+            Ok(()) => Ok(()),
+            // NotFound = a concurrent sweeper or replica won the race.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(CamelError::Io(format!(
+                "cache payload blob unlink '{}': {e}",
+                blob_path.display()
+            ))),
         }
-    }
-
-    /// Delegate-only: the index row is dropped here; the payload blob
-    /// becomes an orphan reclaimed asynchronously at its
-    /// filename-encoded death epoch.
-    async fn invalidate(&self, key: &str) -> Result<(), CamelError> {
-        self.inner.invalidate(key).await
     }
 
     /// Reclaim payload space now: best-effort unlink of every entry of
-    /// the payload dir, then delegate to the index. Unlink failures
-    /// never turn `clear` into `Err` — each failure WARNs and the rest
-    /// of the dir is still attempted.
-    async fn clear(&self) -> Result<(), CamelError> {
-        self.unlink_payload_dir_best_effort().await;
-        self.inner.clear().await
-    }
-
-    /// Delegate-only: the returned count is index-scoped; payload blobs
-    /// are reclaimed asynchronously at their filename-encoded death epoch.
-    async fn invalidate_prefix(&self, prefix: &str) -> Result<u64, CamelError> {
-        self.inner.invalidate_prefix(prefix).await
-    }
-
-    async fn stats(&self) -> CacheStats {
-        self.inner.stats().await
+    /// the payload dir. Unlink failures never turn `clear` into `Err` —
+    /// each failure WARNs and the rest of the dir is still attempted.
+    async fn clear(&self) {
+        self.clear_payload_dir_best_effort().await;
     }
 }
 
-impl std::fmt::Debug for DiskOffloadRepository {
+impl std::fmt::Debug for DiskPayloadStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DiskOffloadRepository")
-            .field("inner", &self.inner)
+        f.debug_struct("DiskPayloadStore")
             .field("dir", &self.dir)
-            .field("stale_retention", &self.stale_retention)
-            .field("sweep_interval", &self.sweep_interval)
-            .field("payload_max_ttl", &self.payload_max_ttl)
             .field("sweep_attached", &self.sweep_handle.lock().is_some())
             .finish()
     }
 }
 
-impl Drop for DiskOffloadRepository {
+impl Drop for DiskPayloadStore {
     fn drop(&mut self) {
         // Abort ONLY the sweep task. Never cancel the context-owned token —
-        // that would shut down the entire context when one repo drops.
+        // that would shut down the entire context when one store drops.
         if let Some(handle) = self.sweep_handle.lock().take() {
             handle.abort();
         }
     }
-}
-
-// ── Filename helpers ─────────────────────────────────────────────────────────
-
-/// One-byte discriminant of the closed [`ContentType`] enum, mixed into the
-/// content fingerprint for domain separation (identical bytes under
-/// different content types produce different fingerprints). Exhaustive
-/// match — the enum is closed by contract (ADR-0049 §Exceptions).
-fn content_type_discriminant(content_type: ContentType) -> u8 {
-    match content_type {
-        ContentType::Bytes => 0,
-        ContentType::Text => 1,
-        ContentType::Json => 2,
-        ContentType::Xml => 3,
-    }
-}
-
-/// Finalize a hasher to its first 128 bits as 32 lowercase hex chars.
-fn hasher_128hex(hasher: blake3::Hasher) -> String {
-    let hex = hasher.finalize().to_hex().to_string();
-    hex[..32].to_string()
-}
-
-/// blake3-128 hex of a single byte slice.
-fn blake3_128hex(data: &[u8]) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(data);
-    hasher_128hex(hasher)
-}
-
-/// 128-bit content fingerprint: `blake3(bytes || content_type discriminant)`.
-fn content_fingerprint(entry: &CacheEntry) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&entry.bytes);
-    hasher.update(&[content_type_discriminant(entry.content_type)]);
-    hasher_128hex(hasher)
-}
-
-/// Blob file name: `{key-hash}.{death_epoch}.{fingerprint}.blob`.
-fn blob_filename(key: &str, death_epoch: u64, entry: &CacheEntry) -> String {
-    format!(
-        "{}.{}.{}.blob",
-        blake3_128hex(key.as_bytes()),
-        death_epoch,
-        content_fingerprint(entry)
-    )
-}
-
-/// Death epoch (second dot-separated component) of a blob file name, if it
-/// parses as `u64`.
-fn parse_death_epoch(file_name: &str) -> Option<u64> {
-    file_name.split('.').nth(1)?.parse().ok()
-}
-
-/// Accept only a bare file name: non-empty, no `/`, no `\`, no `..`.
-///
-/// Absolute paths necessarily contain a separator on both Unix and Windows,
-/// so the separator checks subsume the absolute-path rejection. Everything
-/// else is treated as a corrupt row.
-fn sanitize_blob_name(path: &str) -> Option<&str> {
-    if path.is_empty() || path.contains('/') || path.contains('\\') || path.contains("..") {
-        return None;
-    }
-    Some(path)
 }
 
 // ── Payload sweeper ─────────────────────────────────────────────────────────

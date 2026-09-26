@@ -1802,6 +1802,97 @@ payload_dir = "${env:RUST_CAMEL_TEST_CACHE_PAYLOAD_DIR}"
         .expect("resolved payload_dir with payload = \"disk\" must pass validation");
 }
 
+// ── Redis payload tier ────────────────────────────────────────────────────
+
+#[test]
+fn cache_payload_redis_accepted_on_redis_backend() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload = "redis"
+"#,
+    );
+    cfg.validate()
+        .expect("payload = \"redis\" on the redis backend must pass validation");
+
+    // The duration knobs are tunable on the redis tier too.
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload = "redis"
+payload_sweep_interval = "1h"
+payload_max_ttl = "720h"
+"#,
+    );
+    cfg.validate()
+        .expect("payload = \"redis\" with payload durations must pass validation");
+}
+
+#[test]
+fn cache_payload_redis_rejected_on_redb_backend() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redb"
+payload = "redis"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("requires backend = \"redis\""),
+        "validation error must state payload = \"redis\" requires backend = \"redis\", got: {msg}"
+    );
+    assert!(
+        msg.contains("redb"),
+        "validation error must name the actual backend, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_payload_redis_rejected_on_memory_backend() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "memory"
+payload = "redis"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("cache_repo.payload"),
+        "validation error must name cache_repo.payload, got: {msg}"
+    );
+}
+
+#[test]
+fn cache_payload_redis_with_payload_dir_rejected() {
+    let cfg = make_cfg(
+        r#"
+[cache_repo]
+backend = "redis"
+url = "redis://127.0.0.1:6379"
+payload = "redis"
+payload_dir = "/tmp/blobs"
+"#,
+    );
+
+    let msg = cfg.validate().unwrap_err().to_string();
+    assert!(
+        msg.contains("inconsistent with payload = \"redis\""),
+        "validation error must state payload_dir is inconsistent with payload = \"redis\", got: {msg}"
+    );
+    assert!(
+        msg.contains("payload_dir"),
+        "validation error must name payload_dir, got: {msg}"
+    );
+}
+
 // ── Disk payload offload wiring ───────────────────────────────────────────
 
 /// Records the `message` field of each event into a shared buffer.

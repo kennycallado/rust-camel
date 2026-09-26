@@ -10,7 +10,9 @@ use crate::connection;
 use crate::executor::RepoCommandExecutor;
 use crate::executor::execute_retry_safe;
 use crate::executor::scan_unlink_pattern;
+use crate::executor::scan_unlink_pattern_where;
 use crate::namespaced;
+use crate::payload_store::RedisPayloadStore;
 use crate::validate_namespace_token;
 use camel_api::CamelError;
 use camel_api::ComponentMetrics;
@@ -26,6 +28,12 @@ use std::time::Duration;
 
 /// Injectable wall clock for expiry math and tests.
 pub type ClockFn = Arc<dyn Fn() -> std::time::SystemTime + Send + Sync>;
+
+/// The first key segment reserved for payload blobs on this backend
+/// (`{prefix}:{repo}:payload:{blob}`, ADR-0065). A user key starting with
+/// it would collide with the payload sub-namespace, so `set` rejects it
+/// and `invalidate_prefix` skips scanned payload keys.
+const RESERVED_PAYLOAD_SEGMENT: &str = "payload:";
 
 /// The default production clock: [`std::time::SystemTime::now`].
 pub fn default_clock() -> ClockFn {
@@ -141,6 +149,32 @@ impl RedisCacheRepository {
         )
     }
 
+    /// Connect to `endpoint` and build the repository together with its
+    /// payload store (ADR-0065) over ONE multiplexed connection (ADR-0063:
+    /// one connection per repository). Validates `name` and `key_prefix`
+    /// before any network I/O, then eagerly connects (one topology
+    /// resolution — see `connection`). Uses the production clock.
+    pub async fn connect_with_payload_store(
+        name: &str,
+        endpoint: &RedisEndpointConfig,
+        key_prefix: &str,
+        stale_retention: Duration,
+        metrics: ComponentMetrics,
+    ) -> Result<(RedisCacheRepository, RedisPayloadStore), CamelError> {
+        validate_namespace_token("repository name", name)?;
+        validate_namespace_token("key_prefix", key_prefix)?;
+        let executor: Arc<dyn RepoCommandExecutor> =
+            Arc::new(connection::connect_executor(endpoint).await?);
+        Self::with_executor_and_payload_store(
+            name,
+            key_prefix,
+            stale_retention,
+            default_clock(),
+            executor,
+            metrics,
+        )
+    }
+
     /// Test seam: build the repository around an injected executor and clock.
     ///
     /// Sync and network-free; validates both namespace tokens first.
@@ -168,6 +202,31 @@ impl RedisCacheRepository {
         })
     }
 
+    /// Test seam: build the repository AND its payload store around one
+    /// injected executor (ADR-0063: both objects share the connection in
+    /// production too). Sync and network-free; validates both namespace
+    /// tokens first. `metrics` is cloned into both (the collector sits
+    /// behind an `Arc`).
+    pub(crate) fn with_executor_and_payload_store(
+        name: &str,
+        key_prefix: &str,
+        stale_retention: Duration,
+        clock: ClockFn,
+        executor: Arc<dyn RepoCommandExecutor>,
+        metrics: ComponentMetrics,
+    ) -> Result<(RedisCacheRepository, RedisPayloadStore), CamelError> {
+        let repo = Self::with_executor(
+            name,
+            key_prefix,
+            stale_retention,
+            clock,
+            Arc::clone(&executor),
+            metrics.clone(),
+        )?;
+        let store = RedisPayloadStore::with_executor(key_prefix, name, executor, metrics)?;
+        Ok((repo, store))
+    }
+
     /// Store one entry under `key`, applying Redis-side expiry of
     /// `expires_at + stale_retention` so expired-but-retained entries stay
     /// readable for [`Self::peek_stale_entry`].
@@ -182,6 +241,11 @@ impl RedisCacheRepository {
         value: CacheEntry,
         ttl: Option<Duration>,
     ) -> Result<(), CamelError> {
+        if key.starts_with(RESERVED_PAYLOAD_SEGMENT) {
+            return Err(CamelError::Config(format!(
+                "cache key '{key}' starts with the reserved '{RESERVED_PAYLOAD_SEGMENT}' segment: reserved for payload blobs on the redis backend (ADR-0065)"
+            )));
+        }
         let mut entry = value;
         entry.expires_at = ttl.and_then(|d| (self.clock)().checked_add(d));
         let blob = serde_json::to_vec(&entry)
@@ -456,11 +520,23 @@ impl CacheRepository for RedisCacheRepository {
 
     async fn invalidate_prefix(&self, prefix: &str) -> Result<u64, CamelError> {
         validate_namespace_token("invalidate_prefix", prefix)?;
-        scan_unlink_pattern(
+        // Post-filter, not pattern surgery: the payload sub-namespace
+        // (`{prefix}:{repo}:payload:{blob}`) sits INSIDE the SCAN glob
+        // whenever the user prefix is a prefix of `payload:` (e.g. "p").
+        // Skipping those keys keeps a prefix sweep from deleting payload
+        // blobs of keys outside the requested prefix; payload reclaim
+        // stays with the native EXAT, the eager predecessor overwrite
+        // reclaim, and `clear()`'s full-namespace SCAN.
+        let payload_guard = format!(
+            "{}:{}:{}",
+            self.key_prefix, self.name, RESERVED_PAYLOAD_SEGMENT
+        );
+        scan_unlink_pattern_where(
             &self.executor,
             &format!("{}:{}:{}*", self.key_prefix, self.name, prefix),
             &self.metrics,
             "invalidate_prefix",
+            |key| key.starts_with(&payload_guard),
         )
         .await
     }
@@ -853,6 +929,67 @@ mod tests {
             fake.execute_count(),
             2,
             "the rejected prefix must not trigger a SCAN"
+        );
+    }
+
+    // C1 fail-closed evidence: a user key entering the reserved payload
+    // sub-namespace is rejected BEFORE any command is issued, so it can
+    // never collide with `{prefix}:{repo}:payload:{blob}` rows.
+    #[tokio::test]
+    async fn set_rejects_reserved_payload_segment_keys() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let repo = repo(default_clock(), fake.clone());
+
+        let err = repo
+            .set_entry("payload:k", plain_entry(), None)
+            .await
+            .expect_err("a key starting with the reserved segment must fail the set");
+
+        match &err {
+            CamelError::Config(message) => assert!(
+                message.contains("reserved") && message.contains("payload:"),
+                "error must name the reserved payload segment, got: {message}"
+            ),
+            other => panic!("expected CamelError::Config, got: {other}"),
+        }
+        assert!(
+            fake.commands().is_empty(),
+            "the rejected set must not reach the transport"
+        );
+    }
+
+    // A scanned key inside the payload sub-namespace is skipped from the
+    // UNLINK batch and from the returned count: a user prefix like "p"
+    // globs `{prefix}:{repo}:payload:*` too, and that walk must stay out
+    // of the payload tier.
+    #[tokio::test]
+    async fn invalidate_prefix_skips_payload_namespace() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        let repo = repo(default_clock(), fake.clone());
+        fake.push_result(Ok(scan_reply(
+            0,
+            &[
+                "camel:cache:default:p-user",
+                "camel:cache:default:payload:abc.blob",
+            ],
+        )));
+        fake.push_result(Ok(redis::Value::Int(1)));
+
+        let removed = repo
+            .invalidate_prefix("p")
+            .await
+            .expect("invalidate_prefix must succeed");
+
+        assert_eq!(
+            removed, 1,
+            "the count reflects only the index key, not the skipped payload key"
+        );
+        let commands = fake.commands();
+        assert_eq!(commands.len(), 2, "one SCAN then one UNLINK");
+        assert_eq!(
+            cmd_args(&commands[1]),
+            vec![b"UNLINK".to_vec(), b"camel:cache:default:p-user".to_vec(),],
+            "UNLINK contains only the index key, never the payload key"
         );
     }
 

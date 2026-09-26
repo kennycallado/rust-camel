@@ -2621,6 +2621,7 @@ dependencies = [
  "async-trait",
  "camel-api",
  "camel-component-redis",
+ "camel-core",
  "redis",
  "serde_json",
  "tokio",

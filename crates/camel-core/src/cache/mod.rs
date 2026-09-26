@@ -5,10 +5,12 @@
 
 pub mod disk_offload;
 pub mod memory;
+pub mod offload;
 pub mod redb;
 
-pub use disk_offload::DiskOffloadRepository;
+pub use disk_offload::DiskPayloadStore;
 pub use memory::MemoryCacheRepository;
+pub use offload::{OffloadRepository, PayloadStore};
 pub use redb::RedbCacheRepository;
 
 #[cfg(test)]

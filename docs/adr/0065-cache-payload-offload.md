@@ -1,17 +1,19 @@
 # ADR-0065: Cache Payload Offload
 
 **Date:** 2026-08-24
-**Status:** Accepted
+**Status:** Accepted (amended 2026-09-26: payload location tiering, bd rc-6b88t)
 Cross-references: ADR-0023, ADR-0033, ADR-0056, ADR-0063
 
 ## Decision
 
 ### Decision 1: decorator over the backend, index in backend, blob on disk
 
-`DiskOffloadRepository` (`crates/camel-core/src/cache/disk_offload.rs:62`)
+`OffloadRepository` (`crates/camel-core/src/cache/offload.rs:101`)
 wraps any `Arc<dyn CacheRepository>`. It is a decorator, not a backend. The
 wrapped backend stores a small index entry with an emptied `bytes` field and
-a `payload_path`. The payload bytes live in one blob file under `payload_dir`.
+a `payload_path`. The payload bytes live outside the backend, written
+through a pluggable `PayloadStore` (the 2026-08-24 decision knew only the
+disk tier; the amendment below adds the redis tier).
 
 The payload travels opaquely through the trait. The decorator intercepts
 `set`, `get`, and `peek_stale`, and delegates every other method. One
@@ -35,10 +37,10 @@ orphan. It never leaves an index row that points at missing bytes.
 
 Blob names are
 `{blake3-128hex(key)}.{death_epoch}.{blake3-128hex(payload || content_type-discriminant)}.blob`
-(`blob_filename`, `crates/camel-core/src/cache/disk_offload.rs:479`). The
+(`blob_filename`, `crates/camel-core/src/cache/offload.rs:437`). The
 content fingerprint hashes the payload bytes followed by the one-byte
 discriminant of the `ContentType` enum, which separates the domains
-(`content_fingerprint`, `crates/camel-core/src/cache/disk_offload.rs:471`).
+(`content_fingerprint`, `crates/camel-core/src/cache/offload.rs:429`).
 
 The `death_epoch` is `effective_expires_at + stale_retention +
 payload_sweep_interval` as unix seconds. The sweep-interval grace keeps each
@@ -68,7 +70,7 @@ Errors from the wrapped backend still propagate.
 The read path holds zero expiry logic. The in-band expiry check stays in the
 wrapped backend. When an entry carries `payload_path`, the decorator
 sanitizes the name (`sanitize_blob_name`,
-`crates/camel-core/src/cache/disk_offload.rs:499`): the path must resolve to
+`crates/camel-core/src/cache/offload.rs:457`): the path must resolve to
 a direct child of `payload_dir`. Separators and `..` are rejected, so a
 corrupt or foreign row cannot trigger an arbitrary file read.
 
@@ -79,26 +81,31 @@ Contract C1: a failing disk is a storage failure, not a miss.
 ### Decision 6: standalone sweeper with ENOENT as success
 
 A standalone tokio task sweeps the payload directory
-(`spawn_sweeper`, `crates/camel-core/src/cache/disk_offload.rs:619`). It
+(`spawn_sweeper`, `crates/camel-core/src/cache/disk_offload.rs:440`). It
 unlinks blobs whose encoded death epoch has passed and reclaims stale `.tmp`
 files (`sweep_payload_dir`,
-`crates/camel-core/src/cache/disk_offload.rs:560`). Unlink of an absent file
+`crates/camel-core/src/cache/disk_offload.rs:375`). Unlink of an absent file
 counts as success, so concurrent replicas sweep without coordination. The
 task stops on the context shutdown token, and `Drop` aborts it
-(`crates/camel-core/src/cache/disk_offload.rs:432`). No sweeper exists under
-inline mode.
+(`crates/camel-core/src/cache/disk_offload.rs:295`; the sweeper is owned by
+`DiskPayloadStore`, not by the decorator). No sweeper exists under inline
+mode, and none under the redis tier (the amendment below: native `EXAT`
+replaces the sweeper there).
 
 ### Decision 7: fail-closed config matrix
 
 Four `cache_repo` fields govern offload: `payload` (`"inline"` default,
-`"disk"`), `payload_dir`, `payload_sweep_interval` (default 1h), and
-`payload_max_ttl` (default 720h). Validation rejects `payload = "disk"` on
-the memory backend, `payload = "disk"` without a non-empty `payload_dir`,
+`"disk"`, `"redis"`), `payload_dir`, `payload_sweep_interval` (default 1h),
+and `payload_max_ttl` (default 720h). Validation rejects `payload = "disk"`
+on the memory backend, `payload = "disk"` without a non-empty `payload_dir`,
 and any payload field set under inline mode or the memory backend
-(`crates/camel-config/src/config.rs:1806`,
-`crates/camel-config/src/config.rs:1899`). Malformed or zero intervals fail
-with an error that names the field. `payload_dir` has no default: the
-operator states where the blobs live. `${env:}` strict interpolation applies.
+(`crates/camel-config/src/config.rs:2123`,
+`crates/camel-config/src/config.rs:2222`). The redis-tier rows, added by the
+amendment below (bd rc-6b88t), require `backend = "redis"` for
+`payload = "redis"` and reject `payload_dir` on that tier. Malformed or zero
+intervals fail with an error that names the field. `payload_dir` has no
+default: the operator states where the blobs live. `${env:}` strict
+interpolation applies.
 
 ## Rejected alternatives
 
@@ -178,9 +185,10 @@ appear.
 
 ### Portability
 
-Offloaded entries are unreadable by consumers that do not share
+Disk-tier entries are unreadable by consumers that do not share
 `payload_dir`. Context build emits one startup WARN that names the resolved
-directory (`crates/camel-config/src/context_ext.rs:296`).
+directory (`crates/camel-config/src/context_ext.rs:388`). The redis tier has
+no such WARN: it is shared by construction (amendment below).
 
 ### Multi-replica on RWX volumes
 
@@ -284,22 +292,119 @@ The sweeper logs one INFO line per pass with live and reclaimed blob
 counts and bytes, so operators can watch the volume during any of these
 transitions.
 
+## Amendment (bd rc-6b88t): payload location tiering
+
+A demo-team report on NFS-backed `payload_dir` deployments restated the
+rc-uteoa finding at the storage layer. The disk tier couples payload
+durability to mount semantics: fsync durability is mount-dependent, rename
+plus `create_new` leaves short-lived `.tmp` orphans under load, the sweeper
+`readdir` cost grows with the directory, and `payload_dir` portability
+needs the startup WARN plus an RWX volume shared by every replica. The
+index already has a shared, self-expiring home in redis (ADR-0063); the
+payloads can ride the same keyspace.
+
+Decision: the decorator no longer owns payload storage. A `PayloadStore`
+trait (`crates/camel-core/src/cache/offload.rs:55`) carries `put`, `read`,
+and `unlink`, with `clear` defaulting to a no-op
+(`crates/camel-core/src/cache/offload.rs:90`). The decorator is renamed
+`OffloadRepository` (`crates/camel-core/src/cache/offload.rs:101`); its
+interception, blob naming, death-epoch math, eager predecessor reclaim,
+and read contract are unchanged. `disk_offload.rs` shrinks to
+`DiskPayloadStore` (`crates/camel-core/src/cache/disk_offload.rs:54`):
+tmp+fsync+rename writes, reads, unlinks, the eager payload-dir `clear`,
+and the standalone sweeper with its `Drop` abort. The decorator no longer
+spawns or aborts anything. The redis repository service crate implements
+the trait as `RedisPayloadStore`
+(`crates/services/camel-redis-repo/src/payload_store.rs:30`); the
+dependency direction is preserved, since core never sees redis.
+
+Redis tier contract:
+
+- Payload keys live inside the repository namespace:
+  `{prefix}:{repo}:payload:{blob-name}` (`payload_key`,
+  `crates/services/camel-redis-repo/src/payload_store.rs:59`). The
+  `clear()` prefix-scoped `SCAN` plus `UNLINK` therefore reclaims payloads
+  eagerly, and the namespace and charset guards apply without a second
+  token shape.
+- The `payload:` segment is reserved on this backend (rc-6b88t fix wave).
+  `RedisCacheRepository::set_entry`
+  (`crates/services/camel-redis-repo/src/cache_repo.rs:238`) rejects user
+  keys starting with it as `CamelError::Config`, and
+  `RedisCacheRepository::invalidate_prefix`
+  (`crates/services/camel-redis-repo/src/cache_repo.rs:521`) skips scanned
+  `{prefix}:{repo}:payload:` keys from its UNLINK batches and returned
+  count. Without the reservation, a user prefix like `p` globs every
+  payload key ("payload:" itself starts with "p") and the sweep would
+  delete payload blobs of keys outside the requested prefix while
+  inflating the reported count. Payload reclaim keeps its three
+  legitimate channels: the native `EXAT`, the eager predecessor overwrite
+  reclaim, and `clear()`'s full-namespace SCAN.
+- `put` issues `SET key bytes EXAT death_epoch_secs`. The epoch conversion
+  is checked, and an unusable death epoch (overflow, pre-epoch) fails
+  `put` before any command is issued. The inline fallback of Decision 4
+  then applies: a payload blob is never stored without its deadline.
+- `read` issues `GET`. A nil reply is `None`, which the decorator reports
+  as MISS+WARN (Decision 5). A transport failure is `Err` (Contract C1).
+- Reclamation is native. Every payload entry carries its `EXAT` death
+  epoch, which replaces the disk sweeper: no sweep loop exists on this
+  tier. Overwrite reclaim uses the same row-guided `UNLINK` as the disk
+  tier (rc-uteoa amendment), and `clear()` scavenges through the SCAN
+  above.
+- `RedisCacheRepository::connect_with_payload_store`
+  (`crates/services/camel-redis-repo/src/cache_repo.rs:157`) builds the
+  index and the payload store over ONE multiplexed connection, per
+  ADR-0063. `ComponentMetrics` gained `#[derive(Clone)]` so one metrics
+  facade serves both halves.
+
+Fail-closed matrix additions (`crates/camel-config/src/config.rs:2222`):
+
+- `payload = "redis"` requires `backend = "redis"`; the error names the
+  configured backend.
+- `payload = "redis"` with `payload_dir` set is rejected; the message
+  names `payload_dir` as inconsistent with the redis tier.
+- The memory backend now rejects every offload tier, not only `"disk"`.
+- The duration knobs stay required and validated (parse plus the >= 1s
+  check) on BOTH offload tiers, because the decorator consumes them for
+  the death-epoch and EXAT math on every tier. Inline mode still rejects
+  them.
+
+Wiring: `wrap_payload_offload`
+(`crates/camel-config/src/context_ext.rs:365`) generalizes the disk-only
+wrap. The redis branch builds the store only there, through
+`connect_with_payload_store`
+(`crates/camel-config/src/context_ext.rs:624`). The redb branch keeps
+disk-only wrapping. The decorator still registers under the bare
+backend's name. The redis tier emits no startup WARN, because redis is
+shared by construction; the disk-dir portability WARN stays disk-only.
+
+The reader contract of Decision 5 is per tier, not per medium: a vanished
+payload (expired `EXAT`, evicted entry, disk sweep lag) is a MISS with
+WARN on every tier, and a failing store is an `Err`.
+
 ## Load-bearing citations
 
 | File:line | Element |
 |---|---|
 | `crates/camel-api/src/cache.rs:18` | `CacheEntry` |
 | `crates/camel-api/src/cache.rs:23` | `payload_path: Option<String>`, `#[serde(default)]` |
-| `crates/camel-core/src/cache/disk_offload.rs:62` | `DiskOffloadRepository` decorator |
-| `crates/camel-core/src/cache/disk_offload.rs:479` | `fn blob_filename` self-die name format |
-| `crates/camel-core/src/cache/disk_offload.rs:471` | `fn content_fingerprint` domain-separated blake3-128 |
-| `crates/camel-core/src/cache/disk_offload.rs:490` | `fn parse_death_epoch` |
-| `crates/camel-core/src/cache/disk_offload.rs:499` | `fn sanitize_blob_name` direct-child guard |
-| `crates/camel-core/src/cache/disk_offload.rs:560` | `sweep_payload_dir`: death-epoch unlink, tmp GC |
-| `crates/camel-core/src/cache/disk_offload.rs:619` | `spawn_sweeper` standalone task |
-| `crates/camel-core/src/cache/disk_offload.rs:432` | `impl Drop` aborts the sweeper |
-| `crates/camel-config/src/config.rs:709-730` | the four payload config fields |
-| `crates/camel-config/src/config.rs:1806` | memory-backend payload rejection |
-| `crates/camel-config/src/config.rs:1899` | disk-mode fail-closed matrix |
-| `crates/camel-config/src/context_ext.rs:296-330` | wrap-on-disk wiring and portability WARN |
-| `crates/camel-test/tests/cache_payload_offload.rs` | live redis offload integration suite |
+| `crates/camel-core/src/cache/offload.rs:55` | `PayloadStore` trait (`put`/`read`/`unlink`, default-noop `clear`) |
+| `crates/camel-core/src/cache/offload.rs:101` | `OffloadRepository` decorator |
+| `crates/camel-core/src/cache/offload.rs:437` | `fn blob_filename` self-die name format |
+| `crates/camel-core/src/cache/offload.rs:429` | `fn content_fingerprint` domain-separated blake3-128 |
+| `crates/camel-core/src/cache/offload.rs:448` | `fn parse_death_epoch` |
+| `crates/camel-core/src/cache/offload.rs:457` | `fn sanitize_blob_name` direct-child guard |
+| `crates/camel-core/src/cache/disk_offload.rs:54` | `DiskPayloadStore` (disk-tier store; owns sweeper + `Drop` abort) |
+| `crates/camel-core/src/cache/disk_offload.rs:295` | `impl Drop` aborts the sweeper |
+| `crates/camel-core/src/cache/disk_offload.rs:375` | `sweep_payload_dir`: death-epoch unlink, tmp GC |
+| `crates/camel-core/src/cache/disk_offload.rs:440` | `spawn_sweeper` standalone task |
+| `crates/services/camel-redis-repo/src/payload_store.rs:30` | `RedisPayloadStore` (redis-tier store) |
+| `crates/services/camel-redis-repo/src/payload_store.rs:59` | `fn payload_key` `{prefix}:{repo}:payload:` namespacing |
+| `crates/services/camel-redis-repo/src/cache_repo.rs:157` | `connect_with_payload_store`: index + store, one connection |
+| `crates/services/camel-redis-repo/src/cache_repo.rs:36` | `const RESERVED_PAYLOAD_SEGMENT`: `set` rejection + `invalidate_prefix` payload-key skip |
+| `crates/camel-config/src/config.rs:821` | `PayloadMode` (`inline`/`disk`/`redis`) |
+| `crates/camel-config/src/config.rs:871-897` | the four payload config fields |
+| `crates/camel-config/src/config.rs:2123` | memory-backend payload rejection |
+| `crates/camel-config/src/config.rs:2222` | fail-closed matrix, persistent backends (disk + redis rows) |
+| `crates/camel-config/src/context_ext.rs:365` | `wrap_payload_offload` wiring (disk WARN at :388, redis branch at :405) |
+| `crates/camel-config/src/context_ext.rs:624` | redis-branch store construction |
+| `crates/camel-test/tests/cache_payload_offload.rs` | live offload integration suite (disk + redis tiers) |
