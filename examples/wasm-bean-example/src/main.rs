@@ -53,6 +53,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None,
             false,
         )),
+        // Unbound here: this example builds the CamelContext only AFTER
+        // bean load, so no shutdown slot exists yet. Production code with
+        // a live context binds it: `.with_shutdown_slot(ctx.shutdown_token_slot())`
+        // (see camel-cli run.rs).
         bean_config,
     )
     .await?;

@@ -83,7 +83,8 @@ _Avoid_: LLM tool executor, MCP gateway, agent runtime
 **ComponentContext**:
 Runtime context passed to Components during Endpoint and Consumer/Producer creation. Provides
 access to other components (`resolve_component`), languages (`resolve_language`), metrics
-(`metrics`), and platform services (`platform_service`).
+(`metrics`), platform services (`platform_service`), and Runtime shutdown observance
+(`shutdown_token`).
 _Avoid_: global context, service locator (unqualified)
 
 **ConsumerContext**:

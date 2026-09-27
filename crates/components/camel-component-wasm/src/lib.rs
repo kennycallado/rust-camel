@@ -41,6 +41,8 @@ pub mod source_host;
 pub mod staged_listener;
 pub mod state_store;
 pub mod stream_bridge;
+#[cfg(test)]
+pub(crate) mod test_context;
 mod wasi_surface;
 pub mod wasm_plugin_context;
 

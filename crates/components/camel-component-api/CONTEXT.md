@@ -54,6 +54,10 @@ The Runtime owns each Consumer and applies this sequence:
 should use the `ConsumerContext` cancellation token, or a child token. This lets them stop before
 `stop()` waits for them. ADR-0007 defines crash propagation and Route supervision.
 
+Producer-side and processor-side code (which has no `ConsumerContext`) observes Runtime shutdown
+through `ComponentContext::shutdown_token()`, resolved per call (the Runtime token is replaced on
+each start); unbound contexts return `None` and callers fall back to a local token.
+
 ## Network retry helpers
 
 `NetworkRetryPolicy`, `retry_async`, `retry_async_cancelable`, and

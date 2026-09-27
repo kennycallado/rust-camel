@@ -265,6 +265,12 @@ impl CamelContextBuilder {
         );
         let started_at = std::time::Instant::now();
         let cancel_token = CancellationToken::new();
+        // Slot mirror of `cancel_token` (see
+        // `CamelContext::shutdown_token_slot`): seeded with a clone of the
+        // SAME initial token — clones share cancellation state, so the
+        // mirror matches the initial lineage exactly. `start_context`
+        // rewrites both together on every boot.
+        let shutdown_token_slot = Arc::new(std::sync::Mutex::new(cancel_token.clone()));
         spawn_uptime_refresh(
             Arc::clone(&metrics_handle) as Arc<dyn MetricsCollector>,
             cancel_token.clone(),
@@ -411,6 +417,7 @@ impl CamelContextBuilder {
             supervision_join,
             runtime,
             cancel_token,
+            shutdown_token_slot,
             metrics: metrics_handle,
             platform_service,
             languages,

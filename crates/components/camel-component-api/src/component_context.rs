@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use camel_api::{AsyncHealthCheck, InFlightGauge, MetricsCollector, PlatformService};
 use camel_language_api::Language;
+use tokio_util::sync::CancellationToken;
 
 use crate::Component;
 
@@ -43,6 +44,19 @@ pub trait ComponentContext: Send + Sync {
     /// real registry.
     fn health(&self) -> Arc<dyn crate::HealthCheckRegistry> {
         Arc::new(crate::NoOpHealthCheckRegistry)
+    }
+
+    /// Clone of the Runtime-owned shutdown token when this context is
+    /// bound to one. Producer-side and processor-side code (which has no
+    /// `ConsumerContext`) uses it to observe Runtime shutdown.
+    /// `CamelContext` overrides this with its `shutdown_token()`. Default
+    /// `None` keeps unbound contexts (tests, examples) out of the
+    /// shutdown lineage, so callers mint a local root token instead.
+    /// Callers resolve this per call: CamelContext replaces its shutdown
+    /// token on every start, so a token captured once goes stale across
+    /// stop/start.
+    fn shutdown_token(&self) -> Option<CancellationToken> {
+        None
     }
 
     /// Access the active platform service.
@@ -98,5 +112,14 @@ mod tests {
         let h = ctx.health();
         // Must not panic.
         h.force_unhealthy_for_route("any", "any", "any");
+    }
+
+    #[test]
+    fn shutdown_token_default_is_none() {
+        let ctx = NoOpComponentContext;
+        assert!(
+            ctx.shutdown_token().is_none(),
+            "unbound contexts must return None so callers mint a local root"
+        );
     }
 }

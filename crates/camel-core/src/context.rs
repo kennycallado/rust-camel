@@ -46,6 +46,14 @@ pub struct CamelContext {
     supervision_join: Option<tokio::task::JoinHandle<()>>,
     runtime: Arc<RuntimeBus>,
     cancel_token: CancellationToken,
+    /// Slot mirror of `cancel_token` (wasm wiring): written at build time
+    /// and re-written by every [`start()`](Self::start) next to the token
+    /// reset, so adapters that outlive a single boot
+    /// (`RegistryComponentContext` in wasm bundles/beans, bound via
+    /// `with_shutdown_slot`) resolve the CURRENT shutdown token per call
+    /// instead of a stale pre-restart lineage. The `Arc<Mutex<..>>`
+    /// shares only the slot — it does not extend the context's lifetime.
+    shutdown_token_slot: Arc<std::sync::Mutex<CancellationToken>>,
     /// Shared late-bound metrics cell (rc-hrm1.3): the SAME handle instance
     /// seeds the route controller's `tracer_metrics` and the RuntimeBus
     /// collector, so a collector registered at any time — including after
@@ -97,6 +105,7 @@ pub(crate) struct FromParts {
     pub(crate) supervision_join: Option<tokio::task::JoinHandle<()>>,
     pub(crate) runtime: Arc<RuntimeBus>,
     pub(crate) cancel_token: CancellationToken,
+    pub(crate) shutdown_token_slot: Arc<std::sync::Mutex<CancellationToken>>,
     pub(crate) metrics: Arc<MetricsHandle>,
     pub(crate) platform_service: Arc<dyn PlatformService>,
     pub(crate) languages: SharedLanguageRegistry,
@@ -125,6 +134,7 @@ impl CamelContext {
             supervision_join: parts.supervision_join,
             runtime: parts.runtime,
             cancel_token: parts.cancel_token,
+            shutdown_token_slot: parts.shutdown_token_slot,
             metrics: parts.metrics,
             metrics_levers: MetricsLeversConfig::default(),
             platform_service: parts.platform_service,
@@ -757,6 +767,7 @@ impl CamelContext {
             &self.runtime,
             &self.route_controller,
             &mut self.cancel_token,
+            &self.shutdown_token_slot,
         )
         .await?;
         // Trip the intercept-rules freeze so it applies even with zero
@@ -991,6 +1002,20 @@ impl CamelContext {
     pub fn shutdown_token(&self) -> CancellationToken {
         self.cancel_token.clone()
     }
+
+    /// Access the shutdown-token slot that mirrors
+    /// [`shutdown_token()`](Self::shutdown_token).
+    ///
+    /// The slot is seeded at build time with the initial token and
+    /// re-written by every [`start()`](Self::start), immediately adjacent
+    /// to the Runtime token reset so the two cannot drift. Hand it to
+    /// `RegistryComponentContext::with_shutdown_slot` when constructing
+    /// adapter contexts that must resolve the CURRENT boot's shutdown
+    /// token across stop/start cycles. The returned `Arc` shares the
+    /// slot, not the context: it does not keep the context alive.
+    pub fn shutdown_token_slot(&self) -> Arc<std::sync::Mutex<CancellationToken>> {
+        Arc::clone(&self.shutdown_token_slot)
+    }
 }
 
 /// Dropping the context is a NON-graceful termination of the controller
@@ -1076,6 +1101,13 @@ impl ComponentContext for CamelContext {
     /// `create_producer` and mint `InFlightClaim`s against it.
     fn in_flight_counter(&self) -> Option<Arc<InFlightGauge>> {
         Some(Arc::clone(&self.in_flight_total))
+    }
+
+    /// The Runtime-owned shutdown token, so producer-side and
+    /// processor-side code (which has no `ConsumerContext`) observes
+    /// Runtime shutdown through the `ComponentContext` surface.
+    fn shutdown_token(&self) -> Option<CancellationToken> {
+        Some(CamelContext::shutdown_token(self))
     }
 }
 

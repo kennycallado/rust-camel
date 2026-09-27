@@ -4,6 +4,7 @@ use std::sync::Arc;
 use camel_api::CamelError;
 use camel_api::component_metadata::ComponentMetadata;
 use camel_component_api::Component;
+use tokio_util::sync::CancellationToken;
 
 /// Registry that stores components by their URI scheme.
 ///
@@ -106,10 +107,17 @@ impl Default for Registry {
 /// exists elsewhere — the owning `CamelContext`, or an anchor the
 /// embedder retains. Once the last strong reference drops, resolution
 /// returns `None`.
+///
+/// Shutdown binding is optional: `new` leaves the context unbound
+/// (compile-time scans, tests), while
+/// [`with_shutdown_slot`](Self::with_shutdown_slot) binds it to the
+/// owning context's shutdown-token slot so resolved producers observe
+/// Runtime shutdown.
 pub struct RegistryComponentContext {
     registry: std::sync::Weak<std::sync::Mutex<Registry>>,
     metrics: Arc<dyn camel_api::MetricsCollector>,
     components_enabled: bool,
+    shutdown_slot: Option<Arc<std::sync::Mutex<CancellationToken>>>,
 }
 
 impl RegistryComponentContext {
@@ -124,7 +132,24 @@ impl RegistryComponentContext {
             registry: Arc::downgrade(&registry),
             metrics: metrics.unwrap_or_else(|| Arc::new(camel_api::NoOpMetrics)),
             components_enabled,
+            shutdown_slot: None,
         }
+    }
+
+    /// Binds this context to a shutdown-token slot that mirrors the
+    /// owning `CamelContext`'s CURRENT shutdown token.
+    ///
+    /// The slot is written at context build time and re-written by every
+    /// `start()`, so [`shutdown_token`](camel_component_api::ComponentContext::shutdown_token)
+    /// resolves the token per call: after a stop/start cycle the resolved
+    /// token is the new boot's token, never a stale cancelled one. The
+    /// `Arc` shares only the slot — it does NOT extend the context's
+    /// lifetime, mirroring this struct's `Weak`-registry ownership: once
+    /// the owning context drops, its token is never cancelled (the same
+    /// observable outcome as `resolve_component` returning `None`).
+    pub fn with_shutdown_slot(mut self, slot: Arc<std::sync::Mutex<CancellationToken>>) -> Self {
+        self.shutdown_slot = Some(slot);
+        self
     }
 }
 
@@ -162,6 +187,17 @@ impl camel_component_api::ComponentContext for RegistryComponentContext {
     }
 
     fn unregister_route_health_check(&self, _route_id: &str) {}
+
+    /// The owning context's CURRENT shutdown token, read through the slot
+    /// mirror at call time (see [`with_shutdown_slot`](Self::with_shutdown_slot)).
+    /// Poison-tolerant: a poisoned slot resolves `None` rather than
+    /// panicking, degrading to the slot-less default (callers mint an
+    /// uncancelled local root — fail-safe, never fail-boot).
+    fn shutdown_token(&self) -> Option<CancellationToken> {
+        let slot = self.shutdown_slot.as_ref()?;
+        let guard = slot.lock().ok()?;
+        Some(guard.clone())
+    }
 }
 
 #[cfg(test)]
@@ -476,5 +512,44 @@ mod tests {
         drop(registry);
 
         assert!(ctx.resolve_component("timer").is_none());
+    }
+
+    /// Slot-less construction (security_boot compile-time scan shape) must
+    /// keep resolving `None` so callers mint an uncancelled local root.
+    #[test]
+    fn shutdown_token_is_none_without_shutdown_slot() {
+        let ctx = RegistryComponentContext::new(
+            Arc::new(std::sync::Mutex::new(Registry::new())),
+            None,
+            false,
+        );
+
+        assert!(ComponentContext::shutdown_token(&ctx).is_none());
+    }
+
+    /// Per-call resolution: replacing the slot's token (what `start()`
+    /// does on every boot) is observed by the next resolution, and the
+    /// replaced lineage does not cancel the fresh token.
+    #[test]
+    fn shutdown_token_resolves_the_current_slot_token() {
+        use tokio_util::sync::CancellationToken;
+
+        let slot = Arc::new(std::sync::Mutex::new(CancellationToken::new()));
+        let ctx = RegistryComponentContext::new(
+            Arc::new(std::sync::Mutex::new(Registry::new())),
+            None,
+            false,
+        )
+        .with_shutdown_slot(Arc::clone(&slot));
+
+        let stale = ComponentContext::shutdown_token(&ctx).expect("slot-bound context");
+        *slot.lock().expect("test slot lock") = CancellationToken::new();
+        let fresh = ComponentContext::shutdown_token(&ctx).expect("slot-bound context");
+
+        stale.cancel();
+        assert!(
+            !fresh.is_cancelled(),
+            "resolution is per call: the replacement token must not share the replaced lineage"
+        );
     }
 }

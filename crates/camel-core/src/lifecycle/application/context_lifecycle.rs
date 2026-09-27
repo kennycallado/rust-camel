@@ -8,6 +8,7 @@
 //
 // Established in Tier C Task C2 (`rc-d0pu.3`).
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -81,17 +82,32 @@ pub(crate) fn warn_non_started_routes(statuses: &[(String, String)]) {
 /// after `stop()` gets a clean cancellation state. The cohort activation
 /// gate is likewise re-armed at entry and activated on every exit (see
 /// rc-jxkj).
+///
+/// `shutdown_token_slot` mirrors `cancel_token`: the fresh token is
+/// written into the slot immediately after the reset (one lock round-trip
+/// apart, so the mirror cannot drift from the Runtime token). Adapters
+/// bound to the slot (`RegistryComponentContext::with_shutdown_slot`)
+/// resolve the CURRENT boot's shutdown token per call.
 pub(crate) async fn start_context(
     services: &mut [Box<dyn Lifecycle>],
     startup_checks: &mut Vec<Box<dyn ConfigCheck>>,
     runtime: &RuntimeBus,
     route_controller: &dyn RouteOrderingPort,
     cancel_token: &mut CancellationToken,
+    shutdown_token_slot: &Arc<std::sync::Mutex<CancellationToken>>,
 ) -> Result<(), CamelError> {
     info!("Starting CamelContext");
 
     // Reset cancellation state so a restart after stop() gets a fresh token.
     *cancel_token = CancellationToken::new();
+    // Mirror the fresh token into the shared slot (wasm wiring): the write
+    // sits adjacent to the reset above so the two cannot drift.
+    // Poison-tolerant by design — a poisoned slot must not fail the boot;
+    // leaving a stale token is fail-safe (resolvers keep a lineage that
+    // this boot never cancels).
+    if let Ok(mut slot) = shutdown_token_slot.lock() {
+        *slot = cancel_token.clone();
+    }
 
     // Re-arm the cohort activation gate on every boot so this cohort's
     // first consumer dispatches park until startup completes. Per-boot

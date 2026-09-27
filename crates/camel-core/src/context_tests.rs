@@ -1534,3 +1534,87 @@ async fn stop_start_restart_then_drop_runs_component_drop() {
     .await
     .expect("probe component must be dropped after restart then drop");
 }
+
+/// The `ComponentContext` accessor must hand out the SAME token as the
+/// inherent `shutdown_token()`: cancelling one is observed by the other.
+/// Producer-side and processor-side code reaches Runtime shutdown through
+/// this trait method.
+#[tokio::test]
+async fn component_context_shutdown_token_binds_runtime_token() {
+    let ctx = CamelContext::builder()
+        .build()
+        .await
+        .expect("build context");
+    let inherent = ctx.shutdown_token();
+    let via_trait = ComponentContext::shutdown_token(&ctx)
+        .expect("CamelContext binds the Runtime shutdown token");
+    assert!(!inherent.is_cancelled());
+    inherent.cancel();
+    assert!(
+        via_trait.is_cancelled(),
+        "trait token must be the Runtime shutdown token"
+    );
+}
+
+/// Production wasm wiring regression (producer/bean path): the
+/// `RegistryComponentContext` handed to wasm bundles and beans is bound to
+/// the context's shutdown-token slot, so it resolves Some(token) — and
+/// cancelling the context's CURRENT field token is observed through the
+/// registry-resolved clone, because `CancellationToken` clones share
+/// cancellation state.
+#[tokio::test]
+async fn registry_slot_context_observes_runtime_shutdown_token() {
+    let ctx = CamelContext::builder()
+        .build()
+        .await
+        .expect("build context");
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let reg_ctx = crate::RegistryComponentContext::new(registry, None, false)
+        .with_shutdown_slot(ctx.shutdown_token_slot());
+
+    let resolved = ComponentContext::shutdown_token(&reg_ctx)
+        .expect("slot-bound registry context resolves the Runtime token");
+    assert!(!resolved.is_cancelled());
+
+    ctx.shutdown_token().cancel();
+    assert!(
+        resolved.is_cancelled(),
+        "registry-resolved token must observe the Runtime shutdown"
+    );
+}
+
+/// Boot freshness (the production regression): wasm wiring binds the slot
+/// at boot assembly, BEFORE the first `start()`. Because `start()` resets
+/// the Runtime token and rewrites the slot mirror adjacently, a
+/// registry-resolved token after start is the NEW lineage; a pre-boot
+/// clone stays on the old lineage and is NOT cancelled by the fresh boot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registry_slot_tracks_fresh_token_across_boot() {
+    let mut ctx = CamelContext::builder()
+        .build()
+        .await
+        .expect("build context");
+    let slot = ctx.shutdown_token_slot();
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let reg_ctx = crate::RegistryComponentContext::new(registry, None, false)
+        .with_shutdown_slot(Arc::clone(&slot));
+
+    let pre_boot = ComponentContext::shutdown_token(&reg_ctx)
+        .expect("slot-bound registry context resolves a token pre-boot");
+
+    ctx.start().await.expect("start context");
+
+    let post_boot = ComponentContext::shutdown_token(&reg_ctx)
+        .expect("slot-bound registry context resolves a token post-boot");
+    pre_boot.cancel();
+    assert!(
+        !post_boot.is_cancelled(),
+        "post-boot resolution must be the FRESH token, not the pre-boot lineage"
+    );
+
+    ctx.shutdown_token().cancel();
+    assert!(
+        post_boot.is_cancelled(),
+        "the fresh token resolved through the registry must be the Runtime's current token"
+    );
+}

@@ -417,11 +417,17 @@ pub async fn boot(
     #[cfg(feature = "wasm")]
     {
         let wasm_bundle = camel_component_wasm::WasmBundle::new(
-            Arc::new(camel_core::RegistryComponentContext::new(
-                ctx.registry_arc(),
-                Some(ctx.metrics()),
-                camel_component_api::ComponentContext::component_metrics_enabled(&*ctx),
-            )),
+            Arc::new(
+                camel_core::RegistryComponentContext::new(
+                    ctx.registry_arc(),
+                    Some(ctx.metrics()),
+                    camel_component_api::ComponentContext::component_metrics_enabled(&*ctx),
+                )
+                // Bind to the context's shutdown-token slot so wasm
+                // producers resolve the CURRENT boot's token per call
+                // (fresh across stop/start restarts).
+                .with_shutdown_slot(ctx.shutdown_token_slot()),
+            ),
             project_root.to_path_buf(),
         );
         <camel_component_wasm::WasmBundle as camel_component_api::ComponentBundle>::register_all(

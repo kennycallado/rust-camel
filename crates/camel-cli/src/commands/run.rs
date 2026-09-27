@@ -381,11 +381,17 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
             let wasm_bean = camel_component_wasm::bean::WasmBean::new(
                 &wasm_path,
                 wasm_config,
-                Arc::new(camel_core::RegistryComponentContext::new(
-                    component_registry.clone(),
-                    Some(ctx.metrics()),
-                    camel_component_api::ComponentContext::component_metrics_enabled(&ctx),
-                )),
+                Arc::new(
+                    camel_core::RegistryComponentContext::new(
+                        component_registry.clone(),
+                        Some(ctx.metrics()),
+                        camel_component_api::ComponentContext::component_metrics_enabled(&ctx),
+                    )
+                    // Bind to the context's shutdown-token slot so wasm
+                    // beans resolve the CURRENT boot's token per call
+                    // (fresh across stop/start restarts).
+                    .with_shutdown_slot(ctx.shutdown_token_slot()),
+                ),
                 bean_cfg.config.clone(),
             )
             .await

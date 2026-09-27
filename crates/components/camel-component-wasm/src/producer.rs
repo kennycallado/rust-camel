@@ -85,13 +85,6 @@ pub struct WasmProducer {
     /// existing `runtime: Arc<Mutex<Option<Arc<WasmRuntime>>>>` field above
     /// which holds the WASM runtime instance, not the observability surface.
     observability: Arc<dyn camel_component_api::RuntimeObservability>,
-    /// Producer-local cancellation root. A child token is derived per `call`
-    /// and handed to `process_streaming_exchange` so a stuck guest can be
-    /// cancelled without disturbing sibling in-flight calls.
-    ///
-    /// Root cancellation (graceful shutdown of all in-flight streams) is
-    /// deferred — currently only the per-call watchdog triggers cancellation.
-    cancel: CancellationToken,
     /// Per-stream byte cap forwarded to `process_streaming_exchange`.
     max_bytes: u64,
     /// Watchdog window forwarded to `process_streaming_exchange`.
@@ -109,7 +102,6 @@ impl Clone for WasmProducer {
             init_failed: Arc::clone(&self.init_failed),
             sem: Arc::clone(&self.sem),
             observability: Arc::clone(&self.observability),
-            cancel: self.cancel.clone(),
             max_bytes: self.max_bytes,
             no_progress_timeout: self.no_progress_timeout,
         }
@@ -139,7 +131,6 @@ impl WasmProducer {
             init_failed: Arc::new(AtomicBool::new(false)),
             sem: Arc::new(Semaphore::new(max_concurrent_calls)),
             observability,
-            cancel: CancellationToken::new(),
             max_bytes: max_stream_bytes,
             no_progress_timeout: DEFAULT_NO_PROGRESS_TIMEOUT,
         }
@@ -147,6 +138,16 @@ impl WasmProducer {
 
     pub fn config(&self) -> &crate::config::WasmConfig {
         &self.config
+    }
+
+    /// Per-call cancellation root: the context's CURRENT shutdown token
+    /// when bound, else a fresh local root. Resolved per call because
+    /// `CamelContext` replaces its shutdown token on every start — a
+    /// token captured at construction survives stop/start stale (either
+    /// dead-forever after a restart, or a pre-start token that never
+    /// fires).
+    fn cancel_root(&self) -> CancellationToken {
+        self.registry.shutdown_token().unwrap_or_default()
     }
 }
 
@@ -181,10 +182,11 @@ impl Service<Exchange> for WasmProducer {
         let state_store2 = self.state_store.clone();
         let init_failed = Arc::clone(&self.init_failed);
         let sem = Arc::clone(&self.sem);
-        // Streaming knobs: clone the root token (cheap) and derive a child
-        // per call inside the future; the byte cap and watchdog window are
-        // Copy types.
-        let cancel_root = self.cancel.clone();
+        // Streaming knobs: resolve the cancellation root PER CALL (the
+        // context's shutdown token is replaced on every start) and derive
+        // a child per call inside the future; the byte cap and watchdog
+        // window are Copy types.
+        let cancel_root = self.cancel_root();
         let max_bytes = self.max_bytes;
         let no_progress_timeout = self.no_progress_timeout;
         let observability = Arc::clone(&self.observability);
@@ -459,12 +461,6 @@ mod tests {
         );
         assert_eq!(producer.max_bytes, config.max_stream_bytes);
         assert_eq!(producer.no_progress_timeout, DEFAULT_NO_PROGRESS_TIMEOUT);
-        // Root token is not yet cancelled; a child must also be live.
-        assert!(!producer.cancel.is_cancelled());
-        let child = producer.cancel.child_token();
-        assert!(!child.is_cancelled());
-        producer.cancel.cancel();
-        assert!(child.is_cancelled(), "child must observe parent cancel");
     }
 
     #[test]
@@ -503,9 +499,95 @@ mod tests {
         let cloned = producer.clone();
         assert_eq!(cloned.max_bytes, 2048);
         assert_eq!(cloned.no_progress_timeout, Duration::from_secs(7));
-        // Cloned token shares the same cancellation lineage.
-        let child = cloned.cancel.child_token();
-        producer.cancel.cancel();
-        assert!(child.is_cancelled());
+        // Clones carry no token state: cancellation resolves per call from
+        // the registry. The root→child lineage a single call() resolution
+        // relies on still holds.
+        let root = producer.cancel_root();
+        let child = root.child_token();
+        root.cancel();
+        assert!(child.is_cancelled(), "child must observe parent cancel");
+    }
+
+    /// Bind: the producer's per-call resolution observes the context's
+    /// shutdown token.
+    #[test]
+    fn producer_root_token_binds_context_shutdown_token() {
+        let tok = CancellationToken::new();
+        let producer = WasmProducer::new(
+            PathBuf::from("test.wasm"),
+            Arc::new(crate::test_context::SwappableContext::new(tok.clone())),
+            WasmConfig::default(),
+            test_rt(),
+        );
+        assert!(!producer.cancel_root().is_cancelled());
+        tok.cancel();
+        assert!(
+            producer.cancel_root().is_cancelled(),
+            "cancel_root must observe the bound context shutdown token"
+        );
+    }
+
+    /// Unbound independence (no tautology): consecutive resolutions under a
+    /// context with no shutdown token are INDEPENDENT local roots — cancelling
+    /// one must not affect the other.
+    #[test]
+    fn producer_unbound_roots_are_independent_per_call() {
+        let producer = WasmProducer::new(
+            PathBuf::from("test.wasm"),
+            Arc::new(camel_component_api::NoOpComponentContext),
+            WasmConfig::default(),
+            test_rt(),
+        );
+        let r1 = producer.cancel_root();
+        let r2 = producer.cancel_root();
+        r1.cancel();
+        assert!(r1.is_cancelled());
+        assert!(
+            !r2.is_cancelled(),
+            "consecutive unbound resolutions must be independent local roots, not one captured token"
+        );
+    }
+
+    /// FRESHNESS (lifecycle regression): a producer retained across a
+    /// context stop/start (route registry keeps the pipeline) must resolve
+    /// the NEW shutdown token after the reboot, not the construction-era
+    /// one. A token captured at construction would be dead-forever after a
+    /// restart — every derived child born cancelled.
+    #[test]
+    fn producer_root_token_resolves_fresh_across_context_reboot() {
+        let swappable = Arc::new(crate::test_context::SwappableContext::new(
+            CancellationToken::new(),
+        ));
+        let producer = WasmProducer::new(
+            PathBuf::from("test.wasm"),
+            swappable.clone(),
+            WasmConfig::default(),
+            test_rt(),
+        );
+
+        // Era 1: resolution observes the construction-era token.
+        let r1 = producer.cancel_root();
+        assert!(!r1.is_cancelled());
+
+        // Context reboot: stop cancels the old token, start installs a
+        // fresh one under the same context object.
+        let t2 = CancellationToken::new();
+        swappable.swap(t2.clone());
+
+        // Era 2: per-call resolution must pick up the NEW token.
+        let r2 = producer.cancel_root();
+        assert!(
+            !r1.is_cancelled(),
+            "old-era root is independent of the reboot"
+        );
+        t2.cancel();
+        assert!(
+            r2.is_cancelled(),
+            "resolution after reboot must observe the context's CURRENT shutdown token"
+        );
+        assert!(
+            !r1.is_cancelled(),
+            "pre-reboot root must not alias the new era (proves per-call, not captured)"
+        );
     }
 }
