@@ -51,7 +51,20 @@
         # stable (rustToolchain above); no gate or crate build uses nightly.
         # NOTE: nixpkgs cargo-fuzz is 0.13.1; CI pins 0.13.2 — the
         # 0.13.1→0.13.2 changelog shows no tmin/minimize changes.
-        fuzzNightly = pkgs.rust-bin.nightly.latest.minimal;
+        # Dated pin (bd rc-p957): nightly.latest is lock-pinned but
+        # semantically moving — `nix flake update` bumps the rust-overlay
+        # input and silently re-points "latest", breaking fuzz crash
+        # reproduction (e_opus review 2026-09-01, tmin-prefix-fix: future
+        # crashes must reproduce on the compiler that found them). The date
+        # is bumped DELIBERATELY — only when a fuzz finding needs a newer
+        # toolchain — never by a blind lock update. Bumps keep the CI
+        # fuzz workflows (fuzz-smoke.yml, assurance-monthly.yml) on the
+        # same date — one nightly across local and CI keeps crash repros
+        # portable (CI-side sync pending, bd rc-azd9a). 2026-09-24 is
+        # what the locked rust-overlay rev (ed34466c) resolved "latest"
+        # to at pin time, so this changes nothing today; it freezes
+        # tomorrow.
+        fuzzNightly = pkgs.rust-bin.nightly."2026-09-24".minimal;
 
         # `cargo +nightly` needs a rustup-style proxy; rust-overlay toolchains
         # are real toolchains. The shim dispatches +nightly to fuzzNightly and
