@@ -42,7 +42,7 @@ The compile-side policy rejects unsupported asset classes before writing anythin
 
 - A `Camel.toml` in the compile working directory without an explicit `--config` fails. The artifact must not silently capture ambient configuration.
 - `routeFilesFromRoot` in the entry document requires `--config`: the config directory is its anchor. Without the flag, compile fails.
-- Any `CAMEL_*` environment variable present at compile time fails. Compile requires a clean environment.
+- Any `CAMEL_*` environment variable present at compile time fails. Compile requires a clean environment. The one exception is `CAMEL_TRUSTSTORE`, which is benign at compile time (see [Signing artifacts](#signing-artifacts)).
 - Nested documents embedded through the source plan may not declare further route sources.
 
 The entry document's own `routeFiles` patterns are supported: compile resolves them relative to the document's directory (`routeFilesFromRoot` relative to the `--config` root), reads them under the confinement root, and embeds them as store entries. A v2 job artifact can therefore carry its route files inside the store.
@@ -55,7 +55,7 @@ The encoded image is `CAMELTR1 || content || index || manifest || footer`:
 
 - **Content.** The normalized bytes of every embedded document.
 - **Index.** The canonical store index: one entry per document with its path, kind (`route`, `job`, `config`, `include`, `profile`), byte range, and references. The entry point names the `route` or `job` entry of the artifact's own kind.
-- **Manifest.** A canonical JSON manifest (schema 3; a signed artifact carries schema 4): artifact kind, entry-point name, runtime version, the component schemes used, the `${env:}` names without defaults, the listener endpoints, and one `embedded_files` entry per document with a BLAKE3 content digest.
+- **Manifest.** A canonical JSON manifest (schema 3; a signed artifact carries schema 5): artifact kind, entry-point name, runtime version, the component schemes used, the `${env:}` names without defaults, the listener endpoints, and one `embedded_files` entry per document with a BLAKE3 content digest.
 - **Footer.** 76 bytes: the `CAMELTR1` magic, format version 2, kind, flags, section lengths, and a BLAKE3 checksum over the domain-separated sections.
 
 Legacy v1 artifacts carry one document in a 68-byte footer format. The version-aware reader accepts both.
@@ -68,11 +68,11 @@ The write is atomic. Both the executable copy and the trailer go to a sibling `<
 
 The signature is Ed25519ph (RFC 8032 prehash). It covers the complete final artifact bytes: the executable copy plus the trailer. The compiler hashes that stream once while it writes the artifact, so signing does not re-read or buffer the artifact. Verification streams the artifact the same way.
 
-The key file holds exactly 32 bytes: an Ed25519 seed. Supply it with `--signing-key <PATH>` or the `CAMEL_COMPILE_SIGNING_KEY` environment variable. The flag wins when both are present. `--sign` with no key source exits 2. Compile still rejects every other `CAMEL_*` variable, and rejects a stray `CAMEL_COMPILE_SIGNING_KEY` when `--sign` is absent.
+The key file holds exactly 32 bytes: an Ed25519 seed. Supply it with `--signing-key <PATH>` or the `CAMEL_COMPILE_SIGNING_KEY` environment variable. The flag wins when both are present. `--sign` with no key source exits 2. Compile still rejects every other `CAMEL_*` variable except the benign `CAMEL_TRUSTSTORE`, and rejects a stray `CAMEL_COMPILE_SIGNING_KEY` when `--sign` is absent.
 
-A signed compile moves the manifest to schema 4 and adds a `signing` block: the algorithm (`ed25519ph`), the `key_fingerprint` (`blake3:` plus 64 lowercase hex characters over the 32-byte public key), and a `required` boolean. Unsigned compiles stay schema 3 and stay byte-identical. The private seed never appears in the artifact, the envelope, the manifest, or a log.
+A signed compile moves the manifest to schema 5 and adds a `signing` block: the algorithm (`ed25519ph`), the `key_fingerprint` (`blake3:` plus 64 lowercase hex characters over the 32-byte public key), a `required` boolean, and a mandatory `freshness` marker (a u64 unix-seconds value, signed with the manifest bytes). Schema 4 artifacts (pre-keypin compiles) remain readable. Unsigned compiles stay schema 3 and stay byte-identical. The private seed never appears in the artifact, the envelope, the manifest, or a log.
 
-`--require-signature` sets `required: true`. At boot, a required signature that is absent exits 2. Without the flag, a present envelope is still verified at boot, but an unsigned artifact without an envelope still boots.
+`--require-signature` sets `required: true`. At boot, a required signature that is absent exits 2. Without the flag, a present envelope is still verified at boot, but an unsigned artifact without an envelope still boots (a supplied truststore is stricter; see below).
 
 Verify an artifact without booting:
 
@@ -80,9 +80,19 @@ Verify an artifact without booting:
 ./my-routes --verify
 ```
 
-Exit 0 prints two lines: `algorithm: ed25519ph` and `key_fingerprint: blake3:<hex>`. Any failure exits 2 and names the failing step: envelope, fingerprint, or signature. `--verify` is exclusive with every other artifact argument.
+Exit 0 prints two lines: `algorithm: ed25519ph` and `key_fingerprint: blake3:<hex>`. Any failure exits 2 and names the failing step: envelope, fingerprint, signature, or truststore. `--verify` accepts `--truststore` and is exclusive with every other artifact argument.
 
-**Pinning a producer.** Compare the printed `key_fingerprint` with a known value from the producer. A verified envelope proves that the artifact bytes were signed by the holder of the private key whose public key hashes to the manifest fingerprint. The format carries no trust store, so pinning is an operator comparison. Third-party key pinning and key management are deferred. Authority: [ADR-0083](../adr/0083-artifact-signing-envelope.md).
+**Pinning a producer.** A truststore pins the keys an artifact may verify against. Supply it with the artifact argument `--truststore <path>` or the `CAMEL_TRUSTSTORE` environment variable; the argument wins. `--truststore` is a modifier, not a mode: it pairs with a boot and with `--verify`, and `--help`, `--version`, and `--manifest` reject it. The variable is benign at compile time. The file holds one pin per line, a `blake3:` value plus 64 lowercase hex characters, with an optional decimal floor column; `#` comments and blank lines are ignored, and malformed input fails closed.
+
+Under a supplied truststore:
+
+- The manifest `key_fingerprint` must be pinned; an unpinned key exits 2 with `truststore-pin`.
+- A manifest signing block without its envelope exits 2 (the strip rule), whether or not the manifest marked the signature required.
+- A pinned schema-5 artifact whose freshness marker is below the recorded floor exits 2 with `freshness-rollback`; a pinned schema-4 artifact below an existing floor fails the same way (it carries no marker).
+- Boot records each accepted key's floor in the truststore under an advisory lock on `<truststore>.lock`, merging maxima, so a floor never decreases.
+- `--verify` is a dry run: it applies the same policy and never writes.
+
+`--manifest` (and `--help`/`--version`) also run the boot-side trust policy: on first sight of a pinned key they record its floor, and a rolled-back artifact fails them too. Authority: [ADR-0083](../adr/0083-artifact-signing-envelope.md).
 
 ## Running an artifact
 
@@ -96,7 +106,8 @@ The artifact argument surface is deliberately narrow:
 | `--help` | Print artifact help and exit 0, without booting. |
 | `--version` | Print version information and exit 0, without booting. |
 | `--manifest` | Print the embedded manifest JSON and exit 0, without booting. |
-| `--verify` | Verify the signature envelope and exit 0, without booting. Exclusive with every other artifact argument. |
+| `--verify` | Verify the signature envelope and exit 0, without booting. Accepts `--truststore`; exclusive with every other artifact argument. |
+| `--truststore <PATH>` | Deployment truststore pin file for the boot-side trust policy. A modifier: pairs with a boot and with `--verify`, and is rejected by `--help`, `--version`, and `--manifest`. `CAMEL_TRUSTSTORE` is the fallback; the argument wins. |
 | `--report <FILE>` | Write the run report to this path. |
 
 `--arg` is unsupported and rejected as unknown. A job artifact resolves its declared arguments from the embedded declarations alone: declaration defaults apply, and a required argument without a default fails before boot with exit code 2.

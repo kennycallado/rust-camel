@@ -1,6 +1,6 @@
 # ADR-0083: Artifact signing envelope (detached Ed25519ph sidecar)
 
-- Status: Accepted (decided 2026-09-26; roadmap R4, epic rc-rye74, bd rc-osv9x)
+- Status: Accepted (decided 2026-09-26; roadmap R4, epic rc-rye74, bd rc-osv9x); Amended 2026-09-26: truststore pinning and rollback freshness (keypin change)
 - Source: bd rc-osv9x (R4 acceptance criteria); openspec change `r4sign`
 - Amends: ADR-0075 (adds the R4 signing surface; trailer framing is unchanged)
 
@@ -146,6 +146,55 @@ bytes, stripping the trailer or mutating the executable fails verification.
 Signing protects against tamper, not confidentiality. An artifact that
 embeds a private key stays a secret. Key material must never enter the
 artifact, the envelope, the manifest, or a log.
+
+## Amendment: truststore pinning and rollback freshness (2026-09-26)
+
+The `keypin` change adds a deployment-owned truststore and a rollback
+freshness rule. It amends the Consequences deferral of third-party key
+pinning and trust stores.
+
+**Truststore.** A truststore is a single text file owned by the
+deployment. Each non-empty, non-comment line pins one verifying key as
+`blake3:<64 lowercase hex>`, the same form as the manifest
+`key_fingerprint`, optionally followed by a recorded freshness floor.
+The truststore holds public fingerprints and floors only; no key
+material enters it. It is supplied by the artifact argument
+`--truststore <PATH>` or the `CAMEL_TRUSTSTORE` environment variable;
+the argument wins. Malformed input fails closed with exit 2: a
+file-level failure names the path, a line-level failure names the path
+and the line. An empty truststore pins nothing, so every signed
+artifact fails its pin check. The truststore does not apply to unsigned
+artifacts: unsigned compiles stay schema 3 and boot as before. Under a
+supplied truststore, a manifest with a signing block and no envelope
+fails closed: deleting the `.sig` file must not convert a signed
+artifact into an unsigned one.
+
+**Freshness.** A signed compile emits manifest schema 5: schema 4 plus
+a mandatory `freshness` marker in the signing block, encoded as u64
+unix-seconds. The marker lives inside the signed byte domain, so an
+attacker cannot change it without breaking the signature. The
+truststore records, per pinned key, the highest previously accepted
+marker (the floor). At verify time, a marker below the floor fails
+closed as a rollback with exit 2; a marker at or above the floor is
+accepted. The first sight of a pinned key records its marker as the
+floor. A pre-keypin schema-4 artifact passes pin-only until its key has
+a recorded floor; afterwards it fails as a rollback — the first
+schema-5 boot of a key is the migration boundary, and it does not
+re-open. Rollback detection is bounded by the marker's one-second
+resolution: artifacts compiled in the same second are not orderable by
+the marker. Boot records the floor inside a lock-serialized critical
+section (an advisory lock on `<truststore>.lock`) so concurrent boots
+cannot accept on a stale floor or lower a recorded one; `--verify` is
+a dry run and does not lock or write. A boot that must record a floor
+and cannot lock or write the truststore fails closed.
+
+**Compatibility.** Without a truststore, behavior is unchanged from R4:
+the self-contained chain verifies and boots, and `--verify` prints the
+algorithm and fingerprint. With a truststore, a signed artifact whose
+key is not pinned fails closed, a signed manifest without its envelope
+fails closed, and a pinned artifact below its floor fails closed.
+Readers accept manifest schemas 2, 3, 4, and 5. The 148-byte envelope
+framing does not change.
 
 ## References
 

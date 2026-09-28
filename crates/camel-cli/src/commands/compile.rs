@@ -12,7 +12,8 @@
 //! output path. With `--sign` (r4sign) the artifact bytes stream through
 //! a SHA-512 prehash during that write and a detached `CAMELSG1`
 //! Ed25519ph envelope is published to `<output>.sig` afterwards; a
-//! signed manifest uses schema 4 with the signing block.
+//! signed manifest uses schema 5 (keypin) with the signing block,
+//! carrying the unix-seconds freshness marker.
 //! Every rejection — non-native target, dirty compile
 //! environment, `Camel.toml` in the working directory without
 //! `--config`, invalid UTF-8, aggregate payload over the configured
@@ -42,6 +43,7 @@ use ed25519_dalek::{Digest as _, Sha512, SigningKey};
 
 use crate::compile::manifest;
 use crate::compile::policy;
+use crate::compile::runtime::TRUSTSTORE_ENV;
 use crate::compile::signature;
 use crate::compile::sources::{self, SourceSelection};
 use crate::compile::store::{StoreEntryKind, VirtualDocumentStore};
@@ -51,9 +53,10 @@ use crate::compile::trailer::{self, TrailerKind, TrailerV2};
 const EXIT_REJECTION: i32 = 2;
 
 /// The single namespaced compile-time environment variable allowed
-/// through the clean-environment guard (r4sign): under `--sign` it
-/// supplies the signing-key path (a signing input, not a configuration
-/// override); its stray presence without `--sign` stays rejected.
+/// through the clean-environment guard conditionally (r4sign): under
+/// `--sign` it supplies the signing-key path (a signing input, not a
+/// configuration override); its stray presence without `--sign` stays
+/// rejected.
 const SIGNING_KEY_ENV: &str = "CAMEL_COMPILE_SIGNING_KEY";
 
 /// CLI args for `camel compile`.
@@ -155,10 +158,12 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
     }
 
     // Clean compile environment: a CAMEL_* override would silently change
-    // what the artifact embeds, so none may be present. The single
-    // carve-out (r4sign) is `CAMEL_COMPILE_SIGNING_KEY` — a signing
-    // input, not a configuration override — allowed through only under
-    // `--sign` and rejected as a stray variable otherwise.
+    // what the artifact embeds, so none may be present. The carve-outs:
+    // `CAMEL_COMPILE_SIGNING_KEY` (r4sign) — a signing input, not a
+    // configuration override — allowed through only under `--sign` and
+    // rejected as a stray variable otherwise; and `CAMEL_TRUSTSTORE`
+    // (keypin) — a verify-side input, never read at compile time, so it
+    // is benign in any compile.
     let mut stray_signing_key = false;
     let overrides: Vec<String> = std::env::vars_os()
         .filter_map(|(name, _)| {
@@ -168,6 +173,9 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
             }
             if name == SIGNING_KEY_ENV {
                 stray_signing_key = true;
+                return None;
+            }
+            if name == TRUSTSTORE_ENV {
                 return None;
             }
             Some(name.into_owned())
@@ -222,13 +230,15 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
     } else {
         None
     };
-    // Identity recorded in the schema-4 signing block: the algorithm
+    // Identity recorded in the schema-5 signing block: the algorithm
     // name, the BLAKE3 fingerprint of the verifying key (never the seed),
-    // and the required bit from `--require-signature`.
+    // the required bit from `--require-signature`, and the compile-time
+    // freshness marker (keypin Task 2.1).
     let signing_block = signing_key.as_ref().map(|key| manifest::SigningBlock {
         algorithm: signature::ALGORITHM_NAME_ED25519PH.to_string(),
         key_fingerprint: signature::fingerprint(&key.verifying_key().to_bytes()),
         required: args.require_signature,
+        freshness: Some(unix_seconds_now()),
     });
 
     // `.job.json` is not a compilable document kind: reject it explicitly
@@ -371,11 +381,12 @@ pub fn run_compile(args: &CompileArgs) -> i32 {
             return EXIT_REJECTION;
         }
     };
-    // Signed compiles emit manifest schema 4 with the signing block;
-    // unsigned compiles stay byte-identical schema 3 (the canonical JSON
-    // carries no `signing` field).
+    // Signed compiles emit manifest schema 5 with the signing block and
+    // its freshness marker (keypin Task 2.1); unsigned compiles stay
+    // byte-identical schema 3 (the canonical JSON carries no `signing`
+    // field).
     if let Some(signing) = signing_block {
-        operational.manifest_schema = manifest::MANIFEST_SCHEMA_V4;
+        operational.manifest_schema = manifest::MANIFEST_SCHEMA_V5;
         operational.signing = Some(signing);
     }
     let index_bytes = match store.index.encode_canonical() {
@@ -460,6 +471,17 @@ fn document_kind(path: &Path) -> Option<TrailerKind> {
     } else {
         None
     }
+}
+
+/// The compile-time freshness marker (keypin Task 2.1): unix seconds
+/// since the epoch. The marker lives inside the signature-covered
+/// manifest bytes; its one-second resolution bounds rollback detection,
+/// not security.
+fn unix_seconds_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before the unix epoch") // allow-unwrap
+        .as_secs()
 }
 
 /// Copy `current_exe()` plus the encoded trailer into `output` atomically.

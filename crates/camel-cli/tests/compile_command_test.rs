@@ -1676,8 +1676,8 @@ fn signed_manifest_records_fingerprint_only() {
     let bytes = std::fs::read(dir.path().join("app.bin")).expect("artifact exists");
     let (_, _, manifest) = decode_v2(&bytes);
     assert_eq!(
-        manifest["manifest_schema"], 4,
-        "signed compiles emit manifest schema 4: {manifest}"
+        manifest["manifest_schema"], 5,
+        "signed compiles emit manifest schema 5: {manifest}"
     );
     assert_eq!(manifest["signing"]["algorithm"], "ed25519ph", "{manifest}");
     assert_eq!(
@@ -1685,6 +1685,10 @@ fn signed_manifest_records_fingerprint_only() {
         "manifest records the blake3: fingerprint: {manifest}"
     );
     assert_eq!(manifest["signing"]["required"], false, "{manifest}");
+    assert!(
+        manifest["signing"]["freshness"].is_u64(),
+        "the schema-5 signing block carries the freshness marker: {manifest}"
+    );
 
     // `--manifest` prints the signing block without booting.
     let manifest_out = Command::new(dir.path().join("app.bin"))
@@ -1700,8 +1704,12 @@ fn signed_manifest_records_fingerprint_only() {
     );
     let manifest_text = String::from_utf8_lossy(&manifest_out.stdout).into_owned();
     assert!(
-        manifest_text.contains(r#""manifest_schema":4"#),
-        "manifest output carries schema 4: {manifest_text}"
+        manifest_text.contains(r#""manifest_schema":5"#),
+        "manifest output carries schema 5: {manifest_text}"
+    );
+    assert!(
+        manifest_text.contains(r#""freshness":"#),
+        "manifest output carries the freshness marker: {manifest_text}"
     );
     assert!(
         manifest_text.contains("ed25519ph"),

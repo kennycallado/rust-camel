@@ -47,8 +47,8 @@
 //! trailer-free image falls through to the normal CLI unchanged. A
 //! valid trailer additionally runs boot verification (r4sign Task 1.3)
 //! before any dispatch: a present detached envelope verifies against
-//! the streamed artifact bytes, and a schema-4 manifest whose signature
-//! is required refuses to boot without it.
+//! the streamed artifact bytes, and a schema-4 or schema-5 manifest
+//! whose signature is required refuses to boot without it.
 //!
 //! Exit codes: 0 graceful completion / job Completed; 1 job pipeline
 //! failure (route runs end either in graceful completion or a boot-class
@@ -72,6 +72,7 @@ use super::store::{
     SubstitutionContext, SubstitutionEntry, SubstitutionSpan, VirtualDocumentStore,
 };
 use super::trailer::{self, Trailer, TrailerKind};
+use super::trust;
 use crate::commands::run::{Discover, LifecycleFailure, LifecycleSpec};
 
 /// Exit code for argument misuse, boot failure, and report-write failure.
@@ -84,10 +85,12 @@ const IDLE_NOTE: &str = "compiled artifact running (hot-reload disabled). Press 
 ///
 /// The exclusive modes (`--help`, `--version`, `--manifest`, `--verify`)
 /// print or verify and exit 0 (verify: exit 2 on failure) without
-/// booting; `--report <path>` pairs with a run. The surface is
-/// deliberately narrow: dynamic declared-argument flags are unsupported
-/// (rejected as unknown) — declared arguments resolve from the embedded
-/// declarations alone (jobargs Task 3.2).
+/// booting; `--report <path>` pairs with a run. `--truststore <path>`
+/// (keypin Task 1.1) is a modifier, not a mode: it pairs with a boot,
+/// `--report`, and `--verify` only. The surface is deliberately narrow:
+/// dynamic declared-argument flags are unsupported (rejected as
+/// unknown) — declared arguments resolve from the embedded declarations
+/// alone (jobargs Task 3.2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ArtifactArgs {
     /// `--report <path>`: where the run writes its report.
@@ -101,6 +104,12 @@ pub struct ArtifactArgs {
     /// `--verify` (r4sign Task 1.3): verify the detached signature
     /// envelope and exit 0, or fail closed with exit 2 — no boot.
     pub verify: bool,
+    /// `--truststore <path>` (keypin Task 1.1): the deployment
+    /// truststore for signature pinning. Resolved from
+    /// `CAMEL_TRUSTSTORE` in [`ArtifactArgs::parse`] when the argument
+    /// is absent (the argument wins); later consumers read only this
+    /// field.
+    pub truststore: Option<PathBuf>,
 }
 
 impl ArtifactArgs {
@@ -116,6 +125,21 @@ impl ArtifactArgs {
             Some("--manifest")
         } else if self.verify {
             Some("--verify")
+        } else {
+            None
+        }
+    }
+
+    /// The exclusive mode already present that the `--truststore`
+    /// modifier cannot pair with, if any: it pairs with a boot,
+    /// `--report`, and `--verify` only (keypin Task 1.1).
+    fn first_incompatible_mode(&self) -> Option<&'static str> {
+        if self.help {
+            Some("--help")
+        } else if self.version {
+            Some("--version")
+        } else if self.manifest {
+            Some("--manifest")
         } else {
             None
         }
@@ -157,11 +181,20 @@ impl fmt::Display for ArtifactArgError {
 
 impl std::error::Error for ArtifactArgError {}
 
+/// The deployment truststore environment variable (keypin Task 1.1):
+/// the fallback source for the artifact truststore when `--truststore`
+/// is absent.
+pub(crate) const TRUSTSTORE_ENV: &str = "CAMEL_TRUSTSTORE";
+
 impl ArtifactArgs {
     /// Parse the artifact argv (no program name). Accepts `--report
-    /// <path>`, `--help`, `--version`, `--manifest`, and `--verify`;
-    /// rejects duplicates, exclusive combinations, missing report
-    /// values, unknown flags, and positional arguments.
+    /// <path>`, `--truststore <path>`, `--help`, `--version`,
+    /// `--manifest`, and `--verify`; rejects duplicates, exclusive
+    /// combinations, missing report and truststore values, unknown
+    /// flags, and positional arguments. `--truststore` is a modifier:
+    /// it pairs with a boot, `--report`, and `--verify` only, and
+    /// falls back to a non-empty `CAMEL_TRUSTSTORE` when absent (the
+    /// argument wins when both are present).
     pub fn parse(args: &[String]) -> Result<Self, ArtifactArgError> {
         let mut parsed = Self::default();
         let mut idx = 0;
@@ -185,6 +218,22 @@ impl ArtifactArgs {
                     parsed.report = Some(PathBuf::from(value));
                     idx += 2;
                 }
+                "--truststore" => {
+                    if parsed.truststore.is_some() {
+                        return Err(ArtifactArgError::Duplicate("--truststore"));
+                    }
+                    if let Some(mode) = parsed.first_incompatible_mode() {
+                        return Err(ArtifactArgError::Exclusive(mode, "--truststore"));
+                    }
+                    let Some(value) = args.get(idx + 1) else {
+                        return Err(ArtifactArgError::MissingValue("--truststore"));
+                    };
+                    if value.starts_with('-') {
+                        return Err(ArtifactArgError::MissingValue("--truststore"));
+                    }
+                    parsed.truststore = Some(PathBuf::from(value));
+                    idx += 2;
+                }
                 "--help" | "--version" | "--manifest" | "--verify" => {
                     let flag: &'static str = match arg {
                         "--help" => "--help",
@@ -198,6 +247,9 @@ impl ArtifactArgs {
                         } else {
                             ArtifactArgError::Exclusive(prev, flag)
                         });
+                    }
+                    if parsed.truststore.is_some() && flag != "--verify" {
+                        return Err(ArtifactArgError::Exclusive("--truststore", flag));
                     }
                     match flag {
                         "--help" => parsed.help = true,
@@ -214,6 +266,16 @@ impl ArtifactArgs {
                     return Err(ArtifactArgError::Positional(other.to_string()));
                 }
             }
+        }
+        // Env fallback (keypin Task 1.1): a non-empty `CAMEL_TRUSTSTORE`
+        // supplies the truststore when no argument did — the argument
+        // wins when both are present. Resolved once here so later
+        // consumers read only `args.truststore`.
+        if parsed.truststore.is_none()
+            && let Some(path) = std::env::var_os(TRUSTSTORE_ENV)
+            && !path.is_empty()
+        {
+            parsed.truststore = Some(PathBuf::from(path));
         }
         Ok(parsed)
     }
@@ -782,10 +844,14 @@ pub async fn self_detect_artifact() -> Option<i32> {
         Ok(manifest) => manifest,
         Err(()) => return Some(EXIT_REJECTION),
     };
+    // The deployment truststore path (keypin Task 1.2), resolved once
+    // during argument parsing (argument or `CAMEL_TRUSTSTORE`): both
+    // verify sites receive the same value.
+    let truststore = args.truststore.as_deref();
     if args.verify {
-        return Some(run_verify_only(&exe, &manifest));
+        return Some(run_verify_only(&exe, &manifest, truststore));
     }
-    if let Some(code) = verify_for_boot(&exe, &manifest) {
+    if let Some(code) = verify_for_boot(&exe, &manifest, truststore) {
         return Some(code);
     }
     let request = match decoded {
@@ -836,21 +902,24 @@ fn stream_sha512(artifact: &Path) -> std::io::Result<[u8; 64]> {
 }
 
 /// Whether the manifest marks a boot without the envelope unacceptable:
-/// exactly the schema-4 manifests — the only schema that carries a
-/// signing block — whose required bit is set. The decision keys on
-/// `manifest_schema == MANIFEST_SCHEMA_V4`, never on the signing
-/// block's presence: the lenient legacy parse never populates `signing`
-/// for a schema other than 4, so keying on the schema keeps the
+/// exactly the schema-4 and schema-5 manifests — the only schemas that
+/// carry a signing block — whose required bit is set. The decision keys
+/// on `manifest_schema` being 4 or 5, never on the signing block's
+/// presence: the lenient legacy parse never populates `signing`
+/// for a schema other than 4 or 5, so keying on the schema keeps the
 /// decision total.
 fn requires_signature(manifest: &manifest::Manifest) -> bool {
-    manifest.manifest_schema == manifest::MANIFEST_SCHEMA_V4
-        && manifest.signing.as_ref().is_some_and(|s| s.required)
+    matches!(
+        manifest.manifest_schema,
+        manifest::MANIFEST_SCHEMA_V4 | manifest::MANIFEST_SCHEMA_V5
+    ) && manifest.signing.as_ref().is_some_and(|s| s.required)
 }
 
 /// Verify a PRESENT envelope against the artifact and the manifest
 /// signing block — the shared chain of the `--verify` surface and boot
 /// verification (r4sign Task 1.3): the unpaired-schema check first
-/// (keyed on `manifest_schema == MANIFEST_SCHEMA_V4`), then one
+/// (keyed on manifest schema 4 or 5; schema 3 or earlier plus a present
+/// envelope stays the unpaired rejection), then one
 /// artifact stream through [`stream_sha512`], then
 /// [`signature::verify_envelope`] with the manifest's fingerprint and
 /// algorithm. Every failure has already printed its exit-2 diagnostic
@@ -860,7 +929,10 @@ fn verify_envelope_bytes(
     exe: &Path,
     manifest: &manifest::Manifest,
 ) -> Result<signature::VerifiedEnvelope, ()> {
-    if manifest.manifest_schema != manifest::MANIFEST_SCHEMA_V4 {
+    if !matches!(
+        manifest.manifest_schema,
+        manifest::MANIFEST_SCHEMA_V4 | manifest::MANIFEST_SCHEMA_V5
+    ) {
         eprintln!(
             "compiled artifact signature verification failed: unpaired signature envelope: \
              the manifest (schema {}) carries no signing block; remove the stray envelope \
@@ -870,7 +942,7 @@ fn verify_envelope_bytes(
         return Err(());
     }
     let Some(signing) = &manifest.signing else {
-        // Unreachable: the schema check above gates on the only schema
+        // Unreachable: the schema check above gates on the only schemas
         // whose validated form must carry the signing block. Kept
         // total instead of panicking.
         eprintln!(
@@ -897,16 +969,23 @@ fn verify_envelope_bytes(
 }
 
 /// The `--verify` chain (r4sign Task 1.3, no boot): read the detached
-/// envelope at `<exe>.sig` and verify it against the artifact, then
-/// print the verified identity and exit 0; any failure — missing
-/// envelope (the diagnostic names a required signature too), unreadable
-/// envelope, unpaired envelope, or a named verification step — exits 2
-/// with the diagnostic on stderr.
-fn run_verify_only(exe: &Path, manifest: &manifest::Manifest) -> i32 {
+/// envelope at `<exe>.sig` and verify it against the artifact, apply the
+/// shared trust policy (keypin Task 1.2), then print the verified
+/// identity and exit 0; any failure — missing envelope (the diagnostic
+/// names a required signature too, or the truststore strip rule),
+/// unreadable envelope, unpaired envelope, a named verification step, a
+/// truststore parse failure, or an unpinned key — exits 2 with the
+/// diagnostic on stderr.
+fn run_verify_only(exe: &Path, manifest: &manifest::Manifest, truststore: Option<&Path>) -> i32 {
     let sig = envelope_path(exe);
     let envelope = match std::fs::read(&sig) {
         Ok(envelope) => envelope,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if trust_policy_rejection(truststore, manifest, false, TrustMode::Verify, &sig)
+                .is_some()
+            {
+                return EXIT_REJECTION;
+            }
             if requires_signature(manifest) {
                 eprintln!(
                     "compiled artifact signature verification failed: no signature envelope \
@@ -935,24 +1014,255 @@ fn run_verify_only(exe: &Path, manifest: &manifest::Manifest) -> i32 {
         Ok(verified) => verified,
         Err(()) => return EXIT_REJECTION,
     };
+    if trust_policy_rejection(truststore, manifest, true, TrustMode::Verify, &sig).is_some() {
+        return EXIT_REJECTION;
+    }
     println!("algorithm: {}", verified.algorithm_name);
     println!("key_fingerprint: {}", verified.fingerprint);
     0
 }
 
+/// Which verify site owns the trust policy (keypin Task 2.2): `--verify`
+/// is a dry run (reads floors without locking or writing); boot takes the
+/// lock and records floors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrustMode {
+    /// The `--verify` dry run.
+    Verify,
+    /// The boot path.
+    Boot,
+}
+
+/// Why the trust policy refused an artifact — the diagnostic step token
+/// the helper printed (keypin Tasks 1.2 and 2.2). `None` from
+/// [`trust_policy_rejection`] means the artifact may proceed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrustRejection {
+    /// `truststore-pin`.
+    Pin,
+    /// `truststore-parse`.
+    Parse,
+    /// `freshness-rollback`.
+    Rollback,
+    /// `truststore-update`.
+    Update,
+}
+
+/// One boot decision taken inside the truststore lock (keypin Task 2.2).
+enum BootLockOutcome {
+    /// Marker at the floor (or both absent): proceed, no write needed.
+    Accepted,
+    /// The pin re-check passed and the floor was recorded.
+    Recorded,
+    /// The pin was removed while this boot waited for the lock.
+    Depinned,
+    /// The under-lock marker is below the under-lock floor.
+    Rollback { floor: Option<u64> },
+}
+
+/// The shared deployment truststore policy (keypin Tasks 1.2 and 2.2),
+/// called by BOTH verify sites so the boot and verify-only chains cannot
+/// drift. `envelope_present` selects the hook point:
+///
+/// - absent (the envelope-missing branch of either site): the strip
+///   rule — a manifest carrying a signing block (schema 4 or 5) may not
+///   pass without its envelope while a truststore is in force, WHATEVER
+///   its required bit. The pre-existing required-signature diagnostic
+///   keeps its form only on the no-truststore path. Schema-3-or-earlier
+///   manifests (no signing block) keep their existing behavior
+///   everywhere.
+/// - present (after [`verify_envelope_bytes`] fully passes): parse the
+///   truststore — a [`trust::TrustError`] prints its `truststore-parse`
+///   diagnostic — require the manifest `key_fingerprint` to be pinned
+///   (`truststore-pin` otherwise), then apply the freshness policy.
+///   [`TrustMode::Verify`] reads the parsed floors and never locks or
+///   writes; [`TrustMode::Boot`] takes the `<truststore>.lock` critical
+///   section, re-parses UNDER it, re-checks the pin, decides on the fresh
+///   floors, and records on accept.
+///
+/// Returns `Some(step)` after printing the exit-2 diagnostic when the
+/// artifact must not proceed. With no truststore path supplied this
+/// touches no file: zero new reads on the R4 path.
+fn trust_policy_rejection(
+    truststore: Option<&Path>,
+    manifest: &manifest::Manifest,
+    envelope_present: bool,
+    mode: TrustMode,
+    sig: &Path,
+) -> Option<TrustRejection> {
+    // No truststore path supplied: zero new file reads on the R4 path.
+    let path = truststore?;
+    let Some(signing) = &manifest.signing else {
+        // Schema 3 or earlier carries no signing block, so the
+        // truststore does not apply to it anywhere; a stray envelope on
+        // such a manifest is already rejected inside
+        // `verify_envelope_bytes` before this hook.
+        return None;
+    };
+    if !envelope_present {
+        eprintln!(
+            "truststore-pin: no signature envelope present at {}; the manifest key \
+             fingerprint {} must be envelope-verified while the truststore at {} is in force",
+            sig.display(),
+            signing.key_fingerprint,
+            path.display()
+        );
+        return Some(TrustRejection::Pin);
+    }
+    match mode {
+        TrustMode::Verify => verify_freshness_dry_run(path, signing),
+        TrustMode::Boot => boot_freshness_under_lock(path, signing),
+    }
+}
+
+/// The `--verify` freshness dry run (keypin Task 2.2): parse the
+/// truststore, require the pin, and decide on the parsed floors — no lock,
+/// no write.
+fn verify_freshness_dry_run(
+    path: &Path,
+    signing: &manifest::SigningBlock,
+) -> Option<TrustRejection> {
+    let store = match trust::TrustStore::parse(path) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("{e}");
+            return Some(TrustRejection::Parse);
+        }
+    };
+    if !store.is_pinned(&signing.key_fingerprint) {
+        eprintln!(
+            "truststore-pin: the manifest key fingerprint {} is not pinned by the \
+             truststore at {}",
+            signing.key_fingerprint,
+            path.display()
+        );
+        return Some(TrustRejection::Pin);
+    }
+    let floor = store.floor(&signing.key_fingerprint);
+    match trust::decide(signing.freshness, floor) {
+        trust::FreshnessVerdict::Rollback => {
+            print_freshness_rollback(signing, floor);
+            Some(TrustRejection::Rollback)
+        }
+        // `Accept` and `AcceptRecord` both boot unchanged: `--verify` is a
+        // dry run and never records.
+        trust::FreshnessVerdict::Accept | trust::FreshnessVerdict::AcceptRecord => None,
+    }
+}
+
+/// The boot freshness critical section (keypin Task 2.2): take the
+/// truststore lock, re-parse the snapshot UNDER it, re-check the pin,
+/// decide on the FRESH floors, and record on accept. A lock or write
+/// failure is the underlying [`trust::TrustError`], step
+/// `truststore-update`.
+fn boot_freshness_under_lock(
+    path: &Path,
+    signing: &manifest::SigningBlock,
+) -> Option<TrustRejection> {
+    let lock_path = trust::lock_path_for(path);
+    let result = trust::with_truststore_lock(&lock_path, trust::TRUSTSTORE_LOCK_DEADLINE, || {
+        let fresh = trust::TrustStore::parse(path)?;
+        // A pin removed while this boot waited for the lock must fail
+        // closed before the freshness logic runs.
+        if !fresh.is_pinned(&signing.key_fingerprint) {
+            return Ok(BootLockOutcome::Depinned);
+        }
+        let floor = fresh.floor(&signing.key_fingerprint);
+        match trust::decide(signing.freshness, floor) {
+            trust::FreshnessVerdict::Rollback => Ok(BootLockOutcome::Rollback { floor }),
+            trust::FreshnessVerdict::Accept => Ok(BootLockOutcome::Accepted),
+            trust::FreshnessVerdict::AcceptRecord => {
+                // `AcceptRecord` implies a present marker; the `if let`
+                // keeps the path total without a panic.
+                if let Some(marker) = signing.freshness {
+                    trust::record_floor(&fresh, path, &signing.key_fingerprint, marker)?;
+                }
+                Ok(BootLockOutcome::Recorded)
+            }
+        }
+    });
+    match result {
+        Ok(BootLockOutcome::Accepted | BootLockOutcome::Recorded) => None,
+        Ok(BootLockOutcome::Depinned) => {
+            eprintln!(
+                "truststore-pin: the manifest key fingerprint {} is no longer pinned by \
+                 the truststore at {}",
+                signing.key_fingerprint,
+                path.display()
+            );
+            Some(TrustRejection::Pin)
+        }
+        Ok(BootLockOutcome::Rollback { floor }) => {
+            print_freshness_rollback(signing, floor);
+            Some(TrustRejection::Rollback)
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            Some(rejection_step_for(&e))
+        }
+    }
+}
+
+/// The diagnostic step token of a [`trust::TrustError`]: the lock and
+/// write variants are `truststore-update`, every parse variant is
+/// `truststore-parse`.
+fn rejection_step_for(error: &trust::TrustError) -> TrustRejection {
+    match error {
+        trust::TrustError::LockFailure { .. }
+        | trust::TrustError::Unwritable { .. }
+        | trust::TrustError::Io { .. } => TrustRejection::Update,
+        trust::TrustError::Unreadable { .. }
+        | trust::TrustError::NotUtf8 { .. }
+        | trust::TrustError::MalformedEntry { .. }
+        | trust::TrustError::DuplicatePin { .. } => TrustRejection::Parse,
+    }
+}
+
+/// Print the exit-2 `freshness-rollback` diagnostic naming the
+/// fingerprint and the floor (keypin Task 2.2). A missing marker (legacy
+/// schema 4) names the schema-4 form instead.
+fn print_freshness_rollback(signing: &manifest::SigningBlock, floor: Option<u64>) {
+    let floor = match floor {
+        Some(value) => value.to_string(),
+        None => "unknown".to_string(),
+    };
+    match signing.freshness {
+        Some(marker) => eprintln!(
+            "freshness-rollback: the freshness marker {marker} of key {} is below the \
+             recorded floor {floor}",
+            signing.key_fingerprint
+        ),
+        None => eprintln!(
+            "freshness-rollback: the schema-4 artifact key {} carries no freshness marker \
+             and the recorded floor is {floor}",
+            signing.key_fingerprint
+        ),
+    }
+}
+
 /// Boot verification for every non-`--verify` invocation, including the
 /// bare boot (r4sign Task 1.3): a missing envelope refuses the boot
-/// only when the manifest marks the signature required — otherwise the
-/// artifact proceeds with ZERO hashing (v1 compatibility). A present
-/// envelope runs the shared verification chain before the dispatch; any
+/// only when the manifest marks the signature required — or, under a
+/// supplied truststore, when the manifest carries a signing block (the
+/// keypin Task 1.2 strip rule) — otherwise the artifact proceeds with
+/// ZERO hashing (v1 compatibility). A present envelope runs the shared
+/// verification chain and then the trust policy before the dispatch; any
 /// failure exits 2 with the named step on stderr and no boot.
 ///
 /// Returns `Some(EXIT_REJECTION)` when the boot must not proceed.
-fn verify_for_boot(exe: &Path, manifest: &manifest::Manifest) -> Option<i32> {
+fn verify_for_boot(
+    exe: &Path,
+    manifest: &manifest::Manifest,
+    truststore: Option<&Path>,
+) -> Option<i32> {
     let sig = envelope_path(exe);
     let envelope = match std::fs::read(&sig) {
         Ok(envelope) => envelope,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if trust_policy_rejection(truststore, manifest, false, TrustMode::Boot, &sig).is_some()
+            {
+                return Some(EXIT_REJECTION);
+            }
             if requires_signature(manifest) {
                 eprintln!(
                     "compiled artifact boot refused: the manifest marks the signature \
@@ -975,9 +1285,11 @@ fn verify_for_boot(exe: &Path, manifest: &manifest::Manifest) -> Option<i32> {
         }
     };
     match verify_envelope_bytes(&envelope, exe, manifest) {
-        Ok(_) => None,
-        Err(()) => Some(EXIT_REJECTION),
+        Ok(_) => {}
+        Err(()) => return Some(EXIT_REJECTION),
     }
+    trust_policy_rejection(truststore, manifest, true, TrustMode::Boot, &sig)
+        .map(|_| EXIT_REJECTION)
 }
 
 /// Same dispatch returning the raw process code (0/1/2); the seam for
@@ -1060,6 +1372,9 @@ fn print_artifact_usage() {
     println!("  --report <path>  write the run report to <path>");
     println!("  --manifest       print the operational manifest and exit");
     println!("  --verify         verify the detached signature envelope and exit");
+    println!(
+        "  --truststore <path>  deployment truststore pin file (pairs with a boot and --verify)"
+    );
     println!("  --version        print the runtime version and exit");
     println!("  --help           print this usage and exit");
 }
@@ -1215,10 +1530,44 @@ fn write_route_report(report: Option<&Path>, value: &RouteReport) -> std::io::Re
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactArgError, ArtifactArgs, RouteReport, TrailerKind};
+    use super::{ArtifactArgError, ArtifactArgs, RouteReport, TRUSTSTORE_ENV, TrailerKind};
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Serializes every env-var mutation in this module's tests so
+    /// parallel lib tests cannot observe a half-set variable.
+    static TRUSTSTORE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Restores `CAMEL_TRUSTSTORE` to its prior value on drop, so a
+    /// panicking assertion cannot leak the test's env mutation into
+    /// other tests.
+    struct TruststoreEnvRestore(Option<std::ffi::OsString>);
+
+    impl TruststoreEnvRestore {
+        fn set(value: &str) -> Self {
+            let prior = std::env::var_os(TRUSTSTORE_ENV);
+            // SAFETY: test-scoped; the guard restores the prior value on drop.
+            unsafe { std::env::set_var(TRUSTSTORE_ENV, value) };
+            Self(prior)
+        }
+    }
+
+    impl Drop for TruststoreEnvRestore {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(prior) => {
+                    // SAFETY: test-scoped restore of the value captured
+                    // at guard creation.
+                    unsafe { std::env::set_var(TRUSTSTORE_ENV, prior) };
+                }
+                None => {
+                    // SAFETY: test-scoped; the var was unset before the test.
+                    unsafe { std::env::remove_var(TRUSTSTORE_ENV) };
+                }
+            }
+        }
     }
 
     /// The four accepted forms parse into their flags.
@@ -1316,6 +1665,41 @@ mod tests {
         assert_eq!(
             ArtifactArgs::parse(&argv(&["--verify", "--verify"])),
             Err(ArtifactArgError::Duplicate("--verify"))
+        );
+    }
+
+    /// The `CAMEL_TRUSTSTORE` fallback (keypin Task 1.1): with no
+    /// `--truststore` argument the env var supplies the path; with
+    /// both, the argument wins.
+    #[test]
+    fn artifact_args_resolve_env_truststore() {
+        let _env_lock = TRUSTSTORE_ENV_LOCK.lock().expect("env lock poisoned");
+        let _env = TruststoreEnvRestore::set("/deploy/env-truststore.keys");
+
+        // (a) No argument: the env var supplies the truststore.
+        let from_env = ArtifactArgs::parse(&argv(&[])).expect("bare run parses");
+        assert_eq!(
+            from_env.truststore,
+            Some(std::path::PathBuf::from("/deploy/env-truststore.keys"))
+        );
+
+        // (b) Both present: the argument wins.
+        let both = ArtifactArgs::parse(&argv(&["--truststore", "/deploy/arg-truststore.keys"]))
+            .expect("argument parses");
+        assert_eq!(
+            both.truststore,
+            Some(std::path::PathBuf::from("/deploy/arg-truststore.keys"))
+        );
+    }
+
+    /// Reverse-order enforcement (keypin Task 1.1): `--truststore`
+    /// following an exclusive mode is rejected the same way, naming
+    /// both flags.
+    #[test]
+    fn artifact_args_truststore_after_mode_is_exclusive() {
+        assert_eq!(
+            ArtifactArgs::parse(&argv(&["--help", "--truststore", "t"])),
+            Err(ArtifactArgError::Exclusive("--help", "--truststore"))
         );
     }
 
@@ -1509,6 +1893,116 @@ mod tests {
         assert!(
             err.to_string().contains("expected route"),
             "the rejection must name the kind mismatch: {err}"
+        );
+    }
+
+    /// A synthetic schema-4 manifest for `fingerprint` — no freshness
+    /// marker — so the policy boundary is testable without constructing a
+    /// signed schema-4 artifact (impossible once the compiler emits
+    /// schema 5: the manifest lives inside the signed bytes and the
+    /// trailer checksum).
+    fn schema4_manifest(fingerprint: &str) -> super::manifest::Manifest {
+        super::manifest::Manifest {
+            manifest_schema: super::manifest::MANIFEST_SCHEMA_V4,
+            source_name: "app.yaml".to_string(),
+            runtime_version: super::manifest::RUNTIME_VERSION.to_string(),
+            kind: TrailerKind::Job,
+            artifact_kind: "job".to_string(),
+            components: Vec::new(),
+            env_names: Vec::new(),
+            listeners: Vec::new(),
+            embedded_files: Vec::new(),
+            total_embedded_bytes: 0,
+            signing: Some(super::manifest::SigningBlock {
+                algorithm: "ed25519ph".to_string(),
+                freshness: None,
+                key_fingerprint: fingerprint.to_string(),
+                required: false,
+            }),
+        }
+    }
+
+    /// The schema-4 boundary (keypin Task 2.2): a pinned schema-4
+    /// artifact passes pin-only while no floor is recorded for its key,
+    /// and rolls back once any floor exists.
+    #[test]
+    fn schema4_boundary_is_the_first_recorded_floor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fingerprint = format!("blake3:{}", "a0".repeat(32));
+        let manifest = schema4_manifest(&fingerprint);
+        let sig = dir.path().join("app.bin.sig");
+
+        // (a) No floor recorded: the pin check passes and the boot
+        // proceeds (plain pin-only acceptance).
+        let no_floor = dir.path().join("no-floor.keys");
+        std::fs::write(&no_floor, format!("{fingerprint}\n")).expect("write truststore");
+        assert_eq!(
+            super::trust_policy_rejection(
+                Some(&no_floor),
+                &manifest,
+                true,
+                super::TrustMode::Boot,
+                &sig,
+            ),
+            None,
+            "a schema-4 artifact with no recorded floor proceeds"
+        );
+
+        // (b) Any floor recorded: the marker-less schema-4 artifact is
+        // below it and rolls back.
+        let floored = dir.path().join("floored.keys");
+        std::fs::write(&floored, format!("{fingerprint} 7\n")).expect("write truststore");
+        assert_eq!(
+            super::trust_policy_rejection(
+                Some(&floored),
+                &manifest,
+                true,
+                super::TrustMode::Boot,
+                &sig,
+            ),
+            Some(super::TrustRejection::Rollback),
+            "a schema-4 artifact below a recorded floor rolls back"
+        );
+    }
+
+    /// A pin removed while a boot holds the truststore lock fails closed
+    /// on the under-lock re-parse (keypin Task 2.2): the pin re-check
+    /// fires before the freshness step ever runs.
+    #[test]
+    fn pin_removal_under_lock_fails_closed() {
+        use fs4::FileExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fingerprint = format!("blake3:{}", "ae".repeat(32));
+        let manifest = schema4_manifest(&fingerprint);
+        let sig = dir.path().join("app.bin.sig");
+        let truststore = dir.path().join("pins.keys");
+        std::fs::write(&truststore, format!("{fingerprint}\n")).expect("write truststore");
+        let lock_path = super::trust::lock_path_for(&truststore);
+
+        // Another boot holds the lock while the pin is removed; the
+        // release lets this boot proceed to its under-lock re-parse.
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open the lock file");
+        FileExt::lock(&held).expect("hold the lock");
+        std::fs::write(&truststore, "# pin removed\n").expect("rewrite without the pin");
+        FileExt::unlock(&held).expect("release the lock");
+
+        assert_eq!(
+            super::trust_policy_rejection(
+                Some(&truststore),
+                &manifest,
+                true,
+                super::TrustMode::Boot,
+                &sig,
+            ),
+            Some(super::TrustRejection::Pin),
+            "the under-lock re-parse must fail closed when the pin was removed"
         );
     }
 }

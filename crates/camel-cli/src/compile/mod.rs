@@ -18,6 +18,8 @@
 //!   substitution-targeted assets (r2embed Task 3.2).
 //! - [`signature`] — detached Ed25519ph signature envelope sidecar for
 //!   signed artifacts (r4sign).
+//! - [`trust`] — deployment truststore codec for signature pinning
+//!   (keypin Task 1.2).
 //!
 //! The artifact embeds authoring text, never `RouteDefinition` or compiled
 //! steps: DSL stays responsible for parsing and interpolation, runtime for
@@ -31,6 +33,8 @@ pub mod signature;
 pub mod sources;
 pub mod store;
 pub mod trailer;
+
+mod trust;
 
 use std::fmt;
 

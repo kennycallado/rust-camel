@@ -2727,6 +2727,75 @@ fn artifact_rejects_unknown_positional_and_duplicate_args() {
     }
 }
 
+/// `--truststore` with a missing trailing value exits 2 naming the
+/// argument, without booting (keypin Task 1.1).
+#[test]
+fn truststore_argument_requires_value() {
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_route);
+    let (code, stdout, stderr) =
+        common::run_binary(deploy.path(), &artifact, &["--truststore"], &[]);
+    assert_eq!(
+        code, 2,
+        "a trailing --truststore must exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("requires a value"),
+        "the diagnostic must carry the missing-value message: {combined}"
+    );
+    assert!(!combined.contains("context started"), "no boot: {combined}");
+}
+
+/// `--truststore` is a modifier, not an exclusive mode: paired with
+/// `--manifest`, `--help`, or `--version` it exits 2 with the
+/// duplicate-exclusive diagnostic, without booting (keypin Task 1.1).
+#[test]
+fn truststore_rejected_with_exclusive_modes() {
+    let (deploy, artifact) = deploy_artifact(&fixture().multi_route);
+    for mode in ["--manifest", "--help", "--version"] {
+        let argv = ["--truststore", "truststore.keys", mode];
+        let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &argv, &[]);
+        assert_eq!(
+            code, 2,
+            "argv {argv:?} must exit 2;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        let combined = format!("{stdout}{stderr}");
+        assert!(
+            combined.contains("mutually exclusive"),
+            "argv {argv:?} must carry the duplicate-exclusive diagnostic: {combined}"
+        );
+        assert!(
+            !combined.contains("context started"),
+            "argv {argv:?} must not boot: {combined}"
+        );
+    }
+}
+
+/// `CAMEL_TRUSTSTORE` is benign at compile time (keypin Task 1.1): the
+/// clean-environment guard accepts the verify-side variable — it is
+/// never read at compile time — so an unsigned compile with it set
+/// succeeds.
+#[test]
+fn compile_with_camel_truststore_env_is_benign() {
+    let dir = tempfile::Builder::new()
+        .prefix("camel-truststore-compile-")
+        .tempdir_in(fixture_root())
+        .expect("compile tempdir on the fixture root");
+    std::fs::write(dir.path().join("benign.job.yaml"), JOB_DOC).expect("write document");
+    let output = compile(
+        dir.path(),
+        "benign.job.yaml",
+        "benign.bin",
+        &[("CAMEL_TRUSTSTORE", "/deploy/truststore.keys")],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "compile with CAMEL_TRUSTSTORE set must succeed;\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Marked corruption (terminal magic retained) fails closed: nonzero
 /// integrity diagnostic and no boot. One case mutates the last
 /// embedded-data byte (payload/manifest region, past the executable
@@ -3697,6 +3766,55 @@ fn compiled_runtime_rejects_invalid_store_before_boot() {
 // and its hardlinked deploys are never mutated.
 // ---------------------------------------------------------------------------
 
+/// keypin Task 2.1: a signed compile emits manifest schema 5 whose
+/// signing block carries the unix-seconds freshness marker, within a
+/// minute of the test clock, beside the unchanged algorithm name, key
+/// fingerprint, and required bit — and `--manifest` prints the stored
+/// canonical JSON verbatim, marker included.
+#[test]
+fn signed_compile_emits_schema5_freshness_marker() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &["--manifest"], &[]);
+    assert_eq!(
+        code, 0,
+        "--manifest on a signed artifact must succeed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is manifest JSON");
+    assert_eq!(
+        manifest["manifest_schema"].as_u64(),
+        Some(5),
+        "signed compiles emit manifest schema 5: {manifest}"
+    );
+    let freshness = manifest["signing"]["freshness"]
+        .as_u64()
+        .expect("the schema-5 signing block carries the freshness marker");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after the unix epoch")
+        .as_secs();
+    assert!(
+        freshness <= now && now - freshness <= 60,
+        "freshness marker {freshness} must be within 60 seconds of now {now}"
+    );
+    assert_eq!(
+        manifest["signing"]["algorithm"].as_str(),
+        Some("ed25519ph"),
+        "the signing block keeps the algorithm name: {manifest}"
+    );
+    assert_eq!(
+        manifest["signing"]["required"].as_bool(),
+        Some(false),
+        "the signing block keeps the required bit: {manifest}"
+    );
+    assert!(
+        manifest["signing"]["key_fingerprint"]
+            .as_str()
+            .is_some_and(|f| f.starts_with("blake3:")),
+        "the signing block keeps the key fingerprint: {manifest}"
+    );
+}
+
 /// A signed artifact boots and completes exactly as its unsigned twin:
 /// the same exit code, the same job outcome and reply, and no signature
 /// diagnostic anywhere (the valid envelope verifies silently).
@@ -4239,4 +4357,654 @@ fn envelope_corruption_binds_no_listener() {
     // Drop the held listener only after the child exit is reaped
     // (`run_binary` returns post-reap).
     drop(witness);
+}
+// ---------------------------------------------------------------------------
+// keypin Task 1.2: deployment truststore pin check + strip rule at both
+// verify sites. Like the r4sign battery above, every case drives the REAL
+// self-detect entry — the artifact binary itself — so boot and `--verify`
+// both cross the shared trust policy. The signed cases reuse the shared
+// OnceLock fixtures via the deploy-to-tempdir pattern; truststores are tiny
+// hand-written text files in the per-test deploy directory. The tamper cases
+// keep the deploy-copy discipline: shared fixtures are never mutated.
+// ---------------------------------------------------------------------------
+
+/// A different but well-formed pin, for truststores that must NOT match
+/// the fixture manifest fingerprint.
+const OTHER_PIN_HEX: &str = concat!(
+    "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+);
+
+/// Read the deployed signed artifact's manifest `key_fingerprint` (the
+/// exact `blake3:<hex>` string the truststore must pin) via `--manifest`.
+fn manifest_fingerprint(deploy: &Path, artifact: &Path) -> String {
+    let (code, stdout, stderr) = common::run_binary(deploy, artifact, &["--manifest"], &[]);
+    assert_eq!(
+        code, 0,
+        "--manifest must report the manifest;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is manifest JSON");
+    manifest["signing"]["key_fingerprint"]
+        .as_str()
+        .expect("signed manifest records the key fingerprint")
+        .to_string()
+}
+
+/// Read the deployed signed artifact's schema-5 freshness marker via
+/// `--manifest` (keypin Task 2.2): the unix-seconds value the truststore
+/// floor is compared against.
+fn manifest_marker(deploy: &Path, artifact: &Path) -> u64 {
+    let (code, stdout, stderr) = common::run_binary(deploy, artifact, &["--manifest"], &[]);
+    assert_eq!(
+        code, 0,
+        "--manifest must report the manifest;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is manifest JSON");
+    manifest["signing"]["freshness"]
+        .as_u64()
+        .expect("a schema-5 signing block carries the freshness marker")
+}
+
+/// Write a tiny truststore text file into the deploy directory and
+/// return its path as a command-line argument string.
+fn write_truststore(deploy: &Path, name: &str, body: &str) -> String {
+    let path = deploy.join(name);
+    std::fs::write(&path, body).expect("write truststore file");
+    path.to_string_lossy().into_owned()
+}
+
+/// A signed artifact whose manifest key fingerprint is pinned boots AND
+/// passes `--verify --truststore` (exit 0 both).
+#[test]
+fn pinned_key_verifies_under_truststore() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+    let truststore = write_truststore(deploy.path(), "pins.keys", &format!("{fingerprint}\n"));
+
+    let (boot_code, boot_stdout, boot_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        boot_code, 0,
+        "the pinned artifact must boot;\nstdout:\n{boot_stdout}\nstderr:\n{boot_stderr}"
+    );
+
+    let (verify_code, verify_stdout, verify_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--verify", "--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        verify_code, 0,
+        "--verify under a pinning truststore must succeed;\nstdout:\n{verify_stdout}\nstderr:\n{verify_stderr}"
+    );
+    assert!(
+        !format!("{verify_stdout}{verify_stderr}").contains("context started"),
+        "--verify must not boot: {verify_stdout}"
+    );
+}
+
+/// (a) With no argument, `CAMEL_TRUSTSTORE` supplies a pinning
+/// truststore and `--verify` exits 0. (b) With BOTH set, the argument
+/// wins: a comments-only argument truststore pins nothing, so `--verify`
+/// exits 2 with the `truststore-pin` diagnostic — proving the argument
+/// path was used, not the env one.
+#[test]
+fn env_truststore_supplies_and_argument_wins() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+    let pinning = write_truststore(deploy.path(), "env-pins.keys", &format!("{fingerprint}\n"));
+    let empty = write_truststore(deploy.path(), "arg-empty.keys", "# no pins\n\n");
+
+    let (code, stdout, stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--verify"],
+        &[("CAMEL_TRUSTSTORE", &pinning)],
+    );
+    assert_eq!(
+        code, 0,
+        "the env-supplied truststore must pin the key;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let (code, stdout, stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--verify", "--truststore", &empty],
+        &[("CAMEL_TRUSTSTORE", &pinning)],
+    );
+    assert_eq!(
+        code, 2,
+        "the argument truststore must win over the env var;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("truststore-pin"),
+        "the diagnostic must name the pin step: {stderr}"
+    );
+}
+
+/// `CAMEL_TRUSTSTORE` also supplies the BARE boot path (no
+/// `--truststore`, no `--verify`): a store pinning the deployed
+/// `signed_job` fingerprint boots, and a store pinning nothing refuses
+/// the same boot with `truststore-pin` — proving the env var is read on
+/// the boot chain, not only by `--verify`.
+#[test]
+fn env_truststore_supplies_boot_without_argument() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+    let pinning = write_truststore(
+        deploy.path(),
+        "env-boot-pins.keys",
+        &format!("{fingerprint}\n"),
+    );
+    let empty = write_truststore(deploy.path(), "env-boot-empty.keys", "# no pins\n\n");
+
+    let (code, stdout, stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &[],
+        &[("CAMEL_TRUSTSTORE", &pinning)],
+    );
+    assert_eq!(
+        code, 0,
+        "the env-supplied truststore must let the pinned artifact boot;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let (code, stdout, stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &[],
+        &[("CAMEL_TRUSTSTORE", &empty)],
+    );
+    assert_eq!(
+        code, 2,
+        "an env-supplied store pinning nothing must refuse the boot;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        format!("{stdout}{stderr}").contains("truststore-pin"),
+        "the boot diagnostic must name the pin step: {stdout}{stderr}"
+    );
+}
+
+/// A truststore pinning a DIFFERENT valid fingerprint fails closed at
+/// BOTH sites: boot and `--verify` exit 2 with `truststore-pin` naming
+/// the manifest fingerprint, and nothing boots.
+#[test]
+fn unpinned_key_fails_closed_at_boot_and_verify() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+    let truststore = write_truststore(
+        deploy.path(),
+        "other.keys",
+        &format!("blake3:{OTHER_PIN_HEX}\n"),
+    );
+
+    let (boot_code, boot_stdout, boot_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        boot_code, 2,
+        "an unpinned key must refuse the boot;\nstdout:\n{boot_stdout}\nstderr:\n{boot_stderr}"
+    );
+    let boot_all = format!("{boot_stdout}{boot_stderr}");
+    assert!(
+        boot_all.contains("truststore-pin") && boot_all.contains(&fingerprint),
+        "the boot diagnostic must name the pin step and the manifest fingerprint: {boot_all}"
+    );
+    assert!(
+        !boot_all.contains("context started"),
+        "no boot on an unpinned key: {boot_all}"
+    );
+
+    let (verify_code, _, verify_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--verify", "--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        verify_code, 2,
+        "--verify on an unpinned key must exit 2;\nstderr:\n{verify_stderr}"
+    );
+    assert!(
+        verify_stderr.contains("truststore-pin") && verify_stderr.contains(&fingerprint),
+        "the verify diagnostic must name the pin step and the fingerprint: {verify_stderr}"
+    );
+}
+
+/// The strip rule at BOTH sites (required bit NOT set): a signed
+/// artifact deployed WITHOUT its envelope must not boot or verify under
+/// a truststore — exit 2 with `truststore-pin` naming the manifest
+/// fingerprint, the same diagnostic the required-bit path would print
+/// with no truststore only on the no-truststore path.
+#[test]
+fn stripped_envelope_fails_closed_under_truststore() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+    let truststore = write_truststore(deploy.path(), "pins.keys", &format!("{fingerprint}\n"));
+    std::fs::remove_file(sig_path_of(&artifact)).expect("strip the envelope");
+
+    let (boot_code, boot_stdout, boot_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        boot_code, 2,
+        "a stripped envelope must refuse the boot under a truststore;\nstdout:\n{boot_stdout}\nstderr:\n{boot_stderr}"
+    );
+    let boot_all = format!("{boot_stdout}{boot_stderr}");
+    assert!(
+        boot_all.contains("truststore-pin") && boot_all.contains(&fingerprint),
+        "the boot diagnostic must name the pin step and the fingerprint: {boot_all}"
+    );
+    assert!(
+        !boot_all.contains("context started"),
+        "no boot after stripping: {boot_all}"
+    );
+
+    let (verify_code, _, verify_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--verify", "--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        verify_code, 2,
+        "--verify on a stripped envelope must exit 2 under a truststore;\nstderr:\n{verify_stderr}"
+    );
+    assert!(
+        verify_stderr.contains("truststore-pin") && verify_stderr.contains(&fingerprint),
+        "the verify diagnostic must name the pin step and the fingerprint: {verify_stderr}"
+    );
+}
+
+/// The strip rule with the required bit SET (keypin Phase-1 review gap):
+/// a `--sign --require-signature` artifact deployed without its envelope
+/// under a truststore still hits the strip rule FIRST at BOTH sites —
+/// boot and `--verify` exit 2 with `truststore-pin` naming the manifest
+/// fingerprint, never the required-signature diagnostic.
+#[test]
+fn stripped_envelope_with_required_bit_fails_closed_under_truststore() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_required_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+    let truststore = write_truststore(deploy.path(), "pins.keys", &format!("{fingerprint}\n"));
+    std::fs::remove_file(sig_path_of(&artifact)).expect("strip the envelope");
+
+    let (boot_code, boot_stdout, boot_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        boot_code, 2,
+        "a stripped required-signature envelope must refuse the boot under a truststore;\nstdout:\n{boot_stdout}\nstderr:\n{boot_stderr}"
+    );
+    let boot_all = format!("{boot_stdout}{boot_stderr}");
+    assert!(
+        boot_all.contains("truststore-pin") && boot_all.contains(&fingerprint),
+        "the boot diagnostic must name the pin step and the fingerprint: {boot_all}"
+    );
+    assert!(
+        !boot_all.contains("context started"),
+        "no boot after stripping a required envelope: {boot_all}"
+    );
+
+    let (verify_code, _, verify_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--verify", "--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        verify_code, 2,
+        "--verify on a stripped required envelope must exit 2 under a truststore;\nstderr:\n{verify_stderr}"
+    );
+    assert!(
+        verify_stderr.contains("truststore-pin") && verify_stderr.contains(&fingerprint),
+        "the verify diagnostic must name the pin step and the fingerprint: {verify_stderr}"
+    );
+}
+
+/// Parse failures fail closed at boot: (a) a malformed line 2 exits 2
+/// naming the path and `line 2` (step `truststore-parse`); (b) a missing
+/// truststore file exits 2 naming the path.
+#[test]
+fn malformed_truststore_fails_closed_at_boot() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+
+    let malformed = write_truststore(
+        deploy.path(),
+        "malformed.keys",
+        &format!("{fingerprint}\nnot-a-pin\n"),
+    );
+    let (code, _, stderr) =
+        common::run_binary(deploy.path(), &artifact, &["--truststore", &malformed], &[]);
+    assert_eq!(
+        code, 2,
+        "a malformed truststore must refuse the boot;\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("truststore-parse")
+            && stderr.contains(&malformed)
+            && stderr.contains("line 2"),
+        "the diagnostic must name the parse step, the path, and line 2: {stderr}"
+    );
+
+    let missing = deploy.path().join("absent.keys");
+    let missing = missing.to_string_lossy().into_owned();
+    let (code, _, stderr) =
+        common::run_binary(deploy.path(), &artifact, &["--truststore", &missing], &[]);
+    assert_eq!(
+        code, 2,
+        "a missing truststore file must refuse the boot;\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("truststore-parse") && stderr.contains(&missing),
+        "the diagnostic must name the parse step and the path: {stderr}"
+    );
+}
+
+/// An empty — comments-only — truststore is valid but pins nothing, so
+/// a signed artifact fails its pin check: boot exits 2 with
+/// `truststore-pin`.
+#[test]
+fn empty_truststore_pins_nothing_at_boot() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let truststore = write_truststore(deploy.path(), "empty.keys", "# no pins\n\n");
+
+    let (code, stdout, stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        code, 2,
+        "an empty truststore pins nothing, so the boot must fail;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("truststore-pin"),
+        "the diagnostic must name the pin step: {stderr}"
+    );
+}
+
+/// An unsigned artifact (schema 3, no signing block) ignores the
+/// truststore entirely: it boots unchanged with one supplied — no pin
+/// step, no new reads beyond the ignored path.
+#[test]
+fn unsigned_artifact_ignores_truststore() {
+    let (deploy, artifact) = deploy_artifact(&fixture().job);
+    let truststore = write_truststore(
+        deploy.path(),
+        "pins.keys",
+        &format!("blake3:{OTHER_PIN_HEX}\n"),
+    );
+
+    let (code, stdout, stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--report", "report.json", "--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        code, 0,
+        "an unsigned artifact must boot unchanged under a truststore;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(deploy.path().join("report.json")).expect("report written"),
+    )
+    .expect("report is JSON");
+    assert_eq!(report["outcome"], "Completed", "report: {report}");
+    assert!(
+        !format!("{stdout}{stderr}").contains("truststore"),
+        "no truststore step on an unsigned artifact: {stdout}{stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// keypin Task 2.2: freshness floors. The decision and floor write share one
+// lock-serialized boot critical section; `--verify` is a dry run. The cases
+// reuse the shared schema-5 `signed_job` fixture via `deploy_signed` and read
+// the signed marker from `--manifest`; truststores are hand-written tiny text
+// files in the per-test deploy directory.
+// ---------------------------------------------------------------------------
+
+/// A marker below the recorded floor fails closed at BOTH sites (keypin
+/// Task 2.2): boot and `--verify --truststore` exit 2 with the
+/// `freshness-rollback` diagnostic naming the fingerprint and the floor.
+#[test]
+fn rollback_below_floor_fails_closed() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+    let marker = manifest_marker(deploy.path(), &artifact);
+    let truststore = write_truststore(
+        deploy.path(),
+        "ahead.keys",
+        &format!("{fingerprint} {}\n", marker + 1000),
+    );
+
+    let (boot_code, boot_stdout, boot_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--truststore", &truststore],
+        &[],
+    );
+    let floor = (marker + 1000).to_string();
+    assert_eq!(
+        boot_code, 2,
+        "a marker below the floor must refuse the boot;\nstdout:\n{boot_stdout}\nstderr:\n{boot_stderr}"
+    );
+    let boot_all = format!("{boot_stdout}{boot_stderr}");
+    assert!(
+        boot_all.contains("freshness-rollback")
+            && boot_all.contains(&fingerprint)
+            && boot_all.contains(&floor),
+        "the boot diagnostic must name the rollback step, the fingerprint, and the floor: {boot_all}"
+    );
+    assert!(
+        !boot_all.contains("context started"),
+        "no boot below the floor: {boot_all}"
+    );
+
+    let (verify_code, _, verify_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--verify", "--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        verify_code, 2,
+        "--verify below the floor must exit 2;\nstderr:\n{verify_stderr}"
+    );
+    assert!(
+        verify_stderr.contains("freshness-rollback")
+            && verify_stderr.contains(&fingerprint)
+            && verify_stderr.contains(&floor),
+        "the verify diagnostic must name the rollback step, the fingerprint, and the floor: {verify_stderr}"
+    );
+}
+
+/// The first sight of a pinned key with no recorded floor boots and records
+/// the artifact's marker as that key's floor (keypin Task 2.2).
+#[test]
+fn first_sight_records_floor() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+    let marker = manifest_marker(deploy.path(), &artifact);
+    let truststore = write_truststore(deploy.path(), "first.keys", &format!("{fingerprint}\n"));
+
+    let (code, stdout, stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        code, 0,
+        "the first sight of the pinned key must boot;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let body = std::fs::read_to_string(&truststore).expect("read the rewritten truststore");
+    let line = body
+        .lines()
+        .find(|line| line.trim_start().starts_with(&fingerprint))
+        .expect("the pin survives the rewrite");
+    assert!(
+        line.ends_with(&marker.to_string()),
+        "the first sight records the marker as the floor: {line:?} (marker {marker})"
+    );
+}
+
+/// The floor never decreases (keypin Task 2.2): an equal floor boots with
+/// the truststore bytes unchanged; a lower floor rises to the marker.
+#[test]
+fn floor_never_decreases() {
+    // (a) floor == marker: boot succeeds and is not rewritten.
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+    let marker = manifest_marker(deploy.path(), &artifact);
+    let equal = write_truststore(
+        deploy.path(),
+        "equal.keys",
+        &format!("{fingerprint} {marker}\n"),
+    );
+    let before = std::fs::read(&equal).expect("read the equal-floor store");
+    let (code, stdout, stderr) =
+        common::run_binary(deploy.path(), &artifact, &["--truststore", &equal], &[]);
+    assert_eq!(
+        code, 0,
+        "a marker at the floor boots;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let after = std::fs::read(&equal).expect("read the equal-floor store");
+    assert_eq!(before, after, "an equal floor is not rewritten");
+
+    // (b) floor = marker - 5: boot succeeds and the floor becomes marker.
+    let lower = write_truststore(
+        deploy.path(),
+        "lower.keys",
+        &format!("{fingerprint} {}\n", marker - 5),
+    );
+    let (code, stdout, stderr) =
+        common::run_binary(deploy.path(), &artifact, &["--truststore", &lower], &[]);
+    assert_eq!(
+        code, 0,
+        "a marker above the floor boots;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let body = std::fs::read_to_string(&lower).expect("read the raised-floor store");
+    let line = body
+        .lines()
+        .find(|line| line.trim_start().starts_with(&fingerprint))
+        .expect("the pin survives the rewrite");
+    assert!(
+        line.ends_with(&marker.to_string()),
+        "the floor rises to the marker: {line:?} (marker {marker})"
+    );
+}
+
+/// `--verify` is a dry run (keypin Task 2.2): a marker above the floor
+/// exits 0 and the truststore file is byte-identical before and after.
+#[test]
+fn verify_is_a_dry_run() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+    let marker = manifest_marker(deploy.path(), &artifact);
+    let truststore = write_truststore(
+        deploy.path(),
+        "dry-run.keys",
+        &format!("{fingerprint} {}\n", marker - 5),
+    );
+    let before = std::fs::read(&truststore).expect("read the store before verify");
+
+    let (code, stdout, stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--verify", "--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        code, 0,
+        "--verify above the floor must exit 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let after = std::fs::read(&truststore).expect("read the store after verify");
+    assert_eq!(
+        before, after,
+        "--verify must never lock or write the truststore (dry run)"
+    );
+}
+
+/// A boot that must record a floor against an unwritable truststore fails
+/// closed with `truststore-update` (keypin Task 2.2). The read-only
+/// directory is restored on every path, including failure.
+#[test]
+fn unwritable_truststore_fails_closed() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        /// Restores writable permissions on the deploy directory even if
+        /// the test fails part way (Drop runs on unwind too).
+        struct Writable(PathBuf);
+        impl Drop for Writable {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+        let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+        let truststore =
+            write_truststore(deploy.path(), "read-only.keys", &format!("{fingerprint}\n"));
+        let _restore = Writable(deploy.path().to_path_buf());
+        std::fs::set_permissions(deploy.path(), std::fs::Permissions::from_mode(0o555))
+            .expect("chmod read-only");
+
+        let (code, stdout, stderr) = common::run_binary(
+            deploy.path(),
+            &artifact,
+            &["--truststore", &truststore],
+            &[],
+        );
+        assert_eq!(
+            code, 2,
+            "an unwritable truststore must refuse the boot;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            format!("{stdout}{stderr}").contains("truststore-update"),
+            "the diagnostic must name the update step: {stdout}{stderr}"
+        );
+    }
+}
+
+/// A schema-5 signed artifact with no truststore skips the freshness step
+/// entirely (keypin Task 2.2): the plain R4 chain boots it unchanged.
+#[test]
+fn freshness_without_truststore_skips_the_step() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &[], &[]);
+    assert_eq!(
+        code, 0,
+        "a signed artifact boots on the plain R4 chain;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        !all.contains("freshness"),
+        "no freshness step without a truststore: {all}"
+    );
+    assert!(
+        !all.contains("truststore"),
+        "no truststore step without a truststore: {all}"
+    );
 }

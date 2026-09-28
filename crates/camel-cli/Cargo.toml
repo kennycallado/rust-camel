@@ -29,6 +29,7 @@ chrono.workspace = true
 clap = { workspace = true, features = ["derive", "env", "string"] }
 config.workspace = true
 ed25519-dalek.workspace = true
+fs4.workspace = true
 glob.workspace = true
 humantime.workspace = true
 include_dir = "0.7"

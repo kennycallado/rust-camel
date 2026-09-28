@@ -22,13 +22,17 @@
 //! r4sign) additionally carries the `signing` block: exactly the
 //! algorithm name, the `blake3:` fingerprint of the signing key's
 //! verifying key, and the required bit — never any key material.
+//! Schema 5 (signed freshness, keypin) additionally requires a
+//! `freshness` marker in the signing block: the unsigned 64-bit
+//! unix-seconds compile timestamp the envelope signature covers.
 //!
 //! Decode is strict per schema: only the declared fields are accepted
 //! (unknown fields and wrong types rejected, never collapsed to
 //! defaults), `embedded_files` entries carry well-formed digests, kinds,
 //! lengths, classes, and canonical paths (secret-class entries carry a
 //! null path), and the v2 trailer decode additionally enforces the
-//! schema pairing (manifest 3 or 4 ⇔ store 2, manifest 2 ⇔ store 1) and
+//! schema pairing (manifest 3, 4, or 5 ⇔ store 2, manifest 2 ⇔ store 1)
+//! and
 //! agreement between the manifest and the embedded store (same entries
 //! by position, same content digests, path exposed exactly when the
 //! class is public). The schema-less legacy form stays lenient and is
@@ -64,6 +68,13 @@ pub const MANIFEST_SCHEMA: u64 = 3;
 /// `blake3:` fingerprint of the signing key's verifying key, and the
 /// required bit. Valid only paired with a schema-2 store index.
 pub const MANIFEST_SCHEMA_V4: u64 = 4;
+
+/// Manifest schema of a signed artifact carrying the signed freshness
+/// marker (keypin Task 2.1): the schema-4 signing block plus the
+/// mandatory `freshness` marker — the unix-seconds compile time inside
+/// the signature-covered manifest bytes. Valid only paired with a
+/// schema-2 store index.
+pub const MANIFEST_SCHEMA_V5: u64 = 5;
 
 /// Manifest schema of an R1-era v2 artifact (the operational fields and
 /// 4-field `embedded_files` entries only). Valid only paired with a
@@ -152,14 +163,22 @@ pub struct EmbeddedFile {
     pub path: Option<String>,
 }
 
-/// Signing block of a schema-4 manifest (r4sign): present exactly in
+/// Signing block of a schema-4 or schema-5 manifest: present exactly in
 /// signed artifacts. Records the canonical algorithm name, the
-/// `blake3:` fingerprint of the signing key's verifying key, and the
-/// required bit — never any key material.
+/// `blake3:` fingerprint of the signing key's verifying key, the
+/// required bit, and — from schema 5 (keypin Task 2.1) — the freshness
+/// marker; never any key material.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SigningBlock {
     /// Canonical algorithm name (currently always `ed25519ph`).
     pub algorithm: String,
+    /// Schema-5 signed-freshness marker (keypin Task 2.1): unix seconds
+    /// at compile time, living in the manifest bytes the envelope
+    /// signature covers, so an attacker cannot move it without breaking
+    /// the signature. `None` on the schema-4 form; serialized only when
+    /// present so the schema-4 JSON shape stays unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub freshness: Option<u64>,
     /// `blake3:` + lowercase hex BLAKE3 over the 32-byte verifying key —
     /// the identity operators pin; the private seed never appears
     /// anywhere.
@@ -207,9 +226,9 @@ pub struct Manifest {
     pub embedded_files: Vec<EmbeddedFile>,
     /// Sum of all content-entry byte lengths.
     pub total_embedded_bytes: u64,
-    /// Signing block: present exactly in schema-4 manifests (signed
-    /// artifacts). Unsigned manifests carry `None` and serialize without
-    /// the field, keeping the schema-3 form byte-identical.
+    /// Signing block: present exactly in schema-4 and schema-5 manifests
+    /// (signed artifacts). Unsigned manifests carry `None` and serialize
+    /// without the field, keeping the schema-3 form byte-identical.
     pub signing: Option<SigningBlock>,
 }
 
@@ -217,7 +236,8 @@ impl Manifest {
     /// Serialize to canonical UTF-8 JSON: compact, lexicographically ordered
     /// keys (serde_json maps are BTreeMaps), source-ordered arrays. This is
     /// the schema-3 form carried by v2 artifacts; a signed manifest (schema
-    /// 4) additionally serializes the `signing` block.
+    /// 4 or 5) additionally serializes the `signing` block, schema 5
+    /// including its `freshness` marker.
     pub fn to_canonical_json(&self) -> String {
         let mut value = serde_json::json!({
             "artifact_kind": self.artifact_kind,
@@ -232,11 +252,20 @@ impl Manifest {
             "total_embedded_bytes": self.total_embedded_bytes,
         });
         if let Some(signing) = &self.signing {
-            value["signing"] = serde_json::json!({
+            // Built by hand — the derived Serialize never runs on this
+            // path — so the schema-5 `freshness` marker must be added
+            // here explicitly or every schema-5 artifact would carry a
+            // freshness-less signing block and reject at its own
+            // strictness gate.
+            let mut block = serde_json::json!({
                 "algorithm": signing.algorithm,
                 "key_fingerprint": signing.key_fingerprint,
                 "required": signing.required,
             });
+            if let Some(freshness) = signing.freshness {
+                block["freshness"] = serde_json::json!(freshness);
+            }
+            value["signing"] = block;
         }
         serde_json::to_string(&value).expect("json! of strings and arrays cannot fail") // allow-unwrap
     }
@@ -263,11 +292,13 @@ impl Manifest {
 
     /// Parse and validate canonical manifest JSON. The schema is validated
     /// independently from any trailer version: [`MANIFEST_SCHEMA`] (3),
-    /// [`MANIFEST_SCHEMA_V2`] (2), [`MANIFEST_SCHEMA_V4`] (4), and the
-    /// schema-less legacy v1 form are accepted, anything else is rejected.
-    /// The strict per-schema field rules apply whenever the declared
-    /// schema is known: `check_schema3_fields` for [`MANIFEST_SCHEMA`],
-    /// `check_schema4_fields` for [`MANIFEST_SCHEMA_V4`], and
+    /// [`MANIFEST_SCHEMA_V2`] (2), [`MANIFEST_SCHEMA_V4`] (4),
+    /// [`MANIFEST_SCHEMA_V5`] (5), and the schema-less legacy v1 form are
+    /// accepted, anything else is rejected. The strict per-schema field
+    /// rules apply whenever the declared schema is known:
+    /// `check_schema3_fields` for [`MANIFEST_SCHEMA`],
+    /// `check_schema4_fields` for [`MANIFEST_SCHEMA_V4`],
+    /// `check_schema5_fields` for [`MANIFEST_SCHEMA_V5`], and
     /// `check_schema2_fields` for [`MANIFEST_SCHEMA_V2`]. The
     /// store-schema pairing is enforced where both schemas are visible —
     /// in the trailer decode (`decode_artifact`), never here.
@@ -280,6 +311,7 @@ impl Manifest {
         if schema != MANIFEST_SCHEMA
             && schema != MANIFEST_SCHEMA_V2
             && schema != MANIFEST_SCHEMA_V4
+            && schema != MANIFEST_SCHEMA_V5
             && schema != MANIFEST_SCHEMA_LEGACY
         {
             return Err(CompileError::InvalidDocument(format!(
@@ -292,6 +324,9 @@ impl Manifest {
             }
             MANIFEST_SCHEMA_V4 => {
                 check_schema4_fields(&value).map_err(CompileError::InvalidDocument)?;
+            }
+            MANIFEST_SCHEMA_V5 => {
+                check_schema5_fields(&value).map_err(CompileError::InvalidDocument)?;
             }
             MANIFEST_SCHEMA_V2 => {
                 check_schema2_fields(&value).map_err(CompileError::InvalidDocument)?;
@@ -338,34 +373,37 @@ impl Manifest {
             // the per-schema field check has already rejected its absence.
             None => Vec::new(),
         };
-        // Schemas 3 and 4 carry `artifact_kind` and
+        // Schemas 3, 4, and 5 carry `artifact_kind` and
         // `total_embedded_bytes` explicitly (validated by the per-schema
         // field checks); older schemas predate both, so they are derived
         // to keep the parsed struct total: the artifact kind from the
         // trailer kind, and the aggregate from the entry lengths.
-        let (artifact_kind, total_embedded_bytes) =
-            if schema == MANIFEST_SCHEMA || schema == MANIFEST_SCHEMA_V4 {
-                (
-                    object("artifact_kind")?.to_string(),
-                    value
-                        .get("total_embedded_bytes")
-                        .and_then(serde_json::Value::as_u64)
-                        .ok_or(CompileError::InvalidDocument(
-                            "manifest carries no total_embedded_bytes integer".to_string(),
-                        ))?,
-                )
-            } else {
-                (
-                    artifact_kind_for(kind).to_string(),
-                    embedded_files.iter().map(|f| f.length).sum(),
-                )
-            };
-        // The signing block exists only in schema-4 manifests; the
-        // per-schema field checks have already rejected its presence in
-        // schemas 2/3 (unknown field) and enforced its shape in schema 4.
-        // Extraction is gated on schema 4 so the lenient legacy form
+        let (artifact_kind, total_embedded_bytes) = if schema == MANIFEST_SCHEMA
+            || schema == MANIFEST_SCHEMA_V4
+            || schema == MANIFEST_SCHEMA_V5
+        {
+            (
+                object("artifact_kind")?.to_string(),
+                value
+                    .get("total_embedded_bytes")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or(CompileError::InvalidDocument(
+                        "manifest carries no total_embedded_bytes integer".to_string(),
+                    ))?,
+            )
+        } else {
+            (
+                artifact_kind_for(kind).to_string(),
+                embedded_files.iter().map(|f| f.length).sum(),
+            )
+        };
+        // The signing block exists only in schema-4 and schema-5
+        // manifests; the per-schema field checks have already rejected
+        // its presence in schemas 2/3 (unknown field) and enforced its
+        // shape (freshness included, per schema) in schemas 4/5.
+        // Extraction is gated on schemas 4/5 so the lenient legacy form
         // never gains a signing block it did not carry.
-        let signing = if schema == MANIFEST_SCHEMA_V4 {
+        let signing = if schema == MANIFEST_SCHEMA_V4 || schema == MANIFEST_SCHEMA_V5 {
             match value.get("signing") {
                 Some(block) => Some(
                     serde_json::from_value::<SigningBlock>(block.clone()).map_err(|e| {
@@ -453,6 +491,11 @@ const SCHEMA4_FIELDS: [&str; 11] = [
 
 /// Every field the schema-4 `signing` block may carry.
 const SIGNING_BLOCK_FIELDS: [&str; 3] = ["algorithm", "key_fingerprint", "required"];
+
+/// Every field the schema-5 `signing` block may carry: the schema-4 set
+/// plus the `freshness` marker (keypin Task 2.1).
+const SIGNING_BLOCK_FIELDS_V5: [&str; 4] =
+    ["algorithm", "freshness", "key_fingerprint", "required"];
 
 /// Every field a schema-3 `embedded_files` entry may carry.
 const EMBEDDED_FILE_FIELDS3: [&str; 6] =
@@ -687,25 +730,50 @@ fn check_embedded_file3(item: &serde_json::Value) -> Result<u64, String> {
 /// - `embedded_files` is a required array of entries passing
 ///   [`check_embedded_file3`].
 fn check_schema3_fields(value: &serde_json::Value) -> Result<(), String> {
-    check_schema34_fields(value, false)
+    check_schema345_fields(value, SigningRules::Absent)
 }
 
 /// Strict field rules for a schema-4 manifest (r4sign): exactly the
 /// schema-3 rules plus the mandatory signing block.
 fn check_schema4_fields(value: &serde_json::Value) -> Result<(), String> {
-    check_schema34_fields(value, true)
+    check_schema345_fields(value, SigningRules::Schema4)
 }
 
-/// Shared schema-3/schema-4 field rules; `schema4` selects the field
-/// whitelist (the schema-3 set plus `signing`) and appends the mandatory
+/// Strict field rules for a schema-5 manifest (keypin Task 2.1): the
+/// schema-4 top-level rules plus the signing block's schema-5 strictness
+/// — the mandatory `freshness` marker.
+fn check_schema5_fields(value: &serde_json::Value) -> Result<(), String> {
+    check_schema345_fields(value, SigningRules::Schema5)
+}
+
+/// Which per-schema signing-block rules the shared schema-3/4/5 field
+/// checks apply.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SigningRules {
+    /// Schema 3: no signing block may appear (unknown top-level field).
+    Absent,
+    /// Schema 4 (r4sign): mandatory block, `freshness` forbidden.
+    Schema4,
+    /// Schema 5 (keypin Task 2.1): mandatory block with the mandatory
+    /// `freshness` marker.
+    Schema5,
+}
+
+/// Shared schema-3/schema-4/schema-5 field rules; `signing` selects the
+/// field whitelist (the schema-3 set, or the schema-4 set plus `signing`
+/// shared by schemas 4 and 5) and appends the matching
 /// [`check_signing_block`] validation.
-fn check_schema34_fields(value: &serde_json::Value, schema4: bool) -> Result<(), String> {
-    let fields: &[&str] = if schema4 {
-        &SCHEMA4_FIELDS
-    } else {
+fn check_schema345_fields(value: &serde_json::Value, signing: SigningRules) -> Result<(), String> {
+    let fields: &[&str] = if signing == SigningRules::Absent {
         &SCHEMA3_FIELDS
+    } else {
+        &SCHEMA4_FIELDS
     };
-    let label = if schema4 { "schema-4" } else { "schema-3" };
+    let label = match signing {
+        SigningRules::Absent => "schema-3",
+        SigningRules::Schema4 => "schema-4",
+        SigningRules::Schema5 => "schema-5",
+    };
     let Some(map) = value.as_object() else {
         return Err("manifest is not a JSON object".to_string());
     };
@@ -766,25 +834,54 @@ fn check_schema34_fields(value: &serde_json::Value, schema4: bool) -> Result<(),
             "{label} manifest total_embedded_bytes {declared} does not equal the entry length sum {total}"
         ));
     }
-    if schema4 {
-        check_signing_block(value)?;
+    match signing {
+        SigningRules::Absent => {}
+        SigningRules::Schema4 => check_signing_block(value, false)?,
+        SigningRules::Schema5 => check_signing_block(value, true)?,
     }
     Ok(())
 }
 
-/// Type- and shape-check the mandatory `signing` block of a schema-4
-/// manifest (r4sign):
+/// Type- and shape-check the mandatory `signing` block of a schema-4 or
+/// schema-5 manifest (r4sign; schema 5 keypin Task 2.1):
 ///
-/// - exactly the [`SIGNING_BLOCK_FIELDS`] fields;
+/// - exactly the [`SIGNING_BLOCK_FIELDS`] fields (schema 4) or the
+///   [`SIGNING_BLOCK_FIELDS_V5`] fields (schema 5);
 /// - `algorithm` is the supported algorithm name (`ed25519ph`);
 /// - `key_fingerprint` is `blake3:` + 64 lowercase hex characters;
-/// - `required` is a boolean.
-fn check_signing_block(value: &serde_json::Value) -> Result<(), String> {
+/// - `required` is a boolean;
+/// - schema 5 requires the `freshness` integer (the signed unix-seconds
+///   marker); schema 4 forbids it.
+fn check_signing_block(value: &serde_json::Value, schema5: bool) -> Result<(), String> {
+    let label = if schema5 { "schema-5" } else { "schema-4" };
     let Some(signing) = value.get("signing").and_then(serde_json::Value::as_object) else {
-        return Err("schema-4 manifest carries no signing block".to_string());
+        return Err(format!("{label} manifest carries no signing block"));
     };
+    let fields: &[&str] = if schema5 {
+        &SIGNING_BLOCK_FIELDS_V5
+    } else {
+        &SIGNING_BLOCK_FIELDS
+    };
+    // The freshness rule is named before the field whitelist so a
+    // misplaced marker names the schema boundary it violates, not just
+    // an unknown field.
+    if schema5 {
+        if signing
+            .get("freshness")
+            .and_then(serde_json::Value::as_u64)
+            .is_none()
+        {
+            return Err(format!(
+                "{label} signing block carries no freshness integer"
+            ));
+        }
+    } else if signing.get("freshness").is_some() {
+        return Err(format!(
+            "{label} signing block carries a freshness marker; freshness starts at manifest schema 5"
+        ));
+    }
     for key in signing.keys() {
-        if !SIGNING_BLOCK_FIELDS.contains(&key.as_str()) {
+        if !fields.contains(&key.as_str()) {
             return Err(format!("unknown signing block field {key:?}"));
         }
     }
@@ -826,14 +923,16 @@ fn check_signing_block(value: &serde_json::Value) -> Result<(), String> {
 ///
 /// Each trailer version accepts exactly its own manifest forms: a v1
 /// trailer carries the schema-less legacy manifest only, and a v2 trailer
-/// requires `manifest_schema: 3` (unsigned) or `manifest_schema: 4`
-/// (signed, r4sign) with the strict schema-3/schema-4 field rules
-/// ([`check_schema3_fields`]/[`check_schema4_fields`]) or the R1-era
+/// requires `manifest_schema: 3` (unsigned), `manifest_schema: 4`
+/// (signed, r4sign), or `manifest_schema: 5` (signed freshness, keypin
+/// Task 2.1) with the strict schema-3/schema-4/schema-5 field rules
+/// ([`check_schema3_fields`]/[`check_schema4_fields`],
+/// [`check_schema5_fields`]) or the R1-era
 /// `manifest_schema: 2` with the strict schema-2 field rules
 /// ([`check_schema2_fields`]) — which of these is valid for THIS
 /// artifact is decided by the store-schema pairing check in
-/// `decode_artifact` (manifest 3 or 4 ⇔ store 2, manifest 2 ⇔ store 1),
-/// the only site that sees both schemas. Fail closed on unknown schemas,
+/// `decode_artifact` (manifest 3, 4, or 5 ⇔ store 2, manifest 2 ⇔
+/// store 1), the only site that sees both schemas. Fail closed on unknown schemas,
 /// non-JSON bytes, unrecognizable kinds, and incomplete manifests; the
 /// unknown-schema check runs first, so an unknown manifest schema is
 /// named before any pairing consideration.
@@ -856,6 +955,9 @@ pub(crate) fn validate_manifest(
             }
             MANIFEST_SCHEMA_V4 => {
                 check_schema4_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
+            }
+            MANIFEST_SCHEMA_V5 => {
+                check_schema5_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
             }
             MANIFEST_SCHEMA_V2 => {
                 check_schema2_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
@@ -1605,16 +1707,17 @@ fn secret_manifest_entries_expose_digest_and_length_only() {
     );
 }
 
-/// r2embed Task 2.2 (pairing widened by r4sign Task 1.2): the manifest
-/// reader is trailer-version aware and the v2 pairing is enforced in both
-/// directions — the R1-era pair (store 1 + manifest 2) decodes with null
-/// asset classes, an unknown manifest schema fails with the
-/// unknown-schema diagnostic (never a pairing error), a schema-4 body
-/// without its signing block fails under the schema-4 field rules, and
-/// BOTH mismatched pairings (store 2 + manifest 2, store 1 + manifest 3)
-/// fail closed with the pairing diagnostic naming the accepted set. The
-/// pairing check itself runs in `decode_artifact` after the store decode;
-/// the cases are exercised end-to-end here through `decode_artifact`.
+/// r2embed Task 2.2 (pairing widened by r4sign Task 1.2 and keypin Task
+/// 2.1): the manifest reader is trailer-version aware and the v2 pairing
+/// is enforced in both directions — the R1-era pair (store 1 + manifest
+/// 2) decodes with null asset classes, an unknown manifest schema fails
+/// with the unknown-schema diagnostic (never a pairing error), a
+/// schema-4 body without its signing block fails under the schema-4
+/// field rules, and BOTH mismatched pairings (store 2 + manifest 2,
+/// store 1 + manifest 3) fail closed with the pairing diagnostic naming
+/// the accepted set. The pairing check itself runs in `decode_artifact`
+/// after the store decode; the cases are exercised end-to-end here
+/// through `decode_artifact`.
 #[test]
 fn manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired() {
     use super::store::{StoreDocument, VirtualDocumentStore};
@@ -1687,15 +1790,18 @@ fn manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired() {
     assert_eq!(parsed.embedded_files[0].class, ManifestClass::Public);
     assert_eq!(parsed.embedded_files[0].path.as_deref(), Some("app.yaml"));
 
-    // 2. Unknown manifest schema (5): the unknown-schema diagnostic runs
+    // 2. Unknown manifest schema (6): the unknown-schema diagnostic runs
     // FIRST — never a pairing error — even against a store-2 index.
-    let schema5 = schema3_manifest.replacen("\"manifest_schema\":3", "\"manifest_schema\":5", 1);
+    // (Schema 5 became a known reader schema with keypin Task 2.1; a
+    // signing-block-less schema-5 body fails under the schema-5 field
+    // rules instead, exercised by the unit tests.)
+    let schema6 = schema3_manifest.replacen("\"manifest_schema\":3", "\"manifest_schema\":6", 1);
     assert!(
         matches!(
-            decode(&store2_index, &schema5),
-            Err(TrailerError::InvalidManifestSchema(5))
+            decode(&store2_index, &schema6),
+            Err(TrailerError::InvalidManifestSchema(6))
         ),
-        "schema 5 must fail with the unknown-schema diagnostic"
+        "schema 6 must fail with the unknown-schema diagnostic"
     );
 
     // 3. Schema 4 without the mandatory signing block: named by the
@@ -1712,14 +1818,14 @@ fn manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired() {
     );
 
     // 4. store 2 + manifest 2: the un-paired legacy pairing fails closed,
-    // naming the accepted set (manifest 3 or 4).
+    // naming the accepted set (manifest 3, 4, or 5).
     assert!(
         matches!(
             decode(&store2_index, &schema2_manifest),
             Err(TrailerError::InvalidSchemaPairing {
                 store_schema: 2,
                 manifest_schema: 2,
-                accepted_manifest_schemas: [3, 4],
+                accepted_manifest_schemas: [3, 4, 5],
             })
         ),
         "store 2 with manifest 2 must fail the pairing check"
@@ -2002,6 +2108,123 @@ mod tests {
 
     fn parse(value: &serde_json::Value) -> Result<Manifest, CompileError> {
         Manifest::from_canonical_json(value.to_string().as_bytes())
+    }
+
+    /// A minimal strict-valid signing block; `freshness` attaches exactly
+    /// when `Some` — the schema-5 addition (keypin Task 2.1).
+    fn signing_json(freshness: Option<u64>) -> serde_json::Value {
+        let mut signing = serde_json::json!({
+            "algorithm": signature::ALGORITHM_NAME_ED25519PH,
+            "key_fingerprint": format!("blake3:{}", blake3::hash(b"fixture-key").to_hex()),
+            "required": true,
+        });
+        if let Some(freshness) = freshness {
+            signing["freshness"] = serde_json::json!(freshness);
+        }
+        signing
+    }
+
+    /// A minimal strict-valid schema-3/4/5 manifest body; the signing
+    /// block attaches exactly when `Some`.
+    fn schema345_json(schema: u64, signing: Option<serde_json::Value>) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "artifact_kind": "server",
+            "components": ["direct"],
+            "embedded_files": [{
+                "asset_class": null,
+                "class": "public",
+                "digest": blake3::hash(b"doc").to_hex().to_string(),
+                "kind": "route",
+                "length": 3,
+                "path": "routes/a.yaml",
+            }],
+            "env_names": [],
+            "kind": "route",
+            "listeners": [],
+            "manifest_schema": schema,
+            "runtime_version": RUNTIME_VERSION,
+            "source_name": "routes/a.yaml",
+            "total_embedded_bytes": 3,
+        });
+        if let Some(signing) = signing {
+            value["signing"] = signing;
+        }
+        value
+    }
+
+    /// keypin Task 2.1: a schema-5 manifest's signing block is mandatory
+    /// AND must carry the freshness marker; without it the decode fails
+    /// closed naming the missing marker, never a silent default.
+    #[test]
+    fn schema5_without_freshness_rejected() {
+        let value = schema345_json(5, Some(signing_json(None)));
+        assert!(
+            matches!(
+                parse(&value),
+                Err(CompileError::InvalidDocument(reason))
+                    if reason.contains("schema-5") && reason.contains("freshness")
+            ),
+            "schema 5 without freshness must be rejected by name: {:?}",
+            parse(&value)
+        );
+    }
+
+    /// The inverse strictness: freshness starts at schema 5, so a
+    /// schema-4 signing block carrying the marker fails closed under the
+    /// schema-4 rules.
+    #[test]
+    fn schema4_with_freshness_rejected() {
+        let value = schema345_json(MANIFEST_SCHEMA_V4, Some(signing_json(Some(1_700_000_000))));
+        assert!(
+            matches!(
+                parse(&value),
+                Err(CompileError::InvalidDocument(reason))
+                    if reason.contains("schema-4") && reason.contains("freshness")
+            ),
+            "schema 4 with a freshness marker must be rejected by name: {:?}",
+            parse(&value)
+        );
+    }
+
+    /// Readers accept manifest schemas 2 through 5 — each under its own
+    /// strictness — and still reject schema 6; the schema-5 form parses
+    /// its freshness marker into the typed signing block.
+    #[test]
+    fn readers_accept_manifest_schemas_2_through_5() {
+        assert!(parse(&schema2_json()).is_ok(), "schema 2 decodes");
+        assert!(
+            parse(&schema345_json(MANIFEST_SCHEMA, None)).is_ok(),
+            "schema 3 decodes"
+        );
+        assert!(
+            parse(&schema345_json(
+                MANIFEST_SCHEMA_V4,
+                Some(signing_json(None))
+            ))
+            .is_ok(),
+            "schema 4 decodes"
+        );
+
+        let schema5 = schema345_json(5, Some(signing_json(Some(1_700_000_000))));
+        let parsed = parse(&schema5).expect("schema 5 with a freshness marker decodes");
+        assert_eq!(parsed.manifest_schema, 5);
+        assert_eq!(
+            parsed.signing.as_ref().and_then(|s| s.freshness),
+            Some(1_700_000_000),
+            "the freshness marker parses into the signing block"
+        );
+
+        let mut schema6 = schema5;
+        schema6["manifest_schema"] = serde_json::json!(6);
+        assert!(
+            matches!(
+                parse(&schema6),
+                Err(CompileError::InvalidDocument(reason))
+                    if reason.contains("unsupported manifest schema 6")
+            ),
+            "schema 6 stays unsupported: {:?}",
+            parse(&schema6)
+        );
     }
 
     /// The strict schema-2 field rules: unknown fields, wrong types, bad

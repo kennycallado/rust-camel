@@ -33,12 +33,13 @@
 //! form with `asset_class`, the secret-material `class`, null paths for
 //! secret-class entries, `total_embedded_bytes`, and `artifact_kind` —
 //! schema 4 (r4sign) — the schema-3 fields plus the mandatory `signing`
-//! block — or the R1-era schema 2, each with typed required fields, no
-//! unknown fields, and canonical embedded digests; the schema-less legacy
-//! form only in v1), validates the
+//! block — schema 5 (keypin) — the schema-4 signing block plus the
+//! mandatory `freshness` marker — or the R1-era schema 2, each with
+//! typed required fields, no unknown fields, and canonical embedded
+//! digests; the schema-less legacy form only in v1), validates the
 //! content/index sections through the canonical
 //! [`VirtualDocumentStore`] decoder, enforces the schema pairing
-//! (manifest 3 or 4 ⇔ store 2, manifest 2 ⇔ store 1 — only when both
+//! (manifest 3, 4, or 5 ⇔ store 2, manifest 2 ⇔ store 1 — only when both
 //! schemas are known values, so unknown-schema diagnostics are named
 //! first) and
 //! the typed reference
@@ -167,7 +168,7 @@ pub enum TrailerError {
     /// Manifest declares a `manifest_schema` the reader does not support.
     InvalidManifestSchema(u64),
     /// Manifest schema is not an accepted pair of the store index schema
-    /// (store 2 pairs with manifest 3 or 4; store 1 ⇔ manifest 2).
+    /// (store 2 pairs with manifest 3, 4, or 5; store 1 ⇔ manifest 2).
     /// Checked only when both schemas are known values.
     InvalidSchemaPairing {
         /// The decoded store index schema.
@@ -603,9 +604,10 @@ fn decode_v2_marked(bytes: &[u8]) -> Result<TrailerV2, TrailerError> {
 }
 
 /// Enforce the v2 schema pairing (r2embed Task 2.2, design "nit a";
-/// widened by r4sign Task 1.2): `manifest_schema: 3` (unsigned) or
-/// `manifest_schema: 4` (signed) is valid only with `store_schema: 2`,
-/// and `manifest_schema: 2` (the R1-era form) only with `store_schema: 1`,
+/// widened by r4sign Task 1.2 and keypin Task 2.1): `manifest_schema: 3`
+/// (unsigned), `manifest_schema: 4` (signed), or `manifest_schema: 5`
+/// (signed freshness) is valid only with `store_schema: 2`, and
+/// `manifest_schema: 2` (the R1-era form) only with `store_schema: 1`,
 /// because the substitution table and asset classes only exist when both
 /// halves evolve together. Runs AFTER `StoreIndex::decode`, so an unknown
 /// store schema is already named by its own decoder ("unsupported store
@@ -619,7 +621,11 @@ fn enforce_schema_pairing(index: &StoreIndex, manifest: &[u8]) -> Result<(), Tra
     let schema = manifest::manifest_schema_of(&value).map_err(|_| TrailerError::InvalidManifest)?;
     let accepted: &'static [u64] = match index.store_schema {
         1 => &[manifest::MANIFEST_SCHEMA_V2],
-        2 => &[manifest::MANIFEST_SCHEMA, manifest::MANIFEST_SCHEMA_V4],
+        2 => &[
+            manifest::MANIFEST_SCHEMA,
+            manifest::MANIFEST_SCHEMA_V4,
+            manifest::MANIFEST_SCHEMA_V5,
+        ],
         // Unreachable through `decode_v2_marked` (the store decoder fails
         // closed on any other schema first); kept fail-closed for defense
         // in depth so a hand-routed index cannot bypass the pairing.
@@ -639,7 +645,7 @@ fn enforce_schema_pairing(index: &StoreIndex, manifest: &[u8]) -> Result<(), Tra
     Ok(())
 }
 
-/// Human-readable schema-set list for the pairing diagnostic: `3 or 4`.
+/// Human-readable schema-set list for the pairing diagnostic: `3, 4, or 5`.
 fn schema_set(schemas: &[u64]) -> String {
     schemas
         .iter()
