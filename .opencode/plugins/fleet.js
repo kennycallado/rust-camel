@@ -15,6 +15,15 @@
 //   3. Every WAKE event for an unidentified session is logged once per sid
 //      (ev:"wake-event-miss") — during the outage, misses were invisible,
 //      which made the plugin look dead when it was merely filtering.
+//   4. Hardened 2026-09-30 (bd rc-d0whw, mission 305): (a) a session.idle
+//      roster miss no longer drops the event — it appends the buzzer line
+//      (marked roster:miss) and enqueues the master wake exactly like
+//      error/parked buzzer lines do, so a stale fleet.json can no longer
+//      strand an idle mission (class seen in missions 130/131/148). The
+//      conductor's own session is exempt (self-wake loop). (b) buzzer
+//      appends are atomic: write buzzer.tmp → rename, retry ×3, tmp
+//      cleaned on every failure path, last-resort O_APPEND — no torn
+//      lines for readers, no orphan buzzer.tmp, no lost wake line.
 //
 // State dir resolution (import.meta.url based — server cwd independent):
 //   1. <repo>/.opencode/fleet/   (target home, post-migration)
@@ -23,7 +32,7 @@
 //
 // Wake POST target: env OPENCODE_SERVER || http://localhost:8080
 // (the server always listens on its own port; loopback fetch is safe).
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 
 const BASE = process.env.OPENCODE_SERVER || "http://localhost:8080";
 const PLUGIN_DIR = new URL(".", import.meta.url).pathname; // <repo>/.opencode/plugins/
@@ -69,12 +78,50 @@ function rosterIds(dir) {
   }
 }
 
+function conductorSid(dir) {
+  try {
+    return JSON.parse(readFileSync(`${dir}conductor.json`, "utf8")).conductor || "";
+  } catch {
+    return "";
+  }
+}
+
+// Atomic buzzer append (bd rc-d0whw): write the full replacement content
+// to buzzer.tmp, then rename over buzzer — readers (selfwatch tail, master
+// read-and-clear) see either the old or the new file, never a torn line.
+// Retry ×3 with tmp cleanup on every failure path (no orphan buzzer.tmp);
+// final fallback is O_APPEND so the wake line is never lost. The
+// read-modify-write window is tight (sync, no awaits) and plugin rewrites
+// are one-per-wake-event, so clobbering a concurrent mission-side `>>`
+// append is vanishingly rare — and the selfwatch fallback covers it.
+function appendBuzzerAtomic(dir, line) {
+  const BUZZER = `${dir}buzzer`;
+  const TMP = `${dir}buzzer.tmp`;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let prev = "";
+    try {
+      prev = readFileSync(BUZZER, "utf8");
+    } catch {} // missing buzzer = empty log
+    try {
+      writeFileSync(TMP, prev + line);
+      renameSync(TMP, BUZZER);
+      return;
+    } catch {
+      try {
+        rmSync(TMP, { force: true }); // cleanup on failure — never orphan the tmp
+      } catch {}
+    }
+  }
+  appendFileSync(BUZZER, line); // last resort: line must survive
+}
+
 async function wakeConductor(type, sid, dir) {
   let conductor = "";
   try {
     conductor = JSON.parse(readFileSync(`${dir}conductor.json`, "utf8")).conductor;
   } catch {}
   if (!conductor) return log({ ev: "wake-skipped", reason: "no conductor id" });
+  if (sid === conductor) return log({ ev: "wake-skipped", reason: "conductor session" });
   const now = Date.now();
   if (now - (lastWake.get(sid) || 0) < WAKE_DEBOUNCE_MS) {
     return log({ ev: "wake-debounced", sid: String(sid).slice(0, 24) });
@@ -151,9 +198,20 @@ export const FleetPlugin = async () => {
             loggedMiss.add(sid);
             log({ ev: "wake-event-miss", type, sid: String(sid).slice(0, 24) });
           }
+          // rc-d0whw: an idle roster miss must still enqueue a master wake,
+          // exactly like error/parked buzzer lines do (selfwatch fires on
+          // them). Dropping it strands a parked mission when fleet.json is
+          // stale (missions 130/131/148). The conductor's own idle is
+          // exempt BEFORE the buzzer append — its line would make selfwatch
+          // wake the master every cycle (indirect self-wake loop).
+          if (type === "session.idle" && sid !== conductorSid(dir)) {
+            appendBuzzerAtomic(dir, `${new Date().toISOString()} ${type} ${sid} roster:miss\n`);
+            log({ ev: type, sid: String(sid).slice(0, 24), fleet: false, enqueued: true });
+            await wakeConductor(type, sid, dir);
+          }
           return;
         }
-        appendFileSync(`${dir}buzzer`, `${new Date().toISOString()} ${type} ${sid}\n`);
+        appendBuzzerAtomic(dir, `${new Date().toISOString()} ${type} ${sid}\n`);
         log({ ev: type, sid: String(sid).slice(0, 24), fleet: true });
         await wakeConductor(type, sid, dir);
       } catch (e) {
