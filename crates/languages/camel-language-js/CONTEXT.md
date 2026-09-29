@@ -82,7 +82,7 @@ Value conversion also rejects nesting deeper than 128 levels. The timeout
 returns control to the route, but it cannot cancel a running blocking task. That
 task continues until a Boa limit trips or the script finishes.
 
-Boa 0.21 has no heap-size limit. The source-size bound does not prevent a small
+Boa 0.22 has no heap-size limit. The source-size bound does not prevent a small
 script from allocating a large object graph. Route authors must not run
 untrusted JavaScript in-process.
 

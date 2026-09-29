@@ -1,0 +1,79 @@
+# Partner + SQL combined chain (bd rc-dmhuo item 3): one scenario
+# document that drives a REST CRUD exchange against a harness-provisioned
+# HTTP partner (client role, same shape as partner-crud.test.yaml) and
+# asserts datasource state in the same document (same shape as the
+# scenario-sql.md worked example). REST CRUD + DB assert in one document.
+#
+# The wire half needs [components.http] allow_internal in Camel.toml; the
+# sql half needs the appdb datasource in Camel.toml and the camel-cli
+# `sql` Cargo feature for the `sql:` action.
+#
+# TODO-verify (docs-only mission rc-dmhuo; NO cargo in that lease): this
+# fixture ships unexecuted. Verify with one run:
+#   cd examples/integration-testing
+#   ../../target/debug/camel test partner-sql.test.yaml
+# The grammar halves are independently pinned (partner-crud fixture;
+# sql_prepare_seeds_and_proceeds in camel-integration-test runner_test.rs).
+routeFiles: []
+scenario:
+  - sql:
+      datasource: appdb
+      prepare:
+      - CREATE TABLE orders (id INTEGER, sku TEXT)
+      - INSERT INTO orders VALUES (1, 'abc')
+      - INSERT INTO orders VALUES (2, 'def')
+  - send:
+      to:
+        endpoint: http://127.0.0.1:0/orders
+        provisioning: harness
+        bindVar: PARTNER
+      method: POST
+      body:
+        sku: abc
+  - receive:
+      from:
+        endpoint: http://127.0.0.1:0/orders
+        provisioning: harness
+        bindVar: PARTNER
+      deadline: 5s
+      extract:
+        orderId: body.id
+  - send:
+      to: 'http://${PARTNER}/orders/${orderId}'
+      method: GET
+  - receive:
+      from: 'http://${PARTNER}/orders/${orderId}'
+      deadline: 5s
+  - validate:
+      target:
+        lastReceived: 'http://${PARTNER}/orders/${orderId}'
+      expectation:
+        contains: ord-7
+  - validate:
+      target:
+        sql:
+          datasource: appdb
+          query: SELECT id, sku FROM orders ORDER BY id
+      expectation:
+        columns: [id, sku]
+        rows:
+        - [1, 'abc']
+        - [2, 'def']
+partners:
+  http://127.0.0.1:0/orders:
+    - method: POST
+      path: /orders
+      response:
+        status: 201
+        headers:
+          content-type: application/json
+        body:
+          id: ord-7
+    - method: GET
+      path: /orders/ord-7
+      response:
+        status: 200
+        headers:
+          content-type: application/json
+        body:
+          id: ord-7

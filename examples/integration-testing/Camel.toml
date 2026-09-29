@@ -11,3 +11,10 @@ log_level = "info"
 
 [components.http]
 allow_internal = true
+
+# Scenario-tier shared-memory sqlite for the `sql:` actions in
+# partner-sql.test.yaml (the scenario-sql.md `sqlite::memory:` recap:
+# named shared-memory URI, provider pinned to sqlx).
+[datasources.appdb]
+provider = "sqlx"
+db_url = "sqlite:file:memdb_partner_sql?mode=memory&cache=shared"

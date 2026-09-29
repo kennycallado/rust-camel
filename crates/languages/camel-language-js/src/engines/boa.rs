@@ -29,14 +29,14 @@
 //! |---|---|
 //! | `execution_timeout_ms` | 5,000 ms |
 //! | `max_loop_iterations` | 100,000 (Boa upstream is `u64::MAX`) |
-//! | `max_recursion_depth` | 512 (Boa 0.21 upstream default, pinned) |
-//! | `max_stack_size` | 10,240 (Boa 0.21 upstream default, pinned) |
+//! | `max_recursion_depth` | 512 (Boa 0.22 upstream default, pinned) |
+//! | `max_stack_size` | 10,240 (Boa 0.22 upstream default, pinned) |
 //!
-//! **Heap cap:** not supported by Boa 0.21.
+//! **Heap cap:** not supported by Boa 0.22.
 
 /// Maximum source-string size accepted by [`BoaEngine::eval`] (DoS cap, M-L1).
 ///
-/// Boa 0.21 exposes no heap/allocation cap (`runtime_limits_mut()` covers only
+/// Boa 0.22 exposes no heap/allocation cap (`runtime_limits_mut()` covers only
 /// loop iterations, recursion depth, and stack size). This pre-eval source-size
 /// check neutralizes large-payload bombs before Boa allocates; the residual
 /// in-heap amplification vector (a small source that grows a huge structure via
@@ -117,7 +117,7 @@ impl Default for BoaEngine {
 /// Resolved (concrete) JS limits after folding `Option` → `T` with rust-camel
 /// runtime defaults. Produced by [`resolve_js_limits`].
 ///
-/// **Heap cap gap:** Boa 0.21 does not expose a heap-size limit. The
+/// **Heap cap gap:** Boa 0.22 does not expose a heap-size limit. The
 /// [`JsLimitsConfig`] struct intentionally lacks a `max_heap_size` field;
 /// `deny_unknown_fields` in serde rejects it if a user tries to set it.
 ///
@@ -144,12 +144,12 @@ pub(super) fn resolve_js_limits(limits: &camel_language_api::JsLimitsConfig) -> 
 
 impl JsEngine for BoaEngine {
     fn eval(&self, source: &str, exchange: JsExchange) -> Result<JsEvalResult, JsLanguageError> {
-        // M-L1: pre-eval source-size cap (Boa 0.21 has no heap cap; see const doc).
+        // M-L1: pre-eval source-size cap (Boa 0.22 has no heap cap; see const doc).
         // Stays on the caller side, before the job is sent.
         if source.len() > MAX_SOURCE_BYTES {
             return Err(JsLanguageError::Execution {
                 message: format!(
-                    "JS source {} bytes exceeds max source bytes {} (Boa 0.21 has no heap cap; \
+                    "JS source {} bytes exceeds max source bytes {} (Boa 0.22 has no heap cap; \
                      reject oversized input before eval)",
                     source.len(),
                     MAX_SOURCE_BYTES
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_documented_heap_amplification_gap() {
-        // M-L1 residual gap documentation test: Boa 0.21 exposes no heap cap.
+        // M-L1 residual gap documentation test: Boa 0.22 exposes no heap cap.
         // The existing loop/recursion/stack/timeout limits neutralize CPU-bombs;
         // an in-heap amplification bomb ('x'.repeat(huge)) cannot be bounded
         // without a Boa heap API. This test asserts the CPU-bomb variant IS

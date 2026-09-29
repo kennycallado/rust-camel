@@ -36,7 +36,7 @@ until realm recycling. The context applies these defaults:
 | Stack size | 10,240 slots |
 | Source size | 1 MiB |
 
-Boa 0.21 has no heap-size limit. A timeout also cannot cancel an already running
+Boa 0.22 has no heap-size limit. A timeout also cannot cancel an already running
 blocking task. Do not run untrusted JavaScript in-process. Use the out-of-process
 `function:` path from ADR-0005 instead.
 

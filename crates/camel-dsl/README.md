@@ -718,6 +718,9 @@ routes:
         action:
           literal: "read"
         scopes: ["view"]
+        context:
+          headers: ["X-Tenant"]
+          properties: ["orderId"]
         cache_ttl_secs: 60
         cache_negative_ttl_secs: 5
     steps:
@@ -730,12 +733,19 @@ routes:
 | `resource` | value source | no | Resource identifier; defaults to the `x-resource` header |
 | `action` | value source | no | Requested action; defaults to the `x-action` header |
 | `scopes` | [string] | no | Additional permission scopes |
+| `context` | mapping | no | Include-lists of exchange data forwarded to the evaluator: `headers` and `properties`, each a list of names |
 | `cache_ttl_secs` | u64 | no | Override positive cache TTL |
 | `cache_negative_ttl_secs` | u64 | no | Override negative cache TTL |
 
 A value source is a mapping with `literal`, `header`, or `property`. Declare
 exactly one; a mapping with none fails at load time. When several are set,
 resolution follows that order (`literal`, then `header`, then `property`).
+
+`context` selects which exchange headers and properties the evaluator sees.
+Each listed name that is present on the exchange is copied into the
+evaluation context object passed to the `PermissionEvaluator`; anything not
+listed is not forwarded (route_ast.rs `RouteDslPermissionContext`,
+consumed by `PermissionContextConfig` in `camel-auth`).
 
 ### `credential_sources:` -- Credential Extraction Sources
 

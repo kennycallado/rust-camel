@@ -11,7 +11,8 @@ what the booted route actually sent.
 Files:
 
 - `Camel.toml`: project config. `allow_internal` opts the http producer
-  past the SSRF guard for the loopback partner.
+  past the SSRF guard for the loopback partner. The `appdb` datasource
+  supplies the shared-memory sqlite for `partner-sql.test.yaml`.
 - `routes/bridge.yaml`: the route under test, `direct:start` to
   `${env:PARTNER}/orders`.
 - `orders.test.yaml`: the scenario document. The partner endpoint
@@ -22,6 +23,10 @@ Files:
   one harness partner and one `bindVar` (`MOCK`) serving two route dial
   paths (`/orders`, `/billing`) on one bound authority; the multi-path
   pattern of the [Testing chapter](../../docs/src/testing/index.md).
+- `partner-sql.test.yaml`: one document that combines the partner CRUD
+  chain with an `sql:` prepare and a sql `validate` (REST CRUD + DB
+  assert). TODO-verify: it shipped with a docs-only pass (bd rc-dmhuo).
+  It needs one `camel test` run and the `sql` Cargo feature.
 
 ## Build and run
 

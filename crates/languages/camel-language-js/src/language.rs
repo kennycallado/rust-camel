@@ -14,20 +14,20 @@ use crate::{
 
 // ── Resource limits ───────────────────────────────────────────────────────────
 //
-// Coverage (via Boa 0.21 RuntimeLimits):
+// Coverage (via Boa 0.22 RuntimeLimits):
 //   - Loop iteration count
 //   - Recursion depth
 //   - Stack size
 //
-// Not covered (Boa 0.21 does not expose):
+// Not covered (Boa 0.22 does not expose):
 //   - Heap cap — `deny_unknown_fields` in serde rejects any `max-heap-size`
 //     field in Camel.toml if a user tries to set it.
 //
 // Defaults when not configured (rust-camel runtime defaults, ADR-0011):
 //   - execution_timeout_ms: 5_000
 //   - max_loop_iterations: 100_000  (Boa upstream is u64::MAX)
-//   - max_recursion_depth: 512      (Boa 0.21 upstream default, pinned)
-//   - max_stack_size:     10_240     (Boa 0.21 upstream default, pinned)
+//   - max_recursion_depth: 512      (Boa 0.22 upstream default, pinned)
+//   - max_stack_size:     10_240     (Boa 0.22 upstream default, pinned)
 
 /// JavaScript language plugin backed by [Boa](https://boajs.dev).
 ///

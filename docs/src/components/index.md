@@ -11,7 +11,7 @@ Components connect routes to external systems. Each Component owns a URI scheme 
 | `direct` | both | [camel-direct](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-direct/CONTEXT.md) |
 | `seda` | both | [camel-component-seda](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-seda/CONTEXT.md) |
 | `controlbus` | producer | [camel-controlbus](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-controlbus/CONTEXT.md) |
-| `mock` | producer | [parent](https://github.com/kennycallado/rust-camel/blob/main/crates/components/CONTEXT.md) |
+| `mock` | producer | [camel-mock](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-mock/CONTEXT.md) |
 | `file` | both | [camel-file](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-file/CONTEXT.md) |
 | `http`, `https`, `http-static` | both | [camel-http](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-http/CONTEXT.md) |
 | `ws`, `wss` | both | [camel-ws](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-ws/CONTEXT.md) |
@@ -36,9 +36,9 @@ Components connect routes to external systems. Each Component owns a URI scheme 
 | `cxf` | both | [camel-cxf](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-cxf/CONTEXT.md) |
 | `keycloak` | both | [camel-component-keycloak](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-keycloak/CONTEXT.md) |
 | `wasm` | both | [camel-component-wasm](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-wasm/CONTEXT.md) |
-| `template` | producer | [parent](https://github.com/kennycallado/rust-camel/blob/main/crates/components/CONTEXT.md) |
+| `template` | producer | [camel-template](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-template/CONTEXT.md) |
 
-The table covers every crate under `crates/components/` and every registered URI scheme. The contract crate `camel-component-api` defines the Component SPI and the Consumer, Producer, and Endpoint traits. It registers no URI scheme. The `mock` and `template` components have no per-crate CONTEXT.md; their parent entry is the available authority.
+The table covers every crate under `crates/components/` and every registered URI scheme. The contract crate `camel-component-api` defines the Component SPI and the Consumer, Producer, and Endpoint traits. It registers no URI scheme. The `master` component has no per-crate CONTEXT.md; its parent entry is the available authority.
 
 ## Direction
 
