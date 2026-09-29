@@ -210,6 +210,14 @@ fails all subschemas) span the value; `required` (a missing property) spans the 
 node; `minItems`/`maxItems` span the array; `additionalProperties` spans the offending
 additional key. The jsonschema violation message SHALL be carried in the diagnostic body.
 
+Note: the collapsed `anyOf`/`oneOf` anchoring — and the `anyOf failure
+reports the value` scenario below — stay literally true for every
+non-pattern keyword: `type`, `enum`, `required`, and other failures
+inside a failed `anyOf` keep the single collapsed diagnostic. Only
+nested `pattern` errors de-collapse to their leaf diagnostics, per
+`R-SCHEMA anyOf de-collapse surfaces co-located sibling defects`
+(rc-n3t73).
+
 #### Scenario: Wrong type for a field reports the field value
 
 - **GIVEN** a route file where `steps` is a string instead of an array
