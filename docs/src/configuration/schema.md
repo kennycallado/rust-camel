@@ -26,7 +26,7 @@ The fields below live directly under `[default]`. They are the spine of the file
 | `log_level` | string | `"INFO"` | One of `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`. |
 | `timeout_ms` | integer (ms) | `5000` | Per-exchange timeout enforced by the runtime. Must be `> 0`. |
 | `drain_timeout_ms` | integer (ms) | `10000` | Maximum time the runtime waits for in-flight exchanges to finish on shutdown. Must be `> 0`. |
-| `include` | array of strings | — | Paths to other TOML files merged before the profile pass. See [Configuration](index.md#profiles-and-includes). |
+| `include` | array of strings | — | Paths to other TOML files merged before the profile pass. See [Configuration](index.md#configuration). |
 
 The watcher and the file are wired through `camel-core::reload_watcher::watch_and_reload` (see ADR-0004). The `--watch` and `--no-watch` CLI flags override this field at startup.
 
