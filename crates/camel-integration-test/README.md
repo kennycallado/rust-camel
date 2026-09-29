@@ -291,7 +291,7 @@ back-compat shape that predates `inbound:`. v1 bound: boot-owning
 library callers only; the CLI cannot run inbound documents (named
 infra-unavailable). Runnable reference: `tests/http_inbound_test.rs`.
 
-The [Testing chapter](../../docs/src/testing/index.md) documents the
+The [Scenario documents](../../docs/src/testing/scenario-documents.md) page documents the
 full action grammar, the partner adapters, and the exit contract.
 `examples/integration-testing/` is a runnable example. The
 `partner-retry-route.test.yaml` pair there runs a real retrying route

@@ -472,7 +472,7 @@ scripts/coverage.sh         # needs cargo-llvm-cov; baseline enforced in coverag
 ```
 
 Integration-tier scenario tests: `camel test --integration`
-([Testing chapter](docs/src/testing/index.md); runnable example in
+([Scenario documents](docs/src/testing/scenario-documents.md); runnable example in
 `examples/integration-testing/`).
 
 Local lint and schema tools: `cargo fmt --check`, `cargo clippy -- -D warnings`,

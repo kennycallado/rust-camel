@@ -2,7 +2,7 @@
 
 Scenario testing has two state branches. The TRAFFIC branch asserts messages on the wire: `send`, `receive`, and the `partner` and `lastReceived` validate targets. The STATE branch asserts data at rest. Writes go through the `sql:` prepare action. Reads go through the `validate` sql target. The two vocabularies never mix: a prepare statement that reads fails the load, and a validate query that mutates fails the load too. The contract is pinned in [ADR-0069](../adr/0069-integration-tier-testing-contract.md).
 
-The datasource itself lives in `Camel.toml` and is steered through `env:` interpolation. Read [Datasource steering](index.md#datasource-steering) and [Isolation and teardown](index.md#isolation-and-teardown) first. This page covers only the document-side grammar.
+The datasource itself lives in `Camel.toml` and is steered through `env:` interpolation. Read [Datasource steering](scenario-documents.md#datasource-steering) and [Isolation and teardown](scenario-documents.md#isolation-and-teardown) first. This page covers only the document-side grammar.
 
 Actions run in declaration order, so `sql:` actions compose with `send`, `receive`, and `sleep` in one list.
 
@@ -96,11 +96,11 @@ A bare `sqlite::memory:` URL gives every pooled connection its own private datab
 - the named shared-memory URI `sqlite:file:<name>?mode=memory&cache=shared`, the scenario-tier convention. Pin `provider = "sqlx"`, because `sqlite:file:` matches no automatic datasource factory prefix.
 - the bare `sqlite::memory:?cache=shared`. Pin `max_connections = 1`, because pooled connections can hold private databases there.
 
-The full recipe lives in [Datasource steering](index.md#datasource-steering).
+The full recipe lives in [Datasource steering](scenario-documents.md#datasource-steering).
 
 ## Isolation
 
-Each scenario boot owns its datasource catalog and its pools, and the teardown closes them. A memory datasource starts empty at every boot. A durable datasource, such as file-backed sqlite or a service-container Postgres, keeps its rows across boots, and cleanup is the author's job: the clean-first idiom deletes prior state in the first `prepare` statement. See [Isolation and teardown](index.md#isolation-and-teardown).
+Each scenario boot owns its datasource catalog and its pools, and the teardown closes them. A memory datasource starts empty at every boot. A durable datasource, such as file-backed sqlite or a service-container Postgres, keeps its rows across boots, and cleanup is the author's job: the clean-first idiom deletes prior state in the first `prepare` statement. See [Isolation and teardown](scenario-documents.md#isolation-and-teardown).
 
 ## Worked example
 

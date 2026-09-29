@@ -51,7 +51,7 @@ the decision or crate that defines it.
   and marks the pod NotReady. [Health](../operations/health.md).
 - **DivertCopyTo** — `InterceptAction` variant that copies the exchange to a
   `mock:` target with WireTap semantics and then runs the real producer.
-  [Testing](../testing/index.md), [ADR-0064](../adr/0064-two-tier-testing-contract.md).
+  [Route interception](../testing/route-interception.md), [ADR-0064](../adr/0064-two-tier-testing-contract.md).
 - **EnrichmentStrategy** — strategy that merges the original Exchange with
   the polled or enriched Exchange in the `enrich` and `pollEnrich` verbs.
   Distinct from the EIP-22 `AggregateStrategyDef` family.
@@ -86,7 +86,7 @@ the decision or crate that defines it.
   [Routes & pipelines](routes-pipelines.md),
   [ADR-0012](../adr/0012-log-level-convention-handler-contract-boundaries.md).
 - **InterceptRule** — exact-URI rule that maps a send URI to a `SkipTo` or
-  `DivertCopyTo` action. [Testing](../testing/index.md),
+  `DivertCopyTo` action. [Route interception](../testing/route-interception.md),
   [ADR-0064](../adr/0064-two-tier-testing-contract.md).
 - **LlmProvider** — trait abstraction over LLM backends (OpenAI, Ollama,
   Mock). Camel-shaped, not siumai-shaped. All siumai imports stay in the
@@ -166,7 +166,7 @@ the decision or crate that defines it.
   [Error handling](error-handling.md),
   [ADR-0012](../adr/0012-log-level-convention-handler-contract-boundaries.md).
 - **SkipTo** — `InterceptAction` variant that replaces the original send and
-  routes the exchange to a `mock:` target. [Testing](../testing/index.md),
+  routes the exchange to a `mock:` target. [Route interception](../testing/route-interception.md),
   [ADR-0064](../adr/0064-two-tier-testing-contract.md).
 - **Starting Route** — externally observable Route lifecycle state between
   accepted start intent and confirmed Consumer or Pipeline side effect.

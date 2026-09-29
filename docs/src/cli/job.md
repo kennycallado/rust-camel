@@ -138,6 +138,6 @@ A compiled artifact (see [`camel compile`](compile.md)) can carry a job document
 
 - [Jobs discovery](../configuration/jobs.md) for the `[jobs]` table.
 - [CLI reference](index.md) for the full command surface.
-- [Testing](../testing/index.md) for the reserved-suffix family (`*.test.yaml`).
+- [Declarative camel test](../testing/camel-test.md) for the reserved-suffix family (`*.test.yaml`).
 
 **Reference**: [CLI crate](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-cli/CONTEXT.md)

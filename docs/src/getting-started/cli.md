@@ -165,7 +165,7 @@ This page covers the commands you use to start. The rest of the CLI surface:
 - [`camel compile`](../cli/compile.md) packs a route or job document into a self-contained executable artifact.
 - [`camel plugin new` and `camel plugin build`](../cli/openapi-plugin.md) scaffold and build WASM plugins.
 - [`camel openapi generate`](../cli/openapi-plugin.md) emits an OpenAPI 3.0.3 document from `rest:` blocks.
-- [`camel test`](../testing/index.md) runs declarative mock tests.
+- [`camel test`](../testing/camel-test.md) runs declarative mock tests.
 - The full command table lives in the [CLI reference](../cli/index.md).
 
 ## Next steps

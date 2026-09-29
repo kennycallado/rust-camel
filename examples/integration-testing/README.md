@@ -22,7 +22,7 @@ Files:
 - `partner-multi-path.test.yaml` + `partner-multi-path.routes.yaml`:
   one harness partner and one `bindVar` (`MOCK`) serving two route dial
   paths (`/orders`, `/billing`) on one bound authority; the multi-path
-  pattern of the [Testing chapter](../../docs/src/testing/index.md).
+  pattern of the [Scenario documents](../../docs/src/testing/scenario-documents.md) page.
 - `partner-sql.test.yaml`: one document that combines the partner CRUD
   chain with an `sql:` prepare and a sql `validate` (REST CRUD + DB
   assert). TODO-verify: it shipped with a docs-only pass (bd rc-dmhuo).

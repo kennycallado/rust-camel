@@ -12,7 +12,7 @@ Each command has a reference page in this section. `run`, `new`, and `journal in
 | `camel new <NAME>` | Scaffold a new project | [Getting started: CLI usage](../getting-started/cli.md) |
 | `camel journal inspect <FILE>` | Read events from a runtime journal file | [Getting started: CLI usage](../getting-started/cli.md) |
 | `camel lint <FILE>` | Lint a route file against the production component catalog | this page |
-| `camel test <FILE\|DIR>...` | Run declarative mock tests from `*.test.yaml` documents | [Testing](../testing/index.md) |
+| `camel test <FILE\|DIR>...` | Run declarative mock tests from `*.test.yaml` documents | [Declarative camel test](../testing/camel-test.md) |
 | `camel job [<FILE>]` | Run or list jobs from `*.job.yaml` documents | [camel job](job.md) |
 | `camel compile <DOCUMENT>` | Pack a route or job into a self-contained artifact | [camel compile](compile.md) |
 | `camel plugin new` / `camel plugin build` | Scaffold and build WASM plugins | [OpenAPI and plugin subcommands](openapi-plugin.md) |
@@ -35,7 +35,7 @@ camel lint routes/my-route.yaml
 | 1 | At least one Error diagnostic. |
 | 2 | CLI misuse: missing or unreadable file. |
 
-Warnings do not change the exit code. For example, `camel lint` warns `R-MOCK-IN-PRODUCTION` on inline `to: mock:` sends in route files; see [Testing](../testing/index.md). Reserved documents are skipped with an informational message: `*.test.yaml` test documents and `*.job.yaml` job documents.
+Warnings do not change the exit code. For example, `camel lint` warns `R-MOCK-IN-PRODUCTION` on inline `to: mock:` sends in route files; see [Declarative camel test](../testing/camel-test.md). Reserved documents are skipped with an informational message: `*.test.yaml` test documents and `*.job.yaml` job documents.
 
 ## camel lsp
 

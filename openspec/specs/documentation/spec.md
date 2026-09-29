@@ -109,7 +109,7 @@ behavior.
 
 #### Scenario: Testing build table distinguishes feature sets
 
-- **GIVEN** a reader uses `docs/src/testing/index.md`
+- **GIVEN** a reader uses `docs/src/testing/scenario-documents.md`
 - **WHEN** the reader compares the no-default-features and default builds
 - **THEN** the table identifies the featureless build separately and reflects
   the current default integration-http and integration-sql features

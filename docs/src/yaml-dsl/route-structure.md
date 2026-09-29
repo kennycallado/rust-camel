@@ -49,7 +49,7 @@ success or on error respectively.
 Set `error_handler` to retry failed exchanges and send them to a dead letter
 channel when retries run out. The handler holds a redelivery policy and optional
 per-exception clauses. The full field set lives on the
-[step verbs reference](step-verbs.md).
+[step verbs reference](step-verbs/index.md).
 
 ## Circuit breaker
 
@@ -158,6 +158,6 @@ control bus, not the full authoring model.
 
 ## Next
 
-- [Step verbs](step-verbs.md): every verb and its fields
+- [Step verbs](step-verbs/index.md): every verb and its fields
 
 **Reference**: [DSL crate](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-dsl/CONTEXT.md)
