@@ -528,6 +528,12 @@ struct Fixture {
     /// r4sign Task 1.3: `JOB_DOC` artifact compiled with `--sign
     /// --require-signature`; its manifest marks the signature required.
     signed_required_job: PathBuf,
+    /// Wall-clock unix seconds captured immediately before the first
+    /// signed twin compiles: a schema-5 freshness marker must be >= this
+    /// (the marker is written by THIS suite's compile, never a stale
+    /// cached artifact; the upper bound is the test's own `now`, bd
+    /// rc-xkdbe).
+    signed_compile_started_at: u64,
 }
 
 static FIXTURE: OnceLock<Fixture> = OnceLock::new();
@@ -866,6 +872,7 @@ fn fixture() -> &'static Fixture {
         // r4sign Task 1.3: the signed twins. The synthetic seed file is
         // written at runtime and both compiles emit the detached
         // 148-byte envelope beside the artifact.
+        let signed_compile_started_at = unix_now();
         let seed_path = dir.join("fixture-signing.key");
         std::fs::write(&seed_path, FIXTURE_SEED).expect("write synthetic signing seed");
         let signed_job = {
@@ -919,8 +926,18 @@ fn fixture() -> &'static Fixture {
             typed_arg,
             signed_job,
             signed_required_job,
+            signed_compile_started_at,
         }
     })
+}
+
+/// Wall-clock unix seconds now; the fixture's signed-compile window and
+/// the freshness assertions share one clock reading helper.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after the unix epoch")
+        .as_secs()
 }
 
 /// Deploy a shared fixture artifact into a fresh source-free directory
@@ -1054,6 +1071,18 @@ fn scrub_camel_env(cmd: &mut Command) {
     }
 }
 
+/// Anti-forkbomb invariant (bd rc-yhnq0): only a PARENT test process
+/// may spawn a harness child. A child reaching a spawn helper means the
+/// test forgot `child_guard()` — fail this one test loudly instead of
+/// self-spawning without bound (bd rc-wvydl killed the host five times).
+fn assert_not_harness_child() {
+    assert!(
+        std::env::var_os(CHILD_ENV).is_none(),
+        "harness child re-entered a spawn helper: the enclosing test forgot child_guard() \
+         (bd rc-yhnq0)"
+    );
+}
+
 /// Spawn the artifact runtime as a harness child that runs to
 /// completion (job sends are self-terminating): `output()` waits and
 /// drains both pipes, so no pipe buffer can deadlock the child. Returns
@@ -1065,6 +1094,7 @@ fn spawn_child_output(
     argv: &[&str],
     envs: &[(&str, &str)],
 ) -> (i32, String, String) {
+    assert_not_harness_child();
     let mut cmd = Command::new(std::env::current_exe().expect("current test exe"));
     scrub_camel_env(&mut cmd);
     cmd.env(CHILD_ENV, artifact)
@@ -1103,6 +1133,7 @@ fn spawn_child(
     argv: &[&str],
     envs: &[(&str, &str)],
 ) -> KillOnDrop {
+    assert_not_harness_child();
     let mut cmd = Command::new(std::env::current_exe().expect("current test exe"));
     scrub_camel_env(&mut cmd);
     cmd.env(CHILD_ENV, artifact)
@@ -1795,8 +1826,8 @@ fn artifact_manifest_exits_without_boot() {
     assert!(!all.contains("context started"), "no route boot: {all}");
 }
 
-/// `--manifest` on a v2 virtual-store artifact prints the schema-2
-/// canonical manifest — `manifest_schema` 2, the runtime version, and
+/// `--manifest` on a v2 virtual-store artifact prints the schema-3
+/// canonical manifest — `manifest_schema` 3, the runtime version, and
 /// EVERY embedded logical path with its document kind — and exits 0
 /// without booting (multidoc Task 2.3). The v1 six-field form above is
 /// untouched; a v2 artifact carries the independent store metadata.
@@ -3767,13 +3798,18 @@ fn compiled_runtime_rejects_invalid_store_before_boot() {
 // ---------------------------------------------------------------------------
 
 /// keypin Task 2.1: a signed compile emits manifest schema 5 whose
-/// signing block carries the unix-seconds freshness marker, within a
-/// minute of the test clock, beside the unchanged algorithm name, key
+/// signing block carries the unix-seconds freshness marker, pinned to
+/// the fixture's signed-compile window (the marker is written by THIS
+/// suite's compile — a stale cached artifact or a clock-skewed marker
+/// falls outside it), beside the unchanged algorithm name, key
 /// fingerprint, and required bit — and `--manifest` prints the stored
-/// canonical JSON verbatim, marker included.
+/// canonical JSON verbatim, marker included. The window replaces an
+/// earlier 60-seconds-from-now assert that flaked whenever libtest
+/// scheduled this test late in a long battery (bd rc-xkdbe).
 #[test]
 fn signed_compile_emits_schema5_freshness_marker() {
-    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fixture = fixture();
+    let (deploy, artifact) = deploy_signed(&fixture.signed_job);
     let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &["--manifest"], &[]);
     assert_eq!(
         code, 0,
@@ -3789,13 +3825,13 @@ fn signed_compile_emits_schema5_freshness_marker() {
     let freshness = manifest["signing"]["freshness"]
         .as_u64()
         .expect("the schema-5 signing block carries the freshness marker");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock after the unix epoch")
-        .as_secs();
+    let now = unix_now();
     assert!(
-        freshness <= now && now - freshness <= 60,
-        "freshness marker {freshness} must be within 60 seconds of now {now}"
+        freshness >= fixture.signed_compile_started_at && freshness <= now,
+        "freshness marker {freshness} must sit inside the fixture compile window \
+         [started {}, now {now}] — a marker below the window means a stale cached \
+         artifact, above now means a clock skew (bd rc-xkdbe)",
+        fixture.signed_compile_started_at
     );
     assert_eq!(
         manifest["signing"]["algorithm"].as_str(),
@@ -4066,6 +4102,62 @@ fn unsigned_with_stray_envelope_fails_closed() {
     assert!(
         combined.contains("unpaired"),
         "the diagnostic must name the unpaired envelope: {combined}"
+    );
+    assert!(
+        !combined.contains("context started"),
+        "no boot on a stray envelope: {combined}"
+    );
+}
+
+/// A v1 legacy artifact with ANY envelope beside it fails closed as an
+/// unpaired envelope: the v1 trailer's schema-less manifest decodes as
+/// schema 1 and carries no signing block, so no envelope may be present
+/// — exit 2, no boot. Direct twin of the schema-3 case, bd rc-5u0jx
+/// item (a). The artifact is a REAL executable — the camel binary with
+/// a hand-assembled v1 trailer appended (the compiler emits only v2
+/// trailers now) — because the unpaired check lives in the binary
+/// self-detect path, which the harness child branch never enters.
+#[test]
+fn v1_artifact_with_stray_envelope_fails_closed() {
+    // No harness-child spawn below (run_binary executes the artifact),
+    // but the guard keeps this test safe against any future conversion
+    // to a spawn helper (bd rc-wvydl).
+    child_guard();
+    use std::io::Write as _;
+    let deploy = tempfile::tempdir().expect("deploy tempdir");
+
+    let manifest =
+        camel_cli::compile::manifest::derive("app.yaml", trailer::TrailerKind::Route, ROUTE_DOC)
+            .expect("v1 manifest derives");
+    let v1 = trailer::Trailer {
+        kind: trailer::TrailerKind::Route,
+        payload: ROUTE_DOC.as_bytes().to_vec(),
+        manifest: manifest.to_legacy_json().into_bytes(),
+    };
+    let artifact = deploy.path().join("app.bin");
+    std::fs::copy(env!("CARGO_BIN_EXE_camel"), &artifact).expect("copy camel binary");
+    let mut tail = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&artifact)
+        .expect("open artifact for trailer append");
+    tail.write_all(&trailer::encode(&v1))
+        .expect("append v1 trailer");
+    drop(tail);
+    std::fs::write(sig_path_of(&artifact), b"stray").expect("write stray envelope");
+
+    let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &[], &[]);
+    assert_eq!(
+        code, 2,
+        "stray envelope on a v1 artifact must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("unpaired"),
+        "the diagnostic must name the unpaired envelope: {combined}"
+    );
+    assert!(
+        combined.contains("schema 1"),
+        "the diagnostic must pin the legacy manifest's default schema 1: {combined}"
     );
     assert!(
         !combined.contains("context started"),

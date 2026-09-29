@@ -149,11 +149,17 @@ asset-reference matrix, `compile::store` embeds asset entries into the
 store, `compile::trailer` owns the `CAMELTR1` codec (v1 68-byte footer,
 v2 76-byte footer, `decode_artifact` dispatch), `compile::manifest` owns
 the operational manifest with its independent `manifest_schema: 3`
-(paired with `store_schema: 2`) and `embedded_files` list, and
-`compile::materialize` owns the confined per-boot asset materialization.
+(paired with `store_schema: 2`) and `embedded_files` list,
+`compile::materialize` owns the confined per-boot asset materialization,
+`compile::signature` owns the detached `CAMELSG1` Ed25519ph envelope
+codec and its verify chain (ADR-0083), and `compile::trust` owns the
+truststore pinning policy for signed artifacts (keypin, ADR-0083).
 `compile::runtime` owns the artifact boot seam: registry population,
 substitution, and the materialization guard, all before the route/job
-kind dispatch. The canonical store model
+kind dispatch; runtime.rs holds the zone's size ceiling (2008 lines after
+keypin's trust hooks), and the next growth of its verification block
+extracts `compile/verify.rs` first (deferral recorded, bd rc-5u0jx item
+(c)). The canonical store model
 lives in camel-dsl and is re-exported verbatim; this crate never defines a
 second one.
 

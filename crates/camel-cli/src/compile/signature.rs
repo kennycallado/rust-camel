@@ -307,6 +307,7 @@ pub fn verify_envelope(
     if fingerprint != expected_fingerprint {
         return Err(EnvelopeError::FingerprintMismatch);
     }
+    // A malformed key maps to SignatureInvalid, not a dedicated variant: with a single algorithm the distinction changes no operator decision — split into a BadVerifyingKey variant when a second algorithm joins (bd rc-5u0jx).
     let verifying_key =
         VerifyingKey::from_bytes(&key_bytes).map_err(|_| EnvelopeError::SignatureInvalid)?;
     let signature =
@@ -470,6 +471,60 @@ mod tests {
             )
             .unwrap_err(),
             EnvelopeError::AlgorithmMismatch
+        );
+    }
+
+    #[test]
+    fn malformed_verifying_key_maps_to_signature_invalid() {
+        // The key-parse arm of the verify chain is reachable only with a
+        // checksum-consistent envelope whose key bytes are not a valid
+        // compressed Edwards point. This is the recomputed-checksum
+        // hand-craft that reaches it; mapping a malformed key to
+        // `SignatureInvalid` (no dedicated variant) is intentional until
+        // a second algorithm joins, bd rc-5u0jx item (b).
+        let key = test_key(&TEST_SEED_A);
+        let digest = test_digest(0xA5);
+        let envelope = encode_envelope(&key, &digest);
+
+        // Precondition: the chosen key bytes are a rejected encoding, so
+        // `VerifyingKey::from_bytes` fails inside `verify_envelope`.
+        // y=2: x² = (y²−1)/(d·y²+1) is a non-square, so decompression
+        // fails (unlike [0xff; 32], which is a valid curve point).
+        let mut bad_key = [0u8; 32];
+        bad_key[0] = 2;
+        assert!(
+            VerifyingKey::from_bytes(&bad_key).is_err(),
+            "the chosen key bytes must be rejected by from_bytes"
+        );
+
+        // Overwrite the key field and RECOMPUTE the envelope checksum
+        // over the new key: without the recompute the envelope dies at
+        // the checksum step, never reaching the key parse.
+        let signature_bytes: [u8; 64] = envelope[SIGNATURE_OFFSET..CHECKSUM_OFFSET]
+            .try_into()
+            .expect("signature field is 64 bytes");
+        let mut crafted = envelope;
+        crafted[VERIFYING_KEY_OFFSET..SIGNATURE_OFFSET].copy_from_slice(&bad_key);
+        crafted[CHECKSUM_OFFSET..TERMINAL_MAGIC_OFFSET].copy_from_slice(&envelope_checksum(
+            ENVELOPE_VERSION,
+            ALGORITHM_ED25519PH,
+            0,
+            &bad_key,
+            &signature_bytes,
+        ));
+
+        // The expected fingerprint is derived from the bad key itself, so
+        // the fingerprint step passes and the first failing step is
+        // exactly the key parse: SignatureInvalid.
+        assert_eq!(
+            verify_envelope(
+                &crafted,
+                &digest,
+                &fingerprint(&bad_key),
+                ALGORITHM_NAME_ED25519PH
+            )
+            .unwrap_err(),
+            EnvelopeError::SignatureInvalid
         );
     }
 
