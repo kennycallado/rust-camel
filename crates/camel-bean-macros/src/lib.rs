@@ -1,5 +1,8 @@
 mod handler;
 
+#[cfg(test)]
+mod expansion_baselines;
+
 use handler::find_handler_methods;
 use proc_macro::TokenStream;
 use quote::quote;

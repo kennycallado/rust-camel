@@ -1,0 +1,15 @@
+# syn3 Task 1.3 pre-flip xtask lint verdict manifest (captured on syn 2 pin)
+# Captured from the built binary: cargo build -p xtask && ./target/debug/xtask <lint> > <file> 2>&1; echo EXIT=$? >> <file>
+# Byte-stability self-check: two back-to-back lint-test-sleep captures byte-identical (cmp clean).
+
+## Per-capture record
+lint-test-sleep: sha256=45a6b7adf551da2d3544ce4abc8b4019107a6fa03f2cf5f109c54e23da8f927b lines=2 EXIT=0
+lint-metric-labels: sha256=147e7430364d46894d85e05525661c0563176d42735cf222ffac248fe97ba71a lines=2 EXIT=0
+lint-unbounded-wait: sha256=a96e4a3c11ba8972be1e04e1f14ee21483fa83104dfa6e448353f8045ec21c9c lines=2 EXIT=0
+lint-context-citations: sha256=c006186d32fb1b2fbc3735af8a6548af304089ef715b6bc3ba3cea1b07fd3c2e lines=2 EXIT=0
+
+## Per-target test-count contract (Task 2.4 compares against these)
+LIB: test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+E2E_COMPILE: test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out
+FULL_TEST_EXIT: 0
+# NOTE: E2E_COMPILE line shows "0 passed; 4 ignored" because archive_e2e.rs tests are #[ignore]d; they are executed for real in Task 2.4 via -- --ignored.

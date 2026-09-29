@@ -166,8 +166,8 @@ fn method_in_impl_for_type(items: &[syn::Item], type_name: &str, method: &str) -
         let self_str = impl_block.self_ty.to_token_stream().to_string();
         let mut type_in_block = type_in_string(&self_str, type_name);
         if !type_in_block
-            && let Some((bang, path, _for_token)) = &impl_block.trait_
-            && bang.is_none()
+            && impl_block.modifiers.polarity.is_none()
+            && let Some((path, _for_token)) = &impl_block.trait_
         {
             let trait_str = path.to_token_stream().to_string();
             type_in_block = type_in_string(&trait_str, type_name);

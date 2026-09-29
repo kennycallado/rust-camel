@@ -1,0 +1,2 @@
+lint-metric-labels: OK (0 violations)
+EXIT=0

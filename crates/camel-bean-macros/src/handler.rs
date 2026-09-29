@@ -68,7 +68,7 @@ fn has_handler_attribute(attrs: &[Attribute]) -> bool {
 }
 
 /// Parse a handler method and extract metadata
-fn parse_handler_method(method: &ImplItemFn) -> Result<HandlerMethod> {
+pub(crate) fn parse_handler_method(method: &ImplItemFn) -> Result<HandlerMethod> {
     let name = method.sig.ident.to_string();
     let ident = method.sig.ident.clone();
     let mut body_type = None;
@@ -83,7 +83,7 @@ fn parse_handler_method(method: &ImplItemFn) -> Result<HandlerMethod> {
         match input {
             syn::FnArg::Receiver(receiver) => {
                 // Check for &self
-                if receiver.reference.is_some() {
+                if matches!(receiver.kind, syn::ReceiverKind::Reference(..)) {
                     has_self = true;
                 } else {
                     return Err(Error::new_spanned(

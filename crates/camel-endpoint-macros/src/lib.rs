@@ -4,6 +4,9 @@
 
 mod uri_config;
 
+#[cfg(test)]
+mod expansion_baselines;
+
 use proc_macro::TokenStream;
 use syn::{DeriveInput, parse_macro_input};
 

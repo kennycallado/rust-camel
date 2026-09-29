@@ -1,0 +1,1 @@
+missing #[uri_scheme = "xxx"] attribute on struct

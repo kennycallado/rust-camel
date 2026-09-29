@@ -1,0 +1,1 @@
+bean_impl does not support generic types or lifetimes on the impl block

@@ -1,0 +1,1 @@
+Handler methods must use &self, not self

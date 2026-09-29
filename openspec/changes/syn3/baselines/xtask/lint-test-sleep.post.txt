@@ -1,0 +1,2 @@
+lint-test-sleep: OK (471 findings = max 471)
+EXIT=0

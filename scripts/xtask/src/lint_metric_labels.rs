@@ -370,7 +370,7 @@ fn visit_clean_items(vis: &mut MetricLabelVisitor<'_>, items: &[syn::Item]) {
                 let is_collector = imp
                     .trait_
                     .as_ref()
-                    .and_then(|(_, path, _)| path.segments.last())
+                    .and_then(|(path, _)| path.segments.last())
                     .is_some_and(|seg| COLLECTOR_TRAITS.contains(&seg.ident.to_string().as_str()));
                 if !is_collector {
                     syn::visit::visit_item_impl(vis, imp);
