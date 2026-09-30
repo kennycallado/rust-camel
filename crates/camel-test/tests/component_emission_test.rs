@@ -47,13 +47,17 @@
 //!   legs need live backends (testcontainers/Docker) and are not
 //!   written here — CI covers the failure legs via the
 //!   component-emission step.
-//! - **No honest harness exists without external artifacts** (documented,
-//!   not faked): wasm — endpoint creation canonicalizes the guest module
-//!   path, so even the failure leg needs a compiled `.wasm` guest
-//!   (fixture lives in `camel-component-wasm`); cxf — every consumer
-//!   start requires the `cxf-bridge` binary
-//!   (`support::cxf::require_cxf_bridge_binary`). Both stay in `AUDIT`
-//!   and are verified by their crates' integration suites plus CI.
+//! - **Proven crate-internally (mission 333, bd rc-xlo0)**: wasm `invoke`
+//!   and cxf `consume` carry executable emission proof in their own
+//!   crates — `crates/components/camel-component-wasm/tests/producer_emission_test.rs`
+//!   (real endpoint + producer over the committed echo guest) and
+//!   `crates/components/camel-cxf/tests/consumer_emission_test.rs`
+//!   (real consumer task over the in-crate mock bridge, no native binary)
+//!   — both using the shared `RecordingRuntimeObservability` from
+//!   `camel-component-api` test support. They stay in `AUDIT` as
+//!   non-`DRIVABLE` here because camel-test cannot host their harnesses.
+//!   Every `AUDIT` entry carries executable failure-family proof, and wasm
+//!   and cxf now carry full success+failure legs in-crate.
 
 // Shared test-support module; only the crypto/redis helpers are used
 // here, so dead-code from the unused (feature-gated) siblings is allowed.

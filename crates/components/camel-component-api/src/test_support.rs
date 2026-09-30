@@ -9,10 +9,10 @@
 //!     Arc::new(PanicRuntimeObservability);
 //! ```
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use camel_api::MetricsCollector;
+use camel_api::{ComponentMetrics, MetricsCollector};
 
 use crate::{HealthCheckRegistry, RuntimeObservability};
 
@@ -147,6 +147,97 @@ impl RuntimeObservability for NoopRuntimeObservability {
     }
     fn health(&self) -> Arc<dyn HealthCheckRegistry> {
         Arc::new(*self)
+    }
+}
+
+/// Shared recording state behind the collector and the runtime double.
+struct RecorderState {
+    errors: Mutex<Vec<(String, String)>>,
+    ops: Mutex<Vec<(String, String, String)>>,
+}
+
+/// `MetricsCollector` that records error-family and component-op emissions
+/// into [`RecorderState`]. Every other trait method is a no-op.
+#[derive(Clone)]
+struct RecorderCollector {
+    state: Arc<RecorderState>,
+}
+
+impl MetricsCollector for RecorderCollector {
+    fn record_exchange_duration(&self, _: &str, _: Duration) {}
+    fn increment_errors(&self, component: &str, error_type: &str) {
+        self.state
+            .errors
+            .lock()
+            .expect("recorder errors lock")
+            .push((component.to_string(), error_type.to_string()));
+    }
+    fn increment_exchanges(&self, _: &str) {}
+    fn set_queue_depth(&self, _: &str, _: usize) {}
+    fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+    fn record_component_operation(&self, component: &str, operation: &str, outcome: &str) {
+        self.state.ops.lock().expect("recorder ops lock").push((
+            component.to_string(),
+            operation.to_string(),
+            outcome.to_string(),
+        ));
+    }
+}
+
+/// Recording `RuntimeObservability` double for emission proofs.
+///
+/// The double captures error-family and component-operation emissions
+/// behind shared state. The components lever is baked in at construction.
+/// One type therefore proves both families: the never-gated error family
+/// and the lever-gated component-ops family.
+pub struct RecordingRuntimeObservability {
+    state: Arc<RecorderState>,
+    components_enabled: bool,
+}
+
+impl RecordingRuntimeObservability {
+    /// Builds the double. `components_enabled` is the lever snapshot used
+    /// by every `component_metrics()` facade this double hands out.
+    pub fn new(components_enabled: bool) -> Arc<Self> {
+        Arc::new(Self {
+            state: Arc::new(RecorderState {
+                errors: Mutex::new(Vec::new()),
+                ops: Mutex::new(Vec::new()),
+            }),
+            components_enabled,
+        })
+    }
+
+    /// Snapshot of recorded error-family emissions, in call order.
+    pub fn errors(&self) -> Vec<(String, String)> {
+        self.state
+            .errors
+            .lock()
+            .expect("recorder errors lock")
+            .clone()
+    }
+
+    /// Snapshot of recorded component-operation emissions, in call order.
+    pub fn ops(&self) -> Vec<(String, String, String)> {
+        self.state.ops.lock().expect("recorder ops lock").clone()
+    }
+}
+
+impl HealthCheckRegistry for RecordingRuntimeObservability {
+    fn force_unhealthy_for_route(&self, _: &str, _: &str, _: &str) {}
+}
+
+impl RuntimeObservability for RecordingRuntimeObservability {
+    fn metrics(&self) -> Arc<dyn MetricsCollector> {
+        Arc::new(RecorderCollector {
+            state: Arc::clone(&self.state),
+        })
+    }
+    fn health(&self) -> Arc<dyn HealthCheckRegistry> {
+        Arc::new(NoopRuntimeObservability)
+    }
+    fn component_metrics(&self) -> ComponentMetrics {
+        ComponentMetrics::new(self.metrics(), self.components_enabled)
     }
 }
 
@@ -365,5 +456,33 @@ mod lock_deadline_tests {
             msg.contains(&format!("site {site}")),
             "panic must name the exact acquisition call site: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod recording_tests {
+    use super::*;
+
+    #[test]
+    fn recording_double_captures_facade_emissions() {
+        let rt = RecordingRuntimeObservability::new(true);
+        rt.component_metrics().observe("wasm", "invoke", false);
+        rt.component_metrics().observe("wasm", "invoke", true);
+        assert_eq!(
+            rt.ops(),
+            vec![
+                ("wasm".into(), "invoke".into(), "success".into()),
+                ("wasm".into(), "invoke".into(), "failure".into()),
+            ]
+        );
+        assert_eq!(rt.errors(), vec![("wasm".into(), "e:wasm:invoke".into())]);
+    }
+
+    #[test]
+    fn lever_off_suppresses_ops_not_errors() {
+        let rt = RecordingRuntimeObservability::new(false);
+        rt.component_metrics().observe("cxf", "consume", true);
+        assert_eq!(rt.errors(), vec![("cxf".into(), "e:cxf:consume".into())]);
+        assert!(rt.ops().is_empty());
     }
 }
