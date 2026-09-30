@@ -1,0 +1,14 @@
+{
+  "mcp": [
+    {
+      "server": {
+        "name": "crm",
+        "bind": "127.0.0.1:9100",
+        "tls": {
+          "cert_path": "   ",
+          "key_path": "/etc/certs/crm-key.pem"
+        }
+      }
+    }
+  ]
+}

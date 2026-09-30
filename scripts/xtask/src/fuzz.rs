@@ -6,7 +6,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-const KNOWN_TARGETS: &[&str] = &["dsl_yaml", "dsl_json", "dsl_template", "dsl_parity"];
+const KNOWN_TARGETS: &[&str] = &[
+    "dsl_yaml",
+    "dsl_json",
+    "dsl_template",
+    "dsl_parity",
+    "dsl_rest",
+    "dsl_mcp",
+    "dsl_openapi",
+];
 
 /// True when `git_dir` and `git_common_dir` refer to the same directory,
 /// i.e. the current checkout is the main checkout rather than a linked
@@ -562,19 +570,27 @@ mod tests {
     }
 
     #[test]
-    fn known_targets_cover_all_four() {
-        // The four targets must be listed exactly once each: present, no
-        // duplicates, and no fifth distinct entry. The per-name count
+    fn known_targets_cover_all_seven() {
+        // The seven targets must be listed exactly once each: present, no
+        // duplicates, and no eighth distinct entry. The per-name count
         // catches missing/duplicated names; the length check catches any
-        // extra entry beyond the four.
-        for name in ["dsl_yaml", "dsl_json", "dsl_template", "dsl_parity"] {
+        // extra entry beyond the seven.
+        for name in [
+            "dsl_yaml",
+            "dsl_json",
+            "dsl_template",
+            "dsl_parity",
+            "dsl_rest",
+            "dsl_mcp",
+            "dsl_openapi",
+        ] {
             let occurrences = KNOWN_TARGETS.iter().filter(|known| **known == name).count();
             assert_eq!(
                 occurrences, 1,
                 "KNOWN_TARGETS must contain `{name}` exactly once, got {occurrences}"
             );
         }
-        assert_eq!(KNOWN_TARGETS.len(), 4);
+        assert_eq!(KNOWN_TARGETS.len(), 7);
     }
 
     #[test]

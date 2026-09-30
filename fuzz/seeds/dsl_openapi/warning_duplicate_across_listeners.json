@@ -1,0 +1,20 @@
+{
+  "rest": [
+    {
+      "host": "0.0.0.0",
+      "port": 8080,
+      "path": "/users",
+      "operations": [
+        { "method": "GET", "path": "/{id}", "operation_id": "getUserA", "to": "bean:a" }
+      ]
+    },
+    {
+      "host": "0.0.0.0",
+      "port": 8081,
+      "path": "/users",
+      "operations": [
+        { "method": "GET", "path": "/{id}", "operation_id": "getUserB", "to": "bean:b" }
+      ]
+    }
+  ]
+}

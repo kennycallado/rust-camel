@@ -1,0 +1,13 @@
+{
+  "mcp": [
+    {
+      "server": {
+        "name": "crm",
+        "bind": "localhost:9100"
+      },
+      "tools": [
+        { "name": "lookup", "input_schema": { "type": "object" } }
+      ]
+    }
+  ]
+}

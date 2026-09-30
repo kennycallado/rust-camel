@@ -1,0 +1,16 @@
+{
+  "mcp": [
+    {
+      "server": {
+        "name": "crm",
+        "bind": "127.0.0.1:9100"
+      },
+      "tools": [
+        { "name": "lookup", "input_schema": { "type": "object" } }
+      ],
+      "resources": [
+        { "name": "customers", "uri": "crm://customers" }
+      ]
+    }
+  ]
+}

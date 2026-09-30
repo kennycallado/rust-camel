@@ -57,7 +57,7 @@ jobs:
   fuzz-smoke:
     runs-on: ubuntu-latest
     continue-on-error: true
-    # Dispatch runs all four legs plus the drills; PRs run only the
+    # Dispatch runs all legs plus the drills; PRs run only the
     # selected legs, so the budget scales with the event.
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 30 || 20 }}
     steps:

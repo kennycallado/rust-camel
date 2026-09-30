@@ -37,3 +37,21 @@ name = "dsl_parity"
 path = "fuzz_targets/dsl_parity.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "dsl_rest"
+path = "fuzz_targets/dsl_rest.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "dsl_mcp"
+path = "fuzz_targets/dsl_mcp.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "dsl_openapi"
+path = "fuzz_targets/dsl_openapi.rs"
+test = false
+doc = false
