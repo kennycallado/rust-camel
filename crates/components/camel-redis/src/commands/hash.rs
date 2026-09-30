@@ -2,6 +2,8 @@ use super::{
     get_i64_header, get_str_header, get_str_vec_header, require_key, require_value,
     value_to_redis_arg,
 };
+#[cfg(test)]
+use crate::HEADER_VALUE;
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
@@ -332,7 +334,7 @@ mod tests {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
             ("CamelRedis.Field", serde_json::json!("myfield")),
-            ("CamelRedis.Value", serde_json::json!("myvalue")),
+            (HEADER_VALUE, serde_json::json!("myvalue")),
         ]);
         assert_eq!(crate::commands::require_key(&ex).unwrap(), "mykey");
         assert_eq!(
@@ -471,7 +473,7 @@ mod tests {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
             ("CamelRedis.Field", serde_json::json!("myfield")),
-            ("CamelRedis.Value", serde_json::json!("myvalue")),
+            (HEADER_VALUE, serde_json::json!("myvalue")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Hset, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "HSET");
@@ -482,7 +484,7 @@ mod tests {
     fn test_build_redis_cmd_hset_missing_key() {
         let ex = ex_with(&[
             ("CamelRedis.Field", serde_json::json!("f")),
-            ("CamelRedis.Value", serde_json::json!("v")),
+            (HEADER_VALUE, serde_json::json!("v")),
         ]);
         assert!(build_redis_cmd(&RedisCommand::Hset, &ex).is_err());
     }
@@ -491,7 +493,7 @@ mod tests {
     fn test_build_redis_cmd_hset_missing_field() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("k")),
-            ("CamelRedis.Value", serde_json::json!("v")),
+            (HEADER_VALUE, serde_json::json!("v")),
         ]);
         assert!(build_redis_cmd(&RedisCommand::Hset, &ex).is_err());
     }
@@ -533,7 +535,7 @@ mod tests {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
             ("CamelRedis.Field", serde_json::json!("myfield")),
-            ("CamelRedis.Value", serde_json::json!("myvalue")),
+            (HEADER_VALUE, serde_json::json!("myvalue")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Hsetnx, &ex).unwrap();
         assert_eq!(cmd_name(&cmd), "HSETNX");
@@ -544,7 +546,7 @@ mod tests {
     fn test_build_redis_cmd_hsetnx_missing_key() {
         let ex = ex_with(&[
             ("CamelRedis.Field", serde_json::json!("f")),
-            ("CamelRedis.Value", serde_json::json!("v")),
+            (HEADER_VALUE, serde_json::json!("v")),
         ]);
         assert!(build_redis_cmd(&RedisCommand::Hsetnx, &ex).is_err());
     }

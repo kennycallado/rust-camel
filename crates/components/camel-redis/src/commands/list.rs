@@ -1,6 +1,8 @@
 use super::{
     get_i64_header, get_str_header, get_u64_header, require_key, require_value, value_to_redis_arg,
 };
+#[cfg(test)]
+use crate::HEADER_VALUE;
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
@@ -391,7 +393,7 @@ mod tests {
     fn test_lpush_has_key_and_value() {
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Key", serde_json::json!("mykey"));
-        msg.set_header("CamelRedis.Value", serde_json::json!("hello"));
+        msg.set_header(HEADER_VALUE, serde_json::json!("hello"));
         let ex = Exchange::new(msg);
         assert_eq!(crate::commands::require_key(&ex).unwrap(), "mykey");
         assert_eq!(
@@ -417,7 +419,7 @@ mod tests {
         msg.set_header("CamelRedis.Key", serde_json::json!("mylist"));
         msg.set_header("CamelRedis.Pivot", serde_json::json!("pivot_value"));
         msg.set_header("CamelRedis.Position", serde_json::json!("AFTER"));
-        msg.set_header("CamelRedis.Value", serde_json::json!("new_value"));
+        msg.set_header(HEADER_VALUE, serde_json::json!("new_value"));
         let ex = Exchange::new(msg);
         assert_eq!(get_str_header(&ex, "CamelRedis.Pivot"), Some("pivot_value"));
         assert_eq!(get_str_header(&ex, "CamelRedis.Position"), Some("AFTER"));
@@ -558,7 +560,7 @@ mod tests {
     fn test_build_redis_cmd_lpush() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
-            ("CamelRedis.Value", serde_json::json!("hello")),
+            (HEADER_VALUE, serde_json::json!("hello")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Lpush, &ex).unwrap();
         let args = cmd_args(&cmd);
@@ -571,7 +573,7 @@ mod tests {
     fn test_build_redis_cmd_rpush() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
-            ("CamelRedis.Value", serde_json::json!("world")),
+            (HEADER_VALUE, serde_json::json!("world")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Rpush, &ex).unwrap();
         let args = cmd_args(&cmd);
@@ -584,7 +586,7 @@ mod tests {
     fn test_build_redis_cmd_lpushx() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
-            ("CamelRedis.Value", serde_json::json!("val")),
+            (HEADER_VALUE, serde_json::json!("val")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Lpushx, &ex).unwrap();
         let args = cmd_args(&cmd);
@@ -597,7 +599,7 @@ mod tests {
     fn test_build_redis_cmd_rpushx() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
-            ("CamelRedis.Value", serde_json::json!("val")),
+            (HEADER_VALUE, serde_json::json!("val")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Rpushx, &ex).unwrap();
         let args = cmd_args(&cmd);
@@ -714,7 +716,7 @@ mod tests {
             ("CamelRedis.Key", serde_json::json!("mykey")),
             ("CamelRedis.Pivot", serde_json::json!("pivot")),
             ("CamelRedis.Position", serde_json::json!("AFTER")),
-            ("CamelRedis.Value", serde_json::json!("new_val")),
+            (HEADER_VALUE, serde_json::json!("new_val")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Linsert, &ex).unwrap();
         let args = cmd_args(&cmd);
@@ -730,7 +732,7 @@ mod tests {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
             ("CamelRedis.Pivot", serde_json::json!("pivot")),
-            ("CamelRedis.Value", serde_json::json!("new_val")),
+            (HEADER_VALUE, serde_json::json!("new_val")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Linsert, &ex).unwrap();
         let args = cmd_args(&cmd);
@@ -746,7 +748,7 @@ mod tests {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
             ("CamelRedis.Index", serde_json::json!(2)),
-            ("CamelRedis.Value", serde_json::json!("replacement")),
+            (HEADER_VALUE, serde_json::json!("replacement")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Lset, &ex).unwrap();
         let args = cmd_args(&cmd);
@@ -761,7 +763,7 @@ mod tests {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
             ("CamelRedis.Count", serde_json::json!(3)),
-            ("CamelRedis.Value", serde_json::json!("to_remove")),
+            (HEADER_VALUE, serde_json::json!("to_remove")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Lrem, &ex).unwrap();
         let args = cmd_args(&cmd);
@@ -775,7 +777,7 @@ mod tests {
     fn test_build_redis_cmd_lrem_defaults() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
-            ("CamelRedis.Value", serde_json::json!("to_remove")),
+            (HEADER_VALUE, serde_json::json!("to_remove")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Lrem, &ex).unwrap();
         let args = cmd_args(&cmd);
@@ -828,7 +830,7 @@ mod tests {
     fn test_build_redis_cmd_not_a_list_command() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
-            ("CamelRedis.Value", serde_json::json!("hello")),
+            (HEADER_VALUE, serde_json::json!("hello")),
         ]);
         let err = build_redis_cmd(&RedisCommand::Set, &ex).unwrap_err();
         assert!(err.to_string().contains("Not a list command"));
@@ -836,7 +838,7 @@ mod tests {
 
     #[test]
     fn test_build_redis_cmd_missing_key() {
-        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("hello"))]);
+        let ex = ex_with(&[(HEADER_VALUE, serde_json::json!("hello"))]);
         let err = build_redis_cmd(&RedisCommand::Lpush, &ex).unwrap_err();
         assert!(err.to_string().contains("CamelRedis.Key"));
     }
@@ -845,7 +847,7 @@ mod tests {
     fn test_build_redis_cmd_missing_value() {
         let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
         let err = build_redis_cmd(&RedisCommand::Lpush, &ex).unwrap_err();
-        assert!(err.to_string().contains("CamelRedis.Value"));
+        assert!(err.to_string().contains(HEADER_VALUE));
     }
 
     #[test]
@@ -859,7 +861,7 @@ mod tests {
     fn test_build_redis_cmd_missing_pivot() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("mykey")),
-            ("CamelRedis.Value", serde_json::json!("new_val")),
+            (HEADER_VALUE, serde_json::json!("new_val")),
         ]);
         let err = build_redis_cmd(&RedisCommand::Linsert, &ex).unwrap_err();
         assert!(err.to_string().contains("CamelRedis.Pivot"));

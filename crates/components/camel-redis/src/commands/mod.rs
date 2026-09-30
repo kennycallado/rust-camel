@@ -8,6 +8,7 @@ pub mod set;
 pub mod string;
 pub mod zset;
 
+use crate::HEADER_VALUE;
 use camel_component_api::{CamelError, Exchange};
 
 // ── Header extraction helpers ────────────────────────────────────────────────
@@ -56,8 +57,8 @@ pub fn require_key(exchange: &Exchange) -> Result<String, CamelError> {
 }
 
 pub fn require_value(exchange: &Exchange) -> Result<serde_json::Value, CamelError> {
-    get_value_header(exchange, "CamelRedis.Value").ok_or_else(|| {
-        CamelError::ProcessorError("Missing required header: CamelRedis.Value".into())
+    get_value_header(exchange, HEADER_VALUE).ok_or_else(|| {
+        CamelError::ProcessorError(format!("Missing required header: {HEADER_VALUE}"))
     })
 }
 

@@ -58,6 +58,12 @@ pub use sentinel_config::{SentinelConfig, TopologyKind};
 pub use topology::FakeTopology;
 pub use topology::{RedisTopology, ServerKind, StandaloneTopology, topology_from_config};
 
+// Header constants for redis operations
+
+/// Header key that carries the value payload for value-oriented commands
+/// (for example SET, GET, APPEND).
+pub const HEADER_VALUE: &str = "CamelRedis.Value";
+
 pub struct RedisComponent {
     config: Option<RedisConfig>,
 }

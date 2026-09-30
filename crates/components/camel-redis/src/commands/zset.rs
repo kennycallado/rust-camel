@@ -2,6 +2,8 @@ use super::{
     get_bool_header, get_f64_header, get_i64_header, get_str_header, get_str_vec_header,
     require_key, require_value, value_to_redis_arg,
 };
+#[cfg(test)]
+use crate::HEADER_VALUE;
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
@@ -492,7 +494,7 @@ mod tests {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("myzset")),
             ("CamelRedis.Score", serde_json::json!(10.5)),
-            ("CamelRedis.Value", serde_json::json!("member1")),
+            (HEADER_VALUE, serde_json::json!("member1")),
         ]);
         assert_eq!(crate::commands::require_key(&ex).unwrap(), "myzset");
         assert_eq!(
@@ -703,7 +705,7 @@ mod tests {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("myzset")),
             ("CamelRedis.Score", serde_json::json!(10.5)),
-            ("CamelRedis.Value", serde_json::json!("member1")),
+            (HEADER_VALUE, serde_json::json!("member1")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Zadd, &ex).unwrap();
         assert_cmd_name(&cmd, "ZADD");
@@ -715,7 +717,7 @@ mod tests {
 
     #[test]
     fn test_build_redis_cmd_zadd_missing_key() {
-        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("m1"))]);
+        let ex = ex_with(&[(HEADER_VALUE, serde_json::json!("m1"))]);
         assert!(build_redis_cmd(&RedisCommand::Zadd, &ex).is_err());
     }
 
@@ -729,7 +731,7 @@ mod tests {
     fn test_build_redis_cmd_zrem() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("myzset")),
-            ("CamelRedis.Value", serde_json::json!("member1")),
+            (HEADER_VALUE, serde_json::json!("member1")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Zrem, &ex).unwrap();
         assert_cmd_name(&cmd, "ZREM");
@@ -738,7 +740,7 @@ mod tests {
 
     #[test]
     fn test_build_redis_cmd_zrem_missing_key() {
-        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("m1"))]);
+        let ex = ex_with(&[(HEADER_VALUE, serde_json::json!("m1"))]);
         assert!(build_redis_cmd(&RedisCommand::Zrem, &ex).is_err());
     }
 
@@ -812,7 +814,7 @@ mod tests {
     fn test_build_redis_cmd_zrank() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("myzset")),
-            ("CamelRedis.Value", serde_json::json!("member1")),
+            (HEADER_VALUE, serde_json::json!("member1")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Zrank, &ex).unwrap();
         assert_cmd_name(&cmd, "ZRANK");
@@ -821,7 +823,7 @@ mod tests {
 
     #[test]
     fn test_build_redis_cmd_zrank_missing_key() {
-        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("m1"))]);
+        let ex = ex_with(&[(HEADER_VALUE, serde_json::json!("m1"))]);
         assert!(build_redis_cmd(&RedisCommand::Zrank, &ex).is_err());
     }
 
@@ -835,7 +837,7 @@ mod tests {
     fn test_build_redis_cmd_zrevrank() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("myzset")),
-            ("CamelRedis.Value", serde_json::json!("member1")),
+            (HEADER_VALUE, serde_json::json!("member1")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Zrevrank, &ex).unwrap();
         assert_cmd_name(&cmd, "ZREVRANK");
@@ -844,7 +846,7 @@ mod tests {
 
     #[test]
     fn test_build_redis_cmd_zrevrank_missing_key() {
-        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("m1"))]);
+        let ex = ex_with(&[(HEADER_VALUE, serde_json::json!("m1"))]);
         assert!(build_redis_cmd(&RedisCommand::Zrevrank, &ex).is_err());
     }
 
@@ -858,7 +860,7 @@ mod tests {
     fn test_build_redis_cmd_zscore() {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("myzset")),
-            ("CamelRedis.Value", serde_json::json!("member1")),
+            (HEADER_VALUE, serde_json::json!("member1")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Zscore, &ex).unwrap();
         assert_cmd_name(&cmd, "ZSCORE");
@@ -867,7 +869,7 @@ mod tests {
 
     #[test]
     fn test_build_redis_cmd_zscore_missing_key() {
-        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("m1"))]);
+        let ex = ex_with(&[(HEADER_VALUE, serde_json::json!("m1"))]);
         assert!(build_redis_cmd(&RedisCommand::Zscore, &ex).is_err());
     }
 
@@ -896,7 +898,7 @@ mod tests {
         let ex = ex_with(&[
             ("CamelRedis.Key", serde_json::json!("myzset")),
             ("CamelRedis.Increment", serde_json::json!(2.5)),
-            ("CamelRedis.Value", serde_json::json!("member1")),
+            (HEADER_VALUE, serde_json::json!("member1")),
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Zincrby, &ex).unwrap();
         assert_cmd_name(&cmd, "ZINCRBY");
@@ -906,7 +908,7 @@ mod tests {
 
     #[test]
     fn test_build_redis_cmd_zincrby_missing_key() {
-        let ex = ex_with(&[("CamelRedis.Value", serde_json::json!("m1"))]);
+        let ex = ex_with(&[(HEADER_VALUE, serde_json::json!("m1"))]);
         assert!(build_redis_cmd(&RedisCommand::Zincrby, &ex).is_err());
     }
 
