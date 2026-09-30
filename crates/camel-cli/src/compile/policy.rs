@@ -25,8 +25,9 @@
 //! endpoint URI parameters (`tlsCert`/`tlsKey` on `http:`/`https:`/`ws:`/
 //! `wss:` endpoints — camel-http reads `tlsCert` regardless of scheme,
 //! `camel-component-http/src/lib.rs:805`; the gRPC family
-//! `serverCertPath`/`serverKeyPath`/`clientCaPath` server-side and
-//! `caCertPath`/`clientCertPath`/`clientKeyPath` client-side),
+//! `serverCertPath`/`serverKeyPath`/`clientCaPath` server-side,
+//! `caCertPath`/`clientCertPath`/`clientKeyPath` client-side, and the
+//! `protoFile` proto-descriptor parameter),
 //! `xslt`/`xsd` fields, `xslt:`/`validator:` URI operands, `sql:file:`
 //! URI operands, and `static_dir`/`staticDir` trees. Each reference
 //! records its class, declared path, originating document, and the site
@@ -197,7 +198,9 @@ fn uri_operand_class(scheme: &str) -> Option<(&'static str, bool)> {
 /// `camel-component-ws/src/config.rs:96`); the gRPC family splits into
 /// server-side (`serverCertPath`/`serverKeyPath`/`clientCaPath`) and
 /// client-side (`caCertPath`/`clientCertPath`/`clientKeyPath`) spellings
-/// (`camel-component-grpc/src/config.rs:484-490`).
+/// (`camel-component-grpc/src/config.rs:484-490`). `protoFile` is the
+/// gRPC proto-descriptor parameter — a non-secret file class embedded
+/// and substituted like the TLS family.
 fn tls_uri_param_class(scheme: &str, name: &str) -> Option<&'static str> {
     let httpish = matches!(scheme, "http" | "https" | "ws" | "wss");
     let grpc = scheme == "grpc";
@@ -213,6 +216,7 @@ fn tls_uri_param_class(scheme: &str, name: &str) -> Option<&'static str> {
         "caCertPath" if grpc => Some("client CA"),
         "clientCertPath" if grpc => Some("certificate"),
         "clientKeyPath" if grpc => Some(SECRET_ASSET_CLASS),
+        "protoFile" if grpc => Some("proto file"),
         _ => None,
     }
 }

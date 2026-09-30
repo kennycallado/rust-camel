@@ -61,6 +61,17 @@ Transport setup also fails closed under ADR-0033. Every Endpoint declares
 `transport=plaintext|tls`. The component rejects `insecure_skip_verify=true`,
 an incomplete mTLS identity, and a TLS/plaintext mismatch on a shared listener.
 
+## Lifecycle and security invariants
+
+- `protoFile` parse rule (`proto_path_is_acceptable`): relative paths are the
+  source-tree posture — examples and `camel run` resolve them against the
+  current directory. Any `..` component is rejected unconditionally, relative
+  or absolute. Absolute paths are accepted only when they canonicalize inside
+  `std::env::temp_dir()`: the sealed-artifact per-boot materialization posture,
+  where `camel-cli`'s materializer (`crates/camel-cli/src/compile/materialize.rs`)
+  rewrites `protoFile` to a per-boot file under the OS temp directory at boot.
+  A `canonicalize` failure fails closed (nonexistent path is not accepted).
+
 ## Log-level policy
 
 Per ADR-0012. This is the complete non-test inventory of 21 `error!` and

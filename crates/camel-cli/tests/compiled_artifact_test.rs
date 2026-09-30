@@ -2135,6 +2135,10 @@ const BIND_RACE_MARK: &str = "Address already in use";
 /// [`spawn_child`], whose child branch is selected by `--exact <test>`.
 const SERVE_TEST: &str = "route_server_serves_listener_until_sigterm";
 
+/// The exact test named by the harness-child spawn of
+/// [`grpc_serve_flow`] (same re-entry mechanism as [`SERVE_TEST`]).
+const GRPC_SERVE_TEST: &str = "route_server_serves_grpc_listener_until_sigterm";
+
 /// Probe a free localhost port by binding `127.0.0.1:0`, reading the
 /// assigned port, and dropping the listener. ADR-0070 SUBPROCESS
 /// EXCEPTION: the spawned artifact cannot receive an in-process staged
@@ -2217,28 +2221,51 @@ fn with_bind_race_retry(flow: impl Fn() -> Result<(), String>) {
     }
 }
 
-/// One per-flow compile+deploy: write `doc` into a fresh source
-/// tempdir on the fixture root, `camel compile` it (the compile
-/// commands build with `env_clear()`, so no `CAMEL_*` override can
-/// leak in), and deploy the artifact into a fresh source-free
-/// directory. The compile is per flow because the listener port is
-/// baked into the embedded document — a fresh port per flow is the
-/// point. `Err` carries the failure text (retried on the bind race by
-/// [`with_bind_race_retry`]).
-fn compile_and_deploy_listener(doc: &str) -> Result<(tempfile::TempDir, PathBuf), String> {
+/// One per-flow compile+deploy of a MULTI-file source tree: write each
+/// `(name, content)` pair into a fresh source tempdir on the fixture
+/// root (`create_dir_all` on each entry's parent first, so nested
+/// assets like `protos/*.proto` land where the document's relative
+/// references expect them), `camel compile` the FIRST pair's name as
+/// the entry document (the compile commands build with `env_clear()`,
+/// so no `CAMEL_*` override can leak in), and deploy the artifact into
+/// a fresh source-free directory. The compile is per flow because the
+/// listener port is baked into the embedded document — a fresh port
+/// per flow is the point. `Err` carries the failure text (retried on
+/// the bind race by [`with_bind_race_retry`]).
+fn compile_and_deploy_listener_files(
+    files: &[(&str, &str)],
+) -> Result<(tempfile::TempDir, PathBuf), String> {
     let src = tempfile::Builder::new()
         .prefix("camel-routesrv-src-")
         .tempdir_in(fixture_root())
         .map_err(|e| format!("source tempdir: {e}"))?;
-    std::fs::write(src.path().join("rest.yaml"), doc).map_err(|e| format!("write doc: {e}"))?;
-    let output = compile(src.path(), "rest.yaml", "rest.bin", &[]);
+    for (name, content) in files {
+        if let Some(parent) = std::path::Path::new(name).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(src.path().join(parent))
+                .map_err(|e| format!("create dir {name}: {e}"))?;
+        }
+        std::fs::write(src.path().join(name), content).map_err(|e| format!("write {name}: {e}"))?;
+    }
+    let (doc_name, _) = files
+        .first()
+        .ok_or_else(|| "at least one source file is required".to_string())?;
+    let output = compile(src.path(), doc_name, "rest.bin", &[]);
     if output.status.code() != Some(0) {
         return Err(format!(
-            "rest document must compile: {}",
+            "entry document must compile: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
     Ok(deploy_artifact(&src.path().join("rest.bin")))
+}
+
+/// Single-document convenience wrapper over
+/// [`compile_and_deploy_listener_files`]: the REST batteries all deploy
+/// exactly one `rest.yaml`, so their call sites stay one-argument clean.
+fn compile_and_deploy_listener(doc: &str) -> Result<(tempfile::TempDir, PathBuf), String> {
+    compile_and_deploy_listener_files(&[("rest.yaml", doc)])
 }
 
 /// One full serve flow: fresh port → doc → compile → deploy → spawn
@@ -2341,9 +2368,202 @@ fn route_server_serves_listener_until_sigterm() {
     with_bind_race_retry(serve_listener_flow);
 }
 
+// ── r5batteries: gRPC serve battery ─────────────────────────────────
+//
+// The same sealed-artifact serve contract as [`serve_listener_flow`],
+// pinned on the gRPC transport (bd rc-z332y): the `protoFile`
+// descriptor must embed with the artifact (r5batteries Task 1.2), the
+// consumer must resolve its descriptors and bind the h2 listener
+// BEFORE declaring readiness, and SIGTERM must still exit 0 with the
+// canonical completed-route report.
+
+/// The verbatim `examples/grpc-example/protos/helloworld.proto` text:
+/// the embedded descriptor is the REAL example proto, not a trimmed
+/// fixture, so the battery pins exactly what the documented example
+/// ships (a service plus two messages — enough for descriptor
+/// resolution to fail loudly if embedding loses a byte).
+fn hello_world_proto() -> &'static str {
+    "\
+syntax = \"proto3\";
+package helloworld;
+
+service Greeter {
+  rpc SayHello (HelloRequest) returns (HelloReply) {}
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloReply {
+  string message = 1;
+}
+"
+}
+
+/// The gRPC listener document: a single `grpc://` consumer route bound
+/// on `127.0.0.1:port` for `helloworld.Greeter/SayHello`, reading its
+/// descriptor through the same RELATIVE `protoFile` reference the
+/// example ships (the sealed artifact materializes it to an absolute
+/// path at boot) and running `transport=plaintext` (TLS is a separate
+/// battery's concern).
+fn grpc_listener_doc(port: u16) -> String {
+    format!(
+        "\
+routes:
+  - id: grpc-serve
+    from: grpc://127.0.0.1:{port}/helloworld.Greeter/SayHello?protoFile=protos/helloworld.proto&transport=plaintext
+    steps:
+      - log: \"grpc-request\"
+"
+    )
+}
+
+/// One wire-level HTTP/2 readiness probe: connect raw TCP, send the
+/// h2 client preface plus an empty SETTINGS frame, and require the
+/// server's FIRST frame to be a SETTINGS (type 0x04). Wire-level on
+/// purpose — an HTTP/1-only listener or a plain TCP acceptor would
+/// fail here — and `None` on any connect/read failure, mirroring
+/// [`http_get`]'s `.ok()?` error style.
+fn h2_settings_probe(port: u16) -> Option<()> {
+    use std::io::{Read, Write};
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    // The 24-byte client connection preface (RFC 9113 §3.4)...
+    let preface = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    // ...followed by a 9-byte EMPTY SETTINGS frame header: length 0,
+    // type 0x04 (SETTINGS), flags 0, stream id 0.
+    let settings = [0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00];
+    stream.write_all(preface).ok()?;
+    stream.write_all(&settings).ok()?;
+    let mut header = [0u8; 9];
+    stream.read_exact(&mut header).ok()?;
+    (header[3] == 0x04).then_some(())
+}
+
+/// One full gRPC serve flow: fresh port → doc + proto → compile →
+/// deploy → spawn with `--report` → boot → the grpc readiness marker
+/// (logged only after the registry binds AND the descriptors resolve)
+/// → a wire-level h2 SETTINGS exchange on the listener → liveness →
+/// SIGTERM → exit 0 → the exact completed report → a `--manifest` run
+/// reporting `artifact_kind` `server` with `grpc` among the embedded
+/// components. `Err` carries the failure text; the [`BIND_RACE_MARK`]
+/// signature inside it makes the caller retry the whole flow once (see
+/// [`with_bind_race_retry`]).
+fn grpc_serve_flow() -> Result<(), String> {
+    let port = free_port();
+    let (deploy, artifact) = compile_and_deploy_listener_files(&[
+        ("doc.yaml", &grpc_listener_doc(port)),
+        ("protos/helloworld.proto", hello_world_proto()),
+    ])?;
+    let mut child = spawn_child(
+        GRPC_SERVE_TEST,
+        deploy.path(),
+        &artifact,
+        &["--report", "grpc-report.json"],
+        &[],
+    );
+    let drained = spawn_drained(&mut child);
+    if !wait_for_marker(&drained, "context started", Duration::from_secs(60)) {
+        let captured = drained.captured();
+        return Err(format!("artifact never booted:\n{captured}"));
+    }
+    if !wait_for_marker(
+        &drained,
+        "grpc consumer started, waiting for requests",
+        Duration::from_secs(20),
+    ) {
+        let captured = drained.captured();
+        return Err(format!(
+            "grpc consumer never became ready (registry bind + descriptor resolution must \
+             precede the marker):\n{captured}"
+        ));
+    }
+    if h2_settings_probe(port).is_none() {
+        return Err(format!(
+            "grpc listener must answer the h2 preface with a SETTINGS frame:\n{}",
+            drained.captured()
+        ));
+    }
+    // Liveness probe: after a successful handshake the process must
+    // still be running — the artifact serves while alive and must not
+    // self-exit after boot (bounded self-exit is the job kind's
+    // contract, not the server's).
+    if child
+        .0
+        .try_wait()
+        .expect("child must be pollable")
+        .is_some()
+    {
+        return Err(format!(
+            "artifact must stay alive while serving:\n{}",
+            drained.captured()
+        ));
+    }
+    send_signal(&child.0, "-TERM");
+    let code = wait_exit_code(&mut child, Duration::from_secs(30));
+    if code != 0 {
+        return Err(format!(
+            "SIGTERM must shut down the serving artifact gracefully (exit 0), got {code}:\n{}",
+            drained.captured()
+        ));
+    }
+    let report = std::fs::read_to_string(deploy.path().join("grpc-report.json"))
+        .map_err(|e| format!("route report must be written: {e}"))?;
+    if report.trim() != COMPLETED_ROUTE_REPORT {
+        return Err(format!(
+            "report must be exactly {COMPLETED_ROUTE_REPORT}, got {report}"
+        ));
+    }
+    // The manifest check (same deployed artifact, `--manifest` never
+    // boots, so no `CAMEL_*` env scrub is needed): run it through the
+    // canonical harness helper.
+    let (mcode, mstdout, mstderr) =
+        common::run_binary(deploy.path(), &artifact, &["--manifest"], &[]);
+    if mcode != 0 {
+        return Err(format!(
+            "--manifest must exit 0;\nstdout:\n{mstdout}\nstderr:\n{mstderr}"
+        ));
+    }
+    let manifest: serde_json::Value = serde_json::from_str(mstdout.trim())
+        .map_err(|e| format!("--manifest stdout is not JSON ({e}):\n{mstdout}"))?;
+    if manifest["artifact_kind"] != "server" {
+        return Err(format!(
+            "manifest artifact_kind must be `server`: {manifest}"
+        ));
+    }
+    let grpc_listed = manifest["components"]
+        .as_array()
+        .is_some_and(|c| c.iter().any(|s| s.as_str() == Some("grpc")));
+    if !grpc_listed {
+        return Err(format!(
+            "manifest must list grpc among the embedded components: {manifest}"
+        ));
+    }
+    Ok(())
+}
+
+/// The compiled route artifact serves its declared gRPC listener until
+/// SIGTERM (bd rc-z332y, spec scenario "gRPC consumer serves from a
+/// sealed artifact until SIGTERM"): the grpc readiness marker after
+/// `context started`, a wire-level h2 SETTINGS exchange on the
+/// listener, graceful exit 0 on `kill -TERM` (30 s bound), the report
+/// file exactly `{"kind":"route","status":"completed","error":null}`,
+/// and a `--manifest` run reporting `artifact_kind` `server` with
+/// `grpc` among the components.
+#[test]
+fn route_server_serves_grpc_listener_until_sigterm() {
+    child_guard();
+    with_bind_race_retry(grpc_serve_flow);
+}
+
 /// The exact test named by the harness-child spawn of
 /// [`drain_inflight_flow`] (same re-entry mechanism as [`SERVE_TEST`]).
 const DRAIN_TEST: &str = "route_server_drains_inflight_request";
+
+/// The exact test named by the harness-child spawn of
+/// [`ws_drain_flow`] (same re-entry mechanism as [`SERVE_TEST`]).
+const WS_DRAIN_TEST: &str = "route_server_drains_inflight_ws_exchange";
 
 /// The slow listener document: the same shape as [`rest_listener_doc`]
 /// but the back route is `direct:slow` with the steps `log:
@@ -2482,6 +2702,199 @@ fn drain_inflight_flow() -> Result<(), String> {
 fn route_server_drains_inflight_request() {
     child_guard();
     with_bind_race_retry(drain_inflight_flow);
+}
+
+/// The slow WebSocket listener document: the same step chain as
+/// [`slow_rest_doc`] (`log: "slow-enter"`, `delay`, `set_body:
+/// "slow-pong"`) hung off a `ws://` consumer instead of a REST
+/// operation. The `to:` producer targets the same `ws://` URI the
+/// consumer serves: because a local consumer exists, the producer runs
+/// in server-send mode and echoes back on the sender's connection key
+/// (the same shape as `examples/ws-server`).
+fn ws_slow_doc(port: u16, delay_ms: u64) -> String {
+    format!(
+        "\
+routes:
+  - id: ws-slow-echo
+    from: ws://127.0.0.1:{port}/echo
+    steps:
+      - log: \"slow-enter\"
+      - delay: {delay_ms}
+      - set_body: \"slow-pong\"
+      - to: ws://127.0.0.1:{port}/echo
+"
+    )
+}
+
+/// Perform the RFC 6455 opening handshake as a raw TCP client and
+/// return the upgraded stream: a bounded-retry connect loop (50
+/// attempts, 100 ms apart — the same bounded-poll posture as
+/// [`wait_for_marker`]'s 20 ms steps, since the artifact binds its ws
+/// listener only after boot), then one handshake exchange with a 5 s
+/// read timeout. Returns the stream only when the server answered
+/// `HTTP/1.1 101`; anything else (refused connect, rejected upgrade,
+/// early EOF) yields `None`.
+fn ws_connect(port: u16) -> Option<TcpStream> {
+    use std::io::{Read, Write};
+    for _ in 0..50 {
+        let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+            thread::sleep(Duration::from_millis(100));
+            continue;
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+        let request = format!(
+            "GET /echo HTTP/1.1\r\n\
+             Host: 127.0.0.1:{port}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             \r\n"
+        );
+        stream.write_all(request.as_bytes()).ok()?;
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 512];
+        while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = stream.read(&mut chunk).ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        let head = String::from_utf8_lossy(&buf);
+        return head.starts_with("HTTP/1.1 101").then_some(stream);
+    }
+    None
+}
+
+/// Send one masked text frame (RFC 6455 client framing: every
+/// client-to-server frame MUST be masked): FIN+text opcode `0x81`,
+/// length byte with the mask bit set (`len < 126` for this battery),
+/// the fixed mask, and the payload XOR-masked. I/O failures surface
+/// later as a read timeout in [`ws_read_text`], which the flow
+/// already reports.
+fn ws_send_text(stream: &mut TcpStream, text: &str) {
+    use std::io::Write;
+    let mask = [0x37u8, 0xfa, 0x21, 0x3d];
+    let payload = text.as_bytes();
+    let mut frame = Vec::with_capacity(payload.len() + 6);
+    frame.push(0x81);
+    frame.push(0x80 | payload.len() as u8);
+    frame.extend_from_slice(&mask);
+    frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+    let _ = stream.write_all(&frame);
+}
+
+/// Read one unmasked server text frame and return its UTF-8 payload:
+/// two header bytes first — a set mask bit means a server framing
+/// violation, so `None` — then `header[1] & 0x7f` payload bytes (both
+/// sides keep frames under 126 bytes in this battery). `None` on any
+/// I/O failure or non-UTF-8 payload.
+fn ws_read_text(stream: &mut TcpStream) -> Option<String> {
+    use std::io::Read;
+    let mut header = [0u8; 2];
+    stream.read_exact(&mut header).ok()?;
+    if header[1] & 0x80 != 0 {
+        return None;
+    }
+    let mut payload = vec![0u8; usize::from(header[1] & 0x7f)];
+    stream.read_exact(&mut payload).ok()?;
+    String::from_utf8(payload).ok()
+}
+
+/// One full WebSocket drain flow: fresh port → slow ws doc (3 s delay
+/// route) → compile → deploy → spawn with `--report` → boot → raw
+/// RFC 6455 handshake → one masked text frame → `slow-enter` observed
+/// (the exchange is PROVABLY inside the delayed step) → SIGTERM
+/// mid-delay → the in-flight echo still completes inside the drain
+/// budget → exit 0 → the exact completed report. `Err` carries the
+/// failure text; the [`BIND_RACE_MARK`] signature inside it makes the
+/// caller retry the whole flow once (see [`with_bind_race_retry`]).
+fn ws_drain_flow() -> Result<(), String> {
+    let port = free_port();
+    let doc = ws_slow_doc(port, 3000);
+    let (deploy, artifact) = compile_and_deploy_listener_files(&[("doc.yaml", &doc)])?;
+    let mut child = spawn_child(
+        WS_DRAIN_TEST,
+        deploy.path(),
+        &artifact,
+        &["--report", "drain-ws.json"],
+        &[],
+    );
+    let drained = spawn_drained(&mut child);
+    if !wait_for_marker(&drained, "context started", Duration::from_secs(60)) {
+        let captured = drained.captured();
+        return Err(format!("artifact never booted:\n{captured}"));
+    }
+    let Some(mut stream) = ws_connect(port) else {
+        let captured = drained.captured();
+        return Err(format!(
+            "ws listener never accepted the upgrade:\n{captured}"
+        ));
+    };
+    ws_send_text(&mut stream, "hello");
+    // The reader thread owns the upgraded stream: the flow must be
+    // free to send SIGTERM while the echo is still in flight.
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(ws_read_text(&mut stream));
+    });
+    if !wait_for_marker_tight(&mut child, &drained, "slow-enter", Duration::from_secs(20)) {
+        let captured = drained.captured();
+        return Err(format!(
+            "ws exchange never reached the delayed step (missing `slow-enter`):\n{captured}"
+        ));
+    }
+    // SIGTERM lands immediately after the `slow-enter` marker, i.e.
+    // ≈0 s into the 3 s delay step, so the full 3 s still fit inside
+    // the 10 s default drain budget (`default_drain_timeout_ms` in
+    // camel-config); the in-flight echo must still be delivered, then
+    // exit 0.
+    send_signal(&child.0, "-TERM");
+    match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(Some(s)) if s.contains("slow-pong") => {}
+        Ok(other) => {
+            let captured = drained.captured();
+            return Err(format!(
+                "in-flight ws exchange must complete with a `slow-pong` echo \
+                 inside the drain budget, got {other:?}:\n{captured}"
+            ));
+        }
+        Err(e) => {
+            let captured = drained.captured();
+            return Err(format!(
+                "in-flight ws exchange never completed within 20s ({e}):\n{captured}"
+            ));
+        }
+    }
+    let code = wait_exit_code(&mut child, Duration::from_secs(30));
+    if code != 0 {
+        return Err(format!(
+            "the drained shutdown must exit 0, got {code}:\n{}",
+            drained.captured()
+        ));
+    }
+    let report = std::fs::read_to_string(deploy.path().join("drain-ws.json"))
+        .map_err(|e| format!("route report must be written: {e}"))?;
+    if report.trim() != COMPLETED_ROUTE_REPORT {
+        return Err(format!(
+            "report must be exactly {COMPLETED_ROUTE_REPORT}, got {report}"
+        ));
+    }
+    Ok(())
+}
+
+/// The serving artifact with a 3 s ws consumer route, exchange
+/// provably in flight (the `slow-enter` marker fired) → SIGTERM
+/// immediately after the marker, ≈0 s into the 3 s delay → the
+/// in-flight echo `slow-pong` is still delivered on the same
+/// connection inside the 10 s drain budget, and the process exits 0
+/// (bd rc-z332y, openspec r5batteries, cli-compile "WebSocket consumer
+/// drains an in-flight exchange").
+#[test]
+fn route_server_drains_inflight_ws_exchange() {
+    child_guard();
+    with_bind_race_retry(ws_drain_flow);
 }
 
 /// The exact test named by the harness-child spawn of

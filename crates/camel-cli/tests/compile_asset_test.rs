@@ -354,6 +354,96 @@ routes:
     }
 }
 
+/// The gRPC `protoFile` descriptor is a non-secret file class collected
+/// through the same URI-parameter path as the TLS family: it embeds
+/// WITHOUT `--embed-secrets` and records a `uri` substitution site
+/// (r5batteries Task 1.2).
+#[test]
+fn compile_collects_grpc_protofile_uri_param() {
+    let dir = project();
+    std::fs::create_dir_all(dir.path().join("protos")).expect("mkdir protos");
+    std::fs::write(
+        dir.path().join("protos/helloworld.proto"),
+        "\
+syntax = \"proto3\";
+package helloworld;
+
+service Greeter {
+  rpc SayHello (HelloRequest) returns (HelloReply) {}
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloReply {
+  string message = 1;
+}
+",
+    )
+    .expect("write proto fixture");
+    std::fs::write(
+        dir.path().join("app.yaml"),
+        "\
+routes:
+  - id: grpc-server
+    from: 'grpc://127.0.0.1:50051/helloworld.Greeter/SayHello?protoFile=protos/helloworld.proto&transport=plaintext'
+    steps:
+      - to: log:server
+",
+    )
+    .expect("write document");
+
+    // A non-secret file class embeds with no secret opt-in.
+    let output = compile(dir.path(), "app.yaml", "out.bin", None);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a gRPC protoFile descriptor must compile without --embed-secrets: {}",
+        stderr_of(&output)
+    );
+    let (_, store, _) = decode_v2(&std::fs::read(dir.path().join("out.bin")).expect("artifact"));
+
+    assert_eq!(
+        asset_entries(&store),
+        vec![(
+            "assets/protos/helloworld.proto".into(),
+            Some("proto file".into())
+        )]
+    );
+    let entry = substitution(&store, "app.yaml", "protos/helloworld.proto");
+    assert_eq!(entry.context, SubstitutionContext::Uri);
+    assert_spans_match(&store, entry);
+}
+
+/// An absolute `protoFile` is rejected by name, exactly like the TLS
+/// family: an embeddable asset needs a root-relative, compile-known path
+/// (r5batteries Task 1.2).
+#[test]
+fn compile_rejects_absolute_grpc_protofile() {
+    let dir = project();
+    std::fs::write(
+        dir.path().join("app.yaml"),
+        "\
+routes:
+  - id: grpc-server
+    from: 'grpc://127.0.0.1:50051/helloworld.Greeter/SayHello?protoFile=/etc/svc.proto&transport=plaintext'
+    steps:
+      - to: log:server
+",
+    )
+    .expect("write document");
+
+    let output = compile(dir.path(), "app.yaml", "out.bin", None);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("protoFile") && stderr.contains("root-relative"),
+        "rejection must name the parameter and require a root-relative path: {stderr}"
+    );
+    assert!(!dir.path().join("out.bin").exists(), "no output artifact");
+}
+
 #[test]
 fn compile_collects_uri_scheme_and_sql_file_assets() {
     let dir = project();

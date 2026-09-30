@@ -1831,6 +1831,12 @@ impl WsConsumer {
     }
 }
 
+/// Bound for the graceful-stop settle wait: hardcoded 5 s today, which is
+/// BELOW the configured drain budget (default 10 s in `camel-config`), so
+/// exchanges completing in (5 s, 10 s] lose their echo. Must follow
+/// `drain_timeout_ms` once core propagates it (bd rc-evw3z, from rc-z332y).
+const WS_STOP_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[async_trait]
 impl Consumer for WsConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
@@ -1880,6 +1886,36 @@ impl Consumer for WsConsumer {
             path = self.cfg.inner.path,
             "WebSocket consumer stopping"
         );
+
+        // R5 drain contract (bd rc-z332y; shared `drive_lifecycle` seams,
+        // no transport fork): consumer stop completes BEFORE the route's
+        // ADR-0043 drain wait, so teardown that kills live connections
+        // here would strand an in-flight exchange's echo — the exact gap
+        // the REST drain battery proved closed for the HTTP consumer
+        // (no-op stop). The ws counterpart settles first: wait, bounded,
+        // for the context-global accepted-not-completed gauge to read
+        // zero while the connection senders and the connection-key
+        // registries torn down below are still intact, so in-flight
+        // echoes are delivered. Reload stops and quiet contexts read
+        // zero and proceed instantly; on expiry the wait fails open to
+        // the pre-drain teardown.
+        if let Some(gauge) = self.server_state.as_ref().and_then(|s| s.in_flight.get()) {
+            let settled = tokio::time::timeout(WS_STOP_SETTLE_TIMEOUT, async {
+                while gauge.total() > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await;
+            if settled.is_err() {
+                tracing::warn!(
+                    host = camel_api::redact::redact_host(&self.cfg.inner.host),
+                    port = self.cfg.inner.port,
+                    path = self.cfg.inner.path,
+                    "in-flight exchanges still present at consumer stop — \
+                     proceeding with teardown"
+                );
+            }
+        }
 
         let close_msg = WsMessage::Close(Some(axum::extract::ws::CloseFrame {
             code: axum::extract::ws::CloseCode::from(1001u16),
@@ -2824,6 +2860,115 @@ mod tests {
         );
 
         consumer.stop().await.unwrap();
+    }
+
+    /// rc-z332y drain contract: `stop()` must not tear down the
+    /// connection senders and connection-key registries while an
+    /// acceptance-minted claim is still live — the settle wait gates the
+    /// teardown until the gauge reads zero. Bounded timeout asserts, no
+    /// wall-clock sleeps: the held claim IS the barrier.
+    #[tokio::test]
+    async fn stop_settles_in_flight_before_teardown() {
+        let reg = Arc::new(ServerRegistry::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let uri = format!("ws://127.0.0.1:{port}/settle");
+        let component_ctx = NoOpComponentContext;
+        let _endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
+
+        let mut consumer = WsConsumer::with_server_registry(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+            reg,
+        );
+
+        let counter = Arc::new(InFlightGauge::new());
+        let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-settle-route".to_string(),
+        )
+        .with_in_flight_counter(Arc::clone(&counter));
+
+        consumer.start_with_listener(ctx, listener).await.unwrap();
+
+        let url = format!("ws://127.0.0.1:{port}/settle");
+        let mut client = connect_until_ready(&url).await;
+        client
+            .send(ClientMessage::Text("settle-me".into()))
+            .await
+            .unwrap();
+
+        let mut envelope = tokio::time::timeout(Duration::from_secs(2), route_rx.recv())
+            .await
+            .expect("envelope within 2s")
+            .expect("route channel open");
+        let claim = envelope
+            .in_flight_claim
+            .take()
+            .expect("server frame dispatch must carry an acceptance-minted claim");
+        assert_eq!(counter.total(), 1, "the live claim must gate the stop");
+
+        let mut stop_handle = {
+            let mut consumer = consumer;
+            tokio::spawn(async move {
+                consumer.stop().await.expect("stop must succeed");
+            })
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut stop_handle)
+                .await
+                .is_err(),
+            "stop must not complete while an exchange is still in flight"
+        );
+
+        drop(claim);
+        drop(envelope);
+        tokio::time::timeout(Duration::from_secs(3), stop_handle)
+            .await
+            .expect("stop completes once the gauge settles")
+            .expect("stop task join");
+    }
+
+    /// The settle wait is a gate, not a delay: with the gauge at zero
+    /// (no claims minted) `stop()` proceeds immediately — reload and
+    /// quiet-context teardown are unchanged.
+    #[tokio::test]
+    async fn stop_proceeds_immediately_when_quiet() {
+        let reg = Arc::new(ServerRegistry::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let uri = format!("ws://127.0.0.1:{port}/quiet");
+        let component_ctx = NoOpComponentContext;
+        let _endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
+
+        let mut consumer = WsConsumer::with_server_registry(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+            reg,
+        );
+
+        let counter = Arc::new(InFlightGauge::new());
+        let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-quiet-route".to_string(),
+        )
+        .with_in_flight_counter(Arc::clone(&counter));
+
+        consumer.start_with_listener(ctx, listener).await.unwrap();
+        assert_eq!(counter.total(), 0, "no frames, no claims");
+
+        tokio::time::timeout(Duration::from_secs(2), consumer.stop())
+            .await
+            .expect("quiet stop must not be gated by the settle wait")
+            .expect("stop must succeed");
     }
 
     /// Echo a single envelope back through `producer` (test helper for the

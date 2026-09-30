@@ -652,6 +652,40 @@ fn parse_grpc_query_params(
     })
 }
 
+/// Validate the `protoFile` parameter of a gRPC endpoint URI.
+///
+/// Relative paths are the source-tree posture: examples and `camel run`
+/// resolve them against the current directory. Absolute paths exist for the
+/// sealed-artifact boot, where `camel-cli`'s materializer rewrites
+/// `protoFile` to a per-boot file under the OS temp directory
+/// (`crates/camel-cli/src/compile/materialize.rs`); such paths are accepted
+/// only when they canonicalize inside `std::env::temp_dir()`.
+///
+/// Any `..` component is rejected unconditionally, relative or absolute.
+/// Absolute paths that do not exist fail closed (`canonicalize` error).
+fn proto_path_is_acceptable(proto: &str) -> Result<(), String> {
+    if proto.contains("..") {
+        return Err(format!(
+            "proto path '{proto}' must be relative and cannot contain '..'"
+        ));
+    }
+    if proto.starts_with('/') {
+        let message = format!(
+            "proto path '{proto}' is absolute and outside the OS temp directory — \
+             only materialized per-boot paths are accepted"
+        );
+        let canonical = std::fs::canonicalize(proto).map_err(|_| {
+            format!("proto path '{proto}' does not exist or cannot be resolved — fail closed")
+        })?;
+        let temp_dir = std::env::temp_dir();
+        let temp_root = std::fs::canonicalize(&temp_dir).unwrap_or(temp_dir);
+        if !canonical.starts_with(&temp_root) {
+            return Err(message);
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_grpc_uri(uri: &str) -> Result<(String, u16, String, String, GrpcConfig), CamelError> {
     let parsed = url::Url::parse(uri).map_err(|e| CamelError::RouteError(e.to_string()))?;
     let host = parsed
@@ -671,12 +705,9 @@ pub fn parse_grpc_uri(uri: &str) -> Result<(String, u16, String, String, GrpcCon
             .map(|(k, v)| (k.to_string(), v.to_string())),
     )?;
     if let Some(ref proto) = config.proto_file
-        && (proto.starts_with('/') || proto.contains(".."))
+        && let Err(message) = proto_path_is_acceptable(proto)
     {
-        return Err(CamelError::RouteError(format!(
-            "proto path '{}' must be relative and cannot contain '..'",
-            proto
-        )));
+        return Err(CamelError::RouteError(message));
     }
     if config.reflection {
         tracing::warn!("gRPC reflection is not supported in v1 — parameter ignored");
@@ -980,6 +1011,92 @@ mod tests {
         let result = parse_grpc_uri(uri);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains(".."));
+    }
+
+    /// Panic-safe cleanup for the temp-dir proto fixture: removes the file on
+    /// drop, so an earlier `expect` failing cannot leak it.
+    struct ProtoFixture(std::path::PathBuf);
+
+    impl Drop for ProtoFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// r5batteries: an absolute `protoFile` is accepted when it resolves
+    /// inside the OS temp directory — the sealed-artifact boot posture where
+    /// `camel-cli`'s materializer rewrites `protoFile` to a per-boot file
+    /// under `std::env::temp_dir()`
+    /// (`crates/camel-cli/src/compile/materialize.rs`).
+    #[test]
+    fn test_parse_grpc_uri_proto_absolute_temp_path_accepted() {
+        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "camel-proto-carveout-{}-{}.proto",
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _fixture = ProtoFixture(path.clone());
+        std::fs::write(
+            &path,
+            r#"syntax = "proto3";
+package helloworld;
+
+service Greeter {
+  rpc SayHello (HelloRequest) returns (HelloReply) {}
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloReply {
+  string message = 1;
+}
+"#,
+        )
+        .expect("write proto fixture");
+        let uri = format!(
+            "grpc://localhost:50051/helloworld.Greeter/SayHello?protoFile={}&transport=plaintext",
+            path.display()
+        );
+        let (_, _, _, _, config) =
+            parse_grpc_uri(&uri).expect("absolute protoFile inside temp dir must be accepted");
+        assert_eq!(config.proto_file, Some(path.display().to_string()));
+    }
+
+    /// r5batteries: `..` is rejected unconditionally — the temp-dir carve-out
+    /// must not reopen traversal from within the materialized root.
+    #[test]
+    fn test_parse_grpc_uri_proto_temp_traversal_rejected() {
+        let uri = format!(
+            "grpc://localhost:50051/pkg.Svc/Method?protoFile={}/../etc/passwd&transport=plaintext",
+            std::env::temp_dir().display()
+        );
+        let result = parse_grpc_uri(&uri);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("proto path") && msg.contains(".."),
+            "error must mention proto path and '..': {msg}"
+        );
+    }
+
+    /// r5batteries: an absolute temp-dir path that does not exist fails
+    /// closed — `canonicalize` failure is an error, not an acceptance.
+    #[test]
+    fn test_parse_grpc_uri_proto_nonexistent_temp_path_rejected() {
+        let path = std::env::temp_dir().join("camel-proto-carveout-nonexistent.proto");
+        let uri = format!(
+            "grpc://localhost:50051/pkg.Svc/Method?protoFile={}&transport=plaintext",
+            path.display()
+        );
+        let result = parse_grpc_uri(&uri);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("proto path"),
+            "canonicalize failure must fail closed with a proto path error"
+        );
     }
 
     /// C1 Batch 1: `tls=true` via URI is rejected at parse time — a URI

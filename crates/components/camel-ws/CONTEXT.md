@@ -83,6 +83,13 @@ deterministic trust.
   the host and TLS mode. A later registration with the other TLS mode fails.
 - `ServerRegistry::release` removes the Consumer reference but does not stop the server. Consumer
   shutdown removes its path, policy, and connection registry.
+- `WsConsumer::stop` first settles in-flight work: it waits (bounded, 5 s — the controller's
+  hardcoded consumer join budget) on the context-global in-flight gauge (rc-nftni claims minted at
+  frame dispatch) before broadcasting `Close(1001)` and removing the connection registry, so an
+  exchange inside a delayed route step still echoes back during graceful shutdown. On expiry it
+  warns and fails open to the prior teardown. Because the gauge is context-global, suspending an
+  idle WS route in a context where another route holds claims can now wait up to the same bound
+  before proceeding. When core propagates a configurable drain budget, this bound must follow it.
 - `WsReloadHandler::matches` matches `wss` servers by port and intentionally ignores host. This
   mirrors the port-keyed `ServerRegistry`.
 - Plain WS binds its TCP listener before `ConsumerContext::mark_ready`. WSS also binds its
