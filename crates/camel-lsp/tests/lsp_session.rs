@@ -868,10 +868,6 @@ async fn placeholder_string_field_publishes_info_not_error() {
         "expected publishDiagnostics after didOpen"
     );
 
-    // LSP over-the-wire severity integers: ERROR = 1, INFORMATION = 3.
-    const ERROR: i64 = 1;
-    const INFORMATION: i64 = 3;
-
     let all_diags: Vec<&Value> = notifications
         .iter()
         .filter_map(|n| n["params"]["diagnostics"].as_array())
@@ -966,10 +962,6 @@ async fn placeholder_int_field_publishes_no_error() {
         "expected publishDiagnostics after didOpen"
     );
 
-    // LSP over-the-wire severity integers: ERROR = 1, INFORMATION = 3.
-    const ERROR: i64 = 1;
-    const INFORMATION: i64 = 3;
-
     let all_diags: Vec<&Value> = notifications
         .iter()
         .filter_map(|n| n["params"]["diagnostics"].as_array())
@@ -999,6 +991,317 @@ async fn placeholder_int_field_publishes_no_error() {
     assert!(
         int_notes.is_empty(),
         "carved-out int leaf must not publish an Info note; got: {int_notes:?}"
+    );
+
+    shutdown_server(cw, cr, handle).await;
+}
+
+// ---------------------------------------------------------------------------
+// rc-6g6g4: reserved-suffix documents (.test.yaml / .job.yaml) stay error-free
+// ---------------------------------------------------------------------------
+
+// LSP over-the-wire severity integers (mirrors the rc-93wct constants):
+// ERROR = 1, WARNING = 2, INFORMATION = 3.
+const ERROR: i64 = 1;
+const INFORMATION: i64 = 3;
+
+const RESERVED_TEST_URI: &str = "file:///tmp/lspfix%20dir/routes/hello.test.yaml";
+const RESERVED_TEST_TEXT: &str = "routeFiles: [hello.yaml]\ninputs: {}\nexpects: []\n";
+
+/// Run the initialize handshake and consume the response.
+async fn init_session(cw: &mut ClientWrite, cr: &mut ClientRead) {
+    send_jsonrpc(
+        cw,
+        "initialize",
+        serde_json::json!({"processId": null, "rootUri": null, "capabilities": {}}),
+        1,
+    )
+    .await
+    .unwrap(); // allow-unwrap — test helper
+    let _init = read_jsonrpc(cr).await.expect("init response");
+    send_notification(cw, "initialized", serde_json::json!({}))
+        .await
+        .unwrap(); // allow-unwrap — test helper
+}
+
+/// Drain `publishDiagnostics` notifications arriving within `window` per read.
+async fn drain_publishes(cr: &mut ClientRead, window: Duration) -> Vec<Value> {
+    let mut notifications: Vec<Value> = Vec::new();
+    while let Ok(Some(v)) = tokio::time::timeout(window, read_jsonrpc(cr)).await {
+        if v["method"] == "textDocument/publishDiagnostics" {
+            notifications.push(v);
+        }
+    }
+    notifications
+}
+
+/// Assert that the diagnostics flattened across the given `publishDiagnostics`
+/// notifications contain no Error severity. Returns the flattened diagnostics
+/// so callers can keep asserting on them.
+fn assert_no_errors<'a>(notifications: &'a [Value], context: &str) -> Vec<&'a Value> {
+    let all_diags: Vec<&Value> = notifications
+        .iter()
+        .filter_map(|n| n["params"]["diagnostics"].as_array())
+        .flatten()
+        .collect();
+    let error_anywhere = all_diags.iter().any(|d| d["severity"] == ERROR);
+    assert!(!error_anywhere, "{context}; got: {all_diags:?}");
+    all_diags
+}
+
+/// didOpen of a `*.test.yaml` document (percent-encoded directory exercises
+/// `Url::to_file_path` decoding) must publish exactly one Info diagnostic
+/// (R-RESERVED) and no Errors: reserved documents are never parsed or
+/// route-linted (ADR-0062).
+#[tokio::test]
+async fn reserved_test_yaml_did_open_publishes_single_info_no_errors() {
+    let engine = make_engine();
+    let (mut cw, mut cr, handle) = spawn_server(engine).await;
+    init_session(&mut cw, &mut cr).await;
+
+    send_notification(
+        &mut cw,
+        "textDocument/didOpen",
+        serde_json::json!({
+            "textDocument": {
+                "uri": RESERVED_TEST_URI,
+                "languageId": "camel-yaml",
+                "version": 1,
+                "text": RESERVED_TEST_TEXT
+            }
+        }),
+    )
+    .await
+    .unwrap(); // allow-unwrap — test helper
+
+    let notifications = drain_publishes(&mut cr, Duration::from_millis(200)).await;
+    assert!(
+        !notifications.is_empty(),
+        "expected publishDiagnostics after didOpen"
+    );
+
+    let all_diags = assert_no_errors(
+        &notifications,
+        "reserved document must not publish any Error",
+    );
+    assert_eq!(
+        all_diags.len(),
+        1,
+        "expected exactly one diagnostic for a reserved document; got: {all_diags:?}"
+    );
+    assert_eq!(all_diags[0]["severity"], INFORMATION);
+    assert_eq!(all_diags[0]["source"], "camel-lint");
+    assert_eq!(all_diags[0]["code"], "R-RESERVED");
+
+    shutdown_server(cw, cr, handle).await;
+}
+
+/// didChange on a `*.job.yaml` document: the debounced lint for version 2
+/// must publish with zero Errors — a reserved job document is skipped with
+/// R-RESERVED, never route-linted (ADR-0062).
+#[tokio::test]
+async fn reserved_job_yaml_did_change_debounce_stays_error_free() {
+    let engine = make_engine();
+    let (mut cw, mut cr, handle) = spawn_server(engine).await;
+    init_session(&mut cw, &mut cr).await;
+
+    const JOB_URI: &str = "file:///tmp/routes/nightly.job.yaml";
+
+    // didOpen with a placeholder job body.
+    send_notification(
+        &mut cw,
+        "textDocument/didOpen",
+        serde_json::json!({
+            "textDocument": {
+                "uri": JOB_URI,
+                "languageId": "camel-yaml",
+                "version": 1,
+                "text": "steps: []\n"
+            }
+        }),
+    )
+    .await
+    .unwrap(); // allow-unwrap — test helper
+
+    // Version 2: full replacement with the job body under test.
+    send_notification(
+        &mut cw,
+        "textDocument/didChange",
+        serde_json::json!({
+            "textDocument": {"uri": JOB_URI, "version": 2},
+            "contentChanges": [{"text": "schedule: \"0 2 * * *\"\nsteps: []\n"}]
+        }),
+    )
+    .await
+    .unwrap(); // allow-unwrap — test helper
+
+    // Drain until the publish tagged version 2. The debounce delay is
+    // 50 ms; a 5 s per-read timeout is generous.
+    let mut version_two = None;
+    while let Ok(Some(v)) =
+        tokio::time::timeout(Duration::from_secs(5), read_jsonrpc(&mut cr)).await
+    {
+        if v["method"] == "textDocument/publishDiagnostics" && v["params"]["version"] == 2 {
+            version_two = Some(v);
+            break;
+        }
+    }
+    let publish =
+        version_two.expect("expected a version-2 publishDiagnostics within the drain window");
+    assert_no_errors(
+        std::slice::from_ref(&publish),
+        "reserved job document must stay error-free",
+    );
+
+    shutdown_server(cw, cr, handle).await;
+}
+
+/// didSave on a `*.test.yaml` document must republish error-free
+/// diagnostics (reserved documents are skipped with R-RESERVED).
+#[tokio::test]
+async fn reserved_test_yaml_did_save_stays_error_free() {
+    let engine = make_engine();
+    let (mut cw, mut cr, handle) = spawn_server(engine).await;
+    init_session(&mut cw, &mut cr).await;
+
+    send_notification(
+        &mut cw,
+        "textDocument/didOpen",
+        serde_json::json!({
+            "textDocument": {
+                "uri": RESERVED_TEST_URI,
+                "languageId": "camel-yaml",
+                "version": 1,
+                "text": RESERVED_TEST_TEXT
+            }
+        }),
+    )
+    .await
+    .unwrap(); // allow-unwrap — test helper
+
+    // Consume the didOpen publish so it does not pollute the save window.
+    let _open_publish = drain_publishes(&mut cr, Duration::from_millis(200)).await;
+
+    send_notification(
+        &mut cw,
+        "textDocument/didSave",
+        serde_json::json!({
+            "textDocument": {"uri": RESERVED_TEST_URI}
+        }),
+    )
+    .await
+    .unwrap(); // allow-unwrap — test helper
+
+    let notifications = drain_publishes(&mut cr, Duration::from_millis(200)).await;
+    assert!(
+        !notifications.is_empty(),
+        "expected publishDiagnostics after didSave"
+    );
+
+    assert_no_errors(
+        &notifications,
+        "reserved document must stay error-free on save",
+    );
+
+    shutdown_server(cw, cr, handle).await;
+}
+
+/// A malformed `*.test.yaml` must yield exactly the single R-RESERVED Info —
+/// no R-SYN parse errors — and leave the server responsive.
+#[tokio::test]
+async fn malformed_reserved_yaml_skips_rsyn() {
+    let engine = make_engine();
+    let (mut cw, mut cr, handle) = spawn_server(engine).await;
+    init_session(&mut cw, &mut cr).await;
+
+    send_notification(
+        &mut cw,
+        "textDocument/didOpen",
+        serde_json::json!({
+            "textDocument": {
+                "uri": "file:///tmp/routes/broken.test.yaml",
+                "languageId": "camel-yaml",
+                "version": 1,
+                "text": "not: [a, route"
+            }
+        }),
+    )
+    .await
+    .unwrap(); // allow-unwrap — test helper
+
+    let notifications = drain_publishes(&mut cr, Duration::from_millis(200)).await;
+    assert!(
+        !notifications.is_empty(),
+        "expected publishDiagnostics after didOpen"
+    );
+
+    let all_diags = assert_no_errors(&notifications, "R-SYN must not run on a reserved document");
+    assert_eq!(
+        all_diags.len(),
+        1,
+        "expected exactly one diagnostic for a malformed reserved document; got: {all_diags:?}"
+    );
+    assert_eq!(all_diags[0]["severity"], INFORMATION);
+
+    // The server must still be alive: the shutdown request gets a response.
+    send_jsonrpc(&mut cw, "shutdown", serde_json::json!({}), 42)
+        .await
+        .unwrap(); // allow-unwrap — test helper
+    let resp = tokio::time::timeout(Duration::from_secs(5), read_jsonrpc(&mut cr))
+        .await
+        .expect("shutdown response within 5s")
+        .expect("shutdown response frame");
+    assert_eq!(resp["id"], 42);
+
+    send_notification(&mut cw, "exit", serde_json::json!({}))
+        .await
+        .unwrap(); // allow-unwrap — test helper
+    drop(cw);
+    drop(cr);
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("server did not shut down within 5s");
+}
+
+/// A non-file URI (untitled buffer) has no path context, so the full lint
+/// runs: `foo: bar` is not a valid route document and must yield at least
+/// one Error.
+#[tokio::test]
+async fn untitled_uri_keeps_full_lint() {
+    let engine = make_engine();
+    let (mut cw, mut cr, handle) = spawn_server(engine).await;
+    init_session(&mut cw, &mut cr).await;
+
+    send_notification(
+        &mut cw,
+        "textDocument/didOpen",
+        serde_json::json!({
+            "textDocument": {
+                "uri": "untitled:Untitled-1",
+                "languageId": "camel-yaml",
+                "version": 1,
+                "text": "foo: bar\n"
+            }
+        }),
+    )
+    .await
+    .unwrap(); // allow-unwrap — test helper
+
+    let notifications = drain_publishes(&mut cr, Duration::from_millis(200)).await;
+    assert!(
+        !notifications.is_empty(),
+        "expected publishDiagnostics after didOpen"
+    );
+
+    let all_diags: Vec<&Value> = notifications
+        .iter()
+        .filter_map(|n| n["params"]["diagnostics"].as_array())
+        .flatten()
+        .collect();
+    let has_error = all_diags.iter().any(|d| d["severity"] == ERROR);
+    assert!(
+        has_error,
+        "untitled document has no path context — full lint must report Errors; got: {all_diags:?}"
     );
 
     shutdown_server(cw, cr, handle).await;

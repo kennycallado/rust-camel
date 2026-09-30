@@ -1,7 +1,7 @@
 # ADR-0062: Reserved Test Suffix and Placement Contract
 
 **Date:** 2026-08-22
-**Status:** Accepted (Amended 2026-09-13 — ordered job discovery set; see "Amendments")
+**Status:** Accepted (Amended 2026-09-13 — ordered job discovery set; Amended 2026-09-30 — predicate definition site moved to camel-api; see "Amendments")
 **Origin:** OpenSpec change `test-placement-contract` (bd rc-6760)
 
 ## Context
@@ -139,6 +139,21 @@ no longer consumes `*.test.yaml`.
    suffix is now the first discriminator between the two families.
 
 ## Amendments
+
+### Amendment (2026-09-30): Predicate definition site moves to camel-api
+
+The `lspfix` change for bd `rc-6g6g4` (gh #55) moves the definition of
+`is_test_document`, `is_job_document`, and `is_reserved_document` from
+`camel-dsl` to `camel-api` (`reserved_suffix` module).
+`camel_dsl::discovery` re-exports them, so every existing import path is
+stable and the single-suffix-rule invariant of Rule 2 is unchanged: one
+definition, no consumer-private copies.
+
+Reason: the lint engine gained a path-aware entry point
+(`LintEngine::lint_with_path`) that applies the reserved-suffix skip, but the
+hexagonal boundary forbids `camel-lint` from depending on `camel-dsl`.
+`camel-api` is the one crate visible to both sides of that boundary. The
+definition moved down the layering; no semantics changed.
 
 ### Amendment (2026-09-13): Ordered job discovery set
 

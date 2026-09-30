@@ -47,6 +47,7 @@ pub mod producer;
 pub mod recipient_list;
 pub mod redact;
 pub mod resequencer;
+pub mod reserved_suffix;
 pub mod route_controller;
 pub mod routing_slip;
 pub mod runtime;

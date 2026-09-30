@@ -20,6 +20,13 @@ use crate::template::materializer::materialize_and_compile;
 use crate::virtual_config::build_virtual_config;
 use crate::yaml::parse_yaml_with_threshold_and_security;
 
+// Re-export of the ADR-0062 reserved-suffix predicates. The single
+// definition lives in `camel_api::reserved_suffix` (below the lint/runtime
+// hex boundary) so camel-dsl and camel-lint share it; this keeps every
+// existing `camel_dsl::discovery::*` import path resolving to the same
+// functions.
+pub use camel_api::reserved_suffix::{is_job_document, is_reserved_document, is_test_document};
+
 /// Errors that can occur during route discovery.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -184,35 +191,6 @@ pub fn pattern_targets_json(pattern: &str) -> bool {
         .rsplit('/')
         .next()
         .is_some_and(|last_segment| last_segment.ends_with(".json"))
-}
-
-/// Returns true if the file name ends with the reserved `.test.yaml` or
-/// `.test.yml` suffix. Such files name camel test documents (the
-/// `camel test` family), not routes.
-pub fn is_test_document(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| {
-        let name = name.to_string_lossy();
-        name.ends_with(".test.yaml") || name.ends_with(".test.yml")
-    })
-}
-
-/// Returns true if the file name ends with the reserved `.job.yaml` or
-/// `.job.yml` suffix. Such files name camel job documents (the
-/// `camel job` family), not routes.
-pub fn is_job_document(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| {
-        let name = name.to_string_lossy();
-        name.ends_with(".job.yaml") || name.ends_with(".job.yml")
-    })
-}
-
-/// Returns true if the file name ends with any reserved document suffix:
-/// `.test.yaml`/`.test.yml` (owned by `camel test`) or
-/// `.job.yaml`/`.job.yml` (owned by `camel job`). Such files are never
-/// routes; route discovery skips them under wildcard globs and errors on
-/// literal naming.
-pub fn is_reserved_document(path: &Path) -> bool {
-    is_test_document(path) || is_job_document(path)
 }
 
 /// Returns true if the glob pattern contains no metacharacters (`* ? [ ] { }`),
@@ -2036,6 +2014,11 @@ routes:
         assert!(is_reserved_document(Path::new("a.job.yml")));
         assert!(!is_reserved_document(Path::new("a.yaml")));
         assert!(!is_reserved_document(Path::new("a.test.json")));
+    }
+
+    #[test]
+    fn reexport_predicate_still_true() {
+        assert!(super::is_reserved_document(Path::new("a.test.yaml")));
     }
 
     #[test]

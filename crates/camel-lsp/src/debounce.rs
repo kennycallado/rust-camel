@@ -85,7 +85,10 @@ impl DebouncedLinter {
             }
 
             // Lint WITHOUT holding the read lock — does not block writers.
-            let diags = engine.lint(&raw);
+            // The document path enables reserved-suffix skipping
+            // (.test.yaml / .job.yaml, ADR-0062).
+            let path = task_uri.to_file_path().ok();
+            let diags = engine.lint_with_path(&raw, path.as_deref());
 
             // Re-acquire for a single version check; discard if stale.
             let still_current = {

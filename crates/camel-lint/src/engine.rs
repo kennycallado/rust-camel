@@ -3,12 +3,14 @@
 //! Holds a component metadata catalog and a list of rules. Runs all rules
 //! over a parsed `Document` and returns the concatenated diagnostics.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use camel_api::component_metadata::{ComponentMetadataCatalog, OptionKind};
+use camel_api::reserved_suffix::is_reserved_document;
 
 use crate::completion::CompletionItem;
-use crate::diagnostic::{Diagnostic, Span};
+use crate::diagnostic::{Diagnostic, DiagnosticCode, Severity, Span};
 use crate::document::Document;
 use crate::hover::HoverInfo;
 use crate::route_view::{Endpoint, LintOption, option_present, resolve_option};
@@ -55,10 +57,43 @@ impl LintEngine {
 
     /// Run all rules over `source` and return the concatenated diagnostics.
     ///
-    /// Returns `Vec<Diagnostic>` directly — parse failures are NOT engine
-    /// errors; they flow through `Document.parse_failure` to the R-SYN rule
-    /// (Task 2.1).
+    /// Lints without file context: reserved-suffix skipping (R-RESERVED)
+    /// cannot trigger because no file name is known. Delegates to
+    /// [`LintEngine::lint_with_path`] with `path = None`.
     pub fn lint(&self, source: &str) -> Vec<Diagnostic> {
+        self.lint_with_path(source, None)
+    }
+
+    /// Run all rules over `source`, or skip with a single R-RESERVED info
+    /// diagnostic when `path` names a reserved document (`.test.yaml` /
+    /// `.test.yml` / `.job.yaml` / `.job.yml`, ADR-0062).
+    ///
+    /// Reserved documents (camel test / camel job) are never routes, so no
+    /// rules run and no parse happens. An absent `path` behaves exactly
+    /// like [`LintEngine::lint`].
+    pub fn lint_with_path(&self, source: &str, path: Option<&Path>) -> Vec<Diagnostic> {
+        if let Some(p) = path
+            && is_reserved_document(p)
+        {
+            return vec![Diagnostic {
+                code: DiagnosticCode::RReserved,
+                severity: Severity::Info,
+                span: Span::new(0, 0),
+                message: format!(
+                    "skipped: {} is a reserved document (camel test or camel job)",
+                    p.display()
+                ),
+                fix: None,
+            }];
+        }
+        self.run_rules(source)
+    }
+
+    /// Shared rule loop: parse `source` and run every registered rule.
+    ///
+    /// Returns `Vec<Diagnostic>` directly — parse failures are NOT engine
+    /// errors; they flow through `Document.parse_failure` to the R-SYN rule.
+    fn run_rules(&self, source: &str) -> Vec<Diagnostic> {
         let doc = Document::parse(source);
         let mut diagnostics = Vec::new();
 
@@ -416,6 +451,7 @@ mod tests {
     use super::*;
     use crate::test_support::StubCatalog;
     use camel_api::component_metadata::{ComponentMetadata, OptionKind, UriOption};
+    use std::path::Path;
     use std::sync::Arc;
 
     #[test]
@@ -702,6 +738,98 @@ mod tests {
             items.is_empty(),
             "unknown scheme should return empty; got: {items:?}"
         );
+    }
+
+    // ---- lint_with_path / reserved-suffix skip tests ----
+
+    #[test]
+    fn lint_with_path_reserved_test_suffix_skips_all_rules() {
+        let engine = LintEngine::new(Arc::new(StubCatalog::empty())).with_default_rules();
+        let source = "routeFiles: [hello.yaml]\ninputs: {}\nexpects: []\n";
+
+        let diags = engine.lint_with_path(source, Some(Path::new("routes/hello.test.yaml")));
+
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected exactly one diagnostic; got: {diags:?}"
+        );
+        let d = &diags[0];
+        assert_eq!(d.code, DiagnosticCode::RReserved);
+        assert_eq!(d.severity, Severity::Info);
+        assert_eq!(d.span, Span::new(0, 0));
+        assert!(
+            d.message.contains("reserved document"),
+            "message must mention reserved document; got: {}",
+            d.message
+        );
+        assert!(d.fix.is_none(), "skip diagnostic must carry no fix");
+        assert!(
+            !diags.iter().any(|d| d.severity == Severity::Error),
+            "skip must yield no Error diagnostics; got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn lint_with_path_every_reserved_suffix_variant_skips() {
+        let engine = LintEngine::new(Arc::new(StubCatalog::empty())).with_default_rules();
+        let source = "routeFiles: [hello.yaml]\ninputs: {}\nexpects: []\n";
+
+        for name in ["x.test.yaml", "x.test.yml", "x.job.yaml", "x.job.yml"] {
+            let diags = engine.lint_with_path(source, Some(Path::new(name)));
+            assert_eq!(
+                diags.len(),
+                1,
+                "{name}: expected one diagnostic; got: {diags:?}"
+            );
+            assert_eq!(diags[0].code, DiagnosticCode::RReserved, "{name}");
+            assert_eq!(diags[0].severity, Severity::Info, "{name}");
+        }
+    }
+
+    #[test]
+    fn lint_with_path_ordinary_path_lints_as_before() {
+        let engine = LintEngine::new(Arc::new(StubCatalog::empty())).with_default_rules();
+        let source = "from: timer:tick\n";
+
+        assert_eq!(
+            engine.lint_with_path(source, Some(Path::new("routes/hello.yaml"))),
+            engine.lint(source),
+            "ordinary path must lint identically to path-less lint"
+        );
+    }
+
+    #[test]
+    fn lint_without_path_is_unchanged() {
+        let engine = LintEngine::new(Arc::new(StubCatalog::empty())).with_default_rules();
+        let source = "routeFiles: [hello.yaml]\ninputs: {}\nexpects: []\n";
+
+        let pathless = engine.lint(source);
+        let none_path = engine.lint_with_path(source, None);
+
+        assert_eq!(pathless, none_path, "None path must behave like lint");
+        assert!(
+            !pathless.is_empty(),
+            "test-doc source must still yield rule diagnostics without file context"
+        );
+        assert!(
+            pathless.iter().any(|d| d.severity == Severity::Error),
+            "test-doc source should yield R-SCHEMA errors without file context; got: {pathless:?}"
+        );
+    }
+
+    #[test]
+    fn lint_with_path_lookalike_names_not_skipped() {
+        let engine = LintEngine::new(Arc::new(StubCatalog::empty())).with_default_rules();
+        let source = "routeFiles: [hello.yaml]\ninputs: {}\nexpects: []\n";
+
+        for path in ["routes/atest.yaml", "routes/x.test.json"] {
+            assert_eq!(
+                engine.lint_with_path(source, Some(Path::new(path))),
+                engine.lint(source),
+                "{path} must not trigger the reserved-suffix skip"
+            );
+        }
     }
 
     // ---- hover_at tests ----

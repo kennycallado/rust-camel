@@ -59,6 +59,7 @@ pub enum UriKnownSubCode {
 pub enum DiagnosticCode {
     RSyn,
     RSchema,
+    RReserved,
     RUriKnown(UriKnownSubCode),
     RSecret,
     RDeprecated,
@@ -69,8 +70,8 @@ impl std::fmt::Display for DiagnosticCode {
     /// Canonical stable string for a diagnostic code.
     ///
     /// This is the baseline's stable contract: `R-SYN`, `R-SCHEMA`,
-    /// `R-SECRET`, `R-DEPRECATED`, `R-MOCK-IN-PRODUCTION`, and
-    /// `R-URI-known:<sub>` where `<sub>` is
+    /// `R-SECRET`, `R-DEPRECATED`, `R-MOCK-IN-PRODUCTION`, `R-RESERVED`,
+    /// and `R-URI-known:<sub>` where `<sub>` is
     /// `unverified-scheme` / `unknown-option` / `kind-mismatch` /
     /// `missing-required-option` / `duplicate-key`. Never rely on the
     /// `Debug` repr — it is not a stability boundary.
@@ -78,6 +79,7 @@ impl std::fmt::Display for DiagnosticCode {
         match self {
             DiagnosticCode::RSyn => f.write_str("R-SYN"),
             DiagnosticCode::RSchema => f.write_str("R-SCHEMA"),
+            DiagnosticCode::RReserved => f.write_str("R-RESERVED"),
             DiagnosticCode::RSecret => f.write_str("R-SECRET"),
             DiagnosticCode::RDeprecated => f.write_str("R-DEPRECATED"),
             DiagnosticCode::RMock => f.write_str("R-MOCK-IN-PRODUCTION"),
@@ -100,7 +102,7 @@ impl std::fmt::Display for DiagnosticCode {
 // ---------------------------------------------------------------------------
 
 /// A diagnostic produced by a lint rule.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     pub code: DiagnosticCode,
     pub severity: Severity,
@@ -114,7 +116,7 @@ pub struct Diagnostic {
 // ---------------------------------------------------------------------------
 
 /// A suggested fix: replace `span` in the source with `replacement`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fix {
     pub span: Span,
     pub replacement: String,

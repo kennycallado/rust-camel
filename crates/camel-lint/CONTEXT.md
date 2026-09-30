@@ -11,7 +11,10 @@ Dependencies: `camel-api`, `noyalib`, `jsonschema`, `ariadne`, `serde`, `thiserr
 
 **LintEngine** is stateless — a `Vec<Box<dyn Rule>>` plus an `Arc<dyn ComponentMetadataCatalog>`.
 `lint(source: &str) -> Vec<Diagnostic>` parses the source and runs every rule, concatenating each
-rule's output in rule-list (registration) order — no span sort. R-SCHEMA leaf order follows
+rule's output in rule-list (registration) order — no span sort. `lint_with_path(source: &str,
+path: Option<&Path>) -> Vec<Diagnostic>` is the path-aware entry point: a reserved-suffix path
+(`*.test.yaml` / `*.job.yaml`, ADR-0062) yields a single R-RESERVED Info diagnostic and skips
+every rule; plain `lint()` delegates with `None`, behavior unchanged. R-SCHEMA leaf order follows
 jsonschema `iter_errors` traversal, deterministic per serde_json map configuration (dual-config
 hazard documented in rschema.rs).
 

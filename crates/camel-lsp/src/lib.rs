@@ -96,8 +96,11 @@ impl LanguageServer for Backend {
         let text = params.text_document.text;
         let version = params.text_document.version;
 
+        // Reserved-suffix documents (.test.yaml / .job.yaml, ADR-0062) are
+        // skipped via the document path; a non-file URI keeps the full lint.
+        let path = uri.to_file_path().ok();
         let doc = Document::parse(&text);
-        let diags = self.engine.lint(&doc.raw);
+        let diags = self.engine.lint_with_path(&doc.raw, path.as_deref());
         let lsp_diags = diagnostics_to_lsp(&doc.raw, diags);
 
         self.documents
@@ -159,7 +162,9 @@ impl LanguageServer for Backend {
                 None => return, // save for an unopened document — ignore
             }
         };
-        let diags = self.engine.lint(&raw);
+        // Convert to a path before `uri` is moved into publish_diagnostics.
+        let path = uri.to_file_path().ok();
+        let diags = self.engine.lint_with_path(&raw, path.as_deref());
         self.client
             .publish_diagnostics(uri, diagnostics_to_lsp(&raw, diags), None)
             .await;
