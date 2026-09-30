@@ -331,8 +331,8 @@ pub(crate) fn force_webpki_fallback_rebuild_failure<R>(body: impl FnOnce() -> R)
 /// process-wide native-root probe paths (SSL_CERT_FILE/
 /// SSL_CERT_DIR) at that instant. Every plain test-client build
 /// therefore serializes against the CA-store mutex, closing the
-/// env-window race mechanically: all plain test client builds in lib.rs
-/// `mod tests` and in `client_cache`'s tests are routed through this
+/// env-window race mechanically: all plain test client builds in
+/// `lib_tests.rs` and in `client_cache`'s tests are routed through this
 /// helper, so windows and plain builds can no longer overlap.
 pub(crate) fn plain_http_test_client() -> reqwest::Client {
     let _ca_guard = crate::lock_ca_store_test_mutex();

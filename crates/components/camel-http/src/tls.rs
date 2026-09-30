@@ -145,6 +145,24 @@ fn client_builder(
     builder
 }
 
+/// Shared start for the fallback client configs (rc-jr2g8): resolve the
+/// crypto provider the way reqwest does (async_impl/client.rs) —
+/// process-default provider when the host installed one (camel-cli
+/// installs ring), else the aws-lc-rs default reqwest's `rustls`
+/// feature falls back to — then pin the safe default protocol versions.
+/// Stock rustls providers (ring, aws-lc-rs) always support the safe
+/// default TLS versions; this choice is static, not input- or
+/// platform-dependent.
+fn fallback_client_config_builder()
+-> rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier> {
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+    rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("stock rustls provider supports the safe default protocol versions") // allow-unwrap
+}
+
 /// Bundled-root TLS config for the CA-less-platform fallback (rc-3j4mq):
 /// Mozilla's root set from `webpki-roots`, precedent rc-ayy11 (camel-cli
 /// redis-tls pure-rust roots).
@@ -160,19 +178,7 @@ fn client_builder(
 /// consulting platform roots, so the empty-CA-store builder error cannot
 /// recur there.
 fn webpki_root_client_config() -> rustls::ClientConfig {
-    // Mirror reqwest's own provider resolution (async_impl/client.rs):
-    // process-default provider when the host installed one (camel-cli
-    // installs ring), else the aws-lc-rs default reqwest's `rustls`
-    // feature falls back to.
-    let provider = rustls::crypto::CryptoProvider::get_default()
-        .cloned()
-        .unwrap_or_else(|| std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
-    rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        // Stock rustls providers (ring, aws-lc-rs) always support the
-        // safe default TLS versions; this config is static, not input- or
-        // platform-dependent.
-        .expect("stock rustls provider supports the safe default protocol versions") // allow-unwrap
+    fallback_client_config_builder()
         .with_root_certificates(mozilla_only())
         .with_no_client_auth()
     // No ALPN override: the workspace reqwest builds without the http2
@@ -359,24 +365,11 @@ fn fallback_client_config(
     if !material && !verification_disabled {
         return Ok(None);
     }
-    // Mirror reqwest's own provider resolution (async_impl/client.rs):
-    // process-default provider when the host installed one (camel-cli
-    // installs ring), else the aws-lc-rs default reqwest's `rustls`
-    // feature falls back to.
-    let provider = rustls::crypto::CryptoProvider::get_default()
-        .cloned()
-        .unwrap_or_else(|| std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
+    let builder = fallback_client_config_builder();
     // Computed ALWAYS: strict material validation must happen even when
     // the danger verifier would bypass the roots; `Err` propagates only
     // under strict by construction of `fallback_root_store`.
     let store = fallback_root_store(tls.ca_cert_path.as_deref(), tls.strict)?;
-    let builder = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        // Stock rustls providers (ring, aws-lc-rs) always support the
-        // safe default TLS versions; this config is static, not input- or
-        // platform-dependent.
-        .expect("stock rustls provider supports the safe default protocol versions") // allow-unwrap
-        ;
     let builder = if verification_disabled {
         builder
             .dangerous()
