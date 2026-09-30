@@ -408,10 +408,14 @@ impl BridgeProcess {
     /// Spawn the bridge process. Reads the SSL port from stdout JSON line:
     ///   {"status":"ready","port":PORT}
     ///
-    /// Picks a free OS port and passes it to the bridge via `QUARKUS_HTTP_SSL_PORT`
-    /// so Quarkus binds exactly to that port and PortAnnouncer can echo it back.
-    /// Build-time TLS props are in application.yml; only runtime cert paths
-    /// and the SSL port are passed via env vars.
+    /// Port handoff (bd rc-s7dyw): passes `QUARKUS_HTTP_SSL_PORT=0` so the
+    /// Quarkus JVM binds an OS-assigned port itself; PortAnnouncer reports
+    /// the ACTUAL bound port (from the Quarkus runtime registry) in the ready
+    /// line, and this side connects to the announced port. The port is held
+    /// by the JVM from the first moment it exists, so the ADR-0070
+    /// bind-read-drop race cannot occur. Build-time TLS props are in
+    /// application.yml; only runtime cert paths and the SSL port mode are
+    /// passed via env vars.
     pub async fn start(config: &BridgeProcessConfig) -> Result<Self, BridgeError> {
         use tokio::io::AsyncBufReadExt;
         use tokio::process::Command;
@@ -421,11 +425,12 @@ impl BridgeProcess {
 
         let tls = crate::tls::BridgeTlsMaterial::generate()?;
 
-        // Bind :0 to let the OS pick a free port, then release so the bridge can use it.
-        let free_port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-            listener.local_addr()?.port()
-        };
+        // Port selection is JVM-authoritative (bd rc-s7dyw): 0 makes Quarkus
+        // bind an OS-assigned port and announce the actual bound port. The
+        // old bind-:0-read-drop here left the port unheld between the drop
+        // and the JVM bind (ADR-0070 port-toctou class); with the JVM owning
+        // the bind no such window exists.
+        let free_port: u16 = 0;
 
         // If CAMEL_BRIDGE_LOG_STDERR is set, redirect stderr to a file for debugging.
         let stderr_stdio: std::process::Stdio =

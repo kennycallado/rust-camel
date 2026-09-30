@@ -17,13 +17,13 @@ Per [ADR-0007](../adr/0007-route-supervised-consumer-failure.md), consumers and 
 
 ## gRPC channel
 
-`BridgeProcess::start` spawns the binary, binds `:0` to let the OS pick a free port, then passes the port to the bridge through `QUARKUS_HTTP_SSL_PORT`. The bridge announces its chosen SSL port on stdout as one line of JSON: `{"status":"ready","port":N}`. The crate reads that line, then connects a mTLS tonic channel to `https://127.0.0.1:{port}`.
+`BridgeProcess::start` spawns the binary and passes `QUARKUS_HTTP_SSL_PORT=0`: the Quarkus JVM binds an OS-assigned port itself and announces the ACTUAL bound port (read from the Quarkus runtime registry) on stdout as one line of JSON: `{"status":"ready","port":N}`. The crate reads that line, then connects a mTLS tonic channel to `https://127.0.0.1:{port}`. Port selection is JVM-authoritative — the port is held by the JVM from the first moment it exists, so the bind-read-drop race class (ADR-0070, bd rc-s7dyw) cannot occur.
 
 The TLS material is generated before spawn. The child receives the cert paths through four env vars. Build-time TLS properties live in each bridge's `application.yml`. Runtime cert paths and the SSL port are the only runtime surface.
 
 | Env var | Purpose |
 |---------|---------|
-| `QUARKUS_HTTP_SSL_PORT` | SSL port the bridge binds |
+| `QUARKUS_HTTP_SSL_PORT` | SSL port mode: `0` (JVM binds OS-assigned, announces actual) or fixed port |
 | `QUARKUS_TLS_BRIDGE_KEY_STORE_PEM_0_CERT` | Server cert PEM path |
 | `QUARKUS_TLS_BRIDGE_KEY_STORE_PEM_0_KEY` | Server key PEM path |
 | `QUARKUS_TLS_BRIDGE_TRUST_STORE_PEM_CERTS` | CA cert PEM path (for client auth) |

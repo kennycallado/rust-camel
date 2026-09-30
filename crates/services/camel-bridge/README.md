@@ -33,7 +33,7 @@ The bridge subprocess (Java/Quarkus native image) runs in unified gRPC mode with
 
 | Variable | Description |
 |----------|-------------|
-| `QUARKUS_HTTP_SSL_PORT` | SSL port the bridge listens on |
+| `QUARKUS_HTTP_SSL_PORT` | SSL port mode: `0` (supervisor handoff — JVM binds an OS-assigned port and announces the actual port) or a fixed port for standalone runs |
 | `QUARKUS_TLS_BRIDGE_KEY_STORE_PEM_0_CERT` | Server cert PEM path |
 | `QUARKUS_TLS_BRIDGE_KEY_STORE_PEM_0_KEY` | Server key PEM path |
 | `QUARKUS_TLS_BRIDGE_TRUST_STORE_PEM_CERTS` | CA cert PEM path (for client auth) |
