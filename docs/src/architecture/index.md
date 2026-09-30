@@ -122,7 +122,7 @@ For the complete bounded-context map and domain vocabulary, see
 ## ADR index
 
 Architecture-shaping choices live as ADRs under
-[`../adr/`](../adr/). The index below organizes them by topic. Each
+[`adr/index.md`](../adr/index.md). The index below organizes them by topic. Each
 entry links to the ADR file and gives a one-sentence summary.
 
 See also [Important Findings Summary](https://github.com/kennycallado/rust-camel/blob/main/docs/adr/IMPORTANT-FINDINGS-SUMMARY.md)
