@@ -1,5 +1,9 @@
 pub mod wait;
 
+/// Header name carrying the value payload for redis key/value commands.
+#[allow(dead_code)] // not every test binary including `support` uses it
+pub const REDIS_VALUE_HEADER: &str = "CamelRedis.Value";
+
 /// Binds an ephemeral port on `host` and stages the listener with the HTTP
 /// component's `ServerRegistry`, so the next spawn for the listener's own
 /// `(ip, port)` key serves this exact socket. No probe/rebind window

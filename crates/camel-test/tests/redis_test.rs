@@ -9,6 +9,7 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
+use support::REDIS_VALUE_HEADER;
 use support::install_crypto_provider;
 use support::redis::shared_redis;
 
@@ -48,7 +49,7 @@ async fn redis_string_commands() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("testkey".into()))
-        .set_header("CamelRedis.Value", Value::String("testvalue".into()))
+        .set_header(REDIS_VALUE_HEADER, Value::String("testvalue".into()))
         .to(format!("redis://{}?command=SET", conn_str))
         .to("mock:result")
         .route_id("redis-string-test")
@@ -106,7 +107,7 @@ async fn redis_list_commands() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("mylist".into()))
-        .set_header("CamelRedis.Value", Value::String("item1".into()))
+        .set_header(REDIS_VALUE_HEADER, Value::String("item1".into()))
         .to(format!("redis://{}?command=LPUSH", conn_str))
         .to("mock:result")
         .route_id("redis-list-test")
@@ -165,7 +166,7 @@ async fn redis_hash_commands() {
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("myhash".into()))
         .set_header("CamelRedis.Field", Value::String("field1".into()))
-        .set_header("CamelRedis.Value", Value::String("value1".into()))
+        .set_header(REDIS_VALUE_HEADER, Value::String("value1".into()))
         .to(format!("redis://{}?command=HSET", conn_str))
         .to("mock:result")
         .route_id("redis-hash-test")
@@ -223,7 +224,7 @@ async fn redis_set_commands() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("myset".into()))
-        .set_header("CamelRedis.Value", Value::String("member1".into()))
+        .set_header(REDIS_VALUE_HEADER, Value::String("member1".into()))
         .to(format!("redis://{}?command=SADD", conn_str))
         .to("mock:result")
         .route_id("redis-set-test")
@@ -836,7 +837,7 @@ async fn redis_consumer_queue_mode() {
 
     let producer_route = RouteBuilder::from("timer:push?period=100&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("queue-test".into()))
-        .set_header("CamelRedis.Value", Value::String("queue-item".into()))
+        .set_header(REDIS_VALUE_HEADER, Value::String("queue-item".into()))
         .to(format!("redis://{}?command=RPUSH", conn_str))
         .route_id("redis-queue-producer")
         .build()

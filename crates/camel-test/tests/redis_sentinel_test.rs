@@ -37,6 +37,7 @@ use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
 use camel_component_redis::{RedisComponent, RedisSentinelComponent};
 use camel_test::CamelTestContext;
 use redis::Commands;
+use support::REDIS_VALUE_HEADER;
 use support::send_to_direct;
 use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
@@ -390,7 +391,7 @@ async fn send_set(h: &CamelTestContext, value: &str) -> bool {
     let before = received_bodies(h, "set-done").await.len();
     let mut ex = Exchange::default();
     ex.input
-        .set_header("CamelRedis.Value", Value::String(value.to_string()));
+        .set_header(REDIS_VALUE_HEADER, Value::String(value.to_string()));
     let _ = send_to_direct(h, "direct:sentinel-set", ex).await;
     support::wait::wait_until(
         "SET exchange delivered",

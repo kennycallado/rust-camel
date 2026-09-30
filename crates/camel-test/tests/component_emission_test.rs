@@ -787,7 +787,7 @@ components = true
             serde_json::Value::String("emission-key".into()),
         )
         .set_header(
-            "CamelRedis.Value",
+            support::REDIS_VALUE_HEADER,
             serde_json::Value::String("not-a-number".into()),
         )
         .to(format!("redis://{conn}?command=SET"))
