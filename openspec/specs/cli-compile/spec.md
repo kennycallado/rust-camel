@@ -97,7 +97,7 @@ The compiler SHALL capture document text before `${env:}` interpolation and the 
 
 ### Requirement: Reject unsupported compile-time assets
 
-The compiler SHALL embed the R2 asset matrix — certificates, private keys, and client-CA files in TLS and listener document contexts; TLS endpoint URI parameters (`tlsCert`/`tlsKey` on HTTP and WS endpoints; `serverCertPath`/`serverKeyPath`/`clientCaPath` on gRPC server endpoints and `caCertPath`/`clientCertPath`/`clientKeyPath` on gRPC client endpoints); `xslt` fields and `xslt:` URI operands; `xsd` fields and `validator:` URI operands; `sql:file:` URI operands; `static_dir` trees — and SHALL reject everything else fail-closed: `wasm:` URI operands, file-valued secret fields, dynamic `${env:}` placeholders and absolute paths inside asset fields and TLS URI parameters, compile-time `CAMEL_*` configuration overrides — the signing input `CAMEL_COMPILE_SIGNING_KEY` under `--sign` excepted, whose stray presence without `--sign` still rejects — embedded `Camel.toml` `[beans.<name>]` `plugin` entries, embedded `Camel.toml` `[security.permissions.<name>]` WASM-provider `path` declarations, and asset references that escape the selected root or go missing. TLS-class references — document `tls` blocks, the `tlsCert`/`tlsKey` URI parameters, and the gRPC `*Path` family — SHALL resolve embedded-only: each reference resolves to an embedded virtual-store entry or compilation fails, and NO host-filesystem fallback exists at compile time or runtime. The document `wasm` field is a security-policy registry name, not an embedded asset, and SHALL compile as ordinary document data; there is no `sql` document field and no `plugin` document field. Certificate, key, and CA fields outside TLS or listener contexts remain ordinary document data. Runtime endpoint URI paths, deployment-time `${env:}` values, and deploy-side network/file I/O remain permitted. The `wasm:` URI-operand, `[beans]` plugin, and `[security.permissions]` WASM-provider-path rejections are R2-only deferrals recorded for their roadmap owner, not permanent rejections.
+The compiler SHALL embed the R2 asset matrix — certificates, private keys, and client-CA files in TLS and listener document contexts; TLS endpoint URI parameters (`tlsCert`/`tlsKey` on HTTP and WS endpoints; `serverCertPath`/`serverKeyPath`/`clientCaPath` on gRPC server endpoints and `caCertPath`/`clientCertPath`/`clientKeyPath` on gRPC client endpoints); the `protoFile` URI parameter on gRPC endpoints; `xslt` fields and `xslt:` URI operands; `xsd` fields and `validator:` URI operands; `sql:file:` URI operands; `static_dir` trees — and SHALL reject everything else fail-closed: `wasm:` URI operands, file-valued secret fields, dynamic `${env:}` placeholders and absolute paths inside asset fields and file-valued URI parameters, compile-time `CAMEL_*` configuration overrides — the signing input `CAMEL_COMPILE_SIGNING_KEY` under `--sign` excepted, whose stray presence without `--sign` still rejects — embedded `Camel.toml` `[beans.<name>]` `plugin` entries, embedded `Camel.toml` `[security.permissions.<name>]` WASM-provider `path` declarations, and asset references that escape the selected root or go missing. TLS-class references — document `tls` blocks, the `tlsCert`/`tlsKey` URI parameters, and the gRPC `*Path` family — SHALL resolve embedded-only: each reference resolves to an embedded virtual-store entry or compilation fails, and NO host-filesystem fallback exists at compile time or runtime. The gRPC `protoFile` parameter follows the same embedded-only resolution: its bytes come from the store through the confined per-boot materialization, and the sealed artifact never reads the proto from the deployment directory. The runtime gRPC URI parse accepts an absolute `protoFile` value only when its canonicalized path stays inside the OS temp directory that hosts the per-boot materialization directory; every other absolute path and every `..` traversal keeps failing closed. The document `wasm` field is a security-policy registry name, not an embedded asset, and SHALL compile as ordinary document data; there is no `sql` document field and no `plugin` document field. Certificate, key, and CA fields outside TLS or listener contexts remain ordinary document data. Runtime endpoint URI paths, deployment-time `${env:}` values, and deploy-side network/file I/O remain permitted. The `wasm:` URI-operand, `[beans]` plugin, and `[security.permissions]` WASM-provider-path rejections are R2-only deferrals recorded for their roadmap owner, not permanent rejections.
 
 #### Scenario: Unsupported asset names the reason
 
@@ -126,6 +126,24 @@ The compiler SHALL embed the R2 asset matrix — certificates, private keys, and
 #### Scenario: Absolute TLS URI parameter fails closed
 
 - **GIVEN** an HTTP endpoint URI with `tlsCert=/etc/pki/cert.pem`
+- **WHEN** the operator invokes compilation
+- **THEN** compilation exits 2 naming the parameter and requiring a root-relative compile-known path
+
+#### Scenario: gRPC protoFile compiles into the store
+
+- **GIVEN** a route with `from: grpc://127.0.0.1:50051/helloworld.Greeter/SayHello?protoFile=protos/helloworld.proto&transport=plaintext` and the proto file present under the selected root
+- **WHEN** the operator invokes compilation
+- **THEN** the proto embeds as a typed asset entry with the non-secret `proto file` class (no `--embed-secrets` opt-in required), the `protoFile` parameter receives a Uri-context substitution-table entry, and compilation exits 0
+
+#### Scenario: Runtime parse confines absolute protoFile to the OS temp directory
+
+- **GIVEN** a gRPC endpoint URI whose `protoFile` value is an absolute path
+- **WHEN** the runtime parses the URI
+- **THEN** a path canonically confined under the OS temp directory parses, while paths outside it and paths carrying `..` traversal fail closed naming the proto path
+
+#### Scenario: Absolute protoFile fails closed
+
+- **GIVEN** a gRPC endpoint URI with `protoFile=/etc/service/helloworld.proto`
 - **WHEN** the operator invokes compilation
 - **THEN** compilation exits 2 naming the parameter and requiring a root-relative compile-known path
 
@@ -629,6 +647,34 @@ or missing required envelope exits 2 with no port ever bound.
 - **THEN** the listener answers with the route's response while the
   process keeps running, and the artifact's `--manifest` output lists
   the listener
+
+#### Scenario: gRPC consumer serves from a sealed artifact until SIGTERM
+
+- **GIVEN** a compiled route artifact whose document declares a
+  `grpc://` consumer route carrying
+  `?protoFile=…&transport=plaintext`, deployed into a fresh
+  source-free directory with the proto resolved from the embedded
+  store
+- **WHEN** the artifact boots and a client completes the HTTP/2
+  connection preface against the declared port after the consumer
+  reports it is serving
+- **THEN** the server answers with its SETTINGS frame, the process
+  keeps serving (a liveness probe observes it still running), the first
+  SIGTERM drains gracefully with exit 0, the report file contains
+  `{"kind":"route","status":"completed","error":null}`, and the
+  artifact's `--manifest` output reports `artifact_kind` `server` with
+  `grpc` among the components
+
+#### Scenario: WebSocket consumer drains an in-flight exchange
+
+- **GIVEN** a serving compiled route artifact started with
+  `--report <path>` whose `ws://` consumer route holds a connected
+  WebSocket exchange inside a delay step that completes within the
+  configured drain budget
+- **WHEN** SIGTERM arrives while the exchange is in flight
+- **THEN** the in-flight WebSocket response still completes inside the
+  drain budget, the process exits 0, and the report file contains
+  `{"kind":"route","status":"completed","error":null}`
 
 #### Scenario: First signal drains gracefully and exits 0
 
