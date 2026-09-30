@@ -339,14 +339,8 @@ camel-xj feature "default"
 camel-xj v0.55.0
 camel-xslt feature "default"
 camel-xslt v0.55.0
-cap-fs-ext feature "cap-std"
-cap-fs-ext feature "default"
-cap-fs-ext feature "std"
-cap-fs-ext v4.0.3
 cap-primitives feature "default"
 cap-primitives v4.0.3
-cap-std feature "default"
-cap-std v4.0.3
 cc feature "default"
 cc feature "parallel"
 cc v1.4.4
@@ -458,14 +452,14 @@ cpufeatures feature "default"
 cpufeatures v0.2.17
 cpufeatures v0.3.1
 cranelift-assembler-x64 feature "default"
-cranelift-assembler-x64 v0.135.1
+cranelift-assembler-x64 v0.135.3
 cranelift-assembler-x64-meta feature "default"
-cranelift-assembler-x64-meta v0.135.1
+cranelift-assembler-x64-meta v0.135.3
 cranelift-bforest feature "default"
-cranelift-bforest v0.135.1
+cranelift-bforest v0.135.3
 cranelift-bitset feature "default"
 cranelift-bitset feature "enable-serde"
-cranelift-bitset v0.135.1
+cranelift-bitset v0.135.3
 cranelift-codegen feature "enable-serde"
 cranelift-codegen feature "gimli"
 cranelift-codegen feature "host-arch"
@@ -479,29 +473,29 @@ cranelift-codegen feature "sha2"
 cranelift-codegen feature "std"
 cranelift-codegen feature "timing"
 cranelift-codegen feature "unwind"
-cranelift-codegen v0.135.1
+cranelift-codegen v0.135.3
 cranelift-codegen-meta feature "default"
 cranelift-codegen-meta feature "pulley"
-cranelift-codegen-meta v0.135.1
+cranelift-codegen-meta v0.135.3
 cranelift-codegen-shared feature "default"
-cranelift-codegen-shared v0.135.1
+cranelift-codegen-shared v0.135.3
 cranelift-control feature "fuzz"
-cranelift-control v0.135.1
+cranelift-control v0.135.3
 cranelift-entity feature "default"
 cranelift-entity feature "enable-serde"
 cranelift-entity feature "serde"
 cranelift-entity feature "serde_derive"
-cranelift-entity v0.135.1
+cranelift-entity v0.135.3
 cranelift-frontend feature "default"
 cranelift-frontend feature "std"
-cranelift-frontend v0.135.1
+cranelift-frontend v0.135.3
 cranelift-isle feature "default"
-cranelift-isle v0.135.1
+cranelift-isle v0.135.3
 cranelift-native feature "default"
 cranelift-native feature "std"
-cranelift-native v0.135.1
+cranelift-native v0.135.3
 cranelift-srcgen feature "default"
-cranelift-srcgen v0.135.1
+cranelift-srcgen v0.135.3
 crc feature "default"
 crc v3.4.0
 crc-catalog feature "default"
@@ -845,6 +839,7 @@ hashlink feature "default"
 hashlink v0.10.0
 hashlink v0.11.1
 heck feature "default"
+heck v0.4.1
 heck v0.5.0
 hex feature "alloc"
 hex feature "default"
@@ -974,6 +969,7 @@ is_terminal_polyfill v1.70.2
 itertools feature "default"
 itertools feature "use_alloc"
 itertools feature "use_std"
+itertools v0.11.0
 itertools v0.14.0
 itertools v0.15.0
 itoa feature "default"
@@ -1490,9 +1486,9 @@ pulley-interpreter feature "disas"
 pulley-interpreter feature "encode"
 pulley-interpreter feature "interp"
 pulley-interpreter feature "std"
-pulley-interpreter v48.0.1
+pulley-interpreter v48.0.3
 pulley-macros feature "default"
-pulley-macros v48.0.1 (proc-macro)
+pulley-macros v48.0.3 (proc-macro)
 quick-error feature "default"
 quick-error v1.2.3
 quick-xml feature "default"
@@ -2452,7 +2448,7 @@ wasmtime feature "wasmtime-jit-icache-coherence"
 wasmtime feature "wasmtime-unwinder"
 wasmtime feature "wat"
 wasmtime feature "wit-parser"
-wasmtime v48.0.1
+wasmtime v48.0.3
 wasmtime-environ feature "anyhow"
 wasmtime-environ feature "backtrace"
 wasmtime-environ feature "compile"
@@ -2466,51 +2462,51 @@ wasmtime-environ feature "gc-null"
 wasmtime-environ feature "stack-switching"
 wasmtime-environ feature "std"
 wasmtime-environ feature "threads"
-wasmtime-environ v48.0.1
+wasmtime-environ v48.0.3
 wasmtime-internal-cache feature "default"
-wasmtime-internal-cache v48.0.1
+wasmtime-internal-cache v48.0.3
 wasmtime-internal-component-macro feature "async"
 wasmtime-internal-component-macro feature "component-model-async"
 wasmtime-internal-component-macro feature "default"
-wasmtime-internal-component-macro v48.0.1 (proc-macro)
+wasmtime-internal-component-macro v48.0.3 (proc-macro)
 wasmtime-internal-component-util feature "default"
-wasmtime-internal-component-util v48.0.1
+wasmtime-internal-component-util v48.0.3
 wasmtime-internal-core feature "anyhow"
 wasmtime-internal-core feature "backtrace"
 wasmtime-internal-core feature "default"
 wasmtime-internal-core feature "serde"
 wasmtime-internal-core feature "std"
-wasmtime-internal-core v48.0.1
+wasmtime-internal-core v48.0.3
 wasmtime-internal-cranelift feature "default"
 wasmtime-internal-cranelift feature "pulley"
-wasmtime-internal-cranelift v48.0.1
+wasmtime-internal-cranelift v48.0.3
 wasmtime-internal-fiber feature "default"
 wasmtime-internal-fiber feature "std"
-wasmtime-internal-fiber v48.0.1
+wasmtime-internal-fiber v48.0.3
 wasmtime-internal-jit-debug feature "default"
 wasmtime-internal-jit-debug feature "gdb_jit_int"
 wasmtime-internal-jit-debug feature "object"
 wasmtime-internal-jit-debug feature "perf_jitdump"
 wasmtime-internal-jit-debug feature "rustix"
 wasmtime-internal-jit-debug feature "std"
-wasmtime-internal-jit-debug v48.0.1
+wasmtime-internal-jit-debug v48.0.3
 wasmtime-internal-jit-icache-coherence feature "default"
-wasmtime-internal-jit-icache-coherence v48.0.1
+wasmtime-internal-jit-icache-coherence v48.0.3
 wasmtime-internal-unwinder feature "cranelift"
 wasmtime-internal-unwinder feature "default"
-wasmtime-internal-unwinder v48.0.1
+wasmtime-internal-unwinder v48.0.3
 wasmtime-internal-versioned-export-macros feature "default"
-wasmtime-internal-versioned-export-macros v48.0.1 (proc-macro)
+wasmtime-internal-versioned-export-macros v48.0.3 (proc-macro)
 wasmtime-internal-wit-bindgen feature "async"
 wasmtime-internal-wit-bindgen feature "component-model-async"
 wasmtime-internal-wit-bindgen feature "default"
-wasmtime-internal-wit-bindgen v48.0.1
+wasmtime-internal-wit-bindgen v48.0.3
 wasmtime-wasi feature "default"
 wasmtime-wasi feature "p1"
 wasmtime-wasi feature "p2"
-wasmtime-wasi v48.0.1
+wasmtime-wasi v48.0.3
 wasmtime-wasi-io feature "std"
-wasmtime-wasi-io v48.0.1
+wasmtime-wasi-io v48.0.3
 wast feature "component-model"
 wast feature "wasm-module"
 wast v258.0.0
@@ -2522,11 +2518,11 @@ webpki-roots feature "default"
 webpki-roots v1.0.9
 whoami v1.6.1
 wiggle feature "wasmtime"
-wiggle v48.0.1
+wiggle v48.0.3
 wiggle-generate feature "default"
-wiggle-generate v48.0.1
+wiggle-generate v48.0.3
 wiggle-macro feature "default"
-wiggle-macro v48.0.1 (proc-macro)
+wiggle-macro v48.0.3 (proc-macro)
 winnow feature "alloc"
 winnow feature "ascii"
 winnow feature "binary"
