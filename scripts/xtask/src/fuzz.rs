@@ -196,20 +196,12 @@ pub(crate) fn run(root: &Path, target: &str, time: u64) -> Result<(), String> {
 
     let mut minimized_note = String::new();
     if let Some(artifact) = newest_file(&fresh) {
-        match minimize(root, target, &target_dir, &artifact, &artifacts) {
-            Ok(Some(minimized)) => {
-                println!("minimized artifact: {}", minimized.display());
-                println!(
-                    "promote this input into a #[test] regression case; do not commit the raw artifact"
-                );
-                minimized_note = format!("; minimized artifact: {}", minimized.display());
-            }
-            Ok(None) => eprintln!(
-                "fuzz: tmin succeeded but no new artifact detected in {}",
-                artifacts.display()
-            ),
-            Err(e) => return Err(e),
-        }
+        let minimized = minimize(root, target, &target_dir, &artifact, &artifacts)?;
+        println!("minimized artifact: {}", minimized.display());
+        println!(
+            "promote this input into a #[test] regression case; do not commit the raw artifact"
+        );
+        minimized_note = format!("; minimized artifact: {}", minimized.display());
     }
     Err(format!(
         "fuzz target `{target}` failed with exit code: {exit_code}{minimized_note}"
@@ -291,23 +283,32 @@ fn newest_file(paths: &[PathBuf]) -> Option<PathBuf> {
 const ALREADY_MINIMAL_NOTE: &str =
     "fuzz: tmin wrote no minimized copy (input already minimal: 0 bytes); keeping original";
 
-/// Decide whether a `tmin` run that produced no fresh artifact should fall
-/// back to the original crash input. A zero-byte input cannot be minimized
-/// (there is nothing smaller than empty), and libFuzzer writes no
-/// `minimized-from-*` file for it, so the original is its own minimization.
-fn use_original_when_already_minimal(status_ok: bool, original_len: u64) -> bool {
-    status_ok && original_len == 0
+/// Note logged when a successful `tmin` writes no minimized copy: nothing
+/// smaller kept the crash, so the original is its own minimization. 0 bytes
+/// is provably minimal (nothing smaller than empty); any non-empty size is
+/// near-minimal (rc-fqfe) — the input length is named so the outcome is
+/// distinct from both a real minimization and the 0-byte marker.
+fn nothing_smaller_note(original_len: u64) -> String {
+    if original_len == 0 {
+        ALREADY_MINIMAL_NOTE.to_string()
+    } else {
+        format!(
+            "fuzz: tmin wrote no minimized copy (input {original_len} bytes, likely minimal); keeping original"
+        )
+    }
 }
 
-/// Minimize a crash artifact with `cargo fuzz tmin`; returns the minimized
-/// file (written into the artifacts dir after `tmin` started) when found.
+/// Minimize a crash artifact with `cargo fuzz tmin`; returns the artifact to
+/// treat as minimized: the fresh minimized copy when `tmin` wrote one,
+/// otherwise — a successful `tmin` that found nothing smaller — the original
+/// crash input with an explanatory note.
 fn minimize(
     root: &Path,
     target: &str,
     target_dir: &Path,
     artifact: &Path,
     artifacts: &Path,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<PathBuf, String> {
     let started = SystemTime::now();
     let output = Command::new("cargo")
         .args(["+nightly", "fuzz", "tmin", target])
@@ -325,30 +326,29 @@ fn minimize(
                 output.status.code().unwrap_or(-1)
             );
         }
-        return Ok(Some(minimized));
+        return Ok(minimized);
     }
-    let original_len = artifact
-        .metadata()
-        .map(|m| m.len())
-        .map_err(|e| format!("fuzz minimization cannot stat {}: {e}", artifact.display()))?;
-    if use_original_when_already_minimal(output.status.success(), original_len) {
-        eprintln!("{ALREADY_MINIMAL_NOTE}");
-        return Ok(Some(artifact.to_path_buf()));
+    if output.status.success() {
+        // tmin found nothing smaller that kept the crash: the original is
+        // its own minimization (0 bytes provably, any other size likely).
+        let original_len = artifact
+            .metadata()
+            .map(|m| m.len())
+            .map_err(|e| format!("fuzz minimization cannot stat {}: {e}", artifact.display()))?;
+        eprintln!("{}", nothing_smaller_note(original_len));
+        return Ok(artifact.to_path_buf());
     }
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stderr_note = if stderr.is_empty() {
-            String::new()
-        } else {
-            format!("; stderr: {stderr}")
-        };
-        return Err(format!(
-            "fuzz minimization (`cargo fuzz tmin`) failed with exit code: {} — original crash artifact: {}{stderr_note}",
-            output.status.code().unwrap_or(-1),
-            artifact.display()
-        ));
-    }
-    Ok(None)
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr_note = if stderr.is_empty() {
+        String::new()
+    } else {
+        format!("; stderr: {stderr}")
+    };
+    Err(format!(
+        "fuzz minimization (`cargo fuzz tmin`) failed with exit code: {} — original crash artifact: {}{stderr_note}",
+        output.status.code().unwrap_or(-1),
+        artifact.display()
+    ))
 }
 
 #[cfg(test)]
@@ -396,13 +396,31 @@ mod tests {
     }
 
     #[test]
-    fn already_minimal_only_for_empty_input_on_success() {
-        assert!(use_original_when_already_minimal(true, 0));
-        // tmin failed: keep the honest failure path, never claim minimality
-        assert!(!use_original_when_already_minimal(false, 0));
-        // non-empty input with no fresh artifact is unexpected, not minimal
-        assert!(!use_original_when_already_minimal(true, 4));
-        assert!(!use_original_when_already_minimal(false, 4));
+    fn nothing_smaller_note_zero_byte_keeps_ci_drill_marker() {
+        // rc-7j5e: the 0-byte arm's wording is the CI drill's grep target
+        // (`already minimal` in tmin.log) — the near-minimal extension
+        // must not change it.
+        assert_eq!(nothing_smaller_note(0), ALREADY_MINIMAL_NOTE);
+    }
+
+    #[test]
+    fn nothing_smaller_note_near_minimal_names_size_and_marker() {
+        // rc-fqfe: a 2-byte crash input tmin cannot shrink writes no
+        // minimized-from-* file; the note must report a DISTINCT
+        // nothing-smaller outcome that names the input size.
+        let note = nothing_smaller_note(2);
+        assert!(
+            note.contains("2 bytes"),
+            "note must name the input size: {note}"
+        );
+        assert!(
+            note.contains("likely minimal"),
+            "near-minimal outcome needs its own marker: {note}"
+        );
+        assert!(
+            !note.contains("already minimal"),
+            "near-minimal must not borrow the 0-byte marker: {note}"
+        );
     }
 
     #[test]
