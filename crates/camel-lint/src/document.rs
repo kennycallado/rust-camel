@@ -725,6 +725,60 @@ mod tests {
     }
 
     #[test]
+    fn wire_tap_uri_captured() {
+        // WireTapStep declares `wire_tap` as its endpoint-URI string leaf.
+        let source = "from: direct:start\nsteps:\n  - wire_tap: log:tapped\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none());
+        let endpoints = doc.route_view.endpoints();
+        // [0] = from (direct:start), [1] = wire_tap (log:tapped).
+        assert_eq!(endpoints.len(), 2, "expected from + one wire_tap endpoint");
+        let tap = &endpoints[1];
+        assert_eq!(tap.uri.value, "log:tapped");
+        assert_eq!(slice_at(&doc.raw, &tap.uri.span), "log:tapped");
+    }
+
+    #[test]
+    fn poll_enrich_object_form_uri_captured() {
+        // PollEnrichStep full form reuses EnrichConfig: `uri` is the
+        // endpoint URI inside the object form (shorthand string covered
+        // by the EnrichBody anyOf branch).
+        let source = "from: direct:start\nsteps:\n  - poll_enrich:\n      uri: db:query\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none());
+        let endpoints = doc.route_view.endpoints();
+        // [0] = from (direct:start), [1] = poll_enrich uri (db:query).
+        assert_eq!(
+            endpoints.len(),
+            2,
+            "expected from + one poll_enrich endpoint"
+        );
+        let enrich = &endpoints[1];
+        assert_eq!(enrich.uri.value, "db:query");
+        assert_eq!(slice_at(&doc.raw, &enrich.uri.span), "db:query");
+    }
+
+    #[test]
+    fn dead_letter_channel_uri_captured() {
+        // RouteDslErrorHandler (route-level `error_handler`) declares
+        // `dead_letter_channel` as its dead-letter endpoint URI.
+        let source =
+            "from: direct:start\nsteps: []\nerror_handler:\n  dead_letter_channel: log:dlq\n";
+        let doc = Document::parse(source);
+        assert!(doc.parse_failure.is_none());
+        let endpoints = doc.route_view.endpoints();
+        // [0] = from (direct:start), [1] = dead-letter (log:dlq).
+        assert_eq!(
+            endpoints.len(),
+            2,
+            "expected from + one dead-letter endpoint"
+        );
+        let dlq = &endpoints[1];
+        assert_eq!(dlq.uri.value, "log:dlq");
+        assert_eq!(slice_at(&doc.raw, &dlq.uri.span), "log:dlq");
+    }
+
+    #[test]
     fn option_key_value_spans_byte_exact() {
         // The probe confirmed `period` at byte 25 and `1s` at byte 32 in this
         // source (the task brief's "30/37" are miscounts). Assertions slice

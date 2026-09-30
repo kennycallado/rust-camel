@@ -78,7 +78,8 @@ requires exactly one non-null `literal`/`header`/`property` source per
 siblings count as absent, mirroring serde). Failures render as ONE
 targeted Error per value spec — message matches the runtime error wording
 (`yaml_source_to_value_source`) — via a recursive walk of collapsed
-Option-wrapper `anyOf` error contexts; non-permission oneOf failures keep
+Option-wrapper `anyOf` error contexts (walker lives in
+`rules/rschema/permission.rs`); non-permission oneOf failures keep
 their generic collapsed diagnostics.
 
 **R-SCHEMA pattern de-collapse (rc-n3t73)**: the MCP TLS `cert_path`/`key_path` fields carry a
@@ -94,7 +95,7 @@ Per-token semantics: a whole-document error fallback is forbidden. The
 interpolator lives in `src/env_interpolation.rs` — a SYNC mirror of the
 whole-text splice arm of `camel-dsl::env_interpolation`, because crate
 purity forbids depending on camel-dsl; update both together (rc-ayke
-CROSS-DEP). The integer carve-out's `fn clean_integer` (`rschema.rs:538`)
+CROSS-DEP). The integer carve-out's `fn clean_integer` (`rschema.rs`)
 is the third SYNC copy of the clean-integer rule: it mirrors camel-dsl
 `env_int_probe::clean_integer` (i64-or-u64 magnitude) and camel-config
 `clean_i64` (i64-only); update all three together. The ambient-env

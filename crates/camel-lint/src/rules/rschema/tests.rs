@@ -2956,7 +2956,7 @@ fn rschema_permission_scalar_value_stays_generic() {
 }
 
 #[test]
-fn rschema_credential_oneof_top_level_stays_generic() {
+fn rschema_credential_top_level_failure_stays_collapsed_anyof() {
     // Byte-exact regression: a type error inside CredentialSourceDsl's
     // oneOf (no Option anyOf wrapper around the array items) must keep
     // its generic message byte-identically — no permission machinery
