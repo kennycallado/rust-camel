@@ -57,13 +57,16 @@
         # reproduction (e_opus review 2026-09-01, tmin-prefix-fix: future
         # crashes must reproduce on the compiler that found them). The date
         # is bumped DELIBERATELY — only when a fuzz finding needs a newer
-        # toolchain — never by a blind lock update. Bumps keep the CI
-        # fuzz workflows (fuzz-smoke.yml, assurance-monthly.yml) on the
-        # same date — one nightly across local and CI keeps crash repros
-        # portable (CI-side sync pending, bd rc-azd9a). 2026-09-24 is
-        # what the locked rust-overlay rev (ed34466c) resolved "latest"
-        # to at pin time, so this changes nothing today; it freezes
-        # tomorrow.
+        # toolchain — never by a blind lock update. Lockstep clause
+        # (rc-azd9a): any date bump MUST update the CI fuzz workflows
+        # (fuzz-smoke.yml FUZZ_NIGHTLY, assurance-monthly.yml NIGHTLY) to
+        # the same date in the same change — one nightly across local and
+        # CI keeps crash repros portable. Enforced mechanically: fuzz-smoke
+        # runs the nightly-lockstep check (flake date == CI date) on every
+        # qualifying PR, assurance-monthly re-asserts it monthly.
+        # 2026-09-24 is what the locked rust-overlay rev (ed34466c)
+        # resolved "latest" to at pin time, so this changes nothing today;
+        # it freezes tomorrow.
         fuzzNightly = pkgs.rust-bin.nightly."2026-09-24".minimal;
 
         # `cargo +nightly` needs a rustup-style proxy; rust-overlay toolchains

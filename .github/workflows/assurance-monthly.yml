@@ -44,9 +44,12 @@ concurrency:
 
 env:
   # Keep in lockstep with fuzz-smoke.yml (rc-p957): same nightly + same
-  # cargo-fuzz so crash repros stay portable across workflows.
+  # cargo-fuzz so crash repros stay portable across workflows. The pin
+  # must also match the flake fuzzNightly date — fuzz-smoke's
+  # nightly-lockstep check enforces that pair (rc-azd9a), and the
+  # fuzz-deep job re-asserts it below (monthly cadence).
   CARGO_FUZZ_VERSION: "0.13.2"
-  NIGHTLY: nightly-2026-08-27
+  NIGHTLY: nightly-2026-09-24
   # Pinned by the xtask mutants wrapper (schema + exit codes are 27.x-bound).
   CARGO_MUTANTS_VERSION: "27.1.0"
   FUZZ_SECS: ${{ inputs.fuzz_secs || 900 }}
@@ -63,6 +66,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           toolchain: ${{ env.NIGHTLY }}
+
+      - name: Nightly lockstep (flake fuzzNightly == CI pin, rc-azd9a)
+        run: |
+          flake_date=$(grep -oE 'fuzzNightly = pkgs\.rust-bin\.nightly\."[0-9]{4}-[0-9]{2}-[0-9]{2}"' \
+            flake.nix | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -1)
+          if [ -z "$flake_date" ]; then
+            echo "fuzzNightly dated pin not found in flake.nix"; exit 1
+          fi
+          if [ "$flake_date" != "${NIGHTLY#nightly-}" ]; then
+            echo "nightly drift: flake=$flake_date ci=$NIGHTLY — sync per flake.nix bump policy"; exit 1
+          fi
+          echo "nightly lockstep OK: nightly-$flake_date"
 
       - id: cache-week
         name: Weekly cache rotation suffix
