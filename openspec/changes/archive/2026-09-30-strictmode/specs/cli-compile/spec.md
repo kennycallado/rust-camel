@@ -86,7 +86,7 @@ reject a compile.
 - **WHEN** the artifact starts, or runs `./app --verify`
 - **THEN** boot and verify behave exactly as the R4 chain with no pin step and no freshness step
 
-#### Scenario: Unsigned artifacts boot unchanged under a non-strict truststore
+#### Scenario: Unsigned artifacts ignore the truststore
 
 - **GIVEN** an unsigned artifact (no envelope) with a well-formed truststore supplied that does not carry the strict
   directive
