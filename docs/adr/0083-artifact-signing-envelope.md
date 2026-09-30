@@ -1,6 +1,6 @@
 # ADR-0083: Artifact signing envelope (detached Ed25519ph sidecar)
 
-- Status: Accepted (decided 2026-09-26; roadmap R4, epic rc-rye74, bd rc-osv9x); Amended 2026-09-26: truststore pinning and rollback freshness (keypin change)
+- Status: Accepted (decided 2026-09-26; roadmap R4, epic rc-rye74, bd rc-osv9x); Amended 2026-09-26: truststore pinning and rollback freshness (keypin change); Amended 2026-09-30: strict unsigned rejection opt-in (strictmode change)
 - Source: bd rc-osv9x (R4 acceptance criteria); openspec change `r4sign`
 - Amends: ADR-0075 (adds the R4 signing surface; trailer framing is unchanged)
 
@@ -195,6 +195,19 @@ key is not pinned fails closed, a signed manifest without its envelope
 fails closed, and a pinned artifact below its floor fails closed.
 Readers accept manifest schemas 2, 3, 4, and 5. The 148-byte envelope
 framing does not change.
+
+**Strict opt-in (2026-09-30).** The `strictmode` change closes the
+accepted unsigned boundary as an opt-in. A truststore line whose
+whitespace-separated content is exactly `strict` sets the directive;
+repeated lines are idempotent, surrounding whitespace is tolerated, and
+a second token makes the line malformed. Under the directive, any
+artifact whose manifest carries no signing block fails closed with exit
+2 and the `strict-unsigned` diagnostic at boot, `--verify`, and the
+env-governed `--manifest`/`--help`/`--version` dispatch, and a store
+that cannot be read or parsed fails closed for unsigned artifacts too.
+The directive changes nothing about pin or freshness decisions for
+signed artifacts, and the default stays permissive: a well-formed store
+without the directive changes nothing.
 
 ## References
 

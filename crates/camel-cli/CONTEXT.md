@@ -153,13 +153,15 @@ the operational manifest with its independent `manifest_schema: 3`
 `compile::materialize` owns the confined per-boot asset materialization,
 `compile::signature` owns the detached `CAMELSG1` Ed25519ph envelope
 codec and its verify chain (ADR-0083), and `compile::trust` owns the
-truststore pinning policy for signed artifacts (keypin, ADR-0083).
+truststore pinning policy for signed artifacts plus the strict directive
+decision for unsigned ones (keypin and strictmode, ADR-0083).
 `compile::runtime` owns the artifact boot seam: registry population,
 substitution, and the materialization guard, all before the route/job
-kind dispatch; runtime.rs holds the zone's size ceiling (2008 lines after
-keypin's trust hooks), and the next growth of its verification block
-extracts `compile/verify.rs` first (deferral recorded, bd rc-5u0jx item
-(c)). The canonical store model
+kind dispatch; runtime.rs holds the zone's size ceiling (2042 lines after
+keypin's trust hooks and the strictmode unsigned-rejection increment), and
+the next growth of its verification block extracts `compile/verify.rs`
+first (deferral still holds, now recorded against the strictmode
+increment, bd rc-5u0jx item (c)). The canonical store model
 lives in camel-dsl and is re-exported verbatim; this crate never defines a
 second one.
 

@@ -82,7 +82,7 @@ Verify an artifact without booting:
 
 Exit 0 prints two lines: `algorithm: ed25519ph` and `key_fingerprint: blake3:<hex>`. Any failure exits 2 and names the failing step: envelope, fingerprint, signature, or truststore. `--verify` accepts `--truststore` and is exclusive with every other artifact argument.
 
-**Pinning a producer.** A truststore pins the keys an artifact may verify against. Supply it with the artifact argument `--truststore <path>` or the `CAMEL_TRUSTSTORE` environment variable; the argument wins. `--truststore` is a modifier, not a mode: it pairs with a boot and with `--verify`, and `--help`, `--version`, and `--manifest` reject it. The variable is benign at compile time. The file holds one pin per line, a `blake3:` value plus 64 lowercase hex characters, with an optional decimal floor column; `#` comments and blank lines are ignored, and malformed input fails closed.
+**Pinning a producer.** A truststore pins the keys an artifact may verify against. Supply it with the artifact argument `--truststore <path>` or the `CAMEL_TRUSTSTORE` environment variable; the argument wins. `--truststore` is a modifier, not a mode: it pairs with a boot and with `--verify`, and `--help`, `--version`, and `--manifest` reject it. The variable is benign at compile time. The file holds one pin per line, a `blake3:` value plus 64 lowercase hex characters, with an optional decimal floor column; `#` comments and blank lines are ignored, and malformed input fails closed. A line whose whitespace-separated content is exactly `strict` sets the strict directive: idempotent, whitespace-tolerated, and not a pin.
 
 Under a supplied truststore:
 
@@ -91,6 +91,7 @@ Under a supplied truststore:
 - A pinned schema-5 artifact whose freshness marker is below the recorded floor exits 2 with `freshness-rollback`; a pinned schema-4 artifact below an existing floor fails the same way (it carries no marker).
 - Boot records each accepted key's floor in the truststore under an advisory lock on `<truststore>.lock`, merging maxima, so a floor never decreases.
 - `--verify` is a dry run: it applies the same policy and never writes.
+- With the strict directive, an artifact whose manifest carries no signing block exits 2 with `strict-unsigned` at boot, `--verify`, and the env-governed `--manifest`/`--help`/`--version` dispatch; a store that cannot be read or parsed fails closed for unsigned artifacts too. The directive changes nothing about pin or freshness decisions for signed artifacts.
 
 `--manifest` (and `--help`/`--version`) also run the boot-side trust policy: on first sight of a pinned key they record its floor, and a rolled-back artifact fails them too. Authority: [ADR-0083](../adr/0083-artifact-signing-envelope.md).
 

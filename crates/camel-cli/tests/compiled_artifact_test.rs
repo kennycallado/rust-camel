@@ -5280,6 +5280,377 @@ fn unsigned_artifact_ignores_truststore() {
 }
 
 // ---------------------------------------------------------------------------
+// strictmode Task 1.2: the `strict` store directive. A strict truststore
+// rejects every unsigned artifact (no signing block) at the shared trust
+// hook, on both verify sites and through both truststore sources; a
+// malformed store fails closed for unsigned artifacts too. Signed artifacts
+// keep the pin + freshness policy exactly as without the directive. The
+// cases reuse the keypin deploy helpers, the schema-5 `signed_job` fixture
+// as the fingerprint source, and the hand-assembled v1 trailer pattern of
+// `v1_artifact_with_stray_envelope_fails_closed`.
+// ---------------------------------------------------------------------------
+
+/// A strict truststore (pin + directive) rejects an unsigned schema-3
+/// artifact at BOTH sites: bare boot and `--verify` exit 2 with
+/// `strict-unsigned`, nothing boots, and `--verify` prints no
+/// `key_fingerprint:` line — the strict-unsigned diagnostic replaces the
+/// generic missing-envelope one.
+#[test]
+fn strict_store_rejects_unsigned_at_boot_and_verify() {
+    let (deploy, artifact) = deploy_artifact(&fixture().job);
+    let (signed_deploy, signed_artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(signed_deploy.path(), &signed_artifact);
+    let truststore = write_truststore(
+        deploy.path(),
+        "strict.keys",
+        &format!("{fingerprint}\nstrict\n"),
+    );
+
+    let (boot_code, boot_stdout, boot_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        boot_code, 2,
+        "a strict store must refuse an unsigned artifact;\nstdout:\n{boot_stdout}\nstderr:\n{boot_stderr}"
+    );
+    let boot_all = format!("{boot_stdout}{boot_stderr}");
+    assert!(
+        boot_all.contains("strict-unsigned"),
+        "the boot diagnostic must name the strict-unsigned step: {boot_all}"
+    );
+    assert!(
+        !boot_all.contains("context started"),
+        "no boot under a strict store: {boot_all}"
+    );
+
+    let (verify_code, verify_stdout, verify_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--verify", "--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        verify_code, 2,
+        "--verify under a strict store must refuse the unsigned artifact;\nstdout:\n{verify_stdout}\nstderr:\n{verify_stderr}"
+    );
+    assert!(
+        format!("{verify_stdout}{verify_stderr}").contains("strict-unsigned"),
+        "the verify diagnostic must name the strict-unsigned step: {verify_stdout}{verify_stderr}"
+    );
+    assert!(
+        !verify_stdout.contains("key_fingerprint:"),
+        "no verified identity on a strict rejection: {verify_stdout}"
+    );
+}
+
+/// The env source (`CAMEL_TRUSTSTORE`) carries the strict policy to every
+/// dispatch surface: bare boot and `--verify` exit 2 with
+/// `strict-unsigned` (no verified identity printed), and so do the
+/// exclusive `--manifest`, `--help`, and `--version` modes — boot
+/// verification precedes the dispatch. With the store on the ARGUMENT
+/// surface the exclusive modes keep their argument-surface rejection
+/// (`--truststore` and `--manifest` are mutually exclusive), proving the
+/// modifier rule is unchanged while env policy still governs the modes.
+#[test]
+fn strict_store_rejects_unsigned_through_env_dispatch_modes() {
+    let (deploy, artifact) = deploy_artifact(&fixture().job);
+    let (signed_deploy, signed_artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(signed_deploy.path(), &signed_artifact);
+    let truststore = write_truststore(
+        deploy.path(),
+        "env-strict.keys",
+        &format!("{fingerprint}\nstrict\n"),
+    );
+
+    let (boot_code, boot_stdout, boot_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &[],
+        &[("CAMEL_TRUSTSTORE", &truststore)],
+    );
+    assert_eq!(
+        boot_code, 2,
+        "a strict env store must refuse the unsigned boot;\nstdout:\n{boot_stdout}\nstderr:\n{boot_stderr}"
+    );
+    assert!(
+        format!("{boot_stdout}{boot_stderr}").contains("strict-unsigned"),
+        "the boot diagnostic must name the strict-unsigned step: {boot_stdout}{boot_stderr}"
+    );
+
+    let (verify_code, verify_stdout, verify_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--verify"],
+        &[("CAMEL_TRUSTSTORE", &truststore)],
+    );
+    assert_eq!(
+        verify_code, 2,
+        "--verify under a strict env store must refuse the unsigned artifact;\nstdout:\n{verify_stdout}\nstderr:\n{verify_stderr}"
+    );
+    assert!(
+        format!("{verify_stdout}{verify_stderr}").contains("strict-unsigned"),
+        "the verify diagnostic must name the strict-unsigned step: {verify_stdout}{verify_stderr}"
+    );
+    assert!(
+        !verify_stdout.contains("key_fingerprint:"),
+        "no verified identity on a strict rejection: {verify_stdout}"
+    );
+
+    for mode in ["--manifest", "--help", "--version"] {
+        let (code, stdout, stderr) = common::run_binary(
+            deploy.path(),
+            &artifact,
+            &[mode],
+            &[("CAMEL_TRUSTSTORE", &truststore)],
+        );
+        assert_eq!(
+            code, 2,
+            "{mode} under a strict env store must refuse the unsigned artifact;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+        assert!(
+            format!("{stdout}{stderr}").contains("strict-unsigned"),
+            "{mode} must name the strict-unsigned step: {stdout}{stderr}"
+        );
+    }
+
+    let (arg_code, arg_stdout, arg_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--truststore", &truststore, "--manifest"],
+        &[],
+    );
+    assert_eq!(
+        arg_code, 2,
+        "the argument surface must keep the exclusive-mode rejection;\nstdout:\n{arg_stdout}\nstderr:\n{arg_stderr}"
+    );
+    let arg_all = format!("{arg_stdout}{arg_stderr}");
+    assert!(
+        arg_all.contains("mutually exclusive") && arg_all.contains("--manifest"),
+        "the diagnostic must be the argument-surface one: {arg_all}"
+    );
+    assert!(
+        !arg_all.contains("strict-unsigned"),
+        "the argument surface must not reach the env trust policy: {arg_all}"
+    );
+}
+
+/// A malformed or unreadable truststore fails closed for an UNSIGNED
+/// artifact: the unsigned branch parses the supplied store, so (a) a
+/// malformed line 1 exits 2 with `truststore-parse` naming the line, and
+/// (b) an unreadable path exits 2 naming the path. Nothing boots either
+/// way.
+#[test]
+fn malformed_store_fails_closed_for_unsigned_artifact() {
+    let (deploy, artifact) = deploy_artifact(&fixture().job);
+    let malformed = write_truststore(deploy.path(), "broken.keys", "not-a-pin\n");
+
+    let (code, stdout, stderr) =
+        common::run_binary(deploy.path(), &artifact, &["--truststore", &malformed], &[]);
+    assert_eq!(
+        code, 2,
+        "a malformed store must refuse the unsigned artifact;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("truststore-parse") && combined.contains("line 1"),
+        "the diagnostic must name the parse step and line 1: {combined}"
+    );
+    assert!(
+        !combined.contains("context started"),
+        "no boot on a parse failure: {combined}"
+    );
+
+    let missing = "/nonexistent/strict.keys";
+    let (code, stdout, stderr) =
+        common::run_binary(deploy.path(), &artifact, &["--truststore", missing], &[]);
+    assert_eq!(
+        code, 2,
+        "an unreadable store must refuse the unsigned artifact;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("truststore-parse") && combined.contains(missing),
+        "the diagnostic must name the parse step and the path: {combined}"
+    );
+}
+
+/// A strict store adds the unsigned rejection and NOTHING else for a
+/// signed artifact: the pinned schema-5 fixture boots (exit 0) and
+/// `--verify` prints the verified identity (exit 0). The floor starts one
+/// second below the artifact marker, so the boot records the marker and
+/// rewrites the store file — the rewrite must preserve the `strict`
+/// directive, and `--verify` then reads the just-recorded floor and
+/// accepts.
+#[test]
+fn strict_store_still_boots_signed_pinned_artifact() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+    let marker = manifest_marker(deploy.path(), &artifact);
+    let truststore = write_truststore(
+        deploy.path(),
+        "strict-pins.keys",
+        &format!("{fingerprint} {}\nstrict\n", marker - 1),
+    );
+
+    let (boot_code, boot_stdout, boot_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        boot_code, 0,
+        "a strict store must not change the pinned signed boot;\nstdout:\n{boot_stdout}\nstderr:\n{boot_stderr}"
+    );
+
+    // The boot takes the lock, records the artifact marker as the floor,
+    // and rewrites the store. The rewrite must keep the `strict` directive
+    // line and record the marker as the pin's floor.
+    let rewritten = std::fs::read_to_string(&truststore).expect("read truststore after boot");
+    assert!(
+        rewritten.lines().any(|line| line.trim() == "strict"),
+        "the floor rewrite must preserve the strict directive line: {rewritten}"
+    );
+    assert!(
+        rewritten.contains(&format!("{fingerprint} {marker}")),
+        "the floor rewrite must record the artifact marker as the floor: {rewritten}"
+    );
+
+    let (verify_code, verify_stdout, verify_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--verify", "--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        verify_code, 0,
+        "--verify under a strict store must verify the pinned signed artifact;\nstdout:\n{verify_stdout}\nstderr:\n{verify_stderr}"
+    );
+    assert!(
+        verify_stdout.contains("key_fingerprint:"),
+        "the verified identity must print: {verify_stdout}"
+    );
+}
+
+/// The strip rule keeps precedence under a strict store: a signed
+/// artifact deployed WITHOUT its envelope hits `truststore-pin` (naming
+/// the fingerprint) at BOTH sites, never `strict-unsigned` — the
+/// signing-block-present branch never consults the directive.
+#[test]
+fn strip_rule_keeps_precedence_under_strict_store() {
+    let (deploy, artifact) = deploy_signed(&fixture().signed_job);
+    let fingerprint = manifest_fingerprint(deploy.path(), &artifact);
+    let truststore = write_truststore(
+        deploy.path(),
+        "strict-strip.keys",
+        &format!("{fingerprint}\nstrict\n"),
+    );
+    std::fs::remove_file(sig_path_of(&artifact)).expect("strip the envelope");
+
+    let (boot_code, boot_stdout, boot_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        boot_code, 2,
+        "a stripped envelope must refuse the boot;\nstdout:\n{boot_stdout}\nstderr:\n{boot_stderr}"
+    );
+    let boot_all = format!("{boot_stdout}{boot_stderr}");
+    assert!(
+        boot_all.contains("truststore-pin") && boot_all.contains(&fingerprint),
+        "the boot diagnostic must name the pin step and the fingerprint: {boot_all}"
+    );
+    assert!(
+        !boot_all.contains("strict-unsigned"),
+        "the strip rule must precede the strict directive: {boot_all}"
+    );
+
+    let (verify_code, _, verify_stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--verify", "--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        verify_code, 2,
+        "--verify on a stripped envelope must exit 2;\nstderr:\n{verify_stderr}"
+    );
+    assert!(
+        verify_stderr.contains("truststore-pin") && verify_stderr.contains(&fingerprint),
+        "the verify diagnostic must name the pin step and the fingerprint: {verify_stderr}"
+    );
+    assert!(
+        !verify_stderr.contains("strict-unsigned"),
+        "the strip rule must precede the strict directive: {verify_stderr}"
+    );
+}
+
+/// A strict store also rejects a hand-assembled v1 legacy artifact (no
+/// signing block at any schema number): boot exits 2 with
+/// `strict-unsigned` — the decision keys on the absent signing block, not
+/// the schema number. The trailer construction twins
+/// `v1_artifact_with_stray_envelope_fails_closed`, but NO envelope is
+/// written beside this artifact.
+#[test]
+fn strict_store_rejects_v1_artifact_without_signing_block() {
+    // No harness-child spawn below (run_binary executes the artifact),
+    // but the guard keeps this test safe against any future conversion
+    // to a spawn helper (bd rc-wvydl).
+    child_guard();
+    use std::io::Write as _;
+    let deploy = tempfile::tempdir().expect("deploy tempdir");
+
+    let manifest =
+        camel_cli::compile::manifest::derive("app.yaml", trailer::TrailerKind::Route, ROUTE_DOC)
+            .expect("v1 manifest derives");
+    let v1 = trailer::Trailer {
+        kind: trailer::TrailerKind::Route,
+        payload: ROUTE_DOC.as_bytes().to_vec(),
+        manifest: manifest.to_legacy_json().into_bytes(),
+    };
+    let artifact = deploy.path().join("app.bin");
+    std::fs::copy(env!("CARGO_BIN_EXE_camel"), &artifact).expect("copy camel binary");
+    let mut tail = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&artifact)
+        .expect("open artifact for trailer append");
+    tail.write_all(&trailer::encode(&v1))
+        .expect("append v1 trailer");
+    drop(tail);
+
+    let truststore = write_truststore(
+        deploy.path(),
+        "strict.keys",
+        &format!("blake3:{OTHER_PIN_HEX}\nstrict\n"),
+    );
+
+    let (code, stdout, stderr) = common::run_binary(
+        deploy.path(),
+        &artifact,
+        &["--truststore", &truststore],
+        &[],
+    );
+    assert_eq!(
+        code, 2,
+        "a strict store must refuse a v1 artifact with no signing block;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        combined.contains("strict-unsigned"),
+        "the diagnostic must name the strict-unsigned step: {combined}"
+    );
+    assert!(
+        !combined.contains("context started"),
+        "no boot under a strict store: {combined}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // keypin Task 2.2: freshness floors. The decision and floor write share one
 // lock-serialized boot critical section; `--verify` is a dry run. The cases
 // reuse the shared schema-5 `signed_job` fixture via `deploy_signed` and read

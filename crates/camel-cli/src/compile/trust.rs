@@ -6,7 +6,11 @@
 //! `blake3:` + 64 lowercase hex characters — the manifest
 //! `key_fingerprint` form — optionally followed by whitespace and a
 //! decimal unsigned 64-bit freshness floor. Blank lines and lines whose
-//! first non-space character is `#` are ignored. The validated floor
+//! first non-space character is `#` are ignored. A line whose only token
+//! is `strict` is a store-level directive rather than a pin: it opts in
+//! to the runtime's strict verification policy (read by the verify side,
+//! task 1.2), repeating it is idempotent, and — like a comment — it is
+//! preserved verbatim across floor rewrites. The validated floor
 //! value is stored per pin, and the file's verbatim lines are retained on
 //! the parse ([`TrustStore::lines`]) so a floor rewrite preserves every
 //! comment, blank line, and pin in order.
@@ -41,6 +45,7 @@ pub(crate) struct PinEntry {
 pub(crate) struct TrustStore {
     entries: Vec<PinEntry>,
     lines: Vec<String>,
+    strict: bool,
 }
 
 impl TrustStore {
@@ -67,6 +72,7 @@ impl TrustStore {
         // order-preserving rewrites (keypin Task 2.2).
         let lines: Vec<String> = text.lines().map(str::to_string).collect();
         let mut entries: Vec<PinEntry> = Vec::new();
+        let mut strict = false;
         for (offset, raw) in lines.iter().enumerate() {
             let line = offset + 1;
             let trimmed = raw.trim_start();
@@ -74,6 +80,14 @@ impl TrustStore {
                 continue;
             }
             let tokens: Vec<&str> = raw.split_whitespace().collect();
+            // The store-level `strict` directive: a line whose only token is
+            // `strict`. Checked before the fingerprint/floor match so a bare
+            // `strict` line is never read as a pin. Repeats are idempotent —
+            // unlike pins, a repeated directive is not an error.
+            if tokens.as_slice() == ["strict"] {
+                strict = true;
+                continue;
+            }
             let (fingerprint, floor) = match tokens.as_slice() {
                 [fingerprint] => ((*fingerprint).to_string(), None),
                 [fingerprint, floor] => {
@@ -116,7 +130,16 @@ impl TrustStore {
             }
             entries.push(PinEntry { fingerprint, floor });
         }
-        Ok(TrustStore { entries, lines })
+        Ok(TrustStore {
+            entries,
+            lines,
+            strict,
+        })
+    }
+
+    /// Whether the truststore declared the `strict` directive.
+    pub(crate) fn is_strict(&self) -> bool {
+        self.strict
     }
 
     /// Whether `fingerprint` (the manifest `key_fingerprint` form,
@@ -700,6 +723,107 @@ mod tests {
                 .contains(lock_path.display().to_string().as_str()),
             "the diagnostic names the lock path: {err}"
         );
+    }
+
+    /// The `strict` directive parses as a store-level flag: a bare
+    /// `strict` line sets `is_strict`, beside a pinned fingerprint.
+    #[test]
+    fn strict_directive_parses_and_flags_store() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let body = format!("{}\nstrict\n# note\n\n", pin(HEX_A));
+        let path = write_store(dir.path(), "strict.keys", body.as_bytes());
+
+        let store = TrustStore::parse(&path).expect("strict directive parses");
+
+        assert!(store.is_strict(), "the strict directive is recorded");
+        assert_eq!(store.entries.len(), 1, "one pin is recorded");
+        assert!(
+            store.is_pinned(&pin(HEX_A)),
+            "the fingerprint beside strict stays pinned"
+        );
+    }
+
+    /// Repeated and whitespace-padded `strict` lines are idempotent (no
+    /// duplicate error), and the directive lines survive in `lines`
+    /// verbatim like comments.
+    #[test]
+    fn strict_directive_idempotent_and_whitespace_tolerated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let body = format!("# note\n\n strict \nstrict\n{}\n", pin(HEX_B));
+        let path = write_store(dir.path(), "strict-idem.keys", body.as_bytes());
+
+        let store = TrustStore::parse(&path).expect("repeated strict parses");
+
+        assert!(store.is_strict(), "repeated strict is idempotent");
+        assert_eq!(store.entries.len(), 1, "exactly one pin is recorded");
+        assert!(store.is_pinned(&pin(HEX_B)), "the pin is recorded");
+        assert_eq!(
+            store.lines,
+            vec![
+                "# note".to_string(),
+                String::new(),
+                " strict ".to_string(),
+                "strict".to_string(),
+                pin(HEX_B),
+            ],
+            "the verbatim lines retain directive lines like comments"
+        );
+    }
+
+    /// A `strict` line carrying a second token is not a directive: it falls
+    /// through to the two-token rule and the first token fails
+    /// `is_pinned_form`, so it is malformed.
+    #[test]
+    fn strict_with_second_token_is_malformed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_store(dir.path(), "strict-arg.keys", b"strict 42\n");
+
+        let err = TrustStore::parse(&path).expect_err("strict with an argument must fail");
+        assert_eq!(
+            err,
+            TrustError::MalformedEntry {
+                path: path.clone(),
+                line: 1
+            }
+        );
+        let message = err.to_string();
+        assert!(message.starts_with("truststore-parse"), "{message}");
+        assert!(
+            message.contains(path.display().to_string().as_str()),
+            "{message}"
+        );
+        assert!(message.contains("line 1"), "{message}");
+
+        // A second token that itself looks like a pin is still not a
+        // directive: `strict` does not carry a `blake3:` prefix.
+        let two_token = write_store(
+            dir.path(),
+            "strict-pin.keys",
+            format!("strict {}\n", pin(HEX_A)).as_bytes(),
+        );
+        let err = TrustStore::parse(&two_token).expect_err("strict plus a pin must fail");
+        assert_eq!(
+            err,
+            TrustError::MalformedEntry {
+                path: two_token.clone(),
+                line: 1
+            }
+        );
+    }
+
+    /// A store without a `strict` line defaults to non-strict.
+    #[test]
+    fn strict_absent_by_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_store(
+            dir.path(),
+            "no-strict.keys",
+            format!("{}\n", pin(HEX_A)).as_bytes(),
+        );
+
+        let store = TrustStore::parse(&path).expect("a store without strict parses");
+
+        assert!(!store.is_strict(), "strict is opt-in, absent by default");
     }
 
     /// Two threads run the boot-path lock-guarded sequence — lock,

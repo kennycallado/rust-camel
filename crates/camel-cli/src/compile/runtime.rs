@@ -982,17 +982,20 @@ fn verify_envelope_bytes(
 /// The `--verify` chain (r4sign Task 1.3, no boot): read the detached
 /// envelope at `<exe>.sig` and verify it against the artifact, apply the
 /// shared trust policy (keypin Task 1.2), then print the verified
-/// identity and exit 0; any failure — missing envelope (the diagnostic
-/// names a required signature too, or the truststore strip rule),
-/// unreadable envelope, unpaired envelope, a named verification step, a
-/// truststore parse failure, or an unpinned key — exits 2 with the
-/// diagnostic on stderr.
+/// identity and exit 0; any failure exits 2 with the diagnostic on
+/// stderr. A missing envelope is its own case: the diagnostic names a
+/// required signature when the manifest marks one, the truststore strip
+/// rule when a supplied store is in force, or `strict-unsigned` when the
+/// store is strict and the manifest carries no signing block. An
+/// unreadable envelope, an unpaired envelope, a named verification step,
+/// a truststore parse failure (which fails closed for unsigned artifacts
+/// too), or an unpinned key each exit 2 as well.
 fn run_verify_only(exe: &Path, manifest: &manifest::Manifest, truststore: Option<&Path>) -> i32 {
     let sig = envelope_path(exe);
     let envelope = match std::fs::read(&sig) {
         Ok(envelope) => envelope,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if trust_policy_rejection(truststore, manifest, false, TrustMode::Verify, &sig)
+            if trust_policy_rejection(truststore, manifest, exe, false, TrustMode::Verify, &sig)
                 .is_some()
             {
                 return EXIT_REJECTION;
@@ -1025,7 +1028,7 @@ fn run_verify_only(exe: &Path, manifest: &manifest::Manifest, truststore: Option
         Ok(verified) => verified,
         Err(()) => return EXIT_REJECTION,
     };
-    if trust_policy_rejection(truststore, manifest, true, TrustMode::Verify, &sig).is_some() {
+    if trust_policy_rejection(truststore, manifest, exe, true, TrustMode::Verify, &sig).is_some() {
         return EXIT_REJECTION;
     }
     println!("algorithm: {}", verified.algorithm_name);
@@ -1053,6 +1056,8 @@ pub(crate) enum TrustRejection {
     Pin,
     /// `truststore-parse`.
     Parse,
+    /// `strict-unsigned`.
+    StrictUnsigned,
     /// `freshness-rollback`.
     Rollback,
     /// `truststore-update`.
@@ -1080,8 +1085,11 @@ enum BootLockOutcome {
 ///   pass without its envelope while a truststore is in force, WHATEVER
 ///   its required bit. The pre-existing required-signature diagnostic
 ///   keeps its form only on the no-truststore path. Schema-3-or-earlier
-///   manifests (no signing block) keep their existing behavior
-///   everywhere.
+///   manifests (no signing block) read the strict directive: a strict
+///   store rejects the unsigned artifact (`strict-unsigned`) and a
+///   malformed store fails closed (`truststore-parse`); a well-formed
+///   non-strict store leaves the unsigned path unchanged. That branch
+///   costs exactly one store read.
 /// - present (after [`verify_envelope_bytes`] fully passes): parse the
 ///   truststore — a [`trust::TrustError`] prints its `truststore-parse`
 ///   diagnostic — require the manifest `key_fingerprint` to be pinned
@@ -1097,6 +1105,7 @@ enum BootLockOutcome {
 fn trust_policy_rejection(
     truststore: Option<&Path>,
     manifest: &manifest::Manifest,
+    exe: &Path,
     envelope_present: bool,
     mode: TrustMode,
     sig: &Path,
@@ -1104,11 +1113,30 @@ fn trust_policy_rejection(
     // No truststore path supplied: zero new file reads on the R4 path.
     let path = truststore?;
     let Some(signing) = &manifest.signing else {
-        // Schema 3 or earlier carries no signing block, so the
-        // truststore does not apply to it anywhere; a stray envelope on
-        // such a manifest is already rejected inside
-        // `verify_envelope_bytes` before this hook.
-        return None;
+        // Schema 3 or earlier carries no signing block; a stray envelope
+        // on such a manifest is already rejected inside
+        // `verify_envelope_bytes` before this hook. The supplied store is
+        // still read once: a malformed store fails closed for unsigned
+        // artifacts too, and a strict store rejects every unsigned
+        // artifact; a well-formed non-strict store keeps the historical
+        // unsigned path.
+        match trust::TrustStore::parse(path) {
+            Err(e) => {
+                eprintln!("{e}");
+                return Some(TrustRejection::Parse);
+            }
+            Ok(store) if store.is_strict() => {
+                eprintln!(
+                    "strict-unsigned: the artifact at {} carries no signing block \
+                     (schema {}); the truststore at {} is strict",
+                    exe.display(),
+                    manifest.manifest_schema,
+                    path.display()
+                );
+                return Some(TrustRejection::StrictUnsigned);
+            }
+            Ok(_) => return None,
+        }
     };
     if !envelope_present {
         eprintln!(
@@ -1255,8 +1283,9 @@ fn print_freshness_rollback(signing: &manifest::SigningBlock, floor: Option<u64>
 /// bare boot (r4sign Task 1.3): a missing envelope refuses the boot
 /// only when the manifest marks the signature required — or, under a
 /// supplied truststore, when the manifest carries a signing block (the
-/// keypin Task 1.2 strip rule) — otherwise the artifact proceeds with
-/// ZERO hashing (v1 compatibility). A present envelope runs the shared
+/// keypin Task 1.2 strip rule) or the store is strict and the manifest
+/// carries no signing block (`strict-unsigned`) — otherwise the
+/// artifact proceeds with ZERO hashing (v1 compatibility). A present envelope runs the shared
 /// verification chain and then the trust policy before the dispatch; any
 /// failure exits 2 with the named step on stderr and no boot.
 ///
@@ -1270,7 +1299,8 @@ fn verify_for_boot(
     let envelope = match std::fs::read(&sig) {
         Ok(envelope) => envelope,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if trust_policy_rejection(truststore, manifest, false, TrustMode::Boot, &sig).is_some()
+            if trust_policy_rejection(truststore, manifest, exe, false, TrustMode::Boot, &sig)
+                .is_some()
             {
                 return Some(EXIT_REJECTION);
             }
@@ -1299,7 +1329,7 @@ fn verify_for_boot(
         Ok(_) => {}
         Err(()) => return Some(EXIT_REJECTION),
     }
-    trust_policy_rejection(truststore, manifest, true, TrustMode::Boot, &sig)
+    trust_policy_rejection(truststore, manifest, exe, true, TrustMode::Boot, &sig)
         .map(|_| EXIT_REJECTION)
 }
 
@@ -1941,6 +1971,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let fingerprint = format!("blake3:{}", "a0".repeat(32));
         let manifest = schema4_manifest(&fingerprint);
+        let exe = dir.path().join("app.bin");
         let sig = dir.path().join("app.bin.sig");
 
         // (a) No floor recorded: the pin check passes and the boot
@@ -1951,6 +1982,7 @@ mod tests {
             super::trust_policy_rejection(
                 Some(&no_floor),
                 &manifest,
+                &exe,
                 true,
                 super::TrustMode::Boot,
                 &sig,
@@ -1967,6 +1999,7 @@ mod tests {
             super::trust_policy_rejection(
                 Some(&floored),
                 &manifest,
+                &exe,
                 true,
                 super::TrustMode::Boot,
                 &sig,
@@ -1986,6 +2019,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let fingerprint = format!("blake3:{}", "ae".repeat(32));
         let manifest = schema4_manifest(&fingerprint);
+        let exe = dir.path().join("app.bin");
         let sig = dir.path().join("app.bin.sig");
         let truststore = dir.path().join("pins.keys");
         std::fs::write(&truststore, format!("{fingerprint}\n")).expect("write truststore");
@@ -2008,6 +2042,7 @@ mod tests {
             super::trust_policy_rejection(
                 Some(&truststore),
                 &manifest,
+                &exe,
                 true,
                 super::TrustMode::Boot,
                 &sig,
