@@ -929,6 +929,17 @@ fn verify_envelope_bytes(
     exe: &Path,
     manifest: &manifest::Manifest,
 ) -> Result<signature::VerifiedEnvelope, ()> {
+    // Schema-agnostic rejection: every manifest below schema 4 pairs
+    // with no signing block, so a present envelope is stray regardless
+    // of the integer printed. Boot-level twins cover schemas 1 and 3
+    // (v1_artifact_with_stray_envelope_fails_closed,
+    // unsigned_with_stray_envelope_fails_closed); the schema-2
+    // boot-level twin is deferred — hand-assembling a store-1 (R1-era)
+    // artifact outweighs the marginal coverage, and schema-2 decode and
+    // pairing rejection are unit-tested in manifest.rs
+    // (manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired).
+    // Reopen the defer only if a store-1 artifact builder ever lands
+    // (bd rc-pbezt).
     if !matches!(
         manifest.manifest_schema,
         manifest::MANIFEST_SCHEMA_V4 | manifest::MANIFEST_SCHEMA_V5
