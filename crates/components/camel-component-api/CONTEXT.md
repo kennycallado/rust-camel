@@ -56,7 +56,9 @@ should use the `ConsumerContext` cancellation token, or a child token. This lets
 
 Producer-side and processor-side code (which has no `ConsumerContext`) observes Runtime shutdown
 through `ComponentContext::shutdown_token()`, resolved per call (the Runtime token is replaced on
-each start); unbound contexts return `None` and callers fall back to a local token.
+each start); unbound contexts return `None` and callers fall back to a local token. Token lineage
+binds when the component is registered; endpoint-creation adapter contexts (controller, master
+delegate) resolve `None` by design.
 
 ## Network retry helpers
 

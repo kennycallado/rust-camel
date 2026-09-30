@@ -103,8 +103,12 @@ pub(crate) async fn start_context(
     // Mirror the fresh token into the shared slot (wasm wiring): the write
     // sits adjacent to the reset above so the two cannot drift.
     // Poison-tolerant by design — a poisoned slot must not fail the boot;
-    // leaving a stale token is fail-safe (resolvers keep a lineage that
-    // this boot never cancels).
+    // readers fail CLOSED to `None` (`lock().ok()?` in
+    // `RegistryComponentContext::shutdown_token`), so resolvers mint an
+    // uncancelled local root: Runtime-shutdown observation is lost for that
+    // boot (same observable as unbound contexts), never born-cancelled.
+    // Poison requires a panic while holding a one-line read/write lock
+    // (near-zero probability).
     if let Ok(mut slot) = shutdown_token_slot.lock() {
         *slot = cancel_token.clone();
     }

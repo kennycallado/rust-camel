@@ -164,3 +164,31 @@ fn producer_passthrough_bubbles_delegate_errors() {
     assert_eq!(endpoint_calls.load(Ordering::SeqCst), 1);
     assert_eq!(producer_calls.load(Ordering::SeqCst), 1);
 }
+
+/// Boundary lock (bd rc-4bfnk): `MasterDelegateContext` intentionally keeps
+/// the trait's `None` default for `shutdown_token` — see the impl-block doc
+/// in `endpoint.rs`. Wasm delegates resolve their token from the
+/// registration-time slot-bound context captured by `WasmComponent`, not
+/// from the endpoint-creation-time context passed to them.
+#[test]
+fn master_delegate_shutdown_token_is_none_boundary_lock() {
+    let ctx = crate::endpoint::MasterDelegateContext {
+        delegate_component: Arc::new(MockProducerDelegateComponent {
+            create_endpoint_calls: Arc::new(AtomicUsize::new(0)),
+            create_producer_calls: Arc::new(AtomicUsize::new(0)),
+            fail_producer: false,
+        }),
+        metrics: Arc::new(NoOpMetrics),
+        platform_service: Arc::new(NoopPlatformService::default()),
+    };
+
+    let token = ComponentContext::shutdown_token(&ctx);
+    assert!(
+        token.is_none(),
+        "boundary lock: MasterDelegateContext::shutdown_token must stay None \
+         (endpoint-creation-time adapter context; delegates resolve tokens from \
+         the registration-time slot-bound context instead). If a slot-backed \
+         accessor is ever added to the trait, update this test deliberately — \
+         do not delete it. See bd rc-4bfnk."
+    );
+}

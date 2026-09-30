@@ -59,3 +59,19 @@ fn controller_path_component_metrics_reflects_lever() {
         "disabled snapshot must stay off (opt-in default)"
     );
 }
+
+/// Boundary lock (rc-4bfnk): `ControllerComponentContext` intentionally
+/// keeps the trait's `None` default for `shutdown_token` — see the
+/// impl-block doc in `controller_component_context.rs`.
+#[test]
+fn shutdown_token_is_none_boundary_lock() {
+    let ctx = build_ctx(false);
+    let token = ComponentContext::shutdown_token(&*ctx);
+    assert!(
+        token.is_none(),
+        "boundary lock: ControllerComponentContext::shutdown_token must stay None \
+         (endpoint-creation-time adapter context; no slot-backed accessor is \
+         reachable through it). If a slot-backed accessor is ever added to the \
+         trait, update this test deliberately — do not delete it."
+    );
+}

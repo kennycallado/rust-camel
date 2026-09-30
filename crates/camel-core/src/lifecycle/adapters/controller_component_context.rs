@@ -64,6 +64,14 @@ impl ControllerComponentContext {
     }
 }
 
+/// Boundary decision (rc-4bfnk): `shutdown_token` intentionally keeps the
+/// trait's `None` default — no per-call token consumer is reachable through
+/// this context. The only production callers of the trait method are wasm
+/// `producer.rs:150` and `bean.rs:58` in `camel-component-wasm`, which
+/// resolve from the registration-time slot-bound `RegistryComponentContext`
+/// (see `camel-bundles` lib.rs:421-429 and `camel-cli` run.rs:385-393).
+/// Snapshotting here would be dead code plus a stale-across-stop/start
+/// hazard.
 impl ComponentContext for ControllerComponentContext {
     fn resolve_component(&self, scheme: &str) -> Option<Arc<dyn camel_component_api::Component>> {
         self.registry.lock().ok()?.get(scheme)

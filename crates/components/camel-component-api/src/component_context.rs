@@ -55,6 +55,18 @@ pub trait ComponentContext: Send + Sync {
     /// Callers resolve this per call: CamelContext replaces its shutdown
     /// token on every start, so a token captured once goes stale across
     /// stop/start.
+    ///
+    /// # Binding-time boundary
+    ///
+    /// Token lineage binds at component REGISTRATION time. Production
+    /// registration sites construct slot-bound contexts
+    /// (`RegistryComponentContext::with_shutdown_slot`, re-written by
+    /// every `CamelContext::start`) and hand them to long-lived components
+    /// (for example `WasmComponent`'s captured `Arc<dyn ComponentContext>`).
+    /// Endpoint-creation-time adapter contexts
+    /// (`ControllerComponentContext`, `MasterDelegateContext`) must NOT
+    /// snapshot tokens; they keep the `None` default so no stale-across
+    /// stop/start lineage can leak, and callers mint a local root instead.
     fn shutdown_token(&self) -> Option<CancellationToken> {
         None
     }

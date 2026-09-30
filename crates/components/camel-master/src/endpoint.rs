@@ -60,15 +60,31 @@ impl Endpoint for MasterEndpoint {
 }
 
 pub(crate) struct MasterDelegateContext {
-    // Fields are pub(crate) during Tasks 1-2 because reconcile_event (still in
-    // lib.rs) constructs this struct via field-init syntax. After Task 3 (Commit 2
-    // — leadership.rs extraction), they CAN be narrowed to private since only
-    // endpoint.rs constructs them (in create_producer).
+    // Fields stay pub(crate): the leadership.rs extraction is complete, and
+    // both endpoint.rs (`create_producer`) and leadership.rs
+    // (`reconcile_event`, ~line 283) construct this struct via field-init
+    // syntax. Narrowing these fields to private would break the crate.
+    // (This supersedes the earlier stale note that predicted they could be
+    // narrowed after the leadership.rs extraction.)
     pub(crate) delegate_component: Arc<dyn Component>,
     pub(crate) metrics: Arc<dyn MetricsCollector>,
     pub(crate) platform_service: Arc<dyn PlatformService>,
 }
 
+/// Endpoint-creation-time adapter [`ComponentContext`] handed to a delegate
+/// component by [`MasterEndpoint::create_producer`].
+///
+/// Boundary decision (bd rc-4bfnk): this context deliberately keeps the
+/// trait's `None` default for `shutdown_token`. It is an
+/// endpoint-creation-time adapter context, so it must not snapshot a shutdown
+/// token — such a snapshot goes stale across `CamelContext` stop/start.
+/// Wasm delegates created through this context do not need it: they resolve
+/// tokens from the registration-time slot-bound context captured by
+/// `WasmComponent` (`camel-component-wasm/src/lib.rs:70-84`; endpoint
+/// construction passes `self.registry.clone()`, never the `ctx` passed
+/// here). The only production callers of the trait method are
+/// `camel-component-wasm/src/producer.rs:150` and
+/// `camel-component-wasm/src/bean.rs:58`.
 impl ComponentContext for MasterDelegateContext {
     fn resolve_component(&self, scheme: &str) -> Option<Arc<dyn Component>> {
         if self.delegate_component.scheme() == scheme {
