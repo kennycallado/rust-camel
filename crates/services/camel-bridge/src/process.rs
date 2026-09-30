@@ -1071,13 +1071,21 @@ mod tests {
     // --- R4-L7: Bounded stdout drain tests ---
 
     /// Helper: spawn a child that writes to stdout, return (child, stdout BufReader).
+    ///
+    /// stdin/stderr are nulled so no descendant inherits the test binary's
+    /// harness pipes. Under cargo-nextest, a leaked grandchild (e.g. an
+    /// orphaned `sleep` outliving a SIGKILLed `sh`) that still holds the
+    /// inherited stdin/stderr keeps nextest's pipes open past leak-timeout
+    /// and the test is flagged LEAK even though it passed.
     async fn spawn_child_with_stdout(script: &str) -> tokio::process::Child {
         use tokio::process::Command;
 
         Command::new("sh")
             .arg("-c")
             .arg(script)
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .expect("must spawn test child")
     }
