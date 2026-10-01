@@ -2,7 +2,7 @@
 description: Escalation-only expert. Called when workers are stuck on hard problems.
 mode: subagent
 model: zai-coding-plan/glm-5.3
-variant: max
+variant: high
 temperature: 0.2
 tools:
   write: true

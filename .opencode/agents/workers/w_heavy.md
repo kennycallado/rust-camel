@@ -2,8 +2,8 @@
 description: high - reasoning implementation worker for complex tasks.
 mode: subagent
 temperature: 0.1
-model: zhipuai-coding-plan/glm-5.3
-variant: max
+model: zai-coding-plan/glm-5.3
+variant: high
 tools:
   write: true
   edit: true
