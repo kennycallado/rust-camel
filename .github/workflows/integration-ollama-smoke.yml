@@ -40,7 +40,7 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
       - name: Cache Ollama models (embeddinggemma only, ~621 MB)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.ollama/models
           # Bump the -vN suffix to invalidate if the pinned model changes.
