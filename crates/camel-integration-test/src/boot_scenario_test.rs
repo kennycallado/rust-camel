@@ -934,3 +934,131 @@ provider = "sqlx"
             .expect("shutdown B");
     }
 }
+
+/// Surreal mem-tier boot-freshness test (surreal-state-tier task 2.5),
+/// the surreal twin of the sql `boot_freshness` family above. The
+/// embedded `mem://` tier's per-boot isolation is by construction —
+/// each connect spawns a fresh embedded instance — so the second boot
+/// proves freshness through a fresh catalog over a new client, while
+/// the teardown close seam (factory close → `invalidate()`) must still
+/// complete Ok so a shutdown reports real failures only.
+#[cfg(feature = "surreal")]
+mod surreal_boot_freshness {
+    use std::sync::Arc;
+
+    use camel_api::datasource::DatasourceCatalog;
+    use surrealdb::Surreal;
+    use surrealdb::engine::any::Any as SurrealAny;
+
+    use super::{DOC, ROUTE, boot_scenario, empty_env, project};
+    use crate::surreal_action::{SurrealAction, execute_surreal_prepare};
+
+    /// One `surrealdb` datasource over `mem://`: the embedded instance
+    /// runs with authentication disabled, so no credential extras are
+    /// needed (the task 2.1 factory contract).
+    const MEM_TOML: &str = r#"
+[datasources.statedb]
+provider = "surrealdb"
+db_url = "mem://"
+"#;
+
+    /// Defines the `user` table through the real prepare executor —
+    /// the same path a `surreal:` document action takes.
+    async fn define_table(catalog: &Arc<dyn DatasourceCatalog>) {
+        execute_surreal_prepare(
+            catalog,
+            &SurrealAction {
+                datasource: "statedb".into(),
+                prepare: vec!["DEFINE TABLE user SCHEMALESS".into()],
+            },
+        )
+        .await
+        .expect("define prepare");
+    }
+
+    /// Inserts exactly one record (`name = tag`) through the real
+    /// prepare executor — the same path a `surreal:` document action
+    /// takes.
+    async fn insert(catalog: &Arc<dyn DatasourceCatalog>, tag: &str) {
+        execute_surreal_prepare(
+            catalog,
+            &SurrealAction {
+                datasource: "statedb".into(),
+                prepare: vec![format!("CREATE user SET name = '{tag}'")],
+            },
+        )
+        .await
+        .expect("seed prepare");
+    }
+
+    /// Counts the `user` records through the catalog's pool.
+    async fn count(catalog: &Arc<dyn DatasourceCatalog>) -> usize {
+        let handle = catalog.get_pool("statedb").await.expect("pool");
+        let client = handle
+            .downcast::<Surreal<SurrealAny>>()
+            .expect("any client");
+        let rows: Vec<surrealdb::types::Value> = client
+            .query("SELECT name FROM user")
+            .await
+            .expect("select transport must succeed")
+            .check()
+            .expect("select statement must succeed")
+            .take(0)
+            .expect("select must return an array");
+        rows.len()
+    }
+
+    #[tokio::test]
+    async fn mem_surreal_second_boot_starts_empty() {
+        let (dir, doc) = project(MEM_TOML, Some(("routes.yaml", ROUTE)), DOC);
+
+        // Boot A seeds one record and tears down (close_all Ok through
+        // shutdown).
+        let mut run_a = boot_scenario(&doc, dir.path(), &empty_env())
+            .await
+            .expect("boot A");
+        let catalog_a = run_a.boot.datasource_catalog();
+        define_table(&catalog_a).await;
+        insert(&catalog_a, "a").await;
+        assert_eq!(
+            count(&catalog_a).await,
+            1,
+            "boot A must see its own seeded record"
+        );
+        run_a
+            .boot
+            .shutdown(&mut run_a.ctx)
+            .await
+            .expect("shutdown A");
+        drop(run_a);
+
+        // Boot B: same project, same alias, same process. The fresh
+        // catalog builds a new client over a new `mem://` connect —
+        // freshness by construction; boot A's record must not leak.
+        // The table is defined first through the prepare path so the
+        // zero-read is observable: on a table-less fresh instance
+        // SELECT returns NotFound, not an empty array (surrealdb
+        // 3.2.4 local engine).
+        let mut run_b = boot_scenario(&doc, dir.path(), &empty_env())
+            .await
+            .expect("boot B");
+        let catalog_b = run_b.boot.datasource_catalog();
+        define_table(&catalog_b).await;
+        let count_b = count(&catalog_b).await;
+        assert_eq!(
+            count_b, 0,
+            "boot B must start empty — boot A's mem:// record leaked across boots"
+        );
+        insert(&catalog_b, "b").await;
+        assert_eq!(
+            count(&catalog_b).await,
+            1,
+            "boot B must see only its own record"
+        );
+        run_b
+            .boot
+            .shutdown(&mut run_b.ctx)
+            .await
+            .expect("shutdown B");
+    }
+}

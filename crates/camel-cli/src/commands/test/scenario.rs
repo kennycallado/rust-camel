@@ -2,11 +2,15 @@
 //!
 //! Path selection lives in [`run_scenario_doc`]: a document whose wire
 //! schemes this build provisions beyond `fake` — or that carries a
-//! `sql:` action this build executes (bd rc-25lup.1) — runs through the
-//! embedded full boot (`integration-http`: harness `http` partners and
-//! `direct` route stimulus; `integration-sql`: the `sql:` datasource
-//! action); a `fake`-only document keeps the no-boot smoke path; any
-//! other scheme reports `infra-unavailable` naming the adapter. Both
+//! `sql:` action this build executes (bd rc-25lup.1), or a `surreal:`
+//! action / surreal validate target this build executes
+//! (surreal-state-tier) — runs through the embedded full boot
+//! (`integration-http`: harness `http` partners and `direct` route
+//! stimulus; `integration-sql`: the `sql:` datasource action;
+//! `integration-surreal`: the `surreal:` datasource action and the
+//! surreal validate target); a `fake`-only document keeps the no-boot
+//! smoke path; any other scheme reports `infra-unavailable` naming the
+//! adapter. Both
 //! paths execute the ORIGINAL document through `run_scenario_document`
 //! and map the per-action outcome to rows through [`outcome_rows`];
 //! the taxonomy exit mapping (verdict 1, apparatus 2, doc-validation
@@ -34,19 +38,72 @@ const BOOT_SCHEMES: [&str; 3] = [FAKE_SCHEME, "direct", "http"];
 #[cfg(all(not(feature = "integration-http"), feature = "integration-sql"))]
 const BOOT_SCHEMES: [&str; 2] = [FAKE_SCHEME, "direct"];
 
+/// The wire schemes the full-boot path provisions in a surreal-only
+/// build (`integration-surreal` without `integration-http` or
+/// `integration-sql`): the same `direct` stimulus and no `http`
+/// partner — surreal actions and validate targets reference a named
+/// datasource, never a wire endpoint.
+#[cfg(all(
+    not(feature = "integration-http"),
+    not(feature = "integration-sql"),
+    feature = "integration-surreal"
+))]
+const BOOT_SCHEMES: [&str; 2] = [FAKE_SCHEME, "direct"];
+
 /// What this build's smoke path can provide, for the
 /// infra-unavailable message. Without `integration-http` the string is
 /// the historical one verbatim; `integration-sql` adds the `sql:`
-/// action it executes.
-#[cfg(all(not(feature = "integration-http"), not(feature = "integration-sql")))]
+/// action it executes; `integration-surreal` adds the `surreal:`
+/// datasource action and the surreal validate target.
+#[cfg(all(
+    not(feature = "integration-http"),
+    not(feature = "integration-sql"),
+    not(feature = "integration-surreal")
+))]
 const PROVIDED_ADAPTERS: &str = "only the `fake:` in-memory adapter";
-#[cfg(all(feature = "integration-http", not(feature = "integration-sql")))]
+#[cfg(all(
+    feature = "integration-http",
+    not(feature = "integration-sql"),
+    not(feature = "integration-surreal")
+))]
 const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter and the `http:` wire partner";
-#[cfg(all(not(feature = "integration-http"), feature = "integration-sql"))]
+#[cfg(all(
+    not(feature = "integration-http"),
+    feature = "integration-sql",
+    not(feature = "integration-surreal")
+))]
 const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter and the `sql:` datasource action";
-#[cfg(all(feature = "integration-http", feature = "integration-sql"))]
+#[cfg(all(
+    feature = "integration-http",
+    feature = "integration-sql",
+    not(feature = "integration-surreal")
+))]
 const PROVIDED_ADAPTERS: &str =
     "the `fake:` in-memory adapter, the `http:` wire partner, and the `sql:` datasource action";
+#[cfg(all(
+    not(feature = "integration-http"),
+    not(feature = "integration-sql"),
+    feature = "integration-surreal"
+))]
+const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter, the `surreal:` datasource action, and the surreal validate target";
+#[cfg(all(
+    feature = "integration-http",
+    not(feature = "integration-sql"),
+    feature = "integration-surreal"
+))]
+const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter, the `http:` wire partner, the `surreal:` datasource action, and the surreal validate target";
+#[cfg(all(
+    not(feature = "integration-http"),
+    feature = "integration-sql",
+    feature = "integration-surreal"
+))]
+const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter, the `sql:` datasource action, the `surreal:` datasource action, and the surreal validate target";
+#[cfg(all(
+    feature = "integration-http",
+    feature = "integration-sql",
+    feature = "integration-surreal"
+))]
+const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter, the `http:` wire partner, the `sql:` datasource action, the `surreal:` datasource action, and the surreal validate target";
 
 /// Outcome of running one scenario document: one row per executed
 /// action plus the apparatus-class flag for the exit mapping.
@@ -278,7 +335,11 @@ pub(super) async fn run_scenario_doc(
     // Only the full-boot path reads the root; the featureless smoke
     // path takes it for signature stability.
     #[cfg_attr(
-        not(any(feature = "integration-http", feature = "integration-sql")),
+        not(any(
+            feature = "integration-http",
+            feature = "integration-sql",
+            feature = "integration-surreal"
+        )),
         allow(unused_variables)
     )]
     root: &Path,
@@ -294,7 +355,11 @@ pub(super) async fn run_scenario_doc(
     // the composition root's config-driven subscriber stay untouched.
     camel_integration_test::ensure_capture_subscriber();
     let wired = wire_endpoint_refs(doc);
-    #[cfg(any(feature = "integration-http", feature = "integration-sql"))]
+    #[cfg(any(
+        feature = "integration-http",
+        feature = "integration-sql",
+        feature = "integration-surreal"
+    ))]
     {
         // A `sql:` action full-boots in every build that executes it
         // (bd rc-25lup.1): seeding rides the booted cascade's
@@ -306,11 +371,44 @@ pub(super) async fn run_scenario_doc(
             .scenario
             .iter()
             .any(|action| matches!(action, camel_integration_test::ScenarioAction::Sql { .. }));
+        // The surreal counterpart (surreal-state-tier task 3.2): a
+        // `surreal:` action or a surreal `validate` target full-boots
+        // in every build that executes them — seeding and reads ride
+        // the same booted datasource catalog. A surreal-only document
+        // wires no endpoints (datasource references, the sql
+        // precedent), so the scheme predicate below alone would never
+        // select the full boot for it. The binding itself is
+        // feature-gated (has_sql's effective semantics): the parser
+        // rejects `surreal:` actions without `integration-surreal`,
+        // but the validate target's grammar is UNGATED — a
+        // surreal-target document parses in every build. Ungated,
+        // `has_surreal` would be `true` in a build without
+        // `integration-surreal` and route the document to the full
+        // boot, where it fails with a generic full-boot-failure; the
+        // gate keeps such a document on the smoke path, where the
+        // runner's feature split fires the named demand-gate error at
+        // action time.
+        #[cfg(feature = "integration-surreal")]
+        let has_surreal = doc.scenario.iter().any(|action| {
+            matches!(
+                action,
+                camel_integration_test::ScenarioAction::Surreal { .. }
+                    | camel_integration_test::ScenarioAction::Validate {
+                        target: camel_integration_test::ScenarioTarget::Surreal(_),
+                        ..
+                    }
+            )
+        });
+        // Feature-off twin: the term below is constant-false, so a
+        // surreal-target document never selects the full boot here.
+        #[cfg(not(feature = "integration-surreal"))]
+        let has_surreal = false;
         if (wired.iter().any(|r| scheme_of(&r.endpoint) != FAKE_SCHEME)
             && wired
                 .iter()
                 .all(|r| BOOT_SCHEMES.contains(&scheme_of(&r.endpoint))))
             || has_sql
+            || has_surreal
         {
             return run_scenario_full_boot(doc, root).await;
         }
@@ -432,7 +530,11 @@ async fn http_secret_query_keys(
 /// ([`HttpPartner::start_permissive`]) otherwise — every unmatched
 /// request gets it for the document's lifetime, because outbound
 /// scenarios validate arrivals on the wire, not responses.
-#[cfg(any(feature = "integration-http", feature = "integration-sql"))]
+#[cfg(any(
+    feature = "integration-http",
+    feature = "integration-sql",
+    feature = "integration-surreal"
+))]
 async fn run_scenario_full_boot(
     doc: &camel_integration_test::ScenarioDocument,
     root: &Path,

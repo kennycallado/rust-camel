@@ -3,7 +3,8 @@
 //! parsers (bd rc-m6xr, split out of the parent module; mirrors the
 //! `document/error.rs` and `partner_script.rs` patterns).
 //!
-//! `ScenarioTarget`, `SqlTarget`, and `ValidateExpectation` are
+//! `ScenarioTarget`, `SqlTarget`, `SurrealTarget`, and
+//! `ValidateExpectation` are
 //! re-exported at `crate::document` and the crate root, so consumers
 //! keep the paths they had before the split. `PartnerExpectation`
 //! stays the `camel_matchers::RequestExpectation` alias.
@@ -36,6 +37,12 @@ pub enum ScenarioTarget {
     /// prepare action owns mutations, and the two vocabularies never
     /// mix (bd rc-25lup.2).
     Sql(SqlTarget),
+    /// A named datasource: the assertion executes the doc-authored
+    /// SurrealQL read and validates the returned rows (surreal-state-tier
+    /// task 1.2). Reads only — the `surreal:` prepare action owns
+    /// mutations, and the two vocabularies never mix (the `sql:`
+    /// precedent, bd rc-25lup.2).
+    Surreal(SurrealTarget),
 }
 
 /// The sql `validate` target payload (bd rc-25lup.2): a read against a
@@ -52,10 +59,30 @@ pub struct SqlTarget {
     pub query: String,
 }
 
+/// The surreal `validate` target payload (surreal-state-tier task 1.2):
+/// a SurrealQL read against a configured datasource. The datasource
+/// obeys the identifier law: it names an entry under `[datasources.*]`
+/// in `Camel.toml` and is never interpolated. The query is doc-authored
+/// read text; every statement that fails
+/// [`crate::surreal_action::is_surreal_read_statement`] is rejected at
+/// load — the `surreal:` prepare action owns mutations — and the query
+/// must be a single statement (a `;` followed by more text appends
+/// statements, which the validate target rejects). The expectation
+/// reuses the sql row grammar; because the driver returns key-sorted
+/// objects, `rows` requires `columns` (the projection order is not
+/// recoverable).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurrealTarget {
+    /// The datasource name as declared under `[datasources.*]`.
+    pub datasource: String,
+    /// The SurrealQL read query executed against the datasource.
+    pub query: String,
+}
+
 /// The expectation of a `validate` action, keyed by its target: the
 /// message matcher grammar for `lastReceived` and `variable` targets,
 /// the partner count grammar for `partner` targets, the sql-target
-/// row shape for `sql` targets.
+/// row shape for `sql` and `surreal` targets.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum ValidateExpectation {

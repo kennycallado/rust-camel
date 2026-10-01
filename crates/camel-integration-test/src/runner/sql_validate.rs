@@ -335,8 +335,9 @@ fn sql_mismatch_detail(
 /// A column whose value decodes through NO arm is an explicit
 /// validation failure naming the column and its sqlx type info:
 /// fail-closed, never a silent null and never a sentinel a wildcard
-/// could match away. This is a documented limitation of the any-tier
-/// mapping ahead of surrealdb parity (bd rc-25lup.2).
+/// could match away (bd rc-25lup.2). The surreal family carries the
+/// same law in `runner/surreal_validate.rs` (`surreal_value_to_cell`)
+/// — resolved by bd rc-25lup.5 parity, twin kept for rc-25lup.6.
 #[cfg(feature = "sql")]
 pub(crate) fn any_row_to_tuple(
     row: &sqlx::any::AnyRow,

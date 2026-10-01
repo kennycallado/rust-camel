@@ -1,0 +1,22 @@
+routeFiles: [routes/order.yaml]
+scenario:
+- surreal:
+    datasource: statedb
+    prepare:
+    - REMOVE TABLE IF EXISTS order
+    - DEFINE TABLE order SCHEMALESS
+- send:
+    to: direct:order
+    body:
+      sku: sku-42
+      qty: 3
+- validate:
+    target:
+      surreal:
+        datasource: statedb
+        query: SELECT sku, qty FROM order
+    deadline: 5s
+    expectation:
+      unordered: true
+      columns: [sku, qty]
+      rows: [['sku-42', 3]]

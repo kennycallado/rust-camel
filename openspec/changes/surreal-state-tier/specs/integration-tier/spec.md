@@ -24,7 +24,10 @@ stop at the first failure. Failure diagnostics SHALL carry the
 datasource name, the failing statement index, and ADR-0051-sanitized
 driver error text, and SHALL NOT contain the resolved `db_url` or any
 row or record values; execution uses the non-fetching execute path,
-so driver row results are discarded.
+and every statement response SHALL be checked for driver errors
+before its results are discarded (the surreal driver reports
+statement errors inside the response object, not only at await
+time).
 
 This requirement restates the contract first archived as `SQL prepare
 action` (2026-09-08-sql-prepare-action). The 2026-09-18 canonical
@@ -136,26 +139,45 @@ observable behavior change to the landed sql grammar.
 A `validate` action MAY carry `target: {surreal: {datasource: <name>,
 query: <read>}}`. The `datasource` SHALL be a configured datasource
 name, never env-interpolated (the identifier law). The `query` SHALL
-be a read: its trimmed prefix (skipping leading `(`) SHALL be
-`select` in any letter case; any other prefix is a load-time
-`doc-validation` error naming the action index, in both feature
-configurations. The `expectation` node, the `columns` projection, and
-the `unordered` switch SHALL follow the SQL state assertion grammar
-exactly: exactly one row shape (`rows` tuples through the shared dual
-matcher grammar, or one row-count bound), optional `columns` list
-projecting fields by name in declared order, `unordered: true`
-switching to multiset matching, and the same load-time error catalog
-naming the action index and the offending field.
+be exactly one read statement: its trimmed prefix (skipping leading
+`(`) SHALL be `select` in any letter case, and a statement separator
+(`;`) followed by further non-whitespace text SHALL be a load-time
+`doc-validation` error (appended statements are rejected); any other
+prefix is likewise a load-time `doc-validation` error naming the
+action index, in both feature configurations. The prefix law is
+grammar admission — the read/write family split — not proof that
+execution is read-only. The `expectation` node, the `columns`
+projection, and the `unordered` switch SHALL follow the SQL state
+assertion grammar exactly: exactly one row shape (`rows` tuples
+through the shared dual matcher grammar, or one row-count bound),
+optional `columns` list projecting fields by name in declared order,
+`unordered: true` switching to multiset matching, and the same
+load-time error catalog naming the action index and the offending
+field — with one surreal-specific deviation: the driver returns
+result records as key-sorted objects, so the query's selection order
+is not recoverable, and a surreal target with a `rows` expectation
+SHALL declare `columns`; `rows` without `columns` is a load-time
+`doc-validation` error naming the action index. Row-count bounds do
+not require `columns`.
 
 Execution (feature `surreal`): the action SHALL resolve the datasource
 through the same `DatasourceCatalog` the booted composition root
-built, execute the query, and project each result record into a tuple
-of matcher values by `columns` order — Null to null, Bool to boolean,
-Number (integer or float) to number, Strand to string, Uuid and
-Datetime to their string forms, a record id to its `table:key` string
-form, and Object and Array to structured values the matcher verbs see
-whole. Any other value kind (Bytes, Geometry, ...) SHALL fail closed
-naming the field and its SurrealQL type — never a silent null and
+built, execute the query, and check the response for statement
+errors before projection (the surreal driver reports statement
+errors inside the response object — an unchecked response SHALL NOT
+count as a passing snapshot). Each result record projects into a
+tuple of matcher values by `columns` order, following the
+`surrealdb` 3.2.4 `Value` enum: None and Null to null, Bool to
+boolean, Number to number when it is an integer or a finite float,
+String to string, Uuid and Datetime to their string forms, a record
+id (RecordId) to its `table:key` string form, and Object and Array
+to structured values the matcher verbs see whole, mapped recursively
+by this same law — an unsupported kind nested inside an Object or
+Array fails closed naming the field path. Number forms without an
+exact matcher representation (decimals, non-finite floats) and every
+other value kind (Bytes, Duration, Geometry, Table, File, Range,
+Regex, Set, ...) SHALL fail closed naming the field and its
+SurrealQL type — never a silent null, never a lossy coercion, and
 never a sentinel a wildcard could match away. An unknown `columns`
 field SHALL fail closed naming the field. Without the feature, the
 action SHALL fail with a named demand-gate error naming the `surreal`
@@ -192,27 +214,25 @@ and SHALL NOT contain the resolved `db_url` (driver errors pass
 through the ADR-0051 sanitizer) or any actual cell value.
 
 #### Scenario: ordered rows assertion passes
-
 - **GIVEN** a `surreal:` action that defines a table and creates two
-  records, and a `validate` surreal target selecting both fields with
-  `ORDER BY`
-- **WHEN** the scenario runs with `expectation: {rows: [[1, "alice"],
-  [2, "bob"]]}`
+  records carrying a user-defined numeric field `num`, and a
+  `validate` surreal target selecting both fields with `ORDER BY`
+- **WHEN** the scenario runs with `expectation: {columns: [num,
+  name], rows: [[1, "alice"], [2, "bob"]]}`
 - **THEN** the action passes and the document passes
 
 #### Scenario: unordered rows match out of order
-
-- **GIVEN** records `(1, "alice")` and `(2, "bob")` seeded, and a
-  query without `ORDER BY` selecting both
-- **WHEN** the validate declares `unordered: true` and `rows: [[2,
-  "bob"], [1, "alice"]]`
+- **GIVEN** records with `(num = 1, name = "alice")` and `(num = 2,
+  name = "bob")` seeded, and a query without `ORDER BY` selecting
+  both
+- **WHEN** the validate declares `unordered: true`, `columns: [num,
+  name]`, and `rows: [[2, "bob"], [1, "alice"]]`
 - **THEN** the action passes
 
 #### Scenario: wildcard ignore cell matches any value
-
-- **GIVEN** one record `(7, null)`
-- **WHEN** the validate declares `rows: [[{ignore: null}, {equals:
-  null}]]`
+- **GIVEN** one record with `num = 7` and a stored null `name`
+- **WHEN** the validate declares `columns: [num, name]` and `rows:
+  [[{ignore: null}, {equals: null}]]`
 - **THEN** the action passes
 
 #### Scenario: count bound passes on record count
@@ -229,6 +249,26 @@ through the ADR-0051 sanitizer) or any actual cell value.
 - **WHEN** the document loads
 - **THEN** the load fails `doc-validation` naming the action index,
   whether or not the `surreal` feature is compiled
+
+#### Scenario: appended statement in a validate query is a load error
+
+- **GIVEN** a validate surreal target whose query is `"SELECT * FROM
+  user; CREATE x SET y = 1"` — a read prefix followed by a statement
+  separator and a second statement
+- **WHEN** the document loads
+- **THEN** the load fails `doc-validation` naming the action index
+  (the query SHALL be exactly one statement), whether or not the
+  `surreal` feature is compiled
+
+#### Scenario: rows without columns is a load error
+
+- **GIVEN** a validate surreal target whose expectation declares
+  `rows` tuples with no `columns` list
+- **WHEN** the document loads
+- **THEN** the load fails `doc-validation` naming the action index
+  (the driver returns key-sorted objects, so projection order is not
+  recoverable without `columns`), whether or not the `surreal`
+  feature is compiled
 
 #### Scenario: rows mixed with a count bound is a load error
 
@@ -248,7 +288,7 @@ through the ADR-0051 sanitizer) or any actual cell value.
 #### Scenario: ordered rows without ORDER BY warn exactly once
 
 - **GIVEN** a validate surreal target with an ordered `rows` shape
-  whose query lacks `ORDER BY`
+  (`columns` declared) whose query lacks `ORDER BY`
 - **WHEN** the document loads
 - **THEN** the load emits exactly one WARN naming the action index and
   succeeds
@@ -263,7 +303,8 @@ through the ADR-0051 sanitizer) or any actual cell value.
 
 - **GIVEN** one record whose SurrealQL id is `user:1` and a query
   selecting `id`
-- **WHEN** the validate declares `rows: [["user:1"]]`
+- **WHEN** the validate declares `columns: [id]` and `rows:
+  [["user:1"]]`
 - **THEN** the action passes — the record id projects as the
   `table:key` string
 
@@ -281,19 +322,29 @@ through the ADR-0051 sanitizer) or any actual cell value.
 - **THEN** the action fails naming the field and its SurrealQL type —
   never a silent null
 
+#### Scenario: unsupported kind nested in a structured cell fails closed
+
+- **GIVEN** a record field holding an array or object that itself
+  contains an unsupported kind (for example an array containing a
+  geometry value)
+- **WHEN** the projection walks that field
+- **THEN** the action fails naming the field path and the nested
+  SurrealQL type — recursion never launders an unsupported kind into
+  a structured value
+
 #### Scenario: deadline poll passes when state settles in window
 
 - **GIVEN** an empty table that a running route populates within the
   deadline
-- **WHEN** the validate declares `deadline` and the `rows` the route
-  will write
+- **WHEN** the validate declares `deadline`, `columns`, and the
+  `rows` the route will write
 - **THEN** the final snapshot at expiry matches and the action passes
 
 #### Scenario: no early settle — a matching snapshot is not proof
 
 - **GIVEN** a record present at the first poll snapshot and deleted
-  before the deadline, with `expectation: {rows: [[...]]}` and a
-  `deadline`
+  before the deadline, with `expectation: {columns: [...], rows:
+  [[...]]}` and a `deadline`
 - **WHEN** the deadline expires
 - **THEN** the final snapshot decides and the action fails as a
   validation mismatch
@@ -322,8 +373,10 @@ through the ADR-0051 sanitizer) or any actual cell value.
   nor any actual cell value
 
 #### Scenario: driver error is sanitized
-
-- **GIVEN** a query that fails at execution (a missing table)
+- **GIVEN** a query that fails at execution (a SurrealQL parse
+  error such as `SELECT FROM WHERE` — SurrealDB returns empty
+  results for missing tables, so a parse error is the deterministic
+  driver error)
 - **WHEN** the action executes
 - **THEN** the failure carries the datasource name and sanitized
   driver error text, and never the resolved `db_url`
@@ -681,16 +734,27 @@ SHALL close the SQL datasource pools the boot opened, after the
 context stops: a close timeout warns and does not fail the shutdown,
 while a close error fails it, matching the bridge-pool teardown
 semantics (providers without an explicit close keep their default
-no-op). The same teardown SHALL close the surreal clients the boot
-opened. With the pools closed, a SQLite in-memory database dies with
+no-op). The same teardown SHALL release the surreal clients the boot
+opened. The surrealdb SDK has no explicit client close
+(`invalidate()` revokes authentication; it is not a process-level
+shutdown call), so the release contract is: the factory's close hook
+SHALL invalidate the boot's surreal clients (revoking any session
+credentials — on the auth-free embedded `mem://` tier this is
+hygiene; on remote tiers it terminates the session), and the boot's
+references die with the boot's scope. Each boot owns a fresh
+`DatasourceCatalog`, so a later boot over the same alias resolves
+through a new catalog to a new client. With the pools closed, a
+SQLite in-memory database dies with
 its boot: a later document booting the same `[datasources]` alias in
 the same process SHALL start from an empty database, including named
 shared-memory URIs (`file:<name>?mode=memory&cache=shared`), where a
 lingering connection would otherwise carry rows into the later boot.
 An embedded `mem://` SurrealDB datasource SHALL die with its boot the
-same way: the factory builds one client per datasource name and the
-catalog closes it at teardown, so a later boot over the same alias
-starts from an empty database. File-backed (and other durable)
+same way, by construction plus invalidation: every
+`connect("mem://")` builds a fresh isolated embedded instance, the
+factory builds one client per datasource name, and the boot's
+teardown invalidates it, so a later boot over the same alias
+constructs a new empty instance. File-backed (and other durable)
 datasources — including remote `ws://`/`http://` SurrealDB instances
 — are outside this guarantee: their rows persist across boots, and
 isolation is the document author's responsibility through the
@@ -739,24 +803,25 @@ outside the v1 contract.
 
 #### Scenario: a second boot over a mem surreal datasource starts
 empty
-
 - **GIVEN** a first document boot whose `surreal:` prepare seeded
   records over a `mem://` datasource, and that boot completed
   teardown
 - **WHEN** a second document boots over the same alias in the same
   process
 - **THEN** the second boot's reads see zero of the first boot's
-  records — the embedded database died with the first boot's client
+  records — the first boot's client was invalidated at teardown, the
+  embedded database died with the first boot, and the second boot
+  resolves through a fresh catalog and a new client
 
 #### Scenario: shutdown closes the datasource pools
-
 - **GIVEN** a booted scenario whose document opened a SQL datasource
   pool through a `sql:` action or a sql `validate` target, or a
   surreal client through a `surreal:` action or a surreal `validate`
   target
 - **WHEN** the boot-owning caller runs the boot teardown
-- **THEN** the pools and clients that boot opened are closed before
-  the teardown returns
+- **THEN** the pools that boot opened are closed, the boot's
+  surreal clients' close hook ran (invalidation issued) before the
+  teardown returns, and the teardown returns without close errors
 
 #### Scenario: file-backed state persists across boots
 

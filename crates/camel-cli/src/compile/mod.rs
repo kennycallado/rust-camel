@@ -18,8 +18,8 @@
 //!   substitution-targeted assets (r2embed Task 3.2).
 //! - [`signature`] — detached Ed25519ph signature envelope sidecar for
 //!   signed artifacts (r4sign).
-//! - [`trust`] — deployment truststore codec for signature pinning
-//!   (keypin Task 1.2).
+//! - `trust` — deployment truststore codec for signature pinning
+//!   (keypin Task 1.2; private module, plain reference).
 //!
 //! The artifact embeds authoring text, never `RouteDefinition` or compiled
 //! steps: DSL stays responsible for parsing and interpolation, runtime for

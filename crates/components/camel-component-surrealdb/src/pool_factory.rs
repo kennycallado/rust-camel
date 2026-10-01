@@ -3,7 +3,9 @@
 use std::any::Any as StdAny;
 use std::sync::Arc;
 
-use camel_api::datasource::{CheckFuture, CreatePoolFuture, DatasourceConfig, PoolFactory};
+use camel_api::datasource::{
+    CheckFuture, CloseFuture, CreatePoolFuture, DatasourceConfig, PoolFactory,
+};
 use camel_api::lifecycle::HealthStatus;
 use camel_component_api::{NetworkRetryPolicy, retry_async};
 use surrealdb::Surreal;
@@ -34,22 +36,53 @@ pub fn redact_db_url(db_url: &str) -> String {
 
 /// Extracts a string from the `extra` map on a `DatasourceConfig`.
 fn extra_str(config: &DatasourceConfig, key: &str) -> Result<String, camel_api::CamelError> {
+    extra_str_opt(config, key).ok_or_else(|| {
+        camel_api::CamelError::Config(format!(
+            "datasource extra field '{key}' is required for surrealdb"
+        ))
+    })
+}
+
+/// Extracts an optional string from the `extra` map on a `DatasourceConfig`.
+fn extra_str_opt(config: &DatasourceConfig, key: &str) -> Option<String> {
     config
         .extra
         .get(key)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| {
-            camel_api::CamelError::Config(format!(
-                "datasource extra field '{key}' is required for surrealdb"
-            ))
-        })
+}
+
+/// Extracts a string for a `mem://` datasource, falling back to `default`
+/// when the key is absent. A key that is present but holds a non-string value
+/// is a hard error rather than a silent fallback, matching the remote path's
+/// treatment of malformed extra fields.
+fn extra_str_or_default(
+    config: &DatasourceConfig,
+    key: &str,
+    default: &str,
+) -> Result<String, camel_api::CamelError> {
+    match config.extra.get(key) {
+        None => Ok(default.to_string()),
+        Some(value) => match value.as_str() {
+            Some(s) => Ok(s.to_string()),
+            None => Err(camel_api::CamelError::Config(format!(
+                "datasource extra field '{key}' must be a string for surrealdb"
+            ))),
+        },
+    }
 }
 
 /// PoolFactory for SurrealDB. Creates a `Surreal<Any>` client per datasource.
 ///
 /// Auth order (per SDK examples + spike): connect → signin → use_ns → use_db.
 /// Root fields are `String` (v3 SDK), not `&str`.
+///
+/// `mem://` endpoints are the exception: each connect spawns a fresh embedded
+/// instance with authentication disabled (there is no root user to sign in),
+/// so the username/password extras are not required and the signin step is
+/// skipped. Namespace/database default to `"test"` when absent, and the
+/// `use_ns`/`use_db` calls still run with those defaults. Remote endpoints
+/// (`ws`/`wss`/`http`/`https`) keep the mandatory extras and the signin step.
 ///
 /// # Retry semantics
 ///
@@ -86,10 +119,27 @@ impl PoolFactory for SurrealDbPoolFactory {
     fn create<'a>(&'a self, config: &'a DatasourceConfig) -> CreatePoolFuture<'a> {
         Box::pin(async move {
             let endpoint = &config.db_url;
-            let ns = extra_str(config, "namespace")?;
-            let db = extra_str(config, "database")?;
-            let user = extra_str(config, "username")?;
-            let pass = extra_str(config, "password")?;
+            // `mem://` spawns an isolated embedded instance with
+            // authentication disabled per connect — there is no root user to
+            // sign in, so credentials are not required and ns/db default to
+            // "test". Remote endpoints keep the mandatory credential extras.
+            let is_mem = url::Url::parse(endpoint).is_ok_and(|parsed| parsed.scheme() == "mem");
+            let (ns, db, credentials) = if is_mem {
+                (
+                    extra_str_or_default(config, "namespace", "test")?,
+                    extra_str_or_default(config, "database", "test")?,
+                    None,
+                )
+            } else {
+                (
+                    extra_str(config, "namespace")?,
+                    extra_str(config, "database")?,
+                    Some((
+                        extra_str(config, "username")?,
+                        extra_str(config, "password")?,
+                    )),
+                )
+            };
 
             // Retry only the transport-establishment call (idempotent).
             // Per ADR-0013 security note: `connect` operates on the
@@ -117,21 +167,24 @@ impl PoolFactory for SurrealDbPoolFactory {
                 ))
             })?;
 
-            // Post-connect setup: signin → use_ns → use_db. Retried only on
-            // transaction conflicts (see `is_transaction_conflict` and the
-            // struct-level retry-semantics comment). Auth failures, not-found,
-            // and other permanent errors fail fast without burning attempts.
+            // Post-connect setup: signin (remote only) → use_ns → use_db.
+            // Retried only on transaction conflicts (see
+            // `is_transaction_conflict` and the struct-level retry-semantics
+            // comment). Auth failures, not-found, and other permanent errors
+            // fail fast without burning attempts.
             retry_async::<_, _, _, _, surrealdb::Error>(
                 &policy,
                 "surrealdb",
                 "setup",
                 || async {
-                    client
-                        .signin(Root {
-                            username: user.clone(),
-                            password: pass.clone(),
-                        })
-                        .await?;
+                    if let Some((username, password)) = &credentials {
+                        client
+                            .signin(Root {
+                                username: username.clone(),
+                                password: password.clone(),
+                            })
+                            .await?;
+                    }
                     client.use_ns(&ns).await?;
                     client.use_db(&db).await?;
                     Ok(())
@@ -173,8 +226,36 @@ impl PoolFactory for SurrealDbPoolFactory {
         })
     }
 
+    fn close<'a>(&'a self, handle: &'a camel_api::datasource::DatasourceHandle) -> CloseFuture<'a> {
+        Box::pin(async move {
+            let client = handle.downcast::<Surreal<SurrealAny>>().map_err(|e| {
+                camel_api::CamelError::ProcessorError(format!(
+                    "datasource '{}': pool close downcast failed: {}",
+                    handle.name, e
+                ))
+            })?;
+            // `invalidate()` is the SDK's only teardown lever: it revokes
+            // the client's active auth session. The datasource catalog
+            // keeps the handle cached after close_all (it never drops its
+            // entry), so releasing by drop is not available here — the
+            // invalidation is the observable release on the remote tiers.
+            // On the embedded `mem://` tier authentication is disabled, so
+            // the call is hygiene: nothing is revoked (the SDK's own doc
+            // example runs `invalidate()` on a fresh `mem://` client and
+            // expects Ok), but it must still complete Ok so a teardown
+            // reports real failures only.
+            client.invalidate().await.map_err(|e| {
+                camel_api::CamelError::ProcessorError(format!(
+                    "datasource '{}': surrealdb invalidate failed: {}",
+                    handle.name, e
+                ))
+            })?;
+            Ok(())
+        })
+    }
+
     fn supported_schemes(&self) -> &[&str] {
-        &["ws", "wss", "http", "https"]
+        &["ws", "wss", "http", "https", "mem"]
     }
 
     fn name(&self) -> &'static str {
@@ -328,6 +409,205 @@ mod tests {
         assert!(
             !redacted.contains("token") || redacted.contains("***"),
             "redacted URL must not leak token: {redacted}"
+        );
+    }
+
+    // --- mem scheme (embedded, isolated instance per connect) ---
+
+    /// A `mem://` config with no extras at all: the embedded instance runs
+    /// with authentication disabled, so none of the remote credential
+    /// extras are required.
+    fn make_mem_config() -> DatasourceConfig {
+        DatasourceConfig {
+            db_url: "mem://".to_string(),
+            provider: Some("surrealdb".into()),
+            max_connections: None,
+            min_connections: None,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn factory_supports_mem_scheme() {
+        let factory = SurrealDbPoolFactory;
+        assert!(factory.supported_schemes().contains(&"mem"));
+    }
+
+    #[tokio::test]
+    async fn mem_connect_without_credentials() {
+        let factory = SurrealDbPoolFactory;
+        let config = make_mem_config();
+        assert!(factory.matches(&config));
+        let handle = factory
+            .create(&config)
+            .await
+            .expect("mem:// create must succeed without credentials");
+        let client = handle
+            .downcast::<Surreal<SurrealAny>>()
+            .expect("handle must be a Surreal<Any> client");
+        client
+            .query("RETURN 1")
+            .await
+            .expect("query transport must succeed")
+            .check()
+            .expect("query statement must succeed");
+    }
+
+    #[tokio::test]
+    async fn mem_wrong_type_extra_is_error() {
+        let factory = SurrealDbPoolFactory;
+        let mut config = make_mem_config();
+        config
+            .extra
+            .insert("namespace".into(), TomlValue::Integer(123));
+        let err = factory
+            .create(&config)
+            .await
+            .expect_err("mem:// create must reject a non-string namespace extra");
+        assert!(
+            err.to_string().contains("namespace"),
+            "wrong-type error must name the extra field: {err}"
+        );
+        assert!(
+            err.to_string().contains("must be a string"),
+            "wrong-type error must state the value must be a string: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mem_connect_creates_isolated_client() {
+        let factory = SurrealDbPoolFactory;
+        let config = make_mem_config();
+        let first = factory
+            .create(&config)
+            .await
+            .expect("first mem:// create must succeed");
+        let second = factory
+            .create(&config)
+            .await
+            .expect("second mem:// create must succeed");
+        let c1 = first
+            .downcast::<Surreal<SurrealAny>>()
+            .expect("first handle must be a Surreal<Any> client");
+        let c2 = second
+            .downcast::<Surreal<SurrealAny>>()
+            .expect("second handle must be a Surreal<Any> client");
+        assert!(
+            !Arc::ptr_eq(&c1, &c2),
+            "each mem:// create must yield a distinct client"
+        );
+
+        c1.query("CREATE person:one SET name = 'one'")
+            .await
+            .expect("create transport must succeed")
+            .check()
+            .expect("create statement must succeed");
+        c2.query("CREATE person:two SET name = 'two'")
+            .await
+            .expect("create transport must succeed")
+            .check()
+            .expect("create statement must succeed");
+
+        // Each instance must see exactly its own record. On a shared
+        // instance both rows would be visible to both clients.
+        let rows: Vec<surrealdb::types::Value> = c2
+            .query("SELECT * FROM person")
+            .await
+            .expect("select transport must succeed")
+            .check()
+            .expect("select statement must succeed")
+            .take(0)
+            .expect("select must return an array");
+        assert_eq!(
+            rows.len(),
+            1,
+            "second client must see only its own record: {rows:?}"
+        );
+        let rows: Vec<surrealdb::types::Value> = c1
+            .query("SELECT * FROM person")
+            .await
+            .expect("select transport must succeed")
+            .check()
+            .expect("select statement must succeed")
+            .take(0)
+            .expect("select must return an array");
+        assert_eq!(
+            rows.len(),
+            1,
+            "first client must see only its own record: {rows:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_hook_invalidates_and_completes() {
+        // The close path the catalog's close_all reaches
+        // (`factory.close(handle)`): create a mem client, close it, and
+        // require Ok — proving `invalidate()` ran and completed. On the
+        // auth-free mem tier the revocation itself is unobservable
+        // (hygiene); observable release is the remote tiers' concern,
+        // exercised by the existing remote component tests.
+        let factory = SurrealDbPoolFactory;
+        let config = make_mem_config();
+        let inner = factory
+            .create(&config)
+            .await
+            .expect("mem:// create must succeed");
+        // The catalog wraps the factory's inner into a named handle
+        // (`DatasourceHandle::new`) before close_all reaches
+        // `factory.close(handle)`; mirror that wrapping exactly.
+        let handle = camel_api::datasource::DatasourceHandle::new(
+            "statedb".into(),
+            factory.name().into(),
+            inner,
+        );
+        factory
+            .close(&handle)
+            .await
+            .expect("close must complete Ok — invalidate() ran on the mem client");
+        // Re-run safety per the `PoolFactory::close` idempotency
+        // contract: a second close over the same auth-free client must
+        // still complete Ok.
+        factory
+            .close(&handle)
+            .await
+            .expect("close must stay safe to re-run");
+    }
+
+    #[tokio::test]
+    async fn remote_scheme_still_requires_credentials() {
+        let factory = SurrealDbPoolFactory;
+        // ws:// config with namespace/database but missing username/password:
+        // the remote auth contract is unchanged — missing extras fail before
+        // any connection is attempted.
+        let mut extra = HashMap::new();
+        extra.insert("namespace".into(), TomlValue::String("test_ns".into()));
+        extra.insert("database".into(), TomlValue::String("test_db".into()));
+        let config = DatasourceConfig {
+            db_url: "ws://localhost:8000".to_string(),
+            provider: Some("surrealdb".into()),
+            max_connections: None,
+            min_connections: None,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra,
+        };
+        let err = factory
+            .create(&config)
+            .await
+            .expect_err("ws:// create must fail without credentials");
+        assert!(
+            err.to_string().contains("username"),
+            "missing-extra error must name the field: {err}"
         );
     }
 }

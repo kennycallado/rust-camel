@@ -51,7 +51,7 @@ pub use error::DocError;
 pub mod logs;
 pub use logs::{LogLevel, LogsAssertion};
 pub mod validate;
-pub use validate::{ScenarioTarget, SqlTarget, ValidateExpectation};
+pub use validate::{ScenarioTarget, SqlTarget, SurrealTarget, ValidateExpectation};
 use validate::{backticked, partner_expectation_from_value};
 pub(crate) use validate::{
     expectation_from_value, sql_expectation_from_value, sql_query_lacks_order_by,
@@ -182,16 +182,17 @@ pub enum ScenarioAction {
     Validate {
         /// What to validate: the last message received on an endpoint,
         /// a scenario variable, a partner's recorded traffic, or a
-        /// datasource read.
+        /// datasource read (sql or surreal).
         target: ScenarioTarget,
         /// Matcher expectation: the message grammar for `lastReceived`
         /// and `variable` targets, the partner count grammar for
-        /// `partner` targets, the sql row grammar for `sql` targets.
+        /// `partner` targets, the sql row grammar for `sql` and
+        /// `surreal` targets.
         expectation: ValidateExpectation,
-        /// Optional poll deadline. Only valid on `partner` and `sql`
-        /// targets, whose assertions settle asynchronously or read a
-        /// live datasource; without it the partner assertion reads one
-        /// immediate snapshot.
+        /// Optional poll deadline. Only valid on `partner`, `sql`, and
+        /// `surreal` targets, whose assertions settle asynchronously or
+        /// read a live datasource; without it the partner assertion
+        /// reads one immediate snapshot.
         deadline: Option<Duration>,
         /// Optional minimum wire-arrival age. Only valid on
         /// `lastReceived` targets: the last received message must have
@@ -215,6 +216,23 @@ pub enum ScenarioAction {
         datasource: String,
         /// Ordered SQL mutation statements, executed in order against
         /// the datasource's pool.
+        prepare: Vec<String>,
+    },
+    /// Seed datasource state before the route assertions run
+    /// (surreal-state-tier task 1.1): execute the ordered `prepare`
+    /// mutation statements against the named datasource through the
+    /// scenario `surreal:` vocabulary. Reads are rejected at load
+    /// (`is_surreal_read_statement`): the `validate` surreal target
+    /// owns reads, and the two vocabularies never mix. Activation is
+    /// demand-gated behind the harness `surreal` feature (the
+    /// `sql:`/`http` precedent, ADR-0069 §8); the grammar and
+    /// validation run in every build.
+    Surreal {
+        /// The datasource name as declared under `[datasources.*]` in
+        /// `Camel.toml`.
+        datasource: String,
+        /// Ordered SurrealQL mutation statements, executed in order
+        /// against the datasource.
         prepare: Vec<String>,
     },
 }
@@ -247,11 +265,18 @@ impl ScenarioAction {
                 // endpoint: it declares no bindings (the `Variable`
                 // precedent).
                 ScenarioTarget::Sql(_) => Vec::new(),
+                // A surreal target references a named datasource, never
+                // an endpoint: it declares no bindings (the sql
+                // precedent).
+                ScenarioTarget::Surreal(_) => Vec::new(),
             },
             Self::Sleep { .. } => Vec::new(),
             // A `sql:` action references a named datasource, never an
             // endpoint: it declares no bindings.
             Self::Sql { .. } => Vec::new(),
+            // A `surreal:` action references a named datasource, never
+            // an endpoint: it declares no bindings.
+            Self::Surreal { .. } => Vec::new(),
         }
     }
 }
@@ -440,6 +465,18 @@ struct RawSqlTarget {
     query: String,
 }
 
+/// Raw surreal validate-target payload: the object under the `surreal`
+/// key, parsed next to the sql twin (surreal-state-tier task 1.2).
+/// Field names stay snake_case despite the `camelCase` rename (no
+/// multi-word fields today) — the attribute is load-bearing for the
+/// deny-unknown error and future fields.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RawSurrealTarget {
+    datasource: String,
+    query: String,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RawValidate {
@@ -447,8 +484,8 @@ struct RawValidate {
     /// `variable` / `partner`) converts during validation.
     target: serde_yaml::Value,
     expectation: Value,
-    /// Raw humantime string; partner and sql targets only, parsed
-    /// during validation so the error can name the action index.
+    /// Raw humantime string; partner, sql, and surreal targets only,
+    /// parsed during validation so the error can name the action index.
     deadline: Option<String>,
     /// Raw humantime string; `lastReceived` targets only, parsed
     /// during validation so the error can name the action index.
@@ -852,6 +889,46 @@ fn sql_action_from_raw(
     })
 }
 
+/// Converts a raw `surreal:` action into the model, feature-split so
+/// the arm type checks in both configurations (surreal-state-tier
+/// task 1.1).
+///
+/// Validation (read/empty-prepare defects, naming the action and
+/// statement index) runs in every build BEFORE the gate; only a
+/// structurally valid action reaches the demand gate, which — without
+/// the harness `surreal` feature — rejects it naming the feature and
+/// the rebuild instruction (the `sql:` precedent, ADR-0069 §8).
+#[cfg(feature = "surreal")]
+fn surreal_action_from_raw(
+    raw: crate::surreal_action::RawSurrealAction,
+    index: usize,
+) -> Result<ScenarioAction, DocError> {
+    let validated = crate::surreal_action::validate_surreal_action(&raw, index)
+        .map_err(|message| DocError::Validation { index, message })?;
+    Ok(ScenarioAction::Surreal {
+        datasource: validated.datasource,
+        prepare: validated.prepare,
+    })
+}
+
+/// The feature-off twin: the same validation hook, then the named
+/// demand-gate error instead of the action.
+#[cfg(not(feature = "surreal"))]
+fn surreal_action_from_raw(
+    raw: crate::surreal_action::RawSurrealAction,
+    index: usize,
+) -> Result<ScenarioAction, DocError> {
+    if let Err(message) = crate::surreal_action::validate_surreal_action(&raw, index) {
+        return Err(DocError::Validation { index, message });
+    }
+    Err(DocError::Validation {
+        index,
+        message: "`surreal` requires the `surreal` feature, which this harness build does \
+                  not enable: rebuild with `--features surreal` (demand-gated activation)"
+            .to_string(),
+    })
+}
+
 /// Parses inline `routes` through the shared DSL parser. `parse_yaml`
 /// expects a top-level `routes:` key; the inline value (the array under
 /// `routes:`) is wrapped back into that shape, the same as the unit-tier
@@ -865,18 +942,21 @@ fn parse_inline_routes(value: &serde_yaml::Value) -> Result<Vec<RouteDefinition>
 }
 
 /// Converts one raw action item into the public model. An item is a
-/// single-key map (`send`, `receive`, `sleep`, `validate`, `sql`); dispatch
+/// single-key map (`send`, `receive`, `sleep`, `validate`, `sql`,
+/// `surreal`); dispatch
 /// runs here, not in serde, so every failure carries the action index.
 fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction, DocError> {
     let action_error = |message: String| DocError::Validation { index, message };
     let serde_yaml::Value::Mapping(ref map) = item else {
         return Err(action_error(format!(
-            "action must be a single-key map (`send`, `receive`, `sleep`, `validate`, `sql`), got {item:?}"
+            "action must be a single-key map (`send`, `receive`, `sleep`, `validate`, `sql`, \
+             `surreal`), got {item:?}"
         )));
     };
     let Some((key, content)) = map.iter().next() else {
         return Err(action_error(
-            "action must be a single-key map (`send`, `receive`, `sleep`, `validate`, `sql`), got an empty map"
+            "action must be a single-key map (`send`, `receive`, `sleep`, `validate`, `sql`, \
+             `surreal`), got an empty map"
                 .to_string(),
         ));
     };
@@ -965,17 +1045,22 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
             let deadline = match raw.deadline.as_deref() {
                 None => None,
                 // The poll deadline exists because a partner count
-                // settles asynchronously and a sql read runs against a
-                // live datasource; on any other target it has no
-                // meaning and is a grammar error.
+                // settles asynchronously and a sql or surreal read runs
+                // against a live datasource; on any other target it has
+                // no meaning and is a grammar error.
                 Some(raw_deadline)
-                    if matches!(target, ScenarioTarget::Partner(_) | ScenarioTarget::Sql(_)) =>
+                    if matches!(
+                        target,
+                        ScenarioTarget::Partner(_)
+                            | ScenarioTarget::Sql(_)
+                            | ScenarioTarget::Surreal(_)
+                    ) =>
                 {
                     Some(parse_duration(raw_deadline, index, "deadline")?)
                 }
                 Some(raw_deadline) => {
                     return Err(action_error(format!(
-                        "`deadline` is only valid on a `partner` or `sql` validate target, got `{raw_deadline}`"
+                        "`deadline` is only valid on a `partner`, `sql`, or `surreal` validate target, got `{raw_deadline}`"
                     )));
                 }
             };
@@ -1000,6 +1085,24 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                 ScenarioTarget::Sql(_) => {
                     ValidateExpectation::Rows(sql_expectation_from_value(&raw.expectation, index)?)
                 }
+                ScenarioTarget::Surreal(_) => {
+                    let rows = sql_expectation_from_value(&raw.expectation, index)?;
+                    // Surreal-specific deviation (surreal-state-tier
+                    // task 1.2): the driver returns key-sorted objects,
+                    // so the projection order is not recoverable —
+                    // row patterns cannot align to a query's implicit
+                    // projection and `rows` requires `columns`. Count
+                    // bounds assert the row count and need no order.
+                    if rows.rows.is_some() && rows.columns.is_none() {
+                        return Err(action_error(
+                            "surreal expectation: `rows` requires `columns`; the surreal \
+                             driver returns key-sorted objects and the projection order is not \
+                             recoverable"
+                                .to_string(),
+                        ));
+                    }
+                    ValidateExpectation::Rows(rows)
+                }
                 _ => ValidateExpectation::Message(expectation_from_value(
                     &raw.expectation,
                     index,
@@ -1010,17 +1113,28 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
             // `rows` assertion over a query without `ORDER BY` depends
             // on the database's row return order. Advisory only — the
             // grammar accepts the document; the warning names the
-            // action index so a big scenario stays triageable.
-            if let (ScenarioTarget::Sql(target), ValidateExpectation::Rows(rows)) =
-                (&target, &expectation)
+            // action index so a big scenario stays triageable. The
+            // surreal target carries the same rule (surreal-state-tier
+            // task 1.2); one shared warn callsite keeps the callsite
+            // interest cache single-seated (bd rc-img5).
+            let advisory = match (&target, &expectation) {
+                (ScenarioTarget::Sql(target), ValidateExpectation::Rows(rows)) => {
+                    Some(("sql", target.query.as_str(), rows))
+                }
+                (ScenarioTarget::Surreal(target), ValidateExpectation::Rows(rows)) => {
+                    Some(("surreal", target.query.as_str(), rows))
+                }
+                _ => None,
+            };
+            if let Some((flavor, query, rows)) = advisory
                 && !rows.unordered
                 && rows.rows.is_some()
-                && sql_query_lacks_order_by(&target.query)
+                && sql_query_lacks_order_by(query)
             {
                 tracing::warn!(
-                    "validate action {index}: sql query has no `ORDER BY`; the ordered `rows` \
-                     assertion is nondeterministic without it — declare `unordered: true` or \
-                     add `ORDER BY`"
+                    "validate action {index}: {flavor} query has no `ORDER BY`; the ordered \
+                     `rows` assertion is nondeterministic without it — declare `unordered: \
+                     true` or add `ORDER BY`"
                 );
             }
             Ok(ScenarioAction::Validate {
@@ -1041,24 +1155,36 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
             // execute (the inbound grammar precedent).
             sql_action_from_raw(raw, index)
         }
+        crate::surreal_action::SURREAL_ACTION_KEY => {
+            let raw: crate::surreal_action::RawSurrealAction =
+                serde_yaml::from_value(content.clone()).map_err(action_error_from_serde)?;
+            // Ordering mandate (the `sql:` precedent): validation runs
+            // BEFORE the feature demand gate, so a read or an empty
+            // prepare list fails doc-validation naming the action
+            // index and the statement index in BOTH feature
+            // configurations — the document defect is independent of
+            // what this build can execute.
+            surreal_action_from_raw(raw, index)
+        }
         other => Err(action_error(format!(
-            "unknown action `{other}`; expected `send`, `receive`, `sleep`, `validate`, or `sql`"
+            "unknown action `{other}`; expected `send`, `receive`, `sleep`, `validate`, `sql`, \
+             or `surreal`"
         ))),
     }
 }
 
 /// Builds a `validate` target from the raw `target` node: a single-key
-/// map (`lastReceived`, `variable`, `partner`, or `sql`).
+/// map (`lastReceived`, `variable`, `partner`, `sql`, or `surreal`).
 fn build_target(value: &serde_yaml::Value, index: usize) -> Result<ScenarioTarget, DocError> {
     let action_error = |message: String| DocError::Validation { index, message };
     let serde_yaml::Value::Mapping(map) = value else {
         return Err(action_error(format!(
-            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`, or `sql`), got {value:?}"
+            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`, `sql`, or `surreal`), got {value:?}"
         )));
     };
     let Some((key, content)) = map.iter().next() else {
         return Err(action_error(
-            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`, or `sql`), got an empty map"
+            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`, `sql`, or `surreal`), got an empty map"
                 .to_string(),
         ));
     };
@@ -1107,8 +1233,52 @@ fn build_target(value: &serde_yaml::Value, index: usize) -> Result<ScenarioTarge
                 query: raw.query,
             }))
         }
+        "surreal" => {
+            let raw: RawSurrealTarget =
+                serde_yaml::from_value(content.clone()).map_err(|e| action_error(e.to_string()))?;
+            if raw.datasource.is_empty() {
+                return Err(action_error(
+                    "validate `surreal` target requires a non-empty `datasource`".to_string(),
+                ));
+            }
+            if raw.query.is_empty() {
+                return Err(action_error(
+                    "validate `surreal` target requires a non-empty `query`".to_string(),
+                ));
+            }
+            // Vocabulary split (the `sql` target law): the validate
+            // surreal target owns reads only; the `surreal:` prepare
+            // action owns mutations. Mirrors the prepare-side rejection
+            // phrasing.
+            if !crate::surreal_action::is_surreal_read_statement(&raw.query) {
+                return Err(action_error(
+                    "validate `surreal` target: query is not a read (select prefix); reads \
+                     belong to the validate surreal target, the `surreal:` prepare action owns \
+                     mutations"
+                        .to_string(),
+                ));
+            }
+            // Single-statement law: a `;` separator followed by further
+            // non-whitespace text appends a statement. The validate
+            // target asserts against one read; appended statements are
+            // the `surreal:` prepare action's vocabulary. A trailing
+            // `;` with nothing after it is tolerated.
+            if let Some((_, rest)) = raw.query.split_once(';')
+                && !rest.trim().is_empty()
+            {
+                return Err(action_error(
+                    "validate `surreal` target: query must be a single statement; text after \
+                     `;` appends statements, which the validate target rejects"
+                        .to_string(),
+                ));
+            }
+            Ok(ScenarioTarget::Surreal(SurrealTarget {
+                datasource: raw.datasource,
+                query: raw.query,
+            }))
+        }
         other => Err(action_error(format!(
-            "unknown validate target `{other}`; expected `lastReceived`, `variable`, `partner`, or `sql`"
+            "unknown validate target `{other}`; expected `lastReceived`, `variable`, `partner`, `sql`, or `surreal`"
         ))),
     }
 }

@@ -59,6 +59,12 @@ hyper-util = { workspace = true, optional = true, features = ["tokio"] }
 # only when scenarios prepare state through a datasource. The sqlite
 # driver rides along for the in-memory executor tests.
 sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "any", "sqlite"] }
+# Demand-gated Surreal action activation (mirror of `sql`): the
+# scenario `surreal:` action executor and its surrealdb dependency
+# compile only when scenarios prepare state through a SurrealDB
+# datasource. The grammar and validation stay ungated (surreal-state-tier
+# task 1.1).
+surrealdb = { workspace = true, optional = true }
 # Reply-value extraction for `expectReply` on `direct:` sends
 # (rc-qvz6): the reply body converts to a `serde_json::Value` for
 # the shared matcher verbs without the `http` feature.
@@ -107,6 +113,12 @@ http = [
 # harness is a bundles consumer, so the shadow feature must forward it
 # (lint-gate-forwarding Rule 1).
 sql = ["dep:sqlx", "camel-bundles/sql"]
+# Demand-gated Surreal action activation (mirror of `sql`): the
+# `surreal:` action executor compiles only when scenarios prepare
+# state through a SurrealDB datasource. Forwards camel-bundles'
+# surrealdb gate: the harness is a bundles consumer, so the shadow
+# feature must forward it (lint-gate-forwarding Rule 1).
+surreal = ["dep:surrealdb", "camel-bundles/surrealdb"]
 # Demand-gated WASM activation: forwards camel-bundles' wasm gate so
 # the scenario boot registers the wasm bundle (base-dir fix rc-l3zrr).
 # The harness is a bundles consumer, so the shadow feature must

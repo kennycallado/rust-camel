@@ -11,20 +11,34 @@ target (`{surreal: {datasource: <name>, query: <read>}}`) reuse the
 sql shapes verbatim. The read rule is the same prefix law scoped to
 the SurrealQL vocabulary: a validate query is a read iff its trimmed
 prefix (leading-`(` tolerant) is `select`; SurrealQL has no `with`
-read form, so the surreal read set is `select` alone. Prepare
-statements reject that prefix — writes own prepare, reads own
-validate, per family.
+read form, so the surreal read set is `select` alone. The validate
+query SHALL be exactly one statement — a `;` separator followed by
+further text is a load error (the SDK would otherwise accept
+multi-statement strings). Prepare statements reject the read
+prefix — writes own prepare, reads own validate, per family. The
+prefix law is grammar admission, never proof of read-only
+execution.
 
 **2. Record projection.** SurrealQL SELECT returns objects; the
 executor projects each result record through `columns: [<field>,
-...]` into the shared matcher-tuple grammar. Cell mapping: Null to
-null, Bool to bool, Number (int/float) to number, Strand to string,
-Uuid and Datetime to their string forms, RecordId to its `table:key`
-string, Object and Array to structured values (the matcher verbs see
-them whole). Any other value kind (Bytes, Geometry, ...) fails
-closed naming the field and its SurrealQL type — the
-`any_row_to_tuple` fail-closed precedent, extended to the second
-family as its doc-comment promises (sql_validate.rs:339).
+...]` into the shared matcher-tuple grammar. Cell mapping follows
+the `surrealdb` 3.2.4 `Value` enum: None and Null to null, Bool to
+bool, Number to number when integer or finite float, String to
+string, Uuid and Datetime to their string forms, RecordId to its
+`table:key` string, and Object and Array to structured values (the
+matcher verbs see them whole) mapped recursively — an unsupported
+kind nested inside fails closed naming the field path. Decimals,
+non-finite floats, and every other kind (Bytes, Duration, Geometry,
+Table, File, Range, Regex, Set) fail closed naming the field and
+its SurrealQL type — the `any_row_to_tuple` fail-closed precedent,
+extended to the second family as its doc-comment promises
+(sql_validate.rs:339). Because the driver hands back key-sorted
+objects, a surreal `rows` assertion requires `columns` (selection
+order is not recoverable); `rows` without `columns` is a load error,
+while count bounds do not need it. Statement errors surface inside
+the response object, not only at await time — every prepare
+statement response and every validate snapshot is checked for
+errors before results are discarded or projected.
 
 **3. Hermetic tier: embedded `mem://`, fresh by construction.** The
 workspace `surrealdb` dependency gains `kv-mem`; the factory accepts
@@ -55,7 +69,10 @@ only the embedded tier.
 **4. Demand gate.** `surreal = ["dep:surrealdb",
 "camel-bundles/surrealdb"]` in camel-integration-test — the bundles
 forward is mandatory (lint-gate-forwarding Rule 1, same as `sql`).
-Feature off: the action and target are named load errors. CLI gains
+Feature off: a `surreal:` action is a named
+load error; a well-formed surreal validate target is a named
+demand-gate error at ACTION time (the sql split — parse and load
+validation always run, the executor gate fires on execution). CLI gains
 `integration-surreal`; an `integration-surreal` CI job proves the
 feature stands alone, mirroring `integration-sql` (rc-7lrl2).
 
@@ -72,6 +89,8 @@ behavior change.
 |---|---|---|
 | prepare seeds + validate reads back | surreal | mem |
 | select-prefixed prepare is a load error | surreal | load |
+| appended statement in validate query is a load error | surreal | load |
+| rows without columns is a load error | surreal | load |
 | read-gate both feature configs | surreal | load |
 | rows ordered/unordered, ignore wildcard, bounds | surreal | mem |
 | column projection by field name; unknown field fails closed | surreal | mem |
@@ -79,7 +98,7 @@ behavior change.
 | unknown value kind fails closed | surreal | mem |
 | deadline poll: settle-in-window, no-early-settle, ceiling breach | surreal | mem |
 | second boot over `mem://` starts empty | surreal | mem |
-| teardown closes the surreal client | surreal | mem |
+| teardown releases the surreal client handle | surreal | mem |
 | mismatch/driver diagnostics redact db_url and cells | surreal | mem |
 | feature off names the `surreal` gate (prepare at load, validate at run) | surreal | load |
 | no catalog fails closed | surreal | stub |
@@ -94,7 +113,7 @@ behavior is pinned by the existing component tests
 - `camel-integration-test`: `surreal:` action + surreal validate
   target (parse, validate, execute), `surreal` feature, stub arm.
 - `camel-component-surrealdb`: accept `mem` scheme in
-  `SurrealDbPoolFactory`; teardown close path verified.
+  `SurrealDbPoolFactory`; teardown handle-release path verified.
 - `Cargo.toml` (workspace): `surrealdb` gains `kv-mem`.
 - `camel-cli`: `integration-surreal` feature.
 - `camel-bundles`: no change (gate exists).

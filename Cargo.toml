@@ -162,7 +162,7 @@ async-trait = "0.1"
 thiserror = "2"
 # MCP component (ADR-0060): Streamable HTTP only — no transport-sse-* feature.
 rmcp = { version = "3", features = ["client", "server", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
-surrealdb = { version = "3", default-features = false, features = ["protocol-ws", "protocol-http", "rustls"] }
+surrealdb = { version = "3", default-features = false, features = ["protocol-ws", "protocol-http", "rustls", "kv-mem"] }
 anyhow = "1"
 bytes = "1"
 futures = "0.3"

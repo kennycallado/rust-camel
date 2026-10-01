@@ -259,9 +259,15 @@ suite keeps its runtime and composition.
    (rc-eoft, rc-f0cn). The rc-w1u9 readiness work is already satisfied.
 2. SQL, as the `sql:` scenario action against named datasources
    (rc-25lup.1, rc-25lup.2). It landed 2026-09-08.
-3. WS, after the consumer-client role lands (rc-39d6).
-4. gRPC is a loopback candidate. It needs no Docker. It activates on demand.
-5. Kafka, JMS, and other broker adapters wait for an adapter-specific
+3. SurrealDB, as the `surreal:` scenario action family and the surreal
+   validate target against named datasources (rc-25lup.5). It landed
+   2026-10. The `surreal` Cargo feature gates it, the dedicated
+   `integration-surreal` CI job proves the feature stands alone, and
+   the embedded `mem://` tier runs the family hermetically with no
+   Docker.
+4. WS, after the consumer-client role lands (rc-39d6).
+5. gRPC is a loopback candidate. It needs no Docker. It activates on demand.
+6. Kafka, JMS, and other broker adapters wait for an adapter-specific
    regression.
 
 Each adapter is a Cargo feature. There is no all-components feature. CI runs a

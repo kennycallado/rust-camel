@@ -100,6 +100,28 @@ with one recognized matcher key is that matcher; any other object is a
 literal `equals`.
 _Avoid_: assertion (assertions are the runner's verdict), matcher map
 
+**surreal prepare action**:
+The `surreal:` state action: a `datasource` name plus a non-empty
+ordered `prepare` list of SurrealQL write statements, run in order
+over the boot's catalog client. The load-time read gate rejects a
+`select`-prefixed statement (whitespace trimmed, one leading
+parenthesis group unwrapped) and an empty list, in both feature
+configurations. SurrealQL has no other read prefix, so `select` is
+the only banned one. A build without the `surreal` feature fails a
+declaring document at load with the named demand-gate error.
+_Avoid_: SQL prepare (the family keys are distinct), seed action
+
+**surreal validate target**:
+The `ScenarioTarget::Surreal` case of a `validate` target: exactly
+one `select`-prefixed read statement over a named datasource, the
+shared rows and count-bound expectation grammar, and `deadline`
+validity. The read is single-statement: a `;` separator followed by
+further non-whitespace text is a load error. One surreal deviation: the driver
+returns key-sorted objects, so a `rows` expectation without
+`columns` is a load error. Count bounds do not need `columns`.
+_Avoid_: SQL validate target (the family keys are distinct), record
+query
+
 **elapsedAtLeast**:
 The `validate` timing assertion on a `lastReceived` target: the last
 received message's wire arrival must be at least this long (humantime)
@@ -321,6 +343,38 @@ the remedy when parallel lands is a per-boot unique suffix
 (`memdb_{scenario}_{boot}`). This note is informational, not a rule
 for the sequential runner.
 
+### The surreal state family mirrors the sql family
+
+The `surreal:` prepare action and the surreal validate target reuse
+the sql family's shapes: ordered non-reading prepare statements, the
+single-catalog resolve, a select-prefix read gate, the shared rows
+and count-bound expectation grammar, the ORDER BY advisory, and the
+poll semantics (no early settle, the fixed interval, the immediate
+ceiling breach). Two deviations are load-bearing:
+
+- The surreal read gate bans only the `select` prefix, and the
+  validate query is additionally single-statement: a `;` separator
+  followed by further non-whitespace text is a load error. The check is textual. A
+  `;` inside a string literal false-positives, and the author
+  restructures the query.
+- A `rows` expectation requires `columns`: the driver returns
+  key-sorted objects, so projection order is not recoverable. Record
+  ids project as `table:key` strings. The value mapping fails closed
+  on every kind without an exact matcher form (decimals, non-finite
+  floats, Bytes, Duration, Geometry, Table, File, Range, Regex,
+  Set), naming the field and its SurrealQL type. Recursion never
+  launders a nested unsupported kind.
+
+Teardown joins the family: the surreal factory's close hook issues
+`invalidate()` on every client the boot built (hygiene on the
+auth-free embedded `mem://` tier, session termination on remote
+tiers), so a later boot over the same alias resolves a new client
+against a fresh empty instance. The `mem://` scheme skips signin and
+defaults `namespace` and `database` to `test` and `test`. Pinned by
+the [integration-tier spec](../../openspec/specs/integration-tier/spec.md)
+(State prepare actions, Surreal state assertion, Scenario datasource
+teardown) and ADR-0069 section 8.
+
 ### The scenario tier gates security offline
 
 The tier runs offline: no network. Keycloak/oidc security configuration
@@ -421,8 +475,10 @@ is diagnosable from the failure text.
 - [integration-tier spec](../../openspec/specs/integration-tier/spec.md):
   the scenario boot shares the `camel run` composition root (sealed
   config, security compile-context build, bind acknowledgements, bundle
-  cascade, env-injected discovery, SQL startup checks) and gates
-  keycloak/oidc and wasm security offline.
+  cascade, env-injected discovery, SQL startup checks), gates
+  keycloak/oidc and wasm security offline, and pins the state prepare
+  actions (`sql:`, `surreal:`), the surreal state assertion, and the
+  scenario datasource teardown.
 - ADR-0064: runtime-profile boundary that content-derived tiering
   measures.
 - ADR-0049: `#[non_exhaustive]` posture for public enums.

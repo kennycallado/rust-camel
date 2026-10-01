@@ -42,7 +42,8 @@ queued as rc-25lup.6.
   restates it as the cross-family "State prepare actions" contract.
 
 Excluded: component behavior changes in `camel-component-surrealdb`
-beyond accepting the `mem` scheme and embedded engine features;
+beyond accepting the `mem` scheme, the embedded engine features,
+and the close-hook `invalidate()` teardown wiring;
 tier-3 container provisioning grammar (`testcontainer` /
 `user-provided` stay reserved, ADR-0069 §9); waist extraction
 (rc-25lup.6).

@@ -52,9 +52,6 @@ both feature configurations)
 - `surreal_action_feature_off_is_named_load_error`: (run in a build
   without the `surreal` feature) a document declaring `surreal:` →
   load fails with the demand-gate error naming `surreal`, exit 2.
-- `surreal_target_parses`: (in `doc_parse_test.rs`) a `validate`
-  action with `target: {surreal: {datasource: statedb, query:
-  "SELECT * FROM user"}}` parses to the typed surreal target.
 
 **Acceptance:**
 - `cargo test -p camel-integration-test --lib` passes (feature off:
@@ -64,7 +61,7 @@ both feature configurations)
 - `cargo clippy -p camel-integration-test -- -D warnings` exits 0 in
   both configurations.
 
-- [ ] 1.1
+- [x] 1.1
 
 #### Task 1.2: surreal validate target — expectation grammar and deadline validity
 
@@ -84,15 +81,24 @@ both feature configurations)
    `unordered` flag) — no new expectation type. Parse the raw twin in
    `document.rs` next to `RawSqlTarget` (line 438).
 2. Load validation mirrors the sql target: query read gate
-   (`is_surreal_read_statement` — anything else is a `doc-validation`
-   error naming the action index, both feature configurations);
-   unknown target/expectation fields, `rows` mixed with a count
-   bound, empty `rows`, empty or non-string `columns`, row-tuple
-   length differing from the projection width, inverted range — all
+   (`is_surreal_read_statement` — anything else is a
+   `doc-validation` error naming the action index, both feature
+   configurations) plus the single-statement law (a `;` separator
+   followed by further non-whitespace text is a `doc-validation`
+   error — appended statements rejected); unknown
+   target/expectation fields, `rows` mixed with a count bound,
+   empty `rows`, empty or non-string `columns`, row-tuple length
+   differing from the projection width, inverted range — all
    `doc-validation` errors naming the action index and offending
-   field (and the row index for length mismatch).
+   field (and the row index for length mismatch). Surreal-specific
+   deviation: `rows` without `columns` is a `doc-validation` error
+   naming the action index (the driver returns key-sorted objects;
+   projection order is not recoverable) — count bounds do not
+   require `columns`.
 3. Extend the deadline-validity check from "partner and sql" to
-   "partner, sql, and surreal" (`document.rs:191` today).
+   "partner, sql, and surreal": the field doc comment
+   (`document.rs:191` today) and the enforcement match
+   (`document.rs:965-978`, error string at 978).
 4. Ordered-rows advisory: an ordered `rows` expectation whose query
    lacks `ORDER BY` (case-insensitive substring) emits exactly one
    WARN naming the action index; `unordered: true` suppresses it —
@@ -101,6 +107,13 @@ both feature configurations)
 **Tests:** (load-level, both feature configurations)
 - `surreal_mutation_query_is_load_error`: query `"DELETE user"` →
   `doc-validation` naming the action index.
+- `surreal_appended_statement_is_load_error`: query `"SELECT * FROM
+  user; CREATE x SET y = 1"` → `doc-validation` naming the action
+  index (single-statement law).
+- `surreal_rows_without_columns_is_load_error`: `rows` expectation
+  with no `columns` → `doc-validation` naming the action index.
+- `surreal_count_bound_without_columns_loads`: `atLeast: 1` with no
+  `columns` → load succeeds (bounds do not need `columns`).
 - `surreal_create_query_is_load_error`: query `"CREATE user SET name
   = 'x'"` → `doc-validation` naming the action index.
 - `surreal_rows_mixed_with_count_is_load_error`: expectation with
@@ -108,13 +121,16 @@ both feature configurations)
   node and action index.
 - `surreal_row_length_mismatch_is_load_error`: `columns: [id, name]`
   with a 3-cell row tuple → `doc-validation` naming the row index.
-- `surreal_ordered_rows_without_order_by_warns_once`: ordered rows,
-  query without `ORDER BY` → load succeeds with exactly one WARN
-  naming the action index.
+- `surreal_ordered_rows_without_order_by_warns_once`: ordered rows
+  with `columns` declared, query without `ORDER BY` → load succeeds
+  with exactly one WARN naming the action index.
 - `surreal_unordered_rows_without_order_by_no_warn`: same document
   with `unordered: true` → no WARN.
 - `surreal_deadline_accepted`: validate surreal target with
   `deadline: 2s` → load succeeds.
+- `surreal_target_parses`: (in `doc_parse_test.rs`) a `validate`
+  action with `target: {surreal: {datasource: statedb, query:
+  "SELECT * FROM user"}}` parses to the typed surreal target.
 - `deadline_on_last_received_still_load_error`: (regression)
   `lastReceived` target with `deadline` → `doc-validation` (the
   MODIFIED Partner request verification contract holds).
@@ -125,7 +141,7 @@ both feature configurations)
 - All sql-family parse tests remain green (no expectation-grammar
   drift).
 
-- [ ] 1.2
+- [x] 1.2
 
 #### Task 1.3: sql prepare-action spec-restore regression pins
 
@@ -164,7 +180,7 @@ both feature configurations)
 - `cargo test -p camel-integration-test --lib` passes with every
   restored sql scenario pinned by a named test.
 
-- [ ] 1.3
+- [x] 1.3
 
 ## Phase 2: Executor, projection, and hermetic mem tier
 
@@ -205,8 +221,8 @@ both feature configurations)
 - `mem_connect_creates_isolated_client`: two sequential
   `SurrealDbPoolFactory::create` calls over a `DatasourceConfig`
   with `db_url = "mem://"` produce two handles whose downcasts are
-  distinct `Surreal<Any>` clients, and a record created through the
-  first is invisible to the second.
+  distinct `Surreal<SurrealAny>` clients, and a record created
+  through the first is invisible to the second.
 - `remote_scheme_still_requires_credentials`: (regression) a `ws://`
   config missing `username` → the same missing-extra error as
   before this change.
@@ -216,7 +232,7 @@ both feature configurations)
 - `cargo clippy -p camel-component-surrealdb --all-targets --
   -D warnings` exits 0.
 
-- [ ] 2.1
+- [x] 2.1
 
 ### camel-integration-test (executor)
 
@@ -230,13 +246,18 @@ both feature configurations)
 **Steps:**
 1. Add `pub async fn execute_surreal_prepare(catalog:
    &Arc<dyn DatasourceCatalog>, action: &SurrealAction) ->
-   Result<(), CamelError>` in `surreal_action.rs` (behind
-   `#[cfg(feature = "surreal")]`): resolve the datasource by name
-   through the catalog, downcast the handle to
+   Result<(), String>` in `surreal_action.rs` (behind
+   `#[cfg(feature = "surreal")]`) — the sql prepare executor's
+   signature (`sql_action.rs:156-164`), not CamelError: resolve the
+   datasource by name through the catalog, downcast the handle to
    `Surreal<SurrealAny>` (the `check` precedent in
    `pool_factory.rs:161-171`), execute each `prepare` statement in
-   order through the SDK query path discarding results, stop at the
-   first failure.
+   order through the SDK query path, check each response for
+   statement errors before discarding results (the driver reports
+   statement errors inside the response object — await alone does
+   not establish success), stop at the first failure. The runner
+   arm wraps the Err String into the action failure exactly as the
+   sql arm does (`runner.rs:662-667`).
 2. Sanitize failure text with the existing
    `sql_action::sanitize_db_error` pattern (replace the resolved
    `db_url` occurrences with `[REDACTED]`); diagnostics carry the
@@ -253,8 +274,8 @@ both feature configurations)
   `[datasources.statedb] provider = "surrealdb" db_url = "mem://"`,
   a `surreal:` action with `["DEFINE TABLE user SCHEMALESS",
   "CREATE user SET name = 'alice'"]`, then a `validate` surreal
-  target `SELECT name FROM user` with `rows: [["alice"]]` → the
-  document passes.
+  target `SELECT name FROM user` with `columns: [name]` and
+  `rows: [["alice"]]` → the document passes.
 - `surreal_statement_failure_stops_and_redacts`: second statement
   fails (malformed SurrealQL), datasource `db_url` carries a sentinel
   query parameter, first statement seeded a record with a sentinel
@@ -265,6 +286,10 @@ both feature configurations)
 - `surreal_no_catalog_fails_closed`: surreal action through the
   single-action loop (no catalog) → fails closed naming the missing
   catalog.
+- `surreal_single_catalog_invariant`: a document with two `surreal:`
+  actions over the same datasource name → both resolve through one
+  client handle per name (the catalog's), mirroring the sql pin in
+  Task 1.3.
 
 **Acceptance:**
 - `cargo test -p camel-integration-test --lib --features surreal`
@@ -272,7 +297,7 @@ both feature configurations)
 - `cargo clippy -p camel-integration-test --features surreal --
   -D warnings` exits 0.
 
-- [ ] 2.2
+- [x] 2.2
 
 #### Task 2.3: surreal validate executor — record projection into matcher tuples
 
@@ -288,27 +313,37 @@ both feature configurations)
 **Steps:**
 1. Implement `pub(crate) fn surreal_value_to_cell(v:
    &surrealdb::Value, field: &str) -> Result<camel_api::Value,
-   String>`: Null → `Value::Null`; Bool → boolean; Number (int or
-   float) → number; Strand → string; Uuid → its string form;
-   Datetime → its string form; RecordId → the `table:key` string;
-   Object and Array → the structured `camel_api::Value` (matcher
-   verbs see them whole); any other kind → Err naming the field and
-   the SurrealQL kind (fail closed, never a silent null).
+   String>`: None and Null → `Value::Null`; Bool → boolean; Number →
+   number when Int or finite Float (decimal or non-finite → Err
+   naming the field and kind); String → string; Uuid → its string
+   form; Datetime → its string form; RecordId → the `table:key`
+   string; Object and Array → the structured `camel_api::Value`
+   (matcher verbs see them whole), built recursively through
+   `surreal_value_to_cell` so a nested unsupported kind fails
+   closed naming the field path; every other kind (Bytes, Duration,
+   Geometry, Table, File, Range, Regex, Set) → Err naming the field
+   and the SurrealQL kind (fail closed, never a silent null).
 2. Implement `pub(crate) fn surreal_rows_to_tuples(rows:
    Vec<surrealdb::Value>, fields: &[String]) ->
    Result<Vec<Vec<camel_api::Value>>, String>`: for each result
    object, project the listed fields in declared order through
    `surreal_value_to_cell`; an absent field → Err naming the field
-   (unknown projection field fails closed). Without a `columns`
-   list, project every field of the object in query order.
+   (unknown projection field fails closed). The loader guarantees
+   `columns` is present whenever `rows` is declared (Task 1.2 load
+   error), so this function only runs with a declared projection —
+   count-bound-only expectations skip projection entirely.
 3. Implement `pub(crate) async fn surreal_validate_action(index:
-   usize, target: &SurrealTarget, expected: &ValidateExpectation,
+   usize, target: &SurrealTarget, expected: &RowsExpectation,
    deadline: Option<Duration>, datasource_catalog:
-   Option<&Arc<dyn DatasourceCatalog>>) -> Result<(), CamelError>`
-   following `sql_validate.rs`: resolve the datasource through the
-   catalog, execute the read, project, and hand the tuples and bounds
-   to the shared expectation matcher the sql target uses (same
-   rows/bound decision code, same error classes).
+   Option<&Arc<dyn DatasourceCatalog>>) -> Result<(), ScenarioFailure>`
+   following `sql_validate.rs` — the sql validate seam's shapes
+   (`RowsExpectation` in, `ScenarioFailure` out,
+   `runner/sql_validate.rs:48-54`), with the bound-only branch
+   sharing the sql decision code and error classes: resolve the
+   datasource through the catalog, execute the read, check the
+   response for statement errors before projection, project, and
+   hand the tuples and bounds to the shared expectation matcher the
+   sql target uses.
 4. Wire the surreal target arm in `runner.rs` validate dispatch
    (line 981) mirroring the sql arm's gating shape: the dispatch arm
    itself stays ungated (the sql arm at `runner.rs:980-981` is
@@ -319,28 +354,46 @@ both feature configurations)
 
 **Tests:** (in `surreal_validate_test.rs`, feature `surreal`,
 `mem://` datasource)
-- `ordered_rows_pass_immediately`: seed two records, select both
-  fields with `ORDER BY`, `rows: [[1, "alice"], [2, "bob"]]` → pass.
-- `unordered_rows_match_reorder`: seed `(1, "alice")`, `(2, "bob")`,
-  no `ORDER BY`, `unordered: true`, `rows: [[2, "bob"], [1,
-  "alice"]]` → pass.
-- `wildcard_ignore_matches_any_cell`: one record `(7, null)`,
-  `rows: [[{ignore: null}, {equals: null}]]` → pass.
+- `ordered_rows_pass_immediately`: seed `CREATE user SET num = 1,
+  name = 'alice'` and `num = 2, name = 'bob'` (user-defined numeric
+  field — record ids project as `table:key` strings), select with
+  `ORDER BY num`, `columns: [num, name]`, `rows: [[1, "alice"], [2,
+  "bob"]]` → pass.
+- `unordered_rows_match_reorder`: same two records, no `ORDER BY`,
+  `unordered: true`, `columns: [num, name]`, `rows: [[2, "bob"],
+  [1, "alice"]]` → pass.
+- `wildcard_ignore_matches_any_cell`: one record `CREATE user SET
+  num = 7, name = NULL` (a stored null — if the driver drops the
+  key instead of persisting explicit NULL, seed via `CREATE user
+  content { num: 7, name: null }`; do NOT use `NONE`, which omits
+  the field), `columns: [num, name]`, `rows: [[{ignore: null},
+  {equals: null}]]` → pass (stored-null mapping; the missing-field
+  fail-closed is pinned separately by
+  `unknown_projection_field_fails_closed`).
 - `count_bound_passes_on_record_count`: three records, `atLeast: 2`
   → pass.
 - `field_projection_reorders_by_name`: query selects `id, name`,
   `columns: [name, id]`, `rows: [["alice", "user:1"]]` → pass.
 - `record_id_projects_as_string`: one record, query `SELECT id FROM
-  user`, `rows: [["user:1"]]` → pass (the `table:key` string form).
+  user`, `columns: [id]`, `rows: [["user:1"]]` → pass (the
+  `table:key` string form).
 - `unknown_projection_field_fails_closed`: `columns: [id, missing]`
   → action fails naming `missing`.
 - `unknown_value_kind_fails_closed`: a field holding a value kind
   outside the mapping (insert a geometry or bytes payload) → action
   fails naming the field and its kind.
+- `nested_unsupported_kind_fails_closed`: a field holding an array
+  that contains a geometry value → action fails naming the field
+  path and the nested kind (recursion never launders unsupported
+  kinds).
 - `surreal_validate_feature_off_names_gate`: (run in a build without
   the `surreal` feature; a document whose surreal target passes
   load, e.g. a well-formed read query) the action runs and fails
   naming the `surreal` feature.
+- `surreal_validate_no_catalog_fails_closed`: a surreal validate
+  action through the single-action loop (no catalog) → fails closed
+  naming the missing catalog (the validate-side mirror of the
+  2.2 prepare pin).
 - `row_length_mismatch_load_error_sibling`: expectation row tuple of
   3 cells against 2 columns → load error (pins Task 1.2 at e2e
   level).
@@ -350,7 +403,7 @@ both feature configurations)
   passes.
 - `cargo fmt --check --all` exits 0.
 
-- [ ] 2.3
+- [x] 2.3
 
 #### Task 2.4: poll semantics, deadline, and redaction for surreal targets
 
@@ -374,22 +427,37 @@ both feature configurations)
    an actual cell value.
 
 **Tests:** (feature `surreal`, `mem://`)
-- `deadline_poll_passes_when_record_appears`: an empty table a
-  running route populates within the deadline (a `direct:` route
-  with a `surrealdb:create` producer over the same datasource),
-  validate with `deadline` and the rows the route writes → the final
-  snapshot matches and passes.
-- `no_early_settle_final_snapshot_decides`: record present at first
-  poll, deleted before deadline (route deletes it), `rows` +
-  `deadline` → fails as validation mismatch at expiry.
+- `deadline_poll_passes_when_record_appears`: empty table at start;
+  spawn the validate action (deadline comfortably longer than the
+  write delay) and a writer task (`tokio::spawn`, the sql suite's
+  sanctioned sleep idiom: write at ~150ms via
+  `execute_surreal_prepare(["CREATE user SET ..."])` over the same
+  catalog); AWAIT the writer's completion (join) before awaiting
+  the validate result — the join proves the write landed inside the
+  deadline window; the validate (deadline, `columns`, the rows the
+  spawn writes) passes on the final snapshot. Deterministic: first
+  poll is immediate (record absent), write at 150ms, decision at
+  expiry. No route, no boot — route-driven coverage is Task 2.6.
+- `no_early_settle_final_snapshot_decides`: seed the record, PROVE
+  presence with a preliminary immediate call (a direct
+  `surreal_validate_action` without `deadline`, asserting the
+  record is observed); then spawn the deadline validate and a
+  deleter (`execute_surreal_prepare(["DELETE user"])` at ~150ms);
+  AWAIT the deleter's join before awaiting the validate result
+  (proves deletion landed inside the window); the `rows` +
+  `columns` + `deadline` validate fails as validation mismatch on
+  the final empty snapshot — the test outcome is independent of
+  spawn scheduling.
 - `ceiling_breach_fails_immediately`: two records present,
   `atMost: 1` with `deadline` → first snapshot fails without waiting.
 - `mismatch_detail_elides_cells_and_db_url`: failing rows assertion,
   `db_url` with an embedded credential sentinel → detail names
   datasource, expected/actual counts, field names; contains neither
   the credential nor any cell value.
-- `driver_error_is_sanitized`: query against a missing table →
-  failure carries the datasource name and sanitized driver text,
+- `driver_error_is_sanitized`: query with a guaranteed statement
+  error on `mem://` — `SELECT FROM WHERE` (SurrealQL parse error;
+  passes the load-time select-prefix gate, errors in the response)
+  → failure carries the datasource name and sanitized driver text,
   never the `db_url`.
 
 **Acceptance:**
@@ -397,7 +465,7 @@ both feature configurations)
   passes.
 - No new `unwrap()` (cargo xtask lint-unwrap exits 0).
 
-- [ ] 2.4
+- [x] 2.4
 
 #### Task 2.5: teardown and per-boot freshness for mem surreal datasources
 
@@ -405,35 +473,41 @@ both feature configurations)
 - `crates/camel-integration-test/src/boot_scenario_test.rs`
   (modified)
 - `crates/components/camel-component-surrealdb/src/pool_factory.rs`
-  (modified — only if the close path needs the explicit client
-  invalidation hook)
+  (modified — the close hook gains a mandatory `invalidate()` call)
 
 **Steps:**
-1. Verify the boot teardown's `datasource_catalog.close_all()`
-   closes surreal clients: if the `PoolFactory` close hook has no
-   surreal arm (no-op default), add the explicit
-   `Surreal::<Any>::invalidate` call in the factory's close path so
-   the client dies with the boot.
+1. Wire the factory close hook: the surreal `PoolFactory` close path
+   SHALL call `Surreal::<SurrealAny>::invalidate()` on the client
+   (auth revocation — the SDK's only teardown lever; the catalog's
+   `close_all` does NOT drop its cached entry,
+   `datasource.rs:140-189`). NOTE: embedded `mem://` runs with
+   authentication disabled (surrealdb 3.2.4 local engine) —
+   `invalidate()` on an auth-free mem client revokes nothing
+   observable, so the close-hook invocation is verified in the
+   component crate, not through post-close query failure.
 2. Add the freshness scenario tests (sequential boots in one
    process).
 
-**Tests:** (in `boot_scenario_test.rs`, feature `surreal`)
-- `mem_surreal_second_boot_starts_empty`: first boot seeds records
-   over `[datasources.statedb] db_url = "mem://"` with a `surreal:`
-   prepare and completes teardown; second boot over the same alias
-   reads zero records.
-- `shutdown_closes_surreal_client`: a booted scenario that opened
-   the surreal datasource through `surreal:` or a surreal validate
-   target → teardown returns with the client closed (observable: the
-   second boot's fresh client — combined with the test above — and
-   no close error in the shutdown result).
+**Tests:**
+- (in `pool_factory.rs` `mod tests`, camel-component-surrealdb)
+  `close_hook_invalidates_and_completes`: create a mem client via
+  the factory, invoke the close path, assert it completes Ok (the
+  `invalidate()` call ran — on the auth-free mem tier its effect is
+  hygiene; observability is the remote tier's concern, exercised by
+  the existing remote component tests).
+- (in `boot_scenario_test.rs`, feature `surreal`)
+  `mem_surreal_second_boot_starts_empty`: first boot seeds records
+  over `[datasources.statedb] db_url = "mem://"` with a `surreal:`
+  prepare and completes teardown (close_all Ok); second boot over
+  the same alias reads zero records (fresh catalog, new client —
+  freshness by construction).
 
 **Acceptance:**
 - `cargo test -p camel-integration-test --lib --features surreal`
   passes; existing teardown and boot-freshness tests stay green
   (sql scenarios unaffected).
 
-- [ ] 2.5
+- [x] 2.5
 
 #### Task 2.6: hermetic e2e — prepare, route write, validate, in one document
 
@@ -447,24 +521,27 @@ both feature configurations)
    datasource; a route file with a `direct:` consumer feeding a
    `surrealdb:create?datasource=statedb&table=order` producer; a
    scenario document that (a) prepares with `surreal:`
-   (`DEFINE TABLE order SCHEMALESS` then `REMOVE TABLE order` —
-   clean-first idiom), (b) sends one `direct:` message the route
-   persists, (c) validates the record with a surreal target and a
-   `deadline`.
-2. The test boots the document through the scenario entry point the
-   sql e2e tests use, gated behind the crate's e2e test feature the
-   same way.
+   (`REMOVE TABLE order` first — the clean-first idiom, tolerant of
+   absence — then `DEFINE TABLE order SCHEMALESS`), (b) sends one
+   `direct:` message the route persists, (c) validates the record
+   with a surreal target, `columns`, and a `deadline`.
+2. The test boots the document through the scenario entry point
+   `boot_scenario` in-crate: `tests/surreal_state_test.rs` carries
+   `#![cfg(feature = "surreal")]` and mirrors the
+   `wasm_boot_test.rs` pattern (the crate has no separate e2e
+   feature; the sql full-boot e2e lives in camel-cli and is owned
+   by the integration-sql workflow).
 
 **Tests:**
 - `surreal_state_e2e_prepare_route_validate`: the fixture document
   runs to a passing verdict.
 
 **Acceptance:**
-- The e2e test passes under the crate's e2e feature configuration;
-  default `cargo test -p camel-integration-test --lib` stays
-  hermetic and green.
+- `cargo test -p camel-integration-test --features surreal --test
+  surreal_state_test` passes; default `cargo test -p
+  camel-integration-test --lib` stays hermetic and green.
 
-- [ ] 2.6
+- [x] 2.6
 
 ## Phase 3: Gate forwarding, CLI, CI, docs
 
@@ -492,28 +569,53 @@ both feature configurations)
 - `cargo xtask lint-component-deps` exits 0.
 - The standalone check exits 0.
 
-- [ ] 3.1
+- [x] 3.1
 
 #### Task 3.2: CLI gate and CI independence job
 
 **Files:**
 - `crates/camel-cli/Cargo.toml` (modified)
+- `crates/camel-cli/src/commands/test/scenario.rs` (modified)
 - `.github/workflows/integration-surreal.yml` (new)
 
 **Steps:**
 1. Add the `integration-surreal` feature to `camel-cli/Cargo.toml`
    mirroring `integration-sql`: it enables the camel-test /
    integration-test surreal wiring and the `surrealdb` component
-   feature; add it to `full` alongside `integration-sql`. Keep it
-   out of `flavor-regular` (BUSL-1.1 note, `Cargo.toml:160-166`) —
-   it rides `flavor-full` with `surrealdb`.
-2. Create `.github/workflows/integration-surreal.yml` mirroring
-   `integration-sql.yml`: path filters on
-   `crates/camel-integration-test/**`,
-   `crates/components/camel-component-surrealdb/**`, and the workflow
-   file itself; the job builds `camel-cli --no-default-features
-   --features integration-surreal,itest-e2e` and runs the surreal
-   scenario suite; default suite untouched.
+   feature. Add it EVERYWHERE `integration-sql` rides, adjusted for
+   the BUSL rule: `full` (line 152) and `flavor-full` (line 175 —
+   `flavor-full` does NOT include `full`, so it needs its own
+   entry; it already carries `surrealdb`). Keep it OUT of
+   `flavor-regular` (BUSL-1.1: `integration-surreal` forwards the
+   BUSL-licensed surrealdb engine, which rides `flavor-full` only —
+   `Cargo.toml:174-175`).
+2. Wire the surreal full-boot selection in
+   `camel-cli/src/commands/test/scenario.rs`: `run_scenario_doc`
+   (~276-318) today selects a full boot (booted catalog) only for
+   HTTP wiring or a declared `sql:` action — extend the condition
+   so a document declaring a `surreal:` action or a surreal
+   validate target also takes the full-boot path. Every gate that
+   carries the http/sql boot condition gets the surreal arm:
+   `BOOT_SCHEMES` (~27-49), `run_scenario_full_boot` and the
+   dispatch (~281-318), and the config selection at ~435, each
+   behind `#[cfg(feature = "integration-surreal")]` mirroring the
+   sql arm's gate shape. Without this, a surreal-only document
+   takes the no-boot path and has no catalog (the exact failure
+   `surreal_no_catalog_fails_closed` pins at unit level), or the
+   standalone CLI build fails to compile the boot path.
+3. Create `.github/workflows/integration-surreal.yml` mirroring
+   `integration-sql.yml`'s path-filters list exactly
+   (`integration-sql.yml:6-15`): `Cargo.toml`, `Cargo.lock`,
+   `crates/components/camel-component-surrealdb/**`,
+   `crates/camel-integration-test/**`, `crates/camel-bundles/**`,
+   `crates/camel-cli/src/**`,
+   `crates/camel-cli/tests/test_scenario_cli_e2e.rs`,
+   `crates/camel-cli/Cargo.toml`, and the workflow file itself;
+   the job builds `camel-cli --no-default-features --features
+   integration-surreal,itest-e2e` (independence check), then runs
+   `cargo test -p camel-integration-test --features surreal --test
+   surreal_state_test` (Task 2.6's suite — the crate has no e2e
+   feature of its own); default suite untouched.
 
 **Tests:**
 - CI-level criterion: the job's build line compiles `camel-cli`
@@ -523,10 +625,13 @@ both feature configurations)
 **Acceptance:**
 - `cargo check -p camel-cli --no-default-features --features
   integration-surreal` exits 0 locally.
+- `cargo check -p camel-cli --no-default-features --features
+  flavor-full` exits 0 (the flavor closure carries
+  `integration-surreal`).
 - `cargo xtask lint-publish-cycles` and `lint-publish-registration`
   exit 0.
 
-- [ ] 3.2
+- [x] 3.2
 
 #### Task 3.3: docs page, ADR ladder, context citations
 
@@ -565,4 +670,4 @@ both feature configurations)
 - Both lints exit 0; `mdbook build` (or the repo's doc build
   command) renders the new page without dead links.
 
-- [ ] 3.3
+- [x] 3.3

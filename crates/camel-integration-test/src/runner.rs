@@ -78,6 +78,22 @@ mod sql_validate;
 pub(crate) use sql_validate::any_row_to_tuple;
 pub(crate) use sql_validate::sql_validate_action;
 
+/// Surreal record projection for the `validate` action's `surreal`
+/// target (surreal-state-tier task 2.3): the datasource resolution
+/// through the catalog, the fail-closed record-to-tuple mapping with
+/// its SurrealQL type law, and the cell-free mismatch renderer — the
+/// sql validate seam's shapes.
+mod surreal_validate;
+
+// The dispatch target of the runner's surreal validate arm; the
+// cfg(test) re-exports are its direct unit tests (the sql twin).
+pub(crate) use surreal_validate::surreal_validate_action;
+#[cfg(all(test, feature = "surreal"))]
+pub(crate) use surreal_validate::{surreal_rows_to_tuples, surreal_value_to_cell};
+
+#[cfg(test)]
+mod surreal_validate_test;
+
 /// The default bounded deadline for every `send` action (ADR-0069
 /// §7: every adapter operation carries a deadline). A document-level
 /// `sendDeadline` overrides it (rc-tr4w).
@@ -685,6 +701,55 @@ async fn run_action(
                 });
             }
         }
+        ScenarioAction::Surreal {
+            datasource,
+            prepare,
+        } => {
+            // Apparatus class (exit 2): seeding is harness-side state
+            // preparation — a failure here means the scenario never
+            // got its declared preconditions, never that the system
+            // under test misbehaved (the sql arm's rationale).
+            #[cfg(feature = "surreal")]
+            {
+                let Some(catalog) = datasource_catalog else {
+                    return Err(ScenarioFailure::ActionTransport {
+                        action: index,
+                        source: TransportError::Other {
+                            message: "surreal action: no datasource catalog is available; the \
+                                      boot-owning caller must pass the cascade's catalog"
+                                .to_string(),
+                        },
+                    });
+                };
+                let surreal = crate::surreal_action::SurrealAction {
+                    datasource: datasource.clone(),
+                    prepare: prepare.clone(),
+                };
+                crate::surreal_action::execute_surreal_prepare(catalog, &surreal)
+                    .await
+                    .map_err(|message| ScenarioFailure::ActionTransport {
+                        action: index,
+                        source: TransportError::Other { message },
+                    })?;
+            }
+            // Defense-in-depth: the document parser rejects `surreal:`
+            // without the feature, so only a directly-constructed
+            // document reaches this arm (the boot-level inbound
+            // precedent).
+            #[cfg(not(feature = "surreal"))]
+            {
+                let _ = (datasource, prepare, datasource_catalog);
+                return Err(ScenarioFailure::ActionTransport {
+                    action: index,
+                    source: TransportError::Other {
+                        message: "the `surreal:` action requires the `surreal` feature, which \
+                                  this harness build does not enable: rebuild with \
+                                  `--features surreal` (demand-gated activation)"
+                            .to_string(),
+                    },
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -963,10 +1028,13 @@ async fn receive_action(
 /// the doc-authored read's row shape against the named datasource's
 /// pool through [`sql_validate_action`], which owns the deadline
 /// poll (SQL state is non-monotone, so its lattice differs from the
-/// partner's). Every other target applies the message grammar
-/// against `vars`; the deadline is partner/sql-only (the grammar
-/// rejected it on these targets at parse time, so the message arm
-/// ignores it). An `elapsedAtLeast` bound on a `lastReceived` target
+/// partner's). The `surreal` target projects the datasource's live
+/// records the same way through [`surreal_validate_action`] (its
+/// poll lattice lands with surreal-state-tier task 2.4). Every other
+/// target applies the message grammar
+/// against `vars`; the deadline is partner/sql/surreal-only (the
+/// grammar rejected it on these targets at parse time, so the message
+/// arm ignores it). An `elapsedAtLeast` bound on a `lastReceived` target
 /// checks the message's wire arrival against the scenario-start
 /// anchor before the grammar runs; the grammar rejected it on every
 /// other target at parse time. Mismatch details name the validation
@@ -1006,6 +1074,15 @@ async fn validate_action(
         // its assertion.
         (ScenarioTarget::Sql(target), ValidateExpectation::Rows(expected)) => {
             sql_validate_action(index, target, expected, *deadline, datasource_catalog).await
+        }
+        // The grammar pairs a `surreal` target with the row-shape
+        // grammar (surreal-state-tier task 1.2); this arm reads the
+        // datasource's live records and projects them like the sql
+        // arm. The feature split lives inside surreal_validate (the
+        // sql twin): a feature-off build returns the named
+        // demand-gate error at action time, never a silent pass.
+        (ScenarioTarget::Surreal(target), ValidateExpectation::Rows(expected)) => {
+            surreal_validate_action(index, target, expected, *deadline, datasource_catalog).await
         }
         (_, ValidateExpectation::Message(expectation)) => {
             let (value, subject) = match target {
@@ -1062,6 +1139,11 @@ async fn validate_action(
                 // expectation here means a caller bypassed the
                 // parser.
                 ScenarioTarget::Sql(_) => return Err(unpaired_validate(index)),
+                // Taken by the arm above: the grammar pairs a
+                // `surreal` target with the rows grammar only; a
+                // message expectation here means a caller bypassed
+                // the parser.
+                ScenarioTarget::Surreal(_) => return Err(unpaired_validate(index)),
             };
             // The per-form booleans delegate to the shared core
             // (`camel_matchers::expectation_matches`); the detail
@@ -1150,27 +1232,27 @@ async fn validate_action(
                 }),
             }
         }
-        // The parser never pairs a partner or sql target with another
-        // kind's grammar, and never a rows expectation with a
-        // non-sql target: a `partner` target pairs with the partner
-        // count grammar, a `sql` target with the rows grammar
-        // (`rows` or a count bound), every other target with the
-        // message grammar.
+        // The parser never pairs a partner or sql/surreal target with
+        // another kind's grammar, and never a rows expectation with a
+        // non-datasource target: a `partner` target pairs with the
+        // partner count grammar, a `sql`/`surreal` target with the
+        // rows grammar (`rows` or a count bound), every other target
+        // with the message grammar.
         _ => Err(unpaired_validate(index)),
     }
 }
 
 /// The failure for a target/expectation pairing the grammar never
 /// produces: the parser pairs `partner` targets with the partner
-/// count grammar, `sql` targets with the rows grammar, and every
-/// other target with the message grammar, so only a caller bypassing
-/// the parser reaches these arms.
+/// count grammar, `sql`/`surreal` targets with the rows grammar, and
+/// every other target with the message grammar, so only a caller
+/// bypassing the parser reaches these arms.
 fn unpaired_validate(index: usize) -> ScenarioFailure {
     ScenarioFailure::ValidationMismatch {
         action: index,
         detail: "validate target kind does not pair with the expectation kind: `partner` pairs \
-                 with the partner count grammar, `sql` with the rows grammar, and every other \
-                 target with the message grammar"
+                 with the partner count grammar, `sql`/`surreal` with the rows grammar, and \
+                 every other target with the message grammar"
             .to_string(),
     }
 }

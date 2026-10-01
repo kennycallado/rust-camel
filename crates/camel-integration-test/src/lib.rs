@@ -34,6 +34,7 @@ pub mod inbound;
 pub mod log_capture;
 pub mod runner;
 pub mod sql_action;
+pub mod surreal_action;
 pub mod tier;
 
 /// Partner-script grammar of the scenario document's `partners:` map;
@@ -54,7 +55,7 @@ pub use document::partner_scripts_for;
 pub use document::{
     DocError, EndpointRef, InboundListener, PartnerFault, PartnerScript, PartnerScriptResponse,
     Provisioning, RouteSource, ScenarioAction, ScenarioDocument, ScenarioTarget, SqlTarget,
-    ValidateExpectation, parse_scenario_document,
+    SurrealTarget, ValidateExpectation, parse_scenario_document,
 };
 pub use env_layers::{AmbientLookup, LayeredEnv, ambient_std};
 #[cfg(feature = "http")]
@@ -69,6 +70,10 @@ pub use sql_action::execute_sql_prepare;
 pub use sql_action::{
     RawSqlAction, SQL_ACTION_KEY, SQL_MEMORY_NOT_SHARED, SqlAction, ensure_sqlite_memory_shared,
     is_read_statement, sanitize_db_error, validate_sql_action,
+};
+pub use surreal_action::{
+    RawSurrealAction, SURREAL_ACTION_KEY, SurrealAction, is_surreal_read_statement,
+    validate_surreal_action,
 };
 pub use tier::{DocumentInputs, Tier, derive_tier};
 
@@ -115,6 +120,13 @@ mod sql_stub;
 /// test bodies split internally per config.
 #[cfg(test)]
 mod sql_validate_test;
+
+/// Scenario `surreal:` action read-gate and demand-gate tests
+/// (surreal-state-tier task 1.1). Compiles in BOTH feature
+/// configurations — the feature-off twin lives in the `feature_off`
+/// module.
+#[cfg(test)]
+mod surreal_action_test;
 
 /// Shared cfg(test) support for the in-crate test modules (bd
 /// rc-kkznl): single-entry partner-router construction.

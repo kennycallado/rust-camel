@@ -149,7 +149,7 @@ default = ["flavor-regular"]
 # start from `--no-default-features`.
 # Historical closure list, kept for compose-users; its closure no longer
 # wires function/container (gated behind `containers`) — prefer flavor-full.
-full = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http", "integration-sql", "security", "redis-tls", "lsp", "lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath", "lang-minijinja", "jms", "sql", "redis", "opensearch", "ws", "cxf", "xj", "xslt"]
+full = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http", "integration-sql", "integration-surreal", "security", "redis-tls", "lsp", "lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath", "lang-minijinja", "jms", "sql", "redis", "opensearch", "ws", "cxf", "xj", "xslt"]
 # LSP server surface (`camel lsp`): tower-lsp transport + camel-lsp backend.
 lsp = ["dep:camel-lsp", "dep:tower-lsp"]
 # kubernetes forwards camel-config's platform wiring (pod identity,
@@ -172,7 +172,7 @@ lang-minijinja = ["camel-core/lang-minijinja"]
 # camel-function + camel-component-container as ONE feature).
 flavor-slim = ["mqtt", "mqtt-tls", "http-static", "sql", "lang-jsonpath", "lang-rhai"]
 flavor-regular = ["flavor-slim", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]
-flavor-full = ["flavor-regular", "exec", "kafka", "surrealdb", "containers"]
+flavor-full = ["flavor-regular", "exec", "kafka", "surrealdb", "integration-surreal", "containers"]
 # otel instruments http (always linked) and ws. The ws/otel forward
 # activates the optional camel-component-ws dep without the `ws`
 # capability gate — pre-existing shape: telemetry-on does not imply
@@ -252,6 +252,13 @@ integration-http = ["camel-integration-test/http", "camel-integration-test/secur
 # `integration-http` — an sql-only build runs full-boot documents whose
 # only actions are `sql:`.
 integration-sql = ["camel-integration-test/sql"]
+# Integration-tier `surreal:` action + surreal validate target
+# activation (surreal-state-tier task 3.2, ADR-0069 §8 demand-gating):
+# forwards to the harness's surreal feature and the BUSL-licensed
+# surrealdb component. Independent of `integration-http` and
+# `integration-sql` — a surreal-only build runs full-boot documents
+# whose only datasource wiring is surreal.
+integration-surreal = ["camel-integration-test/surreal", "surrealdb"]
 # Test-only: the e2e suites that spawn the real `camel` binary against
 # scenario documents stay out of the default suite (runtime and spawn
 # cost); the integration-http CI job enables them explicitly.

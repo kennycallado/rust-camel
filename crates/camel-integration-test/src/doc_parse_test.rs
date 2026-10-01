@@ -2501,9 +2501,9 @@ scenario:
 }
 
 /// Existing behavior stands: `deadline` on a `lastReceived` target is
-/// still rejected, and the error now names both valid targets.
+/// still rejected, and the error now names all three valid targets.
 #[test]
-fn deadline_on_last_received_still_rejected() {
+fn deadline_on_last_received_still_load_error() {
     let err = parse_case(
         r#"
 routeFiles: [routes.yaml]
@@ -2521,8 +2521,8 @@ scenario:
         DocError::Validation { index, message } => {
             assert_eq!(index, 0, "error must name the action index");
             assert!(
-                message.contains("`partner` or `sql`"),
-                "message must name both valid targets: {message}"
+                message.contains("`partner`, `sql`, or `surreal`"),
+                "message must name all three valid targets: {message}"
             );
         }
         other => panic!("expected Validation, got {other:?}"),
@@ -2845,6 +2845,396 @@ scenario:
     expectation:
       unordered: true
       rows: [[1]]
+"#,
+        )
+        .expect("parse must succeed")
+    });
+    let events = window.close();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event.level == tracing::Level::WARN && event.message.contains("ORDER BY")),
+        "an unordered shape never advises: {events:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// surreal validate target (Task 1.2, surreal-state-tier): the `surreal`
+// key reuses the sql row grammar (no new expectation type), with the
+// read gate, the single-statement law, the rows-requires-columns
+// deviation, and deadline validity. Load-level: identical in both
+// feature configurations.
+// ---------------------------------------------------------------------------
+
+/// A validate action whose `surreal` target parses keeps the datasource
+/// name and the doc-authored read query, pairing the target with the
+/// row-shape grammar (`ValidateExpectation::Rows`). The query carries
+/// `ORDER BY` so the advisory owns its own windowed tests.
+#[test]
+fn surreal_target_parses() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: statedb
+        query: SELECT * FROM user ORDER BY id
+    expectation:
+      columns: [id, name]
+      rows: [[1, "a"]]
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.first().expect("one action");
+    match action {
+        ScenarioAction::Validate {
+            target,
+            expectation,
+            ..
+        } => {
+            match target {
+                ScenarioTarget::Surreal(target) => {
+                    assert_eq!(
+                        target.datasource, "statedb",
+                        "target must keep the datasource identifier"
+                    );
+                    assert_eq!(
+                        target.query, "SELECT * FROM user ORDER BY id",
+                        "target must keep the doc-authored read query"
+                    );
+                }
+                other => panic!("expected Surreal, got {other:?}"),
+            }
+            assert!(
+                matches!(expectation, ValidateExpectation::Rows(_)),
+                "expectation must parse as the row shape: {expectation:?}"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
+    }
+}
+
+/// A mutation query is a doc-validation error naming the action index
+/// and the read rule: the validate surreal target owns reads, the
+/// `surreal:` prepare action owns mutations.
+#[test]
+fn surreal_mutation_query_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: statedb
+        query: DELETE user
+    expectation:
+      count: 1
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("reads belong to the validate surreal target"),
+                "error must state the read rule: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// A `CREATE` mutation is rejected by the same read gate.
+#[test]
+fn surreal_create_query_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: statedb
+        query: CREATE user SET name = 'x'
+    expectation:
+      count: 1
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("reads belong to the validate surreal target"),
+                "error must state the read rule: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// The single-statement law: a `;` separator followed by further
+/// non-whitespace text appends a statement, and appended statements
+/// are rejected naming the action index.
+#[test]
+fn surreal_appended_statement_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: statedb
+        query: SELECT * FROM user; CREATE x SET y = 1
+    expectation:
+      count: 1
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("single statement"),
+                "error must state the single-statement law: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// Surreal-specific deviation (task 1.2): `rows` without `columns` is
+/// a doc-validation error naming the action index — the driver returns
+/// key-sorted objects, so the projection order is not recoverable.
+#[test]
+fn surreal_rows_without_columns_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: statedb
+        query: SELECT * FROM user
+    expectation:
+      rows: [[1, "a"]]
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("`rows` requires `columns`"),
+                "error must state the rows-requires-columns law: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// Count bounds do NOT require `columns`: an `atLeast` bound asserts
+/// the returned row count, which needs no projection order.
+#[test]
+fn surreal_count_bound_without_columns_loads() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: statedb
+        query: SELECT * FROM user
+    expectation:
+      atLeast: 1
+"#,
+    )
+    .expect("parse must succeed");
+    match doc.scenario.first().expect("one action") {
+        ScenarioAction::Validate {
+            expectation: ValidateExpectation::Rows(rows),
+            ..
+        } => {
+            assert_eq!(rows.columns, None, "no columns are declared");
+            assert_eq!(rows.bound, Some(CountBound::AtLeast(1)));
+            assert!(rows.rows.is_none(), "no row patterns are declared");
+        }
+        other => panic!("expected Validate with Rows expectation, got {other:?}"),
+    }
+}
+
+/// `rows` mixed with a count bound stays exclusive through the shared
+/// grammar: the error names the expectation node and the action index.
+#[test]
+fn surreal_rows_mixed_with_count_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: statedb
+        query: SELECT * FROM user
+    expectation:
+      columns: [id]
+      rows: [[1]]
+      count: 1
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("`rows`") && message.contains("`count`"),
+                "error must name the expectation node and both keys: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// A row tuple whose width differs from the declared `columns` fails
+/// naming the action index AND the offending row index, through the
+/// shared grammar.
+#[test]
+fn surreal_row_length_mismatch_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: statedb
+        query: SELECT * FROM user
+    expectation:
+      columns: [id, name]
+      rows: [[1, "a", "extra"]]
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("row 0"),
+                "error must name the offending row index: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// The poll deadline is valid on a surreal target: the read runs
+/// against a live datasource and may be worth bounding.
+#[test]
+fn surreal_deadline_accepted() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: statedb
+        query: SELECT * FROM user
+    expectation:
+      count: 1
+    deadline: 2s
+"#,
+    )
+    .expect("parse must succeed");
+    match doc.scenario.first().expect("one action") {
+        ScenarioAction::Validate { deadline, .. } => {
+            assert_eq!(
+                *deadline,
+                Some(Duration::from_secs(2)),
+                "deadline must parse as a humantime duration"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
+    }
+}
+
+/// An ordered `rows` assertion (columns declared) over a surreal query
+/// without `ORDER BY` emits exactly one advisory warn naming the
+/// action index — the sql loader rule applied to the surreal target.
+/// Same scoped-dispatch capture as the sql twin.
+#[test]
+fn surreal_ordered_rows_without_order_by_warns_once() {
+    let _guard = ADVISORY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    ensure_global_tracing_default();
+    let dispatch = crate::log_capture::scoped_capture_dispatch();
+    let window = crate::log_capture::open_window();
+    let _doc = tracing::dispatcher::with_default(&dispatch, || {
+        parse_case(
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: statedb
+        query: SELECT * FROM user
+    expectation:
+      columns: [id, name]
+      rows: [[1, "a"]]
+"#,
+        )
+        .expect("parse must succeed")
+    });
+    let events = window.close();
+    let advisories: Vec<_> = events
+        .iter()
+        .filter(|event| event.level == tracing::Level::WARN && event.message.contains("ORDER BY"))
+        .collect();
+    assert_eq!(
+        advisories.len(),
+        1,
+        "exactly one advisory warn must fire: {events:?}"
+    );
+    assert!(
+        advisories[0].message.contains("action 0"),
+        "the advisory names the action index: {}",
+        advisories[0].message
+    );
+    assert!(
+        advisories[0].message.contains("nondeterministic"),
+        "the advisory states the nondeterminism: {}",
+        advisories[0].message
+    );
+}
+
+/// An `unordered` shape never advises on the surreal target either:
+/// the flag is the documented fix. Same scoped-dispatch capture.
+#[test]
+fn surreal_unordered_rows_without_order_by_no_warn() {
+    let _guard = ADVISORY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    ensure_global_tracing_default();
+    let dispatch = crate::log_capture::scoped_capture_dispatch();
+    let window = crate::log_capture::open_window();
+    let _doc = tracing::dispatcher::with_default(&dispatch, || {
+        parse_case(
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: statedb
+        query: SELECT * FROM user
+    expectation:
+      unordered: true
+      columns: [id, name]
+      rows: [[1, "a"]]
 "#,
         )
         .expect("parse must succeed")

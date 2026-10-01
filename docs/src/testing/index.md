@@ -10,3 +10,4 @@ For Rust-level integration tests, the workspace ships a harness crate: `crates/c
 - [Declarative camel test](camel-test.md): the `*.test.yaml` document grammar, stubs, filters, and reports
 - [Scenario documents](scenario-documents.md): the integration-tier `scenario:` document contract
 - [SQL state assertions](scenario-sql.md): sql prepare and validate actions over datasource state
+- [SurrealDB state assertions](scenario-surreal.md): surreal prepare and validate actions over SurrealDB records

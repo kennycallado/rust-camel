@@ -137,6 +137,7 @@
   - [Declarative camel test](testing/camel-test.md)
   - [Scenario documents](testing/scenario-documents.md)
   - [SQL state assertions](testing/scenario-sql.md)
+  - [SurrealDB state assertions](testing/scenario-surreal.md)
 - [Extending rust-camel](extending/index.md)
   - [Custom component](extending/custom-component.md)
 - [Architecture](architecture/index.md)

@@ -62,6 +62,27 @@ metric or health signal.
 - Credentials in an Endpoint URI. Credentials belong in the named datasource.
 - A `live` operation over HTTP. Live queries require `ws` or `wss`.
 
+## Scenario tier
+
+The scenario tier consumes this component through the shared
+`DatasourceCatalog`: the clients the scenario harness drives are the
+ones `SurrealDbPoolFactory` built, one per datasource name, and the
+scenario validate read path executes its single select-prefix read
+through that client before projecting the records into matcher
+cells. See the Surreal state assertion requirement in the
+[integration-tier spec](../../../openspec/specs/integration-tier/spec.md)
+and ADR-0069 section 8.
+
+The factory supports the `mem` scheme for the tier's hermetic
+convention. A `mem://` datasource spawns a fresh embedded instance
+per connect, skips signin (a fresh embedded instance has no root
+user), and treats `namespace` and `database` as optional extras
+defaulting to `test` and `test`. Remote schemes (`ws`, `wss`,
+`http`, `https`) keep the mandatory extras and the signin step.
+Teardown invalidates the boot's clients through the factory close
+hook, so the embedded tier dies with its boot and a later boot over
+the same alias starts empty.
+
 ## Security hardening
 
 ### Identifier validation

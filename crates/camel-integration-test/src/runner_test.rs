@@ -1458,6 +1458,62 @@ scenario:
     run.boot.shutdown(&mut run.ctx).await.expect("shutdown");
 }
 
+/// The single-catalog invariant with actions on both sides: one
+/// document with two `sql:` actions over the same datasource name. The
+/// executor only ever asks the catalog the boot handed it, and that
+/// catalog caches one handle per name — so both actions run against one
+/// pool, the rows the first action seeds are visible to the second, and
+/// two direct catalog resolutions hand back pointer-equal pools (no
+/// second pool is constructed per action).
+#[tokio::test]
+#[cfg(feature = "sql")]
+async fn sql_single_catalog_invariant() {
+    use sqlx::Row;
+    let (dir, doc) = sql_project(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sql:
+    datasource: appdb
+    prepare:
+    - CREATE TABLE t (v TEXT)
+- sql:
+    datasource: appdb
+    prepare:
+    - INSERT INTO t VALUES ('seed')
+"#,
+    );
+    let (mut run, outcome, catalog) = sql_e2e_run(&dir, &doc).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "both actions must run against one booted pool: {outcome:?}"
+    );
+    let first = catalog
+        .get_pool("appdb")
+        .await
+        .expect("the booted catalog resolves appdb");
+    let second = catalog
+        .get_pool("appdb")
+        .await
+        .expect("the booted catalog resolves appdb again");
+    let p1 = first.downcast::<sqlx::AnyPool>().expect("any pool");
+    let p2 = second.downcast::<sqlx::AnyPool>().expect("any pool");
+    assert!(
+        std::sync::Arc::ptr_eq(&p1, &p2),
+        "one datasource name must resolve to exactly one pool handle"
+    );
+    // The second action's insert is the same pool's table: the executor
+    // did not branch off to a second catalog or pool.
+    let row = sqlx::query("SELECT COUNT(*) AS n FROM t")
+        .fetch_one(&*p1)
+        .await
+        .expect("the first action's table must be readable from the catalog pool");
+    let n: i64 = row.get("n");
+    assert_eq!(n, 1, "the second action must have seeded the same pool");
+    run.boot.shutdown(&mut run.ctx).await.expect("shutdown");
+}
+
 /// Item 0 is a read (`select` prefix): doc-validation names the action
 /// index and the statement index, and the document never boots.
 #[tokio::test]
@@ -1761,4 +1817,330 @@ async fn unpaired_validate_sql_message() {
         detail.contains("rows"),
         "the detail must name the rows grammar rule: {detail}"
     );
+}
+
+// -------------------------------------------------------------------------
+// `surreal:` prepare executor over the booted catalog
+// (surreal-state-tier task 2.2)
+//
+// The e2e tests boot a real project whose `Camel.toml` declares one
+// `surrealdb` datasource over `mem://` (the task 2.1 factory: an
+// auth-free embedded instance, isolated per connect), run the document
+// through `run_scenario_document` with the boot's own datasource
+// catalog, and verify seeded state through that same catalog — the
+// sql e2e precedent above. The unit-level grammar and demand-gate
+// twins live in `surreal_action_test.rs` (task 1.1); the validate
+// surreal-target executor lands with task 2.3.
+// -------------------------------------------------------------------------
+
+/// The surreal e2e project's `Camel.toml`: one `surrealdb` datasource
+/// over `mem://`.
+#[cfg(feature = "surreal")]
+const SURREAL_E2E_DATASOURCE: &str = r#"
+[datasources.statedb]
+provider = "surrealdb"
+db_url = "mem://"
+"#;
+
+/// The redaction twin's `Camel.toml`: the datasource URL carries a
+/// sentinel query parameter the executor diagnostics must never print
+/// (ADR-0051).
+#[cfg(feature = "surreal")]
+const SURREAL_REDACT_DATASOURCE: &str = r#"
+[datasources.statedb]
+provider = "surrealdb"
+db_url = "mem://?leak=REDACTURL9"
+"#;
+
+/// The minimal route file: one unconsumed `direct:` route (the sql
+/// e2e shape), so the `surreal:` action is the only scenario behavior.
+#[cfg(feature = "surreal")]
+const SURREAL_E2E_ROUTE: &str = r#"
+routes:
+  - id: boot-route
+    from: direct:start
+    steps:
+      - to: log:info
+"#;
+
+/// Writes the temporary surreal e2e project (the datasource
+/// `Camel.toml`, the minimal route file, and the `.test.yaml`
+/// document) and returns the directory plus the parsed document. Only
+/// for VALID documents: parsing panics on a rejected one.
+#[cfg(feature = "surreal")]
+fn surreal_project_with(datasource_toml: &str, doc: &str) -> (tempfile::TempDir, ScenarioDocument) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("Camel.toml"), datasource_toml).expect("write Camel.toml");
+    std::fs::write(dir.path().join("routes.yaml"), SURREAL_E2E_ROUTE).expect("write route file");
+    let doc_path = dir.path().join("case.test.yaml");
+    std::fs::write(&doc_path, doc).expect("write document");
+    let document = crate::parse_scenario_document(&doc_path).expect("document parses");
+    (dir, document)
+}
+
+/// Boots the project with an empty layered environment and runs its
+/// document through [`run_scenario_document`] with the boot's own
+/// datasource catalog. The run is returned so a test can verify the
+/// seeded state through the same catalog before shutdown.
+#[cfg(feature = "surreal")]
+async fn surreal_e2e_run(
+    dir: &tempfile::TempDir,
+    doc: &ScenarioDocument,
+) -> (
+    crate::boot_scenario::ScenarioRun,
+    DocumentOutcome,
+    std::sync::Arc<dyn camel_api::datasource::DatasourceCatalog>,
+) {
+    use crate::env_layers::{LayeredEnv, ambient_std};
+    let env = LayeredEnv::new(BTreeMap::new(), BTreeMap::new(), Vec::new(), ambient_std());
+    let run = crate::boot_scenario::boot_scenario(doc, dir.path(), &env)
+        .await
+        .expect("the surreal project must boot");
+    let catalog = run.boot.datasource_catalog();
+    let router = PartnerRouter::new(BTreeMap::new());
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(doc, &router, &mut vars, Some(&catalog)).await;
+    (run, outcome, catalog)
+}
+
+/// The happy path: one `surreal:` action defines a table and seeds a
+/// record, and the run passes.
+///
+/// Variant note (task 2.2): the brief offered two pins — (a) prepare
+/// plus a validate step asserting the interim not-wired-yet failure,
+/// or (b) a prepare-only document with a catalog-side seed read. This
+/// test takes variant (b): it pins the same executor-owned behavior
+/// (statements execute in order through the catalog's handle; a
+/// successful prepare lets the run proceed) without asserting the
+/// transient interim validate wording that task 2.3 replaces, so the
+/// test survives 2.3 unchanged. The seed's existence is proven through
+/// the SAME catalog the boot handed the runner.
+#[tokio::test]
+#[cfg(feature = "surreal")]
+async fn surreal_prepare_seeds_and_proceeds() {
+    let (dir, doc) = surreal_project_with(
+        SURREAL_E2E_DATASOURCE,
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- surreal:
+    datasource: statedb
+    prepare:
+    - DEFINE TABLE user SCHEMALESS
+    - CREATE user SET name = 'alice'
+"#,
+    );
+    let (mut run, outcome, catalog) = surreal_e2e_run(&dir, &doc).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the seeded scenario must pass: {outcome:?}"
+    );
+    let handle = catalog.get_pool("statedb").await.expect("pool resolves");
+    let client = handle
+        .downcast::<surrealdb::Surreal<surrealdb::engine::any::Any>>()
+        .expect("the handle must be a Surreal<Any> client");
+    let rows: Vec<surrealdb::types::Value> = client
+        .query("SELECT name FROM user")
+        .await
+        .expect("select transport must succeed")
+        .check()
+        .expect("select statement must succeed")
+        .take(0)
+        .expect("select must return an array");
+    assert_eq!(rows.len(), 1, "exactly one seed record must exist");
+    let surrealdb::types::Value::Object(row) = &rows[0] else {
+        panic!("the seed row must be an object: {:?}", rows[0]);
+    };
+    let name = match row.get("name") {
+        Some(surrealdb::types::Value::String(name)) => name.as_str(),
+        other => panic!("the seed row's name must be a string: {other:?}"),
+    };
+    assert_eq!(name, "alice", "the seed's name field must be alice");
+    run.boot.shutdown(&mut run.ctx).await.expect("shutdown");
+}
+
+/// A malformed second statement stops the run at statement [1]: the
+/// failure names the datasource and the statement index, and the
+/// sanitized text carries neither the datasource URL's sentinel query
+/// parameter nor the seeded record's sentinel field value (ADR-0051).
+/// SurrealDB reports statement errors INSIDE the response object, so
+/// this exercises the executor's `.check()` path, not the transport
+/// path.
+#[tokio::test]
+#[cfg(feature = "surreal")]
+async fn surreal_statement_failure_stops_and_redacts() {
+    let (dir, doc) = surreal_project_with(
+        SURREAL_REDACT_DATASOURCE,
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- surreal:
+    datasource: statedb
+    prepare:
+    - CREATE leakcheck SET marker = 'LEAKROW42'
+    - THIS IS NOT VALID SURREALQL AT ALL
+"#,
+    );
+    let (mut run, outcome, _catalog) = surreal_e2e_run(&dir, &doc).await;
+    assert_eq!(outcome.verdict, None, "the malformed statement must fail");
+    assert_eq!(
+        outcome.per_action.len(),
+        1,
+        "only the failing action's outcome is recorded"
+    );
+    let Err(failure) = &outcome.per_action[0] else {
+        panic!("expected a failure, got {:?}", outcome.per_action[0]);
+    };
+    let text = failure.to_string();
+    assert!(
+        text.contains("statedb"),
+        "the failure must name the datasource: {text}"
+    );
+    assert!(
+        text.contains("statement [1]"),
+        "the failure must name the statement index: {text}"
+    );
+    assert!(
+        !text.contains("REDACTURL9"),
+        "the datasource URL must be redacted: {text}"
+    );
+    assert!(
+        !text.contains("LEAKROW42"),
+        "the seeded record's field value must not print: {text}"
+    );
+    run.boot.shutdown(&mut run.ctx).await.expect("shutdown");
+}
+
+/// An unknown datasource fails closed: the failure names the
+/// datasource and carries nothing URL-shaped.
+#[tokio::test]
+#[cfg(feature = "surreal")]
+async fn surreal_unknown_datasource_fails_closed() {
+    let (dir, doc) = surreal_project_with(
+        SURREAL_E2E_DATASOURCE,
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- surreal:
+    datasource: nodb
+    prepare:
+    - DEFINE TABLE t SCHEMALESS
+"#,
+    );
+    let (mut run, outcome, _catalog) = surreal_e2e_run(&dir, &doc).await;
+    assert_eq!(outcome.verdict, None, "the unknown datasource must fail");
+    let Err(failure) = &outcome.per_action[0] else {
+        panic!("expected a failure, got {:?}", outcome.per_action[0]);
+    };
+    let text = failure.to_string();
+    assert!(
+        text.contains("nodb"),
+        "the failure must name the datasource: {text}"
+    );
+    assert!(
+        !text.contains("mem://"),
+        "no URL may leak through a failed datasource lookup: {text}"
+    );
+    run.boot.shutdown(&mut run.ctx).await.expect("shutdown");
+}
+
+/// The fail-closed backstop in the single-action loop: a `surreal:`
+/// action with no catalog in hand ([`run_scenario`] always passes
+/// `None`) is an apparatus-class failure naming the missing catalog,
+/// never a silently skipped seed. The document is constructed
+/// directly — the parser's demand gate rejects `surreal:` at load
+/// without the feature, so only a directly-constructed document
+/// reaches the arm.
+#[tokio::test]
+#[cfg(feature = "surreal")]
+async fn surreal_no_catalog_fails_closed() {
+    let doc = doc_with(vec![ScenarioAction::Surreal {
+        datasource: "statedb".to_string(),
+        prepare: vec!["DEFINE TABLE user SCHEMALESS".to_string()],
+    }]);
+    let router = PartnerRouter::new(BTreeMap::new());
+    let mut vars = ScenarioVars::new();
+    let failure = run_scenario(&doc, &router, &mut vars)
+        .await
+        .expect_err("the missing catalog must fail the scenario");
+    let ScenarioFailure::ActionTransport { action, source } = failure else {
+        panic!("expected ActionTransport, got {failure:?}");
+    };
+    assert_eq!(action, 0, "the failure must carry the action index");
+    let TransportError::Other { message } = source else {
+        panic!("expected TransportError::Other, got {source:?}");
+    };
+    assert!(
+        message.contains("no datasource catalog"),
+        "the failure must name the missing catalog: {message}"
+    );
+}
+
+/// The single-catalog invariant with actions on both sides: one
+/// document with two `surreal:` actions over the same datasource name.
+/// The executor only ever asks the catalog the boot handed it, and
+/// that catalog caches one handle per name — so both actions run
+/// against one client, the table the first action defines is writable
+/// by the second, and two direct catalog resolutions hand back
+/// pointer-equal clients (no second client is constructed per action).
+/// Mirrors `sql_single_catalog_invariant`.
+#[tokio::test]
+#[cfg(feature = "surreal")]
+async fn surreal_single_catalog_invariant() {
+    let (dir, doc) = surreal_project_with(
+        SURREAL_E2E_DATASOURCE,
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- surreal:
+    datasource: statedb
+    prepare:
+    - DEFINE TABLE t SCHEMALESS
+- surreal:
+    datasource: statedb
+    prepare:
+    - CREATE t SET v = 'seed'
+"#,
+    );
+    let (mut run, outcome, catalog) = surreal_e2e_run(&dir, &doc).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "both actions must run against one booted client: {outcome:?}"
+    );
+    let first = catalog
+        .get_pool("statedb")
+        .await
+        .expect("the booted catalog resolves statedb");
+    let second = catalog
+        .get_pool("statedb")
+        .await
+        .expect("the booted catalog resolves statedb again");
+    let c1 = first
+        .downcast::<surrealdb::Surreal<surrealdb::engine::any::Any>>()
+        .expect("surreal client handle");
+    let c2 = second
+        .downcast::<surrealdb::Surreal<surrealdb::engine::any::Any>>()
+        .expect("surreal client handle");
+    assert!(
+        std::sync::Arc::ptr_eq(&c1, &c2),
+        "one datasource name must resolve to exactly one client handle"
+    );
+    // The second action's record lives on the same client's table: the
+    // executor did not branch off to a second catalog or client.
+    let rows: Vec<surrealdb::types::Value> = c1
+        .query("SELECT * FROM t")
+        .await
+        .expect("select transport must succeed")
+        .check()
+        .expect("select statement must succeed")
+        .take(0)
+        .expect("select must return an array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the second action must have seeded the same client: {rows:?}"
+    );
+    run.boot.shutdown(&mut run.ctx).await.expect("shutdown");
 }
