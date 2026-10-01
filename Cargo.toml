@@ -285,7 +285,7 @@ opentelemetry_sdk = { version = "0.32", features = ["trace", "logs", "metrics", 
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "http-proto", "trace", "logs", "metrics"] }
 opentelemetry-semantic-conventions = { version = "0.32", features = ["semconv_experimental"] }
 opentelemetry-appender-tracing = { version = "0.32" }
-tracing-opentelemetry = { version = "0.33", features = [] }
+tracing-opentelemetry = { version = "0.34", features = [] }
 
 [profile.dev]
 # No debug info by default: agents and humans triage via panic messages
