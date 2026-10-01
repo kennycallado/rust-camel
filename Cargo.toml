@@ -280,7 +280,7 @@ wasmtime = { version = "48.0.3", features = ["component-model", "component-model
 wasmtime-wasi = "48.0.3"
 
 # OpenTelemetry dependencies
-opentelemetry = { version = "0.32", features = ["trace", "logs", "metrics"] }
+opentelemetry = { version = "0.33", features = ["trace", "logs", "metrics"] }
 opentelemetry_sdk = { version = "0.32", features = ["trace", "logs", "metrics", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "http-proto", "trace", "logs", "metrics"] }
 opentelemetry-semantic-conventions = { version = "0.32", features = ["semconv_experimental"] }
