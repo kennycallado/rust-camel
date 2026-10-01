@@ -11,6 +11,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use camel_matchers::{RequestShape, ShapeAspect, request_shape_mismatch};
+
 use crate::adapters::PartnerRouter;
 use crate::adapters::http::{HttpPartner, HttpWireRequest};
 use crate::document::{
@@ -18,8 +20,9 @@ use crate::document::{
     ScenarioDocument, ScenarioTarget, ValidateExpectation,
 };
 use crate::runner::{
-    DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, matching_requests,
-    partner_mismatch_detail, render_bound, render_filters, run_scenario_document,
+    DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, filtered_projections,
+    matching_requests, partner_mismatch_detail, render_bound, render_filters,
+    run_scenario_document, shape_mismatch_detail,
 };
 use crate::test_util::router_for;
 
@@ -88,6 +91,7 @@ fn partner_validate(
             method: method.map(str::to_string),
             path: path.map(|path| PathFilter::Exact(path.to_string())),
             query: None,
+            requests: None,
         }),
         deadline,
         elapsed_at_least: None,
@@ -141,6 +145,51 @@ fn wire(method: &str, path: &str) -> HttpWireRequest {
 /// A GET wire request with no headers and no body.
 fn wire_get(path: &str) -> HttpWireRequest {
     wire("GET", path)
+}
+
+/// A wire request with no headers and the given body bytes.
+fn wire_with_body(method: &str, path: &str, body: &[u8]) -> HttpWireRequest {
+    HttpWireRequest {
+        method: method.to_string(),
+        path: path.to_string(),
+        headers: BTreeMap::new(),
+        body: body.to_vec(),
+    }
+}
+
+/// A request shape asserting nothing beyond position: every aspect
+/// `None` (the empty `requests` entry).
+fn shape_any() -> RequestShape {
+    RequestShape {
+        method: None,
+        path: None,
+        query: None,
+        body: None,
+    }
+}
+
+/// A partner validate on the declared orders endpoint carrying
+/// per-request shapes: the grammar's synthesized exact bound
+/// (`Exact(shapes.len())`) with an optional outer method filter and
+/// poll deadline.
+fn partner_validate_requests(
+    requests: Vec<RequestShape>,
+    method: Option<&str>,
+    deadline: Option<Duration>,
+) -> ScenarioAction {
+    let len = requests.len() as u64;
+    ScenarioAction::Validate {
+        target: ScenarioTarget::Partner(endpoint(ORDERS)),
+        expectation: ValidateExpectation::Partner(PartnerExpectation {
+            bound: CountBound::Exact(len),
+            method: method.map(str::to_string),
+            path: None,
+            query: None,
+            requests: Some(requests),
+        }),
+        deadline,
+        elapsed_at_least: None,
+    }
 }
 
 /// Filter semantics of `matching_requests`: the method filter folds
@@ -490,6 +539,7 @@ fn partner_mismatch_detail_lists_recorded_paths() {
         method: None,
         path: None,
         query: None,
+        requests: None,
     };
     let detail = partner_mismatch_detail(
         "http://127.0.0.1:0/a",
@@ -523,6 +573,7 @@ fn count_mismatch_redacts_secrets() {
             "/login?authPassword=hunter2&x=1".to_string(),
         )),
         query: None,
+        requests: None,
     };
     let detail = partner_mismatch_detail(
         "http://127.0.0.1:0/login?authPassword=hunter2&x=1",
@@ -582,6 +633,7 @@ fn render_filters_redacts_secret_query_and_elides_patterns() {
             ("bbox".to_string(), "1,2".to_string()),
             ("token".to_string(), "abc".to_string()),
         ])),
+        requests: None,
     };
     let rendered = render_filters(&expected, &["token".to_string()]);
     assert!(
@@ -607,5 +659,311 @@ fn render_filters_redacts_secret_query_and_elides_patterns() {
     assert!(
         !rendered.contains("secret"),
         "the pattern payload must never print: {rendered}"
+    );
+}
+
+/// The `requests` entries index the FILTERED sequence (spec: requests
+/// index the filtered sequence): interleaved `GET /health` arrivals
+/// never occupy an index — the two entries assert the two POSTs — and
+/// the same expectation with the entries swapped fails naming request
+/// 2's `method` aspect.
+#[tokio::test]
+async fn shape_indexes_the_filtered_sequence() {
+    let partner = HttpPartner::start_permissive(200)
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    let authority = partner.bound_addr().to_string();
+    raw_request(&authority, "GET", "/health").await;
+    raw_request(&authority, "POST", "/order").await;
+    raw_request(&authority, "GET", "/health").await;
+    raw_request(&authority, "POST", "/order").await;
+    let router = orders_router(partner);
+    let mut vars = ScenarioVars::new();
+
+    let in_order = vec![
+        RequestShape {
+            path: Some(PathFilter::Exact("/order".to_string())),
+            ..shape_any()
+        },
+        shape_any(),
+    ];
+    let doc = doc_with(vec![partner_validate_requests(
+        in_order,
+        Some("POST"),
+        None,
+    )]);
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "the entries must assert the two POSTs: {outcome:?}"
+    );
+
+    let swapped = vec![
+        shape_any(),
+        RequestShape {
+            method: Some("GET".to_string()),
+            ..shape_any()
+        },
+    ];
+    let doc = doc_with(vec![partner_validate_requests(swapped, Some("POST"), None)]);
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(
+        outcome.verdict, None,
+        "the swapped entries must fail: {outcome:?}"
+    );
+    let ScenarioFailure::ValidationMismatch { detail, .. } = first_failure(&outcome) else {
+        panic!(
+            "expected ValidationMismatch, got {:?}",
+            first_failure(&outcome)
+        );
+    };
+    assert!(
+        detail.contains("request 2"),
+        "the mismatch must name the one-based index: {detail}"
+    );
+    assert!(
+        detail.contains("method"),
+        "the mismatch must name the aspect: {detail}"
+    );
+}
+
+/// The Body aspect's one-based naming (spec: shape mismatch names
+/// index and aspect): the judgment itself returns the zero-based
+/// `(index, aspect)` pair, while the rendered detail says `request 2`
+/// with the aspect `body` and both body renderings.
+#[test]
+fn shape_mismatch_names_one_based_index_and_aspect() {
+    let observed = vec![
+        wire_with_body("POST", "/o", br#"{"k":"1"}"#),
+        wire_with_body("POST", "/o", br#"{"k":"2"}"#),
+    ];
+    let shapes = vec![
+        RequestShape {
+            body: Some(camel_matchers::Expectation::Equals(serde_json::json!(
+                {"k": "1"}
+            ))),
+            ..shape_any()
+        },
+        RequestShape {
+            body: Some(camel_matchers::Expectation::Equals(serde_json::json!(
+                {"k": "1"}
+            ))),
+            ..shape_any()
+        },
+    ];
+    let mismatch = request_shape_mismatch(
+        &shapes,
+        filtered_projections(&observed, None, None, None)
+            .iter()
+            .map(|(method, path, body)| (*method, *path, body)),
+    );
+    assert_eq!(mismatch, Some((1, ShapeAspect::Body)));
+    let expected = PartnerExpectation {
+        bound: CountBound::Exact(2),
+        method: None,
+        path: None,
+        query: None,
+        requests: Some(shapes),
+    };
+    let detail = shape_mismatch_detail(
+        "http://127.0.0.1:0/o",
+        mismatch.expect("the judgment must have failed"),
+        &expected,
+        &observed,
+        &[],
+    );
+    assert!(
+        detail.contains("request 2"),
+        "the detail must name the one-based index: {detail}"
+    );
+    assert!(
+        detail.contains("body"),
+        "the detail must name the aspect: {detail}"
+    );
+    assert!(
+        detail.contains(r#"{"k":"1"}"#),
+        "the detail must render the expected body: {detail}"
+    );
+    assert!(
+        detail.contains(r#"{"k":"2"}"#),
+        "the detail must render the observed body: {detail}"
+    );
+}
+
+/// Query redaction on BOTH sides of a shape mismatch (ADR-0051): the
+/// expected pair masks the secret value (`token=<redacted>`), the
+/// observed wire path masks the leaked value (`token=***`), and
+/// neither raw value prints anywhere.
+#[test]
+fn shape_mismatch_query_redacts_both_sides() {
+    let observed = vec![wire("POST", "/o?token=leak")];
+    let shapes = vec![RequestShape {
+        query: Some(BTreeMap::from([(
+            "token".to_string(),
+            "s3cr3t".to_string(),
+        )])),
+        ..shape_any()
+    }];
+    let expected = PartnerExpectation {
+        bound: CountBound::Exact(1),
+        method: None,
+        path: None,
+        query: None,
+        requests: Some(shapes),
+    };
+    let mismatch = request_shape_mismatch(
+        expected.requests.as_deref().expect("the shapes"),
+        filtered_projections(&observed, None, None, None)
+            .iter()
+            .map(|(method, path, body)| (*method, *path, body)),
+    );
+    assert_eq!(mismatch, Some((0, ShapeAspect::Query)));
+    let detail = shape_mismatch_detail(
+        "http://127.0.0.1:0/o",
+        mismatch.expect("the judgment must have failed"),
+        &expected,
+        &observed,
+        &["token".to_string()],
+    );
+    assert!(
+        detail.contains("token=<redacted>"),
+        "the expected side must mask the secret: {detail}"
+    );
+    assert!(
+        detail.contains("token=***"),
+        "the observed side must mask the leaked value: {detail}"
+    );
+    assert!(
+        !detail.contains("s3cr3t"),
+        "the secret must never print: {detail}"
+    );
+    assert!(
+        !detail.contains("leak"),
+        "the leaked value must never print: {detail}"
+    );
+}
+
+/// A `pathContains` shape renders its expected side by KIND only
+/// (ADR-0051 filter-payload elision): the pattern substring never
+/// prints, while the observed recorded path does.
+#[test]
+fn shape_mismatch_path_renders_kind_only_for_contains() {
+    let observed = vec![wire("POST", "/x")];
+    let shapes = vec![RequestShape {
+        path: Some(PathFilter::Contains("/ord".to_string())),
+        ..shape_any()
+    }];
+    let expected = PartnerExpectation {
+        bound: CountBound::Exact(1),
+        method: None,
+        path: None,
+        query: None,
+        requests: Some(shapes),
+    };
+    let mismatch = request_shape_mismatch(
+        expected.requests.as_deref().expect("the shapes"),
+        filtered_projections(&observed, None, None, None)
+            .iter()
+            .map(|(method, path, body)| (*method, *path, body)),
+    );
+    assert_eq!(mismatch, Some((0, ShapeAspect::Path)));
+    let detail = shape_mismatch_detail(
+        "http://127.0.0.1:0/x",
+        mismatch.expect("the judgment must have failed"),
+        &expected,
+        &observed,
+        &[],
+    );
+    assert!(
+        detail.contains("pathContains <pattern elided>"),
+        "the expected side must render by kind only: {detail}"
+    );
+    assert!(
+        !detail.contains("/ord"),
+        "the pattern payload must never print: {detail}"
+    );
+    assert!(
+        detail.contains(", got /x"),
+        "the observed side must render the recorded path: {detail}"
+    );
+}
+
+/// A shape mismatch inside an open window fails fast (spec: shape
+/// mismatch fails fast inside the window): the first filtered arrival
+/// already mismatches its entry, and a present mismatch never heals,
+/// so the verdict returns immediately — long before the five-second
+/// deadline the count-only paths would sleep out.
+#[tokio::test]
+async fn shape_judgment_fail_fast_in_window() {
+    let partner = HttpPartner::start_permissive(200)
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    let authority = partner.bound_addr().to_string();
+    raw_request(&authority, "POST", "/orders").await;
+    let router = orders_router(partner);
+    let shapes = vec![RequestShape {
+        path: Some(PathFilter::Exact("/other".to_string())),
+        ..shape_any()
+    }];
+    let doc = doc_with(vec![partner_validate_requests(
+        shapes,
+        Some("POST"),
+        Some(Duration::from_secs(5)),
+    )]);
+    let mut vars = ScenarioVars::new();
+    let started = std::time::Instant::now();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the present mismatch must fail without waiting the window: {outcome:?}"
+    );
+    assert_eq!(
+        outcome.verdict, None,
+        "the mismatch must fail the scenario: {outcome:?}"
+    );
+}
+
+/// An over-length filtered sequence fails fast where the count-only
+/// `Exact` path sleeps to expiry: two filtered arrivals against a
+/// one-entry `requests` list fail the first snapshot immediately, and
+/// the counts evidence rides along in the detail.
+#[tokio::test]
+async fn shape_over_length_fails_fast_in_window() {
+    let partner = HttpPartner::start_permissive(200)
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    let authority = partner.bound_addr().to_string();
+    raw_request(&authority, "POST", "/orders").await;
+    raw_request(&authority, "POST", "/orders").await;
+    let router = orders_router(partner);
+    let shapes = vec![shape_any()];
+    let doc = doc_with(vec![partner_validate_requests(
+        shapes,
+        Some("POST"),
+        Some(Duration::from_secs(5)),
+    )]);
+    let mut vars = ScenarioVars::new();
+    let started = std::time::Instant::now();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the over-length count must fail without waiting the window: {outcome:?}"
+    );
+    assert_eq!(
+        outcome.verdict, None,
+        "the over-length count must fail the scenario: {outcome:?}"
+    );
+    let ScenarioFailure::ValidationMismatch { detail, .. } = first_failure(&outcome) else {
+        panic!(
+            "expected ValidationMismatch, got {:?}",
+            first_failure(&outcome)
+        );
+    };
+    assert!(
+        detail.contains("expected 1, actual 2"),
+        "the over-length failure must name the counts: {detail}"
     );
 }

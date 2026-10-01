@@ -6,7 +6,7 @@ expectations (`Expectation`), recorded-request count bounds (`CountBound`),
 path filters (`PathFilter`), the request expectation (`RequestExpectation`),
 query-subset matching, and the judgment functions (`bound_holds`,
 `settles_early`, `above_ceiling`, `expectation_matches`, `matching_count`,
-`query_pairs`, `render_bound`, `stringify`). Both tiers call into these
+`request_shape_mismatch`, `query_pairs`, `render_bound`, `stringify`). Both tiers call into these
 types; grammar and observation stay per-tier (ADR-0072).
 
 > **Scope boundary.** This file defines only the pure algebra. Document
@@ -70,6 +70,11 @@ present in the recorded request's percent-decoded query, order- and
 encoding-independent. `query_pairs` decodes `%XX` and `+` via
 `form_urlencoded`.
 _Avoid_: query equality (the subset relation is one-directional)
+
+**request shape**:
+`RequestShape` — the per-request shape of a `requests` entry: method,
+one path filter, query subset, body expectation.
+_Avoid_: request template
 
 **value expectation**:
 `Expectation` — the message-value matcher: `Equals`, `Regex`,

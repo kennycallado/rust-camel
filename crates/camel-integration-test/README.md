@@ -136,22 +136,39 @@ single key of its `target` map:
   next.
 - `sql`: datasource rows at rest, described under [SQL actions](#sql-actions).
 
-A `partner` target asserts the recorded-request
-count of a harness partner. The expectation holds `count`, an exact
-non-negative integer, plus optional `method` and `path` filters. The
-`method` filter compares ASCII-case-insensitively. The `path` filter
-compares the path-and-query exactly. The count counts only the recorded
-requests that pass both filters.
+A `partner` target asserts the recorded-request traffic of a harness
+partner. The expectation declares exactly one bound form: `count: n`
+(exact), `atLeast: n`, `atMost: n`, or `atLeast: n` together with
+`atMost: m` for the inclusive range `n <= m`. Alternatively, a
+`requests: [...]` list of per-request shape entries replaces the bound:
+it synthesizes the exact count of the list length and is exclusive with
+the bound keys. An empty list fails load; express absence as
+`atMost: 0`.
+
+Optional outer filters narrow the counted arrivals. `method` compares
+ASCII-case-insensitively. At most one path filter is allowed: `path`
+(exact path-and-query), `pathContains` (substring), or `pathMatches`
+(regex, compile-verified at load). `query` is a subset map whose every
+declared pair must appear, order- and encoding-independent, in the
+recorded percent-decoded query. The filters combine conjunctively.
+
+Each `requests` entry declares optional `method`, one path filter, a
+`query` subset, and a `body` under the shared dual grammar: a bare value
+is a literal `equals`, an object with one recognized matcher key is that
+matcher. The recorded body is read as JSON when it parses, otherwise as
+lossy UTF-8 text. Entries are positional over the filtered recorded
+sequence (recorder arrival order). A filtered count above the list
+length, or a present element that mismatches its entry, fails
+immediately — the recorder is append-only, so a present mismatch never
+heals. Success settles when the filtered count equals the list length
+with every entry matching.
 
 Without a `deadline`, the assertion reads one immediate snapshot. With a
-`deadline`, it polls a fresh snapshot every 100 ms until the filtered
-count equals the expectation or the deadline passes; the final snapshot
-then decides. Arrivals only add, so a count above the expectation fails
-at every snapshot and never settles back.
-
-Partner expectations are exact-count, not subset like message
-expectations: the count must equal the filtered arrivals, never a lower
-bound.
+`deadline`, it polls a fresh snapshot every 100 ms until the expectation
+settles or the deadline passes; the final snapshot then decides.
+Arrivals only add, so `AtLeast` settles as soon as its floor is reached
+and an `AtMost` or a range maximum broken on any snapshot fails
+immediately and never settles back.
 
 ## SQL actions
 

@@ -335,6 +335,7 @@ fn wiring_excludes_plain_string_validate_partner() {
                     method: None,
                     path: None,
                     query: None,
+                    requests: None,
                 }),
                 deadline: None,
                 elapsed_at_least: None,

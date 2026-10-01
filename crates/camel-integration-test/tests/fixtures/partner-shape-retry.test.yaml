@@ -1,0 +1,41 @@
+# Retry-identical-bodies scenario (Task 1.4 of partner-request-shapes):
+# the scripted partner answers 500 on the first request then 200, the
+# direct-stimulus send carries a fixed JSON body, and the self-declared
+# partner validate pins the two positional `requests` shapes to literal
+# `equals` bodies — each bare body map proves one wire arrival carried
+# the exact projected values, so the retry resend is identical at the
+# value level. The `requests` list implies the exact count of two; no
+# count bound key is declared beside it.
+routeFiles:
+  - partner-shape-retry-route.yaml
+scenario:
+  - send:
+      to: direct:shape-retry
+      body:
+        idempotencyKey: idem-42
+        orderId: ord-7
+  - validate:
+      target:
+        partner:
+          endpoint: http://127.0.0.1:0/order
+          provisioning: harness
+          bindVar: PARTNER_URL
+      expectation:
+        method: POST
+        requests:
+          - body:
+              idempotencyKey: idem-42
+              orderId: ord-7
+          - body:
+              idempotencyKey: idem-42
+              orderId: ord-7
+      deadline: 10s
+partners:
+  http://127.0.0.1:0/order:
+    - path: /order
+      response:
+        status: 500
+    - path: /order
+      response:
+        status: 200
+        body: ok

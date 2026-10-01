@@ -1,0 +1,23 @@
+# Retry-identical-bodies fixture (Task 1.4 of partner-request-shapes):
+# the system under test is a REAL retrying route, stimulated through
+# `direct:` — the context-stimulus adapter dials the booted route the
+# way `camel run` stimulates one. The route's http producer dials the
+# harness-provisioned partner through the env-tier `bindVar` form, and
+# the route-level error handler redelivers the 500-faulted first
+# attempt once (`max_attempts` counts redeliveries: 1 original + 1
+# retry = the 2 wire attempts the shape fixture validates). Redelivery
+# re-runs the failed `to` with the same exchange, so both wire
+# attempts carry the identical body the `requests` shapes pin.
+#
+# `${env:PARTNER_URL}` resolves through the scenario's layered
+# environment at boot (the harness folds the bound `http://host:port`
+# authority in); it is never set under the document's own `env`.
+routes:
+  - id: shape-retry-bridge
+    from: direct:shape-retry
+    error_handler:
+      retry:
+        max_attempts: 1
+        initial_delay_ms: 50
+    steps:
+      - to: ${env:PARTNER_URL}/order

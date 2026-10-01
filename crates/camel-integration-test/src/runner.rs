@@ -61,7 +61,8 @@ mod partner_validate_test;
 use partner_validate::partner_validate_action;
 #[cfg(all(test, feature = "http"))]
 pub(crate) use partner_validate::{
-    matching_requests, partner_mismatch_detail, render_bound, render_filters,
+    filtered_projections, matching_requests, partner_mismatch_detail, render_bound, render_filters,
+    shape_mismatch_detail,
 };
 
 /// SQL row-shape verification for the `validate` action's `sql`
@@ -863,6 +864,32 @@ fn render_expectation(expectation: &Expectation) -> String {
     }
 }
 
+/// Renders one failed expectation's mismatch the way the
+/// message-validate dispatch spells it: `expected ..., got ...` for
+/// `equals` (and the existence check), the verb's own phrasing
+/// otherwise. Shared verbatim with the partner shape detail's `body`
+/// aspect, so a body mismatch renders byte-identically on both
+/// paths. The foreign-`#[non_exhaustive]` fallback is unreachable
+/// through the harness: the message-validate arms fail closed before
+/// reaching this renderer, and a shape's `body` aspect fails only
+/// when [`camel_matchers::expectation_matches`] rejected the value.
+pub(crate) fn render_expectation_mismatch(expectation: &Expectation, observed: &Value) -> String {
+    match expectation {
+        Expectation::Equals(expected) => format!("expected {expected}, got {observed}"),
+        Expectation::Regex(pattern) => format!("`{pattern}` did not match {observed}"),
+        Expectation::Contains(needle) => format!("did not contain `{needle}`: {observed}"),
+        Expectation::StartsWith(prefix) => format!("did not start with `{prefix}`: {observed}"),
+        Expectation::EndsWith(suffix) => format!("did not end with `{suffix}`: {observed}"),
+        Expectation::Exists => "expected a value, got null".to_string(),
+        Expectation::JsonSubset(pattern) => format!("not a superset of {pattern}: {observed}"),
+        // The wildcard verb never fails; this arm is unreachable like
+        // the fallback below.
+        Expectation::Any => "the expectation matches any value".to_string(),
+        // Foreign `#[non_exhaustive]` variants (none today).
+        _ => format!("the expectation {expectation:?} failed, got {observed}"),
+    }
+}
+
 /// Awaits a `receive` action until the deadline, records the message,
 /// and applies `extract` into `vars`.
 async fn receive_action(
@@ -1039,12 +1066,18 @@ async fn validate_action(
             // The per-form booleans delegate to the shared core
             // (`camel_matchers::expectation_matches`); the detail
             // strings stay here, where subject rendering and
-            // redaction live.
+            // redaction live, spelled by the shared mismatch renderer
+            // (`render_expectation_mismatch`) that the partner shape
+            // detail's `body` aspect also calls — byte-identical with
+            // the inline formats this dispatch spelled before.
             match expectation {
-                Expectation::Equals(expected) => check(
+                Expectation::Equals(_) => check(
                     index,
                     expectation_matches(expectation, &value),
-                    format!("{subject}: expected {expected}, got {value}"),
+                    format!(
+                        "{subject}: {}",
+                        render_expectation_mismatch(expectation, &value)
+                    ),
                 ),
                 // The parser pre-verifies regex patterns at load time,
                 // so the invalid-regex arm is unreachable through the
@@ -1061,33 +1094,51 @@ async fn validate_action(
                     check(
                         index,
                         expectation_matches(expectation, &value),
-                        format!("{subject}: `{pattern}` did not match {value}"),
+                        format!(
+                            "{subject}: {}",
+                            render_expectation_mismatch(expectation, &value)
+                        ),
                     )
                 }
-                Expectation::Contains(needle) => check(
+                Expectation::Contains(_) => check(
                     index,
                     expectation_matches(expectation, &value),
-                    format!("{subject}: did not contain `{needle}`: {value}"),
+                    format!(
+                        "{subject}: {}",
+                        render_expectation_mismatch(expectation, &value)
+                    ),
                 ),
-                Expectation::StartsWith(prefix) => check(
+                Expectation::StartsWith(_) => check(
                     index,
                     expectation_matches(expectation, &value),
-                    format!("{subject}: did not start with `{prefix}`: {value}"),
+                    format!(
+                        "{subject}: {}",
+                        render_expectation_mismatch(expectation, &value)
+                    ),
                 ),
-                Expectation::EndsWith(suffix) => check(
+                Expectation::EndsWith(_) => check(
                     index,
                     expectation_matches(expectation, &value),
-                    format!("{subject}: did not end with `{suffix}`: {value}"),
+                    format!(
+                        "{subject}: {}",
+                        render_expectation_mismatch(expectation, &value)
+                    ),
                 ),
                 Expectation::Exists => check(
                     index,
                     expectation_matches(expectation, &value),
-                    format!("{subject}: expected a value, got null"),
+                    format!(
+                        "{subject}: {}",
+                        render_expectation_mismatch(expectation, &value)
+                    ),
                 ),
-                Expectation::JsonSubset(pattern) => check(
+                Expectation::JsonSubset(_) => check(
                     index,
                     expectation_matches(expectation, &value),
-                    format!("{subject}: not a superset of {pattern}: {value}"),
+                    format!(
+                        "{subject}: {}",
+                        render_expectation_mismatch(expectation, &value)
+                    ),
                 ),
                 // Foreign `#[non_exhaustive]` variants (none today):
                 // the harness has no matcher for them, so they fail

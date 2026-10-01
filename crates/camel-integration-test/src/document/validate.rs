@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use camel_api::Value;
-use camel_matchers::{CountBound, Expectation, PathFilter, RowsExpectation};
+use camel_matchers::{CountBound, Expectation, PathFilter, RequestShape, RowsExpectation};
 
 use super::{DocError, EndpointRef, PartnerExpectation};
 
@@ -153,7 +153,10 @@ pub(crate) fn expectation_from_value(
 /// optional `method` string, at most one path filter (`path`,
 /// `pathContains`, `pathMatches` — the regex compiled at load), and
 /// an optional `query` subset map of string keys to string values;
-/// unknown keys fail. Field-by-field extraction, like the
+/// unknown keys fail. A `requests` list of per-request shapes
+/// ([`RequestShape`] entries) replaces the count bound: it implies an
+/// exact count of the recorded requests and is exclusive with
+/// `count`/`atLeast`/`atMost`. Field-by-field extraction, like the
 /// endpoint-reference reader, so errors name the offending key.
 pub(super) fn partner_expectation_from_value(
     value: &Value,
@@ -168,6 +171,7 @@ pub(super) fn partner_expectation_from_value(
         "path",
         "pathContains",
         "pathMatches",
+        "requests",
         "query",
     ];
     let invalid = |message: String| DocError::Validation { index, message };
@@ -183,6 +187,7 @@ pub(super) fn partner_expectation_from_value(
     let mut path: Option<PathFilter> = None;
     let mut path_key: Option<&str> = None;
     let mut query: Option<BTreeMap<String, String>> = None;
+    let mut requests: Option<Vec<RequestShape>> = None;
     for (key, payload) in map {
         match key.as_str() {
             "count" | "atLeast" | "atMost" => {
@@ -241,6 +246,23 @@ pub(super) fn partner_expectation_from_value(
                 }
                 query = Some(subset);
             }
+            "requests" => {
+                let Value::Array(entries) = payload else {
+                    return Err(invalid(format!(
+                        "{FIELD}: `requests` must be a list of entry maps, got {payload}"
+                    )));
+                };
+                if entries.is_empty() {
+                    return Err(invalid(format!(
+                        "{FIELD}: `requests` must not be empty — express absence as `atMost: 0`"
+                    )));
+                }
+                let mut shapes = Vec::with_capacity(entries.len());
+                for (entry_index, entry) in entries.iter().enumerate() {
+                    shapes.push(request_shape_from_value(entry, index, entry_index + 1)?);
+                }
+                requests = Some(shapes);
+            }
             other => {
                 return Err(invalid(format!(
                     "{FIELD}: unknown field `{other}`; expected {}",
@@ -262,8 +284,27 @@ pub(super) fn partner_expectation_from_value(
             backticked(&others)
         )));
     }
+    // The per-request shapes replace the count bound: the list length
+    // is the expected count, so a bound key next to `requests` would
+    // assert two different counts on the same traffic.
+    if requests.is_some() {
+        for key in ["count", "atLeast", "atMost"] {
+            let present = match key {
+                "count" => count.is_some(),
+                "atLeast" => at_least.is_some(),
+                _ => at_most.is_some(),
+            };
+            if present {
+                return Err(invalid(format!(
+                    "{FIELD}: `requests` and `{key}` are exclusive: `requests` implies the count"
+                )));
+            }
+        }
+    }
     let bound = if let Some(exact) = count {
         CountBound::Exact(exact)
+    } else if let Some(shapes) = &requests {
+        CountBound::Exact(shapes.len() as u64)
     } else if let (Some(min), Some(max)) = (at_least, at_most) {
         if min > max {
             return Err(invalid(format!(
@@ -285,6 +326,122 @@ pub(super) fn partner_expectation_from_value(
         method,
         path,
         query,
+        requests,
+    })
+}
+
+/// Parses one `requests` entry into a [`RequestShape`]: the same
+/// filter trio the outer reader carries — `method`, at most one path
+/// filter (`path`/`pathContains`/`pathMatches`, the regex compiled at
+/// load), a `query` subset map — plus an optional `body` expectation
+/// through the shared dual grammar. The empty map is a valid
+/// existence-only shape. `entry_no` is the 1-based position in the
+/// `requests` list, so errors name the offending entry; `index` is
+/// the action index the `DocError` carries.
+fn request_shape_from_value(
+    entry: &Value,
+    index: usize,
+    entry_no: usize,
+) -> Result<RequestShape, DocError> {
+    const FIELD: &str = "partner expectation";
+    const ENTRY_KEYS: &[&str] = &[
+        "method",
+        "path",
+        "pathContains",
+        "pathMatches",
+        "query",
+        "body",
+    ];
+    let invalid = |message: String| DocError::Validation { index, message };
+    let Value::Object(map) = entry else {
+        return Err(invalid(format!(
+            "{FIELD}: `requests` entry {entry_no} must be a map, got {entry}"
+        )));
+    };
+    let mut method: Option<String> = None;
+    let mut path: Option<PathFilter> = None;
+    let mut path_key: Option<&str> = None;
+    let mut query: Option<BTreeMap<String, String>> = None;
+    let mut body: Option<Expectation> = None;
+    for (key, payload) in map {
+        match key.as_str() {
+            "method" => {
+                let text = payload.as_str().ok_or_else(|| {
+                    invalid(format!(
+                        "{FIELD}: `requests` entry {entry_no}: `{key}` must be a string, \
+                         got {payload}"
+                    ))
+                })?;
+                method = Some(text.to_string());
+            }
+            "path" | "pathContains" | "pathMatches" => {
+                if let Some(first) = path_key {
+                    return Err(invalid(format!(
+                        "{FIELD}: `requests` entry {entry_no}: `{first}` and `{key}` are \
+                         exclusive: at most one path filter"
+                    )));
+                }
+                let text = payload.as_str().ok_or_else(|| {
+                    invalid(format!(
+                        "{FIELD}: `requests` entry {entry_no}: `{key}` must be a string, \
+                         got {payload}"
+                    ))
+                })?;
+                path = Some(match key.as_str() {
+                    "path" => PathFilter::Exact(text.to_string()),
+                    "pathContains" => PathFilter::Contains(text.to_string()),
+                    _ => {
+                        if let Err(e) = regex::Regex::new(text) {
+                            return Err(invalid(format!(
+                                "{FIELD}: `requests` entry {entry_no}: invalid regex \
+                                 `{text}`: {e}"
+                            )));
+                        }
+                        PathFilter::Matches(text.to_string())
+                    }
+                });
+                path_key = Some(key.as_str());
+            }
+            "query" => {
+                let Value::Object(pairs) = payload else {
+                    return Err(invalid(format!(
+                        "{FIELD}: `requests` entry {entry_no}: `query` must be a map of \
+                         string keys to string values, got {payload}"
+                    )));
+                };
+                let mut subset = BTreeMap::new();
+                for (name, pair) in pairs {
+                    let Some(text) = pair.as_str() else {
+                        return Err(invalid(format!(
+                            "{FIELD}: `requests` entry {entry_no}: `query` value for \
+                             `{name}` must be a string, got {pair}"
+                        )));
+                    };
+                    subset.insert(name.clone(), text.to_string());
+                }
+                query = Some(subset);
+            }
+            "body" => {
+                body = Some(expectation_from_value(
+                    payload,
+                    index,
+                    "requests entry body",
+                )?);
+            }
+            other => {
+                return Err(invalid(format!(
+                    "{FIELD}: `requests` entry {entry_no}: unknown field `{other}`; \
+                     expected {}",
+                    backticked(ENTRY_KEYS)
+                )));
+            }
+        }
+    }
+    Ok(RequestShape {
+        method,
+        path,
+        query,
+        body,
     })
 }
 

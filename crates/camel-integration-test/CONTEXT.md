@@ -70,8 +70,27 @@ naming it. A self-declared target wires the partner like a
 `send`/`receive` reference: the driver binds it, fills the `bindVar`,
 and exposes it through the harness-provisioned env fold, so a
 validate-only proxy scenario (per-request-varying queries, no literal
-arrival lane) runs with no sacrificial receive.
+arrival lane) runs with no sacrificial receive. The expectation's
+`requests` list adds per-request shape asserts, positional over the
+filtered recorded sequence: each entry carries the filter trio
+(`method`, one `path` form, a `query` subset) plus a `body`
+expectation in the dual grammar. Declaring `requests` excludes the
+count bound keys — the list length synthesizes the exact count — and
+any present mismatched element fails the poll immediately: the
+recorder is append-only, so a mismatch never heals.
 _Avoid_: mock expectation (a partner target asserts recorded wire traffic)
+
+**request shape**:
+One entry of a partner expectation's `requests` list
+(`camel_matchers::RequestShape`): the same filter trio a partner
+expectation carries — `method`, one `path` form, a `query` subset —
+plus an optional `body` expectation over the projected body value
+(JSON when the bytes parse, lossy text otherwise). Entries zip
+positionally with the filtered recorded sequence; a mismatch names
+the failed request (one-based within the filtered sequence) and the
+failed aspect (`method`, `path`, `query`, `body`); every entry key is
+optional — the empty map asserts only existence.
+_Avoid_: request template, per-request mock
 
 **expectation**:
 The matcher grammar of a `validate` action. Keys mirror the mock-testkit

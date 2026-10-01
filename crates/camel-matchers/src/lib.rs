@@ -70,6 +70,48 @@ pub struct RequestExpectation {
     /// present (order- and encoding-independent) in the recorded
     /// request's percent-decoded query.
     pub query: Option<BTreeMap<String, String>>,
+    /// Per-request shape asserts, positional over the filtered
+    /// recorded sequence; `None` on count-only expectations.
+    ///
+    /// When `Some`, the tier grammar synthesizes `bound =
+    /// Exact(requests.len())` and the judgment path keys off the list
+    /// length, not the bound; a hand-constructed literal that violates
+    /// this invariant misrenders diagnostics but never misjudges.
+    pub requests: Option<Vec<RequestShape>>,
+}
+
+/// The per-request shape of a `requests` entry: the same filter trio
+/// [`RequestExpectation`] carries — `method`, one [`PathFilter`], a
+/// query subset — plus an optional body [`Expectation`] over the
+/// projected body value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestShape {
+    /// Optional request-method filter.
+    pub method: Option<String>,
+    /// Optional request-path filter (path-and-query).
+    pub path: Option<PathFilter>,
+    /// Optional query subset filter: every declared pair must be
+    /// present (order- and encoding-independent) in the recorded
+    /// request's percent-decoded query.
+    pub query: Option<BTreeMap<String, String>>,
+    /// Optional body expectation over the projected body value,
+    /// decided by [`expectation_matches`].
+    pub body: Option<Expectation>,
+}
+
+/// The failed aspect of a [`RequestShape`] mismatch: which shape check
+/// the request failed.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ShapeAspect {
+    /// The request method differs.
+    Method,
+    /// The path filter rejects the recorded path-and-query.
+    Path,
+    /// The declared query subset is not present.
+    Query,
+    /// The body expectation rejects the projected body value.
+    Body,
 }
 
 /// A validation expectation. The grammar keys mirror the mock-testkit
@@ -198,7 +240,8 @@ pub fn query_pairs(path_and_query: &str) -> Vec<(String, String)> {
 /// Each request is projected as its `(method, path_and_query)` pair.
 /// The regex of a `Matches` filter compiles once per call, not once
 /// per recorded request; an invalid pattern matches nothing, failing
-/// closed.
+/// closed. The per-request filter predicate is shared with
+/// [`request_shape_mismatch`].
 pub fn matching_count<'a>(
     requests: impl IntoIterator<Item = (&'a str, &'a str)>,
     method: Option<&str>,
@@ -215,25 +258,112 @@ pub fn matching_count<'a>(
     requests
         .into_iter()
         .filter(|(request_method, path)| {
-            let path_matches = match path_filter {
-                None => true,
-                Some(PathFilter::Exact(p)) => p.as_str() == *path,
-                Some(PathFilter::Contains(s)) => path.contains(s.as_str()),
-                Some(PathFilter::Matches(_)) => {
-                    matches_regex.as_ref().is_some_and(|re| re.is_match(path))
-                }
-            };
-            let query_subset = query.is_none_or(|declared| {
-                let pairs = query_pairs(path);
-                declared
-                    .iter()
-                    .all(|(key, value)| pairs.iter().any(|(k, v)| k == key && v == value))
-            });
-            method.is_none_or(|m| m.eq_ignore_ascii_case(request_method))
-                && path_matches
-                && query_subset
+            shape_filter_aspect(
+                method,
+                path_filter,
+                query,
+                matches_regex.as_ref(),
+                request_method,
+                path,
+            )
+            .is_none()
         })
         .count()
+}
+
+/// The shared per-request filter predicate of [`matching_count`] and
+/// [`request_shape_mismatch`]: `None` when the request's
+/// `(method, path_and_query)` projection passes all three filters,
+/// otherwise the first [`ShapeAspect`] that failed — method, then
+/// path, then query. The regex of a `Matches` filter arrives
+/// pre-compiled from the caller; `None` matches nothing, failing
+/// closed.
+fn shape_filter_aspect(
+    method: Option<&str>,
+    path_filter: Option<&PathFilter>,
+    query: Option<&BTreeMap<String, String>>,
+    matches_regex: Option<&regex::Regex>,
+    request_method: &str,
+    path: &str,
+) -> Option<ShapeAspect> {
+    if !method.is_none_or(|m| m.eq_ignore_ascii_case(request_method)) {
+        return Some(ShapeAspect::Method);
+    }
+    let path_matches = match path_filter {
+        None => true,
+        Some(PathFilter::Exact(p)) => p.as_str() == path,
+        Some(PathFilter::Contains(s)) => path.contains(s.as_str()),
+        Some(PathFilter::Matches(_)) => matches_regex.is_some_and(|re| re.is_match(path)),
+    };
+    if !path_matches {
+        return Some(ShapeAspect::Path);
+    }
+    let query_subset = query.is_none_or(|declared| {
+        let pairs = query_pairs(path);
+        declared
+            .iter()
+            .all(|(key, value)| pairs.iter().any(|(k, v)| k == key && v == value))
+    });
+    if !query_subset {
+        return Some(ShapeAspect::Query);
+    }
+    None
+}
+
+/// The first positional mismatch of the per-request shapes over the
+/// filtered recorded sequence: `Some((index, aspect))` names the
+/// zero-based request that failed and the [`ShapeAspect`] it failed;
+/// `None` when every present pair matches. Shapes and projections zip
+/// positionally, and a projection sequence shorter than `shapes` is
+/// not a mismatch of this function — the length is the count bound's
+/// business.
+///
+/// Each projection is one request's `(method, path_and_query, body)`
+/// triple. Per pair the aspects check in order: `method` compares
+/// ASCII-case-insensitively, `path` applies the [`PathFilter`]
+/// semantics of [`matching_count`], `query` the same percent-decoded
+/// subset predicate, and `body` applies [`expectation_matches`] to
+/// the projected body value. The regex of a `Matches` filter compiles
+/// once per call, not once per shape; an invalid pattern matches
+/// nothing, failing closed.
+pub fn request_shape_mismatch<'a>(
+    shapes: &[RequestShape],
+    projections: impl Iterator<Item = (&'a str, &'a str, &'a serde_json::Value)>,
+) -> Option<(usize, ShapeAspect)> {
+    // The regex of a `Matches` filter compiles once per call, not once
+    // per shape. An invalid pattern (the parser rejects it first)
+    // matches nothing, failing closed.
+    let regexes: Vec<Option<regex::Regex>> = shapes
+        .iter()
+        .map(|shape| match shape.path.as_ref() {
+            Some(PathFilter::Matches(pattern)) => regex::Regex::new(pattern).ok(),
+            _ => None,
+        })
+        .collect();
+    shapes
+        .iter()
+        .zip(projections)
+        .enumerate()
+        .find_map(|(index, (shape, (method, path, body)))| {
+            if let Some(aspect) = shape_filter_aspect(
+                shape.method.as_deref(),
+                shape.path.as_ref(),
+                shape.query.as_ref(),
+                regexes[index].as_ref(),
+                method,
+                path,
+            ) {
+                return Some((index, aspect));
+            }
+            if shape
+                .body
+                .as_ref()
+                .is_some_and(|expectation| !expectation_matches(expectation, body))
+            {
+                return Some((index, ShapeAspect::Body));
+            }
+            None
+        })
 }
 
 /// Renders a count bound in its own grammar for mismatch details:
@@ -705,5 +835,129 @@ mod tests {
                 assert_ne!(left, right, "duplicate render `{left}`");
             }
         }
+    }
+
+    #[test]
+    fn shape_positional_match_on_present_elements() {
+        let shapes = vec![
+            RequestShape {
+                method: Some("POST".to_string()),
+                path: None,
+                query: None,
+                body: Some(Expectation::JsonSubset(serde_json::json!({"k": "1"}))),
+            },
+            RequestShape {
+                method: Some("GET".to_string()),
+                path: None,
+                query: None,
+                body: None,
+            },
+        ];
+        let first_body = serde_json::json!({"k": "1", "x": 2});
+        let null = serde_json::Value::Null;
+        let projections = [("POST", "/o", &first_body), ("GET", "/h", &null)];
+        assert_eq!(
+            request_shape_mismatch(&shapes, projections.into_iter()),
+            None
+        );
+    }
+
+    #[test]
+    fn shape_first_mismatch_wins_with_index_and_aspect() {
+        let shapes = vec![
+            RequestShape {
+                method: Some("POST".to_string()),
+                path: None,
+                query: None,
+                body: None,
+            },
+            RequestShape {
+                method: Some("GET".to_string()),
+                path: None,
+                query: None,
+                body: None,
+            },
+        ];
+        let null = serde_json::Value::Null;
+        let projections = [("POST", "/o", &null), ("POST", "/h", &null)];
+        assert_eq!(
+            request_shape_mismatch(&shapes, projections.into_iter()),
+            Some((1, ShapeAspect::Method))
+        );
+    }
+
+    #[test]
+    fn shape_body_contains_over_text_projection() {
+        let shapes = vec![RequestShape {
+            method: None,
+            path: None,
+            query: None,
+            body: Some(Expectation::Contains("idempotency".to_string())),
+        }];
+        let body = serde_json::json!("idempotency-key-42");
+        let projections = [("POST", "/o", &body)];
+        assert_eq!(
+            request_shape_mismatch(&shapes, projections.into_iter()),
+            None
+        );
+    }
+
+    #[test]
+    fn shape_short_projection_is_not_a_mismatch() {
+        let shapes = vec![
+            RequestShape {
+                method: Some("POST".to_string()),
+                path: None,
+                query: None,
+                body: None,
+            },
+            RequestShape {
+                method: Some("POST".to_string()),
+                path: None,
+                query: None,
+                body: None,
+            },
+        ];
+        let null = serde_json::Value::Null;
+        let projections = [("POST", "/o", &null)];
+        assert_eq!(
+            request_shape_mismatch(&shapes, projections.into_iter()),
+            None
+        );
+    }
+
+    #[test]
+    fn shape_path_and_query_aspects() {
+        let null = serde_json::Value::Null;
+        let shapes = vec![RequestShape {
+            method: None,
+            path: Some(PathFilter::Exact("/o?a=1".to_string())),
+            query: Some(BTreeMap::from([("a".to_string(), "1".to_string())])),
+            body: None,
+        }];
+        let ok = [("POST", "/o?a=1", &null)];
+        assert_eq!(request_shape_mismatch(&shapes, ok.into_iter()), None);
+        let query_shapes = vec![RequestShape {
+            method: None,
+            path: Some(PathFilter::Contains("/o".to_string())),
+            query: Some(BTreeMap::from([("a".to_string(), "1".to_string())])),
+            body: None,
+        }];
+        let query_off = [("POST", "/o?a=2", &null)];
+        assert_eq!(
+            request_shape_mismatch(&query_shapes, query_off.into_iter()),
+            Some((0, ShapeAspect::Query))
+        );
+        let contains = vec![RequestShape {
+            method: None,
+            path: Some(PathFilter::Contains("/ord".to_string())),
+            query: None,
+            body: None,
+        }];
+        let path_off = [("GET", "/x", &null)];
+        assert_eq!(
+            request_shape_mismatch(&contains, path_off.into_iter()),
+            Some((0, ShapeAspect::Path))
+        );
     }
 }

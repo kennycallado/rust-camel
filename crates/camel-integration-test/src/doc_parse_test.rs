@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use camel_matchers::expectation_matches;
+use camel_matchers::{RequestShape, expectation_matches};
 use serde_json::json;
 
 use crate::document::{
@@ -802,6 +802,7 @@ scenario:
                     method: Some("POST".to_string()),
                     path: None,
                     query: None,
+                    requests: None,
                 }),
                 "expectation must parse as a partner count with a method filter"
             );
@@ -1554,6 +1555,7 @@ scenario:
                     method: None,
                     path: None,
                     query: None,
+                    requests: None,
                 }),
                 "expectation must parse as an at-least bound"
             );
@@ -1591,6 +1593,7 @@ scenario:
                     method: None,
                     path: None,
                     query: None,
+                    requests: None,
                 }),
                 "atLeast+atMost must combine into a range bound"
             );
@@ -1776,11 +1779,281 @@ scenario:
                         ("a".to_string(), "1+1".to_string()),
                         ("b".to_string(), "2".to_string()),
                     ])),
+                    requests: None,
                 }),
                 "expectation must parse the query subset map"
             );
         }
         other => panic!("expected Validate, got {other:?}"),
+    }
+}
+
+#[test]
+fn partner_requests_parse_into_shapes() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      method: POST
+      requests:
+      - body:
+          jsonSubset:
+            k: "1"
+      - {}
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.get(1).expect("two actions");
+    match action {
+        ScenarioAction::Validate { expectation, .. } => {
+            assert_eq!(
+                expectation,
+                &ValidateExpectation::Partner(PartnerExpectation {
+                    bound: CountBound::Exact(2),
+                    method: Some("POST".to_string()),
+                    path: None,
+                    query: None,
+                    requests: Some(vec![
+                        RequestShape {
+                            method: None,
+                            path: None,
+                            query: None,
+                            body: Some(Expectation::JsonSubset(json!({"k": "1"}))),
+                        },
+                        RequestShape {
+                            method: None,
+                            path: None,
+                            query: None,
+                            body: None,
+                        },
+                    ]),
+                }),
+                "expectation must parse the per-request shapes and imply the exact count"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
+    }
+}
+
+#[test]
+fn partner_requests_bare_body_is_equals() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      requests:
+      - body:
+          idempotencyKey: idem-42
+          orderId: ord-7
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.get(1).expect("two actions");
+    match action {
+        ScenarioAction::Validate { expectation, .. } => {
+            assert_eq!(
+                expectation,
+                &ValidateExpectation::Partner(PartnerExpectation {
+                    bound: CountBound::Exact(1),
+                    method: None,
+                    path: None,
+                    query: None,
+                    requests: Some(vec![RequestShape {
+                        method: None,
+                        path: None,
+                        query: None,
+                        body: Some(Expectation::Equals(json!({
+                            "idempotencyKey": "idem-42",
+                            "orderId": "ord-7",
+                        }))),
+                    }]),
+                }),
+                "a multi-key body object must read as a literal equals (dual grammar)"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
+    }
+}
+
+#[test]
+fn partner_requests_mixed_with_count_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      count: 2
+      requests: [{}]
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 1, "error must name the action index");
+            assert!(
+                message.contains("requests") && message.contains("count"),
+                "message must name both exclusive keys: {message}"
+            );
+            assert!(
+                message.contains("exclusive"),
+                "message must name the keys as exclusive: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn partner_requests_empty_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      requests: []
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 1, "error must name the action index");
+            assert!(
+                message.contains("atMost: 0"),
+                "message must teach the `atMost: 0` absence form: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn partner_requests_unknown_entry_field_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      requests:
+      - bodySubset: {}
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 1, "error must name the action index");
+            assert!(
+                message.contains("unknown field `bodySubset`"),
+                "message must name the unknown entry field: {message}"
+            );
+            assert!(
+                message.contains("`method`") && message.contains("`body`"),
+                "message must list the expected entry fields: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn partner_requests_entry_path_exclusivity_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      requests:
+      - path: /a
+        pathContains: /b
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 1, "error must name the action index");
+            assert!(
+                message.contains("path") && message.contains("pathContains"),
+                "message must name both path keys: {message}"
+            );
+            assert!(
+                message.contains("exclusive"),
+                "message must name the path keys as exclusive: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
+    }
+}
+
+#[test]
+fn partner_requests_entry_not_a_map_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      requests: ["nope"]
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 1, "error must name the action index");
+            assert!(
+                message.contains("entry 1"),
+                "message must name the offending entry: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other}"),
     }
 }
 

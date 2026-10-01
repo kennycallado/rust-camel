@@ -1,5 +1,6 @@
 //! Partner verification for the `validate` action's `partner`
 //! target (ADR-0069 §5): the filtered recorded-request count, the
+//! per-request shape judgments over the filtered sequence, the
 //! deadline poll with its early-settle and ceiling rules, and the
 //! mismatch-detail renderers. Split out of the runner core so the
 //! message-grammar validation and the partner count assertion stay
@@ -10,6 +11,17 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+#[cfg(feature = "http")]
+use camel_api::Value;
+// The pure predicates live in camel-matchers; this layer only
+// sequences recorded-request snapshots against them.
+#[cfg(feature = "http")]
+pub(crate) use camel_matchers::render_bound;
+#[cfg(feature = "http")]
+use camel_matchers::{
+    ShapeAspect, above_ceiling, bound_holds, request_shape_mismatch, settles_early,
+};
+
 use crate::adapters::PartnerRouter;
 #[cfg(feature = "http")]
 use crate::adapters::http::HttpWireRequest;
@@ -18,12 +30,6 @@ use crate::adapters::redact_wire_path;
 use crate::document::PartnerExpectation;
 #[cfg(feature = "http")]
 use crate::document::PathFilter;
-// The pure predicates live in camel-matchers; this layer only
-// sequences recorded-request snapshots against them.
-#[cfg(feature = "http")]
-pub(crate) use camel_matchers::render_bound;
-#[cfg(feature = "http")]
-use camel_matchers::{above_ceiling, bound_holds, settles_early};
 
 use super::ScenarioFailure;
 
@@ -58,6 +64,43 @@ pub(crate) fn matching_requests(
     )
 }
 
+/// The filtered recorded sequence, projected for shape judging
+/// (feature `http`): every request passing the expectation's
+/// `method`, `path`, and `query` filters, as its `(method,
+/// path_and_query, projected-body)` triple. The filter is the count
+/// logic itself — [`camel_matchers::matching_count`] over a
+/// single-element iterator — so the sequence's membership is
+/// byte-identical with the filtered count, with zero predicate
+/// duplication: this layer only sequences. The body projects through
+/// [`super::reply_bytes_value`] (JSON when the bytes parse, lossy
+/// text otherwise), the value the `body` aspects judge.
+#[cfg(feature = "http")]
+pub(crate) fn filtered_projections<'a>(
+    requests: &'a [HttpWireRequest],
+    method: Option<&str>,
+    path_filter: Option<&PathFilter>,
+    query: Option<&BTreeMap<String, String>>,
+) -> Vec<(&'a str, &'a str, Value)> {
+    requests
+        .iter()
+        .filter(|request| {
+            camel_matchers::matching_count(
+                std::iter::once((request.method.as_str(), request.path.as_str())),
+                method,
+                path_filter,
+                query,
+            ) == 1
+        })
+        .map(|request| {
+            (
+                request.method.as_str(),
+                request.path.as_str(),
+                super::reply_bytes_value(&request.body),
+            )
+        })
+        .collect()
+}
+
 /// Asserts the partner expectation against the router's
 /// recorded-request snapshots for the declared endpoint key
 /// (ADR-0069 §5: what crossed the wire is the normative proof).
@@ -72,12 +115,25 @@ pub(crate) fn matching_requests(
 /// claims over the window — they wait the full deadline, fail
 /// immediately on any snapshot above the ceiling, and decide on the
 /// final snapshot. On expiry one final snapshot decides with its own
-/// count the reported actual. Every snapshot clones out of the
-/// recorder's lock before any await, so no lock spans an await point
-/// and the poll sleeps between snapshots. Each iteration snapshots
-/// the recorder once and derives both the filtered count and a
-/// mismatch's evidence paths from that single snapshot, so the
-/// evidence can never list an arrival the count missed.
+/// count the reported actual.
+///
+/// When the expectation carries `requests` shapes, every snapshot
+/// additionally judges the filtered sequence positionally
+/// ([`filtered_projections`],
+/// [`camel_matchers::request_shape_mismatch`]): a filtered count
+/// above the shapes' length, or a present shape mismatch, fails
+/// immediately — the recorder is append-only, so a present mismatch
+/// never heals — and the poll settles only at equality with every
+/// present shape matching. A shape failure renders the mismatched
+/// request's aspect detail ([`shape_mismatch_detail`]) alongside the
+/// counts evidence.
+///
+/// Every snapshot clones out of the recorder's lock before any await,
+/// so no lock spans an await point and the poll sleeps between
+/// snapshots. Each iteration snapshots the recorder once and derives
+/// the filtered count and the shape evidence from that single
+/// snapshot, so the evidence can never list an arrival the count
+/// missed.
 #[cfg(feature = "http")]
 pub(super) async fn partner_validate_action(
     index: usize,
@@ -118,33 +174,95 @@ pub(super) async fn partner_validate_action(
             ),
         }
     };
+    let shape_failure =
+        |requests: &[HttpWireRequest], actual: usize, shape: (usize, ShapeAspect)| {
+            let recorded: Vec<String> = requests
+                .iter()
+                .map(|request| request.path.clone())
+                .collect();
+            let secrets = router.secret_query_keys();
+            ScenarioFailure::ValidationMismatch {
+                action: index,
+                detail: format!(
+                    "{}; {}",
+                    shape_mismatch_detail(uri, shape, expected, requests, &secrets),
+                    partner_mismatch_detail(uri, expected, actual, &recorded, &secrets),
+                ),
+            }
+        };
+    // The per-snapshot failure judgment: `Some` when this snapshot
+    // already fails the expectation. With `requests` shapes the
+    // judgment is position-aware: a filtered count above the shapes'
+    // length, or a present shape mismatch, fails immediately — the
+    // recorder is append-only, so neither ever heals.
+    let judged_failure = |requests: &[HttpWireRequest], actual: usize| -> Option<ScenarioFailure> {
+        match expected.requests.as_deref() {
+            Some(shapes) => {
+                if actual > shapes.len() {
+                    return Some(mismatch(actual, requests));
+                }
+                let projections = filtered_projections(
+                    requests,
+                    expected.method.as_deref(),
+                    expected.path.as_ref(),
+                    expected.query.as_ref(),
+                );
+                request_shape_mismatch(
+                    shapes,
+                    projections
+                        .iter()
+                        .map(|(method, path, body)| (*method, *path, body)),
+                )
+                .map(|shape| shape_failure(requests, actual, shape))
+            }
+            // A ceiling broken beyond recovery fails on the first
+            // observation instead of waiting the window out.
+            None => above_ceiling(&expected.bound, actual).then(|| mismatch(actual, requests)),
+        }
+    };
+    // Whether a snapshot settles the expectation: the shapes path at
+    // plain equality (every present shape already matched, or
+    // `judged_failure` failed first), the count-only path with the
+    // early-settle rules mid-window and the plain bound decision for
+    // the no-deadline read and the final expiry snapshot.
+    let settles = |actual: usize, final_read: bool| -> bool {
+        match expected.requests.as_deref() {
+            Some(shapes) => actual == shapes.len(),
+            None if final_read => bound_holds(&expected.bound, actual),
+            None => settles_early(&expected.bound, actual),
+        }
+    };
     match deadline {
         // No deadline: one immediate snapshot decides for every
-        // bound.
+        // expectation.
         None => {
             let (requests, actual) = snapshot();
-            if bound_holds(&expected.bound, actual) {
+            if let Some(failure) = judged_failure(&requests, actual) {
+                return Err(failure);
+            }
+            if settles(actual, true) {
                 Ok(())
             } else {
                 Err(mismatch(actual, &requests))
             }
         }
         // Poll: early success for `Exact`/`AtLeast`, immediate
-        // failure above an `AtMost`/`Range` ceiling, and the final
-        // snapshot decides at expiry.
+        // failure above an `AtMost`/`Range` ceiling or on any shape
+        // mismatch or over-length count, and the final snapshot
+        // decides at expiry.
         Some(deadline) => {
             let until = tokio::time::Instant::now() + deadline;
             loop {
                 let (requests, actual) = snapshot();
-                if above_ceiling(&expected.bound, actual) {
-                    return Err(mismatch(actual, &requests));
+                if let Some(failure) = judged_failure(&requests, actual) {
+                    return Err(failure);
                 }
-                if settles_early(&expected.bound, actual) {
+                if settles(actual, false) {
                     return Ok(());
                 }
                 let now = tokio::time::Instant::now();
                 if now >= until {
-                    return if bound_holds(&expected.bound, actual) {
+                    return if settles(actual, true) {
                         Ok(())
                     } else {
                         Err(mismatch(actual, &requests))
@@ -234,31 +352,149 @@ pub(crate) fn render_filters(expected: &PartnerExpectation, secret_keys: &[Strin
     if let Some(method) = expected.method.as_deref() {
         clauses.push(format!("method {method}"));
     }
-    match expected.path.as_ref() {
-        Some(PathFilter::Exact(path)) => {
-            clauses.push(format!("path {}", redact_wire_path(path, secret_keys)));
-        }
-        Some(PathFilter::Contains(_)) => {
-            clauses.push("pathContains <pattern elided>".to_string());
-        }
-        Some(PathFilter::Matches(_)) => {
-            clauses.push("pathMatches <pattern elided>".to_string());
-        }
-        // Foreign `#[non_exhaustive]` variants (none today): render by
-        // kind with the payload elided, like Contains/Matches above.
-        Some(_) => {
-            clauses.push("path <filter elided>".to_string());
-        }
-        None => {}
+    if let Some(filter) = expected.path.as_ref() {
+        clauses.push(render_path_filter(filter, secret_keys));
     }
     if let Some(query) = expected.query.as_ref() {
-        for (key, value) in query {
-            if secret_keys.iter().any(|secret| secret == key) {
-                clauses.push(format!("{key}=<redacted>"));
-            } else {
-                clauses.push(format!("{key}={value}"));
-            }
-        }
+        clauses.push(render_query_subset(query, secret_keys));
     }
     clauses.join(", ")
+}
+
+/// Renders one path filter the way [`render_filters`] renders the
+/// outer `path` clause: `Exact` through [`redact_wire_path`],
+/// `Contains`/`Matches` by KIND only with the pattern payload elided.
+/// Shared with the shape detail's `path` aspect, so a shape's
+/// expected side renders byte-identically with the outer filter
+/// clause.
+#[cfg(feature = "http")]
+fn render_path_filter(filter: &PathFilter, secret_keys: &[String]) -> String {
+    match filter {
+        PathFilter::Exact(path) => format!("path {}", redact_wire_path(path, secret_keys)),
+        PathFilter::Contains(_) => "pathContains <pattern elided>".to_string(),
+        PathFilter::Matches(_) => "pathMatches <pattern elided>".to_string(),
+        // Foreign `#[non_exhaustive]` variants (none today): render by
+        // kind with the payload elided, like Contains/Matches above.
+        _ => "path <filter elided>".to_string(),
+    }
+}
+
+/// Renders a declared `query` subset the way [`render_filters`]
+/// renders it: each pair `k=v`, except keys in `secret_keys`, which
+/// render `k=<redacted>`. Shared with the shape detail's `query`
+/// aspect, so a shape's expected side renders byte-identically with
+/// the outer filter clause.
+#[cfg(feature = "http")]
+fn render_query_subset(query: &BTreeMap<String, String>, secret_keys: &[String]) -> String {
+    query
+        .iter()
+        .map(|(key, value)| {
+            if secret_keys.iter().any(|secret| secret == key) {
+                format!("{key}=<redacted>")
+            } else {
+                format!("{key}={value}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The grammar name of a failed shape aspect (the diagnostic
+/// vocabulary the spec pins: `method`, `path`, `query`, `body`).
+#[cfg(feature = "http")]
+fn aspect_name(aspect: &ShapeAspect) -> &'static str {
+    match aspect {
+        ShapeAspect::Method => "method",
+        ShapeAspect::Path => "path",
+        ShapeAspect::Query => "query",
+        ShapeAspect::Body => "body",
+        // Foreign `#[non_exhaustive]` aspects (none today).
+        _ => "request",
+    }
+}
+
+/// The mismatch detail of a failed per-request shape assert: the
+/// partner URI, the one-based request within the FILTERED sequence,
+/// the failed aspect, and the expected-versus-observed rendering, per
+/// aspect under the ADR-0051 redaction law — `method` renders plain
+/// method texts; `path` renders the shape's path filter exactly like
+/// [`render_filters`] and the recorded path through [`redact_wire_path`];
+/// `query` renders the declared pairs with secret keys masked and the
+/// observed redacted wire path; `body` renders through the shared
+/// message-validate renderer. Headers never render: only `method`,
+/// `path`, and `body` are read. The mismatch's index selects from the
+/// filtered sequence re-derived from `observed` through the
+/// expectation's outer filters — the same filtering the action's
+/// snapshot used, so both name the same request.
+#[cfg(feature = "http")]
+pub(crate) fn shape_mismatch_detail(
+    partner: &str,
+    mismatch: (usize, ShapeAspect),
+    expected: &PartnerExpectation,
+    observed: &[HttpWireRequest],
+    secret_keys: &[String],
+) -> String {
+    let (index, aspect) = mismatch;
+    let shapes = expected.requests.as_deref().unwrap_or(&[]);
+    let filtered = filtered_projections(
+        observed,
+        expected.method.as_deref(),
+        expected.path.as_ref(),
+        expected.query.as_ref(),
+    );
+    let projection = filtered.get(index);
+    let observed_method = projection.map(|(method, _, _)| *method);
+    let observed_path = projection.map(|(_, path, _)| *path);
+    let observed_body = projection.map(|(_, _, body)| body);
+    let shape = shapes.get(index);
+    let rendered = match &aspect {
+        ShapeAspect::Method => format!(
+            "expected {}, got {}",
+            shape
+                .and_then(|shape| shape.method.as_deref())
+                .unwrap_or("any"),
+            observed_method.unwrap_or(""),
+        ),
+        ShapeAspect::Path => format!(
+            "expected {}, got {}",
+            shape
+                .and_then(|shape| shape.path.as_ref())
+                .map(|filter| render_path_filter(filter, secret_keys))
+                .unwrap_or_else(|| "any".to_string()),
+            observed_path
+                .map(|path| redact_wire_path(path, secret_keys))
+                .unwrap_or_default(),
+        ),
+        ShapeAspect::Query => format!(
+            "expected {}, got {}",
+            shape
+                .and_then(|shape| shape.query.as_ref())
+                .map(|query| render_query_subset(query, secret_keys))
+                .unwrap_or_default(),
+            observed_path
+                .map(|path| redact_wire_path(path, secret_keys))
+                .unwrap_or_default(),
+        ),
+        ShapeAspect::Body => {
+            match shape.and_then(|shape| shape.body.as_ref()) {
+                // The only reachable pairing: the `body` aspect fails
+                // only when a declared expectation rejected the
+                // projected value.
+                Some(expectation) => match observed_body {
+                    Some(body) => super::render_expectation_mismatch(expectation, body),
+                    None => "expected a body, got none".to_string(),
+                },
+                None => "expected a body, got none".to_string(),
+            }
+        }
+        // Foreign `#[non_exhaustive]` aspects (none today): render by
+        // kind without values, like the elided filter payloads.
+        _ => "expected the declared shape, got the recorded request".to_string(),
+    };
+    format!(
+        "partner {}: request {} (of the filtered sequence) {}: {rendered}",
+        redact_wire_path(partner, secret_keys),
+        index + 1,
+        aspect_name(&aspect),
+    )
 }

@@ -21,9 +21,9 @@ use std::time::Duration;
 
 use camel_integration_test::runner::fill_bind_vars;
 use camel_integration_test::{
-    HttpPartner, HttpRecorder, LayeredEnv, PartnerAdapter, PartnerRouter, ScenarioDocument,
-    ScenarioFailure, ScenarioVars, ScenarioVerdict, TransportError, ambient_std, boot_scenario,
-    parse_scenario_document, partner_scripts_for, run_scenario_document,
+    DirectStimulus, HttpPartner, HttpRecorder, LayeredEnv, PartnerAdapter, PartnerRouter,
+    ScenarioDocument, ScenarioFailure, ScenarioVars, ScenarioVerdict, TransportError, ambient_std,
+    boot_scenario, parse_scenario_document, partner_scripts_for, run_scenario_document,
 };
 
 /// The endpoint URI the partner-only documents declare for their
@@ -33,6 +33,11 @@ const ORDERS: &str = "http://127.0.0.1:0/orders";
 
 /// The endpoint URI the flagship document declares for its partner.
 const PARTNER: &str = "http://127.0.0.1:0/order";
+
+/// The endpoint URI the retry-identical-bodies fixture's route
+/// declares; the scenario send stimulates it through the
+/// context-stimulus adapter.
+const SHAPE_RETRY_DIRECT: &str = "direct:shape-retry";
 
 /// Three sends, a settle sleep (the send returns at connect; the
 /// request writes land asynchronously), then an immediate count
@@ -856,6 +861,106 @@ async fn route_retries_faulted_partner_then_count_e2e() {
     for request in &recorded {
         assert_eq!(request.path, "/order");
     }
+
+    let mut guard = ctx.lock().await;
+    run.boot
+        .shutdown(&mut guard)
+        .await
+        .expect("clean shutdown must complete");
+}
+
+/// The retry-identical-bodies proof: a REAL retrying route stimulated
+/// through `direct:` — the context-stimulus adapter delivers the
+/// scenario send into the booted route. The scripted partner faults
+/// the first attempt with a 500, the route-level
+/// `error_handler.retry` redials once, and the second attempt serves
+/// the healthy status; the partner validate's `requests` shapes pin
+/// both positional arrivals to literal `equals` bodies, so the pass
+/// proves the retry resent the identical projected body values — and
+/// the recorder proves exactly two POST arrivals carrying the same
+/// wire bytes.
+#[tokio::test]
+async fn shape_asserts_prove_retry_identical_bodies() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    // The route's http producer dials loopback — the same opt-in the
+    // shipped two-layer and fixture projects declare.
+    std::fs::write(
+        root.join("Camel.toml"),
+        "log_level = \"info\"\n\n[components.http]\nallow_internal = true\n",
+    )
+    .expect("write Camel.toml");
+    // The committed fixture pair, staged into the temp project root
+    // the document's `routeFiles` resolve against.
+    std::fs::copy(
+        fixtures.join("partner-shape-retry-route.yaml"),
+        root.join("partner-shape-retry-route.yaml"),
+    )
+    .expect("stage the committed route fixture");
+    let path = root.join("partner-shape-retry.test.yaml");
+    std::fs::copy(fixtures.join("partner-shape-retry.test.yaml"), &path)
+        .expect("stage the committed scenario fixture");
+    let doc = parse_scenario_document(&path).expect("document must load");
+
+    let scripts = partner_scripts_for(&doc, PARTNER)
+        .expect("the fixture self-declares its partner through the validate target");
+    let partner = HttpPartner::start(scripts)
+        .await
+        .expect("partner must bind 127.0.0.1:0");
+    let recorder = partner.recorder();
+
+    // The CLI driver's env-tier wiring: the harness tier keeps the
+    // `http://host:port` form the route file interpolates, while
+    // `fill_bind_vars` below keeps the scenario tier at bare
+    // `host:port`. `PARTNER_URL` is reserved — it never appears in
+    // the document's own `env`.
+    let harness_provisioned = BTreeMap::from([(
+        "PARTNER_URL".to_string(),
+        format!("http://{}", partner.bound_addr()),
+    )]);
+    let env = LayeredEnv::new(
+        doc.env.clone().unwrap_or_default(),
+        harness_provisioned,
+        doc.env_passthrough.clone().unwrap_or_default(),
+        ambient_std(),
+    );
+    let run = boot_scenario(&doc, root, &env)
+        .await
+        .expect("the full boot must succeed");
+    let ctx = Arc::new(tokio::sync::Mutex::new(run.ctx));
+
+    let mut adapters: BTreeMap<String, Box<dyn PartnerAdapter>> = BTreeMap::new();
+    adapters.insert(PARTNER.to_string(), Box::new(partner));
+    adapters.insert(
+        SHAPE_RETRY_DIRECT.to_string(),
+        Box::new(DirectStimulus::new(Arc::clone(&ctx))),
+    );
+    let router = PartnerRouter::new(adapters);
+
+    let mut vars = ScenarioVars::new();
+    fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "fault, retry, and identical-body shapes must all settle: {outcome:?}"
+    );
+
+    let recorded = recorder.recorded_requests();
+    assert_eq!(
+        recorded.len(),
+        2,
+        "the faulted attempt and the retry both reach the wire: {recorded:?}"
+    );
+    for request in &recorded {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/order");
+    }
+    assert_eq!(
+        recorded[0].body, recorded[1].body,
+        "the retry must resend the identical wire body"
+    );
 
     let mut guard = ctx.lock().await;
     run.boot
