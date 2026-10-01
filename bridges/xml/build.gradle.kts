@@ -4,7 +4,7 @@ plugins {
     id("com.diffplug.spotless") version "6.25.0"
 }
 
-version = project.findProperty("version")?.toString() ?: "0.6.1"
+version = project.findProperty("version")?.toString() ?: "0.7.0"
 
 repositories {
     mavenCentral()
