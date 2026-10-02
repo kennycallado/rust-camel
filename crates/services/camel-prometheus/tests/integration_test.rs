@@ -58,7 +58,13 @@ async fn test_concurrent_access() {
     }
 
     for handle in handles {
-        handle.await.unwrap();
+        // Workers run finite in-memory work (10x100 counter updates), so the
+        // join is bounded by construction; the timeout fails fast on a wedged
+        // worker instead of hanging the test.
+        tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("worker completes within 10s")
+            .unwrap();
     }
 
     let output = metrics.gather();

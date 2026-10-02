@@ -507,11 +507,14 @@ mod executor {
         });
         // The write must have succeeded INSIDE the window: a skipped
         // seed would otherwise mask a poll bug with a false pass.
-        let joined = writer.await;
+        let joined = tokio::time::timeout(Duration::from_secs(10), writer)
+            .await
+            .expect("writer joins (finite: 150 ms sleep + one seed op)");
         assert!(matches!(joined, Ok(())), "spawned write failed: {joined:?}");
-        let outcome = match validate.await {
-            Ok(outcome) => outcome,
-            Err(err) => panic!("validate task failed: {err}"),
+        let outcome = match tokio::time::timeout(Duration::from_secs(10), validate).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(err)) => panic!("validate task failed: {err}"),
+            Err(_) => panic!("validate join exceeded outer bound (internal deadline 2 s)"),
         };
         assert_eq!(outcome, Ok(()));
     }
@@ -558,14 +561,17 @@ mod executor {
             )
             .await
         });
-        let joined = deleter.await;
+        let joined = tokio::time::timeout(Duration::from_secs(10), deleter)
+            .await
+            .expect("deleter joins (finite: 150 ms sleep + one seed op)");
         assert!(
             matches!(joined, Ok(())),
             "spawned delete failed: {joined:?}"
         );
-        let outcome = match validate.await {
-            Ok(outcome) => outcome,
-            Err(err) => panic!("validate task failed: {err}"),
+        let outcome = match tokio::time::timeout(Duration::from_secs(10), validate).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(err)) => panic!("validate task failed: {err}"),
+            Err(_) => panic!("validate join exceeded outer bound (internal deadline 400 ms)"),
         };
         let failure = expect_failure(outcome);
         let ScenarioFailure::ValidationMismatch { detail, .. } = failure else {

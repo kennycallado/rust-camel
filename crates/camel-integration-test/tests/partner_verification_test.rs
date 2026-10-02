@@ -962,7 +962,7 @@ async fn shape_asserts_prove_retry_identical_bodies() {
         "the retry must resend the identical wire body"
     );
 
-    let mut guard = ctx.lock().await;
+    let mut guard = ctx.lock().await; // allow-test-wait: harness ctx lock for clean shutdown — momentary, uncontended in-test (ADR-0069 §13.2 R1)
     run.boot
         .shutdown(&mut guard)
         .await

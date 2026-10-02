@@ -1230,8 +1230,12 @@ mod tests {
         let token = CancellationToken::new();
         let handle = tokio::spawn(drain_stdout(reader, token.clone()));
 
-        // Wait for child to exit
-        let status = child.wait().await.expect("wait for child");
+        // Wait for child to exit; the echo script terminates promptly, the
+        // bound only guards a hung child from hanging the test forever
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+            .await
+            .expect("child exits within 5s")
+            .expect("wait for child");
         assert!(status.success(), "child should exit successfully");
 
         // Drain task should complete (trailing lines processed, not lost)
