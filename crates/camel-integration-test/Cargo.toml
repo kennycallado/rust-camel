@@ -79,6 +79,11 @@ tracing-subscriber.workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
 toml.workspace = true
+# Paused-time driver tests (`runner/poll.rs`): the workspace `full`
+# feature set does not enable `test-util`, and the poll-discipline
+# tests need `start_paused` + `advance` (no real sleeps,
+# lint-test-sleep).
+tokio = { workspace = true, features = ["test-util"] }
 # Cross-surface byte-identity test (rc-l4wf): compares the camel-dsl YAML
 # lowering against the camel-builder `.parameters()` merge. Test-only, so the
 # authoring crates stay decoupled (no camel-builder dep inside camel-dsl).

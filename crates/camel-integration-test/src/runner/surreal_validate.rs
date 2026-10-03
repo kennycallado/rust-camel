@@ -41,7 +41,7 @@ const SURREAL_VALIDATE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// apparatus-class [`ScenarioFailure`]: the
 /// datasource resolution, driver, and decode errors carry the
 /// datasource NAME only — the `db_url` passes through
-/// [`crate::sql_action::sanitize_db_error`] (ADR-0051) — while the
+/// [`crate::steering::sanitize_db_error`] (ADR-0051) — while the
 /// assertion outcome is a verdict-class
 /// [`ScenarioFailure::ValidationMismatch`] whose detail renders the
 /// expectation shape and the actual row count, never cell values or
@@ -69,62 +69,46 @@ pub(crate) async fn surreal_validate_action(
             },
         });
     };
-    // Datasource resolution, copied from `execute_surreal_prepare`:
-    // the datasource NAME obeys the identifier law (never a URL),
-    // every driver error string is sanitized against the config's
-    // `db_url` before it reaches the failure (ADR-0051), and the
-    // handle must be the `Surreal<Any>` client the catalog provisions
-    // (the `check` precedent in the surrealdb pool factory).
+    // Datasource resolution through the steering seam: the datasource
+    // NAME obeys the identifier law (never a URL), every driver error
+    // string is sanitized against the config's `db_url` before it
+    // reaches the failure (ADR-0051), and the handle must be the
+    // `Surreal<Any>` client the catalog provisions (the `check`
+    // precedent in the surrealdb pool factory). The resolver's message
+    // is already complete, so it maps straight into the transport
+    // class — never through `apparatus`, which would double the
+    // `surreal validation: datasource` prefix.
     let name = &target.datasource;
-    let Some(config) = catalog.get_config(name) else {
-        return Err(ScenarioFailure::ActionTransport {
-            action: index,
-            source: crate::adapters::TransportError::Other {
-                message: format!("surreal validation: unknown datasource '{name}'"),
-            },
-        });
-    };
-    let db_url = config.db_url.clone();
-    // One sanitizing wrapper for every driver-error string below: the
-    // datasource NAME renders, its URL never (ADR-0051).
-    let sanitize = |err_text: String| crate::sql_action::sanitize_db_error(&err_text, &db_url);
-    let handle = catalog
-        .get_pool(name)
-        .await
-        .map_err(|e| apparatus(index, name, sanitize(e.to_string())))?;
-    let client = handle
-        .downcast::<surrealdb::Surreal<surrealdb::engine::any::Any>>()
-        .map_err(|e| apparatus(index, name, sanitize(e.to_string())))?;
-    match deadline {
-        // No deadline: one immediate snapshot decides for every
-        // shape, exactly like the sql validate's no-deadline read.
-        None => {
-            let snapshot = snapshot(index, name, target, expected, &client, &db_url).await?;
-            decide(index, name, expected, &snapshot)
-        }
-        // Poll: the only mid-window exit is an upper-bound ceiling
-        // breach (unrecoverable even under deletion, since the count
-        // observed above the ceiling already falsifies the claim at
-        // this instant); every other shape waits out the window and
-        // the final snapshot at expiry decides. Record sets are NOT
-        // monotone, so there is never an early settle.
-        Some(deadline) => {
-            let until = tokio::time::Instant::now() + deadline;
-            loop {
-                let snapshot = snapshot(index, name, target, expected, &client, &db_url).await?;
-                if let Some(bound) = expected.bound.as_ref()
-                    && camel_matchers::above_ceiling(bound, snapshot.tuples.len())
-                {
-                    return Err(mismatch(index, name, expected, &snapshot));
-                }
-                let now = tokio::time::Instant::now();
-                if now >= until {
-                    return decide(index, name, expected, &snapshot);
-                }
-                tokio::time::sleep((until - now).min(SURREAL_VALIDATE_POLL_INTERVAL)).await;
-            }
-        }
-    }
+    let (client, db_url) = crate::steering::resolve_datasource::<
+        surrealdb::Surreal<surrealdb::engine::any::Any>,
+    >(catalog, name, "surreal validation")
+    .await
+    .map_err(|message| ScenarioFailure::ActionTransport {
+        action: index,
+        source: crate::adapters::TransportError::Other { message },
+    })?;
+    // The shared poll driver owns the deadline discipline. The only
+    // mid-window exit is an upper-bound ceiling breach (unrecoverable
+    // even under deletion, since the count observed above the ceiling
+    // already falsifies the claim at this instant); every other shape
+    // waits out the window and the final snapshot at expiry decides.
+    // Record sets are NOT monotone, so there is never an early settle.
+    let client = &client;
+    let db_url = &db_url;
+    super::poll::poll_until(
+        deadline,
+        SURREAL_VALIDATE_POLL_INTERVAL,
+        move || async move { snapshot(index, name, target, expected, client, db_url).await },
+        move |snapshot: &Snapshot| {
+            expected
+                .bound
+                .as_ref()
+                .is_some_and(|bound| camel_matchers::above_ceiling(bound, snapshot.tuples.len()))
+                .then(|| Err(mismatch(index, name, expected, snapshot)))
+        },
+        move |snapshot: &Snapshot| decide(index, name, expected, snapshot),
+    )
+    .await
 }
 
 /// The feature-off twin (the sql no-sql precedent): the document
@@ -200,7 +184,7 @@ async fn snapshot(
             apparatus(
                 index,
                 name,
-                crate::sql_action::sanitize_db_error(&e.to_string(), db_url),
+                crate::steering::sanitize_db_error(&e.to_string(), db_url),
             )
         })?
         .check()
@@ -208,14 +192,14 @@ async fn snapshot(
             apparatus(
                 index,
                 name,
-                crate::sql_action::sanitize_db_error(&e.to_string(), db_url),
+                crate::steering::sanitize_db_error(&e.to_string(), db_url),
             )
         })?;
     let rows: Vec<surrealdb::types::Value> = response.take(0).map_err(|e| {
         apparatus(
             index,
             name,
-            crate::sql_action::sanitize_db_error(&e.to_string(), db_url),
+            crate::steering::sanitize_db_error(&e.to_string(), db_url),
         )
     })?;
     let tuples = match &expected.columns {

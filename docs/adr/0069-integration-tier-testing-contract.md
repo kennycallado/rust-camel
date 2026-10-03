@@ -1,6 +1,6 @@
 # ADR-0069: Integration-Tier Testing Contract
 
-- Status: Accepted (human-ratified 2026-09-03; e_opus + e_gpt BLESS-WITH-FIXES, fixes applied). Amended 2026-09-06: section 13 added (flake taxonomy and test-design rules R1-R7, bd rc-jwp3; ADR-0070 carries the staged-listener application of R2).
+- Status: Accepted (human-ratified 2026-09-03; e_opus + e_gpt BLESS-WITH-FIXES, fixes applied). Amended 2026-09-06: section 13 added (flake taxonomy and test-design rules R1-R7, bd rc-jwp3; ADR-0070 carries the staged-listener application of R2). Amended 2026-10-03: section 14 added (waist: adapter taxonomy and shared seams; bd rc-25lup.6).
 - Date: 2026-09-03
 - Supersedes: none. Binds the sketch in ADR-0064 section 4.
 - Epic: rc-kk69. Authoring path: human grill + ste-writing (same path as ADR-0064, per rc-379d precedent). Not a conductor-light change.
@@ -145,6 +145,8 @@ probe coerce clean-integer defaults at integer-typed positions in both the
 DSL YAML and camel-config TOML arms. Ports in URIs resolve today.
 
 ### 5. Partner-side assertions are the only normative proof
+
+Scope note 2026-10-03: this rule is traffic-family law; state families carry their own normative proof (see section 14).
 
 The harness owns a listener on the other side of the wire. For an outbound
 route, the harness binds an HTTP server on `127.0.0.1:0` and validates what
@@ -493,6 +495,54 @@ the pilot also requested a minimum-elapsed `not-before-X` assertion
 (bd rc-1alu). Section 2's vocabulary ban governs format mixing, not
 assertion growth. New assertion kinds enter through their own
 changes.
+
+### 14. Waist: adapter taxonomy and shared seams
+
+Added 2026-10-03 (bd rc-25lup.6). This section qualifies section 5 and
+names the shared seams the adapter families run on. It amends the
+taxonomy. It changes no per-family requirement.
+
+Section 5's rule that partner-side assertions are the only normative
+proof is traffic-family law. State families carry their own normative
+proof: the catalog-backed observation of rows at rest through the same
+boot the system under test runs on. A state assertion reads the
+datasource the boot configured, not a harness-owned far side of the
+wire. Section 5's "only" therefore reads as "only for traffic
+adapters."
+
+The tier has two adapter classes. **Traffic adapters** own the far side
+of the wire. The harness binds it, and what arrives there is the proof.
+The partner family is the traffic adapter; the `http` feature activates
+it. **State adapters** assert over data at rest through a datasource
+catalog pool. The SQL and Surreal families are state adapters; the
+`sql` and `surreal` features activate them.
+
+Three rule-of-three seams form the waist. The steering axis and the
+poll driver live inside `camel-integration-test`.
+
+- The **steering axis** (`src/steering.rs`) maps a datasource name to an
+  env-steered URL and then to a typed pool handle. One resolver serves
+  every state family. It carries the identifier law (errors name the
+  datasource, never its URL) and the ADR-0051 redaction law.
+- The **poll driver** (`src/runner/poll.rs`) owns the shared deadline
+  poll discipline: a no-deadline single snapshot; the expiry instant
+  fixed before the first snapshot; a snapshot error stops the poll at
+  once; early judgment precedes the expiry decision; a sleep never
+  exceeds the remaining window. Per-family poll intervals stay at the
+  call sites.
+- The **matcher algebra home** is `camel-matchers` (ADR-0072, cited as
+  Proposed). This amendment decides nothing about ADR-0072's status and
+  claims no vocabulary ownership. Matcher vocabulary ownership stays
+  with ADR-0072.
+
+Activation follows need, one Cargo feature per family. The section-8
+demand gate applies per family. A fourth state family reuses the waist
+and adds only its query vocabulary, its record projection, and an action
+name.
+
+Non-goals. There is no generic `state:` verb. There is no shared
+state-family trait. Per-family poll intervals, error labels, and
+mismatch detail stay in the family files.
 
 ## Consequences
 

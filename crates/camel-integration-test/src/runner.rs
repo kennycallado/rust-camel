@@ -47,6 +47,13 @@ use crate::document::{
     ScenarioDocument, ScenarioTarget, ValidateExpectation,
 };
 
+/// The shared deadline poll driver (delta spec: "Deadline poll driver
+/// contract"): one discipline for every `validate` target that polls,
+/// gated to the families that can call it (any family feature, or a
+/// unit-test build).
+#[cfg(any(test, feature = "http", feature = "sql", feature = "surreal"))]
+mod poll;
+
 /// Partner verification for the `validate` action's `partner` target
 /// (ADR-0069 §5): the filtered recorded-request count, the deadline
 /// poll, and the mismatch-detail renderers.

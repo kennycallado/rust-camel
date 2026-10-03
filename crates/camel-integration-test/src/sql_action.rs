@@ -82,15 +82,10 @@ pub fn validate_sql_action(raw: &RawSqlAction, action_index: usize) -> Result<Sq
     })
 }
 
-/// Replaces every occurrence of `db_url` in `err_text` with
-/// `[REDACTED]` (ADR-0051). An empty `db_url` is a no-op — an empty
-/// pattern would corrupt the text.
-pub fn sanitize_db_error(err_text: &str, db_url: &str) -> String {
-    if db_url.is_empty() {
-        return err_text.to_string();
-    }
-    err_text.replace(db_url, "[REDACTED]")
-}
+/// Compatibility re-export: the sanitize home is `crate::steering`
+/// (waist-extraction task 1.1), but this module is public surface, so
+/// `sql_action::sanitize_db_error` must keep resolving.
+pub use crate::steering::sanitize_db_error;
 
 /// Boot-time lint (ungated): rejects per-connection sqlite `:memory:`
 /// datasource URLs, which give every pooled connection its own private
@@ -163,26 +158,13 @@ pub async fn execute_sql_prepare(
     action: &SqlAction,
 ) -> Result<(), String> {
     let name = &action.datasource;
-    let Some(config) = catalog.get_config(name) else {
-        return Err(format!("sql action: unknown datasource '{name}'"));
-    };
-    let handle = catalog.get_pool(name).await.map_err(|e| {
-        format!(
-            "sql action: datasource '{name}': {}",
-            sanitize_db_error(&e.to_string(), &config.db_url)
-        )
-    })?;
-    let pool = handle.downcast::<sqlx::AnyPool>().map_err(|e| {
-        format!(
-            "sql action: datasource '{name}': {}",
-            sanitize_db_error(&e.to_string(), &config.db_url)
-        )
-    })?;
+    let (pool, db_url) =
+        crate::steering::resolve_datasource::<sqlx::AnyPool>(catalog, name, "sql action").await?;
     for (i, stmt) in action.prepare.iter().enumerate() {
         sqlx::query(stmt).execute(&*pool).await.map_err(|e| {
             format!(
                 "datasource '{name}' statement [{i}]: {}",
-                sanitize_db_error(&e.to_string(), &config.db_url)
+                sanitize_db_error(&e.to_string(), &db_url)
             )
         })?;
     }
@@ -282,21 +264,6 @@ mod tests {
                 "DELETE FROM t WHERE x = 1".to_string(),
             ]
         );
-    }
-
-    #[test]
-    fn sanitizer_redacts_db_url() {
-        let sanitized = sanitize_db_error(
-            "connect failed sqlite::memory:?cache=shared&x=1",
-            "sqlite::memory:?cache=shared&x=1",
-        );
-        assert!(sanitized.contains("[REDACTED]"), "got: {sanitized}");
-        assert!(!sanitized.contains("cache=shared&x=1"), "got: {sanitized}");
-    }
-
-    #[test]
-    fn sanitizer_empty_url_noop() {
-        assert_eq!(sanitize_db_error("boom", ""), "boom");
     }
 
     #[test]

@@ -196,6 +196,34 @@ escaping), null serves empty, any other value serves as compact JSON,
 and an absent body serves empty.
 _Avoid_: JSON serialization (strings are not quoted), double encoding
 
+**traffic adapter**:
+An adapter that owns the harness side of the wire: what arrives at the
+harness listener is the normative proof. The partner family is the only
+traffic adapter; the `http` feature activates it (ADR-0069 section 14).
+_Avoid_: wire adapter, partner adapter
+
+**state adapter**:
+An adapter that asserts over data at rest through a datasource catalog
+pool, observed through the same boot the system under test runs on. The
+SQL and Surreal families are state adapters, activated by the `sql` and
+`surreal` features (ADR-0069 section 14).
+_Avoid_: database adapter, DB tier
+
+**steering axis**:
+The shared datasource seam (`src/steering.rs`): it steers a datasource
+name to an env-steered URL and then to a typed pool handle through one
+resolver. It carries the identifier law (errors name the datasource,
+never its URL) and the ADR-0051 redaction law (ADR-0069 section 14).
+_Avoid_: datasource lookup, connection helper
+
+**poll driver**:
+The shared deadline poll seam (`src/runner/poll.rs`): one discipline for
+partner, SQL, and Surreal polling. The expiry instant is fixed before
+the first snapshot, a snapshot error stops the poll at once, early
+judgment precedes the expiry decision, and a sleep never exceeds the
+remaining window (ADR-0069 section 14).
+_Avoid_: retry loop, wait helper
+
 ## `#[non_exhaustive]` posture
 
 ADR-0049 governs public enums. Every public enum in this crate is

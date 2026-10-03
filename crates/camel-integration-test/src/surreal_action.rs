@@ -105,7 +105,7 @@ use surrealdb::Surreal;
 use surrealdb::engine::any::Any as SurrealAny;
 
 #[cfg(feature = "surreal")]
-use crate::sql_action::sanitize_db_error;
+use crate::steering::sanitize_db_error;
 
 /// Executes the prepare statements in order against the named
 /// datasource's Surreal client (the sql executor's twin, bd rc-25lup.1).
@@ -124,21 +124,9 @@ pub async fn execute_surreal_prepare(
     action: &SurrealAction,
 ) -> Result<(), String> {
     let name = &action.datasource;
-    let Some(config) = catalog.get_config(name) else {
-        return Err(format!("surreal action: unknown datasource '{name}'"));
-    };
-    let handle = catalog.get_pool(name).await.map_err(|e| {
-        format!(
-            "surreal action: datasource '{name}': {}",
-            sanitize_db_error(&e.to_string(), &config.db_url)
-        )
-    })?;
-    let client = handle.downcast::<Surreal<SurrealAny>>().map_err(|e| {
-        format!(
-            "surreal action: datasource '{name}': {}",
-            sanitize_db_error(&e.to_string(), &config.db_url)
-        )
-    })?;
+    let (client, db_url) =
+        crate::steering::resolve_datasource::<Surreal<SurrealAny>>(catalog, name, "surreal action")
+            .await?;
     for (i, stmt) in action.prepare.iter().enumerate() {
         client
             .query(stmt)
@@ -146,14 +134,14 @@ pub async fn execute_surreal_prepare(
             .map_err(|e| {
                 format!(
                     "datasource '{name}' statement [{i}]: {}",
-                    sanitize_db_error(&e.to_string(), &config.db_url)
+                    sanitize_db_error(&e.to_string(), &db_url)
                 )
             })?
             .check()
             .map_err(|e| {
                 format!(
                     "datasource '{name}' statement [{i}]: {}",
-                    sanitize_db_error(&e.to_string(), &config.db_url)
+                    sanitize_db_error(&e.to_string(), &db_url)
                 )
             })?;
     }

@@ -232,46 +232,36 @@ pub(super) async fn partner_validate_action(
             None => settles_early(&expected.bound, actual),
         }
     };
-    match deadline {
-        // No deadline: one immediate snapshot decides for every
-        // expectation.
-        None => {
+    // The shared poll driver owns the deadline discipline. No deadline
+    // takes one snapshot and `decide` answers from it; with a deadline
+    // `early` settles `Exact`/`AtLeast` mid-window, fails above an
+    // `AtMost`/`Range` ceiling or on any shape mismatch or over-length
+    // count, and the final snapshot at expiry decides through `decide`.
+    super::poll::poll_until(
+        deadline,
+        PARTNER_POLL_INTERVAL,
+        || {
             let (requests, actual) = snapshot();
-            if let Some(failure) = judged_failure(&requests, actual) {
-                return Err(failure);
+            std::future::ready(Ok((requests, actual)))
+        },
+        |(requests, actual): &(Vec<HttpWireRequest>, usize)| {
+            if let Some(failure) = judged_failure(requests, *actual) {
+                Some(Err(failure))
+            } else {
+                settles(*actual, false).then_some(Ok(()))
             }
-            if settles(actual, true) {
+        },
+        |(requests, actual): &(Vec<HttpWireRequest>, usize)| {
+            if let Some(failure) = judged_failure(requests, *actual) {
+                Err(failure)
+            } else if settles(*actual, true) {
                 Ok(())
             } else {
-                Err(mismatch(actual, &requests))
+                Err(mismatch(*actual, requests))
             }
-        }
-        // Poll: early success for `Exact`/`AtLeast`, immediate
-        // failure above an `AtMost`/`Range` ceiling or on any shape
-        // mismatch or over-length count, and the final snapshot
-        // decides at expiry.
-        Some(deadline) => {
-            let until = tokio::time::Instant::now() + deadline;
-            loop {
-                let (requests, actual) = snapshot();
-                if let Some(failure) = judged_failure(&requests, actual) {
-                    return Err(failure);
-                }
-                if settles(actual, false) {
-                    return Ok(());
-                }
-                let now = tokio::time::Instant::now();
-                if now >= until {
-                    return if settles(actual, true) {
-                        Ok(())
-                    } else {
-                        Err(mismatch(actual, &requests))
-                    };
-                }
-                tokio::time::sleep((until - now).min(PARTNER_POLL_INTERVAL)).await;
-            }
-        }
-    }
+        },
+    )
+    .await
 }
 
 /// Partner verification needs the http adapter's recording (feature

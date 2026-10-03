@@ -656,6 +656,29 @@ mod executor {
         assert!(!detail.contains("bob"), "got: {detail}");
     }
 
+    /// An unknown datasource name in a validate target fails closed
+    /// naming the label and the name, exactly like the `sql:`
+    /// validation twin (`sql_validate_test.rs::unknown_datasource_fails_closed`):
+    /// the resolver's message maps straight into the transport class
+    /// (the `surreal_validate_action` resolution `map_err` wrap), so
+    /// the catalog holds a DIFFERENT name than the target's.
+    #[tokio::test]
+    async fn surreal_validate_unknown_datasource_fails_closed() {
+        let catalog = surreal_catalog("statedb");
+        let target = surreal_target("nope", "SELECT 1");
+        let expected = bound_expectation(CountBound::Exact(1));
+        let failure = expect_failure(
+            surreal_validate_action(0, &target, &expected, None, Some(&catalog)).await,
+        );
+        let ScenarioFailure::ActionTransport { source, .. } = failure else {
+            panic!("expected ActionTransport, got {failure:?}");
+        };
+        let TransportError::Other { message } = source else {
+            panic!("expected TransportError::Other, got {source:?}");
+        };
+        assert_eq!(message, "surreal validation: unknown datasource 'nope'");
+    }
+
     /// A driver failure (a SurrealQL parse error that passes the
     /// load-time select-prefix gate and errors inside the response,
     /// which `.check()` surfaces) is an apparatus-class

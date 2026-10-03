@@ -34,6 +34,9 @@ pub mod inbound;
 pub mod log_capture;
 pub mod runner;
 pub mod sql_action;
+/// The datasource steering axis (name -> env-steered URL -> pool
+/// handle): the `sanitize_db_error` home and the generic resolver.
+mod steering;
 pub mod surreal_action;
 pub mod tier;
 

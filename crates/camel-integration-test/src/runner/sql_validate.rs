@@ -66,60 +66,43 @@ pub(crate) async fn sql_validate_action(
             },
         });
     };
-    // Pool resolution, copied from `execute_sql_prepare`: the
-    // datasource NAME obeys the identifier law (never a URL), every
-    // driver error string is sanitized against the config's `db_url`
-    // before it reaches the failure, and the handle must be the
-    // sqlx pool the catalog provisions.
+    // Pool resolution through the steering seam: the datasource NAME
+    // obeys the identifier law (never a URL), every driver error
+    // string is sanitized against the config's `db_url` before it
+    // reaches the failure, and the handle must be the sqlx pool the
+    // catalog provisions. The resolver's message is already complete,
+    // so it maps straight into the transport class — never through
+    // `apparatus`, which would double the `sql validation: datasource`
+    // prefix.
     let name = &target.datasource;
-    let Some(config) = catalog.get_config(name) else {
-        return Err(ScenarioFailure::ActionTransport {
-            action: index,
-            source: crate::adapters::TransportError::Other {
-                message: format!("sql validation: unknown datasource '{name}'"),
-            },
-        });
-    };
-    let db_url = config.db_url.clone();
-    // One sanitizing wrapper for every driver-error string below: the
-    // datasource NAME renders, its URL never (ADR-0051).
-    let sanitize = |err_text: String| crate::sql_action::sanitize_db_error(&err_text, &db_url);
-    let handle = catalog
-        .get_pool(name)
-        .await
-        .map_err(|e| apparatus(index, name, sanitize(e.to_string())))?;
-    let pool = handle
-        .downcast::<sqlx::AnyPool>()
-        .map_err(|e| apparatus(index, name, sanitize(e.to_string())))?;
-    match deadline {
-        // No deadline: one immediate snapshot decides for every
-        // shape, exactly like the partner no-deadline read.
-        None => {
-            let snapshot = snapshot(index, target, expected, &pool, &db_url).await?;
-            decide(index, name, expected, &snapshot)
-        }
-        // Poll: the only mid-window exit is an upper-bound ceiling
-        // breach (unrecoverable even under deletion, since the count
-        // observed above the ceiling already falsifies the claim at
-        // this instant); every other shape waits out the window and
-        // the final snapshot at expiry decides.
-        Some(deadline) => {
-            let until = tokio::time::Instant::now() + deadline;
-            loop {
-                let snapshot = snapshot(index, target, expected, &pool, &db_url).await?;
-                if let Some(bound) = expected.bound.as_ref()
-                    && camel_matchers::above_ceiling(bound, snapshot.tuples.len())
-                {
-                    return Err(mismatch(index, name, expected, &snapshot));
-                }
-                let now = tokio::time::Instant::now();
-                if now >= until {
-                    return decide(index, name, expected, &snapshot);
-                }
-                tokio::time::sleep((until - now).min(SQL_VALIDATE_POLL_INTERVAL)).await;
-            }
-        }
-    }
+    let (pool, db_url) =
+        crate::steering::resolve_datasource::<sqlx::AnyPool>(catalog, name, "sql validation")
+            .await
+            .map_err(|message| ScenarioFailure::ActionTransport {
+                action: index,
+                source: crate::adapters::TransportError::Other { message },
+            })?;
+    // The shared poll driver owns the deadline discipline. The only
+    // mid-window exit is an upper-bound ceiling breach (unrecoverable
+    // even under deletion, since the count observed above the ceiling
+    // already falsifies the claim at this instant); every other shape
+    // waits out the window and the final snapshot at expiry decides.
+    let pool = &pool;
+    let db_url = &db_url;
+    super::poll::poll_until(
+        deadline,
+        SQL_VALIDATE_POLL_INTERVAL,
+        move || async move { snapshot(index, target, expected, pool, db_url).await },
+        move |snapshot: &Snapshot| {
+            expected
+                .bound
+                .as_ref()
+                .is_some_and(|bound| camel_matchers::above_ceiling(bound, snapshot.tuples.len()))
+                .then(|| Err(mismatch(index, name, expected, snapshot)))
+        },
+        move |snapshot: &Snapshot| decide(index, name, expected, snapshot),
+    )
+    .await
 }
 
 /// One driver-side failure of the apparatus (feature `sql`): the
