@@ -1,6 +1,6 @@
 # ADR-0069: Integration-Tier Testing Contract
 
-- Status: Accepted (human-ratified 2026-09-03; e_opus + e_gpt BLESS-WITH-FIXES, fixes applied). Amended 2026-09-06: section 13 added (flake taxonomy and test-design rules R1-R7, bd rc-jwp3; ADR-0070 carries the staged-listener application of R2). Amended 2026-10-03: section 14 added (waist: adapter taxonomy and shared seams; bd rc-25lup.6).
+- Status: Accepted (human-ratified 2026-09-03; e_opus + e_gpt BLESS-WITH-FIXES, fixes applied). Amended 2026-09-06: section 13 added (flake taxonomy and test-design rules R1-R7, bd rc-jwp3; ADR-0070 carries the staged-listener application of R2). Amended 2026-10-03: section 14 added (waist: adapter taxonomy and shared seams; bd rc-25lup.6); ratified by e_opus (RATIFIED-WITH-FIXES, fixes applied).
 - Date: 2026-09-03
 - Supersedes: none. Binds the sketch in ADR-0064 section 4.
 - Epic: rc-kk69. Authoring path: human grill + ste-writing (same path as ADR-0064, per rc-379d precedent). Not a conductor-light change.
@@ -504,11 +504,16 @@ taxonomy. It changes no per-family requirement.
 
 Section 5's rule that partner-side assertions are the only normative
 proof is traffic-family law. State families carry their own normative
-proof: the catalog-backed observation of rows at rest through the same
+proof: the catalog-backed observation of committed records at rest through the same
 boot the system under test runs on. A state assertion reads the
 datasource the boot configured, not a harness-owned far side of the
 wire. Section 5's "only" therefore reads as "only for traffic
 adapters."
+
+Section 5's ban stays universal: transport interception and `mock:`
+expectations never produce a green result for any adapter class. A state
+adapter reads only what the system under test committed to the
+datastore, never engine-internal state.
 
 The tier has two adapter classes. **Traffic adapters** own the far side
 of the wire. The harness binds it, and what arrives there is the proof.
@@ -517,7 +522,7 @@ it. **State adapters** assert over data at rest through a datasource
 catalog pool. The SQL and Surreal families are state adapters; the
 `sql` and `surreal` features activate them.
 
-Three rule-of-three seams form the waist. The steering axis and the
+Three shared seams form the waist. The steering axis and the
 poll driver live inside `camel-integration-test`.
 
 - The **steering axis** (`src/steering.rs`) maps a datasource name to an
@@ -528,21 +533,22 @@ poll driver live inside `camel-integration-test`.
   poll discipline: a no-deadline single snapshot; the expiry instant
   fixed before the first snapshot; a snapshot error stops the poll at
   once; early judgment precedes the expiry decision; a sleep never
-  exceeds the remaining window. Per-family poll intervals stay at the
-  call sites.
+  exceeds the remaining window. Traffic and state families both poll through it.
+  Per-family poll intervals stay at the call sites.
 - The **matcher algebra home** is `camel-matchers` (ADR-0072, cited as
   Proposed). This amendment decides nothing about ADR-0072's status and
   claims no vocabulary ownership. Matcher vocabulary ownership stays
   with ADR-0072.
 
 Activation follows need, one Cargo feature per family. The section-8
-demand gate applies per family. A fourth state family reuses the waist
+demand gate applies per family. Each further state family (the next is Redis, bd rc-w8s70) reuses the waist
 and adds only its query vocabulary, its record projection, and an action
 name.
 
 Non-goals. There is no generic `state:` verb. There is no shared
 state-family trait. Per-family poll intervals, error labels, and
-mismatch detail stay in the family files.
+mismatch detail stay in the family files. No state adapter reads
+engine-internal state.
 
 ## Consequences
 
