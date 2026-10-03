@@ -18,6 +18,15 @@ phase-group by phase-group. Single-phase changes look exactly like the
 pre-phase flow (no `## Phase N` headings, no "Phases" section in design.md)
 and run bit-identically.
 
+## Model-policy override (takes precedence over every agent name below)
+
+When the mission order says "NO glm-class subagents" (provider quota
+exhaustion), substitute at every dispatch site in this file:
+`@reviewers/r_glm` → `@reviewers/r_gpt`, `@experts/e_glm` → `@experts/e_gpt`,
+`@workers/w_balanced` and `@workers/w_heavy` → `@workers/w_fast`. Loop counts,
+rejection caps, and verdict handling stay identical. This substitution is
+pre-approved by the owner; do not stop to ask for authorization.
+
 ## Core isolation rule
 
 You NEVER change your own CWD, NEVER run `git switch`, `git stash`, or `cd`.
