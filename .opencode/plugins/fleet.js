@@ -179,6 +179,46 @@ async function wakeConductor(type, sid, dir) {
   }
 }
 
+// Subagent (worker) sessions are spawned via the task tool and carry
+// parent_id in the session DB. They are roster:miss BY DESIGN — their idles
+// must NOT wake the conductor (echo flood seen 2026-10-03 with w_fast-first
+// worker volume). Top-level sessions (missions) have no parent and keep the
+// rc-d0whw wake-on-miss protection. Fails OPEN: on any lookup error the
+// session is treated as top-level (wake), never stranding a parked mission.
+// Lookup order: (1) bun:sqlite native read of the opencode session table
+// (the server runs on Bun; under plain Node this import throws and we fail
+// open). No subprocesses, no python.
+let _sqliteDb = null;
+async function isSubagent(sid) {
+  try {
+    if (_sqliteDb === null) {
+      const sqlite = await import("bun:sqlite");
+      const home = process.env.HOME || "/home/kenny";
+      _sqliteDb = new sqlite.Database(
+        `${home}/.local/share/opencode/opencode.db`,
+        { readonly: true }
+      );
+    }
+    const row = _sqliteDb
+      .query("SELECT parent_id FROM session WHERE id = ?")
+      .get(sid);
+    return Boolean(row && row.parent_id);
+  } catch {
+    _sqliteDb = _sqliteDb || false; // don't retry a broken import every event
+    if (_sqliteDb === false) return false;
+    return false; // fail open (wake)
+  }
+}
+
+let _idleShapeLogged = false;
+function logIdleShapeOnce(properties) {
+  if (_idleShapeLogged || !properties) return;
+  _idleShapeLogged = true;
+  try {
+    log({ ev: "idle-shape", keys: Object.keys(properties).join(",") });
+  } catch {}
+}
+
 export const FleetPlugin = async () => {
   if (!AM_SERVE) return {}; // clients no-op
   const dir = stateDir();
@@ -205,9 +245,14 @@ export const FleetPlugin = async () => {
           // exempt BEFORE the buzzer append — its line would make selfwatch
           // wake the master every cycle (indirect self-wake loop).
           if (type === "session.idle" && sid !== conductorSid(dir)) {
-            appendBuzzerAtomic(dir, `${new Date().toISOString()} ${type} ${sid} roster:miss\n`);
-            log({ ev: type, sid: String(sid).slice(0, 24), fleet: false, enqueued: true });
-            await wakeConductor(type, sid, dir);
+            logIdleShapeOnce(event?.properties);
+            const subagent = await isSubagent(sid);
+            appendBuzzerAtomic(
+              dir,
+              `${new Date().toISOString()} ${type} ${sid} roster:miss${subagent ? ":subagent" : ""}\n`
+            );
+            log({ ev: type, sid: String(sid).slice(0, 24), fleet: false, enqueued: !subagent });
+            if (!subagent) await wakeConductor(type, sid, dir);
           }
           return;
         }
