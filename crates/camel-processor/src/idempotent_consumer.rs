@@ -24,14 +24,55 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use camel_api::{Exchange, IdempotentRepository, OutcomePipeline, OutcomeSegment, PipelineOutcome};
+use camel_api::{
+    BoxValueFuture, Exchange, IdempotentRepository, OutcomePipeline, OutcomeSegment,
+    PipelineOutcome, Value,
+};
 
-/// Synchronous closure that extracts the message-id key from an Exchange.
+/// Fallible message-id source for the idempotent consumer.
 ///
-/// Returns `None` when no key can be extracted — in that case the segment
-/// forwards the exchange to the child sub-pipeline without idempotency
-/// (matching Apache Camel semantics).
-pub type MessageIdExpression = Arc<dyn Fn(&Exchange) -> Option<String> + Send + Sync>;
+/// The sync arm returns `None` when no key can be extracted — in that case
+/// the segment forwards the exchange to the child sub-pipeline without
+/// idempotency (matching Apache Camel semantics). The async arm may fail
+/// with a [`camel_api::CamelError`]; the failure fails the step before the
+/// child runs. Non-scalar values (array/object) are rejected.
+// The closure shapes are part of the published contract (mirroring
+// camel-api's source enums); keep the signatures literal.
+#[allow(clippy::type_complexity)]
+#[derive(Clone)]
+pub enum MessageIdSource {
+    /// Programmatic synchronous extractor.
+    Sync(Arc<dyn Fn(&Exchange) -> Option<String> + Send + Sync>),
+    /// Language-backed asynchronous expression.
+    Async(Arc<dyn Fn(&Exchange) -> BoxValueFuture + Send + Sync>),
+}
+
+impl MessageIdSource {
+    /// Extract the optional message id, propagating async failures.
+    pub async fn message_id(
+        &self,
+        exchange: &Exchange,
+    ) -> Result<Option<String>, camel_api::CamelError> {
+        match self {
+            Self::Sync(f) => Ok(f(exchange)),
+            Self::Async(f) => {
+                let value = f(exchange).await?;
+                Ok(match value {
+                    Value::Null => None,
+                    Value::String(s) if s.is_empty() => None,
+                    Value::String(s) => Some(s),
+                    Value::Array(_) | Value::Object(_) => {
+                        return Err(camel_api::CamelError::ProcessorError(
+                            "message id expression returned a non-scalar value (array/object); expected a string"
+                                .into(),
+                        ));
+                    }
+                    other => Some(other.to_string()),
+                })
+            }
+        }
+    }
+}
 
 /// Outcome-aware Idempotent Consumer segment.
 ///
@@ -60,7 +101,7 @@ pub type MessageIdExpression = Arc<dyn Fn(&Exchange) -> Option<String> + Send + 
 /// re-processing the same message would be incorrect.
 pub struct IdempotentConsumerSegment {
     repository: Arc<dyn IdempotentRepository>,
-    message_id: MessageIdExpression,
+    message_id: MessageIdSource,
     child_pipeline: OutcomeSegment,
     eager: bool,
     remove_on_failure: bool,
@@ -71,7 +112,7 @@ impl IdempotentConsumerSegment {
     /// child sub-pipeline, and behaviour flags.
     pub fn new(
         repository: Arc<dyn IdempotentRepository>,
-        message_id: MessageIdExpression,
+        message_id: MessageIdSource,
         child_pipeline: OutcomeSegment,
         eager: bool,
         remove_on_failure: bool,
@@ -90,7 +131,7 @@ impl Clone for IdempotentConsumerSegment {
     fn clone(&self) -> Self {
         Self {
             repository: Arc::clone(&self.repository),
-            message_id: Arc::clone(&self.message_id),
+            message_id: self.message_id.clone(),
             child_pipeline: self.child_pipeline.clone(),
             eager: self.eager,
             remove_on_failure: self.remove_on_failure,
@@ -108,10 +149,12 @@ impl OutcomePipeline for IdempotentConsumerSegment {
         exchange: Exchange,
     ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
         Box::pin(async move {
-            // 1. Extract message-id. None → no idempotency possible, forward to child.
-            let key = match (self.message_id)(&exchange) {
-                Some(k) => k,
-                None => return self.child_pipeline.run(exchange).await,
+            // 1. Extract message-id. None → no idempotency possible, forward
+            //    to child; a failed evaluation fails the step (contract C1).
+            let key = match self.message_id.message_id(&exchange).await {
+                Ok(Some(k)) => k,
+                Ok(None) => return self.child_pipeline.run(exchange).await,
+                Err(e) => return PipelineOutcome::Failed(e),
             };
 
             // 2. Check repository (contract C1: propagate Err, never treat as non-duplicate).
@@ -277,12 +320,12 @@ mod tests {
         ex
     }
 
-    fn header_message_id() -> MessageIdExpression {
-        Arc::new(|ex: &Exchange| {
+    fn header_message_id() -> MessageIdSource {
+        MessageIdSource::Sync(Arc::new(|ex: &Exchange| {
             ex.input
                 .header("messageId")
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
-        })
+        }))
     }
 
     fn build_segment(
@@ -467,5 +510,42 @@ mod tests {
 
     fn stub_error() -> CamelError {
         CamelError::ProcessorError("child failed".into())
+    }
+
+    // ── Fallible MessageIdSource (task 1.5) ─────────────────────────────
+
+    #[tokio::test]
+    async fn message_id_async_error_propagates() {
+        use camel_api::BoxValueFuture;
+
+        let repo = Arc::new(MockRepo::new());
+        let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let child = ScriptedChild {
+            outcome: PipelineOutcome::Completed(Exchange::new(Message::new(""))),
+            invoked: invoked.clone(),
+        };
+
+        let source = MessageIdSource::Async(Arc::new(|_: &Exchange| {
+            Box::pin(async { Err(CamelError::ProcessorError("id boom".into())) }) as BoxValueFuture
+        }));
+        let mut segment = IdempotentConsumerSegment::new(
+            repo.clone(),
+            source,
+            OutcomeSegment::new(Box::new(child)),
+            false,
+            false,
+        );
+
+        let outcome = segment.run(exchange_with_id("any")).await;
+
+        assert!(
+            matches!(outcome, PipelineOutcome::Failed(ref e) if e.to_string().contains("id boom")),
+            "an async message-id failure must fail the step"
+        );
+        assert!(
+            !invoked.load(std::sync::atomic::Ordering::SeqCst),
+            "child must NOT run when the message-id expression fails"
+        );
+        assert!(!repo.contains_key("any").await);
     }
 }

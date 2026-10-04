@@ -230,7 +230,7 @@ mod tests {
         CamelError, Exchange, IdempotentRepository, Message, OutcomePipeline, OutcomeSegment,
         PipelineOutcome, Value,
     };
-    use camel_processor::{IdempotentConsumerSegment, MessageIdExpression};
+    use camel_processor::{IdempotentConsumerSegment, MessageIdSource};
     use tempfile::{TempDir, tempdir};
 
     use crate::JournalDurability;
@@ -475,12 +475,12 @@ mod tests {
     }
 
     /// Key extractor that reads the `id` header and returns its string value.
-    fn header_id_extractor() -> MessageIdExpression {
-        Arc::new(|ex: &Exchange| {
+    fn header_id_extractor() -> MessageIdSource {
+        MessageIdSource::Sync(Arc::new(|ex: &Exchange| {
             ex.input
                 .header("id")
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
-        })
+        }))
     }
 
     /// Build a non-eager `IdempotentConsumerSegment` with the supplied repo

@@ -1459,3 +1459,188 @@ fn shared_snapshot_is_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<SharedSnapshot>();
 }
+
+/// Language-value-boundary (task 1.6): route-level error propagation for
+/// fallible language carriers. A failing rhai evaluation must fail the step
+/// as `CamelError::ExpressionFailed` carrying the compile-time metadata
+/// (route id, step id, verb) — never silently drop the exchange or default
+/// the value.
+///
+/// Property/header "not written" observability: `PipelineOutcome::Failed`
+/// drops the exchange, so the set-nothing contract is pinned one layer down
+/// (camel-processor `dynamic_set_property_error_sets_nothing`); here we pin
+/// that the pipeline fails at the evaluating step and later steps never run.
+#[cfg(all(test, feature = "lang-rhai"))]
+mod expression_error_tests {
+    use super::*;
+    use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
+    use crate::lifecycle::adapters::step_resolution::{FunctionStagingMode, resolve_steps};
+    use crate::lifecycle::application::route_definition::{
+        BuilderStep, LanguageExpressionDef, ValueSourceDef,
+    };
+    use crate::shared::components::domain::Registry;
+    use camel_api::OpaqueProcessor;
+    use camel_api::PipelineOutcome;
+    use camel_api::ProducerContext;
+    use camel_bean::BeanRegistry;
+    use camel_component_api::test_support::NoopRuntimeObservability;
+    use camel_component_api::{ComponentContext, RuntimeObservability};
+    use camel_language_api::Language;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Component context resolving only the `direct` scheme, so the
+    /// `to: direct:b` leg of the test routes compiles.
+    struct DirectOnlyComponentContext;
+
+    impl ComponentContext for DirectOnlyComponentContext {
+        fn resolve_component(
+            &self,
+            scheme: &str,
+        ) -> Option<Arc<dyn camel_component_api::Component>> {
+            if scheme == "direct" {
+                Some(Arc::new(camel_component_direct::DirectComponent::new()))
+            } else {
+                None
+            }
+        }
+        fn resolve_language(&self, _name: &str) -> Option<Arc<dyn Language>> {
+            None
+        }
+        fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+            Arc::new(camel_api::NoOpMetrics)
+        }
+        fn platform_service(&self) -> Arc<dyn camel_api::PlatformService> {
+            Arc::new(camel_api::NoopPlatformService::default())
+        }
+        fn register_route_health_check(
+            &self,
+            _route_id: &str,
+            _check: Arc<dyn camel_api::AsyncHealthCheck>,
+        ) {
+        }
+        fn unregister_route_health_check(&self, _route_id: &str) {}
+    }
+
+    fn languages_with_rhai() -> SharedLanguageRegistry {
+        let mut map: HashMap<String, Arc<dyn Language>> = HashMap::new();
+        map.insert(
+            "rhai".to_string(),
+            Arc::new(camel_language_rhai::RhaiLanguage::new()),
+        );
+        Arc::new(Mutex::new(map))
+    }
+
+    /// Compile `steps` against a route id of `r1` and run one exchange
+    /// through the compiled pipeline (no error handler).
+    async fn run_route_steps(steps: Vec<BuilderStep>) -> PipelineOutcome {
+        let languages = languages_with_rhai();
+        let producer_ctx = ProducerContext::new();
+        let registry = Arc::new(Mutex::new(Registry::new()));
+        let beans = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(DirectOnlyComponentContext);
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+
+        let compiled = resolve_steps(
+            steps,
+            &producer_ctx,
+            rt,
+            &registry,
+            &languages,
+            &beans,
+            None,
+            component_ctx,
+            Some("r1"),
+            &FunctionStagingMode::DirectAdd,
+            &crate::IdempotentRegistry::new(),
+            &crate::ClaimCheckRegistry::new(),
+            &crate::CacheRegistry::new(),
+            crate::intercept::InterceptRules::default(),
+        )
+        .expect("route should compile");
+
+        run_steps(
+            SharedSnapshot(Arc::from(compiled)),
+            Exchange::new(Message::new("payload")),
+            None,
+            false,
+            "r1",
+            &PipelineRuntimeCtx::compile_time(),
+        )
+        .await
+    }
+
+    /// A failing `set_property` expression must fail the step with a typed
+    /// `ExpressionFailed` carrying the compiled metadata. `x` is absent: the
+    /// setter writes nothing on failure and the pipeline stops before
+    /// `to: direct:b`.
+    #[tokio::test]
+    async fn set_property_expression_error_fails_step() {
+        let steps = vec![
+            BuilderStep::DeclarativeSetProperty {
+                key: "x".into(),
+                value_source: ValueSourceDef::Expression(LanguageExpressionDef {
+                    language: "rhai".into(),
+                    source: "\"no-es-un-numero\".parse_float()".into(),
+                }),
+            },
+            BuilderStep::To("direct:b".into()),
+        ];
+
+        match run_route_steps(steps).await {
+            PipelineOutcome::Failed(CamelError::ExpressionFailed {
+                language,
+                route_id,
+                step_id,
+                verb,
+                ..
+            }) => {
+                assert_eq!(language, "rhai");
+                assert_eq!(route_id, "r1");
+                assert_eq!(step_id, "set_property#0");
+                assert_eq!(verb, "set_property");
+            }
+            other => panic!(
+                "expected PipelineOutcome::Failed(ExpressionFailed), got success={:?}",
+                other.is_success()
+            ),
+        }
+    }
+
+    /// A failing `filter` predicate must propagate the error — the exchange
+    /// is failed, not silently dropped, and the filter body never runs.
+    #[tokio::test]
+    async fn filter_predicate_error_propagates() {
+        let probe_called = Arc::new(AtomicBool::new(false));
+        let probe = Arc::clone(&probe_called);
+
+        let steps = vec![BuilderStep::DeclarativeFilter {
+            predicate: LanguageExpressionDef {
+                language: "rhai".into(),
+                source: "\"no-es-un-numero\".parse_float()".into(),
+            },
+            steps: vec![BuilderStep::Processor(OpaqueProcessor(
+                BoxProcessor::from_fn(move |ex| {
+                    probe.store(true, Ordering::SeqCst);
+                    Box::pin(async move { Ok(ex) })
+                }),
+            ))],
+        }];
+
+        match run_route_steps(steps).await {
+            PipelineOutcome::Failed(CamelError::ExpressionFailed { verb, step_id, .. }) => {
+                assert_eq!(verb, "filter");
+                assert_eq!(step_id, "filter#0");
+            }
+            other => panic!(
+                "expected PipelineOutcome::Failed(ExpressionFailed), got success={:?}",
+                other.is_success()
+            ),
+        }
+        assert!(
+            !probe_called.load(Ordering::SeqCst),
+            "filter body must not run when the predicate evaluation fails"
+        );
+    }
+}

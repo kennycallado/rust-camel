@@ -1,0 +1,172 @@
+{
+  "schema": "rust-camel/quality-gates/v1",
+  "change": "language-value-boundary",
+  "reviewed_commit": "c986a80510878356c375f6bbbab84e8a3743b79b",
+  "reviewed_commit_short": "c986a805",
+  "branch": "feature/339-langboundary",
+  "worktree": "/home/shared/rust-camel-worktrees/339-langboundary",
+  "verification": "STAGE4 FINAL all-quality-gates at c986a805 (verification only; no source edits by verifier)",
+  "start_utc": "2026-10-04T02:05:34Z",
+  "end_utc": "2026-10-04T02:11:51Z",
+  "overall_status": "PASS_WITH_EXEMPTIONS",
+  "source_changes_by_verifier": "none",
+  "worktree_clean_after_run": true,
+  "containment": {
+    "pattern": "systemd-run --user --scope --collect --unit=fleet-langboundary-finalgates-<slug> -p MemoryMax=8G -p MemorySwapMax=2G -p TasksMax=1024 -p OOMPolicy=kill -- env TMPDIR=/home/shared/tmp CARGO_BUILD_JOBS=6 RUSTC_WRAPPER=sccache bash -lc <cmd>",
+    "memory_max": "8G",
+    "swap_max": "2G",
+    "tasks_max": 1024,
+    "oom_policy": "kill",
+    "jobs_flag": "-j4 on cargo build/test/clippy/doc; omitted on cargo fmt/audit/xtask (not supported / xtask passes args after --)",
+    "main_checkout_builds": "none",
+    "orphans_after": {"pgrep_cargo": 0, "pgrep_rustc": 0, "fleet_scopes_remaining": "none (one lingering sccache-server scope fleet-langboundary-finalgates-lint-unwrap was stopped; no cargo/rustc orphan)"}
+  },
+  "baselines": {
+    "main_local_tip": {"rev": "6a1e54c30ccef739fb01599630e09c88d3a5ca15", "clean": true},
+    "branch_merge_base": {"rev": "6b71fade7459de7f3fa645947ca8ff46afadb2f4", "note": "origin/main ref; merge-base(HEAD, main)"},
+    "scanner_changed_on_branch": false,
+    "ratchet_unbounded_wait_max": 296
+  },
+  "registry_gates": [
+    {
+      "name": "fmt check",
+      "commands": [{"run": "cargo fmt --check --all", "exit": 0}],
+      "status": "pass",
+      "log": "target/gate-logs/final-01-fmt.log"
+    },
+    {
+      "name": "clippy",
+      "commands": [
+        {"run": "cargo clippy -j4 --workspace --all-features --exclude camel-cli --exclude camel-component-kafka --exclude security-keycloak --exclude security-wasm-policy -- -D warnings", "exit": 0, "log": "target/gate-logs/final-02-clippy1.log"},
+        {"run": "cargo clippy -j4 -p camel-component-kafka --all-targets -- -D warnings", "exit": 0, "log": "target/gate-logs/final-03-clippy2.log"},
+        {"run": "cargo clippy -j4 -p camel-cli -- -D warnings", "exit": 0, "log": "target/gate-logs/final-04-clippy3.log"},
+        {"run": "cargo clippy -j4 -p camel-cli --no-default-features --features flavor-regular,exec --all-targets -- -D warnings", "exit": 0, "log": "target/gate-logs/final-05-clippy4.log"}
+      ],
+      "status": "pass",
+      "note": "clippy1 log contains 13 non-lint `ts-rs` proc-macro warnings ('failed to parse serde attribute'); they are not rustc/clippy lints and do not fail -D warnings (exit 0)."
+    },
+    {"name": "lint-unwrap", "run": "cargo xtask lint-unwrap", "exit": 0, "status": "pass", "summary": "OK (no violations)", "log": "target/gate-logs/final-06-lint-unwrap.log"},
+    {"name": "lint-secrets", "run": "cargo xtask lint-secrets", "exit": 0, "status": "pass", "summary": "OK (no violations)", "log": "target/gate-logs/final-06-lint-secrets.log"},
+    {"name": "lint-single-source", "run": "cargo xtask lint-single-source", "exit": 0, "status": "pass", "summary": "OK (no violations)", "log": "target/gate-logs/final-06-lint-single-source.log"},
+    {"name": "lint-non-exhaustive", "run": "cargo xtask lint-non-exhaustive", "exit": 0, "status": "pass", "summary": "OK (no violations)", "log": "target/gate-logs/final-06-lint-non-exhaustive.log"},
+    {"name": "lint-log-levels", "run": "cargo xtask lint-log-levels", "exit": 0, "status": "pass", "summary": "OK (strict mode - 0 violations)", "log": "target/gate-logs/final-07-lint-log-levels.log"},
+    {"name": "lint-log-redaction", "run": "cargo xtask lint-log-redaction", "exit": 0, "status": "pass", "summary": "OK (0 violations)", "log": "target/gate-logs/final-07-lint-log-redaction.log"},
+    {"name": "lint-cancel-tokens", "run": "cargo xtask lint-cancel-tokens", "exit": 0, "status": "pass", "summary": "OK (7 sites = max 7)", "log": "target/gate-logs/final-07-lint-cancel-tokens.log"},
+    {"name": "lint-test-sleep", "run": "cargo xtask lint-test-sleep", "exit": 0, "status": "pass", "summary": "OK (471 findings = max 471)", "log": "target/gate-logs/final-07-lint-test-sleep.log"},
+    {
+      "name": "lint-unbounded-wait",
+      "run": "cargo xtask lint-unbounded-wait",
+      "exit": 0,
+      "status": "pass",
+      "summary": "OK (296 findings = max 296)",
+      "log": "target/gate-logs/final-07-lint-unbounded-wait.log",
+      "note": "FIXED at c986a805: was 304 > 296 at 54b28a0d. Now exactly at ratchet ceiling. bd rc-y1cwh left open per directive."
+    },
+    {"name": "lint-ignore", "run": "cargo xtask lint-ignore", "exit": 0, "status": "pass", "summary": "OK (no violations)", "log": "target/gate-logs/final-07-lint-ignore.log"},
+    {"name": "lint-publish-cycles", "run": "cargo xtask lint-publish-cycles", "exit": 0, "status": "pass", "summary": "OK (0 violations)", "log": "target/gate-logs/final-08-lint-publish-cycles.log"},
+    {"name": "lint-publish-registration", "run": "cargo xtask lint-publish-registration", "exit": 0, "status": "pass", "summary": "OK (0 findings)", "log": "target/gate-logs/final-08-lint-publish-registration.log"},
+    {"name": "lint-component-deps", "run": "cargo xtask lint-component-deps", "exit": 0, "status": "pass", "summary": "OK (no violations)", "log": "target/gate-logs/final-08-lint-component-deps.log"},
+    {"name": "lint-gate-forwarding", "run": "cargo xtask lint-gate-forwarding", "exit": 0, "status": "pass", "summary": "OK (0 violations)", "log": "target/gate-logs/final-08-lint-gate-forwarding.log"},
+    {"name": "lint-context-citations", "run": "cargo xtask lint-context-citations", "exit": 0, "status": "pass", "summary": "OK (0 violations)", "log": "target/gate-logs/final-08-lint-context-citations.log"},
+    {"name": "lint-metric-labels", "run": "cargo xtask lint-metric-labels", "exit": 0, "status": "pass", "summary": "OK (0 violations)", "log": "target/gate-logs/final-08-lint-metric-labels.log"},
+    {"name": "schema-check", "run": "cargo xtask schema --check", "exit": 0, "status": "pass", "summary": "OK: all schemas and TS types match.", "log": "target/gate-logs/final-09-schema-check.log"},
+    {"name": "doc-build", "run": "RUSTDOCFLAGS='-D warnings' cargo doc -j4 -p camel-api -p camel-core -p camel-builder -p camel-dsl -p camel-endpoint --no-deps", "exit": 0, "status": "pass", "log": "target/gate-logs/final-11-doc-build.log"},
+    {
+      "name": "cargo-audit",
+      "run": "cargo audit",
+      "exit": 1,
+      "status": "exempted",
+      "summary": "error: 7 vulnerabilities found! warning: 6 allowed warnings found",
+      "vulnerabilities": [
+        "wasmtime 48.0.3 RUSTSEC-2026-0326 (5.7 medium)",
+        "wasmtime 48.0.3 RUSTSEC-2026-0327 (9.3 critical)",
+        "wasmtime 48.0.3 RUSTSEC-2026-0325 (5.9 medium)",
+        "wasmtime-wasi 48.0.3 RUSTSEC-2026-0324 (6.2 medium)",
+        "wasmtime-wasi 48.0.3 RUSTSEC-2026-0323 (2.1 low)",
+        "wasmtime-wasi 48.0.3 RUSTSEC-2026-0322 (5.9 medium)",
+        "wasmtime-wasi 48.0.3 RUSTSEC-2026-0321 (4 medium)"
+      ],
+      "log": "target/gate-logs/final-10-cargo-audit.log",
+      "exemption": "pre_existing_reproduced_main",
+      "baseline_evidence": {
+        "run": "cargo audit --file /home/kenny/dev/rust-camel/Cargo.lock",
+        "result": "same 7 vulnerabilities + 6 allowed warnings (exit 1)",
+        "log": "target/gate-logs/final-10b-cargo-audit-mainlock.log",
+        "note": "Re-run at final HEAD. Main Cargo.lock already pins wasmtime/wasmtime-wasi 48.0.3; branch Cargo.lock +6 lines only adds path-dep entries (bytes, camel-api, futures, tracing-subscriber, camel-language-js, tracing), wasmtime untouched. Advisories published 2026-10-02."
+      },
+      "bd_followup": "rc-9xjw3"
+    }
+  ],
+  "omitted_gates": [
+    {
+      "name": "lint-commits",
+      "run": "git fetch origin main --depth=1 && cargo xtask changelog --check --from FETCH_HEAD --to HEAD",
+      "status": "skipped",
+      "reason": "conductor directive: SKIP ONLY lint-commits because the registry command performs a remote git fetch, which is prohibited in this mission (no network remote operations)."
+    }
+  ],
+  "extra_commands": {
+    "conductor_deviations": [
+      {"run": "cargo build -j4 --workspace", "exit": 0, "duration": "83s", "status": "pass", "log": "target/gate-logs/final-12-build-workspace.log", "note": "BEFORE tests, per conductor"},
+      {"run": "TMPDIR=/tmp cargo test -j4 --workspace --lib", "exit": 0, "duration": "95s", "status": "pass", "log": "target/gate-logs/final-13-test-workspace-lib.log", "summary": "10439 passed; 0 failed; 2 ignored; 71 test binaries", "note": "FIXED at c986a805: was exit 101 (E0277) at 54b28a0d. TMPDIR=/tmp (ext4) per conductor to avoid ntfs3 false positives. bd rc-05n6l left open per directive."},
+      {"run": "cargo test -j4 -p camel-core --test hexagonal_architecture_boundaries_test", "exit": 0, "status": "pass", "summary": "33 passed; 0 failed; 0 ignored", "log": "target/gate-logs/final-14-test-hexagonal.log"}
+    ],
+    "changed_target_tests": [
+      {"run": "cargo test -j4 -p camel-core --test expression_failure_propagation_test --features lang-rhai,lang-jsonpath,lang-js,lang-xpath", "exit": 0, "status": "pass", "summary": "80 passed; 0 failed; 0 ignored", "log": "target/gate-logs/final-15-test-expression-failure.log"},
+      {"run": "cargo test -j4 -p camel-test --test gh62_language_boundary_regression_test", "exit": 0, "status": "pass", "summary": "7 passed; 0 failed; 0 ignored", "log": "target/gate-logs/final-16-test-gh62-regression.log"}
+    ],
+    "ntfs_metachar_evidence": {
+      "reason": "TMPDIR=/home/shared/tmp is ntfs3 (windows_names); filenames containing '?' are rejected with EINVAL. The 2 boot_scenario metachar tests pass under TMPDIR=/tmp (ext4).",
+      "tmp_run": {"run": "TMPDIR=/tmp cargo test -j4 -p camel-integration-test --lib metachar", "exit": 0, "summary": "6 passed; 0 failed (includes boot_rejects_metachar_route_files_entry + boot_rejects_metachar_entry_that_globs_to_nothing)", "log": "target/gate-logs/final-17-test-metachar-tmp.log"},
+      "ntfs_run": {"run": "TMPDIR=/home/shared/tmp cargo test -j4 -p camel-integration-test --lib metachar", "exit": 101, "summary": "5 passed; 1 failed: boot_rejects_metachar_route_files_entry panics at boot_scenario_test.rs:315 writing 'route?.yaml' (Os code 22 InvalidInput)", "log": "target/gate-logs/final-17b-test-metachar-ntfs.log", "classification": "ntfs3 false positive, not a code defect"}
+    }
+  },
+  "exemptions": [
+    {
+      "gate": "cargo-audit",
+      "exit": 1,
+      "classification": "pre_existing_reproduced_main",
+      "evidence": "7 wasmtime/wasmtime-wasi 48.0.3 advisories (RUSTSEC-2026-0321..0327) reproduced identically on main Cargo.lock at final HEAD; branch did not touch wasmtime.",
+      "bd_followup": "rc-9xjw3"
+    }
+  ],
+  "openspec": {
+    "status_command": {"run": "openspec status --change language-value-boundary --json", "exit": 0, "isComplete": true, "schemaName": "expert-gated", "log": "target/gate-logs/final-openspec-status.json"},
+    "validate_command_requested": {"run": "openspec validate --change language-value-boundary --json", "exit": 1, "error": "unknown option '--change' (Did you mean --changes?)", "note": "openspec 1.7.0 validate takes a positional item name, not --change", "log": "target/gate-logs/final-openspec-validate-exact.log"},
+    "validate_command_corrected": {"run": "openspec validate language-value-boundary --json", "exit": 0, "valid": true, "issues": [], "log": "target/gate-logs/final-openspec-validate.json"},
+    "tasks": {"done": 15, "pending": 0}
+  },
+  "bd_followups": [
+    {"id": "rc-y1cwh", "type": "bug", "priority": 2, "deps": "discovered-from:rc-ax6vv", "title": "lint-unbounded-wait ratchet exceeded on feature/339-langboundary (304 > 296)", "status_at_head": "resolved_at_c986a805 (296 = max 296); bd left open per directive"},
+    {"id": "rc-9xjw3", "type": "bug", "priority": 2, "deps": "discovered-from:rc-ax6vv", "title": "cargo-audit: 7 wasmtime/wasmtime-wasi 48.0.3 advisories (pre-existing on main)", "status_at_head": "open; exempted pre-existing reproduced main"},
+    {"id": "rc-05n6l", "type": "bug", "priority": 1, "deps": "discovered-from:rc-ax6vv", "title": "cargo test --workspace --lib fails: camel-integration-test lib test E0277 ambiguity", "status_at_head": "resolved_at_c986a805 (10439 passed / 0 failed); bd left open per directive"}
+  ],
+  "root_bd_issue": {"id": "rc-ax6vv", "status": "in_progress", "note": "left open; human archives"},
+  "coverage_totals": {
+    "registry_gate_names": 22,
+    "registry_pass": 20,
+    "registry_exempted": 1,
+    "registry_skipped": 1,
+    "registry_fail": 0,
+    "clippy_subcommands": 4,
+    "extra_commands": 5,
+    "extra_pass": 5,
+    "extra_fail": 0,
+    "registry_cargo_invocations": 24,
+    "cargo_invocations": 32,
+    "openspec_invocations": 3,
+    "total_invocations_run": 35,
+    "gate_coverage_check": "22 registry names (incl. skipped lint-commits) + 5 extras = 27 named gates; all accounted for, no silent skips"
+  },
+  "environment": {
+    "disk_home_shared": "201G total, 145G used, 56G avail (73%)",
+    "enospc": false,
+    "nproc": 12,
+    "mem_total": "27Gi"
+  },
+  "artifact_logs_dir": "target/gate-logs/ (ignored, under worktree target)",
+  "artifacts": {
+    "results_tsv": "target/gate-logs/final-results.tsv",
+    "runner": "target/gate-logs/run_final_gates.sh"
+  }
+}

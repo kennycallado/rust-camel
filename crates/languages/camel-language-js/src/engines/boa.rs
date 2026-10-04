@@ -142,8 +142,15 @@ pub(super) fn resolve_js_limits(limits: &camel_language_api::JsLimitsConfig) -> 
     }
 }
 
-impl JsEngine for BoaEngine {
-    fn eval(&self, source: &str, exchange: JsExchange) -> Result<JsEvalResult, JsLanguageError> {
+impl BoaEngine {
+    /// Shared dispatch for both eval modes; `read_only` selects the throwing
+    /// read-only snapshot on the worker (see `readonly.rs`).
+    fn dispatch_eval(
+        &self,
+        source: &str,
+        exchange: JsExchange,
+        read_only: bool,
+    ) -> Result<JsEvalResult, JsLanguageError> {
         // M-L1: pre-eval source-size cap (Boa 0.22 has no heap cap; see const doc).
         // Stays on the caller side, before the job is sent.
         if source.len() > MAX_SOURCE_BYTES {
@@ -168,8 +175,23 @@ impl JsEngine for BoaEngine {
                 .execution_timeout_ms
                 .unwrap_or(DEFAULT_EXECUTION_TIMEOUT_MS),
             enqueued: Instant::now(),
+            read_only,
             reply,
         })
+    }
+}
+
+impl JsEngine for BoaEngine {
+    fn eval(&self, source: &str, exchange: JsExchange) -> Result<JsEvalResult, JsLanguageError> {
+        self.dispatch_eval(source, exchange, false)
+    }
+
+    fn eval_read_only(
+        &self,
+        source: &str,
+        exchange: JsExchange,
+    ) -> Result<JsEvalResult, JsLanguageError> {
+        self.dispatch_eval(source, exchange, true)
     }
 
     fn validate(&self, source: &str) -> Result<(), JsLanguageError> {

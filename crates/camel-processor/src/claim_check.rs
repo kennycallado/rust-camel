@@ -19,11 +19,52 @@ use std::task::{Context, Poll};
 use tower::Service;
 
 use camel_api::body::Body;
-use camel_api::{CamelError, ClaimCheckRepository, Exchange, Message};
+use camel_api::{BoxValueFuture, CamelError, ClaimCheckRepository, Exchange, Message, Value};
 
-/// Extracts a claim-check key string from the exchange (e.g. from header/property/body).
-/// Returns an error if the key cannot be resolved (null or empty).
-pub type KeyExpression = Arc<dyn Fn(&Exchange) -> Result<String, CamelError> + Send + Sync>;
+/// Fallible claim-check key source.
+///
+/// The sync arm returns an error when the key cannot be resolved. The async
+/// arm evaluates to a [`Value`]: null/empty values are a validation error,
+/// strings pass through, other scalars are stringified, and non-scalar
+/// values (array/object) are rejected. Evaluation failures propagate
+/// BEFORE any repository mutation.
+// The closure shapes are part of the published contract (mirroring
+// camel-api's source enums); keep the signatures literal.
+#[allow(clippy::type_complexity)]
+#[derive(Clone)]
+pub enum ClaimKeySource {
+    /// Programmatic synchronous extractor.
+    Sync(Arc<dyn Fn(&Exchange) -> Result<String, CamelError> + Send + Sync>),
+    /// Language-backed asynchronous expression.
+    Async(Arc<dyn Fn(&Exchange) -> BoxValueFuture + Send + Sync>),
+}
+
+impl ClaimKeySource {
+    /// Resolve the claim-check key, propagating failures.
+    pub async fn key(&self, exchange: &Exchange) -> Result<String, CamelError> {
+        match self {
+            Self::Sync(f) => f(exchange),
+            Self::Async(f) => {
+                let value = f(exchange).await?;
+                match value {
+                    Value::Null => Err(claim_key_null_or_empty()),
+                    Value::String(s) if s.is_empty() => Err(claim_key_null_or_empty()),
+                    Value::String(s) => Ok(s),
+                    Value::Array(_) | Value::Object(_) => {
+                        Err(CamelError::ProcessorError(
+                            "claim_check key expression returned a non-scalar value (array/object); expected a string key".into(),
+                        ))
+                    }
+                    other => Ok(other.to_string()),
+                }
+            }
+        }
+    }
+}
+
+fn claim_key_null_or_empty() -> CamelError {
+    CamelError::ValidationError("claim_check key expression evaluated to null or empty".into())
+}
 
 /// Claim Check operation variant.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,7 +91,7 @@ pub enum ClaimCheckOp {
 pub struct ClaimCheckService {
     repository: Arc<dyn ClaimCheckRepository>,
     operation: ClaimCheckOp,
-    key_expression: KeyExpression,
+    key_expression: ClaimKeySource,
     filter: Option<ClaimCheckFilter>,
 }
 
@@ -69,7 +110,7 @@ impl ClaimCheckService {
     pub fn new(
         repository: Arc<dyn ClaimCheckRepository>,
         operation: ClaimCheckOp,
-        key_expression: KeyExpression,
+        key_expression: ClaimKeySource,
     ) -> Self {
         Self {
             repository,
@@ -146,11 +187,13 @@ impl Service<Exchange> for ClaimCheckService {
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let repository = self.repository.clone();
         let operation = self.operation.clone();
-        let key_result = (self.key_expression)(&exchange);
+        let key_source = self.key_expression.clone();
         let filter = self.filter.clone();
 
         Box::pin(async move {
-            let key = key_result?;
+            // Key resolution happens FIRST: an evaluation error propagates
+            // before any repository mutation.
+            let key = key_source.key(&exchange).await?;
             match operation {
                 ClaimCheckOp::Set => {
                     let stashed = exchange.input.clone();

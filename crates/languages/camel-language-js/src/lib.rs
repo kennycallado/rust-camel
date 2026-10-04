@@ -44,6 +44,7 @@ mod bindings;
 mod engine;
 mod expression;
 mod language;
+mod readonly;
 
 pub use engine::{JsEngine, JsEvalResult, JsExchange};
 pub use engines::BoaEngine;

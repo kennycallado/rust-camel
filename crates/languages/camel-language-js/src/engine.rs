@@ -47,7 +47,26 @@ pub trait JsEngine: Send + Sync + 'static {
     /// Evaluate `source` JavaScript code with the given exchange context.
     ///
     /// Returns the result including the (potentially mutated) exchange state.
+    /// This is the writable path used by `MutatingExpression`.
     fn eval(&self, source: &str, exchange: JsExchange) -> Result<JsEvalResult, JsLanguageError>;
+
+    /// Evaluate `source` in read-only mode: the exchange snapshot exposed to
+    /// the script refuses mutations at runtime instead of silently discarding
+    /// them (change `language-value-boundary`, B4).
+    ///
+    /// The default is FAIL-CLOSED: it returns
+    /// [`JsLanguageError::ReadOnlyUnsupported`] and never calls
+    /// [`JsEngine::eval`]. A custom engine that only implements the writable
+    /// path therefore cannot silently run a read-only expression or predicate
+    /// against a writable snapshot; it must override this method to opt in.
+    /// The Boa engine overrides it with the throwing read-only snapshot.
+    fn eval_read_only(
+        &self,
+        _source: &str,
+        _exchange: JsExchange,
+    ) -> Result<JsEvalResult, JsLanguageError> {
+        Err(JsLanguageError::ReadOnlyUnsupported)
+    }
 
     /// Validate that `source` is syntactically valid JavaScript without executing it.
     fn validate(&self, source: &str) -> Result<(), JsLanguageError>;

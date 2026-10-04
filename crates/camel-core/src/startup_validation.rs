@@ -882,7 +882,9 @@ mod tests {
         let route = RouteDefinition::new(
             "timer:tick",
             vec![BuilderStep::RoutingSlip {
-                config: RoutingSlipConfig::new(Arc::new(|_| Some("exec:echo".to_string()))),
+                config: RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(|_| {
+                    Some("exec:echo".to_string())
+                }))),
             }],
         )
         .with_route_id("r".to_string());

@@ -2,16 +2,18 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use camel_api::{CamelError, Exchange, FilterPredicate};
+use camel_api::{CamelError, Exchange, FilterPredicate, PredicateSource};
 use tower::Service;
 
 /// Tower Service implementing the Validate EIP.
 ///
-/// If the predicate returns `true`, the exchange continues (returned as `Ok`).
-/// If `false`, a `CamelError::ValidationError` is returned.
+/// If the predicate evaluates to `true`, the exchange continues (returned as `Ok`).
+/// If `false`, a `CamelError::ValidationError` is returned. A failed (async)
+/// predicate evaluation surfaces that typed error directly — it is never
+/// rewritten into a `ValidationError`.
 #[derive(Clone)]
 pub struct ValidateService {
-    predicate: FilterPredicate,
+    predicate: PredicateSource,
     expression_source: String,
 }
 
@@ -22,14 +24,14 @@ impl ValidateService {
         expression_source: impl Into<String>,
     ) -> Self {
         Self {
-            predicate: FilterPredicate::new(predicate),
+            predicate: PredicateSource::Sync(FilterPredicate::new(predicate)),
             expression_source: expression_source.into(),
         }
     }
 
-    /// Create from a pre-boxed `FilterPredicate` (used by `resolve_steps`).
+    /// Create from a fallible `PredicateSource` (used by `resolve_steps`).
     pub fn from_predicate(
-        predicate: FilterPredicate,
+        predicate: PredicateSource,
         expression_source: impl Into<String>,
     ) -> Self {
         Self {
@@ -49,16 +51,20 @@ impl Service<Exchange> for ValidateService {
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
-        if (self.predicate)(&exchange) {
-            Box::pin(async move { Ok(exchange) })
-        } else {
-            let source = self.expression_source.clone();
-            Box::pin(async move {
-                Err(CamelError::ValidationError(format!(
+        // Clone-and-replace: the future owns its state so the predicate can be
+        // awaited before deciding the outcome.
+        let predicate = self.predicate.clone();
+        let source = self.expression_source.clone();
+        Box::pin(async move {
+            match predicate.matches(&exchange).await {
+                Ok(true) => Ok(exchange),
+                Ok(false) => Err(CamelError::ValidationError(format!(
                     "validate('{source}'): predicate returned false",
-                )))
-            })
-        }
+                ))),
+                // Typed predicate failure: surface as-is, not ValidationError.
+                Err(err) => Err(err),
+            }
+        })
     }
 }
 
@@ -131,6 +137,44 @@ mod tests {
         match poll {
             std::task::Poll::Ready(Ok(())) => {}
             other => panic!("expected Ready(Ok(())), got: {other:?}"),
+        }
+    }
+
+    // ── Fallible predicate path (language-value-boundary task 1.4) ──
+
+    use std::sync::Arc;
+
+    use camel_api::{ExpressionErrorClass, PredicateSource};
+
+    fn expression_failed() -> CamelError {
+        CamelError::ExpressionFailed {
+            language: "rhai".to_string(),
+            route_id: "r1".to_string(),
+            step_id: "step#0".to_string(),
+            verb: "validate".to_string(),
+            class: ExpressionErrorClass::Runtime,
+            position: None,
+            conversion: None,
+            cause: None,
+        }
+    }
+
+    fn async_err_predicate(err: CamelError) -> PredicateSource {
+        PredicateSource::Async(Arc::new(move |_: &Exchange| {
+            let err = err.clone();
+            Box::pin(async move { Err(err) }) as camel_api::BoxBoolFuture
+        }))
+    }
+
+    #[tokio::test]
+    async fn validate_predicate_error_is_typed_not_validation() {
+        let mut svc =
+            ValidateService::from_predicate(async_err_predicate(expression_failed()), "expr");
+        let result = svc.call(Exchange::new(Message::new("x"))).await;
+        match result {
+            Err(CamelError::ExpressionFailed { .. }) => {}
+            Err(other) => panic!("expected ExpressionFailed, got {other:?}"),
+            Ok(_) => panic!("expected Err, got Ok"),
         }
     }
 }

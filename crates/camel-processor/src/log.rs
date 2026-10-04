@@ -1,4 +1,4 @@
-use camel_api::{CamelError, Exchange, IdentityProcessor};
+use camel_api::{CamelError, Exchange, IdentityProcessor, Value, ValueSource};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -72,30 +72,36 @@ impl Service<Exchange> for LogProcessor {
 
 /// A log processor that evaluates a message expression against the Exchange at call-time.
 /// Analogous to [`DynamicSetHeader`](crate::dynamic_set_header::DynamicSetHeader).
+///
+/// A failed evaluation fails the step BEFORE logging — no log record is
+/// emitted with a null message.
 #[derive(Clone)]
-pub struct DynamicLog<F> {
+pub struct DynamicLog {
     inner: IdentityProcessor,
     level: LogLevel,
-    expr: F,
+    source: ValueSource,
 }
 
-impl<F> DynamicLog<F>
-where
-    F: Fn(&Exchange) -> String + Clone + Send + Sync + 'static,
-{
-    pub fn new(level: LogLevel, expr: F) -> Self {
+impl DynamicLog {
+    pub fn new(level: LogLevel, source: impl Into<ValueSource>) -> Self {
         Self {
             inner: IdentityProcessor,
             level,
-            expr,
+            source: source.into(),
         }
     }
 }
 
-impl<F> Service<Exchange> for DynamicLog<F>
-where
-    F: Fn(&Exchange) -> String + Clone + Send + Sync + 'static,
-{
+/// Render an evaluated log-message value: strings pass through unquoted,
+/// everything else uses its JSON representation.
+fn log_value_to_string(value: Value) -> String {
+    match value {
+        Value::String(s) => s,
+        other => other.to_string(),
+    }
+}
+
+impl Service<Exchange> for DynamicLog {
     type Response = Exchange;
     type Error = CamelError;
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
@@ -105,17 +111,22 @@ where
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
-        let exchange_id = exchange.correlation_id.clone();
-        let msg = sanitize_preview(&(self.expr)(&exchange));
-        match self.level {
-            LogLevel::Trace => trace!(exchange_id = %exchange_id, "{}", msg),
-            LogLevel::Debug => debug!(exchange_id = %exchange_id, "{}", msg),
-            LogLevel::Info => info!(exchange_id = %exchange_id, "{}", msg),
-            LogLevel::Warn => warn!(exchange_id = %exchange_id, "{}", msg),
-            // log-policy: handler-owned
-            LogLevel::Error => warn!(exchange_id = %exchange_id, "{}", msg),
-        }
-        self.inner.call(exchange)
+        let source = self.source.clone();
+        let level = self.level;
+        Box::pin(async move {
+            let value = source.evaluate(&exchange).await?;
+            let exchange_id = exchange.correlation_id.clone();
+            let msg = sanitize_preview(&log_value_to_string(value));
+            match level {
+                LogLevel::Trace => trace!(exchange_id = %exchange_id, "{}", msg),
+                LogLevel::Debug => debug!(exchange_id = %exchange_id, "{}", msg),
+                LogLevel::Info => info!(exchange_id = %exchange_id, "{}", msg),
+                LogLevel::Warn => warn!(exchange_id = %exchange_id, "{}", msg),
+                // log-policy: handler-owned
+                LogLevel::Error => warn!(exchange_id = %exchange_id, "{}", msg),
+            }
+            Ok(exchange)
+        })
     }
 }
 
@@ -152,11 +163,21 @@ mod tests {
         assert_eq!(result.input.body.as_text(), Some("test body"));
     }
 
+    fn sync_source<F>(f: F) -> camel_api::ValueSource
+    where
+        F: Fn(&Exchange) -> camel_api::Value + Send + Sync + 'static,
+    {
+        camel_api::ValueSource::Sync(std::sync::Arc::new(f))
+    }
+
     #[tokio::test]
     async fn test_dynamic_log_evaluates_body() {
-        let svc = DynamicLog::new(LogLevel::Info, |ex: &Exchange| {
-            format!("body={}", ex.input.body.as_text().unwrap_or(""))
-        });
+        let svc = DynamicLog::new(
+            LogLevel::Info,
+            sync_source(|ex: &Exchange| {
+                camel_api::Value::String(format!("body={}", ex.input.body.as_text().unwrap_or("")))
+            }),
+        );
         let exchange = Exchange::new(Message::new("hello"));
         let result = svc.oneshot(exchange).await.unwrap();
         // Exchange passes through unchanged
@@ -165,14 +186,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_dynamic_log_evaluates_header() {
-        let svc = DynamicLog::new(LogLevel::Info, |ex: &Exchange| {
-            let counter = ex
-                .input
-                .header("CamelTimerCounter")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            format!("{} World", counter)
-        });
+        let svc = DynamicLog::new(
+            LogLevel::Info,
+            sync_source(|ex: &Exchange| {
+                let counter = ex
+                    .input
+                    .header("CamelTimerCounter")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                camel_api::Value::String(format!("{} World", counter))
+            }),
+        );
         let mut msg = Message::new("");
         msg.set_header("CamelTimerCounter", Value::Number(42.into()));
         let exchange = Exchange::new(msg);
@@ -181,6 +205,24 @@ mod tests {
         assert_eq!(
             result.input.header("CamelTimerCounter"),
             Some(&Value::Number(42.into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_log_error_fails_step() {
+        use std::sync::Arc;
+
+        use camel_api::{BoxValueFuture, ValueSource};
+
+        let source = ValueSource::Async(Arc::new(|_: &Exchange| {
+            Box::pin(async { Err(CamelError::ProcessorError("log boom".into())) }) as BoxValueFuture
+        }));
+        let svc = DynamicLog::new(LogLevel::Info, source);
+
+        let result = svc.oneshot(Exchange::new(Message::new("x"))).await;
+        assert!(
+            result.is_err(),
+            "a failed log-message expression must fail the step, not log a null message"
         );
     }
 
@@ -209,9 +251,12 @@ mod tests {
 
     #[tokio::test]
     async fn dynamic_log_sanitizes_control_chars() {
-        let svc = DynamicLog::new(LogLevel::Info, |_ex: &Exchange| {
-            "fake\nline\rinjection".to_string()
-        });
+        let svc = DynamicLog::new(
+            LogLevel::Info,
+            sync_source(|_ex: &Exchange| {
+                camel_api::Value::String("fake\nline\rinjection".to_string())
+            }),
+        );
         // The exchange passes through; sanitization happens inside call().
         // We verify the exchange is unchanged and the call succeeds — the
         // sanitization itself is validated by body_preview_strips_control_chars.

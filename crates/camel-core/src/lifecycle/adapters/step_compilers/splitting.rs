@@ -22,8 +22,9 @@ use super::{
 };
 use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
-use crate::lifecycle::adapters::step_resolution::{await_eval, compile_language_expression};
+use crate::lifecycle::adapters::step_resolution::{compile_language_expression, eval_meta};
 use crate::lifecycle::application::route_definition::BuilderStep;
+use camel_language_api::LanguageExpressionEval;
 
 /// Collect a byte stream into a single `Bytes` value, enforcing a size limit.
 ///
@@ -97,7 +98,7 @@ impl StepCompiler for SplittingCompiler {
     fn compile(
         &self,
         step: BuilderStep,
-        _step_index: usize,
+        step_index: usize,
         ctx: &CompilationContext,
         registry: &StepCompilerRegistry,
     ) -> Result<CompileOutcome, CamelError> {
@@ -144,37 +145,13 @@ impl StepCompiler for SplittingCompiler {
                 stop_on_exception,
                 steps,
             } => {
+                let meta = eval_meta(ctx, &expression.language, "split", step_index, None);
                 let lang_expr = compile_language_expression(ctx.languages, &expression)?;
-                let split_fn: camel_api::splitter::SplitExpression = Arc::new(
-                    move |exchange: &Exchange| {
-                        let value = await_eval(&lang_expr, exchange);
-                        match value {
-                            Value::String(s) => Ok(s
-                                .lines()
-                                .filter(|line| !line.is_empty())
-                                .map(|line| {
-                                    let mut fragment = exchange.clone();
-                                    fragment.input.body = Body::from(line.to_string());
-                                    fragment
-                                })
-                                .collect()),
-                            Value::Array(arr) => Ok(arr
-                                .into_iter()
-                                .map(|v| {
-                                    let mut fragment = exchange.clone();
-                                    fragment.input.body = match v {
-                                        Value::String(s) => Body::Text(s),
-                                        other => Body::Json(other),
-                                    };
-                                    fragment
-                                })
-                                .collect()),
-                            _ => Err(CamelError::TypeConversionFailed(format!(
-                                "declarative split requires a text or array value, got {received}; add an unmarshal step before split",
-                                received = camel_api::value_type_name(&value)
-                            ))),
-                        }
-                    },
+                // Fallible split source: evaluation failures propagate before
+                // any fragment is materialized; fragment derivation (string →
+                // lines, array → elements) lives in `SplitSource::split`.
+                let splitter = camel_api::SplitSource::Async(
+                    LanguageExpressionEval::new(lang_expr, meta).into_value_fn(),
                 );
 
                 let (sub_segments, lifecycles) = ctx.compile_children_segments(steps, registry)?;
@@ -194,7 +171,7 @@ impl StepCompiler for SplittingCompiler {
                     body_segment
                 };
                 let split_segment = camel_processor::SplitSegment {
-                    splitter: split_fn,
+                    splitter,
                     body: body_segment,
                     parallel,
                     parallel_limit,

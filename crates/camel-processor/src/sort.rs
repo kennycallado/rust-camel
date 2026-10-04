@@ -55,9 +55,40 @@ impl PartialEq for SortKey {
 impl Eq for SortKey {}
 
 /// Extracts a sort key from each element of the body array.
-/// MUST return a scalar (Null/Bool/Number/String); returning Array/Object is a user error.
-pub type SortExpression =
-    Arc<dyn Fn(&serde_json::Value) -> Result<SortKey, CamelError> + Send + Sync>;
+///
+/// The sync arm keeps the historical contract (the closure decides what is a
+/// valid key). The async arm rejects non-scalar results: Array/Object keys
+/// are a user error.
+// The closure shapes are part of the published contract (mirroring
+// camel-api's source enums); keep the signatures literal.
+#[allow(clippy::type_complexity)]
+#[derive(Clone)]
+pub enum SortKeySource {
+    /// Programmatic synchronous key extractor.
+    Sync(Arc<dyn Fn(&serde_json::Value) -> Result<SortKey, CamelError> + Send + Sync>),
+    /// Language-backed asynchronous expression.
+    Async(Arc<dyn Fn(&serde_json::Value) -> camel_api::BoxValueFuture + Send + Sync>),
+}
+
+impl SortKeySource {
+    /// Extract the sort key for `value`, propagating failures.
+    pub async fn key(&self, value: &serde_json::Value) -> Result<SortKey, CamelError> {
+        match self {
+            Self::Sync(f) => f(value),
+            Self::Async(f) => {
+                let evaluated = f(value).await?;
+                match evaluated {
+                    serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                        Err(CamelError::ProcessorError(
+                            "sort expression returned a non-scalar value (array/object); expected null/bool/number/string".into(),
+                        ))
+                    }
+                    scalar => Ok(SortKey(scalar)),
+                }
+            }
+        }
+    }
+}
 
 /// SortService: order body collection by expression.
 ///
@@ -65,12 +96,12 @@ pub type SortExpression =
 /// Non-array/non-Json body → Err. Array/Object keys → Err.
 #[derive(Clone)]
 pub struct SortService {
-    expression: SortExpression,
+    expression: SortKeySource,
     reverse: bool,
 }
 
 impl SortService {
-    pub fn new(expression: SortExpression, reverse: bool) -> Self {
+    pub fn new(expression: SortKeySource, reverse: bool) -> Self {
         Self {
             expression,
             reverse,
@@ -88,7 +119,7 @@ impl Service<Exchange> for SortService {
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
-        let expression = Arc::clone(&self.expression);
+        let expression = self.expression.clone();
         let reverse = self.reverse;
         Box::pin(async move {
             let array = match std::mem::take(&mut exchange.input.body) {
@@ -102,7 +133,7 @@ impl Service<Exchange> for SortService {
 
             let mut indexed: Vec<(SortKey, serde_json::Value)> = Vec::with_capacity(array.len());
             for element in array {
-                let key = expression(&element)?;
+                let key = expression.key(&element).await?;
                 indexed.push((key, element));
             }
 
@@ -129,7 +160,7 @@ mod tests {
     #[tokio::test]
     async fn ascending_numeric_sort() {
         let exchange = Exchange::new(Message::new(Body::Json(json!([3, 1, 2]))));
-        let expr: SortExpression = Arc::new(|v| Ok(SortKey(v.clone())));
+        let expr = SortKeySource::Sync(Arc::new(|v| Ok(SortKey(v.clone()))));
         let svc = SortService::new(expr, false);
         let result = svc.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body, Body::Json(json!([1, 2, 3])));
@@ -138,7 +169,7 @@ mod tests {
     #[tokio::test]
     async fn descending_numeric_sort() {
         let exchange = Exchange::new(Message::new(Body::Json(json!([3, 1, 2]))));
-        let expr: SortExpression = Arc::new(|v| Ok(SortKey(v.clone())));
+        let expr = SortKeySource::Sync(Arc::new(|v| Ok(SortKey(v.clone()))));
         let svc = SortService::new(expr, true);
         let result = svc.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body, Body::Json(json!([3, 2, 1])));
@@ -149,7 +180,7 @@ mod tests {
         let exchange = Exchange::new(Message::new(Body::Json(json!([
             "banana", "apple", "cherry"
         ]))));
-        let expr: SortExpression = Arc::new(|v| Ok(SortKey(v.clone())));
+        let expr = SortKeySource::Sync(Arc::new(|v| Ok(SortKey(v.clone()))));
         let svc = SortService::new(expr, false);
         let result = svc.oneshot(exchange).await.unwrap();
         assert_eq!(
@@ -161,7 +192,7 @@ mod tests {
     #[tokio::test]
     async fn empty_array_passthrough() {
         let exchange = Exchange::new(Message::new(Body::Json(json!([]))));
-        let expr: SortExpression = Arc::new(|v| Ok(SortKey(v.clone())));
+        let expr = SortKeySource::Sync(Arc::new(|v| Ok(SortKey(v.clone()))));
         let svc = SortService::new(expr, false);
         let result = svc.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body, Body::Json(json!([])));
@@ -170,7 +201,7 @@ mod tests {
     #[tokio::test]
     async fn non_array_body_errors() {
         let exchange = Exchange::new(Message::new(Body::Text("hello".to_string())));
-        let expr: SortExpression = Arc::new(|v| Ok(SortKey(v.clone())));
+        let expr = SortKeySource::Sync(Arc::new(|v| Ok(SortKey(v.clone()))));
         let svc = SortService::new(expr, false);
         let result = svc.oneshot(exchange).await;
         assert!(matches!(result, Err(CamelError::ProcessorError(_))));
@@ -179,13 +210,13 @@ mod tests {
     #[tokio::test]
     async fn array_key_errors() {
         let exchange = Exchange::new(Message::new(Body::Json(json!([[1, 2], 3]))));
-        let expr: SortExpression = Arc::new(|v| {
+        let expr = SortKeySource::Sync(Arc::new(|v| {
             if v.is_array() {
                 Err(CamelError::ProcessorError("array key rejected".into()))
             } else {
                 Ok(SortKey(v.clone()))
             }
-        });
+        }));
         let svc = SortService::new(expr, false);
         let result = svc.oneshot(exchange).await;
         assert!(result.is_err());
@@ -197,13 +228,31 @@ mod tests {
         let exchange = Exchange::new(Message::new(Body::Json(json!([
             "str", null, false, 42, true, 1
         ]))));
-        let expr: SortExpression = Arc::new(|v| Ok(SortKey(v.clone())));
+        let expr = SortKeySource::Sync(Arc::new(|v| Ok(SortKey(v.clone()))));
         let svc = SortService::new(expr, false);
         let result = svc.oneshot(exchange).await.unwrap();
         // Expected: null, false, true, 1, 42, "str"
         assert_eq!(
             result.input.body,
             Body::Json(json!([null, false, true, 1, 42, "str"]))
+        );
+    }
+
+    #[tokio::test]
+    async fn sort_async_error_propagates() {
+        use camel_api::BoxValueFuture;
+
+        let source = SortKeySource::Async(Arc::new(|_: &serde_json::Value| {
+            Box::pin(async { Err(CamelError::ProcessorError("sort boom".into())) })
+                as BoxValueFuture
+        }));
+        let exchange = Exchange::new(Message::new(Body::Json(json!([3, 1, 2]))));
+        let svc = SortService::new(source, false);
+
+        let result = svc.oneshot(exchange).await;
+        assert!(
+            matches!(result, Err(CamelError::ProcessorError(ref e)) if e.contains("sort boom")),
+            "an async key-expression failure must propagate"
         );
     }
 }

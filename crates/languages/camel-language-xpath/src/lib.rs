@@ -6,7 +6,7 @@ use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use serde_json::Value as JsonValue;
 use sxd_document::parser;
 use sxd_xpath::{Context, Factory, Value as SxdValue};
-use tracing::{debug, warn};
+use tracing::debug;
 
 // TODO(XPH-002): sxd-xpath is unmaintained; replacement planned.
 // Input size is bounded to prevent resource exhaustion.
@@ -98,7 +98,7 @@ fn compile_xpath(query: &str) -> Result<sxd_xpath::XPath, LanguageError> {
     factory
         .build(query)
         .map_err(|e| {
-            warn!(error = %e, "xpath expression compile failed");
+            debug!(error = %e, "xpath expression compile failed");
             LanguageError::ParseError {
                 expr: query.to_string(),
                 reason: e.to_string(),
@@ -106,7 +106,7 @@ fn compile_xpath(query: &str) -> Result<sxd_xpath::XPath, LanguageError> {
         })
         .and_then(|opt| {
             opt.ok_or_else(|| {
-                warn!("xpath expression compile failed");
+                debug!("xpath expression compile failed");
                 LanguageError::ParseError {
                     expr: query.to_string(),
                     reason: "empty XPath expression".into(),
@@ -131,7 +131,7 @@ fn run_query(
         // sxd parse errors can embed document-derived content (e.g. MismatchedTag
         // includes tag names from the exchange body which may be sensitive).
         // Return a generic message; do NOT include the raw error in logs or errors.
-        warn!("xpath: body XML could not be parsed");
+        debug!("xpath: body XML could not be parsed");
         LanguageError::EvalError("xml parse error: body is not valid XML".to_string())
     })?;
     let doc = package.as_document();
@@ -143,7 +143,7 @@ fn run_query(
         // sxd_xpath eval errors describe query structure issues (unknown variable/function,
         // type mismatch). No document-derived values are embedded, but we follow the
         // same conservative pattern: generic message, no raw external error strings.
-        warn!("xpath: expression evaluation failed");
+        debug!("xpath: expression evaluation failed");
         LanguageError::EvalError(
             "xpath query failed: expression could not be evaluated".to_string(),
         )
@@ -184,14 +184,30 @@ impl Predicate for XPathPredicate {
     async fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
         let xml = extract_xml(exchange)?;
         let result = run_query(&self.xpath, &xml, &self.config)?;
-        Ok(match &result {
-            JsonValue::Null => false,
-            JsonValue::Bool(b) => *b,
-            JsonValue::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-            JsonValue::String(s) => !s.is_empty(),
-            JsonValue::Array(arr) => !arr.is_empty(),
-            _ => true,
-        })
+        // Strict bool: only an XPath boolean result is valid. Nodesets,
+        // numbers, strings, and null are type errors — no truthiness coercion
+        // (change `language-value-boundary`, sealed Q3).
+        match &result {
+            JsonValue::Bool(b) => Ok(*b),
+            other => Err(LanguageError::TypeMismatch {
+                expected: "bool".to_string(),
+                actual: json_type_name(other).to_string(),
+                position: None,
+            }),
+        }
+    }
+}
+
+/// Type name of a [`JsonValue`] for `TypeMismatch` diagnostics. Type names
+/// only — never runtime values.
+fn json_type_name(value: &JsonValue) -> &'static str {
+    match value {
+        JsonValue::Null => "null",
+        JsonValue::Bool(_) => "bool",
+        JsonValue::Number(_) => "number",
+        JsonValue::String(_) => "string",
+        JsonValue::Array(_) => "array",
+        JsonValue::Object(_) => "object",
     }
 }
 
@@ -391,19 +407,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn predicate_non_empty_nodeset_is_true() {
+    async fn xpath_predicate_non_bool_is_type_mismatch() {
+        // Sealed Q3: only an XPath boolean is a valid predicate result.
+        // Nodesets, non-empty strings, and non-zero numbers are type errors.
         let lang = XPathLanguage::new();
-        let pred = lang.create_predicate("/root/item").unwrap();
+        let cases: [(&str, &str, &str); 3] = [
+            (
+                "/root/item",
+                "<root><item>a</item><item>b</item></root>",
+                "array",
+            ),
+            ("/root/missing", "<root><name>test</name></root>", "null"),
+            (
+                "string(/root/name)",
+                "<root><name>hello</name></root>",
+                "string",
+            ),
+        ];
+        for (query, xml, actual) in cases {
+            let pred = lang.create_predicate(query).unwrap();
+            let ex = exchange_with_xml(xml).await;
+            match pred.matches(&ex).await {
+                Err(LanguageError::TypeMismatch {
+                    expected,
+                    actual: got,
+                    position: None,
+                }) => {
+                    assert_eq!(expected, "bool");
+                    assert_eq!(got, actual, "query `{query}`");
+                }
+                other => panic!("expected TypeMismatch for `{query}`, got: {other:?}"),
+            }
+        }
+
+        // A real boolean result still works.
+        let pred = lang.create_predicate("count(/root/item) > 1").unwrap();
         let ex = exchange_with_xml("<root><item>a</item><item>b</item></root>").await;
         assert!(pred.matches(&ex).await.unwrap());
     }
 
     #[tokio::test]
-    async fn predicate_empty_result_is_false() {
+    async fn xpath_no_warn_on_eval_failure() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer = SharedWriter(Arc::clone(&buf));
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+
         let lang = XPathLanguage::new();
-        let pred = lang.create_predicate("/root/missing").unwrap();
-        let ex = exchange_with_xml("<root><name>test</name></root>").await;
-        assert!(!pred.matches(&ex).await.unwrap());
+        let expr = lang.create_expression("/root").unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::Xml("<broken>".to_string());
+        let result = expr.evaluate(&ex).await;
+        assert!(result.is_err(), "invalid XML must fail the eval");
+
+        drop(guard);
+        let out = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            out.is_empty(),
+            "language crate must not emit WARN/ERROR on eval failure, got: {out}"
+        );
     }
 
     #[tokio::test]
@@ -486,7 +565,7 @@ mod tests {
     async fn predicate_compiles_only_once() {
         let lang = XPathLanguage::new();
         let _ = reset_compile_count();
-        let pred = lang.create_predicate("/root/item").unwrap();
+        let pred = lang.create_predicate("count(/root/item) = 1").unwrap();
         assert_eq!(
             read_compile_count(),
             1,

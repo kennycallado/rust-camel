@@ -49,7 +49,7 @@ impl Service<Exchange> for RecipientListService {
         let pipeline = self.pipeline.clone();
 
         Box::pin(async move {
-            let uris_raw = (config.expression)(&exchange);
+            let uris_raw = config.expression.resolve(&exchange).await?;
             if uris_raw.is_empty() {
                 return Ok(exchange);
             }
@@ -260,7 +260,9 @@ mod tests {
             }
         });
 
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| "mock:a".to_string()));
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:a".to_string(),
+        )));
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("test"));
@@ -287,9 +289,9 @@ mod tests {
             }
         });
 
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
-            "mock:a,mock:b,mock:c".to_string()
-        }));
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:a,mock:b,mock:c".to_string(),
+        )));
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("test"));
@@ -301,7 +303,9 @@ mod tests {
 
     #[tokio::test]
     async fn recipient_list_empty_expression() {
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| String::new()));
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| String::new(),
+        )));
 
         let mut svc = RecipientListService::new(config, mock_resolver()).unwrap();
         let ex = Exchange::new(Message::new("test"));
@@ -312,8 +316,9 @@ mod tests {
 
     #[tokio::test]
     async fn recipient_list_invalid_endpoint_error() {
-        let config =
-            RecipientListConfig::new(Arc::new(|_ex: &Exchange| "invalid:endpoint".to_string()));
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "invalid:endpoint".to_string(),
+        )));
 
         let mut svc = RecipientListService::new(config, mock_resolver()).unwrap();
         let ex = Exchange::new(Message::new("test"));
@@ -341,9 +346,9 @@ mod tests {
             })
         };
 
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
-            "mock:x|mock:y|mock:z".to_string()
-        }))
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:x|mock:y|mock:z".to_string(),
+        )))
         .delimiter("|");
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
@@ -359,10 +364,12 @@ mod tests {
         let expr_count = Arc::new(AtomicUsize::new(0));
         let expr_count_clone = expr_count.clone();
 
-        let config = RecipientListConfig::new(Arc::new(move |_ex: &Exchange| {
-            expr_count_clone.fetch_add(1, Ordering::SeqCst);
-            "mock:a,mock:b".to_string()
-        }));
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            move |_ex: &Exchange| {
+                expr_count_clone.fetch_add(1, Ordering::SeqCst);
+                "mock:a,mock:b".to_string()
+            },
+        )));
 
         let mut svc = RecipientListService::new(config, mock_resolver()).unwrap();
         let ex = Exchange::new(Message::new("test"));
@@ -392,9 +399,9 @@ mod tests {
             }
         });
 
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
-            " ,mock:a, ,mock:b,, ".to_string()
-        }));
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| " ,mock:a, ,mock:b,, ".to_string(),
+        )));
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("test"));
@@ -422,9 +429,9 @@ mod tests {
             }
         });
 
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
-            "mock:mutate,mock:verify".to_string()
-        }));
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:mutate,mock:verify".to_string(),
+        )));
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("original"));
@@ -460,16 +467,18 @@ mod tests {
             })
         };
 
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
-            "mock:a,mock:b,mock:c".to_string()
-        }))
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:a,mock:b,mock:c".to_string(),
+        )))
         .parallel(true);
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("test"));
         svc.ready().await.unwrap().call(ex).await.unwrap();
 
-        let records = records.lock().await;
+        let records = tokio::time::timeout(Duration::from_secs(5), records.lock())
+            .await
+            .expect("records lock timeout");
         assert_eq!(records.len(), 3);
 
         let mut overlap_found = false;
@@ -504,9 +513,9 @@ mod tests {
             }
         });
 
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
-            "mock:a,mock:err,mock:c".to_string()
-        }))
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:a,mock:err,mock:c".to_string(),
+        )))
         .parallel(true)
         .stop_on_exception(true);
 
@@ -518,9 +527,9 @@ mod tests {
 
     #[tokio::test]
     async fn recipient_list_parallel_limit_respects_limit() {
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
-            "mock:a,mock:b,mock:c,mock:d".to_string()
-        }))
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:a,mock:b,mock:c,mock:d".to_string(),
+        )))
         .parallel(true)
         .parallel_limit(2);
 
@@ -570,9 +579,9 @@ mod tests {
             }
         });
 
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
-            "mock:a,mock:b,mock:c".to_string()
-        }))
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:a,mock:b,mock:c".to_string(),
+        )))
         .strategy(MulticastStrategy::CollectAll);
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
@@ -604,9 +613,9 @@ mod tests {
             }
         });
 
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
-            "mock:a,mock:b,mock:c".to_string()
-        }))
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:a,mock:b,mock:c".to_string(),
+        )))
         .strategy(MulticastStrategy::Original);
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
@@ -653,12 +662,14 @@ mod tests {
         // The expression reads it off the passed `&Exchange` — this is what
         // makes the cap an untrusted-data-validation control, not a local
         // limit.
-        let config = RecipientListConfig::new(Arc::new(|ex: &Exchange| {
-            ex.input
-                .header("CamelRecipients")
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_default()
-        }))
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |ex: &Exchange| {
+                ex.input
+                    .header("CamelRecipients")
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .unwrap_or_default()
+            },
+        )))
         .max_recipients(4);
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
@@ -697,9 +708,9 @@ mod tests {
             })
         };
 
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
-            "mock:a,mock:b,mock:c".to_string()
-        }))
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:a,mock:b,mock:c".to_string(),
+        )))
         .strategy(MulticastStrategy::LastWins);
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
@@ -734,8 +745,10 @@ mod tests {
             "mock:a",
             CamelError::Config(String::from("seq-all-failed")),
         )]);
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| "mock:a".to_string()))
-            .strategy(MulticastStrategy::LastWins);
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:a".to_string(),
+        )))
+        .strategy(MulticastStrategy::LastWins);
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
         let mut ex = Exchange::new(Message::new("timer:t tick #1"));
@@ -760,10 +773,11 @@ mod tests {
             ("mock:a", CamelError::Config(String::from("par-err-a"))),
             ("mock:b", CamelError::Config(String::from("par-err-b"))),
         ]);
-        let config =
-            RecipientListConfig::new(Arc::new(|_ex: &Exchange| "mock:a,mock:b".to_string()))
-                .strategy(MulticastStrategy::LastWins)
-                .parallel(true);
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:a,mock:b".to_string(),
+        )))
+        .strategy(MulticastStrategy::LastWins)
+        .parallel(true);
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("inbound"));
@@ -806,10 +820,11 @@ mod tests {
                 None
             }
         });
-        let config =
-            RecipientListConfig::new(Arc::new(|_ex: &Exchange| "mock:a,mock:b".to_string()))
-                .strategy(MulticastStrategy::LastWins)
-                .parallel(true);
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:a,mock:b".to_string(),
+        )))
+        .strategy(MulticastStrategy::LastWins)
+        .parallel(true);
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("inbound"));
@@ -822,7 +837,10 @@ mod tests {
             tokio::task::yield_now().await;
         }
         let _ = tx.send(());
-        let result = join.await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), join)
+            .await
+            .expect("join timeout")
+            .unwrap();
 
         assert!(
             matches!(result, Err(CamelError::Config(ref m)) if m == "par-err-b"),
@@ -852,9 +870,10 @@ mod tests {
                 None
             }
         });
-        let config =
-            RecipientListConfig::new(Arc::new(|_ex: &Exchange| "mock:fail,mock:ok".to_string()))
-                .strategy(MulticastStrategy::LastWins);
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:fail,mock:ok".to_string(),
+        )))
+        .strategy(MulticastStrategy::LastWins);
 
         let mut svc = RecipientListService::new(config, resolver).unwrap();
         let ex = Exchange::new(Message::new("inbound"));
@@ -886,9 +905,9 @@ mod tests {
                 None
             }
         });
-        let config = RecipientListConfig::new(Arc::new(|_ex: &Exchange| {
-            "mock:panic1,mock:panic2".to_string()
-        }))
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(
+            |_ex: &Exchange| "mock:panic1,mock:panic2".to_string(),
+        )))
         .strategy(MulticastStrategy::LastWins)
         .parallel(true);
 
@@ -903,6 +922,45 @@ mod tests {
         assert!(
             matches!(result, Err(CamelError::ProcessorError(_))),
             "panic must surface as a ProcessorError representative"
+        );
+    }
+
+    #[tokio::test]
+    async fn recipient_list_error_fails_step() {
+        use camel_api::{BoxValueFuture, RecipientSource};
+
+        let resolver_calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = resolver_calls.clone();
+        let resolver: camel_api::EndpointResolver = Arc::new(move |uri: &str| {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            if uri.starts_with("mock:") {
+                Some(BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })))
+            } else {
+                None
+            }
+        });
+
+        let config = RecipientListConfig::new(RecipientSource::Async(Arc::new(|_: &Exchange| {
+            Box::pin(async { Err(CamelError::ProcessorError("recipient boom".into())) })
+                as BoxValueFuture
+        })));
+
+        let mut svc = RecipientListService::new(config, resolver).unwrap();
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(Exchange::new(Message::new("test")))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a failed recipient expression must fail the step"
+        );
+        assert_eq!(
+            resolver_calls.load(Ordering::SeqCst),
+            0,
+            "no endpoint may be resolved when the recipient expression fails"
         );
     }
 }

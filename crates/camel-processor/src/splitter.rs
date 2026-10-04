@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 use tower::Service;
 
 use camel_api::{
-    AggregationStrategy, Body, BoxProcessor, CamelError, Exchange, SplitterConfig, Value,
+    AggregationStrategy, Body, BoxProcessor, CamelError, Exchange, SplitSource, SplitterConfig,
+    Value,
 };
 
 // ── Metadata property keys ─────────────────────────────────────────────
@@ -38,7 +39,7 @@ pub const CAMEL_SPLIT_COMPLETE: &str = "CamelSplitComplete";
 /// cancel in-flight futures. Sequential mode stops processing immediately.
 #[derive(Clone)]
 pub struct SplitterService {
-    expression: camel_api::SplitExpression,
+    expression: SplitSource,
     sub_pipeline: BoxProcessor,
     aggregation: AggregationStrategy,
     parallel: bool,
@@ -99,7 +100,7 @@ impl Service<Exchange> for SplitterService {
             // Split the exchange into fragments. A typed expression error
             // (e.g. wrong body type) fails loud instead of degrading to an
             // empty-fragment pass-through.
-            let mut fragments = expression(&exchange)?;
+            let mut fragments = expression.split(&exchange).await?;
 
             // If no fragments were produced, return the original exchange.
             if fragments.is_empty() {
@@ -351,6 +352,58 @@ mod tests {
 
     fn make_exchange(text: &str) -> Exchange {
         Exchange::new(Message::new(text))
+    }
+
+    #[tokio::test]
+    async fn split_sync_builtin_still_works() {
+        // The Sync arm of SplitSource must keep the built-in expressions
+        // compiling and behaving unchanged.
+        let config = SplitterConfig::new(camel_api::split_body_lines());
+        let mut svc = SplitterService::new(config, uppercase_pipeline()).unwrap();
+
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("a\nb\nc"))
+            .await
+            .unwrap();
+        assert_eq!(result.input.body.as_text(), Some("C"));
+    }
+
+    #[tokio::test]
+    async fn split_async_error_propagates_before_fragments() {
+        use camel_api::{BoxValueFuture, SplitSource};
+
+        let pipeline_calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = pipeline_calls.clone();
+        let pipeline = BoxProcessor::from_fn(move |ex: Exchange| {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok(ex) })
+        });
+
+        let config = SplitterConfig::new(SplitSource::Async(Arc::new(|_: &Exchange| {
+            Box::pin(async { Err(CamelError::ProcessorError("split boom".into())) })
+                as BoxValueFuture
+        })));
+        let mut svc = SplitterService::new(config, pipeline).unwrap();
+
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("a\nb\nc"))
+            .await;
+
+        assert!(
+            matches!(result, Err(CamelError::ProcessorError(ref e)) if e.contains("split boom")),
+            "an async split-expression failure must propagate"
+        );
+        assert_eq!(
+            pipeline_calls.load(Ordering::SeqCst),
+            0,
+            "no fragment may reach the sub-pipeline when the split expression fails"
+        );
     }
 
     #[test]

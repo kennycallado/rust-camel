@@ -51,16 +51,20 @@ in debug, 64 in release) — rc-dip6.
 ## Mutation model
 
 Read-only expressions and predicates expose `body` and `headers` variables plus
-the `header()`, `set_header()`, `property()`, and `set_property()` host
-functions. Their writes affect only the current evaluation.
+the `header()` and `property()` readers. `set_header()` and `set_property()` are
+rejected at create time (the parse error names a `script:` step as the
+alternative); the read-only engine never registers them.
 
 A `MutatingExpression` exposes `body`, `headers`, and `properties` as mutable
-scope variables. The implementation writes all three back only after successful
-evaluation. An error leaves the Exchange unchanged.
+scope variables. Its write-back is a validate-all-then-commit transaction: the
+post-eval scope is compared with the pre-eval snapshot, only changed entries and
+an assigned body are converted, and the Exchange is untouched unless the whole
+evaluation succeeds. An error leaves the Exchange unchanged.
 
 ## Rhai boundary
 
-All direct Rhai use is confined to `src/lib.rs`. Public constructors accept
+Direct Rhai use is confined to `src/lib.rs` and its private `converter`,
+`stream_body`, and `transaction` modules. Public constructors accept
 `RhaiLimitsConfig` from `camel-language-api`, and Language factory methods return
 SPI trait objects. No public signature exposes a Rhai type.
 

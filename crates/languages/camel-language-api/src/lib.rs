@@ -3,9 +3,10 @@
 //! Language SPI for rust-camel — defines the core traits all expression/predicate languages implement.
 //!
 //! Main traits: `Language`, `Expression`, `Predicate`, `MutatingExpression`, `MutatingPredicate`.
-//! Main modules: `error`, `language_limits`.
+//! Main modules: `error`, `eval`, `language_limits`.
 
 pub mod error;
+pub mod eval;
 pub mod language_limits;
 
 pub use async_trait::async_trait;
@@ -13,7 +14,9 @@ pub use camel_api::Value;
 pub use camel_api::body::Body;
 pub use camel_api::exchange::Exchange;
 pub use camel_api::message::Message;
+pub use camel_api::{ErrorPosition, ExpressionErrorClass};
 pub use error::LanguageError;
+pub use eval::{EvalMeta, LanguageExpressionEval, LanguagePredicateEval, to_expression_failed};
 pub use language_limits::{
     JsEngineConfig, JsLimitsConfig, LanguagesConfig, MinijinjaEngineConfig, MinijinjaLimitsConfig,
     RhaiEngineConfig, RhaiLimitsConfig,

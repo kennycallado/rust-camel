@@ -47,9 +47,10 @@ impl Service<Exchange> for RoutingSlipService {
         let pipeline = self.pipeline.clone();
 
         Box::pin(async move {
-            let slip = match (config.expression)(&exchange) {
-                None => return Ok(exchange),
-                Some(s) => s,
+            let slip = match config.expression.resolve(&exchange).await {
+                Ok(None) => return Ok(exchange),
+                Ok(Some(s)) => s,
+                Err(e) => return Err(e),
             };
 
             for uri in slip.split(&config.uri_delimiter) {
@@ -108,7 +109,10 @@ mod tests {
             }
         });
 
-        let config = RoutingSlipConfig::new(Arc::new(|_ex: &Exchange| Some("mock:a".to_string())));
+        let config =
+            RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(|_ex: &Exchange| {
+                Some("mock:a".to_string())
+            })));
 
         let mut svc = RoutingSlipService::new(config, resolver);
         let ex = Exchange::new(Message::new("test"));
@@ -135,9 +139,10 @@ mod tests {
             }
         });
 
-        let config = RoutingSlipConfig::new(Arc::new(|_ex: &Exchange| {
-            Some("mock:a,mock:b,mock:c".to_string())
-        }));
+        let config =
+            RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(|_ex: &Exchange| {
+                Some("mock:a,mock:b,mock:c".to_string())
+            })));
 
         let mut svc = RoutingSlipService::new(config, resolver);
         let ex = Exchange::new(Message::new("test"));
@@ -149,7 +154,10 @@ mod tests {
 
     #[tokio::test]
     async fn routing_slip_empty_expression() {
-        let config = RoutingSlipConfig::new(Arc::new(|_ex: &Exchange| None));
+        let config =
+            RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(|_ex: &Exchange| {
+                None
+            })));
 
         let mut svc = RoutingSlipService::new(config, mock_resolver());
         let ex = Exchange::new(Message::new("test"));
@@ -160,7 +168,10 @@ mod tests {
 
     #[tokio::test]
     async fn routing_slip_empty_string() {
-        let config = RoutingSlipConfig::new(Arc::new(|_ex: &Exchange| Some(String::new())));
+        let config =
+            RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(|_ex: &Exchange| {
+                Some(String::new())
+            })));
 
         let mut svc = RoutingSlipService::new(config, mock_resolver());
         let ex = Exchange::new(Message::new("test"));
@@ -171,10 +182,11 @@ mod tests {
 
     #[tokio::test]
     async fn routing_slip_invalid_endpoint_error() {
-        let config = RoutingSlipConfig::new(Arc::new(|_ex: &Exchange| {
-            Some("invalid:endpoint".to_string())
-        }))
-        .ignore_invalid_endpoints(false);
+        let config =
+            RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(|_ex: &Exchange| {
+                Some("invalid:endpoint".to_string())
+            })))
+            .ignore_invalid_endpoints(false);
 
         let mut svc = RoutingSlipService::new(config, mock_resolver());
         let ex = Exchange::new(Message::new("test"));
@@ -201,10 +213,11 @@ mod tests {
             }
         });
 
-        let config = RoutingSlipConfig::new(Arc::new(|_ex: &Exchange| {
-            Some("invalid:endpoint,mock:valid".to_string())
-        }))
-        .ignore_invalid_endpoints(true);
+        let config =
+            RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(|_ex: &Exchange| {
+                Some("invalid:endpoint,mock:valid".to_string())
+            })))
+            .ignore_invalid_endpoints(true);
 
         let mut svc = RoutingSlipService::new(config, resolver);
         let ex = Exchange::new(Message::new("test"));
@@ -230,9 +243,10 @@ mod tests {
             }))
         });
 
-        let config = RoutingSlipConfig::new(Arc::new(|_ex: &Exchange| {
-            Some("mock:first,mock:second,mock:third".to_string())
-        }));
+        let config =
+            RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(|_ex: &Exchange| {
+                Some("mock:first,mock:second,mock:third".to_string())
+            })));
 
         let mut svc = RoutingSlipService::new(config, resolver);
         let ex = Exchange::new(Message::new("test"));
@@ -258,7 +272,9 @@ mod tests {
         });
 
         let config =
-            RoutingSlipConfig::new(Arc::new(|_ex: &Exchange| Some("mock:a,mock:b".to_string())));
+            RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(|_ex: &Exchange| {
+                Some("mock:a,mock:b".to_string())
+            })));
 
         let mut svc = RoutingSlipService::new(config, resolver);
         let ex = Exchange::new(Message::new("test"));
@@ -287,9 +303,10 @@ mod tests {
             }
         });
 
-        let config = RoutingSlipConfig::new(Arc::new(|_ex: &Exchange| {
-            Some("mock:mutate,mock:verify".to_string())
-        }));
+        let config =
+            RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(|_ex: &Exchange| {
+                Some("mock:mutate,mock:verify".to_string())
+            })));
 
         let mut svc = RoutingSlipService::new(config, resolver);
         let ex = Exchange::new(Message::new("original"));
@@ -315,14 +332,16 @@ mod tests {
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_clone = call_count.clone();
 
-        let config = RoutingSlipConfig::new(Arc::new(move |_ex: &Exchange| {
-            let n = call_clone.fetch_add(1, Ordering::SeqCst);
-            if n < 2 {
-                Some("mock:a,mock:b".to_string())
-            } else {
-                None
-            }
-        }));
+        let config = RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(
+            move |_ex: &Exchange| {
+                let n = call_clone.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Some("mock:a,mock:b".to_string())
+                } else {
+                    None
+                }
+            },
+        )));
 
         let mut svc = RoutingSlipService::new(config, resolver);
         let ex1 = Exchange::new(Message::new("test1"));
@@ -347,10 +366,11 @@ mod tests {
             }))
         });
 
-        let config = RoutingSlipConfig::new(Arc::new(|_ex: &Exchange| {
-            Some("mock:x|mock:y|mock:z".to_string())
-        }))
-        .uri_delimiter("|");
+        let config =
+            RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(|_ex: &Exchange| {
+                Some("mock:x|mock:y|mock:z".to_string())
+            })))
+            .uri_delimiter("|");
 
         let mut svc = RoutingSlipService::new(config, resolver);
         let ex = Exchange::new(Message::new("test"));
@@ -373,10 +393,12 @@ mod tests {
             }
         });
 
-        let config = RoutingSlipConfig::new(Arc::new(move |_ex: &Exchange| {
-            expr_count_clone.fetch_add(1, Ordering::SeqCst);
-            Some("mock:a,mock:b".to_string())
-        }));
+        let config = RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(
+            move |_ex: &Exchange| {
+                expr_count_clone.fetch_add(1, Ordering::SeqCst);
+                Some("mock:a,mock:b".to_string())
+            },
+        )));
 
         let mut svc = RoutingSlipService::new(config, resolver);
         let ex = Exchange::new(Message::new("test"));
@@ -386,6 +408,29 @@ mod tests {
             expr_count.load(Ordering::SeqCst),
             1,
             "Expression must be evaluated exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn routing_slip_target_error_fails_step() {
+        use camel_api::{BoxValueFuture, TargetSource};
+
+        let config = RoutingSlipConfig::new(TargetSource::Async(Arc::new(|_: &Exchange| {
+            Box::pin(async { Err(CamelError::ProcessorError("slip boom".into())) })
+                as BoxValueFuture
+        })));
+
+        let mut svc = RoutingSlipService::new(config, mock_resolver());
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(Exchange::new(Message::new("test")))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a failed slip expression must fail the step"
         );
     }
 }

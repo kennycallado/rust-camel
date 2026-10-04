@@ -11,7 +11,9 @@
 use camel_api::SpanKindHint;
 use std::sync::Arc;
 
-use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, IdentityProcessor, Message, Value};
+use camel_api::{
+    Body, BoxProcessor, BoxProcessorExt, Exchange, IdentityProcessor, Message, Value, ValueSource,
+};
 use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
 use camel_language_api::Language;
 use camel_language_simple::SimpleLanguage;
@@ -78,10 +80,11 @@ fn pure_closure_pipeline() -> BoxProcessor {
 // ---------------------------------------------------------------------------
 
 fn concrete_processor_pipeline() -> BoxProcessor {
-    let body = Body::Text("response".into());
-    let set_body = BoxProcessor::new(SetBody::new(IdentityProcessor, move |_: &Exchange| {
-        body.clone()
-    }));
+    let body = Value::String("response".into());
+    let set_body = BoxProcessor::new(SetBody::new(
+        IdentityProcessor,
+        ValueSource::Sync(Arc::new(move |_: &Exchange| body.clone())),
+    ));
     let set_header = BoxProcessor::new(SetHeader::new(
         IdentityProcessor,
         "Content-Type",
@@ -128,10 +131,11 @@ fn concrete_processor_pipeline() -> BoxProcessor {
 // ---------------------------------------------------------------------------
 
 fn identity_wrapped_pipeline() -> BoxProcessor {
-    let body = Body::Text("response".into());
-    let set_body = BoxProcessor::new(SetBody::new(IdentityProcessor, move |_: &Exchange| {
-        body.clone()
-    }));
+    let body = Value::String("response".into());
+    let set_body = BoxProcessor::new(SetBody::new(
+        IdentityProcessor,
+        ValueSource::Sync(Arc::new(move |_: &Exchange| body.clone())),
+    ));
     let set_header = BoxProcessor::new(SetHeader::new(
         IdentityProcessor,
         "Content-Type",
@@ -176,14 +180,14 @@ fn identity_wrapped_pipeline() -> BoxProcessor {
 // ---------------------------------------------------------------------------
 
 fn deep_pipeline() -> BoxProcessor {
-    let body = Body::Text("response".into());
+    let body = Value::String("response".into());
     let mut steps: Vec<CompiledStep> = Vec::with_capacity(10);
 
     for i in 0..10 {
         let step: BoxProcessor = if i % 2 == 0 {
             BoxProcessor::new(SetBody::new(IdentityProcessor, {
                 let b = body.clone();
-                move |_: &Exchange| b.clone()
+                ValueSource::Sync(Arc::new(move |_: &Exchange| b.clone()))
             }))
         } else {
             BoxProcessor::new(SetHeader::new(

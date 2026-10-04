@@ -9,7 +9,10 @@ use camel_language_api::{
 use crate::{
     engine::JsEngine,
     engines::boa::BoaEngine,
-    expression::{JsExpression, JsMutatingExpression, JsPredicate, validate_to_parse_error},
+    expression::{
+        JsExpression, JsMutatingExpression, JsPredicate, reject_read_only_mutation,
+        validate_to_parse_error,
+    },
 };
 
 // ── Resource limits ───────────────────────────────────────────────────────────
@@ -116,6 +119,7 @@ impl Language for JsLanguage {
 
     fn create_expression(&self, script: &str) -> Result<Box<dyn Expression>, LanguageError> {
         validate_to_parse_error(&self.engine, script)?;
+        reject_read_only_mutation(script)?;
         Ok(Box::new(JsExpression::new(
             script.to_string(),
             Arc::clone(&self.engine),
@@ -125,6 +129,7 @@ impl Language for JsLanguage {
 
     fn create_predicate(&self, script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
         validate_to_parse_error(&self.engine, script)?;
+        reject_read_only_mutation(script)?;
         Ok(Box::new(JsPredicate::new(
             script.to_string(),
             Arc::clone(&self.engine),
@@ -266,5 +271,102 @@ mod tests {
         let expr = lang2.create_expression("42").unwrap();
         let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val.as_i64().unwrap(), 42);
+    }
+
+    /// A custom engine that implements only the writable path must fail closed
+    /// on the read-only paths: the default `eval_read_only` returns a typed
+    /// read-only error and never calls `eval`. The mutating path still works.
+    #[tokio::test]
+    async fn js_custom_writable_engine_read_only_fails_closed() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use camel_language_api::{ExpressionErrorClass, LanguageError};
+
+        use crate::engine::{JsEngine, JsEvalResult, JsExchange};
+        use crate::error::JsLanguageError;
+
+        struct WritableOnlyEngine {
+            eval_calls: Arc<AtomicUsize>,
+        }
+
+        impl JsEngine for WritableOnlyEngine {
+            fn eval(
+                &self,
+                _source: &str,
+                exchange: JsExchange,
+            ) -> Result<JsEvalResult, JsLanguageError> {
+                self.eval_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(JsEvalResult {
+                    return_value: json!("writable"),
+                    headers: exchange.headers,
+                    body: exchange.body,
+                    properties: exchange.properties,
+                })
+            }
+
+            fn validate(&self, _source: &str) -> Result<(), JsLanguageError> {
+                Ok(())
+            }
+        }
+
+        let eval_calls = Arc::new(AtomicUsize::new(0));
+        let lang = JsLanguage::with_engine(WritableOnlyEngine {
+            eval_calls: Arc::clone(&eval_calls),
+        });
+
+        // A dynamic write is not statically decidable, so it compiles on the
+        // read-only paths and reaches the engine.
+        let source = "const k = 'body'; camel[k] = 1; true";
+        let expr = lang.create_expression(source).expect("must compile");
+        let ex = make_exchange().await;
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("read-only eval must fail closed");
+        assert!(
+            matches!(
+                err,
+                LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Runtime,
+                    position: None,
+                    detail: Some(_),
+                }
+            ),
+            "expected typed read-only failure, got {err:?}"
+        );
+
+        let pred = lang.create_predicate(source).expect("must compile");
+        let ex = make_exchange().await;
+        let perr = pred
+            .matches(&ex)
+            .await
+            .expect_err("read-only predicate must fail closed");
+        assert!(
+            matches!(
+                perr,
+                LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Runtime,
+                    position: None,
+                    detail: Some(_),
+                }
+            ),
+            "expected typed read-only failure, got {perr:?}"
+        );
+
+        assert_eq!(
+            eval_calls.load(Ordering::SeqCst),
+            0,
+            "the writable eval must not be called for a read-only expression"
+        );
+
+        // The mutating path still uses `eval`.
+        let expr = lang
+            .create_mutating_expression("camel.body = 'new'; true")
+            .expect("mutating must compile");
+        let mut ex = make_exchange().await;
+        let value = expr.evaluate(&mut ex).await.expect("mutating must work");
+        assert_eq!(value.as_str(), Some("writable"));
+        assert_eq!(eval_calls.load(Ordering::SeqCst), 1);
     }
 }

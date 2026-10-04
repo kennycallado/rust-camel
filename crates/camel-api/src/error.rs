@@ -76,6 +76,103 @@ pub enum EndpointUriError {
     InvalidParamKey { key: String },
 }
 
+/// Classification of a language-expression evaluation failure.
+///
+/// Matchable class attached to [`CamelError::ExpressionFailed`] so route-level
+/// error handlers can discriminate failure kinds programmatically without
+/// parsing message text. Variants carry no data — diagnostics that need detail
+/// live on the `ExpressionFailed` variant itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExpressionErrorClass {
+    /// Evaluation failed at runtime (engine error not covered by a finer class).
+    Runtime,
+    /// Arithmetic failure (overflow, division by zero, NaN rejection, ...).
+    Arithmetic,
+    /// Value type does not match the expected type.
+    TypeMismatch,
+    /// Referenced function is not registered with the language engine.
+    FunctionNotFound,
+    /// A configured evaluation limit was exceeded.
+    Limit,
+    /// Evaluation exceeded its time budget.
+    Timeout,
+    /// The result could not be converted to the declared destination type.
+    Conversion,
+    /// The expression source could not be parsed.
+    Parse,
+}
+
+impl ExpressionErrorClass {
+    /// Stable lowercase kebab-case name used in diagnostic messages.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Runtime => "runtime",
+            Self::Arithmetic => "arithmetic",
+            Self::TypeMismatch => "type-mismatch",
+            Self::FunctionNotFound => "function-not-found",
+            Self::Limit => "limit",
+            Self::Timeout => "timeout",
+            Self::Conversion => "conversion",
+            Self::Parse => "parse",
+        }
+    }
+}
+
+impl fmt::Display for ExpressionErrorClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 1-based position inside the expression source text, as reported by the
+/// language engine. Not a route-definition position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ErrorPosition {
+    /// 1-based line inside the expression source.
+    pub line: u32,
+    /// 1-based column inside the expression source.
+    pub column: u32,
+}
+
+impl fmt::Display for ErrorPosition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.line, self.column)
+    }
+}
+
+/// Source and destination type names for a failed result conversion.
+///
+/// Both fields are TYPE NAMES (trusted config strings, e.g. `f64`,
+/// `property p`); runtime values never enter this struct.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConversionDetail {
+    /// Type name of the value the engine produced.
+    pub source_type: String,
+    /// Type name (or destination description) the value was converted to.
+    pub target: String,
+}
+
+/// Position suffix: `" at {line}:{column}"` when present, empty otherwise.
+fn expression_position_suffix(position: &Option<ErrorPosition>) -> String {
+    match position {
+        Some(pos) => format!(" at {pos}"),
+        None => String::new(),
+    }
+}
+
+/// Conversion suffix: `" while converting {source_type} to {target}"` when
+/// present, empty otherwise.
+fn expression_conversion_suffix(conversion: &Option<ConversionDetail>) -> String {
+    match conversion {
+        Some(detail) => format!(
+            " while converting {} to {}",
+            detail.source_type, detail.target
+        ),
+        None => String::new(),
+    }
+}
+
 /// Opaque handle to an underlying error, preserving its source chain without
 /// exposing the concrete type.
 ///
@@ -265,6 +362,36 @@ pub enum CamelError {
     /// (REST DSL default-strict content negotiation, HTTP 406).
     #[error("Not acceptable: accept {accept}, produced {produced}")]
     NotAcceptable { accept: String, produced: String },
+
+    /// Evaluation of a language expression failed during a route step
+    /// (language-value-boundary spec). All fields are route metadata and typed
+    /// diagnostics — no exchange data enters any field or the Display output.
+    #[error(
+        "expression failed: {class} in {language} `{verb}` step `{step_id}` (route `{route_id}`){}{}",
+        expression_position_suffix(.position),
+        expression_conversion_suffix(.conversion),
+    )]
+    ExpressionFailed {
+        /// Language the failing expression was written in (e.g. `rhai`).
+        language: String,
+        /// Id of the route that owned the failing step.
+        route_id: String,
+        /// Id of the failing step.
+        step_id: String,
+        /// DSL verb that evaluated the expression (e.g. `set_property`).
+        verb: String,
+        /// Typed failure classification.
+        class: ExpressionErrorClass,
+        /// Position inside the expression source, when the engine reports one.
+        position: Option<ErrorPosition>,
+        /// Failed result-conversion detail, when the failure was a conversion.
+        conversion: Option<ConversionDetail>,
+        /// Chained underlying error, when the failure wraps another
+        /// [`CamelError`] (e.g. a catch predicate failure chaining the
+        /// original route error).
+        #[source]
+        cause: Option<Box<CamelError>>,
+    },
 }
 
 /// Manual `Clone` impl: every arm clones its fields normally, except
@@ -322,6 +449,25 @@ impl Clone for CamelError {
             Self::NotAcceptable { accept, produced } => Self::NotAcceptable {
                 accept: accept.clone(),
                 produced: produced.clone(),
+            },
+            Self::ExpressionFailed {
+                language,
+                route_id,
+                step_id,
+                verb,
+                class,
+                position,
+                conversion,
+                cause,
+            } => Self::ExpressionFailed {
+                language: language.clone(),
+                route_id: route_id.clone(),
+                step_id: step_id.clone(),
+                verb: verb.clone(),
+                class: *class,
+                position: *position,
+                conversion: conversion.clone(),
+                cause: cause.clone(),
             },
         }
     }
@@ -405,6 +551,7 @@ impl CamelError {
             Self::EndpointUri(_) => "EndpointUri",
             Self::UnsupportedMediaType { .. } => "UnsupportedMediaType",
             Self::NotAcceptable { .. } => "NotAcceptable",
+            Self::ExpressionFailed { .. } => "ExpressionFailed",
         }
     }
 }
@@ -715,6 +862,46 @@ mod tests {
     }
 
     #[test]
+    fn expression_failed_display_has_no_exchange_data() {
+        let err = CamelError::ExpressionFailed {
+            language: "rhai".to_string(),
+            route_id: "r1".to_string(),
+            step_id: "set_property#0".to_string(),
+            verb: "set_property".to_string(),
+            class: ExpressionErrorClass::Arithmetic,
+            position: Some(ErrorPosition { line: 3, column: 8 }),
+            conversion: None,
+            cause: None,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("arithmetic"), "missing class: {msg}");
+        assert!(msg.contains("rhai"), "missing language: {msg}");
+        assert!(msg.contains("set_property"), "missing verb/step: {msg}");
+        assert!(msg.contains("3:8"), "missing position: {msg}");
+        // Nothing beyond the metadata fields: the full rendering is pinned.
+        assert_eq!(
+            msg,
+            "expression failed: arithmetic in rhai `set_property` step \
+             `set_property#0` (route `r1`) at 3:8"
+        );
+    }
+
+    #[test]
+    fn expression_failed_variant_name() {
+        let err = CamelError::ExpressionFailed {
+            language: "rhai".to_string(),
+            route_id: "r1".to_string(),
+            step_id: "set_property#0".to_string(),
+            verb: "set_property".to_string(),
+            class: ExpressionErrorClass::Runtime,
+            position: None,
+            conversion: None,
+            cause: None,
+        };
+        assert_eq!(err.variant_name(), "ExpressionFailed");
+    }
+
+    #[test]
     fn config_validation_error_on_exception_conflict_display() {
         let err = ConfigValidationError::OnExceptionStepsHandledByConflict;
         let msg = format!("{err}");
@@ -769,7 +956,10 @@ mod tests {
 
 #[cfg(test)]
 mod variant_name_tests {
-    use super::{CamelError, ConfigValidationError, EndpointUriError, OpaqueErrorSource};
+    use super::{
+        CamelError, ConfigValidationError, EndpointUriError, ExpressionErrorClass,
+        OpaqueErrorSource,
+    };
     use std::sync::Arc;
 
     /// Representative value for each enum variant. This test fails to compile
@@ -862,6 +1052,19 @@ mod variant_name_tests {
                 "NotAcceptable",
             ),
             (
+                CamelError::ExpressionFailed {
+                    language: "rhai".into(),
+                    route_id: "r1".into(),
+                    step_id: "set_property#0".into(),
+                    verb: "set_property".into(),
+                    class: ExpressionErrorClass::Runtime,
+                    position: None,
+                    conversion: None,
+                    cause: None,
+                },
+                "ExpressionFailed",
+            ),
+            (
                 CamelError::AuthProviderUnavailable("x".into()),
                 "ProcessorError",
             ),
@@ -869,7 +1072,7 @@ mod variant_name_tests {
 
         assert_eq!(
             cases.len(),
-            26,
+            27,
             "variant_name_covers_all_variants must cover every CamelError variant; \
              extend this table and the camel-dsl classification guard"
         );

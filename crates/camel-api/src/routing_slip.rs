@@ -1,21 +1,17 @@
-use std::sync::Arc;
-
-use crate::Exchange;
-
-pub type RoutingSlipExpression = Arc<dyn Fn(&Exchange) -> Option<String> + Send + Sync>;
+use crate::filter::TargetSource;
 
 #[derive(Clone)]
 pub struct RoutingSlipConfig {
-    pub expression: RoutingSlipExpression,
+    pub expression: TargetSource,
     pub uri_delimiter: String,
     pub cache_size: i32,
     pub ignore_invalid_endpoints: bool,
 }
 
 impl RoutingSlipConfig {
-    pub fn new(expression: RoutingSlipExpression) -> Self {
+    pub fn new(expression: impl Into<TargetSource>) -> Self {
         Self {
-            expression,
+            expression: expression.into(),
             uri_delimiter: ",".to_string(),
             cache_size: 1000,
             ignore_invalid_endpoints: false,
@@ -54,8 +50,8 @@ mod tests {
 
     use super::*;
 
-    fn noop_expr() -> RoutingSlipExpression {
-        Arc::new(|_| None)
+    fn noop_expr() -> TargetSource {
+        TargetSource::Sync(Arc::new(|_| None))
     }
 
     #[test]

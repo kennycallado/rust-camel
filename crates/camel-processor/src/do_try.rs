@@ -7,7 +7,7 @@
 
 use camel_api::error_handler::ExceptionDisposition;
 use camel_api::exchange::PROPERTY_EXCEPTION_HANDLED;
-use camel_api::{BoxProcessor, CamelError, Exchange, FilterPredicate};
+use camel_api::{BoxProcessor, CamelError, Exchange, PredicateSource};
 use tower::Service;
 use tower::ServiceExt;
 
@@ -19,23 +19,45 @@ pub enum CatchMatcher {
     /// Match by CamelError variant name (e.g. ["ProcessorError", "Io"]).
     /// `"*"` matches any variant — equivalent to Camel's `doCatch(Throwable.class)`.
     ByVariant(Vec<String>),
-    /// Match by predicate over the Exchange.
-    Predicate(FilterPredicate),
+    /// Match by a fallible predicate over the Exchange.
+    Predicate(PredicateSource),
 }
 
 impl CatchMatcher {
-    /// Returns `true` if this matcher matches the given error and exchange.
-    pub fn matches(&self, err: &CamelError, ex: &Exchange) -> bool {
+    /// Returns whether this matcher matches the given error and exchange.
+    ///
+    /// A failed predicate evaluation yields `Err` (language-value-boundary:
+    /// the caller chains the original error and fails the scope).
+    pub async fn matches(&self, err: &CamelError, ex: &Exchange) -> Result<bool, CamelError> {
         match self {
             CatchMatcher::ByVariant(names) => {
                 if names.iter().any(|n| n == "*") {
-                    return true;
+                    return Ok(true);
                 }
-                names.iter().any(|n| n == err.variant_name())
+                Ok(names.iter().any(|n| n == err.variant_name()))
             }
-            CatchMatcher::Predicate(p) => p(ex),
+            CatchMatcher::Predicate(source) => source.matches(ex).await,
         }
     }
+}
+
+/// Chain the original try error into a failed catch-predicate error
+/// (language-value-boundary: catch `when` / `on_when` failure envelope).
+///
+/// Predicate evaluation errors arrive as `CamelError::ExpressionFailed` with
+/// `cause: None`. The copy keeps every field unchanged except `cause`, which
+/// holds the original error so the chain stays retrievable. Errors that carry
+/// no `cause` slot (or an existing chain) pass through untouched.
+pub(crate) fn chain_predicate_error(
+    mut predicate_err: CamelError,
+    original: CamelError,
+) -> CamelError {
+    if let CamelError::ExpressionFailed { cause, .. } = &mut predicate_err
+        && cause.is_none()
+    {
+        *cause = Some(Box::new(original));
+    }
+    predicate_err
 }
 
 /// A single `doCatch` clause.
@@ -44,7 +66,7 @@ pub struct CatchClause {
     /// The main matcher (variant-name list or predicate).
     pub matcher: CatchMatcher,
     /// Optional sub-predicate evaluated AFTER the main matcher passes.
-    pub on_when: Option<FilterPredicate>,
+    pub on_when: Option<PredicateSource>,
     /// Sub-pipeline executed when the clause matches.
     pub steps: Vec<BoxProcessor>,
     /// ADR-0019 disposition: Handled (default), Propagate, or Continued (rejected at parse time).
@@ -62,7 +84,7 @@ pub struct DoTryService {
     /// Steps in the finally block (empty = no finally).
     pub finally_steps: Vec<BoxProcessor>,
     /// Optional onWhen predicate for finally.
-    pub finally_on_when: Option<FilterPredicate>,
+    pub finally_on_when: Option<PredicateSource>,
 }
 
 impl DoTryService {
@@ -82,7 +104,7 @@ impl DoTryService {
         try_steps: Vec<BoxProcessor>,
         catch_clauses: Vec<CatchClause>,
         finally_steps: Vec<BoxProcessor>,
-        finally_on_when: Option<FilterPredicate>,
+        finally_on_when: Option<PredicateSource>,
     ) -> Self {
         Self {
             try_steps,
@@ -120,34 +142,36 @@ async fn run_pipeline(
 ///   logs and restores the previous error).
 /// - If finally throws AND no previous error: `NoPreviousFail` (caller logs
 ///   and propagates finally_err).
+/// - If the finally `on_when` predicate itself fails: `Err` (the typed
+///   predicate error fails the scope).
 ///
 /// Logging lives at the CALLERS so the restore record's field names can
 /// match the calling flow (`previous_error` vs `catch_error`, bd rc-zgbqq).
 async fn run_finally(
     finally_steps: Vec<BoxProcessor>,
-    finally_on_when: Option<FilterPredicate>,
+    finally_on_when: Option<PredicateSource>,
     ex: Exchange,
     previous_err: Option<CamelError>,
-) -> FinallyOutcome {
+) -> Result<FinallyOutcome, CamelError> {
     if finally_steps.is_empty() {
-        return FinallyOutcome::Completed(ex);
+        return Ok(FinallyOutcome::Completed(ex));
     }
     if let Some(on_when) = &finally_on_when
-        && !on_when(&ex)
+        && !on_when.matches(&ex).await?
     {
-        return FinallyOutcome::Completed(ex);
+        return Ok(FinallyOutcome::Completed(ex));
     }
     match run_pipeline(finally_steps, ex).await {
-        Ok(ex) => FinallyOutcome::Completed(ex),
+        Ok(ex) => Ok(FinallyOutcome::Completed(ex)),
         Err(failed) => {
             let (_, finally_err) = *failed;
-            match previous_err {
+            Ok(match previous_err {
                 Some(prev) => FinallyOutcome::Restore {
                     previous: prev,
                     finally_err,
                 },
                 None => FinallyOutcome::NoPreviousFail(finally_err),
-            }
+            })
         }
     }
 }
@@ -168,6 +192,36 @@ enum FinallyOutcome {
         previous: CamelError,
         finally_err: CamelError,
     },
+}
+
+/// Run finally after a catch-predicate failure, then surface `failure`.
+///
+/// A failed finally `on_when` predicate supersedes `failure`; a throwing
+/// finally body restores `failure` (Camel parity with the other restore
+/// flows).
+async fn run_finally_for_failure(
+    finally_steps: Vec<BoxProcessor>,
+    finally_on_when: Option<PredicateSource>,
+    ex: Exchange,
+    failure: CamelError,
+) -> CamelError {
+    match run_finally(finally_steps, finally_on_when, ex, Some(failure.clone())).await {
+        Err(pred_err) => pred_err,
+        Ok(FinallyOutcome::Restore {
+            previous,
+            finally_err,
+        }) => {
+            tracing::warn!(
+                finally_error = %finally_err,
+                previous_error = %previous,
+                "doFinally threw after catch predicate failure; restoring previous (Camel parity)"
+            );
+            previous
+        }
+        // NoPreviousFail is unreachable here (previous is Some); Completed
+        // falls through to the chained failure.
+        Ok(_) => failure,
+    }
 }
 
 impl tower::Service<Exchange> for DoTryService {
@@ -198,13 +252,16 @@ impl tower::Service<Exchange> for DoTryService {
             let try_result = run_pipeline(try_steps, exchange).await;
             match try_result {
                 Ok(ex) => match run_finally(finally_steps, finally_on_when, ex, None).await {
-                    FinallyOutcome::Completed(ex) => Ok(ex),
-                    FinallyOutcome::NoPreviousFail(fin) => {
+                    Ok(FinallyOutcome::Completed(ex)) => Ok(ex),
+                    Ok(FinallyOutcome::NoPreviousFail(fin)) => {
                         tracing::warn!(error = %fin, "doFinally threw");
                         Err(fin)
                     }
                     // Unreachable: the try-Ok flow passes no previous error.
-                    FinallyOutcome::Restore { previous, .. } => Err(previous),
+                    Ok(FinallyOutcome::Restore { previous, .. }) => Err(previous),
+                    // Failed finally `on_when` predicate: the typed error fails
+                    // the scope.
+                    Err(pred_err) => Err(pred_err),
                 },
                 Err(failed) => {
                     let (failed_ex, original_err) = *failed;
@@ -218,13 +275,42 @@ impl tower::Service<Exchange> for DoTryService {
                             steps,
                             disposition,
                         } = clause;
-                        if !matcher.matches(&original_err, &ex) {
+                        let matched = match matcher.matches(&original_err, &ex).await {
+                            Ok(m) => m,
+                            // Failed catch `when` predicate: replaces the original
+                            // error (preserved as `cause`), fails the scope after
+                            // finally runs.
+                            Err(pred_err) => {
+                                let chained = chain_predicate_error(pred_err, original_err);
+                                return Err(run_finally_for_failure(
+                                    finally_steps,
+                                    finally_on_when,
+                                    ex,
+                                    chained,
+                                )
+                                .await);
+                            }
+                        };
+                        if !matched {
                             continue;
                         }
-                        if let Some(ref on_when) = on_when
-                            && !on_when(&ex)
-                        {
-                            continue;
+                        if let Some(ref on_when) = on_when {
+                            match on_when.matches(&ex).await {
+                                Ok(true) => {}
+                                Ok(false) => continue,
+                                // Failed catch `on_when` predicate: same envelope
+                                // as a failed `when` predicate.
+                                Err(pred_err) => {
+                                    let chained = chain_predicate_error(pred_err, original_err);
+                                    return Err(run_finally_for_failure(
+                                        finally_steps,
+                                        finally_on_when,
+                                        ex,
+                                        chained,
+                                    )
+                                    .await);
+                                }
+                            }
                         }
 
                         let catch_result = run_pipeline(steps, ex.clone()).await;
@@ -262,15 +348,15 @@ impl tower::Service<Exchange> for DoTryService {
                                 )
                                 .await
                                 {
-                                    FinallyOutcome::Completed(ex) => ex,
-                                    FinallyOutcome::NoPreviousFail(fin) => {
+                                    Ok(FinallyOutcome::Completed(ex)) => ex,
+                                    Ok(FinallyOutcome::NoPreviousFail(fin)) => {
                                         tracing::warn!(error = %fin, "doFinally threw");
                                         return Err(fin);
                                     }
-                                    FinallyOutcome::Restore {
+                                    Ok(FinallyOutcome::Restore {
                                         previous,
                                         finally_err,
-                                    } => {
+                                    }) => {
                                         tracing::warn!(
                                             finally_error = %finally_err,
                                             previous_error = %previous,
@@ -278,6 +364,9 @@ impl tower::Service<Exchange> for DoTryService {
                                         );
                                         return Err(previous);
                                     }
+                                    // Failed finally `on_when` predicate: the typed
+                                    // error fails the scope.
+                                    Err(pred_err) => return Err(pred_err),
                                 };
                                 // AFTER finally has run (and had access to exception props),
                                 // apply handle_error() for Handled disposition to clear the
@@ -315,17 +404,20 @@ impl tower::Service<Exchange> for DoTryService {
                                     Some(catch_err.clone()),
                                 )
                                 .await;
-                                if let FinallyOutcome::Restore {
-                                    previous,
-                                    finally_err,
-                                } = outcome
-                                {
-                                    tracing::warn!(
-                                        catch_error = %previous,
-                                        finally_error = %finally_err,
-                                        "doFinally threw after failed catch; restoring catch error"
-                                    );
-                                    return Err(previous);
+                                match outcome {
+                                    Err(pred_err) => return Err(pred_err),
+                                    Ok(FinallyOutcome::Restore {
+                                        previous,
+                                        finally_err,
+                                    }) => {
+                                        tracing::warn!(
+                                            catch_error = %previous,
+                                            finally_error = %finally_err,
+                                            "doFinally threw after failed catch; restoring catch error"
+                                        );
+                                        return Err(previous);
+                                    }
+                                    Ok(_) => {}
                                 }
                                 Err(catch_err)
                             }
@@ -333,26 +425,28 @@ impl tower::Service<Exchange> for DoTryService {
                     }
 
                     // No catch matched. Run finally with previous=original. Propagate original.
-                    let outcome = run_finally(
+                    match run_finally(
                         finally_steps,
                         finally_on_when,
                         ex,
                         Some(original_err.clone()),
                     )
-                    .await;
-                    if let FinallyOutcome::Restore {
-                        previous,
-                        finally_err,
-                    } = outcome
+                    .await
                     {
-                        tracing::warn!(
-                            finally_error = %finally_err,
-                            previous_error = %previous,
-                            "doFinally threw; restoring previous exception (Camel parity)"
-                        );
-                        return Err(previous);
+                        Ok(FinallyOutcome::Restore {
+                            previous,
+                            finally_err,
+                        }) => {
+                            tracing::warn!(
+                                finally_error = %finally_err,
+                                previous_error = %previous,
+                                "doFinally threw; restoring previous exception (Camel parity)"
+                            );
+                            Err(previous)
+                        }
+                        Ok(_) => Err(original_err),
+                        Err(pred_err) => Err(pred_err),
                     }
-                    Err(original_err)
                 }
             }
         })
@@ -463,7 +557,7 @@ mod tests {
         });
         let mut svc = DoTryService::new(vec![try_step]);
         svc.catch_clauses.push(CatchClause {
-            matcher: CatchMatcher::Predicate(predicate),
+            matcher: CatchMatcher::Predicate(PredicateSource::Sync(predicate)),
             on_when: None,
             steps: vec![passthrough()],
             disposition: ExceptionDisposition::Handled,
@@ -486,7 +580,7 @@ mod tests {
         let mut svc = DoTryService::new(vec![try_step]);
         svc.catch_clauses.push(CatchClause {
             matcher: CatchMatcher::ByVariant(vec!["ProcessorError".into()]),
-            on_when: Some(FilterPredicate::new(|_ex| false)),
+            on_when: Some(PredicateSource::Sync(FilterPredicate::new(|_ex| false))),
             steps: vec![record_call(first_call.clone())],
             disposition: ExceptionDisposition::Handled,
         });
@@ -597,7 +691,7 @@ mod tests {
         let finally_call = Arc::new(AtomicU32::new(0));
         let mut svc = DoTryService::new(vec![passthrough()]);
         svc.finally_steps = vec![record_call(finally_call.clone())];
-        svc.finally_on_when = Some(FilterPredicate::new(|_ex| false));
+        svc.finally_on_when = Some(PredicateSource::Sync(FilterPredicate::new(|_ex| false)));
 
         let mut boxed = BoxProcessor::new(svc);
         let _ = boxed.ready().await.unwrap().call(Exchange::default()).await;
@@ -748,7 +842,7 @@ mod tests {
         let mut svc = DoTryService::new(vec![try_step]);
         // No catch clauses → original error stays.
         svc.finally_steps = vec![finally_step];
-        svc.finally_on_when = Some(FilterPredicate::new(|_ex| false));
+        svc.finally_on_when = Some(PredicateSource::Sync(FilterPredicate::new(|_ex| false)));
 
         let mut boxed = BoxProcessor::new(svc);
         let result = boxed.ready().await.unwrap().call(Exchange::default()).await;
@@ -931,5 +1025,95 @@ mod tests {
             finally.contains("fin-fail"),
             "finally_error must carry the finally error, got: {finally}"
         );
+    }
+
+    // ── Fallible predicate path (language-value-boundary task 1.4) ──
+
+    use camel_api::{ExpressionErrorClass, FilterPredicate, PredicateSource};
+
+    fn expression_failed() -> CamelError {
+        CamelError::ExpressionFailed {
+            language: "rhai".to_string(),
+            route_id: "r1".to_string(),
+            step_id: "step#0".to_string(),
+            verb: "when".to_string(),
+            class: ExpressionErrorClass::Runtime,
+            position: None,
+            conversion: None,
+            cause: None,
+        }
+    }
+
+    fn async_err_predicate(err: CamelError) -> PredicateSource {
+        PredicateSource::Async(Arc::new(move |_: &Exchange| {
+            let err = err.clone();
+            Box::pin(async move { Err(err) }) as camel_api::BoxBoolFuture
+        }))
+    }
+
+    #[tokio::test]
+    async fn catch_when_predicate_error_chains_original() {
+        let try_step = always_fail(CamelError::ProcessorError("boom".into()));
+        let mut svc = DoTryService::new(vec![try_step]);
+        svc.catch_clauses.push(CatchClause {
+            matcher: CatchMatcher::Predicate(async_err_predicate(expression_failed())),
+            on_when: None,
+            steps: vec![passthrough()],
+            disposition: ExceptionDisposition::Handled,
+        });
+
+        let mut boxed = BoxProcessor::new(svc);
+        let result = boxed.ready().await.unwrap().call(Exchange::default()).await;
+        match result {
+            Err(CamelError::ExpressionFailed {
+                cause: Some(cause), ..
+            }) => {
+                assert!(
+                    cause.to_string().contains("boom"),
+                    "cause must carry the original error, got: {cause}"
+                );
+            }
+            other => panic!("expected Err(ExpressionFailed) with chained cause, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn catch_on_when_predicate_error_chains_original() {
+        let try_step = always_fail(CamelError::ProcessorError("boom".into()));
+        let mut svc = DoTryService::new(vec![try_step]);
+        svc.catch_clauses.push(CatchClause {
+            matcher: CatchMatcher::ByVariant(vec!["*".into()]),
+            on_when: Some(async_err_predicate(expression_failed())),
+            steps: vec![passthrough()],
+            disposition: ExceptionDisposition::Handled,
+        });
+
+        let mut boxed = BoxProcessor::new(svc);
+        let result = boxed.ready().await.unwrap().call(Exchange::default()).await;
+        match result {
+            Err(CamelError::ExpressionFailed {
+                cause: Some(cause), ..
+            }) => {
+                assert!(
+                    cause.to_string().contains("boom"),
+                    "cause must carry the original error, got: {cause}"
+                );
+            }
+            other => panic!("expected Err(ExpressionFailed) with chained cause, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn finally_on_when_predicate_error_fails() {
+        let mut svc = DoTryService::new(vec![passthrough()]);
+        svc.finally_steps = vec![passthrough()];
+        svc.finally_on_when = Some(async_err_predicate(expression_failed()));
+
+        let mut boxed = BoxProcessor::new(svc);
+        let result = boxed.ready().await.unwrap().call(Exchange::default()).await;
+        match result {
+            Err(CamelError::ExpressionFailed { .. }) => {}
+            other => panic!("expected Err(ExpressionFailed), got {other:?}"),
+        }
     }
 }

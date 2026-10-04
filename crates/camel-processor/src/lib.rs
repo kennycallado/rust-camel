@@ -63,7 +63,7 @@ pub use choice::{ChoiceSegment, ChoiceService, WhenClause, WhenClauseSegment};
 pub use circuit_breaker::{
     CircuitBreakerDecision, CircuitBreakerGate, CircuitBreakerLayer, CircuitBreakerService,
 };
-pub use claim_check::{ClaimCheckOp, ClaimCheckService, KeyExpression};
+pub use claim_check::{ClaimCheckOp, ClaimCheckService, ClaimKeySource};
 pub use content_enricher::{EnrichService, PollEnrichService};
 pub use content_negotiation::{ContentNegotiationCheck, ContentNegotiationProcessor};
 pub use convert_body::ConvertBodyTo;
@@ -88,11 +88,11 @@ pub use error_handler::{
     invoke_processor,
 };
 pub use filter::{FilterSegment, FilterService};
-pub use idempotent_consumer::{IdempotentConsumerSegment, MessageIdExpression};
+pub use idempotent_consumer::{IdempotentConsumerSegment, MessageIdSource};
 pub use intercept_compose::compose_divert;
 pub use json_schema_validate::JsonSchemaValidateService;
 pub use load_balancer::{LoadBalanceSegment, LoadBalancerService};
-pub use log::{LogLevel, LogProcessor};
+pub use log::{DynamicLog, LogLevel, LogProcessor};
 pub use loop_eip::{CAMEL_LOOP_INDEX, CAMEL_LOOP_SIZE, LoopSegment, LoopService};
 pub use map_body::{MapBody, MapBodyLayer};
 pub use marshal::{MarshalService, UnmarshalService};
@@ -107,7 +107,7 @@ pub use security_policy_layer::{SecurityPolicyLayer, SecurityPolicyService};
 pub use set_body::{SetBody, SetBodyLayer};
 pub use set_header::{SetHeader, SetHeaderIfAbsent, SetHeaderLayer};
 pub use set_property::{SetProperty, SetPropertyLayer};
-pub use sort::{SortExpression, SortKey, SortService};
+pub use sort::{SortKey, SortKeySource, SortService};
 pub use split_segment::SplitSegment;
 pub use splitter::SplitterService;
 pub use stream_cache::StreamCacheService;

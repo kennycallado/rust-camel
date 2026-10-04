@@ -214,18 +214,35 @@ fn to_f64(v: &Value) -> Result<f64, LanguageError> {
     match v.as_f64() {
         Some(n) => Ok(n),
         None => {
-            // Attempt string-to-number coercion for comparisons like "5" == 5
+            // Attempt string-to-number coercion for comparisons like "5" == 5.
+            // Redacted: type names only, never operand values (change
+            // `language-value-boundary`).
             match v.as_str() {
-                Some(s) => s.parse::<f64>().map_err(|_| {
-                    LanguageError::EvalError(format!(
-                        "cannot coerce string \"{s}\" to number for comparison"
-                    ))
+                Some(s) => s.parse::<f64>().map_err(|_| LanguageError::TypeMismatch {
+                    expected: "number".to_string(),
+                    actual: "string".to_string(),
+                    position: None,
                 }),
-                None => Err(LanguageError::EvalError(format!(
-                    "expected number, got {v}"
-                ))),
+                None => Err(LanguageError::TypeMismatch {
+                    expected: "number".to_string(),
+                    actual: value_type_name(v).to_string(),
+                    position: None,
+                }),
             }
         }
+    }
+}
+
+/// Type name of a [`Value`] for `TypeMismatch` diagnostics. Type names only —
+/// never runtime values.
+pub(crate) fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::String(_) => "string",
+        Value::Number(_) => "number",
+        Value::Bool(_) => "bool",
+        Value::Null => "null",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 

@@ -4,6 +4,7 @@
 //! `ThrottleBuilder`, `LoopBuilder`, `LoadBalancerBuilder`, `OnExceptionBuilder`.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use camel_api::DelayConfig;
 use camel_api::aggregator::{
@@ -12,13 +13,13 @@ use camel_api::aggregator::{
 use camel_api::body::Body;
 use camel_api::body_converter::BodyType;
 use camel_api::circuit_breaker::CircuitBreakerConfig;
-use camel_api::dynamic_router::{DynamicRouterConfig, RouterExpression};
+use camel_api::dynamic_router::DynamicRouterConfig;
 use camel_api::error_handler::{ErrorHandlerConfig, RedeliveryPolicy};
 use camel_api::load_balancer::LoadBalancerConfig;
 use camel_api::loop_eip::{LoopConfig, LoopMode};
 use camel_api::multicast::{MulticastConfig, MulticastStrategy};
-use camel_api::recipient_list::{RecipientListConfig, RecipientListExpression};
-use camel_api::routing_slip::{RoutingSlipConfig, RoutingSlipExpression};
+use camel_api::recipient_list::RecipientListConfig;
+use camel_api::routing_slip::RoutingSlipConfig;
 use camel_api::splitter::SplitterConfig;
 use camel_api::throttler::{ThrottleStrategy, ThrottlerConfig};
 use camel_api::{
@@ -33,7 +34,7 @@ use camel_api::{
 use camel_component_api::ConcurrencyModel;
 use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition, WhenStep};
 use camel_processor::{
-    ConvertBodyTo, DynamicSetHeader, LogLevel, MapBody, MarshalService, SetBody, SetHeader,
+    ConvertBodyTo, DynamicSetHeader, LogLevel, MapBody, MarshalService, SetHeader,
     StreamCacheService, UnmarshalService, builtin_data_format,
 };
 
@@ -99,7 +100,16 @@ pub trait StepAccumulator: Sized {
         B: Into<Body> + Clone + Send + Sync + 'static,
     {
         let body: Body = body.into();
-        let svc = SetBody::new(IdentityProcessor, move |_ex: &Exchange| body.clone());
+        // Static Body (may be Bytes/Stream/Xml): assign directly. The
+        // `SetBody` service is reserved for `Value`-shaped sources —
+        // arbitrary Body variants do not round-trip through `Value`.
+        let svc = ProcessorFn::new(move |mut ex: Exchange| {
+            let body = body.clone();
+            async move {
+                ex.input.body = body;
+                Ok(ex)
+            }
+        });
         self.steps_mut()
             .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
                 svc,
@@ -122,7 +132,15 @@ pub trait StepAccumulator: Sized {
     where
         F: Fn(&Exchange) -> Body + Clone + Send + Sync + 'static,
     {
-        let svc = SetBody::new(IdentityProcessor, expr);
+        // Body-producing closure: assign directly (see `set_body` for why
+        // this no longer routes through the Value-shaped `SetBody`).
+        let svc = ProcessorFn::new(move |mut ex: Exchange| {
+            let body = expr(&ex);
+            async move {
+                ex.input.body = body;
+                Ok(ex)
+            }
+        });
         self.steps_mut()
             .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
                 svc,
@@ -134,7 +152,11 @@ pub trait StepAccumulator: Sized {
     where
         F: Fn(&Exchange) -> Value + Clone + Send + Sync + 'static,
     {
-        let svc = DynamicSetHeader::new(IdentityProcessor, key, expr);
+        let svc = DynamicSetHeader::new(
+            IdentityProcessor,
+            key,
+            camel_api::ValueSource::Sync(Arc::new(expr)),
+        );
         self.steps_mut()
             .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
                 svc,
@@ -688,7 +710,9 @@ impl RouteBuilder {
     {
         LoopBuilder {
             parent: self,
-            config: LoopConfig::new(LoopMode::While(camel_api::FilterPredicate::new(predicate))),
+            config: LoopConfig::new(LoopMode::While(camel_api::PredicateSource::Sync(
+                camel_api::FilterPredicate::new(predicate),
+            ))),
             steps: vec![],
         }
     }
@@ -709,19 +733,21 @@ impl RouteBuilder {
     /// Add a dynamic router step that routes exchanges dynamically based on
     /// expression evaluation at runtime.
     ///
-    /// The expression receives the exchange and returns `Some(uri)` to route to
-    /// the next endpoint, or `None` to stop routing.
+    /// The expression source resolves each exchange to `Some(uri)` to route
+    /// to the next endpoint, or `None` to stop routing. Language-backed
+    /// fallible sources are built with `TargetSource::Async`; evaluation
+    /// failures fail the step instead of silently stopping the route.
     ///
     /// # Example
     /// ```ignore
     /// RouteBuilder::from("timer:tick")
     ///     .route_id("test-route")
-    ///     .dynamic_router(|ex| {
+    ///     .dynamic_router(TargetSource::Sync(Arc::new(|ex| {
     ///         ex.input.header("dest").and_then(|v| v.as_str().map(|s| s.to_string()))
-    ///     })
+    ///     })))
     ///     .build()
     /// ```
-    pub fn dynamic_router(self, expression: RouterExpression) -> Self {
+    pub fn dynamic_router(self, expression: impl Into<camel_api::TargetSource>) -> Self {
         self.dynamic_router_with_config(DynamicRouterConfig::new(expression))
     }
 
@@ -733,7 +759,7 @@ impl RouteBuilder {
         self
     }
 
-    pub fn routing_slip(self, expression: RoutingSlipExpression) -> Self {
+    pub fn routing_slip(self, expression: impl Into<camel_api::TargetSource>) -> Self {
         self.routing_slip_with_config(RoutingSlipConfig::new(expression))
     }
 
@@ -742,7 +768,7 @@ impl RouteBuilder {
         self
     }
 
-    pub fn recipient_list(self, expression: RecipientListExpression) -> Self {
+    pub fn recipient_list(self, expression: impl Into<camel_api::RecipientSource>) -> Self {
         self.recipient_list_with_config(RecipientListConfig::new(expression))
     }
 
@@ -1647,7 +1673,9 @@ impl LoopBuilder {
     {
         LoopInLoopBuilder {
             parent: self,
-            config: LoopConfig::new(LoopMode::While(camel_api::FilterPredicate::new(predicate))),
+            config: LoopConfig::new(LoopMode::While(camel_api::PredicateSource::Sync(
+                camel_api::FilterPredicate::new(predicate),
+            ))),
             steps: vec![],
         }
     }
@@ -3041,7 +3069,9 @@ mod tests {
     fn test_dynamic_router_builder() {
         let definition = RouteBuilder::from("timer:tick")
             .route_id("test-route")
-            .dynamic_router(Arc::new(|_| Some("mock:result".to_string())))
+            .dynamic_router(camel_api::TargetSource::Sync(Arc::new(|_| {
+                Some("mock:result".to_string())
+            })))
             .build()
             .unwrap();
 
@@ -3054,9 +3084,11 @@ mod tests {
 
     #[test]
     fn test_dynamic_router_builder_with_config() {
-        let config = DynamicRouterConfig::new(Arc::new(|_| Some("mock:a".to_string())))
-            .max_iterations(100)
-            .cache_size(500);
+        let config = DynamicRouterConfig::new(camel_api::TargetSource::Sync(Arc::new(|_| {
+            Some("mock:a".to_string())
+        })))
+        .max_iterations(100)
+        .cache_size(500);
 
         let definition = RouteBuilder::from("timer:tick")
             .route_id("test-route")
@@ -3078,7 +3110,9 @@ mod tests {
         // Steps after dynamic_router() are added to the outer pipeline.
         let definition = RouteBuilder::from("timer:tick")
             .route_id("test-route")
-            .dynamic_router(Arc::new(|_| Some("mock:inner".to_string())))
+            .dynamic_router(camel_api::TargetSource::Sync(Arc::new(|_| {
+                Some("mock:inner".to_string())
+            })))
             .to("mock:outer")
             .build()
             .unwrap();
@@ -3093,9 +3127,9 @@ mod tests {
 
     #[test]
     fn routing_slip_builder_creates_step() {
-        use camel_api::RoutingSlipExpression;
+        use camel_api::TargetSource;
 
-        let expression: RoutingSlipExpression = Arc::new(|_| Some("direct:a,direct:b".to_string()));
+        let expression = TargetSource::Sync(Arc::new(|_| Some("direct:a,direct:b".to_string())));
 
         let route = RouteBuilder::from("direct:start")
             .route_id("routing-slip-test")
@@ -3113,10 +3147,12 @@ mod tests {
     fn routing_slip_with_config_builder_creates_step() {
         use camel_api::RoutingSlipConfig;
 
-        let config = RoutingSlipConfig::new(Arc::new(|_| Some("mock:a".to_string())))
-            .uri_delimiter("|")
-            .cache_size(50)
-            .ignore_invalid_endpoints(true);
+        let config = RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(|_| {
+            Some("mock:a".to_string())
+        })))
+        .uri_delimiter("|")
+        .cache_size(50)
+        .ignore_invalid_endpoints(true);
 
         let route = RouteBuilder::from("direct:start")
             .route_id("routing-slip-config-test")
@@ -3225,7 +3261,9 @@ mod tests {
     fn test_builder_recipient_list_creates_step() {
         let route = RouteBuilder::from("direct:start")
             .route_id("recipient-list-test")
-            .recipient_list(Arc::new(|_| "direct:a,direct:b".to_string()))
+            .recipient_list(camel_api::RecipientSource::Sync(Arc::new(|_| {
+                "direct:a,direct:b".to_string()
+            })))
             .build()
             .unwrap();
 
@@ -3237,7 +3275,9 @@ mod tests {
 
     #[test]
     fn test_builder_recipient_list_with_config_creates_step() {
-        let config = RecipientListConfig::new(Arc::new(|_| "mock:a".to_string()));
+        let config = RecipientListConfig::new(camel_api::RecipientSource::Sync(Arc::new(|_| {
+            "mock:a".to_string()
+        })));
 
         let route = RouteBuilder::from("direct:start")
             .route_id("recipient-list-config-test")
@@ -4359,7 +4399,9 @@ mod tests {
     fn test_build_canonical_rejects_dynamic_router_step() {
         let err = RouteBuilder::from("direct:start")
             .route_id("canonical-dyn-router")
-            .dynamic_router(Arc::new(|_| Some("mock:a".to_string())))
+            .dynamic_router(camel_api::TargetSource::Sync(Arc::new(|_| {
+                Some("mock:a".to_string())
+            })))
             .build_canonical()
             .unwrap_err();
 
@@ -4370,7 +4412,9 @@ mod tests {
     fn test_build_canonical_rejects_routing_slip_step() {
         let err = RouteBuilder::from("direct:start")
             .route_id("canonical-routing-slip")
-            .routing_slip(Arc::new(|_| Some("mock:a".to_string())))
+            .routing_slip(camel_api::TargetSource::Sync(Arc::new(|_| {
+                Some("mock:a".to_string())
+            })))
             .build_canonical()
             .unwrap_err();
 
@@ -4381,7 +4425,9 @@ mod tests {
     fn test_build_canonical_rejects_recipient_list_step() {
         let err = RouteBuilder::from("direct:start")
             .route_id("canonical-recipient")
-            .recipient_list(Arc::new(|_| "mock:a".to_string()))
+            .recipient_list(camel_api::RecipientSource::Sync(Arc::new(|_| {
+                "mock:a".to_string()
+            })))
             .build_canonical()
             .unwrap_err();
 

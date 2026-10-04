@@ -4,11 +4,12 @@
 //! with the exchange state intact. See ADR-0025 §3.
 
 use crate::do_try::CatchMatcher;
+use crate::do_try::chain_predicate_error;
 use crate::error_handler::record_span_error;
 use camel_api::error_handler::ExceptionDisposition;
 use camel_api::outcome_pipeline::OutcomePipeline;
 use camel_api::pipeline_outcome::PipelineOutcome;
-use camel_api::{CamelError, Exchange, FilterPredicate};
+use camel_api::{CamelError, Exchange, PredicateSource};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -18,7 +19,7 @@ use std::pin::Pin;
 #[derive(Clone)]
 pub struct CatchClauseSegment {
     pub matcher: CatchMatcher,
-    pub on_when: Option<FilterPredicate>,
+    pub on_when: Option<PredicateSource>,
     pub body: camel_api::OutcomeSegment,
     pub disposition: ExceptionDisposition,
 }
@@ -26,7 +27,7 @@ pub struct CatchClauseSegment {
 /// Compilable segment for a `doFinally` clause within a `DoTrySegment`.
 #[derive(Clone)]
 pub struct FinallyClauseSegment {
-    pub on_when: Option<FilterPredicate>,
+    pub on_when: Option<PredicateSource>,
     pub body: camel_api::OutcomeSegment,
 }
 
@@ -58,6 +59,9 @@ impl Clone for DoTrySegment {
 enum FinallyOutcome {
     Stopped(Box<Exchange>),
     Failed(CamelError),
+    /// The finally `on_when` predicate itself failed; the typed error fails
+    /// the segment.
+    PredicateFailed(CamelError),
 }
 
 /// Run the finally body if present and on_when permits.
@@ -74,13 +78,41 @@ async fn run_finally_body(
     let Some(f) = finally.as_mut() else {
         return Ok(ex);
     };
-    if !f.on_when.as_ref().map(|p| p(&ex)).unwrap_or(true) {
-        return Ok(ex);
+    if let Some(on_when) = &f.on_when {
+        match on_when.matches(&ex).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(ex),
+            Err(err) => return Err(FinallyOutcome::PredicateFailed(err)),
+        }
     }
     match f.body.run(ex).await {
         PipelineOutcome::Completed(e) => Ok(e),
         PipelineOutcome::Stopped(e) => Err(FinallyOutcome::Stopped(Box::new(e))),
         PipelineOutcome::Failed(e) => Err(FinallyOutcome::Failed(e)),
+    }
+}
+
+/// Surface a failed catch-predicate error after running finally.
+///
+/// The chained predicate error becomes the main failure (Camel parity: a
+/// throwing finally body restores it; Stop in finally still stops the outer
+/// route; a failed finally `on_when` predicate supersedes it).
+async fn fail_after_predicate_error(
+    finally: &mut Option<FinallyClauseSegment>,
+    ex: Exchange,
+    chained: CamelError,
+) -> PipelineOutcome {
+    match run_finally_body(finally, ex).await {
+        Ok(_) => PipelineOutcome::Failed(chained),
+        Err(FinallyOutcome::Stopped(e)) => PipelineOutcome::Stopped(*e),
+        Err(FinallyOutcome::Failed(_finally_err)) => {
+            tracing::warn!(
+                error = %chained,
+                "doFinally threw after catch predicate failure; restoring chained error"
+            );
+            PipelineOutcome::Failed(chained)
+        }
+        Err(FinallyOutcome::PredicateFailed(pred_err)) => PipelineOutcome::Failed(pred_err),
     }
 }
 
@@ -107,74 +139,103 @@ impl OutcomePipeline for DoTrySegment {
                     // 2. try failed — try each catch in order. Walk the catch
                     // chain starting from the failed try-exchange. On the first
                     // matching catch whose `on_when` is true (or unset), run it.
+                    // A failed catch `when`/`on_when` predicate replaces the
+                    // original error (preserved as `cause`) and fails the scope.
                     let mut current_ex = exchange_for_unmatched;
                     current_ex.set_error(err.clone());
                     for catch in self.catches.iter_mut() {
-                        if catch.matcher.matches(&err, &current_ex)
-                            && catch
-                                .on_when
-                                .as_ref()
-                                .map(|p| p(&current_ex))
-                                .unwrap_or(true)
-                        {
-                            match catch.body.run(current_ex).await {
-                                // Stop in catch: skip finally AND outer route halts.
-                                PipelineOutcome::Stopped(stopped_ex) => {
-                                    return PipelineOutcome::Stopped(stopped_ex);
+                        let matched = match catch.matcher.matches(&err, &current_ex).await {
+                            Ok(m) => m,
+                            Err(pred_err) => {
+                                let chained = chain_predicate_error(pred_err, err);
+                                return fail_after_predicate_error(
+                                    &mut self.finally,
+                                    current_ex,
+                                    chained,
+                                )
+                                .await;
+                            }
+                        };
+                        if !matched {
+                            continue;
+                        }
+                        if let Some(on_when) = &catch.on_when {
+                            match on_when.matches(&current_ex).await {
+                                Ok(true) => {}
+                                Ok(false) => continue,
+                                Err(pred_err) => {
+                                    let chained = chain_predicate_error(pred_err, err);
+                                    return fail_after_predicate_error(
+                                        &mut self.finally,
+                                        current_ex,
+                                        chained,
+                                    )
+                                    .await;
                                 }
-                                // Catch handled — exit catch chain with this exchange.
-                                PipelineOutcome::Completed(next) => {
-                                    match catch.disposition {
-                                        ExceptionDisposition::Handled => {
-                                            current_ex = next;
-                                            break;
-                                        }
-                                        ExceptionDisposition::Continued => {
-                                            current_ex = next;
-                                            break;
-                                        }
-                                        // Propagate and any future variant run finally then
-                                        // surface the original error (fail-closed).
-                                        _ => {
-                                            match run_finally_body(&mut self.finally, next).await {
-                                                Ok(_) => {}
-                                                Err(FinallyOutcome::Stopped(e)) => {
-                                                    return PipelineOutcome::Stopped(*e);
-                                                }
-                                                Err(FinallyOutcome::Failed(_finally_err)) => {
-                                                    tracing::warn!(
-                                                        error = %err,
-                                                        "doFinally threw during Propagate; \
-                                                         restoring original"
-                                                    );
-                                                    return PipelineOutcome::Failed(err);
-                                                }
+                            }
+                        }
+                        match catch.body.run(current_ex).await {
+                            // Stop in catch: skip finally AND outer route halts.
+                            PipelineOutcome::Stopped(stopped_ex) => {
+                                return PipelineOutcome::Stopped(stopped_ex);
+                            }
+                            // Catch handled — exit catch chain with this exchange.
+                            PipelineOutcome::Completed(next) => {
+                                match catch.disposition {
+                                    ExceptionDisposition::Handled => {
+                                        current_ex = next;
+                                        break;
+                                    }
+                                    ExceptionDisposition::Continued => {
+                                        current_ex = next;
+                                        break;
+                                    }
+                                    // Propagate and any future variant run finally then
+                                    // surface the original error (fail-closed).
+                                    _ => {
+                                        match run_finally_body(&mut self.finally, next).await {
+                                            Ok(_) => {}
+                                            Err(FinallyOutcome::Stopped(e)) => {
+                                                return PipelineOutcome::Stopped(*e);
                                             }
-                                            return PipelineOutcome::Failed(err);
+                                            Err(FinallyOutcome::Failed(_finally_err)) => {
+                                                tracing::warn!(
+                                                    error = %err,
+                                                    "doFinally threw during Propagate; \
+                                                     restoring original"
+                                                );
+                                                return PipelineOutcome::Failed(err);
+                                            }
+                                            // Failed finally `on_when` predicate:
+                                            // the typed error fails the segment.
+                                            Err(FinallyOutcome::PredicateFailed(pred_err)) => {
+                                                return PipelineOutcome::Failed(pred_err);
+                                            }
                                         }
+                                        return PipelineOutcome::Failed(err);
                                     }
                                 }
-                                // Catch-body Failed: surface THAT error to outer
-                                // route. Per ADR-0025 invariant #4 ("doTry is a
-                                // local error-handler island"), a failing catch
-                                // body propagates as Failed — it does NOT re-enter
-                                // the catch chain (no recursive catch-of-catch in
-                                // Camel). Skip remaining catches and finally.
-                                PipelineOutcome::Failed(catch_err) => {
-                                    // Sealed failure envelope: the catch error
-                                    // stays the main error (returned below);
-                                    // the original try error is surfaced
-                                    // through the unconditional warn record
-                                    // and, when a span is active, the span
-                                    // error record. No new span is created.
-                                    tracing::warn!(
-                                        original_error = %err,
-                                        catch_error = %catch_err,
-                                        "do_try catch block failed; catch error supersedes original"
-                                    );
-                                    record_span_error(&catch_err);
-                                    return PipelineOutcome::Failed(catch_err);
-                                }
+                            }
+                            // Catch-body Failed: surface THAT error to outer
+                            // route. Per ADR-0025 invariant #4 ("doTry is a
+                            // local error-handler island"), a failing catch
+                            // body propagates as Failed — it does NOT re-enter
+                            // the catch chain (no recursive catch-of-catch in
+                            // Camel). Skip remaining catches and finally.
+                            PipelineOutcome::Failed(catch_err) => {
+                                // Sealed failure envelope: the catch error
+                                // stays the main error (returned below);
+                                // the original try error is surfaced
+                                // through the unconditional warn record
+                                // and, when a span is active, the span
+                                // error record. No new span is created.
+                                tracing::warn!(
+                                    original_error = %err,
+                                    catch_error = %catch_err,
+                                    "do_try catch block failed; catch error supersedes original"
+                                );
+                                record_span_error(&catch_err);
+                                return PipelineOutcome::Failed(catch_err);
                             }
                         }
                     }
@@ -193,6 +254,9 @@ impl OutcomePipeline for DoTrySegment {
                     );
                     PipelineOutcome::Failed(finally_err)
                 }
+                // Failed finally `on_when` predicate: the typed error fails
+                // the segment.
+                Err(FinallyOutcome::PredicateFailed(pred_err)) => PipelineOutcome::Failed(pred_err),
             }
         })
     }
@@ -422,7 +486,7 @@ mod tests {
             catches: vec![
                 CatchClauseSegment {
                     matcher: CatchMatcher::ByVariant(vec!["Io".into()]),
-                    on_when: Some(FilterPredicate::new(|_ex| false)),
+                    on_when: Some(PredicateSource::Sync(FilterPredicate::new(|_ex| false))),
                     body: seg_record(first_call.clone()),
                     disposition: ExceptionDisposition::Handled,
                 },
@@ -463,7 +527,7 @@ mod tests {
             try_body: seg_complete(),
             catches: vec![],
             finally: Some(FinallyClauseSegment {
-                on_when: Some(FilterPredicate::new(|_ex| false)),
+                on_when: Some(PredicateSource::Sync(FilterPredicate::new(|_ex| false))),
                 body: seg_record(finally_call.clone()),
             }),
         };
@@ -562,6 +626,54 @@ mod tests {
         assert!(
             catch.contains("catch-fail"),
             "catch_error must carry the catch error, got: {catch}"
+        );
+    }
+
+    // ── Fallible predicate path (language-value-boundary task 1.4) ──
+
+    use camel_api::{ExpressionErrorClass, FilterPredicate, PredicateSource};
+
+    fn expression_failed() -> CamelError {
+        CamelError::ExpressionFailed {
+            language: "rhai".to_string(),
+            route_id: "r1".to_string(),
+            step_id: "step#0".to_string(),
+            verb: "on_when".to_string(),
+            class: ExpressionErrorClass::Runtime,
+            position: None,
+            conversion: None,
+            cause: None,
+        }
+    }
+
+    fn async_err_predicate(err: CamelError) -> PredicateSource {
+        PredicateSource::Async(Arc::new(move |_: &Exchange| {
+            let err = err.clone();
+            Box::pin(async move { Err(err) }) as camel_api::BoxBoolFuture
+        }))
+    }
+
+    #[tokio::test]
+    async fn finally_on_when_predicate_error_fails_segment() {
+        let finally_call = Arc::new(AtomicU32::new(0));
+        let mut seg = DoTrySegment {
+            try_body: seg_complete(),
+            catches: vec![],
+            finally: Some(FinallyClauseSegment {
+                on_when: Some(async_err_predicate(expression_failed())),
+                body: seg_record(finally_call.clone()),
+            }),
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        match result {
+            PipelineOutcome::Failed(CamelError::ExpressionFailed { .. }) => {}
+            other => panic!("expected Failed(ExpressionFailed), got {other:?}"),
+        }
+        assert_eq!(
+            finally_call.load(Ordering::SeqCst),
+            0,
+            "finally body must not run when its on_when predicate errors"
         );
     }
 }

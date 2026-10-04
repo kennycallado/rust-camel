@@ -1,0 +1,11 @@
+# clippy::result_large_err threshold (default 128 bytes).
+#
+# CamelError is the framework-wide error enum and carries typed diagnostic
+# payloads (ADR-0049 contract enums; language-value-boundary change added
+# `ExpressionFailed` with language/route/step metadata). Rich typed errors are
+# intentional here: boxing the payload would break matchability contracts, and
+# per-site `#[allow]`s would multiply across every crate returning
+# `Result<_, CamelError>`. The threshold is raised to 200 so the enum's
+# diagnostic payload (~176 bytes) stays lint-clean while the lint remains
+# active for anything larger.
+large-error-threshold = 200

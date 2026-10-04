@@ -32,7 +32,7 @@ use camel_api::cache::{CacheEntry, CacheRepository, ContentType};
 use camel_api::{CamelError, Exchange, OutcomePipeline, OutcomeSegment, PipelineOutcome};
 use camel_component_api::RuntimeObservability;
 
-use crate::MessageIdExpression;
+use crate::MessageIdSource;
 
 // ── Singleflight miss coalescing (cache-admin task 2.4) ──
 
@@ -171,7 +171,7 @@ pub struct CacheService {
     repository: Arc<dyn CacheRepository>,
     /// Cached `repository.name()` for OTel span tagging (Task 3.3).
     repository_name: String,
-    key_expr: MessageIdExpression,
+    key_expr: MessageIdSource,
     ttl: Option<Duration>,
     max_entry_bytes: usize,
     on_miss: OutcomeSegment,
@@ -190,7 +190,7 @@ impl CacheService {
     /// in sync with the resolved backend.
     pub fn new(
         repository: Arc<dyn CacheRepository>,
-        key_expr: MessageIdExpression,
+        key_expr: MessageIdSource,
         ttl: Option<Duration>,
         max_entry_bytes: usize,
         on_miss: OutcomeSegment,
@@ -283,7 +283,7 @@ impl Clone for CacheService {
         Self {
             repository: Arc::clone(&self.repository),
             repository_name: self.repository_name.clone(),
-            key_expr: Arc::clone(&self.key_expr),
+            key_expr: self.key_expr.clone(),
             ttl: self.ttl,
             max_entry_bytes: self.max_entry_bytes,
             on_miss: self.on_miss.clone(),
@@ -304,10 +304,12 @@ impl OutcomePipeline for CacheService {
         exchange: Exchange,
     ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
         Box::pin(async move {
-            // 1. Evaluate key. None → not cacheable, bypass straight to on_miss.
-            let key = match (self.key_expr)(&exchange) {
-                Some(k) => k,
-                None => return self.on_miss.run(exchange).await,
+            // 1. Evaluate key. None → not cacheable, bypass straight to
+            //    on_miss; a failed evaluation fails the step (contract C1).
+            let key = match self.key_expr.message_id(&exchange).await {
+                Ok(Some(k)) => k,
+                Ok(None) => return self.on_miss.run(exchange).await,
+                Err(e) => return PipelineOutcome::Failed(e),
             };
 
             // 2. Lookup (contract C1: propagate Err, never treat as miss).
@@ -635,9 +637,9 @@ pub const CAMEL_CACHE_INVALIDATED_COUNT: &str = "CamelCacheInvalidatedCount";
 #[derive(Clone)]
 pub enum CacheInvalidateTarget {
     /// Invalidate the single entry under the resolved key.
-    Key(MessageIdExpression),
+    Key(MessageIdSource),
     /// Invalidate every entry whose key starts with the resolved prefix.
-    Prefix(MessageIdExpression),
+    Prefix(MessageIdSource),
 }
 
 /// Outcome-aware segment that invalidates a single cache entry or a namespace.
@@ -700,9 +702,10 @@ impl OutcomePipeline for CacheInvalidateService {
         Box::pin(async move {
             match self.target.clone() {
                 CacheInvalidateTarget::Key(key_expr) => {
-                    let key = match key_expr(&exchange) {
-                        Some(k) => k,
-                        None => return PipelineOutcome::Completed(exchange),
+                    let key = match key_expr.message_id(&exchange).await {
+                        Ok(Some(k)) => k,
+                        Ok(None) => return PipelineOutcome::Completed(exchange),
+                        Err(e) => return PipelineOutcome::Failed(e),
                     };
                     match self.repository.invalidate(&key).await {
                         Err(e) => PipelineOutcome::Failed(e),
@@ -723,9 +726,10 @@ impl OutcomePipeline for CacheInvalidateService {
                     }
                 }
                 CacheInvalidateTarget::Prefix(prefix_expr) => {
-                    let prefix = match prefix_expr(&exchange) {
-                        Some(p) => p,
-                        None => return PipelineOutcome::Completed(exchange),
+                    let prefix = match prefix_expr.message_id(&exchange).await {
+                        Ok(Some(p)) => p,
+                        Ok(None) => return PipelineOutcome::Completed(exchange),
+                        Err(e) => return PipelineOutcome::Failed(e),
                     };
                     match self.repository.invalidate_prefix(&prefix).await {
                         Err(e) => PipelineOutcome::Failed(e),
@@ -809,7 +813,7 @@ impl PeekStaleMissPolicy {
 ///       `Completed(exchange)` so `choice` can branch on `CamelCachePeekHit`.
 pub struct CachePeekStaleService {
     repository: Arc<dyn CacheRepository>,
-    key_expr: MessageIdExpression,
+    key_expr: MessageIdSource,
     miss_policy: PeekStaleMissPolicy,
     rt: Arc<dyn RuntimeObservability>,
     repository_name: String,
@@ -818,7 +822,7 @@ pub struct CachePeekStaleService {
 impl CachePeekStaleService {
     pub fn new(
         repository: Arc<dyn CacheRepository>,
-        key_expr: MessageIdExpression,
+        key_expr: MessageIdSource,
         miss_policy: PeekStaleMissPolicy,
         rt: Arc<dyn RuntimeObservability>,
     ) -> Self {
@@ -837,7 +841,7 @@ impl Clone for CachePeekStaleService {
     fn clone(&self) -> Self {
         Self {
             repository: Arc::clone(&self.repository),
-            key_expr: Arc::clone(&self.key_expr),
+            key_expr: self.key_expr.clone(),
             miss_policy: self.miss_policy,
             rt: Arc::clone(&self.rt),
             repository_name: self.repository_name.clone(),
@@ -862,9 +866,9 @@ impl OutcomePipeline for CachePeekStaleService {
         exchange: Exchange,
     ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
         Box::pin(async move {
-            let key = match (self.key_expr)(&exchange) {
-                Some(k) => k,
-                None => {
+            let key = match self.key_expr.message_id(&exchange).await {
+                Ok(Some(k)) => k,
+                Ok(None) => {
                     tracing::debug!(
                         step = "cache_peek_stale",
                         repository = %self.repository.name(),
@@ -872,6 +876,7 @@ impl OutcomePipeline for CachePeekStaleService {
                     );
                     return PipelineOutcome::Stopped(exchange);
                 }
+                Err(e) => return PipelineOutcome::Failed(e),
             };
             match self.repository.peek_stale(&key).await {
                 Err(e) => PipelineOutcome::Failed(e),
@@ -1313,22 +1318,22 @@ mod tests {
 
     // ── Builders ──
 
-    fn fixed_key() -> MessageIdExpression {
-        Arc::new(|_| Some("cache-key".to_string()))
+    fn fixed_key() -> MessageIdSource {
+        MessageIdSource::Sync(Arc::new(|_| Some("cache-key".to_string())))
     }
 
-    fn none_key() -> MessageIdExpression {
-        Arc::new(|_| None)
+    fn none_key() -> MessageIdSource {
+        MessageIdSource::Sync(Arc::new(|_| None))
     }
 
-    fn prefix_key() -> MessageIdExpression {
-        Arc::new(|_| Some("ns:".to_string()))
+    fn prefix_key() -> MessageIdSource {
+        MessageIdSource::Sync(Arc::new(|_| Some("ns:".to_string())))
     }
 
     /// Build a CacheService whose on-miss sets `body` and returns `outcome`.
     fn build_service(
         repo: Arc<MockCacheRepository>,
-        key_expr: MessageIdExpression,
+        key_expr: MessageIdSource,
         max_entry_bytes: usize,
         body: Option<Body>,
         outcome: ScriptedOutcome,
@@ -2715,15 +2720,27 @@ mod tests {
 
         release.notify_waiters();
 
-        let leader_ex = match leader.await.expect("leader task join") {
+        let leader_ex = match tokio::time::timeout(Duration::from_secs(5), leader)
+            .await
+            .expect("leader task join timeout")
+            .expect("leader task join")
+        {
             PipelineOutcome::Completed(ex) => ex,
             other => panic!("expected leader Completed, got {other:?}"),
         };
-        let w1_ex = match w1.await.expect("waiter 1 task join") {
+        let w1_ex = match tokio::time::timeout(Duration::from_secs(5), w1)
+            .await
+            .expect("waiter 1 task join timeout")
+            .expect("waiter 1 task join")
+        {
             PipelineOutcome::Completed(ex) => ex,
             other => panic!("expected waiter 1 Completed, got {other:?}"),
         };
-        let w2_ex = match w2.await.expect("waiter 2 task join") {
+        let w2_ex = match tokio::time::timeout(Duration::from_secs(5), w2)
+            .await
+            .expect("waiter 2 task join timeout")
+            .expect("waiter 2 task join")
+        {
             PipelineOutcome::Completed(ex) => ex,
             other => panic!("expected waiter 2 Completed, got {other:?}"),
         };

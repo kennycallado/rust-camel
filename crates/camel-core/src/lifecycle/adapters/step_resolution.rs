@@ -8,39 +8,43 @@ pub(crate) enum FunctionStagingMode {
 
 use crate::lifecycle::adapters::step_compilers::CompiledStep;
 use crate::{CacheRegistry, ClaimCheckRegistry, IdempotentRegistry};
-use camel_api::{CamelError, Exchange, FilterPredicate, FunctionInvoker, ProducerContext, Value};
+use camel_api::filter::{PredicateSource, ValueSource};
+use camel_api::{CamelError, Exchange, FunctionInvoker, ProducerContext};
 use camel_bean::BeanRegistry;
 use camel_component_api::{ComponentContext, RuntimeObservability};
-use camel_language_api::{Expression, Language, Predicate};
-use camel_processor::{EnrichmentStrategy, ThrowOnNoPoll, UseEnrichedBody};
-
-/// Helper to evaluate an async expression from a sync closure context.
-///
-/// These closures are stored in sync callback types (FilterPredicate, SetBody callback, etc.)
-/// but are only executed at runtime inside Tower services (async context). We use
-/// `tokio::task::block_in_place` + `Handle::block_on` to bridge the sync→async gap.
-pub(crate) fn await_eval(expr: &Arc<dyn Expression>, exchange: &Exchange) -> Value {
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::try_current()
-            .expect("await_eval: must be called from within a tokio runtime") // allow-unwrap
-            .block_on(expr.evaluate(exchange))
-    })
-    .unwrap_or(Value::Null)
-}
-
-/// Helper to evaluate an async predicate from a sync closure context.
-pub(crate) fn await_matches(pred: &Arc<dyn Predicate>, exchange: &Exchange) -> bool {
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::try_current()
-            .expect("await_matches: must be called from within a tokio runtime") // allow-unwrap
-            .block_on(pred.matches(exchange))
-    })
-    .unwrap_or(false)
-}
+use camel_language_api::{
+    EvalMeta, Expression, Language, LanguageExpressionEval, LanguagePredicateEval, Predicate,
+};
+use camel_processor::{
+    ClaimKeySource, EnrichmentStrategy, MessageIdSource, SortKeySource, ThrowOnNoPoll,
+    UseEnrichedBody,
+};
 
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
 use crate::lifecycle::application::route_definition::{BuilderStep, LanguageExpressionDef};
 use crate::shared::components::domain::Registry;
+
+/// Build the trusted [`EvalMeta`] for a compiling step.
+///
+/// `route_id` falls back to `"(unassigned)"` when the route under compilation
+/// has no id yet. `step_id` is `"{verb}#{index}"` where `index` is the step
+/// ordinal threaded from the compile loop. `target` carries the property or
+/// header key, or `"body"`, for verbs that have one.
+pub(crate) fn eval_meta(
+    ctx: &crate::lifecycle::adapters::step_compilers::CompilationContext<'_>,
+    language: &str,
+    verb: &str,
+    index: usize,
+    target: Option<String>,
+) -> EvalMeta {
+    EvalMeta {
+        language: language.to_string(),
+        route_id: ctx.route_id.unwrap_or("(unassigned)").to_string(),
+        step_id: format!("{verb}#{index}"),
+        verb: verb.to_string(),
+        target,
+    }
+}
 
 pub(crate) fn resolve_language(
     languages: &SharedLanguageRegistry,
@@ -86,89 +90,93 @@ pub(crate) fn compile_language_predicate(
     Ok(Arc::from(compiled))
 }
 
+/// Compile a `LanguageExpressionDef` into a fallible [`PredicateSource`].
+///
+/// The async arm binds the compiled predicate to `meta`; evaluation failures
+/// surface as `CamelError::ExpressionFailed` carrying that metadata instead of
+/// silently dropping the exchange.
 pub(crate) fn compile_filter_predicate(
     languages: &SharedLanguageRegistry,
     expression: &LanguageExpressionDef,
-) -> Result<FilterPredicate, CamelError> {
+    meta: EvalMeta,
+) -> Result<PredicateSource, CamelError> {
     let predicate = compile_language_predicate(languages, expression)?;
-    Ok(FilterPredicate::new(move |exchange: &Exchange| {
-        await_matches(&predicate, exchange)
-    }))
+    Ok(PredicateSource::Async(
+        LanguagePredicateEval::new(predicate, meta).into_bool_fn(),
+    ))
 }
 
-/// Compile a `LanguageExpressionDef` into a `SortExpression` closure.
-/// Uses `await_eval` to bridge the sync→async gap (same pattern as `compile_filter_predicate`).
-/// Returns a `SortKey` for each element's value.
+/// Compile a `LanguageExpressionDef` into a fallible [`SortKeySource`].
+///
+/// The async arm evaluates against a synthetic per-element exchange (the
+/// element value as JSON body); non-scalar keys are rejected by
+/// `SortKeySource::key`.
 pub(crate) fn compile_sort_expression(
     languages: &SharedLanguageRegistry,
     expression: &LanguageExpressionDef,
-) -> Result<camel_processor::SortExpression, CamelError> {
-    let expr = compile_language_expression(languages, expression)?;
-    Ok(std::sync::Arc::new(move |value: &serde_json::Value| {
-        // Create a minimal exchange containing the element as body,
-        // evaluate the language expression against it, then convert result to SortKey.
-        let msg = camel_api::Message::new(camel_api::body::Body::Json(value.clone()));
-        let exchange = camel_api::Exchange::new(msg);
-        let result = await_eval(&expr, &exchange);
-        // Reject non-scalar keys (Array/Object)
-        if result.is_array() || result.is_object() {
-            return Err(CamelError::ProcessorError(
-                "sort expression returned a non-scalar value (array/object); expected null/bool/number/string"
-                    .into(),
-            ));
-        }
-        Ok(camel_processor::SortKey(result))
-    }))
+    meta: EvalMeta,
+) -> Result<SortKeySource, CamelError> {
+    let value_fn =
+        LanguageExpressionEval::new(compile_language_expression(languages, expression)?, meta)
+            .into_value_fn();
+    Ok(SortKeySource::Async(Arc::new(
+        move |value: &serde_json::Value| {
+            let msg = camel_api::Message::new(camel_api::body::Body::Json(value.clone()));
+            let exchange = Exchange::new(msg);
+            value_fn(&exchange)
+        },
+    )))
 }
 
-/// Compile a `LanguageExpressionDef` into a synchronous `MessageIdExpression`
-/// closure for the Idempotent Consumer EIP. Uses `await_eval` to bridge the
-/// sync→async gap (same pattern as `compile_filter_predicate`).
+/// Compile a `LanguageExpressionDef` into a fallible [`ValueSource`] bound to
+/// the [`EvalMeta`] for `verb`/`step_index`/`target`.
+///
+/// Evaluation failures surface as `CamelError::ExpressionFailed` carrying that
+/// metadata instead of silently dropping the exchange. Shared by the
+/// declarative value-setting verbs (set_header, set_property, set_body, log,
+/// script fallback).
+pub(crate) fn compile_value_source(
+    ctx: &crate::lifecycle::adapters::step_compilers::CompilationContext<'_>,
+    expression: &LanguageExpressionDef,
+    verb: &str,
+    step_index: usize,
+    target: Option<String>,
+) -> Result<ValueSource, CamelError> {
+    let meta = eval_meta(ctx, &expression.language, verb, step_index, target);
+    Ok(ValueSource::Async(
+        LanguageExpressionEval::new(
+            compile_language_expression(ctx.languages, expression)?,
+            meta,
+        )
+        .into_value_fn(),
+    ))
+}
+
+/// Compile a `LanguageExpressionDef` into a fallible [`MessageIdSource`] for
+/// the Idempotent Consumer and Cache EIPs. Null/empty/non-scalar coercion is
+/// handled by `MessageIdSource::message_id`.
 pub(crate) fn compile_message_id_expression(
     languages: &SharedLanguageRegistry,
     expression: &LanguageExpressionDef,
-) -> Result<camel_processor::MessageIdExpression, CamelError> {
-    let expr = compile_language_expression(languages, expression)?;
-    Ok(Arc::new(move |exchange: &Exchange| {
-        let value = await_eval(&expr, exchange);
-        match value {
-            Value::Null => None,
-            Value::String(s) if s.is_empty() => None,
-            Value::String(s) => Some(s),
-            other => {
-                // Non-string, non-null: stringify. Matches Apache Camel's
-                // coercion of expression results to message-id strings.
-                let s = other.to_string();
-                if s.is_empty() { None } else { Some(s) }
-            }
-        }
-    }))
+    meta: EvalMeta,
+) -> Result<MessageIdSource, CamelError> {
+    Ok(MessageIdSource::Async(
+        LanguageExpressionEval::new(compile_language_expression(languages, expression)?, meta)
+            .into_value_fn(),
+    ))
 }
 
-/// Compile a `LanguageExpressionDef` into a `KeyExpression` closure for the
-/// Claim Check EIP. Uses `await_eval` to bridge sync→async (same pattern as
-/// `compile_message_id_expression`). Returns a `CamelError::ValidationError`
-/// if the expression evaluates to null or empty — Claim Check keys are
-/// REQUIRED non-empty strings, otherwise it's a user error.
+/// Compile a `LanguageExpressionDef` into a fallible [`ClaimKeySource`] for
+/// the Claim Check EIP. Null/empty keys fail as `ValidationError` and
+/// non-scalar keys are rejected by `ClaimKeySource::key`.
 pub(crate) fn compile_key_expression(
     languages: &SharedLanguageRegistry,
     expression: &LanguageExpressionDef,
-) -> Result<camel_processor::KeyExpression, CamelError> {
-    let expr = compile_language_expression(languages, expression)?;
-    Ok(std::sync::Arc::new(
-        move |exchange: &camel_api::Exchange| {
-            let value = await_eval(&expr, exchange);
-            match value {
-                Value::Null => Err(CamelError::ValidationError(
-                    "claim_check key expression evaluated to null or empty".into(),
-                )),
-                Value::String(s) if s.is_empty() => Err(CamelError::ValidationError(
-                    "claim_check key expression evaluated to null or empty".into(),
-                )),
-                Value::String(s) => Ok(s),
-                other => Ok(other.to_string()),
-            }
-        },
+    meta: EvalMeta,
+) -> Result<ClaimKeySource, CamelError> {
+    Ok(ClaimKeySource::Async(
+        LanguageExpressionEval::new(compile_language_expression(languages, expression)?, meta)
+            .into_value_fn(),
     ))
 }
 
@@ -231,6 +239,7 @@ mod tests {
     use camel_api::BoxProcessor;
     use camel_api::IdentityProcessor;
     use camel_api::OpaqueProcessor;
+    use camel_api::Value;
     use camel_api::body::Body;
 
     /// A mock endpoint that returns `None` for polling_consumer (default).
@@ -364,12 +373,19 @@ mod tests {
             language: "simple".into(),
             source: "${header.flag} == 'yes'".into(),
         };
-        let predicate = compile_filter_predicate(&languages, &expression).unwrap();
+        let meta = EvalMeta {
+            language: "simple".into(),
+            route_id: "r1".into(),
+            step_id: "filter#0".into(),
+            verb: "filter".into(),
+            target: None,
+        };
+        let predicate = compile_filter_predicate(&languages, &expression, meta).unwrap();
 
         let mut msg = camel_api::message::Message::default();
         msg.set_header("flag", Value::String("yes".into()));
         let exchange = Exchange::new(msg);
-        assert!(predicate(&exchange));
+        assert!(predicate.matches(&exchange).await.unwrap());
     }
 
     fn local_value_to_body(value: Value) -> Body {
@@ -651,7 +667,9 @@ mod tests {
                 steps: vec![BuilderStep::Stop, BuilderStep::Stop],
             },
             BuilderStep::DynamicRouter {
-                config: camel_api::DynamicRouterConfig::new(Arc::new(|_| None)),
+                config: camel_api::DynamicRouterConfig::new(camel_api::TargetSource::Sync(
+                    Arc::new(|_| None),
+                )),
             },
             BuilderStep::DeclarativeDynamicRouter {
                 expression: expr("${header.routes}"),
@@ -661,7 +679,9 @@ mod tests {
                 max_iterations: 3,
             },
             BuilderStep::RoutingSlip {
-                config: camel_api::RoutingSlipConfig::new(Arc::new(|_| None)),
+                config: camel_api::RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(
+                    |_| None,
+                ))),
             },
             BuilderStep::DeclarativeRoutingSlip {
                 expression: expr("${header.routes}"),
@@ -670,9 +690,9 @@ mod tests {
                 ignore_invalid_endpoints: true,
             },
             BuilderStep::RecipientList {
-                config: camel_api::recipient_list::RecipientListConfig::new(Arc::new(|_| {
-                    String::new()
-                })),
+                config: camel_api::recipient_list::RecipientListConfig::new(
+                    camel_api::RecipientSource::Sync(Arc::new(|_| String::new())),
+                ),
             },
             BuilderStep::DeclarativeRecipientList {
                 expression: expr("${header.routes}"),

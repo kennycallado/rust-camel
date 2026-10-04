@@ -50,7 +50,9 @@ use std::time::Instant;
 
 use boa_engine::property::PropertyKey;
 use boa_engine::realm::Realm;
-use boa_engine::{Context, JsObject, JsValue, Script, Source, js_string};
+use boa_engine::{
+    Context, EngineError, JsError, JsNativeErrorKind, JsObject, JsValue, Script, Source, js_string,
+};
 
 use super::boa::{ResolvedJsLimits, resolve_js_limits};
 use super::integrity::IntegrityBaseline;
@@ -58,7 +60,8 @@ use crate::{
     bindings,
     engine::{JsEvalResult, JsExchange},
     error::JsLanguageError,
-    value::js_to_value,
+    readonly::ReadOnlySentinel,
+    value::{ArrayDetector, js_to_value_with_detector},
 };
 
 #[cfg(test)]
@@ -77,6 +80,9 @@ pub(super) enum JsJob {
         exchange: JsExchange,
         timeout_ms: u64,
         enqueued: Instant,
+        /// `true` installs the throwing read-only snapshot (expression and
+        /// predicate paths); `false` is the writable `script:` path.
+        read_only: bool,
         reply: mpsc::SyncSender<Result<JsEvalResult, JsLanguageError>>,
     },
     Validate {
@@ -124,6 +130,47 @@ impl JsWorkerHandle {
 pub(super) fn worker_unavailable() -> JsLanguageError {
     JsLanguageError::Execution {
         message: "JS worker unavailable".to_string(),
+    }
+}
+
+/// Classify a Boa evaluation error from its STRUCTURED kind, before any
+/// rendering.
+///
+/// Boa 0.22 exposes typed accessors, so no message scraping is needed:
+///
+/// - [`JsError::as_engine`] surfaces the uncatchable
+///   [`EngineError::RuntimeLimit`] family (loop iteration, recursion, stack
+///   size) → [`JsLanguageError::Limit`].
+/// - [`JsError::as_native`] surfaces a host/engine-owned
+///   [`boa_engine::JsNativeError`]; a `Type` kind →
+///   [`JsLanguageError::TypeMismatch`].
+///
+/// Opaque errors (a user `throw`, including `throw new TypeError(...)`) stay
+/// [`JsLanguageError::Execution`]: their only payload is the runtime value, and
+/// the redaction boundary in `expression.rs` discards the rendered message
+/// rather than forwarding it. The message is rendered here only for that
+/// internal carrier; it is never exposed as a `LanguageError` detail.
+///
+/// A read-only evaluation passes its private sentinel: an uncaught error whose
+/// thrown value is exactly that sentinel is a refused mutation, classified as
+/// [`JsLanguageError::ReadOnlyMutation`] by identity — never by message text,
+/// so no exchange-derived string can spoof it.
+fn classify_eval_error(e: JsError, sentinel: Option<&ReadOnlySentinel>) -> JsLanguageError {
+    if let Some(sentinel) = sentinel
+        && sentinel.matches(&e)
+    {
+        return JsLanguageError::ReadOnlyMutation;
+    }
+    if let Some(EngineError::RuntimeLimit(_)) = e.as_engine() {
+        return JsLanguageError::Limit;
+    }
+    if let Some(native) = e.as_native()
+        && matches!(native.kind(), JsNativeErrorKind::Type)
+    {
+        return JsLanguageError::TypeMismatch;
+    }
+    JsLanguageError::Execution {
+        message: e.to_string(),
     }
 }
 
@@ -253,13 +300,14 @@ enum InstallError {
 fn install_bindings(
     ctx: &mut Context,
     exchange: &JsExchange,
+    read_only: Option<&ReadOnlySentinel>,
 ) -> Result<InstalledGlobals, InstallError> {
     let console = bindings::register_console(ctx).map_err(|_| InstallError::Rejected)?;
-    let camel_obj = bindings::build_camel_global(exchange, ctx).map_err(|e| {
-        InstallError::Data(JsLanguageError::Execution {
-            message: e.to_string(),
-        })
-    })?;
+    // Preserve the typed variant (e.g. `TypeConversion` for unsafe integers)
+    // so the redaction boundary can classify it as a `conversion` error
+    // instead of collapsing it into `Execution`.
+    let camel_obj =
+        bindings::build_camel_global(exchange, read_only, ctx).map_err(InstallError::Data)?;
     ctx.global_object()
         .set(
             js_string!("camel"),
@@ -289,6 +337,11 @@ pub(super) struct WorkerState {
     /// Integrity baseline for the current realm generation, captured after
     /// the initial `camel`/`console` install.
     baseline: IntegrityBaseline,
+    /// Privately-retained pristine `Array.isArray` for the current realm,
+    /// captured before any script runs. Used to identify read-only proxy
+    /// arrays during conversion; `None` only if capture failed, in which case
+    /// proxy-array conversion fails closed with a typed conversion error.
+    array_detector: Option<ArrayDetector>,
     /// Number of realm recycles (drift, install-verify failure, or panic
     /// rebuild) since construction. A plain field, deliberately NOT a
     /// process-wide static: parallel tests share one binary and a global
@@ -322,11 +375,16 @@ impl WorkerState {
             cache: ScriptCache::new(SCRIPT_CACHE_CAPACITY),
             limits,
             baseline: IntegrityBaseline::empty(),
+            array_detector: None,
             recycle_count: 0,
         };
-        if install_bindings(&mut state.ctx, &JsExchange::default()).is_ok() {
+        if install_bindings(&mut state.ctx, &JsExchange::default(), None).is_ok() {
             state.baseline = IntegrityBaseline::capture(&mut state.ctx);
         }
+        // Capture the pristine `Array.isArray` BEFORE any script runs on this
+        // realm. A capture failure leaves `None`; proxy-array conversion then
+        // fails closed rather than falling back to the writable global.
+        state.array_detector = ArrayDetector::capture(&mut state.ctx).ok();
         state
     }
 
@@ -348,14 +406,13 @@ impl WorkerState {
         source: &str,
         exchange: JsExchange,
         deadline: Instant,
+        read_only: bool,
     ) -> Result<JsEvalResult, JsLanguageError> {
         // Job deadline. The dequeue-time check in the dispatch loop already
         // skipped expired jobs; this re-check guards the budget for the
         // recycle-retry path inside this method.
         if Instant::now() > deadline {
-            return Err(JsLanguageError::Execution {
-                message: "JS execution timeout".to_string(),
-            });
+            return Err(JsLanguageError::Timeout);
         }
         // Re-enter the stable realm explicitly: the persistent context must
         // always evaluate against the same realm.
@@ -367,12 +424,19 @@ impl WorkerState {
         // costs on the order of a fresh realm build), and retries
         // install+verify exactly once. Deterministic exchange-data errors
         // are surfaced directly — they recur identically on a fresh realm.
+        //
+        // The read-only sentinel is realm-bound, so a fresh one is created
+        // per install attempt; the one that survives verification is the
+        // identity anchor for classification after the eval.
+        let mut sentinel: Option<ReadOnlySentinel> = None;
         let mut verified = false;
         for attempt in 0..2 {
             self.scrub_globals();
-            match install_bindings(&mut self.ctx, &exchange) {
+            let attempt_sentinel = read_only.then(ReadOnlySentinel::new);
+            match install_bindings(&mut self.ctx, &exchange, attempt_sentinel.as_ref()) {
                 Ok(installed) => {
                     if self.install_verify(&installed) {
+                        sentinel = attempt_sentinel;
                         verified = true;
                         break;
                     }
@@ -382,9 +446,7 @@ impl WorkerState {
             }
             self.recycle();
             if attempt == 0 && Instant::now() > deadline {
-                return Err(JsLanguageError::Execution {
-                    message: "JS execution timeout".to_string(),
-                });
+                return Err(JsLanguageError::Timeout);
             }
         }
         if !verified {
@@ -395,7 +457,7 @@ impl WorkerState {
             });
         }
 
-        let outcome = self.eval_cached(source);
+        let outcome = self.eval_cached(source, sentinel.as_ref());
 
         // Integrity verification runs after the eval regardless of its
         // outcome; drift recycles the realm for the NEXT job. The current
@@ -413,9 +475,19 @@ impl WorkerState {
     /// `eval("<escaped source>")` (parse is pure — it creates no bindings),
     /// evaluate it — the wrapper's completion value is the inner eval's
     /// completion value — and cache the compiled script.
-    fn eval_cached(&mut self, source: &str) -> Result<JsEvalResult, JsLanguageError> {
-        // Field split so the cache and the context can be borrowed disjointly.
-        let WorkerState { ctx, cache, .. } = self;
+    fn eval_cached(
+        &mut self,
+        source: &str,
+        sentinel: Option<&ReadOnlySentinel>,
+    ) -> Result<JsEvalResult, JsLanguageError> {
+        // Field split so the cache, the context, and the detector can be
+        // borrowed disjointly.
+        let WorkerState {
+            ctx,
+            cache,
+            array_detector,
+            ..
+        } = self;
 
         let key: Arc<str> = Arc::from(source);
 
@@ -433,14 +505,12 @@ impl WorkerState {
             }
         };
 
-        let result = outcome.map_err(|e| JsLanguageError::Execution {
-            message: e.to_string(),
-        })?;
+        let result = outcome.map_err(|e| classify_eval_error(e, sentinel))?;
 
-        let return_value = js_to_value(&result, ctx)?;
+        let return_value = js_to_value_with_detector(&result, ctx, array_detector.as_ref())?;
 
         // Extract modified exchange state.
-        let modified = bindings::extract_camel_state(ctx)?;
+        let modified = bindings::extract_camel_state(ctx, array_detector.as_ref())?;
 
         Ok(JsEvalResult {
             return_value,
@@ -534,8 +604,10 @@ impl WorkerState {
             let _previous = self.ctx.enter_realm(realm.clone());
             self.realm = realm;
             apply_runtime_limits(&mut self.ctx, &self.limits);
-            if install_bindings(&mut self.ctx, &JsExchange::default()).is_ok() {
+            if install_bindings(&mut self.ctx, &JsExchange::default(), None).is_ok() {
                 self.baseline = IntegrityBaseline::capture(&mut self.ctx);
+                // Re-capture the pristine detector for the fresh realm.
+                self.array_detector = ArrayDetector::capture(&mut self.ctx).ok();
                 self.cache.clear();
                 return;
             }
@@ -555,7 +627,17 @@ impl WorkerState {
     /// created and the stable realm stays clean. Failures map to
     /// [`JsLanguageError::Parse`].
     pub(super) fn run_validate(&mut self, source: &str) -> Result<(), JsLanguageError> {
-        let _script = Script::parse(Source::from_bytes(source.as_bytes()), None, &mut self.ctx)
+        // Parse against a FRESH global scope, not the realm's scope. A prior
+        // evaluation can leak a top-level `let`/`const` into the realm's
+        // global lexical scope (each eval gets a fresh declarative
+        // environment, but `Script::parse` analyzes against the realm scope),
+        // and that leaked name must not make an unrelated source look like a
+        // duplicate declaration. Duplicate declarations WITHIN `source` are
+        // still caught by the fresh scope's own analysis.
+        let scope = boa_engine::ast::scope::Scope::new_global();
+        let mut parser = boa_engine::parser::Parser::new(Source::from_bytes(source.as_bytes()));
+        parser
+            .parse_script(&scope, self.ctx.interner_mut())
             .map_err(|e| JsLanguageError::Parse {
                 message: e.to_string(),
             })?;
@@ -601,18 +683,17 @@ fn worker_loop(rx: mpsc::Receiver<JsJob>, limits: camel_language_api::JsLimitsCo
                 exchange,
                 timeout_ms,
                 enqueued,
+                read_only,
                 reply,
             } => {
                 // Deadline check at dequeue: an expired job never executes.
                 if enqueued.elapsed() > Duration::from_millis(timeout_ms) {
-                    let _ = reply.send(Err(JsLanguageError::Execution {
-                        message: "JS execution timeout".to_string(),
-                    }));
+                    let _ = reply.send(Err(JsLanguageError::Timeout));
                     continue;
                 }
                 let deadline = enqueued + Duration::from_millis(timeout_ms);
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    state.run_eval(&source, exchange, deadline)
+                    state.run_eval(&source, exchange, deadline, read_only)
                 }));
                 reply_outcome(&reply, attempt)
             }
@@ -686,7 +767,27 @@ mod tests {
         source: &str,
         exchange: JsExchange,
     ) -> Result<JsEvalResult, JsLanguageError> {
-        state.run_eval(source, exchange, Instant::now() + Duration::from_secs(5))
+        state.run_eval(
+            source,
+            exchange,
+            Instant::now() + Duration::from_secs(5),
+            false,
+        )
+    }
+
+    /// Read-only eval under a generous 5 s deadline (the expression/predicate
+    /// path, where mutation traps throw).
+    fn eval_read_only_now(
+        state: &mut WorkerState,
+        source: &str,
+        exchange: JsExchange,
+    ) -> Result<JsEvalResult, JsLanguageError> {
+        state.run_eval(
+            source,
+            exchange,
+            Instant::now() + Duration::from_secs(5),
+            true,
+        )
     }
 
     /// Local `WorkerState` under default limits.
@@ -717,6 +818,7 @@ mod tests {
                 exchange: JsExchange::default(),
                 timeout_ms: 1,
                 enqueued: Instant::now(),
+                read_only: false,
                 reply: tx,
             })
             .unwrap();
@@ -737,6 +839,7 @@ mod tests {
                 exchange: JsExchange::default(),
                 timeout_ms: 5_000,
                 enqueued: Instant::now(),
+                read_only: false,
                 reply: tx,
             })
             .unwrap();
@@ -766,6 +869,7 @@ mod tests {
                 exchange: JsExchange::default(),
                 timeout_ms: 5_000,
                 enqueued: Instant::now(),
+                read_only: false,
                 reply: tx,
             })
             .unwrap();
@@ -891,6 +995,60 @@ mod tests {
         let m2 = message_of(&e2);
         assert!(m1.contains("boom"), "error must carry the JS message: {m1}");
         assert_eq!(m1, m2, "first and cached error must be identical");
+    }
+
+    #[test]
+    fn validate_after_eval_ignores_realm_lexical_leak() {
+        // A prior eval's top-level `const` leaks into the realm global
+        // lexical scope; validating the same source again must still parse
+        // (validation uses a fresh scope, not the realm scope).
+        let mut state = worker_state();
+        state
+            .run_validate("const k = 1; k")
+            .expect("first validate");
+        eval_now(&mut state, "const k = 1; k", JsExchange::default()).unwrap();
+        state
+            .run_validate("const k = 1; k")
+            .expect("validate after eval must not see a duplicate declaration");
+    }
+
+    #[test]
+    fn read_only_dynamic_mutation_refused_writable_accepts() {
+        let mut state = worker_state();
+        let exchange = JsExchange::from_headers_body_properties(
+            [("foo".to_string(), serde_json::json!("bar"))]
+                .into_iter()
+                .collect(),
+            serde_json::Value::String("hello".to_string()),
+            HashMap::new(),
+        );
+
+        // Read-only: the dynamic write is refused by sentinel identity, not
+        // by any rendered message.
+        let err = eval_read_only_now(&mut state, "camel[\"body\"] = 1; true", exchange.clone())
+            .expect_err("read-only dynamic mutation must refuse");
+        assert!(
+            matches!(err, JsLanguageError::ReadOnlyMutation),
+            "expected ReadOnlyMutation, got {err:?}"
+        );
+
+        // A script that throws a lookalike string must NOT be classified as a
+        // refusal (identity, not message, is the discriminator).
+        let spoof = eval_read_only_now(
+            &mut state,
+            "throw 'JS read-only mutation refused'",
+            exchange.clone(),
+        )
+        .expect_err("user throw must fail");
+        assert!(
+            matches!(spoof, JsLanguageError::Execution { .. }),
+            "user throw must stay Execution, got {spoof:?}"
+        );
+
+        // Writable mode accepts the same dynamic write and applies it.
+        let ok = eval_now(&mut state, "camel[\"body\"] = 1; true", exchange)
+            .expect("writable mode accepts");
+        assert_eq!(ok.body.as_i64(), Some(1));
     }
 
     #[tokio::test]

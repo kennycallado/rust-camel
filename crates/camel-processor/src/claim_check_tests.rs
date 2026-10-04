@@ -80,13 +80,39 @@ impl ClaimCheckRepository for TestRepo {
     }
 }
 
-fn make_key_expr(key: &str) -> KeyExpression {
+fn make_key_expr(key: &str) -> ClaimKeySource {
     let k = key.to_string();
-    Arc::new(move |_ex: &Exchange| Ok(k.clone()))
+    ClaimKeySource::Sync(Arc::new(move |_ex: &Exchange| Ok(k.clone())))
 }
 
 fn make_exchange(body: Body) -> Exchange {
     Exchange::new(Message::new(body))
+}
+
+#[tokio::test]
+async fn claim_key_async_error_propagates() {
+    use camel_api::BoxValueFuture;
+
+    let repo = Arc::new(TestRepo::new("test"));
+    let svc = ClaimCheckService::new(
+        repo.clone(),
+        ClaimCheckOp::Set,
+        ClaimKeySource::Async(Arc::new(|_: &Exchange| {
+            Box::pin(async { Err(CamelError::ProcessorError("key boom".into())) }) as BoxValueFuture
+        })),
+    );
+
+    let result = svc
+        .oneshot(make_exchange(Body::Text("secret-data".to_string())))
+        .await;
+
+    assert!(
+        matches!(result, Err(CamelError::ProcessorError(ref e)) if e.contains("key boom")),
+        "an async key-expression failure must fail the step"
+    );
+    // The registry must stay untouched: evaluation errors propagate BEFORE
+    // any repository mutation.
+    assert!(repo.keys.lock().expect("mutex poisoned").is_empty());
 }
 
 #[tokio::test]

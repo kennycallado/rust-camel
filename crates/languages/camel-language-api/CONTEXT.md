@@ -36,11 +36,35 @@ _Avoid_: side-effecting expression (use the precise trait name)
 
 **LanguageError**:
 The shared error enum (`error.rs`): `ParseError { expr, reason }` (compile/parse failure),
-`EvalError(String)` (runtime evaluation failure), `UnknownVariable(String)` (missing variable),
-`NotFound(String)` (unregistered language), and `NotSupported { feature, language }` (the default
-for unimplemented mutating variants). `LanguageError::eval_error` attaches the expression text
-to an `EvalError` (`fn eval_error`).
+`EvalError(String)` (unstructured runtime failure), `UnknownVariable(String)` (missing variable),
+`NotFound(String)` (unregistered language), `NotSupported { feature, language }` (the default for
+unimplemented mutating variants), `EvalFailure { class, position, detail }` (structured failure
+with a typed `ExpressionErrorClass`), `TypeMismatch { expected, actual, position }` (type names
+only), and `ConversionError { source_type, target }` (type/destination names only).
+`class()` exposes the `ExpressionErrorClass` for structured transport; `position()` exposes the
+engine-reported 1-based position. `LanguageError::eval_error` attaches the expression text to an
+`EvalError`.
 _Avoid_: ScriptError, eval failure (use LanguageError and its variant names)
+
+**EvalMeta / ExpressionFailed (transport)**:
+`eval.rs` binds a language `Expression`/`Predicate` to trusted compile-time route metadata
+(`EvalMeta`: language, route id, step id, verb, and the trusted compile-time destination
+`target`). `to_expression_failed` maps a `LanguageError` onto `CamelError::ExpressionFailed`
+carrying the class and position; a `ConversionError` whose `target` is a generic placeholder
+(`value`, `body`) is rewritten to the trusted `EvalMeta.target`, never to runtime-derived text.
+The carriers `LanguageExpressionEval` / `LanguagePredicateEval` wrap the trait object with its
+metadata and expose `into_value_fn` / `into_bool_fn`, the async closure shapes the
+`camel-api` `ValueSource` / `PredicateSource` async arms consume.
+_Avoid_: error wrapper (use the carrier names; `ExpressionFailed` is the camel-api carrier)
+
+**Clone ceiling**:
+`into_value_fn` / `into_bool_fn` produce `'static` boxed futures, so each call clones the
+expression/predicate handle, the metadata, and the `Exchange`. The `Exchange` clone is the real
+per-call cost: a deep copy proportional to payload size for `Json`/`Text`/`Xml` bodies and the
+header/property maps, while `Bytes` is refcount-cheap and `Stream` shares its single-consumption
+handle (read-only isolation for streams rests on the stream-read guard, not the clone). This is
+the current clone ceiling; the documented upgrade path is a lifetime-carrying
+`BoxValueFuture<'a>` / `BoxBoolFuture<'a>` or an owned-`Exchange` API if profiling flags it.
 
 ## Example dialogue
 

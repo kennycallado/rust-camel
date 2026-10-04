@@ -1,8 +1,8 @@
-use camel_api::SpanKindHint;
 use camel_api::{
     AggregationStrategy, Body, BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message,
     SplitterConfig, Value, split_body,
 };
+use camel_api::{PredicateSource, SpanKindHint};
 use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
 use camel_processor::{
     ChoiceService, FilterService, LogLevel, LogProcessor, SplitterService, WhenClause,
@@ -22,12 +22,12 @@ fn build_pipeline() -> BoxProcessor {
 
     let choice = BoxProcessor::new(ChoiceService::new(
         vec![WhenClause {
-            predicate: FilterPredicate::new(|ex: &Exchange| {
+            predicate: PredicateSource::Sync(FilterPredicate::new(|ex: &Exchange| {
                 matches!(
                     ex.input.header("type"),
                     Some(v) if v == &Value::String("important".to_string())
                 )
-            }),
+            })),
             pipeline: noop(),
         }],
         Some(noop()),

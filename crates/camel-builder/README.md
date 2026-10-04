@@ -129,16 +129,17 @@ let route = RouteBuilder::from("direct:input")
 ### RecipientList Pattern
 
 ```rust
-use camel_api::recipient_list::{RecipientListConfig, RecipientListExpression};
+use camel_api::RecipientSource;
+use std::sync::Arc;
 
-let expression: RecipientListExpression = Arc::new(|ex: &Exchange| {
+let expression = RecipientSource::Sync(Arc::new(|ex: &Exchange| {
     ex.input.header("destinations")
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_default()
-});
+}));
 
 let route = RouteBuilder::from("direct:input")
-    .recipient_list(RecipientListConfig::new(expression))
+    .recipient_list(expression)
     .to("mock:result")
     .build()
     .unwrap();

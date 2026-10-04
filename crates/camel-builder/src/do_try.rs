@@ -15,7 +15,7 @@
 
 use crate::RouteBuilder;
 use camel_api::error_handler::ExceptionDisposition;
-use camel_api::{BoxProcessor, CamelError, FilterPredicate, OpaqueProcessor};
+use camel_api::{BoxProcessor, CamelError, FilterPredicate, OpaqueProcessor, PredicateSource};
 use camel_core::route::BuilderStep;
 use camel_processor::{CatchClause, CatchMatcher, DoTryService};
 
@@ -27,7 +27,7 @@ pub struct DoTryBuilder {
     try_steps: Vec<BoxProcessor>,
     catch_clauses: Vec<CatchClause>,
     finally_steps: Vec<BoxProcessor>,
-    finally_on_when: Option<FilterPredicate>,
+    finally_on_when: Option<PredicateSource>,
     finally_set: bool,
 }
 
@@ -35,7 +35,7 @@ pub struct DoTryBuilder {
 pub struct DoCatchBuilder {
     parent: DoTryBuilder,
     matcher: CatchMatcher,
-    on_when: Option<FilterPredicate>,
+    on_when: Option<PredicateSource>,
     steps: Vec<BoxProcessor>,
     disposition: ExceptionDisposition,
 }
@@ -44,7 +44,7 @@ pub struct DoCatchBuilder {
 pub struct DoFinallyBuilder {
     parent: DoTryBuilder,
     steps: Vec<BoxProcessor>,
-    on_when: Option<FilterPredicate>,
+    on_when: Option<PredicateSource>,
 }
 
 impl RouteBuilder {
@@ -85,7 +85,7 @@ impl DoTryBuilder {
     pub fn do_catch_when(self, predicate: FilterPredicate) -> DoCatchBuilder {
         DoCatchBuilder {
             parent: self,
-            matcher: CatchMatcher::Predicate(predicate),
+            matcher: CatchMatcher::Predicate(PredicateSource::Sync(predicate)),
             on_when: None,
             steps: Vec::new(),
             disposition: ExceptionDisposition::Handled,
@@ -143,7 +143,7 @@ impl DoCatchBuilder {
 
     /// Set an additional predicate that must also match for this catch clause to fire.
     pub fn on_when(mut self, predicate: FilterPredicate) -> Self {
-        self.on_when = Some(predicate);
+        self.on_when = Some(PredicateSource::Sync(predicate));
         self
     }
 
@@ -211,7 +211,7 @@ impl DoFinallyBuilder {
 
     /// Set an optional predicate that gates whether the finally block runs.
     pub fn on_when(mut self, predicate: FilterPredicate) -> Self {
-        self.on_when = Some(predicate);
+        self.on_when = Some(PredicateSource::Sync(predicate));
         self
     }
 

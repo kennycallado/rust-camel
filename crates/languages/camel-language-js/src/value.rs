@@ -1,6 +1,9 @@
 //! Conversions between [`serde_json::Value`] and [`boa_engine::JsValue`].
 
-use boa_engine::{Context, JsString, JsValue, object::builtins::JsArray};
+use boa_engine::{
+    Context, JsObject, JsString, JsValue, builtins::proxy::Proxy, js_string,
+    object::builtins::JsArray,
+};
 use serde_json::{Map, Value};
 
 use crate::error::JsLanguageError;
@@ -81,17 +84,83 @@ fn value_to_js_inner(
     }
 }
 
+/// A privately-retained pristine `Array.isArray` builtin.
+///
+/// Boa 0.22 does not expose the abstract `IsArray` operation publicly
+/// (`JsObject::is_array_abstract` and `JsValue::is_array` are `pub(crate)`),
+/// and `Proxy::try_data` is likewise crate-private, so a proxy target cannot
+/// be unwrapped from outside the engine. The read-only boundary wraps snapshot
+/// arrays in proxies, whose `JsObject::is_array` vtable check reports `false`;
+/// conversion therefore needs the engine's abstract check.
+///
+/// The builtin is captured from the realm's intrinsic `Array` constructor
+/// BEFORE any script runs and retained on the host. Script code can replace
+/// the writable global `Array.isArray` (or the intrinsic property) without
+/// affecting this handle, so a hostile override cannot make an array look like
+/// a plain object or throw into the conversion path.
+#[derive(Clone)]
+pub(crate) struct ArrayDetector(JsObject);
+
+impl ArrayDetector {
+    /// Capture the pristine `Array.isArray` from the active realm.
+    pub(crate) fn capture(ctx: &mut Context) -> Result<Self, JsLanguageError> {
+        let array_constructor = ctx.intrinsics().constructors().array().constructor();
+        let is_array = array_constructor
+            .get(js_string!("isArray"), ctx)
+            .map_err(|e| JsLanguageError::TypeConversion {
+                message: format!("array detector capture failed: {e}"),
+            })?;
+        let function = is_array
+            .as_object()
+            .ok_or_else(|| JsLanguageError::TypeConversion {
+                message: "array detector capture: Array.isArray is not callable".to_string(),
+            })?;
+        Ok(Self(function))
+    }
+
+    /// Abstract `IsArray` for `obj` via the retained pristine builtin.
+    fn is_array(&self, obj: &JsObject, ctx: &mut Context) -> Result<bool, JsLanguageError> {
+        let value = self
+            .0
+            .call(&JsValue::undefined(), &[JsValue::from(obj.clone())], ctx)
+            .map_err(|e| JsLanguageError::TypeConversion {
+                message: format!("array detection failed: {e}"),
+            })?;
+        value
+            .as_boolean()
+            .ok_or_else(|| JsLanguageError::TypeConversion {
+                message: "array detection returned a non-boolean".to_string(),
+            })
+    }
+}
+
 /// Convert a [`boa_engine::JsValue`] back into a [`serde_json::Value`].
 ///
 /// Requires a mutable `context` to call JS methods (e.g., `toString`, array length).
+///
+/// This entry point carries no pristine array detector, so a read-only proxy
+/// wrapping an array cannot be identified and conversion fails closed with a
+/// typed [`JsLanguageError::TypeConversion`]. Internal callers use
+/// `js_to_value_with_detector`.
 pub fn js_to_value(value: &JsValue, ctx: &mut Context) -> Result<Value, JsLanguageError> {
-    js_to_value_inner(value, ctx, 0)
+    js_to_value_inner(value, ctx, 0, None)
+}
+
+/// Convert a [`boa_engine::JsValue`] back into a [`serde_json::Value`] using a
+/// privately-retained pristine `Array.isArray` detector for proxy arrays.
+pub(crate) fn js_to_value_with_detector(
+    value: &JsValue,
+    ctx: &mut Context,
+    detector: Option<&ArrayDetector>,
+) -> Result<Value, JsLanguageError> {
+    js_to_value_inner(value, ctx, 0, detector)
 }
 
 fn js_to_value_inner(
     value: &JsValue,
     ctx: &mut Context,
     depth: u32,
+    detector: Option<&ArrayDetector>,
 ) -> Result<Value, JsLanguageError> {
     if depth > MAX_DEPTH {
         return Err(JsLanguageError::TypeConversion {
@@ -149,7 +218,32 @@ fn js_to_value_inner(
                     .map_err(|e| JsLanguageError::TypeConversion {
                         message: format!("array get error at {i}: {e}"),
                     })?;
-                arr.push(js_to_value_inner(&item, ctx, depth + 1)?);
+                arr.push(js_to_value_inner(&item, ctx, depth + 1, detector)?);
+            }
+            return Ok(Value::Array(arr));
+        } else if object_is_array(&obj, ctx, detector)? {
+            // A read-only Proxy wrapping an array: `JsObject::is_array` is a
+            // vtable check and reports false for proxies, so the privately
+            // retained pristine `Array.isArray` above identified it. Read
+            // through the proxy so element objects stay wrapped.
+            let len = obj
+                .get(js_string!("length"), ctx)
+                .ok()
+                .and_then(|v| v.as_number())
+                .unwrap_or(0.0);
+            let len = if len.is_finite() && len > 0.0 {
+                len as u32
+            } else {
+                0
+            };
+            let mut arr = Vec::with_capacity(len as usize);
+            for i in 0..len {
+                let item = obj
+                    .get(i, ctx)
+                    .map_err(|e| JsLanguageError::TypeConversion {
+                        message: format!("array get error at {i}: {e}"),
+                    })?;
+                arr.push(js_to_value_inner(&item, ctx, depth + 1, detector)?);
             }
             return Ok(Value::Array(arr));
         } else {
@@ -171,7 +265,7 @@ fn js_to_value_inner(
                     .map_err(|e| JsLanguageError::TypeConversion {
                         message: format!("object get error for key '{key_str}': {e}"),
                     })?;
-                map.insert(key_str, js_to_value_inner(&val, ctx, depth + 1)?);
+                map.insert(key_str, js_to_value_inner(&val, ctx, depth + 1, detector)?);
             }
             return Ok(Value::Object(map));
         }
@@ -179,6 +273,36 @@ fn js_to_value_inner(
     Err(JsLanguageError::TypeConversion {
         message: format!("unhandled JsValue type: {value:?}"),
     })
+}
+
+/// Abstract `IsArray` (ECMAScript `Array.isArray`) for an object, including a
+/// read-only `Proxy` wrapping an array.
+///
+/// `JsObject::is_array` compares the internal-methods vtable, so a `Proxy`
+/// around an array reports `false`. The read-only boundary wraps snapshot
+/// arrays in proxies; conversion must therefore use the engine's abstract
+/// check, which unwraps the proxy target.
+///
+/// The check runs through the privately-retained pristine [`ArrayDetector`],
+/// never through the writable global `Array.isArray` (which script code can
+/// replace). A missing detector or a failed call is a typed, redacted
+/// conversion error — never a silent `false` that would degrade an array into
+/// a plain object.
+fn object_is_array(
+    obj: &JsObject,
+    ctx: &mut Context,
+    detector: Option<&ArrayDetector>,
+) -> Result<bool, JsLanguageError> {
+    if obj.is_array() {
+        return Ok(true);
+    }
+    if !obj.is::<Proxy>() {
+        return Ok(false);
+    }
+    let detector = detector.ok_or_else(|| JsLanguageError::TypeConversion {
+        message: "array detection unavailable: pristine Array.isArray not retained".to_string(),
+    })?;
+    detector.is_array(obj, ctx)
 }
 
 #[cfg(test)]

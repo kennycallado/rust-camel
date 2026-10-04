@@ -68,9 +68,10 @@ impl Service<Exchange> for DynamicRouterService {
                     )));
                 }
 
-                let destinations = match (config.expression)(&exchange) {
-                    None => break,
-                    Some(uris) => uris,
+                let destinations = match config.expression.resolve(&exchange).await {
+                    Ok(None) => break,
+                    Ok(Some(uris)) => uris,
+                    Err(e) => return Err(e),
                 };
 
                 if last_destinations.as_deref() == Some(destinations.as_str()) {
@@ -119,7 +120,7 @@ mod tests {
     where
         F: Fn(&Exchange) -> Option<String> + Send + Sync + 'static,
     {
-        DynamicRouterConfig::new(Arc::new(f))
+        DynamicRouterConfig::new(camel_api::TargetSource::Sync(Arc::new(f)))
     }
 
     fn mock_resolver() -> EndpointResolver {
@@ -151,16 +152,18 @@ mod tests {
             }
         });
 
-        let config = DynamicRouterConfig::new(Arc::new(move |ex: &Exchange| {
-            let count = expr_count_clone.fetch_add(1, Ordering::SeqCst);
-            if count == 0 {
-                ex.input
-                    .header("dest")
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
-            } else {
-                None
-            }
-        }));
+        let config = DynamicRouterConfig::new(camel_api::TargetSource::Sync(Arc::new(
+            move |ex: &Exchange| {
+                let count = expr_count_clone.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    ex.input
+                        .header("dest")
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                } else {
+                    None
+                }
+            },
+        )));
 
         let mut svc = DynamicRouterService::new(config, resolver);
 
@@ -176,14 +179,16 @@ mod tests {
         let iterations = Arc::new(AtomicUsize::new(0));
         let iterations_clone = iterations.clone();
 
-        let config = DynamicRouterConfig::new(Arc::new(move |_ex: &Exchange| {
-            let count = iterations_clone.fetch_add(1, Ordering::SeqCst);
-            match count {
-                0 => Some("mock:a".to_string()),
-                1 => Some("mock:b".to_string()),
-                _ => None,
-            }
-        }));
+        let config = DynamicRouterConfig::new(camel_api::TargetSource::Sync(Arc::new(
+            move |_ex: &Exchange| {
+                let count = iterations_clone.fetch_add(1, Ordering::SeqCst);
+                match count {
+                    0 => Some("mock:a".to_string()),
+                    1 => Some("mock:b".to_string()),
+                    _ => None,
+                }
+            },
+        )));
 
         let mut svc = DynamicRouterService::new(config, mock_resolver());
 
@@ -258,14 +263,16 @@ mod tests {
             }
         });
 
-        let config = DynamicRouterConfig::new(Arc::new(move |_ex: &Exchange| {
-            let count = expr_count_clone.fetch_add(1, Ordering::SeqCst);
-            if count == 0 {
-                Some("invalid:endpoint,mock:valid".to_string())
-            } else {
-                None
-            }
-        }))
+        let config = DynamicRouterConfig::new(camel_api::TargetSource::Sync(Arc::new(
+            move |_ex: &Exchange| {
+                let count = expr_count_clone.fetch_add(1, Ordering::SeqCst);
+                if count == 0 {
+                    Some("invalid:endpoint,mock:valid".to_string())
+                } else {
+                    None
+                }
+            },
+        )))
         .ignore_invalid_endpoints(true);
 
         let mut svc = DynamicRouterService::new(config, resolver);
@@ -295,15 +302,17 @@ mod tests {
         // Cache capacity of 2; we will route through 3 distinct URIs.
         let expr_count = Arc::new(AtomicUsize::new(0));
         let expr_count_clone = expr_count.clone();
-        let config = DynamicRouterConfig::new(Arc::new(move |_ex: &Exchange| {
-            let n = expr_count_clone.fetch_add(1, Ordering::SeqCst);
-            match n {
-                0 => Some("mock:a".to_string()),
-                1 => Some("mock:b".to_string()),
-                2 => Some("mock:c".to_string()),
-                _ => None,
-            }
-        }))
+        let config = DynamicRouterConfig::new(camel_api::TargetSource::Sync(Arc::new(
+            move |_ex: &Exchange| {
+                let n = expr_count_clone.fetch_add(1, Ordering::SeqCst);
+                match n {
+                    0 => Some("mock:a".to_string()),
+                    1 => Some("mock:b".to_string()),
+                    2 => Some("mock:c".to_string()),
+                    _ => None,
+                }
+            },
+        )))
         .cache_size(2);
 
         let mut svc = DynamicRouterService::new(config, resolver);
@@ -314,5 +323,44 @@ mod tests {
         // The cache capacity is 2 so mock:a, mock:b, mock:c each required a resolver call
         // (mock:a is evicted before mock:c is inserted). All three resolver calls must have happened.
         assert_eq!(resolver_call_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn dynamic_router_target_error_fails_step() {
+        use camel_api::{BoxValueFuture, TargetSource};
+
+        let resolver_calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = resolver_calls.clone();
+        let resolver: EndpointResolver = Arc::new(move |uri: &str| {
+            calls_clone.fetch_add(1, Ordering::SeqCst);
+            if uri.starts_with("mock:") {
+                Some(BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) })))
+            } else {
+                None
+            }
+        });
+
+        let config = DynamicRouterConfig::new(TargetSource::Async(Arc::new(|_: &Exchange| {
+            Box::pin(async { Err(CamelError::ProcessorError("router boom".into())) })
+                as BoxValueFuture
+        })));
+
+        let mut svc = DynamicRouterService::new(config, resolver);
+        let result = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(Exchange::new(Message::new("test")))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a failed target expression must fail the step"
+        );
+        assert_eq!(
+            resolver_calls.load(Ordering::SeqCst),
+            0,
+            "no endpoint may be resolved when the target expression fails"
+        );
     }
 }

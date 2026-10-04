@@ -1,13 +1,10 @@
-use std::sync::Arc;
 use std::time::Duration;
 
-use crate::Exchange;
-
-pub type RouterExpression = Arc<dyn Fn(&Exchange) -> Option<String> + Send + Sync>;
+use crate::filter::TargetSource;
 
 #[derive(Clone)]
 pub struct DynamicRouterConfig {
-    pub expression: RouterExpression,
+    pub expression: TargetSource,
     pub uri_delimiter: String,
     pub cache_size: i32,
     pub ignore_invalid_endpoints: bool,
@@ -16,9 +13,9 @@ pub struct DynamicRouterConfig {
 }
 
 impl DynamicRouterConfig {
-    pub fn new(expression: RouterExpression) -> Self {
+    pub fn new(expression: impl Into<TargetSource>) -> Self {
         Self {
-            expression,
+            expression: expression.into(),
             uri_delimiter: ",".to_string(),
             cache_size: 1000,
             ignore_invalid_endpoints: false,
@@ -77,8 +74,8 @@ mod tests {
 
     use super::*;
 
-    fn noop_expr() -> RouterExpression {
-        Arc::new(|_| None)
+    fn noop_expr() -> TargetSource {
+        TargetSource::Sync(Arc::new(|_| None))
     }
 
     #[test]

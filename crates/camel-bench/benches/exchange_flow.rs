@@ -1,5 +1,5 @@
-use camel_api::SpanKindHint;
 use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message, Value};
+use camel_api::{PredicateSource, SpanKindHint};
 use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
 use camel_processor::{ChoiceService, FilterService, LogLevel, LogProcessor, WhenClause};
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -32,7 +32,9 @@ fn build_exchange_flow() -> BoxProcessor {
     let step2 = BoxProcessor::new(FilterService::new(|_: &Exchange| true, noop()));
     let step3 = BoxProcessor::new(ChoiceService::new(
         vec![WhenClause {
-            predicate: FilterPredicate::new(|ex: &Exchange| ex.input.header("step").is_some()),
+            predicate: PredicateSource::Sync(FilterPredicate::new(|ex: &Exchange| {
+                ex.input.header("step").is_some()
+            })),
             pipeline: noop(),
         }],
         Some(noop()),

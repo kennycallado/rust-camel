@@ -1,4 +1,4 @@
-use crate::filter::FilterPredicate;
+use crate::filter::PredicateSource;
 
 /// How the loop terminates.
 #[derive(Clone)]
@@ -6,8 +6,10 @@ use crate::filter::FilterPredicate;
 pub enum LoopMode {
     /// Fixed iteration count.
     Count(usize),
-    /// While a runtime predicate evaluates to true.
-    While(FilterPredicate),
+    /// While a runtime predicate evaluates to true. Evaluation is fallible:
+    /// a failed predicate ends the loop with that error (never as loop-end
+    /// success).
+    While(PredicateSource),
 }
 
 impl std::fmt::Debug for LoopMode {
@@ -52,9 +54,10 @@ pub const MAX_LOOP_ITERATIONS: usize = 10_000;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filter::{FilterPredicate, PredicateSource};
 
-    fn always_true() -> FilterPredicate {
-        FilterPredicate::new(|_| true)
+    fn always_true() -> PredicateSource {
+        PredicateSource::Sync(FilterPredicate::new(|_| true))
     }
 
     #[test]

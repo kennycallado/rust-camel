@@ -941,6 +941,7 @@ fn supported_exception_kinds() -> Vec<&'static str> {
         "NotAcceptable",
         "ProcessorErrorWithSource",
         "ValidationError",
+        "ExpressionFailed",
     ]
 }
 
@@ -1000,6 +1001,9 @@ fn exception_kind_matches(kind: &str, err: &CamelError) -> bool {
             matches!(err, CamelError::ProcessorErrorWithSource(_, _))
         }
         "ValidationError" => matches!(err, CamelError::ValidationError(_)),
+        // Language-expression evaluation failure (language-value-boundary):
+        // raised in-pipeline by carriers, so catch/on_exceptions can match it.
+        "ExpressionFailed" => matches!(err, CamelError::ExpressionFailed { .. }),
         _ => false,
     }
 }
@@ -2508,6 +2512,7 @@ mod tests {
             "NotAcceptable",
             "ProcessorErrorWithSource",
             "ValidationError",
+            "ExpressionFailed",
         ];
 
         assert_eq!(supported_exception_kinds(), expected);
@@ -2532,6 +2537,7 @@ mod tests {
         "EndpointCreationFailed",
         "EndpointCreationFailedWithSource",
         "EndpointUri",
+        "ExpressionFailed",
         "HttpOperationFailed",
         "InvalidUri",
         "Io",
@@ -2569,7 +2575,7 @@ mod tests {
     fn test_exception_kind_vocabulary_classification_guard() {
         assert_eq!(
             ALL_CAMEL_ERROR_VARIANTS.len(),
-            26,
+            27,
             "ALL_CAMEL_ERROR_VARIANTS must enumerate every CamelError variant"
         );
         assert_eq!(
@@ -2577,8 +2583,8 @@ mod tests {
                 .iter()
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            26
-        ); // dupe+omission swap would keep len==26
+            27
+        ); // dupe+omission swap would keep len==27
 
         let vocab = supported_exception_kinds();
 

@@ -7,6 +7,7 @@ use crate::body::{Body, body_type_name};
 use crate::error::CamelError;
 use crate::exchange::Exchange;
 use crate::message::Message;
+use crate::value::Value;
 
 /// A function that splits a single exchange into multiple fragment exchanges.
 ///
@@ -15,6 +16,73 @@ use crate::message::Message;
 /// `Ok(Vec::new())` (pass-through).
 pub type SplitExpression =
     Arc<dyn Fn(&Exchange) -> Result<Vec<Exchange>, CamelError> + Send + Sync>;
+
+/// Fallible split source: a synchronous [`SplitExpression`] or a
+/// language-backed asynchronous expression.
+///
+/// The async arm evaluates to a [`Value`]; fragments are derived with the
+/// canonical split rules (string → non-empty line fragments, array → one
+/// fragment per element). Evaluation errors propagate before any fragment
+/// is materialized.
+#[derive(Clone)]
+#[non_exhaustive]
+pub enum SplitSource {
+    /// Programmatic synchronous splitter.
+    Sync(SplitExpression),
+    /// Language-backed asynchronous expression.
+    Async(Arc<dyn Fn(&Exchange) -> crate::filter::BoxValueFuture + Send + Sync>),
+}
+
+impl From<SplitExpression> for SplitSource {
+    fn from(f: SplitExpression) -> Self {
+        Self::Sync(f)
+    }
+}
+
+impl SplitSource {
+    /// Split `exchange` into fragments, propagating evaluation failures.
+    pub async fn split(&self, exchange: &Exchange) -> Result<Vec<Exchange>, CamelError> {
+        match self {
+            Self::Sync(f) => f(exchange),
+            Self::Async(f) => derive_fragments(exchange, f(exchange).await?),
+        }
+    }
+}
+
+/// Derive fragment exchanges from an evaluated language value.
+///
+/// Mirrors the rules previously inlined in camel-core `splitting.rs`
+/// (DeclarativeSplit): a string yields one fragment per non-empty line; an
+/// array yields one fragment per element (string elements become text
+/// bodies, everything else JSON); anything else is a type error.
+fn derive_fragments(exchange: &Exchange, value: Value) -> Result<Vec<Exchange>, CamelError> {
+    match value {
+        Value::String(s) => Ok(s
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let mut fragment = exchange.clone();
+                fragment.input.body = Body::from(line.to_string());
+                fragment
+            })
+            .collect()),
+        Value::Array(arr) => Ok(arr
+            .into_iter()
+            .map(|v| {
+                let mut fragment = exchange.clone();
+                fragment.input.body = match v {
+                    Value::String(s) => Body::Text(s),
+                    other => Body::Json(other),
+                };
+                fragment
+            })
+            .collect()),
+        other => Err(CamelError::TypeConversionFailed(format!(
+            "declarative split requires a text or array value, got {received}; add an unmarshal step before split",
+            received = crate::value_type_name(&other)
+        ))),
+    }
+}
 
 /// A function that lazily produces a stream of exchange fragments.
 ///
@@ -214,7 +282,7 @@ pub const DEFAULT_TRACE_ITEM_THRESHOLD: usize = 100;
 #[derive(Clone)]
 pub struct SplitterConfig {
     /// Expression that splits an exchange into fragments.
-    pub expression: SplitExpression,
+    pub expression: SplitSource,
     /// How to aggregate fragment results.
     pub aggregation: AggregationStrategy,
     /// Whether to process fragments in parallel.
@@ -253,9 +321,9 @@ impl std::fmt::Debug for SplitterConfig {
 
 impl SplitterConfig {
     /// Create a new splitter config with the given split expression.
-    pub fn new(expression: SplitExpression) -> Self {
+    pub fn new(expression: impl Into<SplitSource>) -> Self {
         Self {
-            expression,
+            expression: expression.into(),
             aggregation: AggregationStrategy::default(),
             parallel: false,
             parallel_limit: None,

@@ -61,9 +61,59 @@ members from affecting host-bound exchange data.
 | `camel.property(name)` | Reads an exchange property |
 | `camel.set_property(name, value)` | Writes an exchange property |
 
-Read-only expressions and predicates evaluate a snapshot and discard changes.
-A `MutatingExpression` writes body, header, and property changes back only after
+Read-only expressions and predicates run against a read-only snapshot whose
+mutating surface throws; they never silently discard a write. A
+`MutatingExpression` writes body, header, and property changes back only after
 successful evaluation. Failure leaves the Exchange unchanged.
+
+The read-only paths (`create_expression`, `create_predicate`) compile-reject
+exchange mutations at creation time: the raw source is parsed and walked for
+the `camel.*` mutation surface — mutating method calls
+(`camel.headers.set`, `camel.properties.remove`, `camel.set_property`,
+`camel.set_header`), assignment including compound assignment
+(`camel.body = ...`), update (`camel.body++`, `++camel.body`), and
+`delete camel.body` — and resolves STATIC computed member names to the same
+surface (`camel["set_property"]`, `camel.headers["set"]`, and the assignment
+`camel["body"] = ...`). Destructuring-pattern assignment targets that name a
+`camel` member (`[camel.body] = [...]`, `({ body: camel.body } = ...)`) are
+rejected too.
+
+What the walk cannot decide — dynamic dispatch (`camel[expr]`), an aliased
+method reference (`const m = camel.headers.set; m(...)`), method
+destructuring (`const { set } = camel.headers`), and host-style
+`Object.defineProperty(camel, ...)` / `Reflect.set(camel, ...)` — is refused at
+RUNTIME by the read-only snapshot, never discarded:
+
+- Every snapshot object (`camel`, the header/property maps, their `__data`
+  backing objects, the body, and nested objects/arrays) is wrapped in a
+  `Proxy` whose `set`, `deleteProperty`, `defineProperty`, `setPrototypeOf`,
+  and `preventExtensions` traps throw a private per-evaluation sentinel. The
+  `preventExtensions` trap makes `Object.preventExtensions`, `Object.seal`,
+  and `Object.freeze` on a snapshot fail loudly instead of silently locking
+  it.
+- The `camel` mutator functions (`set_property`, `headers.set`,
+  `headers.remove`, `properties.set`, `properties.remove`) are installed as
+  throwing host functions, so an alias captured before the call still refuses.
+- An uncaught refusal maps to a redacted `EvalFailure` of class `runtime`
+  whose static detail points at `script:`; an in-script `try`/`catch` handles
+  it like any other script error. Same-value writes and write-then-restore are
+  refused too (refusal does not compare the final snapshot), which is why
+  `Object.freeze`, strict-mode writes, and snapshot diffing are not used.
+
+Independently created local objects stay mutable, and ordinary `camel` reads
+keep working. The sentinel is compared by object identity, never by message
+text, so exchange data cannot spoof a refusal.
+
+A read-only proxy wrapping an array reports `false` to Boa's vtable
+`JsObject::is_array` check, so conversion identifies it through the abstract
+`IsArray` operation. Boa 0.22 does not expose that operation publicly, so the
+worker captures the pristine `Array.isArray` builtin from the realm's
+intrinsic `Array` constructor BEFORE any script runs and retains it privately
+on the host. Script code can replace the writable global `Array.isArray`
+without affecting the retained handle, so a hostile override cannot make an
+array look like a plain object or throw into the conversion path. A missing
+detector or a failed call is a typed, redacted conversion error — never a
+silent `false` fallback.
 
 ## Resource limits
 
@@ -88,17 +138,33 @@ untrusted JavaScript in-process.
 
 ## Boa boundary
 
-Direct Boa use is confined to five implementation files:
+Direct Boa use is confined to six implementation files:
 
 - `src/engines/boa.rs`
 - `src/engines/worker.rs`
 - `src/engines/integrity.rs`
 - `src/bindings.rs`
 - `src/value.rs`
+- `src/readonly.rs`
 
 The public API exposes rust-camel types such as `JsEngine`, `JsExchange`, and
 `JsEvalResult`. No public signature exposes a Boa type. A future engine can
 implement `JsEngine` without changing Language SPI consumers.
+
+Engine failures cross the boundary by structured kind, never by message scrape.
+`worker.rs` classifies a Boa `JsError` before rendering: the uncatchable
+`EngineError::RuntimeLimit` family (loop iteration, recursion, stack size) maps
+to the `limit` class, and a native `JsNativeErrorKind::Type` maps to
+`type-mismatch`. Opaque user throws stay `runtime`; their rendered engine
+message is discarded at the `LanguageError` boundary in `expression.rs`. This
+closes rc-6e66r (quota trips were previously misclassified as `runtime`).
+
+`JsEngine::eval_read_only` is FAIL-CLOSED by default: a custom engine that
+implements only the writable path returns a typed read-only error
+(`JsLanguageError::ReadOnlyUnsupported`, mapped to a redacted `runtime`
+`EvalFailure` whose static detail points at `script:`) and `eval` is never
+called. An engine must override `eval_read_only` to opt in. The Boa engine
+overrides it with the throwing read-only snapshot.
 
 ## API evolution
 

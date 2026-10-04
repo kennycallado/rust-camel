@@ -1,7 +1,9 @@
 //! camel-language-rhai — Rhai script language for Camel Rust.
 //!
 //! Main types: `RhaiLanguage`, `RhaiExpression`, `RhaiPredicate`, `RhaiMutatingExpression`.
-//! Scripts have access to `body`, `headers`, `header()`, `set_header()`, `property()`, `set_property()`.
+//! Read-only scripts access `body`, `headers`, `header()`, and `property()`;
+//! `set_header()`/`set_property()` calls are rejected at create time — use a
+//! mutating script expression (`headers["k"] = ...`) instead.
 //!
 //! # Resource Limits
 //!
@@ -74,46 +76,63 @@
 //! - Resource limits (max operations, string/array/map sizes, expression
 //!   depths) are enforced as denial-of-service protection, not as a sandbox.
 //!   They are configurable — see [# Resource Limits](#resource-limits) above.
-//! - The `body` variable is always a string. Structured access to JSON/XML
-//!   bodies requires explicit parsing within the script using Rhai's built-in
-//!   map/array types.
+//! - The `body` variable mirrors the exchange body natively (task 2.2, B1):
+//!   strings, JSON maps/arrays, blobs and unit for empty bodies. A streaming
+//!   body binds as an access-aware refusal marker — any materializing read
+//!   of it fails with a typed conversion error; the stream itself is never
+//!   touched. See `docs/src/languages/rhai.md`.
 //! - String methods such as `replace`, `trim`, and `pad` mutate the subject in
 //!   place and return unit `()`. They do NOT return a new string. Call them as
-//!   statements (`body.replace(",", "%2C")`). Never write `body = body.replace(...)`
-//!   or `headers["k"] = headers["k"].replace(...)` — the right-hand side is unit,
-//!   so the assignment silently drops the value (the body stays unchanged; a
-//!   header entry becomes `Null`). See the `rhai_replace_*` tests and bd rc-2mjo.
+//!   statements (`body.replace(",", "%2C");`). Never write
+//!   `body = body.replace(...)` or `headers["k"] = headers["k"].replace(...)`:
+//!   the right-hand side is unit, so the assignment stores unit. The body is
+//!   cleared to `Empty` (unit maps back to the empty body) and a header entry
+//!   becomes `Null`. See the `rhai_replace_*` tests and bd rc-2mjo.
 
 use async_trait::async_trait;
+use camel_api::{ErrorPosition, ExpressionErrorClass};
 use camel_language_api::{
     Body, Exchange, Expression, Language, LanguageError, MutatingExpression, Predicate,
     RhaiLimitsConfig, Value,
 };
 use rhai::{
-    AST, Engine, Scope,
+    AST, Engine, OptimizationLevel, Scope,
     packages::{Package, StandardPackage},
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::debug;
+
+mod converter;
+mod stream_body;
+mod transaction;
+
+use converter::{dynamic_to_value, json_to_dynamic};
+use stream_body::{StreamBodyRef, StreamCounters};
+use transaction::{EntryDelta, map_deltas, rhai_values_differ, value_to_body};
 
 // Test-only compile counter. Per-thread (via `thread_local!`) so parallel
 // test execution does not perturb the counter that a single test observes.
 // Incremented each time `engine.compile` is called from a `create_*`
-// method. The regression test asserts the counter is 1 after `create_*` +
-// N `evaluate`s — proving the AST is stored at create time and reused at
-// eval time, not re-compiled.
+// method. Read-only `create_*` calls compile TWICE (walk-AST at
+// `OptimizationLevel::None` + exec-AST at `Simple`); the mutating path
+// compiles once. The regression tests assert the counter delta per
+// `create_*` call and 0 after N `evaluate`s — proving the AST is stored at
+// create time and reused at eval time, not re-compiled.
 #[cfg(test)]
 thread_local! {
     pub(crate) static COMPILE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Result type for mutating eval (returns value + modified exchange fields).
+///
+/// The body is `Option<Body>`: `None` means the script never assigned it, so
+/// the caller must leave the original body (variant included) untouched.
 type EvalMutResult = Result<
     (
         Value,
-        Body,
+        Option<Body>,
         std::collections::HashMap<String, Value>,
         std::collections::HashMap<String, Value>,
     ),
@@ -148,19 +167,152 @@ fn resolve_rhai_limits(limits: &RhaiLimitsConfig) -> ResolvedRhaiLimits {
     }
 }
 
+/// Classify a `rhai::EvalAltResult` by its innermost kind.
+///
+/// Payload-blind: classification keys on the variant shape only, never on
+/// wrapped value text. A later mapping layer (change
+/// `language-value-boundary` task 2.2) may inspect ONLY the dedicated guard
+/// sentinel and the type-signature/type-list fields of
+/// `ErrorFunctionNotFound`/`ErrorIndexingType` — never `ErrorRuntime`
+/// payloads or `Display` text.
+fn eval_alt_class(e: &rhai::EvalAltResult) -> ExpressionErrorClass {
+    use rhai::EvalAltResult;
+    match e.unwrap_inner() {
+        EvalAltResult::ErrorArithmetic(..) => ExpressionErrorClass::Arithmetic,
+        EvalAltResult::ErrorMismatchOutputType(..) | EvalAltResult::ErrorMismatchDataType(..) => {
+            ExpressionErrorClass::TypeMismatch
+        }
+        EvalAltResult::ErrorFunctionNotFound(..) => ExpressionErrorClass::FunctionNotFound,
+        EvalAltResult::ErrorTooManyOperations(_)
+        | EvalAltResult::ErrorTooManyModules(_)
+        | EvalAltResult::ErrorStackOverflow(_)
+        | EvalAltResult::ErrorDataTooLarge(..)
+        | EvalAltResult::ErrorTooManyVariables(_) => ExpressionErrorClass::Limit,
+        EvalAltResult::ErrorTerminated(..) => ExpressionErrorClass::Timeout,
+        EvalAltResult::ErrorParsing(..) => ExpressionErrorClass::Parse,
+        _ => ExpressionErrorClass::Runtime,
+    }
+}
+
+/// Optional `detail` text for a `rhai::EvalAltResult`.
+///
+/// Redaction contract (ADR-0012, change `language-value-boundary`): value
+/// bearing kinds (`ErrorArithmetic`, `ErrorRuntime`, `ErrorMismatchDataType`,
+/// `ErrorIndexingType`, `ErrorPropertyNotFound`, ...) carry `None` — thrown
+/// values and operands never reach the error. Only short static
+/// operand-free strings are attached for function-not-found and
+/// limit/timeout kinds.
+fn eval_alt_detail(e: &rhai::EvalAltResult) -> Option<String> {
+    use rhai::EvalAltResult;
+    let detail = match e.unwrap_inner() {
+        EvalAltResult::ErrorFunctionNotFound(..) => "function not found",
+        EvalAltResult::ErrorTooManyOperations(_)
+        | EvalAltResult::ErrorTooManyModules(_)
+        | EvalAltResult::ErrorStackOverflow(_)
+        | EvalAltResult::ErrorDataTooLarge(..)
+        | EvalAltResult::ErrorTooManyVariables(_) => "evaluation limit exceeded",
+        EvalAltResult::ErrorTerminated(..) => "script terminated",
+        _ => return None,
+    };
+    Some(detail.to_string())
+}
+
+/// Map a rhai `Position` to an [`ErrorPosition`].
+///
+/// `column: 0` means "top of the line" (rhai reports no column there);
+/// `Position::NONE` maps to `None`.
+fn to_error_position(p: rhai::Position) -> Option<ErrorPosition> {
+    let line = u32::try_from(p.line()?).ok()?;
+    let column = p
+        .position()
+        .map_or(0, |c| u32::try_from(c).unwrap_or(u32::MAX));
+    Some(ErrorPosition { line, column })
+}
+
+/// Map an eval error, honoring the stream-refusal mapping first (task 2.2):
+/// the guard sentinel and structured type-signature/type-list mentions of
+/// `StreamBodyRef` become the `Body::Stream` conversion error; everything
+/// else falls through to the structured 1.7 mapper.
+fn eval_error(e: &rhai::EvalAltResult, target: &str) -> LanguageError {
+    stream_body::map_stream_refusal(e, target).unwrap_or_else(|| map_eval_alt(e))
+}
+
+/// Map a `rhai::EvalAltResult` to a structured, redacted [`LanguageError`].
+///
+/// Classification uses the innermost error (`unwrap_inner`); position is the
+/// deepest available (inner first, outer fallback).
+fn map_eval_alt(e: &rhai::EvalAltResult) -> LanguageError {
+    let inner = e.unwrap_inner();
+    let position = to_error_position(inner.position().or_else(e.position()));
+    LanguageError::EvalFailure {
+        class: eval_alt_class(e),
+        position,
+        detail: eval_alt_detail(e),
+    }
+}
+
+/// Type name of a [`Value`] for `TypeMismatch` diagnostics. Type names only —
+/// never runtime values.
+fn value_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::String(_) => "string",
+        Value::Number(_) => "number",
+        Value::Bool(_) => "bool",
+        Value::Null => "null",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Callee names that mutate the exchange — forbidden in read-only
+/// expressions and predicates (change `language-value-boundary`, B4).
+const READ_ONLY_MUTATION_FNS: [&str; 2] = ["set_property", "set_header"];
+
+/// Walk the whole AST (statements, expressions, nested script-function
+/// bodies, blocks, `if`/`switch`/loop bodies) and return the first forbidden
+/// mutation callee found, if any.
+///
+/// Uses the rhai `internals` walker (`AST::walk`), which recurses through
+/// every `Stmt`/`Expr` shape including dotted chains and method calls.
+fn find_read_only_mutation(ast: &AST) -> Option<&'static str> {
+    let mut found: Option<&'static str> = None;
+    ast.walk(&mut |path: &[rhai::ASTNode]| {
+        for node in path {
+            let callee = match node {
+                rhai::ASTNode::Expr(
+                    rhai::Expr::FnCall(call, ..) | rhai::Expr::MethodCall(call, ..),
+                ) => Some(call.name.as_str()),
+                rhai::ASTNode::Stmt(rhai::Stmt::FnCall(call, ..)) => Some(call.name.as_str()),
+                _ => None,
+            };
+            let Some(callee) = callee else { continue };
+            for forbidden in READ_ONLY_MUTATION_FNS {
+                if callee == forbidden {
+                    found = Some(forbidden);
+                    return false;
+                }
+            }
+        }
+        true
+    });
+    found
+}
+
 /// Rhai scripting language for rust-camel.
 ///
-/// Scripts have access to:
-/// - `body` — exchange body as a string variable
+/// Read-only expressions and predicates have access to:
+/// - `body` — exchange body, natively typed (string / map / array / blob /
+///   unit); a streaming body binds as a refusal marker that fails any
+///   materializing read
 /// - `headers` — exchange headers as a Rhai Map
 /// - `header(name)` — look up a header value by name
-/// - `set_header(name, value)` — set a header (visible within the same script evaluation)
 /// - `property(name)` — look up an exchange property by name
-/// - `set_property(name, value)` — set a property (visible within the same script evaluation)
 ///
-/// **Note:** `set_header` and `set_property` only affect values visible within the current
-/// script evaluation. Changes do **not** propagate back to the Exchange because expressions
-/// receive a read-only `&Exchange` reference.
+/// `set_header()` and `set_property()` are **rejected at create time** for
+/// read-only expressions (parse error); they are also never registered on
+/// the eval engine, so dynamic calls cannot slip through. To mutate the
+/// exchange, use a mutating script expression with map assignment syntax
+/// (see [`RhaiMutatingExpression`]).
 ///
 /// ## Resource Limits
 ///
@@ -214,32 +366,85 @@ impl RhaiLanguage {
         // Defense in depth — no-op safe if symbols already absent under no_module.
         engine.disable_symbol("eval");
         engine.disable_symbol("import");
+        // Stream-body refusal guards (task 2.2, B1): the marker type plus
+        // the registered guard surface (`to_string`, `to_debug`, the binary
+        // operators over marker/scalar shapes). Compile-time engines get
+        // them too — registrations have no effect on parsing or folding.
+        stream_body::register_stream_guards(&mut engine);
         engine
     }
 
+    /// Convert the exchange body into the rhai `body` variable (task 2.2, B1).
+    ///
+    /// Eager variants bind natively: `Text`/`Xml` as strings, `Json` through
+    /// the fallible inbound converter, `Empty` as unit, `Bytes` as a blob.
+    /// `Stream` binds as an access-aware [`StreamBodyRef`] marker — no
+    /// stream data is read and no handle crosses the boundary. Callers that
+    /// evaluate a script must pair this with [`StreamCounters::of_dynamic`]
+    /// (via [`bind_body`]) so the post-eval rule can observe the marker.
+    fn body_to_dynamic(body: &Body, target: &str) -> Result<rhai::Dynamic, LanguageError> {
+        Ok(match body {
+            Body::Text(s) | Body::Xml(s) => rhai::Dynamic::from(s.clone()),
+            Body::Json(v) => json_to_dynamic(v, target)?,
+            Body::Empty => rhai::Dynamic::UNIT,
+            Body::Bytes(b) => rhai::Dynamic::from(rhai::Blob::from(b.as_ref())),
+            Body::Stream(_) => rhai::Dynamic::from(StreamBodyRef::new()),
+            // Forward compatibility (Body is #[non_exhaustive]): an unknown
+            // future variant must fail the inbound conversion, never bind as
+            // a silent empty string.
+            _ => {
+                return Err(LanguageError::ConversionError {
+                    source_type: "unrecognized Body variant".to_string(),
+                    target: target.to_string(),
+                });
+            }
+        })
+    }
+
+    /// Bind the `body` scope variable: the converted value plus, for a
+    /// stream body, the marker's counters for the post-eval refusal check.
+    /// Counters are borrowed before the marker enters the scope (plain `Arc`
+    /// handles — no marker clone, `reads` stays 0).
+    fn bind_body(body: &Body) -> Result<(rhai::Dynamic, Option<StreamCounters>), LanguageError> {
+        let d = Self::body_to_dynamic(body, "body")?;
+        let counters = StreamCounters::of_dynamic(&d);
+        Ok((d, counters))
+    }
+
     /// Build a scope with `body` and `headers` variables from the exchange.
-    fn make_scope(exchange: &Exchange) -> (Scope<'static>, rhai::Map, rhai::Map) {
+    ///
+    /// Inbound conversion is fallible: a header or property holding a value
+    /// rhai cannot represent (u64 > i64::MAX, sealed Q4) fails the evaluation
+    /// before the script runs.
+    fn make_scope(
+        exchange: &Exchange,
+    ) -> Result<(Scope<'static>, rhai::Map, rhai::Map), LanguageError> {
         let mut scope = Scope::new();
-        let body = exchange.input.body.as_text().unwrap_or("").to_string();
+        let (body, _) = Self::bind_body(&exchange.input.body)?;
         scope.push("body", body);
 
         let mut headers = rhai::Map::new();
         for (k, v) in &exchange.input.headers {
-            headers.insert(k.clone().into(), json_to_dynamic(v));
+            headers.insert(k.clone().into(), json_to_dynamic(v, "header entry")?);
         }
         scope.push("headers", headers.clone());
 
         let mut properties = rhai::Map::new();
         for (k, v) in &exchange.properties {
-            properties.insert(k.clone().into(), json_to_dynamic(v));
+            properties.insert(k.clone().into(), json_to_dynamic(v, "property entry")?);
         }
 
-        (scope, headers, properties)
+        Ok((scope, headers, properties))
     }
 
-    /// Create a fresh engine with `header()`, `set_header()`, `property()`, and
-    /// `set_property()` registered as native functions. A new engine per eval
-    /// avoids sharing mutable state between evaluations.
+    /// Create a read-only eval engine with `header()` and `property()`
+    /// registered as native readers. A new engine per eval avoids sharing
+    /// mutable state between evaluations.
+    ///
+    /// `set_header()`/`set_property()` are deliberately NOT registered:
+    /// read-only expressions reject them at create time (see
+    /// [`RhaiLanguage::compile_read_only`]), and leaving them unregistered
+    /// is the dynamic-call backstop.
     fn create_eval_engine(
         limits: &RhaiLimitsConfig,
         headers: rhai::Map,
@@ -247,7 +452,6 @@ impl RhaiLanguage {
     ) -> Engine {
         let mut engine = Self::create_base_engine(limits);
 
-        // Shared mutable headers map: header() reads, set_header() writes
         let h = Arc::new(RwLock::new(headers));
 
         let h_read = h.clone();
@@ -260,15 +464,6 @@ impl RhaiLanguage {
                 .unwrap_or(rhai::Dynamic::UNIT)
         });
 
-        let h_write = h.clone();
-        engine.register_fn("set_header", move |name: String, value: rhai::Dynamic| {
-            h_write
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(name.into(), value);
-        });
-
-        // Shared mutable properties map: property() reads, set_property() writes
         let p = Arc::new(RwLock::new(properties));
 
         let p_read = p.clone();
@@ -281,62 +476,113 @@ impl RhaiLanguage {
                 .unwrap_or(rhai::Dynamic::UNIT)
         });
 
-        let p_write = p.clone();
-        engine.register_fn("set_property", move |name: String, value: rhai::Dynamic| {
-            p_write
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(name.into(), value);
-        });
-
         engine
+    }
+
+    /// Compile a read-only expression or predicate under the two-AST
+    /// discipline (change `language-value-boundary`, B4):
+    ///
+    /// 1. **Walk-AST** — compiled at `OptimizationLevel::None` on a
+    ///    compile-scoped engine so no constant folding can hide or reorder a
+    ///    forbidden setter call. The AST is walked
+    ///    ([`find_read_only_mutation`]) and any `set_property`/`set_header`
+    ///    call is rejected at create time.
+    /// 2. **Exec-AST** — a SECOND compilation at `OptimizationLevel::Simple`
+    ///    (explicit Simple). This
+    ///    is the AST that is cached and evaluated; task 2.2's
+    ///    discarded-statement exemption depends on `Simple` folding.
+    ///
+    /// The walk-AST is validation-only and discarded after the check.
+    fn compile_read_only(script: &str, limits: &RhaiLimitsConfig) -> Result<AST, LanguageError> {
+        let mut walk_engine = Self::create_base_engine(limits);
+        walk_engine.set_optimization_level(OptimizationLevel::None);
+        let walk_ast = walk_engine.compile(script).map_err(|e| {
+            debug!(error = %e, "rhai expression compile failed");
+            LanguageError::ParseError {
+                expr: script.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        #[cfg(test)]
+        COMPILE_COUNT.with(|c| c.set(c.get() + 1));
+
+        if let Some(callee) = find_read_only_mutation(&walk_ast) {
+            return Err(LanguageError::ParseError {
+                expr: script.to_string(),
+                reason: format!(
+                    "{callee}() cannot be used in a read-only expression; use a script: step instead"
+                ),
+            });
+        }
+
+        let mut exec_engine = Self::create_base_engine(limits);
+        // Explicit `Simple` (not left to the engine default): task 2.2's
+        // discarded-statement exemption (`body;` optimized away) depends on
+        // this exact level.
+        exec_engine.set_optimization_level(OptimizationLevel::Simple);
+        let exec_ast = exec_engine.compile(script).map_err(|e| {
+            debug!(error = %e, "rhai expression compile failed");
+            LanguageError::ParseError {
+                expr: script.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+        #[cfg(test)]
+        COMPILE_COUNT.with(|c| c.set(c.get() + 1));
+        Ok(exec_ast)
     }
 
     /// Sync eval for non-mutating expressions. Extracts exchange data into
     /// owned values, builds engine+scope, runs the pre-compiled AST, and
     /// returns the script's last expression value. Compilation happens at
     /// `create_*` time, never here.
+    ///
+    /// A stream body binds as the access-aware marker; the post-eval rule
+    /// (task 2.2) refuses the evaluation when the script materialized the
+    /// stream without a forgiving registered guard hit.
     fn eval_sync(
         ast: &rhai::AST,
         limits: &RhaiLimitsConfig,
-        body_text: String,
+        body: rhai::Dynamic,
         headers_map: rhai::Map,
         properties_map: rhai::Map,
     ) -> Result<Value, LanguageError> {
         let mut scope = Scope::new();
-        scope.push("body", body_text);
+        let stream = StreamCounters::of_dynamic(&body);
+        scope.push("body", body);
         scope.push("headers", headers_map.clone());
 
         let engine = Self::create_eval_engine(limits, headers_map, properties_map);
 
         // eval_ast_with_scope reuses the pre-compiled AST — no re-parse per eval.
         // The AST was built once in `create_expression` / `create_predicate`.
-        let result: rhai::Dynamic = engine.eval_ast_with_scope(&mut scope, ast).map_err(|e| {
-            let pos = e.position();
-            let location = match (pos.line(), pos.position()) {
-                (Some(l), Some(c)) => format!(" at line {l}, column {c}"),
-                (Some(l), None) => format!(" at line {l}"),
-                _ => String::new(),
-            };
-            // EvalAltResult::ErrorRuntime embeds the thrown value verbatim,
-            // which may contain exchange body/header secrets (e.g. `throw headers["Authorization"]`).
-            // Emit only the error kind and position; never the thrown value.
-            let safe_kind = if matches!(*e, rhai::EvalAltResult::ErrorRuntime(_, _)) {
-                "script threw an exception (thrown value not logged)".to_string()
-            } else {
-                format!("{e}")
-            };
-            let err_msg = format!("rhai evaluation error{location}: {safe_kind}");
-            warn!("rhai expression eval failed{location}");
-            LanguageError::EvalError(err_msg)
-        })?;
+        let result: rhai::Dynamic = engine
+            .eval_ast_with_scope(&mut scope, ast)
+            .map_err(|e| eval_error(&e, "value"))?;
 
-        dynamic_to_json(result)
+        // POST-EVAL RULE: an unforgiven stream materialization refuses.
+        if let Some(counters) = &stream {
+            counters.refuse_if_unforgiven("value")?;
+        }
+
+        dynamic_to_value(result, "value")
     }
 
     /// Sync eval for mutating expressions. Takes owned exchange fields, runs
-    /// the pre-compiled AST, and returns the result value + modified fields.
-    /// The caller writes fields back on success (implicit rollback on error).
+    /// the pre-compiled AST, and returns the result value + committed fields.
+    ///
+    /// The write-back is a validate-all-then-commit transaction (task 2.3,
+    /// B2 + B3): the pre-eval native snapshots are compared with the post-eval
+    /// scope values using [`rhai_values_differ`] (type-sensitive). Only
+    /// added/changed/removed entries are converted (generic targets) and
+    /// committed; the body is written only when it was assigned, so a
+    /// header-only script leaves every body variant bit-identical. A
+    /// conversion failure returns `Err` with no mutation applied.
+    ///
+    /// A stream body binds as the access-aware marker; the post-eval rule
+    /// (task 2.2) refuses the evaluation when the script materialized the
+    /// stream without a forgiving registered guard hit. A still-marker body is
+    /// classified unassigned without cloning or counting it.
     fn eval_mut_sync(
         ast: &rhai::AST,
         limits: &RhaiLimitsConfig,
@@ -344,140 +590,147 @@ impl RhaiLanguage {
         headers: HashMap<String, Value>,
         properties: HashMap<String, Value>,
     ) -> EvalMutResult {
-        // 1. Create scope with Rhai Map variables
-        let mut scope = Scope::new();
-
-        let mut headers_map = rhai::Map::new();
+        // 1. Pre-eval snapshots: native rhai values built from the exchange.
+        let mut pre_headers = rhai::Map::new();
         for (k, v) in &headers {
-            headers_map.insert(k.clone().into(), json_to_dynamic(v));
+            pre_headers.insert(k.clone().into(), json_to_dynamic(v, "header entry")?);
         }
-
-        let mut properties_map = rhai::Map::new();
+        let mut pre_properties = rhai::Map::new();
         for (k, v) in &properties {
-            properties_map.insert(k.clone().into(), json_to_dynamic(v));
+            pre_properties.insert(k.clone().into(), json_to_dynamic(v, "property entry")?);
         }
 
-        let body_str = body.as_text().unwrap_or("").to_string();
-
-        scope.push("headers", headers_map);
-        scope.push("properties", properties_map);
-        scope.push("body", body_str);
-
-        // 2. Run the pre-compiled AST (no re-parse per eval).
-        let engine = RhaiLanguage::create_base_engine(limits);
-
-        let result: rhai::Dynamic = match engine.eval_ast_with_scope(&mut scope, ast) {
-            Ok(v) => v,
-            Err(e) => {
-                let pos = e.position();
-                let location = match (pos.line(), pos.position()) {
-                    (Some(l), Some(c)) => format!(" at line {l}, column {c}"),
-                    (Some(l), None) => format!(" at line {l}"),
-                    _ => String::new(),
-                };
-                let safe_kind = if matches!(*e, rhai::EvalAltResult::ErrorRuntime(_, _)) {
-                    "script threw an exception (thrown value not logged)".to_string()
-                } else {
-                    format!("{e}")
-                };
-                let err_msg = format!("rhai evaluation error{location}: {safe_kind}");
-                warn!("rhai expression eval failed{location}");
-                return Err(LanguageError::EvalError(err_msg));
-            }
+        // A stream marker must not be cloned for snapshotting (a clone counts
+        // as a read and would wrongly trip the refusal rule). Eager bodies are
+        // cloned once so the post-eval comparison can detect an assignment.
+        let (body_dyn, stream) = Self::bind_body(&body)?;
+        let pre_body = if stream.is_none() {
+            Some(body_dyn.clone())
+        } else {
+            None
         };
 
-        // 3. Sync changes back
+        // 2. Scope with the pre-eval snapshots.
+        let mut scope = Scope::new();
+        scope.push("headers", pre_headers.clone());
+        scope.push("properties", pre_properties.clone());
+        scope.push_dynamic("body", body_dyn);
+
+        // 3. Run the pre-compiled AST (no re-parse per eval). The engine is
+        // reused below as the frozen scalar-comparison engine.
+        let engine = RhaiLanguage::create_base_engine(limits);
+        let result: rhai::Dynamic = engine
+            .eval_ast_with_scope(&mut scope, ast)
+            .map_err(|e| eval_error(&e, "value"))?;
+
+        // POST-EVAL RULE: an unforgiven stream materialization refuses
+        // before any write-back — no partial mutation.
+        if let Some(counters) = &stream {
+            counters.refuse_if_unforgiven("value")?;
+        }
+
+        // 4. Post-eval maps. A whole-variable reassignment to a non-map is a
+        // typed boundary violation, never a silent fallback: reusing the
+        // pre-eval snapshot would drop every mutation the script made to that
+        // container before the invalid assignment while still committing
+        // unrelated body/other-map changes. Borrow the scope value (never
+        // clone it) and refuse a wrong type with a payload-blind error naming
+        // the generic container; the transaction commits nothing.
+        let post_headers = Self::scope_map(&scope, "headers")?;
+        let post_properties = Self::scope_map(&scope, "properties")?;
+
+        // 5. Validate every pending change BEFORE committing any of it —
+        // generic entry targets only, runtime keys never enter diagnostics.
+        let header_deltas = map_deltas(&engine, &pre_headers, &post_headers, "header entry")?;
+        let property_deltas =
+            map_deltas(&engine, &pre_properties, &post_properties, "property entry")?;
+        let body_change = Self::body_change(&scope, &engine, pre_body.as_ref(), stream.as_ref())?;
+        let result_value = dynamic_to_value(result, "value")?;
+
+        // 6. Commit: start from the original owned maps so untouched entries
+        // keep their original value handle.
         let mut out_headers = headers;
-        if let Some(h) = scope.get_value::<rhai::Map>("headers") {
-            out_headers = rhai_map_to_value_map(&h);
+        for (k, delta) in header_deltas {
+            match delta {
+                EntryDelta::Set(v) => {
+                    out_headers.insert(k, v);
+                }
+                EntryDelta::Remove => {
+                    out_headers.remove(&k);
+                }
+            }
         }
         let mut out_properties = properties;
-        if let Some(p) = scope.get_value::<rhai::Map>("properties") {
-            out_properties = rhai_map_to_value_map(&p);
-        }
-        let mut out_body = body;
-        if let Some(b) = scope.get_value::<String>("body") {
-            out_body = Body::Text(b);
-        }
-
-        Ok((
-            dynamic_to_value(result),
-            out_body,
-            out_headers,
-            out_properties,
-        ))
-    }
-}
-
-/// Convert a serde_json::Value to a rhai::Dynamic.
-fn json_to_dynamic(v: &Value) -> rhai::Dynamic {
-    match v {
-        Value::String(s) => rhai::Dynamic::from(s.clone()),
-        Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                rhai::Dynamic::from(i)
-            } else if let Some(f) = n.as_f64() {
-                rhai::Dynamic::from_float(f)
-            } else {
-                rhai::Dynamic::from(n.to_string())
+        for (k, delta) in property_deltas {
+            match delta {
+                EntryDelta::Set(v) => {
+                    out_properties.insert(k, v);
+                }
+                EntryDelta::Remove => {
+                    out_properties.remove(&k);
+                }
             }
         }
-        Value::Bool(b) => rhai::Dynamic::from(*b),
-        Value::Null => rhai::Dynamic::UNIT,
-        Value::Array(arr) => {
-            let rhai_arr: rhai::Array = arr.iter().map(json_to_dynamic).collect();
-            rhai::Dynamic::from(rhai_arr)
-        }
-        Value::Object(obj) => {
-            let mut rhai_map = rhai::Map::new();
-            for (k, v) in obj {
-                rhai_map.insert(k.clone().into(), json_to_dynamic(v));
+
+        Ok((result_value, body_change, out_headers, out_properties))
+    }
+
+    /// Classify the post-eval `body` as assigned (converted) or unassigned.
+    ///
+    /// A streaming body that is still the marker is unassigned by definition;
+    /// the check borrows the marker without cloning it. An eager body is
+    /// compared with its pre-eval snapshot through [`rhai_values_differ`].
+    fn body_change(
+        scope: &Scope<'_>,
+        engine: &Engine,
+        pre_body: Option<&rhai::Dynamic>,
+        stream: Option<&StreamCounters>,
+    ) -> Result<Option<Body>, LanguageError> {
+        let Some(post) = scope.get("body") else {
+            return Ok(None);
+        };
+        if stream.is_some() {
+            // Still-marker => unassigned (comparison marker==marker).
+            if post.read_lock::<StreamBodyRef>().is_some() {
+                return Ok(None);
             }
-            rhai::Dynamic::from(rhai_map)
+            return Ok(Some(value_to_body(dynamic_to_value(post.clone(), "body")?)));
+        }
+        match pre_body {
+            Some(pre_body) if rhai_values_differ(engine, pre_body, post) => {
+                Ok(Some(value_to_body(dynamic_to_value(post.clone(), "body")?)))
+            }
+            _ => Ok(None),
         }
     }
-}
 
-fn dynamic_to_json(d: rhai::Dynamic) -> Result<Value, LanguageError> {
-    if d.is_string() {
-        Ok(Value::String(d.cast::<String>()))
-    } else if d.is::<bool>() {
-        Ok(Value::Bool(d.cast::<bool>()))
-    } else if d.is_float() {
-        Ok(Value::from(d.cast::<f64>()))
-    } else if d.is_int() {
-        Ok(Value::from(d.cast::<i64>()))
-    } else if d.is_unit() {
-        Ok(Value::Null)
-    } else {
-        Ok(Value::String(d.to_string()))
+    /// Borrow the post-eval `headers`/`properties` scope value as a map.
+    ///
+    /// A whole-variable reassignment to a non-map is a typed boundary
+    /// violation, not a silent no-op: falling back to the pre-eval snapshot
+    /// would discard every mutation the script made to that container before
+    /// the invalid assignment while still committing unrelated changes.
+    /// Borrows through a read lock (no clone, so a container holding a stream
+    /// marker is not counted as a read) and refuses a wrong type with a
+    /// payload-blind [`LanguageError::ConversionError`] naming the generic
+    /// container — never a runtime key or value.
+    fn scope_map<'a>(
+        scope: &'a Scope<'_>,
+        container: &'static str,
+    ) -> Result<rhai::DynamicReadLock<'a, rhai::Map>, LanguageError> {
+        let value = scope
+            .get(container)
+            .ok_or_else(|| LanguageError::ConversionError {
+                source_type: "missing".to_string(),
+                target: container.to_string(),
+            })?;
+        value
+            .read_lock::<rhai::Map>()
+            .ok_or_else(|| LanguageError::ConversionError {
+                source_type: value.type_name().to_string(),
+                target: container.to_string(),
+            })
     }
-}
-
-/// Convert a rhai::Dynamic to a serde_json::Value (infallible version for mutating expressions).
-fn dynamic_to_value(d: rhai::Dynamic) -> Value {
-    if d.is_string() {
-        Value::String(d.cast::<String>())
-    } else if d.is::<bool>() {
-        Value::Bool(d.cast::<bool>())
-    } else if d.is_int() {
-        Value::from(d.cast::<i64>())
-    } else if d.is_float() {
-        Value::from(d.cast::<f64>())
-    } else if d.is_unit() {
-        Value::Null
-    } else {
-        Value::String(d.to_string())
-    }
-}
-
-/// Convert a Rhai Map to a HashMap<String, Value> for syncing back to exchange.
-fn rhai_map_to_value_map(map: &rhai::Map) -> std::collections::HashMap<String, Value> {
-    let mut result = std::collections::HashMap::new();
-    for (k, v) in map {
-        result.insert(k.to_string(), dynamic_to_value(v.clone()));
-    }
-    result
 }
 
 struct RhaiExpression {
@@ -499,19 +752,30 @@ async fn eval_async(
 ) -> Result<Value, LanguageError> {
     let r = resolve_rhai_limits(limits);
     let timeout = Duration::from_millis(r.execution_timeout_ms);
-    let body_text = exchange.input.body.as_text().unwrap_or("").to_string();
-    let (_, headers_map, properties_map) = RhaiLanguage::make_scope(exchange);
+    let body = RhaiLanguage::body_to_dynamic(&exchange.input.body, "body")?;
+    let (_, headers_map, properties_map) = RhaiLanguage::make_scope(exchange)?;
     let limits = limits.clone();
 
     tokio::time::timeout(timeout, async move {
         tokio::task::spawn_blocking(move || {
-            RhaiLanguage::eval_sync(&ast, &limits, body_text, headers_map, properties_map)
+            RhaiLanguage::eval_sync(&ast, &limits, body, headers_map, properties_map)
         })
         .await
-        .map_err(|join| LanguageError::EvalError(format!("rhai execution join error: {join}")))?
+        .map_err(|_join| {
+            // Panic payload may carry exchange data — never render it.
+            LanguageError::EvalFailure {
+                class: ExpressionErrorClass::Runtime,
+                position: None,
+                detail: None,
+            }
+        })?
     })
     .await
-    .map_err(|_| LanguageError::EvalError("rhai execution timeout".to_string()))?
+    .map_err(|_elapsed| LanguageError::EvalFailure {
+        class: ExpressionErrorClass::Timeout,
+        position: None,
+        detail: None,
+    })?
 }
 
 #[async_trait]
@@ -525,11 +789,17 @@ impl Expression for RhaiExpression {
 impl Predicate for RhaiPredicate {
     async fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
         let val = eval_async(self.ast.clone(), &self.limits, exchange).await?;
-        Ok(match &val {
-            Value::Bool(b) => *b,
-            Value::Null => false,
-            _ => true,
-        })
+        // Strict bool: predicates must evaluate to a real boolean. No
+        // truthiness coercion — any other value (including Null) is a type
+        // error (change `language-value-boundary`).
+        match &val {
+            Value::Bool(b) => Ok(*b),
+            other => Err(LanguageError::TypeMismatch {
+                expected: "bool".to_string(),
+                actual: value_type_name(other).to_string(),
+                position: None,
+            }),
+        }
     }
 }
 
@@ -538,7 +808,8 @@ impl Predicate for RhaiPredicate {
 /// The script has access to three mutable scope variables:
 /// - `headers` — a Rhai map (`#{}`) representing the exchange headers
 /// - `properties` — a Rhai map (`#{}`) representing the exchange properties
-/// - `body` — a string representing the exchange body
+/// - `body` — the exchange body, natively typed (a streaming body binds as
+///   a refusal marker; assigning a value replaces it)
 ///
 /// Changes to these variables are propagated back to the Exchange after evaluation.
 /// If evaluation fails, all changes are **rolled back atomically**.
@@ -581,24 +852,34 @@ impl MutatingExpression for RhaiMutatingExpression {
         // spawn_blocking gives Result<Result<..., JoinErr>, timeout gives Result<Result<..., JoinErr>, Elapsed>
         match tokio::time::timeout(timeout, join).await {
             Ok(Ok(Ok((value, out_body, out_headers, out_properties)))) => {
-                // Success — write back to exchange
+                // Commit the transaction: only an assigned body is replaced,
+                // so a header-only script leaves the body bit-identical.
+                if let Some(body) = out_body {
+                    exchange.input.body = body;
+                }
                 exchange.input.headers = out_headers;
                 exchange.properties = out_properties;
-                exchange.input.body = out_body;
                 Ok(value)
             }
             Ok(Ok(Err(e))) => {
                 // Eval error — exchange untouched (implicit rollback)
                 Err(e)
             }
-            Ok(Err(join_err)) => Err(LanguageError::EvalError(format!(
-                "rhai execution join error: {join_err}"
-            ))),
-            Err(_) => {
+            Ok(Err(_join_err)) => {
+                // Panic payload may carry exchange data — never render it.
+                Err(LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Runtime,
+                    position: None,
+                    detail: None,
+                })
+            }
+            Err(_elapsed) => {
                 // Timeout — exchange untouched
-                Err(LanguageError::EvalError(
-                    "rhai execution timeout".to_string(),
-                ))
+                Err(LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Timeout,
+                    position: None,
+                    detail: None,
+                })
             }
         }
     }
@@ -610,20 +891,10 @@ impl Language for RhaiLanguage {
     }
 
     fn create_expression(&self, script: &str) -> Result<Box<dyn Expression>, LanguageError> {
-        let engine = Self::create_base_engine(&self.limits);
-        // Compile once at create time. The AST is reused on every `evaluate`
-        // call via `eval_ast_with_scope` — no re-parse per evaluation.
-        // Surface parse errors here so they show up at route construction
-        // rather than first message.
-        let ast = engine.compile(script).map_err(|e| {
-            warn!(error = %e, "rhai expression compile failed");
-            LanguageError::ParseError {
-                expr: script.to_string(),
-                reason: e.to_string(),
-            }
-        })?;
-        #[cfg(test)]
-        COMPILE_COUNT.with(|c| c.set(c.get() + 1));
+        // Two-AST discipline: walk-AST (None) enforces read-only purity,
+        // exec-AST (Simple) is cached for evaluation. Parse errors surface
+        // here at route construction rather than first message.
+        let ast = Self::compile_read_only(script, &self.limits)?;
         debug!("rhai expression compiled");
         Ok(Box::new(RhaiExpression {
             ast: Arc::new(ast),
@@ -632,16 +903,7 @@ impl Language for RhaiLanguage {
     }
 
     fn create_predicate(&self, script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
-        let engine = Self::create_base_engine(&self.limits);
-        let ast = engine.compile(script).map_err(|e| {
-            warn!(error = %e, "rhai expression compile failed");
-            LanguageError::ParseError {
-                expr: script.to_string(),
-                reason: e.to_string(),
-            }
-        })?;
-        #[cfg(test)]
-        COMPILE_COUNT.with(|c| c.set(c.get() + 1));
+        let ast = Self::compile_read_only(script, &self.limits)?;
         debug!("rhai expression compiled");
         Ok(Box::new(RhaiPredicate {
             ast: Arc::new(ast),
@@ -659,7 +921,7 @@ impl Language for RhaiLanguage {
     ) -> Result<Box<dyn MutatingExpression>, LanguageError> {
         let engine = Self::create_base_engine(&self.limits);
         let ast = engine.compile(script).map_err(|e| {
-            warn!(error = %e, "rhai expression compile failed");
+            debug!(error = %e, "rhai expression compile failed");
             LanguageError::ParseError {
                 expr: script.to_string(),
                 reason: e.to_string(),
@@ -683,7 +945,10 @@ impl Default for RhaiLanguage {
 
 #[cfg(test)]
 mod tests {
-    use camel_language_api::{Exchange, Language, Message, Value};
+    use camel_api::ExpressionErrorClass;
+    use camel_language_api::{
+        EvalMeta, Exchange, Language, LanguageError, Message, Value, to_expression_failed,
+    };
     use std::fs;
     use tempfile::NamedTempFile;
 
@@ -746,22 +1011,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rhai_set_header_visible_within_script() {
-        let lang = RhaiLanguage::new();
-        let expr = lang
-            .create_expression(
-                r#"
-            set_header("done", "yes");
-            header("done")
-        "#,
-            )
-            .unwrap();
-        let ex = exchange_with_body("test");
-        let val = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(val, Value::String("yes".to_string()));
-    }
-
-    #[tokio::test]
     async fn test_rhai_property_access() {
         let lang = RhaiLanguage::new();
         let expr = lang.create_expression(r#"property("myProp")"#).unwrap();
@@ -769,22 +1018,6 @@ mod tests {
         ex.set_property("myProp".to_string(), Value::String("propVal".to_string()));
         let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val, Value::String("propVal".to_string()));
-    }
-
-    #[tokio::test]
-    async fn test_rhai_set_property_visible_within_script() {
-        let lang = RhaiLanguage::new();
-        let expr = lang
-            .create_expression(
-                r#"
-            set_property("key", "value");
-            property("key")
-        "#,
-            )
-            .unwrap();
-        let ex = exchange_with_body("test");
-        let val = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(val, Value::String("value".to_string()));
     }
 
     #[tokio::test]
@@ -814,16 +1047,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rhai_eval_error_contains_location_info() {
+    async fn test_rhai_function_not_found_has_class_and_position() {
+        // Calling a nonexistent function yields a structured FunctionNotFound
+        // failure with the engine-reported position.
         let lang = RhaiLanguage::new();
         let expr = lang.create_expression("nonexistent_fn()").unwrap();
         let ex = exchange_with_body("test");
         let err = expr.evaluate(&ex).await.unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("rhai evaluation error"),
-            "error should contain 'rhai evaluation error', got: {msg}"
-        );
+        match &err {
+            LanguageError::EvalFailure {
+                class, position, ..
+            } => {
+                assert!(
+                    matches!(class, ExpressionErrorClass::FunctionNotFound),
+                    "expected FunctionNotFound, got: {class:?}"
+                );
+                assert!(position.is_some(), "position must be reported: {err:?}");
+            }
+            other => panic!("expected EvalFailure, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -912,29 +1154,35 @@ mod tests {
     #[tokio::test]
     async fn test_rhai_timeout_fires_when_ops_limit_high() {
         use camel_language_api::RhaiLimitsConfig;
-        // Set max_operations very high (not u64::MAX which disables counting in Rhai)
-        // and a low timeout. Either the timeout or ops limit must fire.
+        // Ops limit high enough that the timeout deterministically wins
+        // (rhai runs at opt-level 2 in tests); either guard must terminate
+        // the script fast.
         let limits = RhaiLimitsConfig {
-            max_operations: Some(50_000_000),
+            max_operations: Some(500_000_000),
             execution_timeout_ms: Some(50),
             ..Default::default()
         };
         let lang = RhaiLanguage::with_limits(limits);
-        // CPU-bound loop; either ops limit or timeout must terminate it fast.
+        // CPU-bound loop; the timeout must terminate it fast.
         let expr = lang.create_expression("loop {}").unwrap();
         let ex = exchange_with_body("test");
         let start = std::time::Instant::now();
         let result = expr.evaluate(&ex).await;
         let elapsed = start.elapsed();
-        assert!(result.is_err(), "must error");
+        let err = result.expect_err("must error");
         assert!(
             elapsed < std::time::Duration::from_secs(2),
             "must terminate fast: {elapsed:?}"
         );
-        let msg = format!("{}", result.unwrap_err());
         assert!(
-            msg.to_lowercase().contains("timeout") || msg.to_lowercase().contains("operation"),
-            "error should reference timeout or op limit: {msg}"
+            matches!(
+                &err,
+                LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Timeout,
+                    ..
+                }
+            ),
+            "expected Timeout class, got: {err:?}"
         );
     }
 
@@ -957,11 +1205,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_rhai_empty_body() {
+        // B1 (task 2.2): an Empty body binds as unit, not as an empty string.
         let lang = RhaiLanguage::new();
         let expr = lang.create_expression("body").unwrap();
         let ex = Exchange::new(Message::default());
         let val = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(val, Value::String("".to_string()));
+        assert_eq!(val, Value::Null);
     }
 
     #[tokio::test]
@@ -1113,7 +1362,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rhai_sandbox_blocks_import_with_canary() {
         // Canary secret exported by a tmp .rhai file. Sandbox must block the
         // import; the canary must not appear in any error message.
@@ -1201,7 +1450,7 @@ mod tests {
     /// the counter robust against parallel test execution (each test thread
     /// has its own counter, so other tests' compiles are not visible).
     #[tokio::test]
-    async fn test_compile_count_expression_is_one_per_create() {
+    async fn test_compile_count_expression_is_two_per_create() {
         use super::COMPILE_COUNT;
         let lang = RhaiLanguage::new();
         let ex = exchange_with_body("test");
@@ -1209,10 +1458,11 @@ mod tests {
         let before = COMPILE_COUNT.with(|c| c.get());
         let expr = lang.create_expression("body + 1").unwrap();
         let after_create = COMPILE_COUNT.with(|c| c.get());
+        // Two-AST discipline: walk-AST (None) + exec-AST (Simple).
         assert_eq!(
             after_create - before,
-            1,
-            "create_expression must compile exactly once (delta={})",
+            2,
+            "create_expression must compile exactly twice (delta={})",
             after_create - before
         );
 
@@ -1229,7 +1479,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compile_count_predicate_is_one_per_create() {
+    async fn test_compile_count_predicate_is_two_per_create() {
         use super::COMPILE_COUNT;
         let lang = RhaiLanguage::new();
         let ex = exchange_with_body("test");
@@ -1239,10 +1489,11 @@ mod tests {
             .create_predicate(r#"header("type") == "order""#)
             .unwrap();
         let after_create = COMPILE_COUNT.with(|c| c.get());
+        // Two-AST discipline: walk-AST (None) + exec-AST (Simple).
         assert_eq!(
             after_create - before,
-            1,
-            "create_predicate must compile exactly once (delta={})",
+            2,
+            "create_predicate must compile exactly twice (delta={})",
             after_create - before
         );
 
@@ -1311,9 +1562,9 @@ mod tests {
     //
     //   - statement form  `body.replace(...)`     → works (mutates in place)
     //   - expression form `body.replace(...)`     → evaluates to `()` (Null)
-    //   - assignment form `body = body.replace()` → silently wrong: RHS is
-    //     `()`, so `body` becomes non-String and the sync-back falls back
-    //     to the original snapshot (unchanged) — or, for a header entry,
+    //   - assignment form `body = body.replace()` → wrong: RHS is `()`, so the
+    //     task 2.3 transaction records an explicit body assignment and writes
+    //     `Empty` (the replaced string is discarded) — or, for a header entry,
     //     the value becomes Null. No error is emitted.
     //
     // These tests pin the actual behaviour so a future Rhai upgrade that
@@ -1353,21 +1604,23 @@ mod tests {
         );
     }
 
-    /// Assignment form (FOOTGUN): `body = body.replace(...)` assigns unit
-    /// to `body`; the String sync-back then fails and the original body
-    /// snapshot is restored — silently unchanged.
+    /// Assignment form (FOOTGUN): `body = body.replace(...)` mutates `body`
+    /// in place and then assigns the method's unit result to it. The task 2.3
+    /// transaction detects the assignment (unit differs from the original
+    /// string) and writes the body back as `Empty` — the replaced string is
+    /// discarded, never silently kept.
     #[tokio::test]
-    async fn rhai_replace_assigned_to_body_is_silently_unchanged() {
+    async fn rhai_replace_assigned_to_body_becomes_empty() {
         let lang = RhaiLanguage::new();
         let expr = lang
             .create_mutating_expression(r#"body = body.replace(",", "%2C")"#)
             .expect("replace must compile");
         let mut ex = exchange_with_body("bbox=1,2,3,4");
         expr.evaluate(&mut ex).await.expect("replace must eval");
-        assert_eq!(
-            ex.input.body.as_text(),
-            Some("bbox=1,2,3,4"),
-            "assignment form is a footgun: body silently stays original"
+        assert!(
+            matches!(ex.input.body, Body::Empty),
+            "assignment form assigns unit: body becomes Empty, got {:?}",
+            ex.input.body
         );
     }
 
@@ -1390,5 +1643,1101 @@ mod tests {
             Some(&Value::Null),
             "header assignment form is a footgun: value silently becomes Null"
         );
+    }
+
+    // ── language-value-boundary task 1.7 ──
+    //
+    // Structured, redacted error mapping; strict-bool predicates; read-only
+    // mutation rejection. The tests below pin the NEW contract; they were
+    // written red first (against the old stringly/coercing behavior).
+
+    /// Trusted route metadata for `to_expression_failed` renderings.
+    fn eval_meta() -> EvalMeta {
+        EvalMeta {
+            language: "rhai".to_string(),
+            route_id: "route".to_string(),
+            step_id: "step".to_string(),
+            verb: "set_property".to_string(),
+            target: Some("body".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_float_error_is_class_and_position_only() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression(r#""SECRET".parse_float()"#)
+            .expect("compile must succeed (raw parse errors surface at eval)");
+        let ex = exchange_with_body("test");
+        let err = expr.evaluate(&ex).await.expect_err("parse_float must fail");
+        assert!(
+            matches!(
+                &err,
+                LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Arithmetic,
+                    ..
+                }
+            ),
+            "expected Arithmetic EvalFailure, got: {err:?}"
+        );
+        // Every rendering of the error chain must be redacted.
+        let dbg = format!("{err:?}");
+        let disp = format!("{err}");
+        let camel = format!("{}", to_expression_failed(err, &eval_meta()));
+        for rendering in [&dbg, &disp, &camel] {
+            assert!(!rendering.contains("SECRET"), "secret leaked: {rendering}");
+        }
+    }
+
+    #[tokio::test]
+    async fn predicate_non_bool_is_type_mismatch() {
+        let lang = RhaiLanguage::new();
+        let ex = exchange_with_body("test");
+
+        let pred = lang.create_predicate(r#""false""#).expect("compile");
+        let err = pred
+            .matches(&ex)
+            .await
+            .expect_err("string predicate must not coerce");
+        assert!(
+            matches!(
+                &err,
+                LanguageError::TypeMismatch {
+                    expected,
+                    actual,
+                    ..
+                } if expected == "bool" && actual == "string"
+            ),
+            "expected bool/string TypeMismatch, got: {err:?}"
+        );
+
+        let pred = lang.create_predicate("42").expect("compile");
+        let err = pred
+            .matches(&ex)
+            .await
+            .expect_err("number predicate must not coerce");
+        assert!(
+            matches!(
+                &err,
+                LanguageError::TypeMismatch {
+                    expected,
+                    actual,
+                    ..
+                } if expected == "bool" && actual == "number"
+            ),
+            "expected bool/number TypeMismatch, got: {err:?}"
+        );
+
+        let pred = lang.create_predicate("true").expect("compile");
+        assert!(pred.matches(&ex).await.expect("bool predicate matches"));
+    }
+
+    #[tokio::test]
+    async fn predicate_null_is_type_mismatch() {
+        let lang = RhaiLanguage::new();
+        let pred = lang.create_predicate("()").expect("compile");
+        let ex = exchange_with_body("test");
+        let err = pred
+            .matches(&ex)
+            .await
+            .expect_err("null must not coerce to false");
+        assert!(
+            matches!(
+                &err,
+                LanguageError::TypeMismatch {
+                    expected,
+                    actual,
+                    ..
+                } if expected == "bool" && actual == "null"
+            ),
+            "expected bool/null TypeMismatch, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_set_property_is_compile_error() {
+        let lang = RhaiLanguage::new();
+        for script in [r#"set_property("k", 1)"#, r#"set_header("k", 1)"#] {
+            let Err(err) = lang.create_expression(script) else {
+                panic!("read-only setter must be rejected at create time: {script}");
+            };
+            assert!(
+                matches!(&err, LanguageError::ParseError { reason, .. } if reason.contains("script:")),
+                "expected ParseError mentioning `script:`, got: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_read_only_setter_is_compile_error() {
+        let lang = RhaiLanguage::new();
+        let Err(err) = lang.create_expression(r#"if true { set_property("k", 1) }"#) else {
+            panic!("setter nested in a block must be rejected");
+        };
+        assert!(
+            matches!(&err, LanguageError::ParseError { .. }),
+            "expected ParseError, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn limit_error_class_is_limit_not_runtime() {
+        use camel_language_api::RhaiLimitsConfig;
+        let limits = RhaiLimitsConfig {
+            max_operations: Some(10),
+            ..Default::default()
+        };
+        let lang = RhaiLanguage::with_limits(limits);
+        let expr = lang.create_expression("loop { }").expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr.evaluate(&ex).await.expect_err("must trip the limit");
+        assert!(
+            matches!(
+                &err,
+                LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Limit,
+                    ..
+                }
+            ),
+            "expected Limit class, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrapped_error_in_function_classifies_inner() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression(r#"fn f() { "no".parse_float(); } f()"#)
+            .expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr.evaluate(&ex).await.expect_err("must fail");
+        match &err {
+            LanguageError::EvalFailure {
+                class, position, ..
+            } => {
+                assert!(
+                    matches!(class, ExpressionErrorClass::Arithmetic),
+                    "inner Arithmetic must not collapse to Runtime, got: {class:?}"
+                );
+                let pos = position.expect("deepest available position must be reported");
+                assert_eq!(pos.line, 1, "position must be inside the script: {pos}");
+            }
+            other => panic!("expected EvalFailure, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn throw_text_mentioning_marker_stays_runtime() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression(r#"throw "StreamBodyRef""#)
+            .expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr.evaluate(&ex).await.expect_err("throw must fail");
+        assert!(
+            matches!(
+                &err,
+                LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Runtime,
+                    detail: None,
+                    ..
+                }
+            ),
+            "thrown text must stay Runtime and redacted, got: {err:?}"
+        );
+        assert!(!format!("{err:?}").contains("StreamBodyRef"));
+        assert!(!format!("{err}").contains("StreamBodyRef"));
+    }
+
+    #[tokio::test]
+    async fn read_only_sentinel_text_throw_stays_runtime() {
+        // Spoof attempt: the operator controls the thrown value. Even the
+        // exact string once used as the guard sentinel must not be
+        // reclassified as a `Body::Stream` conversion on a Text body. The
+        // guard sentinel is a private typed payload, not a string, so no
+        // user-visible value can imitate it.
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression(r#"throw "STREAM_SENTINEL""#)
+            .expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr.evaluate(&ex).await.expect_err("throw must fail");
+        assert!(
+            matches!(
+                &err,
+                LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Runtime,
+                    detail: None,
+                    ..
+                }
+            ),
+            "thrown sentinel text must stay Runtime and redacted, got: {err:?}"
+        );
+        assert!(
+            !matches!(&err, LanguageError::ConversionError { .. }),
+            "thrown text must not become a conversion refusal: {err:?}"
+        );
+        for rendering in [format!("{err:?}"), format!("{err}")] {
+            assert!(
+                !rendering.contains("STREAM_SENTINEL"),
+                "thrown value leaked: {rendering}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mutating_sentinel_text_throw_stays_runtime() {
+        // Same spoof attempt on the mutating path: a Text body plus
+        // `throw "STREAM_SENTINEL"` is a plain redacted runtime failure, and
+        // the exchange is unchanged (implicit rollback).
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"throw "STREAM_SENTINEL""#)
+            .expect("compile");
+        let mut ex = exchange_with_body("test");
+        let err = expr.evaluate(&mut ex).await.expect_err("throw must fail");
+        assert!(
+            matches!(
+                &err,
+                LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Runtime,
+                    detail: None,
+                    ..
+                }
+            ),
+            "thrown sentinel text must stay Runtime and redacted, got: {err:?}"
+        );
+        assert!(
+            !matches!(&err, LanguageError::ConversionError { .. }),
+            "thrown text must not become a conversion refusal: {err:?}"
+        );
+        for rendering in [format!("{err:?}"), format!("{err}")] {
+            assert!(
+                !rendering.contains("STREAM_SENTINEL"),
+                "thrown value leaked: {rendering}"
+            );
+        }
+        assert_eq!(ex.input.body.as_text(), Some("test"), "rollback must hold");
+    }
+
+    #[tokio::test]
+    async fn timeout_maps_to_timeout_class() {
+        use camel_language_api::RhaiLimitsConfig;
+        // Ops limit high enough that the 20 ms timeout always wins (rhai runs
+        // at opt-level 2 in tests, so an empty loop burns millions of
+        // operations per millisecond); the detached worker still terminates
+        // on its own afterwards.
+        let limits = RhaiLimitsConfig {
+            max_operations: Some(500_000_000),
+            execution_timeout_ms: Some(20),
+            ..Default::default()
+        };
+        let lang = RhaiLanguage::with_limits(limits);
+        let expr = lang.create_expression("loop {}").expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr.evaluate(&ex).await.expect_err("timeout must fire");
+        assert!(
+            matches!(
+                &err,
+                LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Timeout,
+                    ..
+                }
+            ),
+            "expected Timeout class, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn throw_still_redacted() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression(r#"throw "SECRET""#)
+            .expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr.evaluate(&ex).await.expect_err("throw must fail");
+        assert!(
+            matches!(
+                &err,
+                LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Runtime,
+                    ..
+                }
+            ),
+            "expected Runtime class, got: {err:?}"
+        );
+        let dbg = format!("{err:?}");
+        let disp = format!("{err}");
+        let camel = format!("{}", to_expression_failed(err, &eval_meta()));
+        for rendering in [&dbg, &disp, &camel] {
+            assert!(!rendering.contains("SECRET"), "secret leaked: {rendering}");
+        }
+    }
+
+    // ── language-value-boundary task 2.2: native body exposure (B1) ──
+    //
+    // Eager bodies bind natively (string / map / array / blob / unit);
+    // streaming bodies bind as an access-aware refusal marker
+    // (`StreamBodyRef`). Any materializing read of the marker fails with a
+    // typed `ConversionError { source_type: "Body::Stream" }`; a script that
+    // never materializes the stream succeeds and the stream handle stays
+    // bit-identical and unconsumed. These tests pin the spike table so a
+    // rhai upgrade that changes clone or optimization semantics surfaces.
+
+    use bytes::Bytes;
+    use camel_api::error::CamelError;
+    use camel_api::{Body, StreamBody};
+    use futures::stream::{BoxStream, StreamExt};
+    use std::sync::Arc;
+
+    /// Shared handle to a stream body's inner stream (identity + unconsumed
+    /// assertions).
+    type StreamHandle =
+        Arc<tokio::sync::Mutex<Option<BoxStream<'static, Result<Bytes, CamelError>>>>>;
+
+    /// An exchange with a streaming body plus its inner stream handle.
+    fn stream_exchange() -> (Exchange, StreamHandle) {
+        let stream: BoxStream<'static, Result<Bytes, CamelError>> =
+            futures::stream::empty().boxed();
+        let handle = Arc::new(tokio::sync::Mutex::new(Some(stream)));
+        let msg = Message {
+            body: Body::Stream(StreamBody {
+                stream: handle.clone(),
+                metadata: Default::default(),
+            }),
+            ..Default::default()
+        };
+        (Exchange::new(msg), handle)
+    }
+
+    fn assert_stream_body_conversion(err: &LanguageError) {
+        assert!(
+            matches!(
+                err,
+                LanguageError::ConversionError { source_type, .. }
+                    if source_type == "Body::Stream"
+            ),
+            "expected Body::Stream ConversionError, got: {err:?}"
+        );
+    }
+
+    fn assert_body_still_stream(ex: &Exchange, handle: &StreamHandle) {
+        match &ex.input.body {
+            Body::Stream(sb) => {
+                assert!(
+                    Arc::ptr_eq(&sb.stream, handle),
+                    "stream identity must be unchanged"
+                );
+                assert!(
+                    sb.stream.try_lock().expect("stream mutex").is_some(),
+                    "stream must be unconsumed"
+                );
+            }
+            other => panic!("body must remain Body::Stream, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn json_body_reads_as_map() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression(r#"type_of(body) == "map""#).unwrap();
+        let obj: Value = r#"{"n":1}"#.parse().unwrap();
+        let ex = Exchange::new(Message::new(obj));
+        assert_eq!(expr.evaluate(&ex).await.unwrap(), Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn xml_body_reads_as_string_and_keeps_variant() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression(r#"body == "<a/>""#).unwrap();
+        let msg = Message {
+            body: Body::Xml("<a/>".to_string()),
+            ..Default::default()
+        };
+        let ex = Exchange::new(msg);
+        assert_eq!(expr.evaluate(&ex).await.unwrap(), Value::Bool(true));
+        assert!(
+            matches!(ex.input.body, Body::Xml(_)),
+            "read-only eval must keep the Xml variant"
+        );
+    }
+
+    #[tokio::test]
+    async fn bytes_body_reads_as_blob() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression(r#"type_of(body) == "blob""#)
+            .unwrap();
+        let msg = Message {
+            body: Body::Bytes(Bytes::from(vec![1_u8, 2])),
+            ..Default::default()
+        };
+        let ex = Exchange::new(msg);
+        assert_eq!(expr.evaluate(&ex).await.unwrap(), Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn empty_body_is_unit() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression(r#"type_of(body) == "()""#).unwrap();
+        let ex = Exchange::new(Message::default());
+        assert_eq!(expr.evaluate(&ex).await.unwrap(), Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn marker_named_missing_function_stays_function_not_found() {
+        // A missing function whose CALLEE NAME contains the marker name must
+        // not be reclassified as a stream conversion. Only the operand-type
+        // list of the engine's `ErrorFunctionNotFound` signature may name the
+        // marker, and only as an exact `StreamBodyRef` token.
+        for script in ["StreamBodyRef()", "not_StreamBodyRef_fn()"] {
+            let lang = RhaiLanguage::new();
+            let expr = lang.create_expression(script).expect("compile");
+            let ex = exchange_with_body("test");
+            let err = expr.evaluate(&ex).await.expect_err("missing fn must fail");
+            assert!(
+                matches!(
+                    &err,
+                    LanguageError::EvalFailure {
+                        class: ExpressionErrorClass::FunctionNotFound,
+                        ..
+                    }
+                ),
+                "{script}: expected FunctionNotFound, got: {err:?}"
+            );
+            assert!(
+                !matches!(&err, LanguageError::ConversionError { .. }),
+                "{script}: callee name must not map to conversion: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_body_fails_loudly_when_read() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("body.to_string()").unwrap();
+        let (ex, _handle) = stream_exchange();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("reading a stream body must refuse");
+        assert_stream_body_conversion(&err);
+    }
+
+    #[tokio::test]
+    async fn stream_body_untouched_script_succeeds() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers["h"] = "v""#)
+            .unwrap();
+        let (mut ex, handle) = stream_exchange();
+        expr.evaluate(&mut ex)
+            .await
+            .expect("a script that never touches the stream body must succeed");
+        assert_eq!(ex.input.headers.get("h").and_then(Value::as_str), Some("v"));
+        assert_body_still_stream(&ex, &handle);
+    }
+
+    #[tokio::test]
+    async fn stream_body_index_and_arithmetic_fail_loudly() {
+        // `body[0]`: indexing raises ErrorIndexingType (type list names the
+        // marker); `body + 1` and `body == body`: registered guard sentinel.
+        for script in ["body[0]", "body + 1", "body == body"] {
+            let lang = RhaiLanguage::new();
+            let expr = lang.create_expression(script).unwrap();
+            let (ex, _handle) = stream_exchange();
+            let err = expr
+                .evaluate(&ex)
+                .await
+                .expect_err("stream access must refuse with a conversion error");
+            assert_stream_body_conversion(&err);
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_body_bare_read_in_result_position_fails() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("body").unwrap();
+        let (ex, _handle) = stream_exchange();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("marker result must be rejected by the result converter");
+        assert_stream_body_conversion(&err);
+    }
+
+    #[tokio::test]
+    async fn stream_body_alias_fails_on_use() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression("let x = body; x.to_string()")
+            .unwrap();
+        let (ex, _handle) = stream_exchange();
+        let err = expr.evaluate(&ex).await.expect_err("alias use must refuse");
+        assert_stream_body_conversion(&err);
+    }
+
+    #[tokio::test]
+    async fn stream_body_type_of_returns_marker_name_documented() {
+        // Documented exception 1: `type_of` reads the static type name
+        // without cloning the marker (reads=0) — no stream data accessed.
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("type_of(body)").unwrap();
+        let (ex, _handle) = stream_exchange();
+        let val = expr.evaluate(&ex).await.unwrap();
+        assert_eq!(val, Value::String("StreamBodyRef".to_string()));
+    }
+
+    #[tokio::test]
+    async fn stream_body_read_discarded_result_fails() {
+        // The clone counter catches captures whose value is never used.
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("let x = body; 42").unwrap();
+        let (ex, _handle) = stream_exchange();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("vanished capture must refuse");
+        assert_stream_body_conversion(&err);
+    }
+
+    #[tokio::test]
+    async fn stream_body_caught_method_read_is_suppressed_e7() {
+        // Guard hits whose failures are handled in-script are forgiven
+        // (E7 in-script error handling): the outer fallback variable wins.
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression(
+                "let r = 0; try { body.to_string(); r = 1; } catch (err) { r = 42; } r",
+            )
+            .unwrap();
+        let (ex, _handle) = stream_exchange();
+        let val = expr.evaluate(&ex).await.unwrap();
+        assert_eq!(val, Value::from(42));
+    }
+
+    #[tokio::test]
+    async fn stream_body_caught_index_read_is_suppressed_e7() {
+        // Indexing raises BEFORE cloning the marker (reads=0), so the
+        // structured failure is an ordinary, fully suppressible script error.
+        // rhai 1.26 discards the catch block's value: a try-catch whose
+        // catch ran evaluates to unit (pinned with the spike row: Ok).
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression("try { let a = body[0]; 1 } catch (err) { 42 }")
+            .unwrap();
+        let (ex, _handle) = stream_exchange();
+        let val = expr.evaluate(&ex).await.unwrap();
+        assert_eq!(val, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn stream_body_caught_comparison_is_suppressed_e7() {
+        // Binary guard counts both operand clones (2 reads / 2 hits),
+        // forgiven when caught in-script.
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression("let r = 0; try { r = (body == body); } catch (err) { r = 42; } r")
+            .unwrap();
+        let (ex, _handle) = stream_exchange();
+        let val = expr.evaluate(&ex).await.unwrap();
+        assert_eq!(val, Value::from(42));
+    }
+
+    #[tokio::test]
+    async fn stream_body_capture_after_caught_guard_still_fails() {
+        // A forgiven guard hit does not license a later RAW capture
+        // (reads=2 > hits=1): the post-eval rule still refuses.
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression(
+                "let r = 0; try { body.to_string(); r = 1; } catch (err) { r = 2; }; let x = body; 99",
+            )
+            .unwrap();
+        let (ex, _handle) = stream_exchange();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("raw capture after a caught guard must refuse");
+        assert_stream_body_conversion(&err);
+    }
+
+    #[tokio::test]
+    async fn stream_body_caught_unsupported_op_still_fails() {
+        // Documented residue: an operation OUTSIDE the registered guard
+        // surface (`%`) that is CAUGHT in-script still fails post-eval —
+        // rhai exposes no caught-error hook, so the boundary refusal cannot
+        // see the catch. No partial mutation and the stream stays intact.
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(
+                "let r = 0; try { let q = body % 1; r = 1; } catch (err) { r = 42; } r",
+            )
+            .unwrap();
+        let (mut ex, handle) = stream_exchange();
+        let err = expr
+            .evaluate(&mut ex)
+            .await
+            .expect_err("unsupported-op residue must refuse");
+        assert_stream_body_conversion(&err);
+        assert_body_still_stream(&ex, &handle);
+        assert!(ex.input.headers.is_empty(), "no partial mutation");
+        assert!(ex.properties.is_empty(), "no partial mutation");
+    }
+
+    #[tokio::test]
+    async fn stream_body_block_capture_fails() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("{ let x = body; } 42").unwrap();
+        let (ex, _handle) = stream_exchange();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("block-scoped capture must refuse");
+        assert_stream_body_conversion(&err);
+    }
+
+    #[tokio::test]
+    async fn stream_body_alias_overwritten_fails() {
+        // Overwritten aliases still counted as materializations.
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("let x = body; x = 0; 42").unwrap();
+        let (ex, _handle) = stream_exchange();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("overwritten alias must refuse");
+        assert_stream_body_conversion(&err);
+    }
+
+    #[tokio::test]
+    async fn stream_body_nested_in_array_fails() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("let x = [body]; 42").unwrap();
+        let (ex, _handle) = stream_exchange();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("array nesting must refuse");
+        assert_stream_body_conversion(&err);
+    }
+
+    #[tokio::test]
+    async fn stream_body_fn_arg_fails() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("fn f(v) { 42 } f(body)").unwrap();
+        let (ex, _handle) = stream_exchange();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("marker as function argument must refuse");
+        assert_stream_body_conversion(&err);
+    }
+
+    #[tokio::test]
+    async fn stream_body_discarded_statement_is_noop() {
+        // Documented exception 2: a bare discarded statement-expression is
+        // folded away by the Simple exec-AST — nothing materializes.
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("body; 42").unwrap();
+        let (ex, _handle) = stream_exchange();
+        let val = expr.evaluate(&ex).await.unwrap();
+        assert_eq!(val, Value::from(42));
+    }
+
+    #[tokio::test]
+    async fn stream_body_overwrite_assignment_allowed() {
+        let lang = RhaiLanguage::new();
+
+        // Plain assignment replaces the marker without materializing it.
+        let expr = lang
+            .create_mutating_expression(r#"body = "replacement""#)
+            .unwrap();
+        let (mut ex, _handle) = stream_exchange();
+        expr.evaluate(&mut ex).await.unwrap();
+        assert_eq!(ex.input.body.as_text(), Some("replacement"));
+
+        // A read in the SAME script returns the replaced value.
+        let expr = lang
+            .create_mutating_expression(r#"body = "r"; body"#)
+            .unwrap();
+        let (mut ex, _handle) = stream_exchange();
+        let val = expr.evaluate(&mut ex).await.unwrap();
+        assert_eq!(val, Value::String("r".to_string()));
+        assert_eq!(ex.input.body.as_text(), Some("r"));
+    }
+
+    #[tokio::test]
+    async fn stream_body_read_after_replacement_succeeds() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"body = "r"; body.to_string()"#)
+            .unwrap();
+        let (mut ex, _handle) = stream_exchange();
+        let val = expr.evaluate(&mut ex).await.unwrap();
+        assert_eq!(val, Value::String("r".to_string()));
+        assert_eq!(ex.input.body.as_text(), Some("r"));
+    }
+
+    // ── language-value-boundary task 2.3: mutating-script transaction (B2 + B3) ──
+    //
+    // The write-back is validate-all-then-commit: the evaluator compares the
+    // pre-eval snapshots with the post-eval scope using a recursive,
+    // TYPE-SENSITIVE comparison (an int-to-float change is a change, even
+    // though rhai's `==` treats `1 == 1.0` as true). Only added/changed/
+    // removed entries are converted (generic targets only) and committed;
+    // untouched entries keep their original value and variant, and a
+    // conversion failure leaves the exchange untouched.
+
+    #[tokio::test]
+    async fn header_only_script_preserves_json_body_bit_identical() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers["h"] = "v""#)
+            .unwrap();
+        let json: Value = r#"{"a":[1,2]}"#.parse().unwrap();
+        let before = json.to_string();
+        let mut ex = Exchange::new(Message::new(Body::Json(json)));
+        expr.evaluate(&mut ex).await.unwrap();
+        match &ex.input.body {
+            Body::Json(v) => assert_eq!(v.to_string(), before, "body must be bit-identical"),
+            other => panic!("body variant must stay Json, got {other:?}"),
+        }
+        assert_eq!(ex.input.headers.get("h"), Some(&Value::String("v".into())));
+    }
+
+    #[tokio::test]
+    async fn header_only_script_preserves_xml_body_variant() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers["h"] = "v""#)
+            .unwrap();
+        let msg = Message {
+            body: Body::Xml("<a/>".to_string()),
+            ..Default::default()
+        };
+        let mut ex = Exchange::new(msg);
+        expr.evaluate(&mut ex).await.unwrap();
+        match &ex.input.body {
+            Body::Xml(s) => assert_eq!(s, "<a/>"),
+            other => panic!("body variant must stay Xml, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_body_stays_empty() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers["h"] = "v""#)
+            .unwrap();
+        let mut ex = Exchange::new(Message::default());
+        expr.evaluate(&mut ex).await.unwrap();
+        assert!(
+            matches!(ex.input.body, Body::Empty),
+            "Empty must not become Text(\"\")"
+        );
+    }
+
+    #[tokio::test]
+    async fn untouched_map_property_stays_object() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"properties["other"] = 1"#)
+            .unwrap();
+        let map: Value = r#"{"a":[1,2]}"#.parse().unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.properties.insert("m".to_string(), map.clone());
+        expr.evaluate(&mut ex).await.unwrap();
+        let stored = ex.properties.get("m").expect("m must remain");
+        assert!(
+            stored.is_object(),
+            "untouched map must stay an object, got {stored:?}"
+        );
+        assert_eq!(stored, &map);
+    }
+
+    #[tokio::test]
+    async fn removed_header_is_removed() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers.remove("x")"#)
+            .unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.input.headers.insert("x".to_string(), Value::from(1));
+        expr.evaluate(&mut ex).await.unwrap();
+        assert!(
+            !ex.input.headers.contains_key("x"),
+            "removed header must be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn body_assignment_writes_json() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"body = #{ "k": 1 };"#)
+            .unwrap();
+        let mut ex = Exchange::new(Message::default());
+        expr.evaluate(&mut ex).await.unwrap();
+        let expected: Value = r#"{"k":1}"#.parse().unwrap();
+        assert_eq!(ex.input.body, Body::Json(expected));
+    }
+
+    #[tokio::test]
+    async fn conversion_failure_commits_nothing() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(
+                r#"headers["h"] = "changed"; properties["ok"] = 1; properties["bad"] = 0.0/0.0;"#,
+            )
+            .unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.input
+            .headers
+            .insert("h".to_string(), Value::String("orig".into()));
+        ex.properties.insert("ok".to_string(), Value::from(0));
+        ex.properties.insert("bad".to_string(), Value::from(0));
+        let err = expr
+            .evaluate(&mut ex)
+            .await
+            .expect_err("NaN conversion must refuse");
+        assert!(
+            matches!(err, LanguageError::ConversionError { .. }),
+            "expected ConversionError, got {err:?}"
+        );
+        assert_eq!(
+            ex.input.headers.get("h"),
+            Some(&Value::String("orig".into())),
+            "header diff must not be applied"
+        );
+        assert_eq!(ex.properties.get("ok"), Some(&Value::from(0)));
+        assert_eq!(ex.properties.get("bad"), Some(&Value::from(0)));
+    }
+
+    #[tokio::test]
+    async fn same_value_body_assignment_writes_nothing() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_mutating_expression(r#"body = body;"#).unwrap();
+        let json: Value = r#"{"a":[1,2]}"#.parse().unwrap();
+        let before = json.to_string();
+        let mut ex = Exchange::new(Message::new(Body::Json(json)));
+        expr.evaluate(&mut ex).await.unwrap();
+        match &ex.input.body {
+            Body::Json(v) => assert_eq!(v.to_string(), before),
+            other => panic!("body must stay Json, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unexecuted_assignment_is_untouched() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"properties["other"] = 1"#)
+            .unwrap();
+        let json: Value = r#"{"a":[1,2]}"#.parse().unwrap();
+        let before = json.to_string();
+        let mut ex = Exchange::new(Message::new(Body::Json(json)));
+        expr.evaluate(&mut ex).await.unwrap();
+        match &ex.input.body {
+            Body::Json(v) => assert_eq!(v.to_string(), before),
+            other => panic!("body must stay Json, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_map_change_is_detected() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"properties["m"]["inner"] = 42"#)
+            .unwrap();
+        let map: Value = r#"{"a":[1,2]}"#.parse().unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.properties.insert("m".to_string(), map);
+        expr.evaluate(&mut ex).await.unwrap();
+        let m = ex.properties.get("m").expect("m must remain");
+        assert_eq!(m["inner"], Value::from(42));
+        assert_eq!(m["a"], r#"[1,2]"#.parse::<Value>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn numeric_type_change_is_a_change() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"properties["n"] = 1.0; body = 1.0;"#)
+            .unwrap();
+        let mut ex = Exchange::new(Message::new(Body::Json(Value::from(1))));
+        ex.properties.insert("n".to_string(), Value::from(1));
+        expr.evaluate(&mut ex).await.unwrap();
+
+        let prop = ex.properties.get("n").expect("n must remain");
+        assert!(
+            prop.as_i64().is_none() && prop.as_f64() == Some(1.0),
+            "int-to-float change must be written back as 1.0, got {prop:?}"
+        );
+        match &ex.input.body {
+            Body::Json(v) => assert!(
+                v.as_i64().is_none() && v.as_f64() == Some(1.0),
+                "body int-to-float change must be written back as 1.0, got {v:?}"
+            ),
+            other => panic!("body must be Json, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn same_value_type_preserved_assignment_writes_nothing() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"properties["n"] = 1"#)
+            .unwrap();
+        let mut ex = Exchange::new(Message::default());
+        let original = Value::from(1);
+        ex.properties.insert("n".to_string(), original.clone());
+        expr.evaluate(&mut ex).await.unwrap();
+        let stored = ex.properties.get("n").expect("n must remain");
+        assert_eq!(stored, &original, "same value/type must be preserved");
+        assert!(stored.as_i64().is_some(), "must stay an integer");
+    }
+
+    #[tokio::test]
+    async fn secret_key_never_enters_diagnostics() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(
+                r#"properties["SECRET-KEY-" + headers.Authorization] = 0.0/0.0;"#,
+            )
+            .unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.input
+            .headers
+            .insert("Authorization".to_string(), Value::String("tok".into()));
+        let err = expr
+            .evaluate(&mut ex)
+            .await
+            .expect_err("NaN conversion must refuse");
+        match &err {
+            LanguageError::ConversionError { target, .. } => {
+                assert_eq!(target, "property entry", "runtime key must not leak");
+            }
+            other => panic!("expected ConversionError, got {other:?}"),
+        }
+        let dbg = format!("{err:?}");
+        let disp = format!("{err}");
+        let camel = to_expression_failed(err, &eval_meta());
+        let camel_dbg = format!("{camel:?}");
+        let camel_disp = format!("{camel}");
+        for rendering in [&dbg, &disp, &camel_dbg, &camel_disp] {
+            assert!(
+                !rendering.contains("SECRET-KEY"),
+                "runtime key leaked: {rendering}"
+            );
+            assert!(!rendering.contains("tok"), "token leaked: {rendering}");
+        }
+    }
+
+    // ── r_gpt finding: invalid whole-container assignment rolls back ──
+    //
+    // A script may reassign the whole `headers`/`properties` scope variable
+    // to a non-map. The transaction must refuse with a typed, payload-blind
+    // error naming the GENERIC container and commit NOTHING. The pre-fix
+    // fallback silently reused the pre-eval snapshot, dropping the container's
+    // own mutations while still committing unrelated body/other-map changes.
+
+    #[tokio::test]
+    async fn invalid_headers_container_rolls_back_all_changes() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(
+                r#"body = "changed"; properties["p"] = 1; headers = "SECRET-PAYLOAD";"#,
+            )
+            .unwrap();
+        let mut ex = Exchange::new(Message::new("original"));
+        ex.input
+            .headers
+            .insert("h".to_string(), Value::String("orig".into()));
+        ex.properties.insert("p".to_string(), Value::from(0));
+
+        let err = expr
+            .evaluate(&mut ex)
+            .await
+            .expect_err("invalid headers container must refuse");
+
+        match &err {
+            LanguageError::ConversionError { target, .. } => {
+                assert_eq!(target, "headers", "generic container target only");
+            }
+            other => panic!("expected ConversionError, got {other:?}"),
+        }
+
+        // Exact pre-step state: no body write, no property write, no header
+        // loss.
+        assert_eq!(ex.input.body.as_text(), Some("original"));
+        assert_eq!(
+            ex.input.headers.get("h"),
+            Some(&Value::String("orig".into())),
+            "header entry must be untouched"
+        );
+        assert_eq!(ex.properties.get("p"), Some(&Value::from(0)));
+
+        // Payload-blind: no rendering may leak the invalid assignment value.
+        let dbg = format!("{err:?}");
+        let disp = format!("{err}");
+        let camel = to_expression_failed(err, &eval_meta());
+        let camel_dbg = format!("{camel:?}");
+        let camel_disp = format!("{camel}");
+        for rendering in [&dbg, &disp, &camel_dbg, &camel_disp] {
+            assert!(
+                !rendering.contains("SECRET-PAYLOAD"),
+                "assigned payload leaked: {rendering}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_properties_container_rolls_back_all_changes() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(
+                r#"body = "changed"; headers["h"] = "changed"; properties = 0.0/0.0;"#,
+            )
+            .unwrap();
+        let mut ex = Exchange::new(Message::new("original"));
+        ex.input
+            .headers
+            .insert("h".to_string(), Value::String("orig".into()));
+        ex.properties
+            .insert("p".to_string(), Value::String("orig".into()));
+
+        let err = expr
+            .evaluate(&mut ex)
+            .await
+            .expect_err("invalid properties container must refuse");
+
+        match &err {
+            LanguageError::ConversionError { target, .. } => {
+                assert_eq!(target, "properties", "generic container target only");
+            }
+            other => panic!("expected ConversionError, got {other:?}"),
+        }
+
+        assert_eq!(ex.input.body.as_text(), Some("original"));
+        assert_eq!(
+            ex.input.headers.get("h"),
+            Some(&Value::String("orig".into()))
+        );
+        assert_eq!(ex.properties.get("p"), Some(&Value::String("orig".into())));
+
+        // The container misuse is reported by type name only; the assigned
+        // NaN scalar can never appear as text in any rendering.
+        let dbg = format!("{err:?}");
+        let disp = format!("{err}");
+        let camel = to_expression_failed(err, &eval_meta());
+        let camel_dbg = format!("{camel:?}");
+        let camel_disp = format!("{camel}");
+        for rendering in [&dbg, &disp, &camel_dbg, &camel_disp] {
+            assert!(
+                !rendering.contains("NaN") && !rendering.contains("nan"),
+                "assigned payload leaked: {rendering}"
+            );
+        }
     }
 }

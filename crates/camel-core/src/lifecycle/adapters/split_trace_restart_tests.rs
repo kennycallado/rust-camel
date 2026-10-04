@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use camel_api::{
     AggregationStrategy, Body, CamelError, Exchange, Message, OutcomePipeline, OutcomeSegment,
-    PipelineOutcome, SplitExpression,
+    PipelineOutcome, SplitSource,
 };
 use camel_processor::SplitSegment;
 use opentelemetry::global;
@@ -87,8 +87,8 @@ impl OutcomePipeline for FailOnNthSegment {
 
 /// Splitter yielding one text fragment per input line (the custom-splitter
 /// pattern from `split_segment.rs` tests).
-fn line_splitter() -> SplitExpression {
-    Arc::new(|ex: &Exchange| {
+fn line_splitter() -> SplitSource {
+    SplitSource::Sync(Arc::new(|ex: &Exchange| {
         Ok(ex
             .input
             .body
@@ -101,7 +101,7 @@ fn line_splitter() -> SplitExpression {
                 frag
             })
             .collect())
-    })
+    }))
 }
 
 /// Drive a hand-built split segment (body = `body`, one fragment per line of

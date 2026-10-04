@@ -1,9 +1,5 @@
-use std::sync::Arc;
-
-use crate::Exchange;
 use crate::error::CamelError;
-
-pub type RecipientListExpression = Arc<dyn Fn(&Exchange) -> String + Send + Sync>;
+use crate::filter::RecipientSource;
 
 /// Default cap on the number of recipients an expression may yield.
 /// A million-token expression like `"a,b,c,…"` is truncated to this size
@@ -15,7 +11,7 @@ pub const DEFAULT_MAX_RECIPIENTS: usize = 1_000;
 
 #[derive(Clone)]
 pub struct RecipientListConfig {
-    pub expression: RecipientListExpression,
+    pub expression: RecipientSource,
     pub delimiter: String,
     pub parallel: bool,
     pub parallel_limit: Option<usize>,
@@ -29,9 +25,9 @@ pub struct RecipientListConfig {
 }
 
 impl RecipientListConfig {
-    pub fn new(expression: RecipientListExpression) -> Self {
+    pub fn new(expression: impl Into<RecipientSource>) -> Self {
         Self {
-            expression,
+            expression: expression.into(),
             delimiter: ",".to_string(),
             parallel: false,
             parallel_limit: None,
@@ -112,8 +108,8 @@ mod tests {
 
     use super::*;
 
-    fn noop_expr() -> RecipientListExpression {
-        Arc::new(|_| String::new())
+    fn noop_expr() -> RecipientSource {
+        RecipientSource::Sync(Arc::new(|_| String::new()))
     }
 
     #[test]

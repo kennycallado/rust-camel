@@ -12,14 +12,17 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+camel-api.workspace = true
 camel-language-api.workspace = true
 async-trait.workspace = true
-rhai.workspace = true
+rhai = { workspace = true, features = ["internals"] }
 tokio = { workspace = true, features = ["rt", "time", "macros"] }
 tracing.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
 
 [lints]
 workspace = true

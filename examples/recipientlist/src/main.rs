@@ -21,8 +21,8 @@
 
 use std::sync::Arc;
 
-use camel_api::recipient_list::{RecipientListConfig, RecipientListExpression};
-use camel_api::{CamelError, Value};
+use camel_api::recipient_list::RecipientListConfig;
+use camel_api::{CamelError, RecipientSource, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
@@ -36,7 +36,7 @@ async fn main() -> Result<(), CamelError> {
     ctx.register_component(TimerComponent::new());
     ctx.register_component(LogComponent::new());
 
-    let expression: RecipientListExpression = Arc::new(|ex| {
+    let expression = RecipientSource::Sync(Arc::new(|ex| {
         ex.input
             .header("destinations")
             .and_then(|v| match v {
@@ -44,7 +44,7 @@ async fn main() -> Result<(), CamelError> {
                 _ => None,
             })
             .unwrap_or_default()
-    });
+    }));
 
     // ANCHOR: recipient-list-route
     let route = RouteBuilder::from("timer:tick?period=2000&repeatCount=3")

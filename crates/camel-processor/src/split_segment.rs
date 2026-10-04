@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::task::JoinSet;
 
 use camel_api::{
-    AggregationStrategy, Body, CamelError, Exchange, OutcomeSegment, PipelineOutcome,
-    SplitExpression, Value,
+    AggregationStrategy, Body, CamelError, Exchange, OutcomeSegment, PipelineOutcome, SplitSource,
+    Value,
 };
 
 use crate::splitter::{CAMEL_SPLIT_COMPLETE, CAMEL_SPLIT_INDEX, CAMEL_SPLIT_SIZE};
@@ -84,7 +84,7 @@ pub(crate) fn aggregate_completed(
 /// at the Stop point.
 pub struct SplitSegment {
     /// Splits an exchange into fragment exchanges.
-    pub splitter: SplitExpression,
+    pub splitter: SplitSource,
     /// The sub-pipeline executed for each fragment.
     pub body: OutcomeSegment,
     /// Whether to process fragments in parallel.
@@ -108,7 +108,7 @@ pub struct SplitSegment {
 impl Clone for SplitSegment {
     fn clone(&self) -> Self {
         Self {
-            splitter: Arc::clone(&self.splitter),
+            splitter: self.splitter.clone(),
             body: self.body.clone(),
             parallel: self.parallel,
             parallel_limit: self.parallel_limit,
@@ -127,7 +127,7 @@ impl camel_api::OutcomePipeline for SplitSegment {
         &'a mut self,
         exchange: camel_api::Exchange,
     ) -> Pin<Box<dyn Future<Output = camel_api::PipelineOutcome> + Send + 'a>> {
-        let splitter = Arc::clone(&self.splitter);
+        let splitter = self.splitter.clone();
         let aggregation = self.aggregation.clone();
         let parallel = self.parallel;
         let parallel_limit = self.parallel_limit;
@@ -138,7 +138,7 @@ impl camel_api::OutcomePipeline for SplitSegment {
             let original = exchange;
             // A typed error from the split expression fails loud as
             // `Failed`, carrying the original error untouched.
-            let mut fragments = match splitter(&original) {
+            let mut fragments = match splitter.split(&original).await {
                 Ok(fragments) => fragments,
                 Err(err) => return PipelineOutcome::Failed(err),
             };
@@ -472,7 +472,7 @@ mod tests {
         };
 
         let mut seg = SplitSegment {
-            splitter: camel_api::split_body_lines(),
+            splitter: camel_api::SplitSource::Sync(camel_api::split_body_lines()),
             body: OutcomeSegment::new(Box::new(body)),
             parallel: false,
             parallel_limit: None,
@@ -493,7 +493,7 @@ mod tests {
     #[tokio::test]
     async fn stop_inside_split_sequential_preserves_exchange_mutations() {
         let mut seg = SplitSegment {
-            splitter: camel_api::split_body_lines(),
+            splitter: camel_api::SplitSource::Sync(camel_api::split_body_lines()),
             body: OutcomeSegment::new(Box::new(MutateAndStopBody)),
             parallel: false,
             parallel_limit: None,
@@ -538,7 +538,7 @@ mod tests {
         let bar = Arc::clone(&barrier);
 
         // Custom splitter producing 3 fragments.
-        let splitter: SplitExpression = Arc::new(|ex: &Exchange| {
+        let splitter = SplitSource::Sync(Arc::new(|ex: &Exchange| {
             Ok((0..3)
                 .map(|i| {
                     let mut frag = ex.clone();
@@ -546,7 +546,7 @@ mod tests {
                     frag
                 })
                 .collect())
-        });
+        }));
 
         /// Body that uses a barrier to synchronize all fragments past the
         /// pre-start gate, then dispatches:
@@ -644,7 +644,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn stop_inside_split_parallel_lowest_stopped_index_wins() {
         // Custom splitter producing 3 fragments with index-identifiable body.
-        let splitter: SplitExpression = Arc::new(|ex: &Exchange| {
+        let splitter = SplitSource::Sync(Arc::new(|ex: &Exchange| {
             Ok((0..3)
                 .map(|i| {
                     let mut frag = ex.clone();
@@ -652,7 +652,7 @@ mod tests {
                     frag
                 })
                 .collect())
-        });
+        }));
 
         // Body that stops for fragments 0 and 2; fragment 1 completes.
         struct DualStopBody;
@@ -730,7 +730,7 @@ mod tests {
         let max_concurrent = Arc::new(AtomicUsize::new(0));
 
         // Split into 6 fragments. parallel_limit=2.
-        let splitter: SplitExpression = Arc::new(|ex: &Exchange| {
+        let splitter = SplitSource::Sync(Arc::new(|ex: &Exchange| {
             Ok((0..6)
                 .map(|i| {
                     let mut frag = ex.clone();
@@ -738,7 +738,7 @@ mod tests {
                     frag
                 })
                 .collect())
-        });
+        }));
 
         let c = Arc::clone(&concurrent);
         let mc = Arc::clone(&max_concurrent);
@@ -841,7 +841,7 @@ mod tests {
         let invocations = Arc::new(AtomicUsize::new(0));
         let body = make_fail_body(1, Arc::clone(&invocations));
         let mut seg = SplitSegment {
-            splitter: camel_api::split_body_lines(),
+            splitter: camel_api::SplitSource::Sync(camel_api::split_body_lines()),
             body: OutcomeSegment::new(Box::new(body)),
             parallel: false,
             parallel_limit: None,
@@ -906,7 +906,7 @@ mod tests {
         let invocations = Arc::new(AtomicUsize::new(0));
         let body = make_fail_body(1, Arc::clone(&invocations));
         let mut seg = SplitSegment {
-            splitter: camel_api::split_body_lines(),
+            splitter: camel_api::SplitSource::Sync(camel_api::split_body_lines()),
             body: OutcomeSegment::new(Box::new(body)),
             parallel: false,
             parallel_limit: None,
@@ -935,7 +935,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn split_parallel_stop_on_exception_true() {
-        let splitter: SplitExpression = Arc::new(|ex: &Exchange| {
+        let splitter = SplitSource::Sync(Arc::new(|ex: &Exchange| {
             Ok((0..5)
                 .map(|i| {
                     let mut frag = ex.clone();
@@ -943,7 +943,7 @@ mod tests {
                     frag
                 })
                 .collect())
-        });
+        }));
 
         // All fragments fail. stop_on_exception=true → first Failed propagated.
         let invocations = Arc::new(AtomicUsize::new(0));
@@ -1002,7 +1002,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn split_parallel_stop_on_exception_false() {
-        let splitter: SplitExpression = Arc::new(|ex: &Exchange| {
+        let splitter = SplitSource::Sync(Arc::new(|ex: &Exchange| {
             Ok((0..5)
                 .map(|i| {
                     let mut frag = ex.clone();
@@ -1010,7 +1010,7 @@ mod tests {
                     frag
                 })
                 .collect())
-        });
+        }));
 
         // Fragment 0 passes, 1 fails, 2-4 pass.
         let invocations = Arc::new(AtomicUsize::new(0));
@@ -1092,12 +1092,12 @@ mod tests {
         }
 
         let invocations = Arc::new(AtomicUsize::new(0));
-        let splitter: SplitExpression = Arc::new(|_| {
+        let splitter = SplitSource::Sync(Arc::new(|_| {
             Err(CamelError::TypeConversionFailed(
                 "declarative split requires a text or array value, got number; add an unmarshal step before split"
                     .to_string(),
             ))
-        });
+        }));
 
         let mut seg = SplitSegment {
             splitter,
@@ -1167,8 +1167,8 @@ mod tests {
     }
 
     /// Custom splitter producing `n` fragments with distinguishable bodies.
-    fn n_fragment_splitter(n: u64) -> SplitExpression {
-        Arc::new(move |ex: &Exchange| {
+    fn n_fragment_splitter(n: u64) -> SplitSource {
+        SplitSource::Sync(Arc::new(move |ex: &Exchange| {
             Ok((0..n)
                 .map(|i| {
                     let mut frag = ex.clone();
@@ -1176,7 +1176,7 @@ mod tests {
                     frag
                 })
                 .collect())
-        })
+        }))
     }
 
     #[tokio::test]

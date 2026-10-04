@@ -375,10 +375,14 @@ fn resolve_steps_covers_declarative_and_eip_variants() {
             ],
         },
         BuilderStep::DynamicRouter {
-            config: camel_api::DynamicRouterConfig::new(Arc::new(|_| Some("mock:dr".into()))),
+            config: camel_api::DynamicRouterConfig::new(camel_api::TargetSource::Sync(Arc::new(
+                |_| Some("mock:dr".into()),
+            ))),
         },
         BuilderStep::RoutingSlip {
-            config: camel_api::RoutingSlipConfig::new(Arc::new(|_| Some("mock:rs".into()))),
+            config: camel_api::RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(
+                |_| Some("mock:rs".into()),
+            ))),
         },
     ];
 
@@ -921,7 +925,9 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
     let resolved = controller
         .resolve_steps(
             vec![BuilderStep::RoutingSlip {
-                config: camel_api::RoutingSlipConfig::new(Arc::new(|_| Some("mock:rs".into()))),
+                config: camel_api::RoutingSlipConfig::new(camel_api::TargetSource::Sync(Arc::new(
+                    |_| Some("mock:rs".into()),
+                ))),
             }],
             &producer_ctx,
             &controller.registry,
@@ -950,9 +956,9 @@ fn resolve_steps_covers_remaining_builder_step_arms() {
     let resolved = controller
         .resolve_steps(
             vec![BuilderStep::RecipientList {
-                config: camel_api::recipient_list::RecipientListConfig::new(Arc::new(|_| {
-                    "mock:r1,mock:r2".into()
-                })),
+                config: camel_api::recipient_list::RecipientListConfig::new(
+                    camel_api::RecipientSource::Sync(Arc::new(|_| "mock:r1,mock:r2".into())),
+                ),
             }],
             &producer_ctx,
             &controller.registry,
@@ -1489,8 +1495,8 @@ async fn direct_entry_aggregate_delivers_single_aggregated_reply() {
     // Producing route: one timer tick, split into 5 distinct fragments
     // sharing the correlation header, each dispatched via direct:agg-in.
     let fragment_bodies: Vec<String> = (0..5).map(|i| format!("frag-{i}")).collect();
-    let split_config =
-        camel_api::splitter::SplitterConfig::new(Arc::new(move |exchange: &Exchange| {
+    let split_config = camel_api::splitter::SplitterConfig::new(camel_api::SplitSource::Sync(
+        Arc::new(move |exchange: &Exchange| {
             Ok(fragment_bodies
                 .iter()
                 .map(|body| {
@@ -1500,7 +1506,8 @@ async fn direct_entry_aggregate_delivers_single_aggregated_reply() {
                     )
                 })
                 .collect())
-        }));
+        }),
+    ));
     let producer_route = RouteDefinition::new(
         "timer:drive?period=10&repeatCount=1",
         vec![

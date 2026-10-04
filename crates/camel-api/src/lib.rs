@@ -78,11 +78,12 @@ pub use datasource::{
 };
 pub use declarative::{LanguageExpressionDef, ValueSourceDef};
 pub use delayer::{DEFAULT_MAX_DELAY_MS, DelayConfig};
-pub use dynamic_router::{DynamicRouterConfig, RouterExpression};
+pub use dynamic_router::DynamicRouterConfig;
 pub use endpoint_pipeline::{CAMEL_SLIP_ENDPOINT, EndpointPipelineConfig, EndpointResolver};
 pub use endpoint_uri::EndpointUri;
 pub use error::{
-    CIRCUIT_OPEN, CamelError, ConfigValidationError, EndpointUriError, OpaqueErrorSource,
+    CIRCUIT_OPEN, CamelError, ConfigValidationError, ConversionDetail, EndpointUriError,
+    ErrorPosition, ExpressionErrorClass, OpaqueErrorSource,
 };
 pub use error_handler::{
     BoundaryKind, ErrorHandlerConfig, ExceptionDisposition, ExceptionPolicy,
@@ -105,7 +106,10 @@ pub use exchange::{
     CAMEL_STOP, Exchange, ExchangePattern, ORIGINAL_MESSAGE_EXTENSION, is_camel_stop,
 };
 pub use exchange_lookup::{ExchangeLookupPath, LookupPathError, PathSegment};
-pub use filter::FilterPredicate;
+pub use filter::{
+    BoxBoolFuture, BoxValueFuture, FilterPredicate, PredicateSource, RecipientSource, TargetSource,
+    ValueSource,
+};
 pub use from_body::FromBody;
 pub use function::{
     ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId, FunctionInvocationError,
@@ -136,7 +140,7 @@ pub use resequencer::{
     BatchCompletion, CapacityPolicy, GapPolicy, ResequenceMode, ResequencePolicyConfig,
 };
 pub use route_controller::{RouteAction, RouteController, RouteStatus};
-pub use routing_slip::{RoutingSlipConfig, RoutingSlipExpression};
+pub use routing_slip::RoutingSlipConfig;
 pub use runtime::{
     CANONICAL_CONTRACT_DECLARATIVE_ONLY_STEPS, CANONICAL_CONTRACT_EXCLUDED_DECLARATIVE_STEPS,
     CANONICAL_CONTRACT_NAME, CANONICAL_CONTRACT_RUST_ONLY_STEPS,
@@ -146,9 +150,9 @@ pub use runtime::{
     RuntimeQueryResult, canonical_contract_rejection_reason, canonical_contract_supports_step,
 };
 pub use splitter::{
-    AggregationStrategy, SplitExpression, SplitterConfig, StreamSplitConfig, StreamSplitFormat,
-    StreamingSplitExpression, fragment_exchange, split_body, split_body_json_array,
-    split_body_lines, streaming_split_type_error,
+    AggregationStrategy, SplitExpression, SplitSource, SplitterConfig, StreamSplitConfig,
+    StreamSplitFormat, StreamingSplitExpression, fragment_exchange, split_body,
+    split_body_json_array, split_body_lines, streaming_split_type_error,
 };
 pub use ssrf::{SsrfPolicy, is_ssrf_blocked_ip};
 pub use step_lifecycle::{StepLifecycle, StepShutdownReason};

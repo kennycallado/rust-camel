@@ -56,11 +56,17 @@ impl Expression for SimpleExpression {
 impl Predicate for SimplePredicate {
     async fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
         let val = evaluator::evaluate(&self.expr, exchange, &self.resolver).await?;
-        Ok(match &val {
-            Value::Bool(b) => *b,
-            Value::Null => false,
-            _ => true,
-        })
+        // Strict bool: predicates must evaluate to a real boolean. No
+        // truthiness coercion — any other value (including an empty string or
+        // `null`) is a type error (change `language-value-boundary`, R4).
+        match &val {
+            Value::Bool(b) => Ok(*b),
+            other => Err(LanguageError::TypeMismatch {
+                expected: "bool".to_string(),
+                actual: evaluator::value_type_name(other).to_string(),
+                position: None,
+            }),
+        }
     }
 }
 
@@ -90,7 +96,7 @@ impl Language for SimpleLanguage {
 mod tests {
     use super::SimpleLanguage;
     use camel_language_api::Language;
-    use camel_language_api::{Exchange, Message, Value};
+    use camel_language_api::{Exchange, LanguageError, Message, Value};
 
     fn exchange_with_header(key: &str, val: &str) -> Exchange {
         let mut msg = Message::default();
@@ -329,19 +335,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_predicate_null_is_false() {
+    async fn test_predicate_null_is_type_mismatch() {
+        // Sealed Q3: a bare expression evaluating to `null` is not `false`.
         let lang = SimpleLanguage::new();
         let pred = lang.create_predicate("${header.missing}").unwrap();
         let ex = exchange_with_body("test");
-        assert!(!pred.matches(&ex).await.unwrap());
+        assert!(matches!(
+            pred.matches(&ex).await,
+            Err(LanguageError::TypeMismatch { .. })
+        ));
     }
 
     #[tokio::test]
-    async fn test_predicate_non_null_is_true() {
+    async fn test_predicate_non_bool_is_type_mismatch() {
+        // A bare string is not coerced to `true`.
         let lang = SimpleLanguage::new();
         let pred = lang.create_predicate("${header.type}").unwrap();
         let ex = exchange_with_header("type", "order");
-        assert!(pred.matches(&ex).await.unwrap());
+        assert!(matches!(
+            pred.matches(&ex).await,
+            Err(LanguageError::TypeMismatch { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn simple_predicate_empty_string_is_type_mismatch() {
+        // R4 unit form: an empty-string flag is not `false`.
+        let lang = SimpleLanguage::new();
+        let pred = lang.create_predicate("${header.flag}").unwrap();
+        let ex = exchange_with_header("flag", "");
+        match pred.matches(&ex).await {
+            Err(LanguageError::TypeMismatch {
+                expected, actual, ..
+            }) => {
+                assert_eq!(expected, "bool");
+                assert_eq!(actual, "string");
+            }
+            other => panic!("expected TypeMismatch, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn simple_coercion_error_has_no_operand() {
+        // The rejected operand (exchange data) must not appear in the error.
+        let secret = "SECRETVAL";
+        let lang = SimpleLanguage::new();
+        let expr = lang.create_expression("${header.secret} > 1").unwrap();
+        let ex = exchange_with_header("secret", secret);
+        let err = expr.evaluate(&ex).await.expect_err("must fail");
+        match &err {
+            LanguageError::TypeMismatch {
+                expected,
+                actual,
+                position: None,
+            } => {
+                assert_eq!(expected, "number");
+                assert_eq!(actual, "string");
+            }
+            other => panic!("expected number/string TypeMismatch, got: {other:?}"),
+        }
+        assert!(!err.to_string().contains(secret), "operand leaked: {err}");
     }
 
     #[tokio::test]
@@ -485,11 +538,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_body_empty_predicate_is_false() {
+    async fn test_body_empty_predicate_is_type_mismatch() {
+        // Empty body renders as `null`, which is not a boolean.
         let lang = SimpleLanguage::new();
         let pred = lang.create_predicate("${body}").unwrap();
         let ex = Exchange::new(Message::default());
-        assert!(!pred.matches(&ex).await.unwrap());
+        assert!(matches!(
+            pred.matches(&ex).await,
+            Err(LanguageError::TypeMismatch { .. })
+        ));
     }
 
     #[tokio::test]

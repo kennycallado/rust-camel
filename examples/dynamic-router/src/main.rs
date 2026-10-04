@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use camel_api::body::Body;
-use camel_api::{CamelError, Value};
+use camel_api::{CamelError, TargetSource, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
@@ -61,25 +61,27 @@ async fn main() -> Result<(), CamelError> {
             })
         })
         // Dynamic router: read header and route to correct endpoint
-        .dynamic_router(Arc::new(move |exchange: &camel_api::Exchange| {
-            let mut routed = routed_clone.lock().unwrap(); // allow-unwrap
-            let key = exchange.correlation_id().to_string();
-            if routed.insert(key.clone()) {
-                let dest = exchange
-                    .input
-                    .header("destination")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("a");
-                Some(format!(
-                    "log:routed-{}?showBody=true&showHeaders=true",
-                    dest
-                ))
-            } else {
-                // Second call on the same exchange: routing is complete.
-                routed.remove(&key);
-                None
-            }
-        }))
+        .dynamic_router(TargetSource::Sync(Arc::new(
+            move |exchange: &camel_api::Exchange| {
+                let mut routed = routed_clone.lock().unwrap(); // allow-unwrap
+                let key = exchange.correlation_id().to_string();
+                if routed.insert(key.clone()) {
+                    let dest = exchange
+                        .input
+                        .header("destination")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("a");
+                    Some(format!(
+                        "log:routed-{}?showBody=true&showHeaders=true",
+                        dest
+                    ))
+                } else {
+                    // Second call on the same exchange: routing is complete.
+                    routed.remove(&key);
+                    None
+                }
+            },
+        )))
         .build()?;
     // ANCHOR_END: dynamic-router-route
 

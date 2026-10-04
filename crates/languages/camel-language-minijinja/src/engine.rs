@@ -13,7 +13,9 @@ use crate::autoescape_validator;
 
 use async_trait::async_trait;
 use camel_api::{Body, Exchange, Value};
-use camel_language_api::{Expression, LanguageError, MinijinjaLimitsConfig};
+use camel_language_api::{
+    ErrorPosition, Expression, ExpressionErrorClass, LanguageError, MinijinjaLimitsConfig,
+};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -234,6 +236,38 @@ fn template_name_for(source: &str) -> String {
     format!("t{:016x}", hasher.finish())
 }
 
+/// Map a MiniJinja render error to a redacted [`LanguageError`].
+///
+/// `minijinja::Error`'s `Display` can quote rendered data (the value that
+/// failed an operation), so only the error kind and the template line are
+/// retained. `Error::line()` is 1-based; MiniJinja exposes no column, so the
+/// column is reported as `0` ("top of line"), mirroring the rhai mapping.
+fn map_render_error(e: &minijinja::Error) -> LanguageError {
+    let class = match e.kind() {
+        minijinja::ErrorKind::SyntaxError => ExpressionErrorClass::Parse,
+        minijinja::ErrorKind::UnknownFunction
+        | minijinja::ErrorKind::UnknownFilter
+        | minijinja::ErrorKind::UnknownTest
+        | minijinja::ErrorKind::UnknownMethod => ExpressionErrorClass::FunctionNotFound,
+        minijinja::ErrorKind::OutOfFuel => ExpressionErrorClass::Limit,
+        minijinja::ErrorKind::InvalidOperation
+        | minijinja::ErrorKind::NonPrimitive
+        | minijinja::ErrorKind::NonKey => ExpressionErrorClass::TypeMismatch,
+        _ => ExpressionErrorClass::Runtime,
+    };
+    let position = e.line().and_then(|line| {
+        u32::try_from(line)
+            .ok()
+            .map(|line| ErrorPosition { line, column: 0 })
+    });
+    LanguageError::EvalFailure {
+        class,
+        position,
+        // Static kind description only — never `e.detail()` or the Display.
+        detail: Some(e.kind().to_string()),
+    }
+}
+
 #[async_trait]
 impl Expression for MinijinjaExpression {
     async fn evaluate(&self, exchange: &Exchange) -> Result<Value, LanguageError> {
@@ -270,7 +304,7 @@ impl Expression for MinijinjaExpression {
             // S: Serialize and W: io::Write by value. The returned Captured
             // is dropped — we keep only the bytes already written to `buf`.
             tmpl.render_captured_to(&ctx, &mut writer)
-                .map_err(|e| LanguageError::EvalError(format!("render: {e}")))?;
+                .map_err(|e| map_render_error(&e))?;
             String::from_utf8(buf)
                 .map_err(|e| LanguageError::EvalError(format!("non-utf8 output: {e}")))
         });
@@ -433,9 +467,7 @@ pub async fn render(
     let context = context.clone();
 
     let join = tokio::task::spawn_blocking(move || -> Result<String, LanguageError> {
-        let tmpl = env
-            .get_template(&name)
-            .map_err(|e| LanguageError::EvalError(format!("template lookup: {e}")))?;
+        let tmpl = env.get_template(&name).map_err(|e| map_render_error(&e))?;
         let mut buf = Vec::new();
         let mut writer = LimitedWriter::new(&mut buf, max_output);
         // render_captured_to is the non-deprecated equivalent of
@@ -443,7 +475,7 @@ pub async fn render(
         // S: Serialize and W: io::Write by value. The returned Captured
         // is dropped — we keep only the bytes already written to `buf`.
         tmpl.render_captured_to(&context, &mut writer)
-            .map_err(|e| LanguageError::EvalError(format!("render: {e}")))?;
+            .map_err(|e| map_render_error(&e))?;
         String::from_utf8(buf)
             .map_err(|e| LanguageError::EvalError(format!("non-utf8 output: {e}")))
     });

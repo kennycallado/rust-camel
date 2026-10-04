@@ -24,7 +24,7 @@ The Recipient List is a Message Router from Hohpe and Woolf. It evaluates an exp
 
 </details>
 
-The route stores three `log` endpoint URIs in the `destinations` header. The `.recipient_list_with_config(...)` call takes a closure of type `RecipientListExpression`. That closure reads the header and returns the comma-separated string. The processor splits the string, resolves each URI, and dispatches a clone of the exchange to each endpoint. The `.parallel(true)` flag runs the three dispatches concurrently instead of one after the other.
+The route stores three `log` endpoint URIs in the `destinations` header. The `.recipient_list_with_config(...)` call takes a `RecipientSource` — here a `RecipientSource::Sync` closure that reads the header and returns the comma-separated string (a language-backed `RecipientSource::Async` expression is the other arm). The processor splits the string, resolves each URI, and dispatches a clone of the exchange to each endpoint. The `.parallel(true)` flag runs the three dispatches concurrently instead of one after the other.
 
 The exchange that reaches the next step depends on the aggregation strategy. The default `LastWins` strategy forwards one branch's result to the step that follows. Set `MulticastStrategy::Original` to pass the input exchange through unchanged and discard every branch output. Set `CollectAll` to gather each branch body into a JSON array. The example keeps the default, so `log:summary` receives the result of one resolved branch.
 

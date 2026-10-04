@@ -66,6 +66,7 @@ toml.workspace = true
 camel-language-api.workspace = true
 camel-language-rhai.workspace = true
 camel-language-jsonpath.workspace = true
+camel-language-js.workspace = true
 camel-language-xpath.workspace = true
 camel-dsl.workspace = true
 camel-bean.workspace = true
@@ -86,6 +87,7 @@ wiremock = { workspace = true }
 reqwest = { workspace = true }
 axum.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing.workspace = true
 redis = { workspace = true, features = ["tokio-comp", "aio"] }
 futures.workspace = true
 http.workspace = true

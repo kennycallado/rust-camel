@@ -881,6 +881,7 @@ impl RouteDefinitionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::{RecipientSource, TargetSource};
 
     /// Task 1.2 (span-name-enrichment): `BuilderStep::span_label` mapping.
     ///
@@ -1273,8 +1274,8 @@ mod tests {
             format!(
                 "{:?}",
                 BuilderStep::DynamicRouter {
-                    config: DynamicRouterConfig::new(Arc::new(|_: &Exchange| Some(
-                        "mock:dr".into()
+                    config: DynamicRouterConfig::new(TargetSource::Sync(Arc::new(
+                        |_: &Exchange| Some("mock:dr".into())
                     ))),
                 }
             ),
@@ -1285,7 +1286,9 @@ mod tests {
             format!(
                 "{:?}",
                 BuilderStep::RoutingSlip {
-                    config: RoutingSlipConfig::new(Arc::new(|_: &Exchange| Some("mock:rs".into()))),
+                    config: RoutingSlipConfig::new(TargetSource::Sync(Arc::new(|_: &Exchange| {
+                        Some("mock:rs".into())
+                    }))),
                 }
             ),
             "RoutingSlip { config: RoutingSlipConfig { uri_delimiter: \",\", cache_size: 1000, ignore_invalid_endpoints: false } }"
@@ -1295,7 +1298,9 @@ mod tests {
             format!(
                 "{:?}",
                 BuilderStep::RecipientList {
-                    config: RecipientListConfig::new(Arc::new(|_: &Exchange| String::new())),
+                    config: RecipientListConfig::new(RecipientSource::Sync(Arc::new(
+                        |_: &Exchange| String::new()
+                    ))),
                 }
             ),
             "RecipientList { config: RecipientListConfig { delimiter: \",\", parallel: false, parallel_limit: None, stop_on_exception: false, max_recipients: 1000 } }"
@@ -1778,10 +1783,14 @@ mod tests {
                 steps: vec![BuilderStep::To("mock:l1".into())],
             },
             BuilderStep::DynamicRouter {
-                config: DynamicRouterConfig::new(Arc::new(|_| Some("mock:dr".into()))),
+                config: DynamicRouterConfig::new(TargetSource::Sync(Arc::new(|_| {
+                    Some("mock:dr".into())
+                }))),
             },
             BuilderStep::RoutingSlip {
-                config: RoutingSlipConfig::new(Arc::new(|_| Some("mock:rs".into()))),
+                config: RoutingSlipConfig::new(TargetSource::Sync(Arc::new(|_| {
+                    Some("mock:rs".into())
+                }))),
             },
         ];
 

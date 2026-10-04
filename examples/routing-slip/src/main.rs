@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use camel_api::body::Body;
-use camel_api::{CamelError, Value};
+use camel_api::{CamelError, TargetSource, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
@@ -46,12 +46,14 @@ async fn main() -> Result<(), CamelError> {
                 Ok(exchange)
             })
         })
-        .routing_slip(Arc::new(|exchange: &camel_api::Exchange| {
-            exchange
-                .input
-                .header("slip")
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-        }))
+        .routing_slip(TargetSource::Sync(Arc::new(
+            |exchange: &camel_api::Exchange| {
+                exchange
+                    .input
+                    .header("slip")
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+            },
+        )))
         .build()?;
     // ANCHOR_END: routing-slip-route
 

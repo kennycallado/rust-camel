@@ -25,9 +25,9 @@ fn bench_choice_predicates(c: &mut Criterion) {
     for count in [3, 10, 50] {
         let whens: Vec<WhenClause> = (0..count)
             .map(|i| WhenClause {
-                predicate: FilterPredicate::new(move |ex: &Exchange| {
-                    ex.input.header(&format!("match-{i}")).is_some()
-                }),
+                predicate: camel_api::PredicateSource::Sync(FilterPredicate::new(
+                    move |ex: &Exchange| ex.input.header(&format!("match-{i}")).is_some(),
+                )),
                 pipeline: append_body(&format!("-matched-{i}")),
             })
             .collect();

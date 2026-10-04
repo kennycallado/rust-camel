@@ -4,7 +4,7 @@
 //! Provides expressions and predicates for JSON-based routing and transformation.
 
 use async_trait::async_trait;
-use camel_language_api::{Body, Exchange, Value};
+use camel_language_api::{Body, Exchange, ExpressionErrorClass, Value};
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use jsonpath_rust::parser::model::JpQuery;
 use jsonpath_rust::parser::parse_json_path;
@@ -135,8 +135,14 @@ fn extract_json(exchange: &Exchange, config: &JsonPathConfig) -> Result<JsonValu
                     s.len()
                 )));
             }
-            let value: JsonValue = serde_json::from_str(s)
-                .map_err(|e| LanguageError::EvalError(format!("body is not valid JSON: {e}")))?;
+            // Redacted: serde's Display can quote a body fragment. Class +
+            // static detail only (change `language-value-boundary`).
+            let value: JsonValue =
+                serde_json::from_str(s).map_err(|_| LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Conversion,
+                    position: None,
+                    detail: Some("body is not valid JSON".to_string()),
+                })?;
             check_depth(&value, max_depth)?;
             Ok(value)
         }
@@ -186,29 +192,30 @@ impl Predicate for JsonPathPredicate {
     async fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
         let json = extract_json(exchange, &self.config)?;
         let result = run_query(&self.query, &json)?;
-        Ok(is_truthy(&result))
+        // Strict bool: only a JSON boolean is a valid predicate result. No
+        // truthiness coercion — `"false"`, `0`, `[]`, `{}`, and `null` are all
+        // type errors (change `language-value-boundary`, sealed Q3).
+        match &result {
+            JsonValue::Bool(b) => Ok(*b),
+            other => Err(LanguageError::TypeMismatch {
+                expected: "bool".to_string(),
+                actual: json_type_name(other).to_string(),
+                position: None,
+            }),
+        }
     }
 }
 
-fn is_truthy(value: &JsonValue) -> bool {
+/// Type name of a [`JsonValue`] for `TypeMismatch` diagnostics. Type names
+/// only — never runtime values.
+fn json_type_name(value: &JsonValue) -> &'static str {
     match value {
-        JsonValue::Null => false,
-        JsonValue::Bool(b) => *b,
-        JsonValue::Number(n) => {
-            if let Some(v) = n.as_i64() {
-                return v != 0;
-            }
-            if let Some(v) = n.as_u64() {
-                return v != 0;
-            }
-            if let Some(v) = n.as_f64() {
-                return v != 0.0;
-            }
-            true
-        }
-        JsonValue::String(s) => !s.is_empty(),
-        JsonValue::Array(arr) => !arr.is_empty(),
-        JsonValue::Object(_) => true,
+        JsonValue::Null => "null",
+        JsonValue::Bool(_) => "bool",
+        JsonValue::Number(_) => "number",
+        JsonValue::String(_) => "string",
+        JsonValue::Array(_) => "array",
+        JsonValue::Object(_) => "object",
     }
 }
 
@@ -435,75 +442,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn predicate_non_empty_array_is_true() {
+    async fn jsonpath_predicate_non_bool_is_type_mismatch() {
+        // Sealed Q3: only JSON booleans are valid predicate results. Strings,
+        // numbers, arrays, objects, and null are all type errors — including
+        // the old `[]` false vs `{}` true asymmetry.
         let lang = default_lang().await;
-        let pred = lang.create_predicate("$.items[*]").unwrap();
-        let ex = exchange_with_json(r#"{"items":[1,2,3]}"#).await;
-        assert!(pred.matches(&ex).await.unwrap());
-    }
+        for (json_body, actual) in [
+            (r#"{"val":"false"}"#, "string"),
+            (r#"{"val":"x"}"#, "string"),
+            (r#"{"val":0}"#, "number"),
+            (r#"{"val":1}"#, "number"),
+            (r#"{"val":[]}"#, "array"),
+            (r#"{"val":{}}"#, "object"),
+            (r#"{"other":1}"#, "null"),
+        ] {
+            let pred = lang.create_predicate("$.val").unwrap();
+            let ex = exchange_with_json(json_body).await;
+            match pred.matches(&ex).await {
+                Err(LanguageError::TypeMismatch {
+                    expected,
+                    actual: got,
+                    position: None,
+                }) => {
+                    assert_eq!(expected, "bool");
+                    assert_eq!(got, actual, "body {json_body}");
+                }
+                other => panic!("expected TypeMismatch for {json_body}, got: {other:?}"),
+            }
+        }
 
-    #[tokio::test]
-    async fn predicate_empty_result_is_false() {
-        let lang = default_lang().await;
-        let pred = lang.create_predicate("$.missing").unwrap();
-        let ex = exchange_with_json(r#"{"other":1}"#).await;
-        assert!(!pred.matches(&ex).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn predicate_boolean_true() {
-        let lang = default_lang().await;
+        // Real booleans still work.
         let pred = lang.create_predicate("$.active").unwrap();
-        let ex = exchange_with_json(r#"{"active":true}"#).await;
-        assert!(pred.matches(&ex).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn predicate_boolean_false() {
-        let lang = default_lang().await;
+        assert!(
+            pred.matches(&exchange_with_json(r#"{"active":true}"#).await)
+                .await
+                .unwrap()
+        );
         let pred = lang.create_predicate("$.active").unwrap();
-        let ex = exchange_with_json(r#"{"active":false}"#).await;
-        assert!(!pred.matches(&ex).await.unwrap());
+        assert!(
+            !pred
+                .matches(&exchange_with_json(r#"{"active":false}"#).await)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
-    async fn predicate_found_value_is_true() {
+    async fn jsonpath_invalid_body_error_is_conversion_class_no_snippet() {
         let lang = default_lang().await;
-        let pred = lang.create_predicate("$.name").unwrap();
-        let ex = exchange_with_json(r#"{"name":"test"}"#).await;
-        assert!(pred.matches(&ex).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn predicate_zero_is_false() {
-        let lang = default_lang().await;
-        let pred = lang.create_predicate("$.val").unwrap();
-        let ex = exchange_with_json(r#"{"val":0}"#).await;
-        assert!(!pred.matches(&ex).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn predicate_non_zero_is_true() {
-        let lang = default_lang().await;
-        let pred = lang.create_predicate("$.val").unwrap();
-        let ex = exchange_with_json(r#"{"val":1}"#).await;
-        assert!(pred.matches(&ex).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn predicate_empty_string_is_false() {
-        let lang = default_lang().await;
-        let pred = lang.create_predicate("$.val").unwrap();
-        let ex = exchange_with_json(r#"{"val":""}"#).await;
-        assert!(!pred.matches(&ex).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn predicate_non_empty_string_is_true() {
-        let lang = default_lang().await;
-        let pred = lang.create_predicate("$.val").unwrap();
-        let ex = exchange_with_json(r#"{"val":"x"}"#).await;
-        assert!(pred.matches(&ex).await.unwrap());
+        let expr = lang.create_expression("$.key").unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::Text("SECRETVAL not json".to_string());
+        let err = expr.evaluate(&ex).await.expect_err("must fail");
+        match &err {
+            LanguageError::EvalFailure {
+                class: ExpressionErrorClass::Conversion,
+                position: None,
+                detail: Some(detail),
+            } => {
+                assert_eq!(detail, "body is not valid JSON");
+            }
+            other => panic!("expected Conversion EvalFailure, got: {other:?}"),
+        }
+        assert!(!err.to_string().contains("SECRETVAL"), "body leaked: {err}");
     }
 
     // --- Resource limit tests (A-26) ---
@@ -721,7 +722,7 @@ mod tests {
     async fn compilation_happens_only_once_for_predicate() {
         let before = COMPILE_COUNT.with(std::cell::Cell::get);
         let lang = JsonPathLanguage::new();
-        let pred = lang.create_predicate("$.items[*]").unwrap();
+        let pred = lang.create_predicate("$.active").unwrap();
         let after_create = COMPILE_COUNT.with(std::cell::Cell::get);
         assert_eq!(
             after_create,
@@ -730,7 +731,7 @@ mod tests {
         );
 
         for _ in 0..50 {
-            let ex = exchange_with_json(r#"{"items":[1,2,3]}"#).await;
+            let ex = exchange_with_json(r#"{"active":true}"#).await;
             assert!(pred.matches(&ex).await.unwrap());
         }
         assert_eq!(

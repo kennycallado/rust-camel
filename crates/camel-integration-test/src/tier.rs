@@ -241,7 +241,7 @@ mod tests {
     use super::{DocumentInputs, Tier, derive_tier};
     use camel_api::error_handler::ErrorHandlerConfig;
     use camel_api::recipient_list::RecipientListConfig;
-    use camel_api::{DynamicRouterConfig, RoutingSlipConfig};
+    use camel_api::{DynamicRouterConfig, RecipientSource, RoutingSlipConfig, TargetSource};
     use camel_core::intercept::InterceptAction;
     use camel_core::{BuilderStep, RouteDefinition};
 
@@ -384,19 +384,25 @@ mod tests {
             (
                 "recipient_list",
                 BuilderStep::RecipientList {
-                    config: RecipientListConfig::new(Arc::new(|_| "mock:one".to_string())),
+                    config: RecipientListConfig::new(RecipientSource::Sync(Arc::new(|_| {
+                        "mock:one".to_string()
+                    }))),
                 },
             ),
             (
                 "routing_slip",
                 BuilderStep::RoutingSlip {
-                    config: RoutingSlipConfig::new(Arc::new(|_| Some("mock:one".to_string()))),
+                    config: RoutingSlipConfig::new(TargetSource::Sync(Arc::new(|_| {
+                        Some("mock:one".to_string())
+                    }))),
                 },
             ),
             (
                 "dynamic_router",
                 BuilderStep::DynamicRouter {
-                    config: DynamicRouterConfig::new(Arc::new(|_| Some("mock:one".to_string()))),
+                    config: DynamicRouterConfig::new(TargetSource::Sync(Arc::new(|_| {
+                        Some("mock:one".to_string())
+                    }))),
                 },
             ),
             ("to_d", BuilderStep::To("${env:SCHEME}:orders".into())),

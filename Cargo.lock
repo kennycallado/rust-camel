@@ -2451,7 +2451,10 @@ name = "camel-language-rhai"
 version = "0.56.0"
 dependencies = [
  "async-trait",
+ "bytes",
+ "camel-api",
  "camel-language-api",
+ "futures",
  "rhai",
  "tempfile",
  "tokio",
@@ -2481,6 +2484,7 @@ dependencies = [
  "sxd-xpath",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2748,6 +2752,7 @@ dependencies = [
  "camel-endpoint",
  "camel-function",
  "camel-language-api",
+ "camel-language-js",
  "camel-language-jsonpath",
  "camel-language-rhai",
  "camel-language-xpath",
@@ -2786,6 +2791,7 @@ dependencies = [
  "tonic",
  "tower 0.5.3",
  "tower-http 0.7.1",
+ "tracing",
  "tracing-subscriber",
  "wiremock",
  "zip",

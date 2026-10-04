@@ -13,8 +13,16 @@ use serde_json::Value;
 use crate::{
     engine::JsExchange,
     error::JsLanguageError,
-    value::{js_to_value, value_to_js},
+    readonly::{ReadOnlySentinel, deep_readonly_wrap, readonly_proxy, throwing_mutator},
+    value::{ArrayDetector, js_to_value_with_detector, value_to_js},
 };
+
+/// Map a Boa error from host-object construction into the typed language error.
+fn host_error(e: boa_engine::JsError) -> JsLanguageError {
+    JsLanguageError::Execution {
+        message: e.to_string(),
+    }
+}
 
 macro_rules! make_console_fn {
     ($level:ident, $ctx:expr) => {{
@@ -71,20 +79,24 @@ pub fn register_console(ctx: &mut Context) -> boa_engine::JsResult<JsObject> {
 }
 
 /// Build the `camel` global object with `headers`, `properties`, and `body`.
+///
+/// When `read_only` is `Some`, every snapshot object is wrapped in a throwing
+/// `Proxy`, the mutator functions throw the sentinel, and the returned object
+/// is itself wrapped — see [`crate::readonly`]. The writable path
+/// (`read_only == None`) is unchanged.
 pub fn build_camel_global(
     exchange: &JsExchange,
+    read_only: Option<&ReadOnlySentinel>,
     ctx: &mut Context,
 ) -> Result<JsObject, JsLanguageError> {
     let camel = JsObject::with_null_proto();
 
-    let headers = build_map_object(&exchange.headers, ctx)?;
+    let headers = build_map_object(&exchange.headers, read_only, ctx)?;
     camel
         .set(js_string!("headers"), JsValue::from(headers), false, ctx)
-        .map_err(|e| JsLanguageError::Execution {
-            message: e.to_string(),
-        })?;
+        .map_err(host_error)?;
 
-    let properties = build_map_object(&exchange.properties, ctx)?;
+    let properties = build_map_object(&exchange.properties, read_only, ctx)?;
     camel
         .set(
             js_string!("properties"),
@@ -92,10 +104,12 @@ pub fn build_camel_global(
             false,
             ctx,
         )
-        .map_err(|e| JsLanguageError::Execution {
-            message: e.to_string(),
-        })?;
+        .map_err(host_error)?;
 
+    // `property(name)` is a read-only accessor: it reads the (already
+    // read-only-wrapped) backing data and returns the wrapped value. In
+    // read-only mode the map it captures is a proxy, so `__data` resolves to
+    // the proxied backing object.
     let properties_get = properties.clone();
     let property_fn = NativeFunction::from_copy_closure_with_captures(
         move |_this, args, props, ctx| {
@@ -120,78 +134,88 @@ pub fn build_camel_global(
             false,
             ctx,
         )
-        .map_err(|e| JsLanguageError::Execution {
-            message: e.to_string(),
-        })?;
+        .map_err(host_error)?;
 
-    let properties_set = properties.clone();
-    let set_property_fn = NativeFunction::from_copy_closure_with_captures(
-        move |_this, args, props, ctx| {
-            let key = args
-                .first()
-                .unwrap_or(&JsValue::undefined())
-                .to_string(ctx)?
-                .to_std_string_escaped();
-            let val = args.get(1).cloned().unwrap_or(JsValue::undefined());
-            let data = props.get(js_string!("__data"), ctx)?;
-            let data_obj = data.as_object().ok_or_else(|| {
-                boa_engine::JsNativeError::typ().with_message("properties.__data missing")
-            })?;
-            data_obj.set(js_string!(key.as_str()), val, false, ctx)?;
-            Ok(JsValue::undefined())
-        },
-        properties_set,
-    );
-    let set_property_js = set_property_fn.to_js_function(ctx.realm());
+    // `set_property(name, value)`: a throwing mutator in read-only mode, the
+    // real writer otherwise.
+    let set_property_js = match read_only {
+        Some(sentinel) => throwing_mutator(sentinel, ctx),
+        None => {
+            let properties_set = properties.clone();
+            let set_property_fn = NativeFunction::from_copy_closure_with_captures(
+                move |_this, args, props, ctx| {
+                    let key = args
+                        .first()
+                        .unwrap_or(&JsValue::undefined())
+                        .to_string(ctx)?
+                        .to_std_string_escaped();
+                    let val = args.get(1).cloned().unwrap_or(JsValue::undefined());
+                    let data = props.get(js_string!("__data"), ctx)?;
+                    let data_obj = data.as_object().ok_or_else(|| {
+                        boa_engine::JsNativeError::typ().with_message("properties.__data missing")
+                    })?;
+                    data_obj.set(js_string!(key.as_str()), val, false, ctx)?;
+                    Ok(JsValue::undefined())
+                },
+                properties_set,
+            );
+            JsValue::from(set_property_fn.to_js_function(ctx.realm()))
+        }
+    };
     camel
-        .set(
-            js_string!("set_property"),
-            JsValue::from(set_property_js),
-            false,
-            ctx,
-        )
-        .map_err(|e| JsLanguageError::Execution {
-            message: e.to_string(),
-        })?;
+        .set(js_string!("set_property"), set_property_js, false, ctx)
+        .map_err(host_error)?;
 
     let body_val = value_to_js(&exchange.body, ctx)?;
+    let body_val = match read_only {
+        Some(sentinel) => deep_readonly_wrap(body_val, sentinel, ctx).map_err(host_error)?,
+        None => body_val,
+    };
     camel
         .set(js_string!("body"), body_val, false, ctx)
-        .map_err(|e| JsLanguageError::Execution {
-            message: e.to_string(),
-        })?;
+        .map_err(host_error)?;
 
-    Ok(camel)
+    match read_only {
+        Some(sentinel) => readonly_proxy(camel, sentinel, ctx).map_err(host_error),
+        None => Ok(camel),
+    }
 }
 
 /// Build a map-like JS object with get/set/has/remove/keys methods backed by a `__data` object.
+///
+/// In read-only mode the backing values and the `__data` object are wrapped in
+/// throwing proxies and `set`/`remove` are throwing host functions (so an
+/// alias captured before the call still refuses).
 fn build_map_object(
     map: &HashMap<String, Value>,
+    read_only: Option<&ReadOnlySentinel>,
     ctx: &mut Context,
 ) -> Result<JsObject, JsLanguageError> {
     // Build the backing __data object.
     let data = JsObject::with_null_proto();
     for (k, v) in map {
         let js_val = value_to_js(v, ctx)?;
+        let js_val = match read_only {
+            Some(sentinel) => deep_readonly_wrap(js_val, sentinel, ctx).map_err(host_error)?,
+            None => js_val,
+        };
         data.set(js_string!(k.as_str()), js_val, false, ctx)
-            .map_err(|e| JsLanguageError::Execution {
-                message: e.to_string(),
-            })?;
+            .map_err(host_error)?;
     }
 
     let map_obj = JsObject::with_null_proto();
+    let data_value = match read_only {
+        Some(sentinel) => {
+            JsValue::from(readonly_proxy(data.clone(), sentinel, ctx).map_err(host_error)?)
+        }
+        None => JsValue::from(data.clone()),
+    };
     map_obj
-        .set(
-            js_string!("__data"),
-            JsValue::from(data.clone()),
-            false,
-            ctx,
-        )
-        .map_err(|e| JsLanguageError::Execution {
-            message: e.to_string(),
-        })?;
+        .set(js_string!("__data"), data_value, false, ctx)
+        .map_err(host_error)?;
 
-    // get(key) -> value.
+    // get(key) -> value. The captured backing object already stores
+    // read-only-wrapped values in read-only mode.
     let data_get = data.clone();
     let get_fn = NativeFunction::from_copy_closure_with_captures(
         move |_this, args, data_obj, ctx| {
@@ -207,31 +231,32 @@ fn build_map_object(
     let get_js = get_fn.to_js_function(ctx.realm());
     map_obj
         .set(js_string!("get"), JsValue::from(get_js), false, ctx)
-        .map_err(|e| JsLanguageError::Execution {
-            message: e.to_string(),
-        })?;
+        .map_err(host_error)?;
 
-    // set(key, value).
-    let data_set = data.clone();
-    let set_fn = NativeFunction::from_copy_closure_with_captures(
-        move |_this, args, data_obj, ctx| {
-            let key = args
-                .first()
-                .unwrap_or(&JsValue::undefined())
-                .to_string(ctx)?
-                .to_std_string_escaped();
-            let val = args.get(1).cloned().unwrap_or(JsValue::undefined());
-            data_obj.set(js_string!(key.as_str()), val, false, ctx)?;
-            Ok(JsValue::undefined())
-        },
-        data_set,
-    );
-    let set_js = set_fn.to_js_function(ctx.realm());
+    // set(key, value): throwing mutator in read-only mode, real writer otherwise.
+    let set_js = match read_only {
+        Some(sentinel) => throwing_mutator(sentinel, ctx),
+        None => {
+            let data_set = data.clone();
+            let set_fn = NativeFunction::from_copy_closure_with_captures(
+                move |_this, args, data_obj, ctx| {
+                    let key = args
+                        .first()
+                        .unwrap_or(&JsValue::undefined())
+                        .to_string(ctx)?
+                        .to_std_string_escaped();
+                    let val = args.get(1).cloned().unwrap_or(JsValue::undefined());
+                    data_obj.set(js_string!(key.as_str()), val, false, ctx)?;
+                    Ok(JsValue::undefined())
+                },
+                data_set,
+            );
+            JsValue::from(set_fn.to_js_function(ctx.realm()))
+        }
+    };
     map_obj
-        .set(js_string!("set"), JsValue::from(set_js), false, ctx)
-        .map_err(|e| JsLanguageError::Execution {
-            message: e.to_string(),
-        })?;
+        .set(js_string!("set"), set_js, false, ctx)
+        .map_err(host_error)?;
 
     // has(key) -> bool.
     let data_has = data.clone();
@@ -250,30 +275,31 @@ fn build_map_object(
     let has_js = has_fn.to_js_function(ctx.realm());
     map_obj
         .set(js_string!("has"), JsValue::from(has_js), false, ctx)
-        .map_err(|e| JsLanguageError::Execution {
-            message: e.to_string(),
-        })?;
+        .map_err(host_error)?;
 
-    // remove(key).
-    let data_remove = data.clone();
-    let remove_fn = NativeFunction::from_copy_closure_with_captures(
-        move |_this, args, data_obj, ctx| {
-            let key = args
-                .first()
-                .unwrap_or(&JsValue::undefined())
-                .to_string(ctx)?
-                .to_std_string_escaped();
-            data_obj.delete_property_or_throw(js_string!(key.as_str()), ctx)?;
-            Ok(JsValue::undefined())
-        },
-        data_remove,
-    );
-    let remove_js = remove_fn.to_js_function(ctx.realm());
+    // remove(key): throwing mutator in read-only mode, real remover otherwise.
+    let remove_js = match read_only {
+        Some(sentinel) => throwing_mutator(sentinel, ctx),
+        None => {
+            let data_remove = data.clone();
+            let remove_fn = NativeFunction::from_copy_closure_with_captures(
+                move |_this, args, data_obj, ctx| {
+                    let key = args
+                        .first()
+                        .unwrap_or(&JsValue::undefined())
+                        .to_string(ctx)?
+                        .to_std_string_escaped();
+                    data_obj.delete_property_or_throw(js_string!(key.as_str()), ctx)?;
+                    Ok(JsValue::undefined())
+                },
+                data_remove,
+            );
+            JsValue::from(remove_fn.to_js_function(ctx.realm()))
+        }
+    };
     map_obj
-        .set(js_string!("remove"), JsValue::from(remove_js), false, ctx)
-        .map_err(|e| JsLanguageError::Execution {
-            message: e.to_string(),
-        })?;
+        .set(js_string!("remove"), remove_js, false, ctx)
+        .map_err(host_error)?;
 
     // keys() -> string[].
     let data_keys = data.clone();
@@ -295,15 +321,22 @@ fn build_map_object(
     let keys_js = keys_fn.to_js_function(ctx.realm());
     map_obj
         .set(js_string!("keys"), JsValue::from(keys_js), false, ctx)
-        .map_err(|e| JsLanguageError::Execution {
-            message: e.to_string(),
-        })?;
+        .map_err(host_error)?;
 
-    Ok(map_obj)
+    match read_only {
+        Some(sentinel) => readonly_proxy(map_obj, sentinel, ctx).map_err(host_error),
+        None => Ok(map_obj),
+    }
 }
 
 /// Extract the (possibly mutated) exchange state from the `camel` global.
-pub fn extract_camel_state(ctx: &mut Context) -> Result<JsExchange, JsLanguageError> {
+///
+/// `detector` is the privately-retained pristine `Array.isArray` used to
+/// identify read-only proxy arrays during conversion.
+pub fn extract_camel_state(
+    ctx: &mut Context,
+    detector: Option<&ArrayDetector>,
+) -> Result<JsExchange, JsLanguageError> {
     let camel_val = ctx
         .global_object()
         .get(js_string!("camel"), ctx)
@@ -327,6 +360,7 @@ pub fn extract_camel_state(ctx: &mut Context) -> Result<JsExchange, JsLanguageEr
                 message: e.to_string(),
             })?,
         ctx,
+        detector,
     )?;
 
     let properties = extract_map(
@@ -336,6 +370,7 @@ pub fn extract_camel_state(ctx: &mut Context) -> Result<JsExchange, JsLanguageEr
                 message: e.to_string(),
             })?,
         ctx,
+        detector,
     )?;
 
     let body_js =
@@ -344,7 +379,7 @@ pub fn extract_camel_state(ctx: &mut Context) -> Result<JsExchange, JsLanguageEr
             .map_err(|e| JsLanguageError::ExchangeAccess {
                 message: e.to_string(),
             })?;
-    let body = js_to_value(&body_js, ctx)?;
+    let body = js_to_value_with_detector(&body_js, ctx, detector)?;
 
     Ok(JsExchange {
         headers,
@@ -357,6 +392,7 @@ pub fn extract_camel_state(ctx: &mut Context) -> Result<JsExchange, JsLanguageEr
 fn extract_map(
     map_val: &JsValue,
     ctx: &mut Context,
+    detector: Option<&ArrayDetector>,
 ) -> Result<HashMap<String, Value>, JsLanguageError> {
     let map_obj = match map_val.as_object() {
         Some(obj) => obj,
@@ -390,9 +426,18 @@ fn extract_map(
                     message: e.to_string(),
                 }
             })?;
-            let val = js_to_value(&v, ctx).map_err(|e| JsLanguageError::ExchangeAccess {
-                message: format!("value extraction failed for key '{k}': {e}"),
-            })?;
+            // Preserve the typed conversion refusal so the boundary classifies
+            // it as `conversion`, not `runtime`. Only a genuinely unrelated
+            // error degrades to an exchange-access failure.
+            let val = match js_to_value_with_detector(&v, ctx, detector) {
+                Ok(val) => val,
+                Err(err @ JsLanguageError::TypeConversion { .. }) => return Err(err),
+                Err(e) => {
+                    return Err(JsLanguageError::ExchangeAccess {
+                        message: format!("value extraction failed for key '{k}': {e}"),
+                    });
+                }
+            };
             result.insert(k, val);
         }
     }

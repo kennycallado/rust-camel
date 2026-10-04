@@ -273,6 +273,39 @@ mod expression_tests {
         let result = expr.evaluate(&Exchange::default()).await;
         assert!(result.is_err(), "recursion-depth must trip");
     }
+
+    #[tokio::test]
+    async fn minijinja_render_error_is_class_and_position() {
+        use camel_language_api::ExpressionErrorClass;
+
+        // A type error on body data on line 2 of the template. The error must
+        // carry a class and the template line, and must not quote the body.
+        let src = "{% autoescape \"none\" %}\n{{ body + 1 }}\n{% endautoescape %}";
+        let expr = MinijinjaExpression::compile(src, ResolvedLimits::default()).expect("compile");
+
+        let mut ex = Exchange::new(camel_api::Message::default());
+        ex.input.body = Body::Text("SECRETVAL".to_string());
+
+        let err = expr.evaluate(&ex).await.expect_err("must fail");
+        match &err {
+            LanguageError::EvalFailure {
+                class,
+                position: Some(pos),
+                detail,
+            } => {
+                assert_eq!(*class, ExpressionErrorClass::TypeMismatch);
+                assert_eq!(pos.line, 2, "template line");
+                assert_eq!(pos.column, 0);
+                assert_eq!(detail.as_deref(), Some("invalid operation"));
+            }
+            other => panic!("expected structured EvalFailure, got: {other:?}"),
+        }
+        let rendered = format!("{err} | {err:?}");
+        assert!(
+            !rendered.contains("SECRETVAL"),
+            "rendered data leaked: {rendered}"
+        );
+    }
 }
 
 #[cfg(test)]

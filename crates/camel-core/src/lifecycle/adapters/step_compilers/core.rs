@@ -5,29 +5,21 @@
 use camel_api::SpanKindHint;
 use std::sync::Arc;
 
-use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, Value, body::Body};
+use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, Value};
 use camel_language_api::LanguageError;
 use camel_processor::claim_check::ClaimCheckFilter;
 use camel_processor::{LogProcessor, log::DynamicLog, script_mutator::ScriptMutator, set_property};
-use tracing::warn;
 
 use super::{
     CompilationContext, CompileOutcome, CompiledStep, StepCompiler, StepCompilerRegistry,
     pack_lifecycles,
 };
 use crate::lifecycle::adapters::step_resolution::{
-    FunctionStagingMode, await_eval, compile_filter_predicate, compile_language_expression,
-    compile_message_id_expression, compile_sort_expression, resolve_language,
+    FunctionStagingMode, compile_filter_predicate, compile_key_expression,
+    compile_message_id_expression, compile_sort_expression, compile_value_source, eval_meta,
+    resolve_language,
 };
 use crate::lifecycle::application::route_definition::{BuilderStep, ValueSourceDef};
-
-fn value_to_body(value: Value) -> Body {
-    match value {
-        Value::Null => Body::Empty,
-        Value::String(text) => Body::Text(text),
-        other => Body::Json(other),
-    }
-}
 
 pub(crate) struct CoreCompiler;
 
@@ -35,7 +27,7 @@ impl StepCompiler for CoreCompiler {
     fn compile(
         &self,
         step: BuilderStep,
-        _step_index: usize,
+        step_index: usize,
         ctx: &CompilationContext,
         registry: &StepCompilerRegistry,
     ) -> Result<CompileOutcome, CamelError> {
@@ -73,7 +65,8 @@ impl StepCompiler for CoreCompiler {
 
             // ── Validate ──
             BuilderStep::Validate { predicate } => {
-                let predicate_arc = compile_filter_predicate(ctx.languages, &predicate)?;
+                let meta = eval_meta(ctx, &predicate.language, "validate", step_index, None);
+                let predicate_arc = compile_filter_predicate(ctx.languages, &predicate, meta)?;
                 let expression_source = predicate.source.clone();
                 let svc = camel_processor::ValidateService::from_predicate(
                     predicate_arc,
@@ -111,7 +104,17 @@ impl StepCompiler for CoreCompiler {
                             "idempotent_consumer: repository '{repository}' is not registered"
                         ))
                     })?;
-                let message_id = compile_message_id_expression(ctx.languages, &expression)?;
+                let message_id = compile_message_id_expression(
+                    ctx.languages,
+                    &expression,
+                    eval_meta(
+                        ctx,
+                        &expression.language,
+                        "idempotent_consumer",
+                        step_index,
+                        None,
+                    ),
+                )?;
                 let (child_segments, child_lifecycles) =
                     ctx.compile_children_segments(steps, registry)?;
                 let child_pipeline = compose_outcome_segment(child_segments);
@@ -149,7 +152,11 @@ impl StepCompiler for CoreCompiler {
                         "cache: repository '{repo_name}' is not registered"
                     ))
                 })?;
-                let key_expr = compile_message_id_expression(ctx.languages, &key)?;
+                let key_expr = compile_message_id_expression(
+                    ctx.languages,
+                    &key,
+                    eval_meta(ctx, &key.language, "cache", step_index, None),
+                )?;
                 let ttl_dur = ttl
                     .as_ref()
                     .map(|s| humantime::parse_duration(s))
@@ -207,17 +214,19 @@ impl StepCompiler for CoreCompiler {
                         "cache_invalidate: key/key_prefix must not be empty".into(),
                     ));
                 }
-                let target = if as_prefix {
-                    camel_processor::CacheInvalidateTarget::Prefix(compile_message_id_expression(
-                        ctx.languages,
-                        expr,
-                    )?)
-                } else {
-                    camel_processor::CacheInvalidateTarget::Key(compile_message_id_expression(
-                        ctx.languages,
-                        expr,
-                    )?)
-                };
+                let meta = eval_meta(ctx, &expr.language, "cache_invalidate", step_index, None);
+                let target =
+                    if as_prefix {
+                        camel_processor::CacheInvalidateTarget::Prefix(
+                            compile_message_id_expression(ctx.languages, expr, meta)?,
+                        )
+                    } else {
+                        camel_processor::CacheInvalidateTarget::Key(compile_message_id_expression(
+                            ctx.languages,
+                            expr,
+                            meta,
+                        )?)
+                    };
                 let repo_name = repository.as_deref().unwrap_or("memory");
                 let repo = ctx.cache_repositories.get(repo_name).ok_or_else(|| {
                     CamelError::ComponentNotFound(format!(
@@ -246,7 +255,11 @@ impl StepCompiler for CoreCompiler {
                         "cache_peek_stale: repository '{repo_name}' is not registered"
                     ))
                 })?;
-                let key_expr = compile_message_id_expression(ctx.languages, &key)?;
+                let key_expr = compile_message_id_expression(
+                    ctx.languages,
+                    &key,
+                    eval_meta(ctx, &key.language, "cache_peek_stale", step_index, None),
+                )?;
                 let svc = camel_processor::CachePeekStaleService::new(
                     repo,
                     key_expr,
@@ -316,20 +329,8 @@ impl StepCompiler for CoreCompiler {
                         "DeclarativeLog with Literal should have been compiled to a Processor"
                     );
                 };
-                let expression = compile_language_expression(ctx.languages, &expression)?;
-                let svc =
-                    DynamicLog::new(level, move |exchange: &Exchange| {
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::try_current()
-                            .expect("DynamicLog expression: must be called from within a tokio runtime") // allow-unwrap
-                            .block_on(expression.evaluate(exchange))
-                        })
-                        .unwrap_or_else(|e| {
-                            warn!(error = %e, "log expression evaluation failed");
-                            Value::Null
-                        })
-                        .to_string()
-                    });
+                let source = compile_value_source(ctx, &expression, "log", step_index, None)?;
+                let svc = DynamicLog::new(level, source);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
                     kind_hint: SpanKindHint::Internal,
                     processor: BoxProcessor::new(svc),
@@ -354,12 +355,15 @@ impl StepCompiler for CoreCompiler {
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
-                    let expression = compile_language_expression(ctx.languages, &expression)?;
-                    let svc = camel_processor::DynamicSetHeader::new(
-                        IdentityProcessor,
-                        key,
-                        move |exchange: &Exchange| await_eval(&expression, exchange),
-                    );
+                    let source = compile_value_source(
+                        ctx,
+                        &expression,
+                        "set_header",
+                        step_index,
+                        Some(key.clone()),
+                    )?;
+                    let svc =
+                        camel_processor::DynamicSetHeader::new(IdentityProcessor, key, source);
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
                         kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(svc),
@@ -400,11 +404,17 @@ impl StepCompiler for CoreCompiler {
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
-                    let expression = compile_language_expression(ctx.languages, &expression)?;
+                    let source = compile_value_source(
+                        ctx,
+                        &expression,
+                        "set_header_if_absent",
+                        step_index,
+                        Some(key.clone()),
+                    )?;
                     let svc = camel_processor::DynamicSetHeaderIfAbsent::new(
                         IdentityProcessor,
                         key,
-                        move |exchange: &Exchange| await_eval(&expression, exchange),
+                        source,
                     );
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
                         kind_hint: SpanKindHint::Internal,
@@ -432,12 +442,15 @@ impl StepCompiler for CoreCompiler {
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
-                    let expression = compile_language_expression(ctx.languages, &expression)?;
-                    let svc = camel_processor::DynamicSetProperty::new(
-                        IdentityProcessor,
-                        key,
-                        move |exchange: &Exchange| await_eval(&expression, exchange),
-                    );
+                    let source = compile_value_source(
+                        ctx,
+                        &expression,
+                        "set_property",
+                        step_index,
+                        Some(key.clone()),
+                    )?;
+                    let svc =
+                        camel_processor::DynamicSetProperty::new(IdentityProcessor, key, source);
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
                         kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(svc),
@@ -453,11 +466,11 @@ impl StepCompiler for CoreCompiler {
             // ── SetBody (declarative) ──
             BuilderStep::DeclarativeSetBody { value } => match value {
                 ValueSourceDef::Literal(value) => {
-                    let body = value_to_body(value);
-                    let svc = camel_processor::SetBody::new(
-                        IdentityProcessor,
-                        move |_exchange: &Exchange| body.clone(),
-                    );
+                    // Static body: clone the literal per exchange; `SetBody`
+                    // converts the evaluated Value to a Body internally.
+                    let source = Arc::new(move |_: &Exchange| value.clone())
+                        as Arc<dyn Fn(&Exchange) -> Value + Send + Sync>;
+                    let svc = camel_processor::SetBody::new(IdentityProcessor, source);
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
                         kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(svc),
@@ -468,14 +481,14 @@ impl StepCompiler for CoreCompiler {
                     }))
                 }
                 ValueSourceDef::Expression(expression) => {
-                    let expression = compile_language_expression(ctx.languages, &expression)?;
-                    let svc = camel_processor::SetBody::new(
-                        IdentityProcessor,
-                        move |exchange: &Exchange| {
-                            let value = await_eval(&expression, exchange);
-                            value_to_body(value)
-                        },
-                    );
+                    let source = compile_value_source(
+                        ctx,
+                        &expression,
+                        "set_body",
+                        step_index,
+                        Some("body".to_string()),
+                    )?;
+                    let svc = camel_processor::SetBody::new(IdentityProcessor, source);
                     Ok(CompileOutcome::Matched(CompiledStep::Process {
                         kind_hint: SpanKindHint::Internal,
                         processor: BoxProcessor::new(svc),
@@ -490,26 +503,29 @@ impl StepCompiler for CoreCompiler {
 
             // ── Declarative Script (graceful degradation: try mutating, fallback to SetBody) ──
             BuilderStep::DeclarativeScript { expression } => {
+                let meta = eval_meta(ctx, &expression.language, "script", step_index, None);
                 let lang = resolve_language(ctx.languages, &expression.language)?;
                 match lang.create_mutating_expression(&expression.source) {
                     Ok(mut_expr) => Ok(CompileOutcome::Matched(CompiledStep::Process {
                         kind_hint: SpanKindHint::Internal,
-                        processor: BoxProcessor::new(ScriptMutator::new(mut_expr)),
+                        processor: BoxProcessor::new(ScriptMutator::with_meta(mut_expr, meta)),
                         body_contract: None,
                         lifecycle: None,
                         label: None,
                         to_uri: None,
                     })),
                     Err(LanguageError::NotSupported { .. }) => {
-                        // Graceful degradation: fall back to read-only Expression → SetBody
-                        let expression = compile_language_expression(ctx.languages, &expression)?;
-                        let svc = camel_processor::SetBody::new(
-                            IdentityProcessor,
-                            move |exchange: &Exchange| {
-                                let value = await_eval(&expression, exchange);
-                                value_to_body(value)
-                            },
-                        );
+                        // Graceful degradation: fall back to read-only Expression → SetBody.
+                        // Target is the body the fallback replaces; errors
+                        // propagate like every other verb.
+                        let source = compile_value_source(
+                            ctx,
+                            &expression,
+                            "script",
+                            step_index,
+                            Some("body".to_string()),
+                        )?;
+                        let svc = camel_processor::SetBody::new(IdentityProcessor, source);
                         Ok(CompileOutcome::Matched(CompiledStep::Process {
                             kind_hint: SpanKindHint::Internal,
                             processor: BoxProcessor::new(svc),
@@ -535,7 +551,7 @@ impl StepCompiler for CoreCompiler {
                     ));
                 };
                 definition.route_id = ctx.route_id.map(|s| s.to_string());
-                definition.step_index = Some(_step_index);
+                definition.step_index = Some(step_index);
                 match ctx.staging_mode {
                     FunctionStagingMode::DirectAdd => {
                         invoker.stage_pending(definition.clone(), ctx.route_id, 0);
@@ -591,11 +607,12 @@ impl StepCompiler for CoreCompiler {
 
             // ── Script (hard error on NotSupported) ──
             BuilderStep::Script { language, script } => {
+                let meta = eval_meta(ctx, &language, "script", step_index, None);
                 let lang = resolve_language(ctx.languages, &language)?;
                 match lang.create_mutating_expression(&script) {
                     Ok(mut_expr) => Ok(CompileOutcome::Matched(CompiledStep::Process {
                         kind_hint: SpanKindHint::Internal,
-                        processor: BoxProcessor::new(ScriptMutator::new(mut_expr)),
+                        processor: BoxProcessor::new(ScriptMutator::with_meta(mut_expr, meta)),
                         body_contract: None,
                         lifecycle: None,
                         label: None,
@@ -642,9 +659,10 @@ impl StepCompiler for CoreCompiler {
                         )));
                     }
                 };
-                let key_expr = crate::lifecycle::adapters::step_resolution::compile_key_expression(
+                let key_expr = compile_key_expression(
                     ctx.languages,
                     &key,
+                    eval_meta(ctx, &key.language, "claim_check", step_index, None),
                 )?;
                 let mut svc = camel_processor::ClaimCheckService::new(repo, op, key_expr);
                 if let Some(filter_str) = filter {
@@ -683,7 +701,11 @@ impl StepCompiler for CoreCompiler {
                 expression,
                 reverse,
             } => {
-                let sort_expr = compile_sort_expression(ctx.languages, &expression)?;
+                let sort_expr = compile_sort_expression(
+                    ctx.languages,
+                    &expression,
+                    eval_meta(ctx, &expression.language, "sort", step_index, None),
+                )?;
                 let svc = camel_processor::SortService::new(sort_expr, reverse);
                 Ok(CompileOutcome::Matched(CompiledStep::Process {
                     kind_hint: SpanKindHint::Internal,

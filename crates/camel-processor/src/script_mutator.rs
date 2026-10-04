@@ -7,19 +7,43 @@ use tower::Service;
 
 use camel_api::CamelError;
 use camel_api::exchange::Exchange;
-use camel_language_api::MutatingExpression;
+use camel_language_api::{EvalMeta, MutatingExpression, to_expression_failed};
 
 /// Processor that executes a mutating expression, allowing scripts to modify the Exchange.
 /// Uses `Arc<dyn MutatingExpression>` to enable `Clone` (required by `BoxProcessor`).
+///
+/// Evaluation failures are mapped to [`CamelError::ExpressionFailed`] with
+/// the trusted route metadata supplied via [`ScriptMutator::with_meta`]
+/// (ParseError routes as class `Parse` via `LanguageError::class()`).
 #[derive(Clone)]
 pub struct ScriptMutator {
     expression: Arc<dyn MutatingExpression>,
+    meta: EvalMeta,
 }
 
 impl ScriptMutator {
+    /// Create without route metadata. The default metadata reports language
+    /// `unknown` — tests only; production code should use
+    /// [`ScriptMutator::with_meta`].
     pub fn new(expression: Box<dyn MutatingExpression>) -> Self {
+        Self::with_meta(
+            expression,
+            EvalMeta {
+                language: "unknown".to_string(),
+                route_id: String::new(),
+                step_id: String::new(),
+                verb: String::new(),
+                target: None,
+            },
+        )
+    }
+
+    /// Create with trusted route metadata used to enrich evaluation
+    /// failures as [`CamelError::ExpressionFailed`].
+    pub fn with_meta(expression: Box<dyn MutatingExpression>, meta: EvalMeta) -> Self {
         Self {
             expression: expression.into(),
+            meta,
         }
     }
 }
@@ -35,34 +59,37 @@ impl Service<Exchange> for ScriptMutator {
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let expression = self.expression.clone();
+        let meta = self.meta.clone();
         Box::pin(async move {
             let result = expression.evaluate(&mut exchange).await;
-            result.map(|_| exchange).map_err(language_err_to_camel)
+            result
+                .map(|_| exchange)
+                .map_err(|e| to_expression_failed(e, &meta))
         })
-    }
-}
-
-fn language_err_to_camel(e: camel_language_api::LanguageError) -> CamelError {
-    use camel_language_api::LanguageError;
-    match e {
-        LanguageError::EvalError(msg) => CamelError::ProcessorError(msg),
-        LanguageError::ParseError { expr, reason } => {
-            CamelError::ProcessorError(format!("parse error in `{expr}`: {reason}"))
-        }
-        LanguageError::NotSupported { feature, language } => CamelError::ProcessorError(format!(
-            "feature '{feature}' not supported by language '{language}'"
-        )),
-        other => CamelError::ProcessorError(other.to_string()),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use camel_api::{CamelError, Exchange, Message, Value};
-    use camel_language_api::LanguageError;
+    use camel_api::{CamelError, Exchange, ExpressionErrorClass, Message, Value};
+    use camel_language_api::{EvalMeta, LanguageError};
     use tower::ServiceExt;
 
     use super::*;
+
+    /// A mutating expression that always fails with a structured failure.
+    struct EvalFailureMutatingExpression;
+
+    #[async_trait::async_trait]
+    impl MutatingExpression for EvalFailureMutatingExpression {
+        async fn evaluate(&self, _exchange: &mut Exchange) -> Result<Value, LanguageError> {
+            Err(LanguageError::EvalFailure {
+                class: ExpressionErrorClass::Runtime,
+                position: None,
+                detail: None,
+            })
+        }
+    }
 
     /// A simple test mutating expression that sets a header
     struct TestMutatingExpression;
@@ -136,13 +163,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn script_mutator_error_is_expression_failed() {
+        let meta = EvalMeta {
+            language: "rhai".to_string(),
+            route_id: "r1".to_string(),
+            step_id: "script#0".to_string(),
+            verb: "script".to_string(),
+            target: None,
+        };
+        let mutator = ScriptMutator::with_meta(Box::new(EvalFailureMutatingExpression), meta);
+
+        let result = mutator.oneshot(Exchange::new(Message::new("test"))).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(CamelError::ExpressionFailed {
+                    ref language,
+                    ref verb,
+                    class: ExpressionErrorClass::Runtime,
+                    ..
+                }) if language == "rhai" && verb == "script"
+            ),
+            "mutating-eval failure must map to ExpressionFailed with the bound meta"
+        );
+    }
+
+    #[tokio::test]
     async fn test_script_mutator_maps_parse_error() {
         let exchange = Exchange::new(Message::new("test"));
         let mutator = ScriptMutator::new(Box::new(ParseErrorMutatingExpression));
         let result = mutator.oneshot(exchange).await;
-        assert!(
-            matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "parse error in `x`: bad")
-        );
+        assert!(matches!(
+            result,
+            Err(CamelError::ExpressionFailed {
+                class: ExpressionErrorClass::Parse,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]
@@ -150,9 +208,16 @@ mod tests {
         let exchange = Exchange::new(Message::new("test"));
         let mutator = ScriptMutator::new(Box::new(NotSupportedMutatingExpression));
         let result = mutator.oneshot(exchange).await;
-        assert!(
-            matches!(result, Err(CamelError::ProcessorError(msg)) if msg == "feature 'f' not supported by language 'l'")
-        );
+        // NotSupported carries no class: to_expression_failed defaults it to
+        // Runtime under the default "unknown" language.
+        assert!(matches!(
+            result,
+            Err(CamelError::ExpressionFailed {
+                ref language,
+                class: ExpressionErrorClass::Runtime,
+                ..
+            }) if language == "unknown"
+        ));
     }
 
     #[tokio::test]
@@ -160,8 +225,12 @@ mod tests {
         let exchange = Exchange::new(Message::new("test"));
         let mutator = ScriptMutator::new(Box::new(UnknownVariableMutatingExpression));
         let result = mutator.oneshot(exchange).await;
-        assert!(
-            matches!(result, Err(CamelError::ProcessorError(msg)) if msg.contains("unknown variable: foo"))
-        );
+        assert!(matches!(
+            result,
+            Err(CamelError::ExpressionFailed {
+                class: ExpressionErrorClass::Runtime,
+                ..
+            })
+        ));
     }
 }

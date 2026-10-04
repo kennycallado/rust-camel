@@ -14,8 +14,9 @@ use super::{
 };
 use crate::lifecycle::adapters::endpoint_resolver_factory;
 use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
-use crate::lifecycle::adapters::step_resolution::{await_eval, compile_language_expression};
+use crate::lifecycle::adapters::step_resolution::{compile_language_expression, eval_meta};
 use crate::lifecycle::application::route_definition::BuilderStep;
+use camel_language_api::LanguageExpressionEval;
 
 pub(crate) struct RoutingCompiler;
 
@@ -23,7 +24,7 @@ impl StepCompiler for RoutingCompiler {
     fn compile(
         &self,
         step: BuilderStep,
-        _step_index: usize,
+        step_index: usize,
         ctx: &CompilationContext,
         registry: &StepCompilerRegistry,
     ) -> Result<CompileOutcome, CamelError> {
@@ -55,16 +56,17 @@ impl StepCompiler for RoutingCompiler {
                 ignore_invalid_endpoints,
                 max_iterations,
             } => {
+                let meta = eval_meta(
+                    ctx,
+                    &expression.language,
+                    "dynamic_router",
+                    step_index,
+                    None,
+                );
                 let expression = compile_language_expression(ctx.languages, &expression)?;
-                let expression: camel_api::RouterExpression =
-                    Arc::new(move |exchange: &camel_api::Exchange| {
-                        let value = await_eval(&expression, exchange);
-                        match value {
-                            camel_api::Value::Null => None,
-                            camel_api::Value::String(s) => Some(s),
-                            other => Some(other.to_string()),
-                        }
-                    });
+                let expression = camel_api::TargetSource::Async(
+                    LanguageExpressionEval::new(expression, meta).into_value_fn(),
+                );
 
                 let config = camel_api::DynamicRouterConfig::new(expression)
                     .uri_delimiter(uri_delimiter)
@@ -114,16 +116,11 @@ impl StepCompiler for RoutingCompiler {
                 cache_size,
                 ignore_invalid_endpoints,
             } => {
+                let meta = eval_meta(ctx, &expression.language, "routing_slip", step_index, None);
                 let expression = compile_language_expression(ctx.languages, &expression)?;
-                let expression: camel_api::RoutingSlipExpression =
-                    Arc::new(move |exchange: &camel_api::Exchange| {
-                        let value = await_eval(&expression, exchange);
-                        match value {
-                            camel_api::Value::Null => None,
-                            camel_api::Value::String(s) => Some(s),
-                            other => Some(other.to_string()),
-                        }
-                    });
+                let expression = camel_api::TargetSource::Async(
+                    LanguageExpressionEval::new(expression, meta).into_value_fn(),
+                );
 
                 let config = camel_api::RoutingSlipConfig::new(expression)
                     .uri_delimiter(uri_delimiter)
@@ -174,16 +171,17 @@ impl StepCompiler for RoutingCompiler {
                 stop_on_exception,
                 aggregation: _aggregation,
             } => {
+                let meta = eval_meta(
+                    ctx,
+                    &expression.language,
+                    "recipient_list",
+                    step_index,
+                    None,
+                );
                 let expression = compile_language_expression(ctx.languages, &expression)?;
-                let expression: camel_api::recipient_list::RecipientListExpression =
-                    Arc::new(move |exchange: &camel_api::Exchange| {
-                        let value = await_eval(&expression, exchange);
-                        match value {
-                            camel_api::Value::Null => String::new(),
-                            camel_api::Value::String(s) => s,
-                            other => other.to_string(),
-                        }
-                    });
+                let expression = camel_api::RecipientSource::Async(
+                    LanguageExpressionEval::new(expression, meta).into_value_fn(),
+                );
 
                 let config = camel_api::recipient_list::RecipientListConfig::new(expression)
                     .delimiter(&delimiter)
