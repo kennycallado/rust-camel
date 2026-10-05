@@ -1635,6 +1635,7 @@ reqwest feature "rustls"
 reqwest feature "stream"
 reqwest v0.13.4
 rhai feature "default"
+rhai feature "internals"
 rhai feature "no_module"
 rhai feature "std"
 rhai feature "sync"
