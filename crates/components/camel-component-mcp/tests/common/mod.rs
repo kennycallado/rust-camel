@@ -26,7 +26,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, DiscoverResult, ProtocolVersion,
-    ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities, ServerInfo,
+    ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities, ServerConfig,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
@@ -115,8 +115,8 @@ struct MockHandler {
 }
 
 impl rmcp::ServerHandler for MockHandler {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::default()
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::default()
     }
 
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {

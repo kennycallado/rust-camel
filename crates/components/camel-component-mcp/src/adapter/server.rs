@@ -56,8 +56,8 @@ use rmcp::model::{
     DiscoverResult, ErrorCode, Implementation, InitializeRequestParams, InitializeResult,
     ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
     ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
-    ResourceContents, ResourcesCapability, ServerCapabilities, ServerInfo, SubscribeRequestParams,
-    Tool, ToolsCapability,
+    ResourceContents, ResourcesCapability, ServerCapabilities, ServerConfig,
+    SubscribeRequestParams, Tool, ToolsCapability,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
@@ -121,8 +121,8 @@ pub struct McpServerAdapter {
 }
 
 impl rmcp::ServerHandler for McpServerAdapter {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::new(capabilities());
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::new(capabilities());
         info.protocol_version = ProtocolVersion::V_2026_07_28;
         info.server_info =
             Implementation::new(self.identity_name.clone(), env!("CARGO_PKG_VERSION"));

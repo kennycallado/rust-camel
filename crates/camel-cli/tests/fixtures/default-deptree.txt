@@ -1293,6 +1293,7 @@ opentelemetry-otlp feature "default"
 opentelemetry-otlp feature "grpc-tonic"
 opentelemetry-otlp feature "http"
 opentelemetry-otlp feature "http-proto"
+opentelemetry-otlp feature "httpdate"
 opentelemetry-otlp feature "internal-logs"
 opentelemetry-otlp feature "logs"
 opentelemetry-otlp feature "metrics"
@@ -2333,6 +2334,7 @@ typeid v1.0.3
 typenum feature "const-generics"
 typenum feature "default"
 typenum v1.20.1
+ucd-trie feature "default"
 ucd-trie feature "std"
 ucd-trie v0.1.7
 unicase feature "default"
@@ -2425,6 +2427,7 @@ wasmtime feature "cache"
 wasmtime feature "compile-time-builtins"
 wasmtime feature "component-model"
 wasmtime feature "component-model-async"
+wasmtime feature "component-model-bytes"
 wasmtime feature "coredump"
 wasmtime feature "cranelift"
 wasmtime feature "debug"
@@ -2505,6 +2508,7 @@ wasmtime-internal-wit-bindgen v48.0.3
 wasmtime-wasi feature "default"
 wasmtime-wasi feature "p1"
 wasmtime-wasi feature "p2"
+wasmtime-wasi feature "p3"
 wasmtime-wasi v48.0.3
 wasmtime-wasi-io feature "std"
 wasmtime-wasi-io v48.0.3

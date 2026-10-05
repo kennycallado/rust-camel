@@ -28,7 +28,10 @@ use opentelemetry::Context;
 use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::trace::{Link, SpanKind, TraceContextExt, TraceId};
-use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry_otlp::{
+    LogExporter, MetricExporter, RetryPolicy, SpanExporter, WithExportConfig, WithHttpConfig,
+    WithTonicConfig,
+};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::resource::Resource;
@@ -43,6 +46,9 @@ use tracing::{error, info, warn};
 use crate::OtelMetrics;
 use crate::config::{OtelConfig, OtelProtocol, OtelSampler};
 
+#[cfg(test)]
+#[path = "exporter_retry_tests.rs"]
+mod exporter_retry_tests;
 #[cfg(test)]
 #[path = "sampler_tests.rs"]
 mod sampler_tests;
@@ -166,6 +172,7 @@ impl OtelService {
             OtelProtocol::Grpc => SpanExporter::builder()
                 .with_tonic()
                 .with_endpoint(&self.config.endpoint)
+                .with_retry_policy(RetryPolicy::disabled())
                 .build()
                 .map_err(|e| {
                     CamelError::Config(format!("Failed to build gRPC span exporter: {}", e))
@@ -173,6 +180,7 @@ impl OtelService {
             OtelProtocol::HttpProtobuf => SpanExporter::builder()
                 .with_http()
                 .with_endpoint(format!("{}/v1/traces", self.config.endpoint))
+                .with_retry_policy(RetryPolicy::disabled())
                 .build()
                 .map_err(|e| {
                     CamelError::Config(format!("Failed to build HTTP span exporter: {}", e))
@@ -186,6 +194,7 @@ impl OtelService {
             OtelProtocol::Grpc => MetricExporter::builder()
                 .with_tonic()
                 .with_endpoint(&self.config.endpoint)
+                .with_retry_policy(RetryPolicy::disabled())
                 .build()
                 .map_err(|e| {
                     CamelError::Config(format!("Failed to build gRPC metric exporter: {}", e))
@@ -193,10 +202,32 @@ impl OtelService {
             OtelProtocol::HttpProtobuf => MetricExporter::builder()
                 .with_http()
                 .with_endpoint(format!("{}/v1/metrics", self.config.endpoint))
+                .with_retry_policy(RetryPolicy::disabled())
                 .build()
                 .map_err(|e| {
                     CamelError::Config(format!("Failed to build HTTP metric exporter: {}", e))
                 }),
+        }
+    }
+
+    /// Build the OTLP log exporter based on the configured protocol.
+    ///
+    /// Extracted from [`Self::build_logger_provider_internal`] so the
+    /// exporter's transport configuration is directly testable.
+    fn build_log_exporter(&self) -> Result<LogExporter, CamelError> {
+        match self.config.protocol {
+            OtelProtocol::Grpc => LogExporter::builder()
+                .with_tonic()
+                .with_endpoint(&self.config.endpoint)
+                .with_retry_policy(RetryPolicy::disabled())
+                .build()
+                .map_err(|e| CamelError::Config(format!("Failed to build log exporter: {}", e))),
+            OtelProtocol::HttpProtobuf => LogExporter::builder()
+                .with_http()
+                .with_endpoint(format!("{}/v1/logs", self.config.endpoint))
+                .with_retry_policy(RetryPolicy::disabled())
+                .build()
+                .map_err(|e| CamelError::Config(format!("Failed to build log exporter: {}", e))),
         }
     }
 
@@ -205,18 +236,7 @@ impl OtelService {
     /// This is a pure function — it does not mutate service status.
     /// The caller is responsible for setting status on error.
     fn build_logger_provider_internal(&self) -> Result<SdkLoggerProvider, CamelError> {
-        let exporter = match self.config.protocol {
-            OtelProtocol::Grpc => LogExporter::builder()
-                .with_tonic()
-                .with_endpoint(&self.config.endpoint)
-                .build()
-                .map_err(|e| CamelError::Config(format!("Failed to build log exporter: {}", e)))?,
-            OtelProtocol::HttpProtobuf => LogExporter::builder()
-                .with_http()
-                .with_endpoint(format!("{}/v1/logs", self.config.endpoint))
-                .build()
-                .map_err(|e| CamelError::Config(format!("Failed to build log exporter: {}", e)))?,
-        };
+        let exporter = self.build_log_exporter()?;
 
         let provider = SdkLoggerProvider::builder()
             .with_resource(self.build_resource())

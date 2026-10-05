@@ -33,6 +33,15 @@ tokio = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tower = { workspace = true }
 serial_test = "4"
+opentelemetry-proto = { version = "0.33", default-features = false, features = [
+    "gen-tonic",
+    "trace",
+    "metrics",
+    "logs",
+] }
+tonic.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
+futures.workspace = true
 
 [lints]
 workspace = true

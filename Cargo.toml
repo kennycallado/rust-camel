@@ -265,7 +265,7 @@ rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 sqlx = "0.8"
 sxd-document = "0.3"
 syn = "3"
-jsonschema = { version = "0.52", default-features = false, features = ["resolve-file"] }
+jsonschema = { version = "0.58", default-features = false, features = ["resolve-file"] }
 ariadne = "0.6"
 ron = "0.12"
 noyalib = { version = "0.0.29", features = ["compat-serde-yaml"] }
@@ -276,16 +276,16 @@ ts-rs = "12"
 
 # WASM dependencies
 wit-bindgen = "0.61"
-wasmtime = { version = "48.0.3", features = ["component-model", "component-model-async"] }
-wasmtime-wasi = "48.0.3"
+wasmtime = { version = "49.0.2", features = ["component-model", "component-model-async"] }
+wasmtime-wasi = "49.0.2"
 
 # OpenTelemetry dependencies
-opentelemetry = { version = "0.32", features = ["trace", "logs", "metrics"] }
-opentelemetry_sdk = { version = "0.32", features = ["trace", "logs", "metrics", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "http-proto", "trace", "logs", "metrics"] }
-opentelemetry-semantic-conventions = { version = "0.32", features = ["semconv_experimental"] }
-opentelemetry-appender-tracing = { version = "0.32" }
-tracing-opentelemetry = { version = "0.33", features = [] }
+opentelemetry = { version = "0.33", features = ["trace", "logs", "metrics"] }
+opentelemetry_sdk = { version = "0.33", features = ["trace", "logs", "metrics", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.33", features = ["grpc-tonic", "http-proto", "trace", "logs", "metrics"] }
+opentelemetry-semantic-conventions = { version = "0.33", features = ["semconv_experimental"] }
+opentelemetry-appender-tracing = { version = "0.33" }
+tracing-opentelemetry = { version = "0.34", features = [] }
 
 [profile.dev]
 # No debug info by default: agents and humans triage via panic messages
