@@ -1541,8 +1541,8 @@ outside the v1 contract.
   process
 - **THEN** the second boot's reads see zero of the first boot's rows
 
-#### Scenario: a second boot over a mem surreal datasource starts
-empty
+#### Scenario: a second boot over a mem surreal datasource starts empty
+
 - **GIVEN** a first document boot whose `surreal:` prepare seeded
   records over a `mem://` datasource, and that boot completed
   teardown
