@@ -65,6 +65,12 @@ sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "any", 
 # datasource. The grammar and validation stay ungated (surreal-state-tier
 # task 1.1).
 surrealdb = { workspace = true, optional = true }
+# Demand-gated Redis action activation (mirror of `sql`/`surreal`): the
+# scenario `redis` validate target's executor and its redis dependency
+# compile only when scenarios assert state in a Redis datasource. The
+# grammar and load-time validation stay ungated and run in every build
+# (redis-state-tier task 1).
+redis = { workspace = true, optional = true, features = ["tokio-comp", "aio"] }
 # Reply-value extraction for `expectReply` on `direct:` sends
 # (rc-qvz6): the reply body converts to a `serde_json::Value` for
 # the shared matcher verbs without the `http` feature.
@@ -76,6 +82,8 @@ serde_json.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+testcontainers.workspace = true
+testcontainers-modules.workspace = true
 async-trait.workspace = true
 tempfile.workspace = true
 toml.workspace = true
@@ -96,6 +104,7 @@ camel-builder.workspace = true
 camel-component-api = { workspace = true, features = ["test-support"] }
 
 [features]
+redis-live = []
 # Shared security composition root (scenario-shared-boot task 3.1):
 # when on, boot_scenario builds the security compile context through
 # the camel-bundles builder; when off, any configured [security.*]
@@ -124,6 +133,12 @@ sql = ["dep:sqlx", "camel-bundles/sql"]
 # surrealdb gate: the harness is a bundles consumer, so the shadow
 # feature must forward it (lint-gate-forwarding Rule 1).
 surreal = ["dep:surrealdb", "camel-bundles/surrealdb"]
+# Demand-gated Redis action activation (mirror of `surreal`): the
+# redis validate executor compiles only when scenarios assert state in a
+# Redis datasource. Forwards camel-bundles' redis gate: the harness is a
+# bundles consumer, so the shadow feature must forward it
+# (lint-gate-forwarding Rule 1).
+redis = ["dep:redis", "camel-bundles/redis"]
 # Demand-gated WASM activation: forwards camel-bundles' wasm gate so
 # the scenario boot registers the wasm bundle (base-dir fix rc-l3zrr).
 # The harness is a bundles consumer, so the shadow feature must

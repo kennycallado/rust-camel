@@ -10,11 +10,17 @@
 //! recorded request must match the sent body, method, path, and the
 //! route-stamped header for the run to exit 0.
 #![cfg(feature = "itest-e2e")]
+mod common;
 
 // Used only by the http and sql fixture helpers; surreal-only builds
 // keep the import out so slim test builds stay warning-free.
 #[cfg(any(feature = "integration-http", feature = "integration-sql"))]
 use std::path::Path;
+#[cfg(any(
+    feature = "integration-http",
+    feature = "integration-sql",
+    feature = "integration-surreal"
+))]
 use std::process::Command;
 
 #[cfg(feature = "integration-http")]
@@ -469,4 +475,158 @@ scenario:
         stdout.contains("1 passed, 0 failed"),
         "the action must pass\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+}
+#[cfg(feature = "integration-redis")]
+mod redis_cases {
+    use super::*;
+    use testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner};
+    use testcontainers_modules::redis::Redis;
+    static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> =
+        std::sync::LazyLock::new(|| tokio::runtime::Runtime::new().expect("runtime"));
+    static CONTAINER: tokio::sync::OnceCell<ContainerAsync<Redis>> =
+        tokio::sync::OnceCell::const_new();
+
+    fn fixture_bounded(
+        key: &str,
+        value: &str,
+        expected: &str,
+        send: bool,
+    ) -> (i32, String, String) {
+        RUNTIME.block_on(fixture(key, value, expected, send))
+    }
+
+    async fn fixture(key: &str, value: &str, expected: &str, send: bool) -> (i32, String, String) {
+        // Separate budgets: a Tokio timeout cannot preempt the synchronous
+        // child helper, which enforces its own 90-second kill/reap deadline.
+        let (mut conn, port) = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            let container = CONTAINER
+                .get_or_init(|| async {
+                    Redis::default()
+                        .with_tag("7-alpine")
+                        .start()
+                        .await
+                        .expect("redis container")
+                })
+                .await;
+            let port = container.get_host_port_ipv4(6379).await.expect("port");
+            let url = format!("redis://127.0.0.1:{port}/0");
+            let mut conn = redis::Client::open(url.as_str())
+                .expect("client")
+                .get_multiplexed_async_connection()
+                .await
+                .expect("connect");
+            redis::cmd("DEL")
+                .arg(key)
+                .query_async::<()>(&mut conn)
+                .await
+                .expect("clean first");
+            if !send {
+                redis::cmd("SET")
+                    .arg(key)
+                    .arg(value)
+                    .query_async::<()>(&mut conn)
+                    .await
+                    .expect("seed");
+            }
+            (conn, port)
+        })
+        .await
+        .expect("Redis CLI setup exceeded 60s");
+        let url = format!("redis://127.0.0.1:{port}/0");
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Camel.toml"),
+            format!("[datasources.statedb]\nprovider = \"redis\"\ndb_url = \"{url}\"\n"),
+        )
+        .expect("config");
+        std::fs::write(dir.path().join("routes.yaml"), format!("routes:\n- id: redis-route\n  from: direct:start\n  steps:\n  - to: 'redis://127.0.0.1:{port}?command=SET&key={key}'\n")).expect("routes");
+        let send_action = if send {
+            format!(
+                "- send:\n    to: direct:start\n    body: '{value}'\n    headers:\n      CamelRedis.Value: '{value}'\n"
+            )
+        } else {
+            String::new()
+        };
+        let doc = dir.path().join("redis.test.yaml");
+        std::fs::write(&doc, format!("routeFiles: [routes.yaml]\nscenario:\n{send_action}- validate:\n    target:\n      redis: {{datasource: statedb, key: '{key}', type: string}}\n    expectation:\n      rows: [['{expected}']]\n    deadline: 300ms\n")).expect("document");
+        let output = common::run_binary(
+            dir.path(),
+            std::path::Path::new(env!("CARGO_BIN_EXE_camel")),
+            &["test", doc.to_str().expect("fixture path")],
+            &[],
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            redis::cmd("DEL").arg(key).query_async::<()>(&mut conn),
+        )
+        .await
+        .expect("Redis CLI cleanup exceeded 10s")
+        .expect("cleanup");
+        output
+    }
+    #[test]
+    fn redis_only_doc_boots_full() {
+        let output = fixture_bounded("rc-redis-cli-direct", "route-value", "route-value", true);
+        let stdout = &output.1;
+        assert!(output.0 == 0, "{stdout}\n{}", output.2);
+        assert!(stdout.contains("[full]"));
+        assert!(stdout.contains("#scenario[0] send"));
+        assert!(stdout.contains("#scenario[1] validate"));
+        assert!(stdout.contains("2 passed, 0 failed"));
+    }
+    #[test]
+    fn redis_validate_only_doc_boots_full() {
+        let output = fixture_bounded("rc-redis-cli-validate-only-pass", "value", "value", false);
+        let stdout = &output.1;
+        assert!(output.0 == 0, "{stdout}\n{}", output.2);
+        assert!(stdout.contains("[full]"));
+        assert!(stdout.contains("#scenario[0] validate"));
+        assert!(stdout.contains("1 passed, 0 failed"));
+    }
+    #[test]
+    fn redis_validate_only_mismatch_exits_1() {
+        let key = "rc-redis-cli-validate-only-mismatch";
+        let output = fixture_bounded(key, "CLI_ACTUAL_SECRET", "CLI_EXPECTED_SECRET", false);
+        let stdout = &output.1;
+        assert_eq!(output.0, 1, "{stdout}");
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.starts_with("FAIL ") && line.contains("#scenario[0] validate"))
+        );
+        assert!(stdout.contains("0 passed, 1 failed"));
+        assert!(stdout.contains(key));
+        assert!(stdout.contains("declared string, observed string"));
+        assert!(stdout.contains("expected 1 rows"));
+        assert!(stdout.contains("actual 1 rows"));
+        assert!(!stdout.contains("CLI_ACTUAL_SECRET"));
+        assert!(!stdout.contains("CLI_EXPECTED_SECRET"));
+    }
+}
+
+#[cfg(not(feature = "integration-redis"))]
+#[test]
+fn redis_target_feature_off_demand_gate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("Camel.toml"), "").expect("config");
+    std::fs::write(
+        dir.path().join("routes.yaml"),
+        "routes:\n- id: dormant\n  from: direct:start\n  steps:\n  - to: log:info\n",
+    )
+    .expect("route");
+    let doc = dir.path().join("redis.test.yaml");
+    std::fs::write(&doc, "routeFiles: [routes.yaml]\nscenario:\n- validate:\n    target:\n      redis: {datasource: statedb, key: k, type: string}\n    expectation:\n      count: 1\n").expect("doc");
+    let output = common::run_binary(
+        dir.path(),
+        std::path::Path::new(env!("CARGO_BIN_EXE_camel")),
+        &["test", doc.to_str().expect("fixture path")],
+        &[],
+    );
+    let stdout = &output.1;
+    assert_eq!(output.0, 1, "{stdout}\n{}", output.2);
+    assert!(stdout.lines().any(|line| line.starts_with("FAIL ")
+        && line.contains("#scenario[0] validate")
+        && line.contains("requires the `redis` feature")));
+    assert!(stdout.contains("0 passed, 1 failed"));
+    assert!(!stdout.contains("full-boot-failure"));
 }

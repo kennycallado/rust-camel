@@ -8,8 +8,9 @@
 //!
 //! Identifier law: resolution errors name the datasource, never its
 //! URL. Every error string carries the family label (`sql action`,
-//! `sql validation`, `surreal action`, `surreal validation`) and the
-//! datasource name; driver detail is retained otherwise.
+//! `sql validation`, `surreal action`, `surreal validation`,
+//! `redis validation`) and the datasource name; driver detail is
+//! retained otherwise.
 //!
 //! Redaction law (ADR-0051, Credential Redaction at Diagnostic
 //! Boundaries): database URLs carry credential bytes and must not
@@ -27,7 +28,7 @@ pub fn sanitize_db_error(err_text: &str, db_url: &str) -> String {
     err_text.replace(db_url, "[REDACTED]")
 }
 
-#[cfg(any(feature = "sql", feature = "surreal"))]
+#[cfg(any(feature = "sql", feature = "surreal", feature = "redis"))]
 use std::sync::Arc;
 
 /// Resolves the named datasource through `catalog` into a typed pool
@@ -36,7 +37,7 @@ use std::sync::Arc;
 /// and the datasource name, driver detail retained, URL redacted
 /// (ADR-0051). Labels stay at the call sites — no family enum, no
 /// family-specific text here.
-#[cfg(any(feature = "sql", feature = "surreal"))]
+#[cfg(any(feature = "sql", feature = "surreal", feature = "redis"))]
 pub(crate) async fn resolve_datasource<T: 'static + Send + Sync>(
     catalog: &Arc<dyn camel_api::datasource::DatasourceCatalog>,
     name: &str,
@@ -221,5 +222,55 @@ mod resolver_tests {
         );
         assert!(err.contains("failed to downcast handle"), "got: {err}");
         assert!(!err.contains("sqlite::memory:"), "got: {err}");
+    }
+}
+
+/// The `redis validation` label pinned against the unknown-name
+/// message (equality, not substring), the redis arm of the resolver
+/// exact-string regression (redis-state-tier task 1). The stub handles
+/// `redis::aio::MultiplexedConnection`, so the module carries the
+/// `redis` gate.
+#[cfg(all(test, feature = "redis"))]
+mod resolver_redis_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use camel_api::datasource::{DatasourceCatalog, DatasourceConfig};
+    use camel_core::datasource::RuntimeDatasourceCatalog;
+
+    use super::resolve_datasource;
+
+    fn config_with_url(db_url: &str) -> DatasourceConfig {
+        DatasourceConfig {
+            db_url: db_url.to_string(),
+            provider: None,
+            max_connections: None,
+            min_connections: None,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_redis_validation_label_pinned() {
+        let mut configs = HashMap::new();
+        configs.insert(
+            "other".to_string(),
+            config_with_url("redis://localhost:6379/0"),
+        );
+        let catalog: Arc<dyn DatasourceCatalog> = Arc::new(RuntimeDatasourceCatalog::new(configs));
+        let err = resolve_datasource::<redis::aio::MultiplexedConnection>(
+            &catalog,
+            "missing",
+            "redis validation",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "redis validation: unknown datasource 'missing'");
     }
 }

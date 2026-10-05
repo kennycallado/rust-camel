@@ -1,0 +1,16 @@
+routeFiles: [routes/order.yaml]
+scenario:
+- send:
+    to: direct:order
+    body: order-value
+    headers:
+      CamelRedis.Value: order-value
+- validate:
+    target:
+      redis:
+        datasource: statedb
+        key: rc-redis-state:redis_state_e2e_route_write_validate
+        type: string
+    expectation:
+      rows: [[order-value]]
+    deadline: 300ms

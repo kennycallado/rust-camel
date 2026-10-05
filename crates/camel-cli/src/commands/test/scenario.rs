@@ -55,55 +55,32 @@ const BOOT_SCHEMES: [&str; 2] = [FAKE_SCHEME, "direct"];
 /// the historical one verbatim; `integration-sql` adds the `sql:`
 /// action it executes; `integration-surreal` adds the `surreal:`
 /// datasource action and the surreal validate target.
+fn provided_adapters() -> String {
+    let fragments = [
+        "the `fake:` in-memory adapter",
+        #[cfg(feature = "integration-http")]
+        "the `http:` wire partner",
+        #[cfg(feature = "integration-sql")]
+        "the `sql:` datasource action",
+        #[cfg(feature = "integration-surreal")]
+        "the `surreal:` datasource action and surreal validate target",
+        #[cfg(feature = "integration-redis")]
+        "the redis validate target",
+    ];
+    if fragments.len() == 1 {
+        format!("only {}", fragments[0])
+    } else {
+        fragments.join(", ")
+    }
+}
+
 #[cfg(all(
     not(feature = "integration-http"),
     not(feature = "integration-sql"),
-    not(feature = "integration-surreal")
+    not(feature = "integration-surreal"),
+    feature = "integration-redis"
 ))]
-const PROVIDED_ADAPTERS: &str = "only the `fake:` in-memory adapter";
-#[cfg(all(
-    feature = "integration-http",
-    not(feature = "integration-sql"),
-    not(feature = "integration-surreal")
-))]
-const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter and the `http:` wire partner";
-#[cfg(all(
-    not(feature = "integration-http"),
-    feature = "integration-sql",
-    not(feature = "integration-surreal")
-))]
-const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter and the `sql:` datasource action";
-#[cfg(all(
-    feature = "integration-http",
-    feature = "integration-sql",
-    not(feature = "integration-surreal")
-))]
-const PROVIDED_ADAPTERS: &str =
-    "the `fake:` in-memory adapter, the `http:` wire partner, and the `sql:` datasource action";
-#[cfg(all(
-    not(feature = "integration-http"),
-    not(feature = "integration-sql"),
-    feature = "integration-surreal"
-))]
-const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter, the `surreal:` datasource action, and the surreal validate target";
-#[cfg(all(
-    feature = "integration-http",
-    not(feature = "integration-sql"),
-    feature = "integration-surreal"
-))]
-const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter, the `http:` wire partner, the `surreal:` datasource action, and the surreal validate target";
-#[cfg(all(
-    not(feature = "integration-http"),
-    feature = "integration-sql",
-    feature = "integration-surreal"
-))]
-const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter, the `sql:` datasource action, the `surreal:` datasource action, and the surreal validate target";
-#[cfg(all(
-    feature = "integration-http",
-    feature = "integration-sql",
-    feature = "integration-surreal"
-))]
-const PROVIDED_ADAPTERS: &str = "the `fake:` in-memory adapter, the `http:` wire partner, the `sql:` datasource action, the `surreal:` datasource action, and the surreal validate target";
+const BOOT_SCHEMES: [&str; 2] = [FAKE_SCHEME, "direct"];
 
 /// Outcome of running one scenario document: one row per executed
 /// action plus the apparatus-class flag for the exit mapping.
@@ -338,7 +315,8 @@ pub(super) async fn run_scenario_doc(
         not(any(
             feature = "integration-http",
             feature = "integration-sql",
-            feature = "integration-surreal"
+            feature = "integration-surreal",
+            feature = "integration-redis"
         )),
         allow(unused_variables)
     )]
@@ -358,7 +336,8 @@ pub(super) async fn run_scenario_doc(
     #[cfg(any(
         feature = "integration-http",
         feature = "integration-sql",
-        feature = "integration-surreal"
+        feature = "integration-surreal",
+        feature = "integration-redis"
     ))]
     {
         // A `sql:` action full-boots in every build that executes it
@@ -403,12 +382,25 @@ pub(super) async fn run_scenario_doc(
         // surreal-target document never selects the full boot here.
         #[cfg(not(feature = "integration-surreal"))]
         let has_surreal = false;
+        #[cfg(feature = "integration-redis")]
+        let has_redis = doc.scenario.iter().any(|action| {
+            matches!(
+                action,
+                camel_integration_test::ScenarioAction::Validate {
+                    target: camel_integration_test::ScenarioTarget::Redis(_),
+                    ..
+                }
+            )
+        });
+        #[cfg(not(feature = "integration-redis"))]
+        let has_redis = false;
         if (wired.iter().any(|r| scheme_of(&r.endpoint) != FAKE_SCHEME)
             && wired
                 .iter()
                 .all(|r| BOOT_SCHEMES.contains(&scheme_of(&r.endpoint))))
             || has_sql
             || has_surreal
+            || has_redis
         {
             return run_scenario_full_boot(doc, root).await;
         }
@@ -456,7 +448,8 @@ async fn run_scenario_fake_smoke(
             action_results: Vec::new(),
             doc_error: Some(format!(
                 "infra-unavailable: endpoint {endpoint} needs the {scheme} partner adapter; \
-                 this build provides {PROVIDED_ADAPTERS}"
+                 this build provides {}",
+                provided_adapters()
             )),
             apparatus: true,
         };
@@ -533,7 +526,8 @@ async fn http_secret_query_keys(
 #[cfg(any(
     feature = "integration-http",
     feature = "integration-sql",
-    feature = "integration-surreal"
+    feature = "integration-surreal",
+    feature = "integration-redis"
 ))]
 async fn run_scenario_full_boot(
     doc: &camel_integration_test::ScenarioDocument,

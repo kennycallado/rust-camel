@@ -211,3 +211,16 @@ because LLM provider APIs can change rapidly. camel-redis uses `redis` as its
 protocol driver, and its command modules intentionally use the driver types
 directly. Reassess this boundary if driver API churn makes changes spread beyond
 the component's Redis-specific modules.
+## Datasource catalog boundary
+
+`RedisPoolFactory` creates standalone multiplexed connections for named
+datasources. It parses driver URLs with `redis::Client::open`, preserving
+ACL usernames and `/db` selection. This is distinct from the route endpoint
+parser, which uses `?db=`.
+`RedisBundle::with_catalog` registers the factory under provider `redis`.
+The factory supports `redis` and TLS-enabled `rediss`, not cluster or
+sentinel datasource URLs. Health checks issue `PING`.
+Factory failures omit URLs and driver text. Close remains the trait's no-op.
+Connections are released only after all catalog and boot owners drop them.
+See the [integration-tier spec](../../../openspec/specs/integration-tier/spec.md)
+for the state-assertion boundary.

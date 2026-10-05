@@ -1,0 +1,5 @@
+routes:
+- id: redis-order
+  from: direct:order
+  steps:
+  - to: ${env:REDIS_PRODUCER_URI}

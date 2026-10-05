@@ -117,6 +117,9 @@ tikv-jemallocator = { version = "0.7", optional = true, default-features = false
 tikv-jemalloc-ctl = { version = "0.7", optional = true, default-features = false, features = ["use_std", "stats", "profiling"] }
 
 [dev-dependencies]
+testcontainers.workspace = true
+testcontainers-modules.workspace = true
+redis = { workspace = true, features = ["tokio-comp", "aio"] }
 # camel-auth is test-only here (run_tests.rs / test/scenario.rs mod
 # tests exercise the shared security builder's provider registry).
 # camel-processor is test-only here (bench_instrument tests construct
@@ -149,7 +152,7 @@ default = ["flavor-regular"]
 # start from `--no-default-features`.
 # Historical closure list, kept for compose-users; its closure no longer
 # wires function/container (gated behind `containers`) — prefer flavor-full.
-full = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http", "integration-sql", "integration-surreal", "security", "redis-tls", "lsp", "lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath", "lang-minijinja", "jms", "sql", "redis", "opensearch", "ws", "cxf", "xj", "xslt"]
+full = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http", "integration-sql", "integration-surreal", "integration-redis", "security", "redis-tls", "lsp", "lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath", "lang-minijinja", "jms", "sql", "redis", "opensearch", "ws", "cxf", "xj", "xslt"]
 # LSP server surface (`camel lsp`): tower-lsp transport + camel-lsp backend.
 lsp = ["dep:camel-lsp", "dep:tower-lsp"]
 # kubernetes forwards camel-config's platform wiring (pod identity,
@@ -172,7 +175,7 @@ lang-minijinja = ["camel-core/lang-minijinja"]
 # camel-function + camel-component-container as ONE feature).
 flavor-slim = ["mqtt", "mqtt-tls", "http-static", "sql", "lang-jsonpath", "lang-rhai"]
 flavor-regular = ["flavor-slim", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]
-flavor-full = ["flavor-regular", "exec", "kafka", "surrealdb", "integration-surreal", "containers"]
+flavor-full = ["flavor-regular", "exec", "kafka", "surrealdb", "integration-surreal", "integration-redis", "containers"]
 # otel instruments http (always linked) and ws. The ws/otel forward
 # activates the optional camel-component-ws dep without the `ws`
 # capability gate — pre-existing shape: telemetry-on does not imply
@@ -259,6 +262,7 @@ integration-sql = ["camel-integration-test/sql"]
 # `integration-sql` — a surreal-only build runs full-boot documents
 # whose only datasource wiring is surreal.
 integration-surreal = ["camel-integration-test/surreal", "surrealdb"]
+integration-redis = ["camel-integration-test/redis"]
 # Test-only: the e2e suites that spawn the real `camel` binary against
 # scenario documents stay out of the default suite (runtime and spawn
 # cost); the integration-http CI job enables them explicitly.

@@ -20,8 +20,8 @@ use crate::document::{
     sql_query_lacks_order_by,
 };
 use crate::{
-    CountBound, DocError, Expectation, PartnerExpectation, Provisioning, ScenarioAction,
-    ScenarioDocument, ScenarioTarget, ValidateExpectation, parse_scenario_document,
+    CountBound, DocError, Expectation, PartnerExpectation, Provisioning, RedisTarget, RedisType,
+    ScenarioAction, ScenarioDocument, ScenarioTarget, ValidateExpectation, parse_scenario_document,
 };
 
 /// Writes `text` to a fresh temporary `case.test.yaml` and parses it.
@@ -3246,4 +3246,111 @@ scenario:
             .any(|event| event.level == tracing::Level::WARN && event.message.contains("ORDER BY")),
         "an unordered shape never advises: {events:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// redis validate target (redis-state-tier task 1): the `redis` key, the
+// inherent type schema, and the poll deadline.
+// ---------------------------------------------------------------------------
+
+/// A validate action whose `redis` target parses keeps the datasource
+/// name, the document-authored key, and the declared type, and pairs
+/// the target with the reused row-shape grammar
+/// (`ValidateExpectation::Rows`).
+#[test]
+fn redis_target_parses() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      redis:
+        datasource: statedb
+        key: "user:1"
+        type: hash
+    expectation:
+      count: 1
+"#,
+    )
+    .expect("parse must succeed");
+    let action = doc.scenario.first().expect("one action");
+    match action {
+        ScenarioAction::Validate { target, .. } => {
+            assert_eq!(
+                target,
+                &ScenarioTarget::Redis(RedisTarget {
+                    datasource: "statedb".to_string(),
+                    key: "user:1".to_string(),
+                    r#type: RedisType::Hash,
+                    ttl: None,
+                }),
+                "target must parse into the redis target shape"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
+    }
+}
+
+/// The redis target reuses the sql expectation grammar: an expectation
+/// that declares neither `rows` nor a count bound fails the reused
+/// loader naming the action index.
+#[test]
+fn redis_target_requires_the_reused_rows_grammar() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      redis:
+        datasource: statedb
+        key: "k"
+        type: string
+    expectation: {}
+"#,
+    )
+    .expect_err("parse must fail");
+    match err {
+        DocError::Validation { index, message } => {
+            assert_eq!(index, 0, "error must name the action index");
+            assert!(
+                message.contains("requires either `rows` or a count bound"),
+                "error must be the reused rows grammar error: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// The poll deadline is valid on a redis target: the read runs against
+/// a live datasource and may be worth bounding.
+#[test]
+fn redis_deadline_accepted() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      redis:
+        datasource: statedb
+        key: "k"
+        type: string
+    expectation:
+      count: 1
+    deadline: 2s
+"#,
+    )
+    .expect("parse must succeed");
+    match doc.scenario.first().expect("one action") {
+        ScenarioAction::Validate { deadline, .. } => {
+            assert_eq!(
+                *deadline,
+                Some(Duration::from_secs(2)),
+                "deadline must parse as a humantime duration"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
+    }
 }

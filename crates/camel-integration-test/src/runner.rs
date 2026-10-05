@@ -51,7 +51,13 @@ use crate::document::{
 /// contract"): one discipline for every `validate` target that polls,
 /// gated to the families that can call it (any family feature, or a
 /// unit-test build).
-#[cfg(any(test, feature = "http", feature = "sql", feature = "surreal"))]
+#[cfg(any(
+    test,
+    feature = "http",
+    feature = "sql",
+    feature = "surreal",
+    feature = "redis"
+))]
 mod poll;
 
 /// Partner verification for the `validate` action's `partner` target
@@ -100,6 +106,17 @@ pub(crate) use surreal_validate::{surreal_rows_to_tuples, surreal_value_to_cell}
 
 #[cfg(test)]
 mod surreal_validate_test;
+
+/// Redis type-aware projection and value law for the `validate`
+/// action's `redis` target (redis-state-tier task 1): the coherent
+/// atomic-snapshot decoder, the fail-closed RESP-to-cell law, the
+/// non-monotone poll lattice, and the cell-free mismatch renderer.
+mod redis_validate;
+
+// The dispatch target of the runner's redis validate arm. The module
+// carries both feature arms internally (the sql/surreal twin shape);
+// its colocated tests own the value law and the injected source seam.
+pub(crate) use redis_validate::redis_validate_action;
 
 /// The default bounded deadline for every `send` action (ADR-0069
 /// §7: every adapter operation carries a deadline). A document-level
@@ -1091,6 +1108,15 @@ async fn validate_action(
         (ScenarioTarget::Surreal(target), ValidateExpectation::Rows(expected)) => {
             surreal_validate_action(index, target, expected, *deadline, datasource_catalog).await
         }
+        // The grammar pairs a `redis` target with the row-shape
+        // grammar (redis-state-tier task 1); this arm reads one
+        // atomic key snapshot and projects it like the sql arm. The
+        // feature split lives inside redis_validate (the sql twin): a
+        // feature-off build returns the named demand-gate error at
+        // action time, never a silent pass.
+        (ScenarioTarget::Redis(target), ValidateExpectation::Rows(expected)) => {
+            redis_validate_action(index, target, expected, *deadline, datasource_catalog).await
+        }
         (_, ValidateExpectation::Message(expectation)) => {
             let (value, subject) = match target {
                 ScenarioTarget::LastReceived(endpoint) => {
@@ -1151,6 +1177,10 @@ async fn validate_action(
                 // message expectation here means a caller bypassed
                 // the parser.
                 ScenarioTarget::Surreal(_) => return Err(unpaired_validate(index)),
+                // Taken by the arm above: the grammar pairs a `redis`
+                // target with the rows grammar only; a message
+                // expectation here means a caller bypassed the parser.
+                ScenarioTarget::Redis(_) => return Err(unpaired_validate(index)),
             };
             // The per-form booleans delegate to the shared core
             // (`camel_matchers::expectation_matches`); the detail

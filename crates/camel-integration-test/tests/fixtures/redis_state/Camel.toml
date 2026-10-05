@@ -1,0 +1,3 @@
+[datasources.statedb]
+provider = "redis"
+db_url = "${env:REDIS_URL}"

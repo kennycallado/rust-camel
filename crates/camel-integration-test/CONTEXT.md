@@ -234,6 +234,26 @@ mandate.
 
 ## Architecture notes
 
+### Redis assertion family
+
+The `redis` validate target names a datasource, key, and declared type.
+It provides no prepare action. Routes or clients seed Redis keys.
+The `redis` Cargo feature activates execution. `redis-live` activates
+the Docker library battery only.
+String, hash, list, set, and sorted-set payloads project into matcher tuples.
+`columns` selects or reorders the inherent schema. Finite integral scores
+become JSON integers only within `[-2^63, 2^63)`.
+TTL bounds use positive whole-millisecond durations and shared count algebra.
+Missing and persistent keys fail declared TTL bounds.
+The fixed read-only `EVAL` snapshot observes type, payload, and TTL atomically.
+Missing/wrong-type snapshots remain verdict data until final judgment.
+The shared steering resolver uses the `redis validation` family label.
+The shared poll driver never settles Redis assertions early, except on count
+ceiling breaches. Malformed replies and transport errors stop immediately.
+Catalog connection release is drop-scoped, not guaranteed by shutdown return.
+See the [integration-tier spec](../../openspec/specs/integration-tier/spec.md)
+for the state-assertion contracts.
+
 ### Two-stage parse with index-carrying errors
 
 Serde deserializes into a raw form where action lists stay raw values

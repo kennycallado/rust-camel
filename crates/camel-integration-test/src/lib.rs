@@ -57,8 +57,8 @@ pub use camel_matchers::{CountBound, Expectation, PathFilter, RowsExpectation};
 pub use document::partner_scripts_for;
 pub use document::{
     DocError, EndpointRef, InboundListener, PartnerFault, PartnerScript, PartnerScriptResponse,
-    Provisioning, RouteSource, ScenarioAction, ScenarioDocument, ScenarioTarget, SqlTarget,
-    SurrealTarget, ValidateExpectation, parse_scenario_document,
+    Provisioning, RedisTarget, RedisType, RouteSource, ScenarioAction, ScenarioDocument,
+    ScenarioTarget, SqlTarget, SurrealTarget, ValidateExpectation, parse_scenario_document,
 };
 pub use env_layers::{AmbientLookup, LayeredEnv, ambient_std};
 #[cfg(feature = "http")]

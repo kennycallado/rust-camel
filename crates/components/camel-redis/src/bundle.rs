@@ -6,6 +6,21 @@ use crate::{RedisComponent, RedisConfig, RedisSentinelComponent, RedissSentinelC
 
 pub struct RedisBundle {
     config: RedisConfig,
+    catalog: Option<Arc<dyn camel_api::datasource::DatasourceCatalog>>,
+}
+
+impl RedisBundle {
+    /// Registers the Redis datasource factory with the boot-owned catalog.
+    pub fn with_catalog(
+        mut self,
+        catalog: Arc<dyn camel_api::datasource::DatasourceCatalog>,
+    ) -> Self {
+        if let Err(error) = catalog.register_factory("redis", Arc::new(crate::RedisPoolFactory)) {
+            tracing::warn!(%error, "Redis datasource factory registration failed");
+        }
+        self.catalog = Some(catalog);
+        self
+    }
 }
 
 impl ComponentBundle for RedisBundle {
@@ -17,7 +32,10 @@ impl ComponentBundle for RedisBundle {
         let config: RedisConfig = value
             .try_into()
             .map_err(|e: toml::de::Error| CamelError::Config(e.to_string()))?;
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            catalog: None,
+        })
     }
 
     fn register_all(self, ctx: &mut dyn ComponentRegistrar) {
@@ -35,6 +53,22 @@ impl ComponentBundle for RedisBundle {
 mod tests {
     use super::*;
     use camel_component_api::ComponentBundle;
+
+    #[test]
+    fn bundle_with_catalog_registers_redis_factory() {
+        let catalog = Arc::new(camel_core::datasource::RuntimeDatasourceCatalog::new(
+            std::collections::HashMap::new(),
+        ));
+        let _bundle = RedisBundle::from_toml(toml::Value::Table(toml::map::Map::new()))
+            .expect("empty config")
+            .with_catalog(catalog.clone());
+        use camel_api::datasource::DatasourceCatalog;
+        assert!(
+            catalog
+                .register_factory("redis", Arc::new(crate::RedisPoolFactory))
+                .is_err()
+        );
+    }
 
     struct TestRegistrar {
         schemes: Vec<String>,

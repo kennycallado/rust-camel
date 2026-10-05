@@ -52,6 +52,11 @@ pub mod logs;
 pub use logs::{LogLevel, LogsAssertion};
 pub mod validate;
 pub use validate::{ScenarioTarget, SqlTarget, SurrealTarget, ValidateExpectation};
+// The `redis` validate-target grammar (redis-state-tier task 1): the
+// target types and the load-time projection/ttl law.
+pub mod redis_target;
+pub use redis_target::{RedisTarget, RedisType};
+use redis_target::{redis_expectation_from_value, redis_target_from_value};
 use validate::{backticked, partner_expectation_from_value};
 pub(crate) use validate::{
     expectation_from_value, sql_expectation_from_value, sql_query_lacks_order_by,
@@ -269,6 +274,10 @@ impl ScenarioAction {
                 // an endpoint: it declares no bindings (the sql
                 // precedent).
                 ScenarioTarget::Surreal(_) => Vec::new(),
+                // A redis target references a named datasource, never
+                // an endpoint: it declares no bindings (the sql
+                // precedent).
+                ScenarioTarget::Redis(_) => Vec::new(),
             },
             Self::Sleep { .. } => Vec::new(),
             // A `sql:` action references a named datasource, never an
@@ -1054,13 +1063,14 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                         ScenarioTarget::Partner(_)
                             | ScenarioTarget::Sql(_)
                             | ScenarioTarget::Surreal(_)
+                            | ScenarioTarget::Redis(_)
                     ) =>
                 {
                     Some(parse_duration(raw_deadline, index, "deadline")?)
                 }
                 Some(raw_deadline) => {
                     return Err(action_error(format!(
-                        "`deadline` is only valid on a `partner`, `sql`, or `surreal` validate target, got `{raw_deadline}`"
+                        "`deadline` is only valid on a `partner`, `sql`, or `surreal`, or a `redis` validate target, got `{raw_deadline}`"
                     )));
                 }
             };
@@ -1103,6 +1113,9 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                     }
                     ValidateExpectation::Rows(rows)
                 }
+                ScenarioTarget::Redis(target) => ValidateExpectation::Rows(
+                    redis_expectation_from_value(&raw.expectation, index, target.r#type.schema())?,
+                ),
                 _ => ValidateExpectation::Message(expectation_from_value(
                     &raw.expectation,
                     index,
@@ -1174,17 +1187,18 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
 }
 
 /// Builds a `validate` target from the raw `target` node: a single-key
-/// map (`lastReceived`, `variable`, `partner`, `sql`, or `surreal`).
+/// map (`lastReceived`, `variable`, `partner`, `sql`, `surreal`, or
+/// `redis`).
 fn build_target(value: &serde_yaml::Value, index: usize) -> Result<ScenarioTarget, DocError> {
     let action_error = |message: String| DocError::Validation { index, message };
     let serde_yaml::Value::Mapping(map) = value else {
         return Err(action_error(format!(
-            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`, `sql`, or `surreal`), got {value:?}"
+            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`, `sql`, `surreal`, or `redis`), got {value:?}"
         )));
     };
     let Some((key, content)) = map.iter().next() else {
         return Err(action_error(
-            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`, `sql`, or `surreal`), got an empty map"
+            "validate `target` must be a single-key map (`lastReceived`, `variable`, `partner`, `sql`, `surreal`, or `redis`), got an empty map"
                 .to_string(),
         ));
     };
@@ -1277,8 +1291,11 @@ fn build_target(value: &serde_yaml::Value, index: usize) -> Result<ScenarioTarge
                 query: raw.query,
             }))
         }
+        "redis" => Ok(ScenarioTarget::Redis(redis_target_from_value(
+            content, index,
+        )?)),
         other => Err(action_error(format!(
-            "unknown validate target `{other}`; expected `lastReceived`, `variable`, `partner`, `sql`, or `surreal`"
+            "unknown validate target `{other}`; expected `lastReceived`, `variable`, `partner`, `sql`, `surreal`, or `redis`"
         ))),
     }
 }

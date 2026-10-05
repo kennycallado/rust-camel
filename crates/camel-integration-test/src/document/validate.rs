@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use camel_api::Value;
 use camel_matchers::{CountBound, Expectation, PathFilter, RequestShape, RowsExpectation};
 
-use super::{DocError, EndpointRef, PartnerExpectation};
+use super::{DocError, EndpointRef, PartnerExpectation, redis_target::RedisTarget};
 
 /// What a `validate` action asserts against.
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +43,11 @@ pub enum ScenarioTarget {
     /// mutations, and the two vocabularies never mix (the `sql:`
     /// precedent, bd rc-25lup.2).
     Surreal(SurrealTarget),
+    /// A named datasource: the assertion reads one key's value, type,
+    /// and remaining TTL through an atomic read-only Lua snapshot
+    /// (redis-state-tier task 1). Assertion-only — the landed `redis:`
+    /// component producer owns writes.
+    Redis(RedisTarget),
 }
 
 /// The sql `validate` target payload (bd rc-25lup.2): a read against a

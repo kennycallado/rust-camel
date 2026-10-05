@@ -267,9 +267,13 @@ suite keeps its runtime and composition.
    `integration-surreal` CI job proves the feature stands alone, and
    the embedded `mem://` tier runs the family hermetically with no
    Docker.
-4. WS, after the consumer-client role lands (rc-39d6).
-5. gRPC is a loopback candidate. It needs no Docker. It activates on demand.
-6. Kafka, JMS, and other broker adapters wait for an adapter-specific
+4. Redis key assertions (rc-w8s70). The `redis` harness feature activates
+   the assertion-only state adapter. The `integration-redis` CI job uses
+   testcontainers Redis and proves Redis-only CLI execution. Routes or
+   clients seed keys. There is no Redis scenario prepare action.
+5. WS, after the consumer-client role lands (rc-39d6).
+6. gRPC is a loopback candidate. It needs no Docker. It activates on demand.
+7. Kafka, JMS, and other broker adapters wait for an adapter-specific
    regression.
 
 Each adapter is a Cargo feature. There is no all-components feature. CI runs a
@@ -541,7 +545,7 @@ poll driver live inside `camel-integration-test`.
   with ADR-0072.
 
 Activation follows need, one Cargo feature per family. The section-8
-demand gate applies per family. Each further state family (the next is Redis, bd rc-w8s70) reuses the waist
+demand gate applies per family. Redis (bd rc-w8s70) and each further state family reuse the waist
 and adds only its query vocabulary, its record projection, and an action
 name.
 

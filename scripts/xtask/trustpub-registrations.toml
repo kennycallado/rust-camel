@@ -147,10 +147,6 @@ name = "camel-component-opensearch"
 state = "registered"
 
 [[crates]]
-name = "camel-component-redis"
-state = "registered"
-
-[[crates]]
 name = "camel-component-seda"
 state = "registered"
 
@@ -195,11 +191,11 @@ name = "camel-builder"
 state = "registered"
 
 [[crates]]
-name = "camel-platform-kubernetes"
+name = "camel-component-redis"
 state = "registered"
 
 [[crates]]
-name = "camel-redis-repo"
+name = "camel-platform-kubernetes"
 state = "registered"
 
 [[crates]]
@@ -224,6 +220,10 @@ state = "registered"
 
 [[crates]]
 name = "camel-template"
+state = "registered"
+
+[[crates]]
+name = "camel-redis-repo"
 state = "registered"
 
 [[crates]]

@@ -376,7 +376,18 @@ pub async fn boot(
     #[cfg(feature = "opensearch")]
     register_bundle::<camel_component_opensearch::OpenSearchBundle>(ctx, config)?;
     #[cfg(feature = "redis")]
-    register_bundle::<camel_component_redis::RedisBundle>(ctx, config)?;
+    {
+        match bundle_from_config::<camel_component_redis::RedisBundle>(config) {
+            Ok(bundle) => {
+                let bundle = bundle.with_catalog(Arc::clone(&datasource_catalog));
+                <camel_component_redis::RedisBundle as camel_component_api::ComponentBundle>::register_all(bundle, ctx);
+            }
+            Err(error) => {
+                // log-policy: system-broken
+                tracing::error!(%error, "failed to initialize Redis bundle");
+            }
+        }
+    }
     #[cfg(feature = "sql")]
     {
         match bundle_from_config::<camel_component_sql::SqlBundle>(config) {

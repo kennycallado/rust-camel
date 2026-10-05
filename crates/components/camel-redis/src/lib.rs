@@ -273,3 +273,5 @@ mod tests {
 // (testcontainers-backed). The `mod integration_tests` block that used to live here — three
 // `#[ignore]` tests against `127.0.0.1:6379` — was a redundant duplicate of that coverage and
 // has been removed.
+mod pool_factory;
+pub use pool_factory::RedisPoolFactory;
