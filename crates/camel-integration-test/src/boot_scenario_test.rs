@@ -290,30 +290,20 @@ routes:
       - to: log:info
 "#;
 
-/// The sibling a `?` glob would additionally match (`?` = any single
-/// character): pre-fix, the boot loaded BOTH this file and the
-/// declared literal (rc-rbde1 edge 1).
-const GLOB_SIBLING_ROUTE: &str = r#"
-routes:
-  - id: glob-sibling
-    from: direct:sibling
-    steps:
-      - to: log:info
-"#;
-
 #[tokio::test]
 async fn boot_rejects_metachar_route_files_entry() {
-    // rc-rbde1: the declared file `route?.yaml` exists literally, but
-    // the discovery delegation glob-interprets the entry — pre-fix,
-    // the `?` additionally matched the sibling `routeX.yaml`, so the
-    // booted context carried MORE routes than the document declared.
-    // The load-time doc gate rejects the entry inside
-    // `parse_scenario_document`; this boot-level rejection stays as
-    // defense-in-depth for documents constructed directly, bypassing
-    // the parser (the rc-9dpx inline-routes pattern).
+    // rc-rbde1: a declared entry carrying a glob metacharacter must be
+    // rejected, not glob-interpreted (pre-fix the `?` in `route?.yaml`
+    // additionally matched a sibling, booting routes the document
+    // never declared). The boot-level `anchored` pre-check rejects the
+    // entry before any filesystem access, so no literal metacharacter
+    // file is created: `?` is not a valid filename character on every
+    // filesystem the suite runs on (NTFS rejects it with EINVAL), and
+    // the rejection deliberately precedes the existence pre-check.
+    // This boot-level rejection stays as defense-in-depth for
+    // documents constructed directly, bypassing the parser (the
+    // rc-9dpx inline-routes pattern).
     let (dir, mut doc) = project("# minimal\n", Some(("routes.yaml", ROUTE)), DOC);
-    std::fs::write(dir.path().join("route?.yaml"), METACHAR_ROUTE).expect("write declared");
-    std::fs::write(dir.path().join("routeX.yaml"), GLOB_SIBLING_ROUTE).expect("write sibling");
     doc.route_source = RouteSource::RouteFiles(vec!["route?.yaml".into()]);
     let err = expect_boot_error(
         boot_scenario(&doc, dir.path(), &empty_env()).await,
