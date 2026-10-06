@@ -1110,6 +1110,14 @@ fn resolve_assets(
     root: &Path,
     documents: &[(String, String)],
 ) -> Result<AssetSet, SourceError> {
+    // Canonicalize the root once: it may itself be reached through a
+    // symlink (macOS tempdirs live under `/var`, a symlink to
+    // `/private/var`), and comparing a canonicalized asset against a
+    // raw root rejects every asset. A root that cannot be canonicalized
+    // keeps its prior path, preserving prior rejections.
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root = canonical_root.as_path();
+
     // Canonical target -> `assets/`-prefixed store path. Deduplicating
     // by canonical target keeps one shared entry per file; the first
     // reference's class names the entry.
@@ -1659,5 +1667,82 @@ mod tests {
                 "diagnostic must name both spellings: {declared:?}"
             );
         }
+    }
+
+    /// A confinement root reached through a symlink must resolve like
+    /// its target. macOS `TempDir` paths live under `/var`, itself a
+    /// symlink to `/private/var`, so a raw (non-canonical) root made
+    /// every canonicalized asset look like an escape (CI Weekly run
+    /// 37267949557).
+    #[cfg(unix)]
+    #[test]
+    fn resolve_assets_accepts_symlinked_root() {
+        let real = tempfile::tempdir().expect("tempdir");
+        let link_parent = tempfile::tempdir().expect("link parent");
+        let link_root = link_parent.path().join("root-link");
+        std::os::unix::fs::symlink(real.path(), &link_root).expect("symlink root");
+        std::fs::write(real.path().join("my cert.pem"), "x").expect("write overlapping file");
+        std::fs::write(real.path().join("cert.pem"), "x").expect("write substring file");
+        let docs = vec![(
+            "app.yaml".to_string(),
+            "cert: \"my cert.pem\"\nclient_ca: cert.pem\n".to_string(),
+        )];
+        let refs = vec![
+            AssetRef {
+                class: "certificate",
+                declared: "my cert.pem".to_string(),
+                field: "cert".to_string(),
+                site: "app.yaml".to_string(),
+                context: SubstitutionContext::Literal,
+            },
+            AssetRef {
+                class: "client CA",
+                declared: "cert.pem".to_string(),
+                field: "client_ca".to_string(),
+                site: "app.yaml".to_string(),
+                context: SubstitutionContext::Literal,
+            },
+        ];
+        let Err(err) = resolve_assets(refs, &link_root, &docs) else {
+            panic!("a spelling inside another's site must be rejected");
+        };
+        assert!(
+            matches!(err, SourceError::AssetSpanOverlap { .. }),
+            "a symlinked confinement root must resolve like its target: {err:?}"
+        );
+    }
+
+    /// Root canonicalization must not weaken escape rejection: a symlink
+    /// inside a symlinked root that points outside is still an
+    /// `AssetOutsideRoot` rejection.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_assets_rejects_escape_under_symlinked_root() {
+        let real = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("secret.pem"), "x").expect("write outside file");
+        let link_parent = tempfile::tempdir().expect("link parent");
+        let link_root = link_parent.path().join("root-link");
+        std::os::unix::fs::symlink(real.path(), &link_root).expect("symlink root");
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.pem"),
+            real.path().join("escape.pem"),
+        )
+        .expect("symlink escape");
+        let docs = vec![("app.yaml".to_string(), "cert: escape.pem\n".to_string())];
+        let refs = vec![AssetRef {
+            class: "certificate",
+            declared: "escape.pem".to_string(),
+            field: "cert".to_string(),
+            site: "app.yaml".to_string(),
+            context: SubstitutionContext::Literal,
+        }];
+        let Err(err) = resolve_assets(refs, &link_root, &docs) else {
+            panic!("an escaping symlink must be rejected");
+        };
+        assert!(
+            matches!(err, SourceError::AssetOutsideRoot { .. }),
+            "escape rejection must survive root canonicalization: {err:?}"
+        );
     }
 }
