@@ -64,7 +64,10 @@ routes:
     from: "direct:start"
     steps:
       - filter:
-          xpath: "/order[@status='active']"
+          # Strict-bool predicate contract (language-value-boundary, sealed Q3):
+          # a bare nodeset like /order[@status='active'] is a TypeMismatch, so
+          # wrap the match test in boolean() to yield a bool result.
+          xpath: "boolean(/order[@status='active'])"
           steps:
             - to: "mock:filtered"
 "#;

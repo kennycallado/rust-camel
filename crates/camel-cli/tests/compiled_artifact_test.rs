@@ -4807,15 +4807,22 @@ fn job_artifact_exits_without_signal() {
 /// artifact trailer stays valid, so `decode_artifact` succeeds and boot
 /// verification is the failing step — fails closed with exit 2 naming
 /// signature verification, and the child never binds the declared
-/// listener: the test binds `TcpListener` on the declared port BEFORE
-/// the spawn and holds it across the child's entire execution, so any
-/// bind attempt would surface as [`BIND_RACE_MARK`]. No
-/// [`with_bind_race_retry`] here: the held port is the witness — a bind
-/// diagnostic would be the very failure the test detects, so retrying
-/// would discard it.
+/// listener: the test acquires the held witness `TcpListener` FIRST, on
+/// an OS-assigned ephemeral port it keeps bound for the whole test, and
+/// reads the declared listener port back FROM that held socket. The
+/// port is therefore never in a released state, so no sibling test can
+/// claim it — closing the `free_port()` drop-then-rebind TOCTOU that
+/// made this test flaky under parallel execution (a sibling probe or a
+/// live artifact server could grab the port during the slow signed
+/// compile). Any bind attempt by the child still surfaces loudly as
+/// [`BIND_RACE_MARK`] because the witness holds exactly the declared
+/// port. No [`with_bind_race_retry`] here: the held port is the witness
+/// — a bind diagnostic would be the very failure the test detects, so
+/// retrying would discard it.
 #[test]
 fn envelope_corruption_binds_no_listener() {
-    let port = free_port();
+    let witness = TcpListener::bind("127.0.0.1:0").expect("hold declared listener port");
+    let port = witness.local_addr().expect("held listener addr").port();
     let src = tempfile::Builder::new()
         .prefix("camel-routesrv-sig-")
         .tempdir_in(fixture_root())
@@ -4841,10 +4848,10 @@ fn envelope_corruption_binds_no_listener() {
     bytes[mid] ^= 0xFF;
     std::fs::write(&sig, bytes).expect("write corrupted envelope");
 
-    // Held-listener witness: bound before the spawn, held across the
-    // child's entire execution — "never bound" is distinguished from
-    // "bound, then closed" because a bind attempt fails loudly.
-    let witness = TcpListener::bind(("127.0.0.1", port)).expect("hold declared listener port");
+    // Held-listener witness (acquired above, before the document was
+    // written): bound across the child's entire execution — "never
+    // bound" is distinguished from "bound, then closed" because a bind
+    // attempt fails loudly.
     let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &[], &[]);
     assert_eq!(
         code, 2,

@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use camel_api::{Exchange, Message, body::Body};
+use camel_bridge::process::BridgeProcess;
 use camel_bridge::reconnect::BridgeReconnectHandler;
 use camel_component_api::{Component, NoOpComponentContext, ProducerContext};
 use camel_xslt::{
-    BridgeState, StylesheetId, XsltBridgeClient, XsltComponent, XsltComponentConfig, XsltError,
-    XsltTransformBackend,
+    BridgeState, StylesheetId, XsltBridgeClient, XsltBridgeStarter, XsltComponent,
+    XsltComponentConfig, XsltError, XsltTransformBackend,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -60,6 +61,26 @@ impl XsltTransformBackend for MockBackend {
     }
 }
 
+/// Fake bridge process starter: returns no managed child and a lazy channel.
+///
+/// The restart path must be exercised without spawning the real xml-bridge
+/// binary, which is absent under `cargo test --workspace` (CI reclaims the
+/// bridge build artifacts before the workspace test).
+#[derive(Debug)]
+struct FakeStarter {
+    channel: Channel,
+}
+
+#[async_trait]
+impl XsltBridgeStarter for FakeStarter {
+    async fn start(
+        &self,
+        _config: &XsltComponentConfig,
+    ) -> Result<(Option<BridgeProcess>, Channel), XsltError> {
+        Ok((None, self.channel.clone()))
+    }
+}
+
 #[tokio::test]
 async fn reconnect_reseeds_registered_stylesheets() {
     // rustls 0.23 requires a process-level CryptoProvider.
@@ -75,7 +96,16 @@ async fn reconnect_reseeds_registered_stylesheets() {
 
     let mut cfg = XsltComponentConfig::default();
     cfg.reconnect.max_attempts = 4; // 3 retries after initial = 4 total calls
-    let component = XsltComponent::with_client_for_testing(cfg, state_tx, state_rx, client.clone());
+    let starter = Arc::new(FakeStarter {
+        channel: Endpoint::from_static("http://127.0.0.1:50051").connect_lazy(),
+    });
+    let component = XsltComponent::with_client_and_starter_for_testing(
+        cfg,
+        state_tx,
+        state_rx,
+        client.clone(),
+        starter,
+    );
 
     let file = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(file.path(), b"<xsl:stylesheet version=\"1.0\"/>").unwrap();

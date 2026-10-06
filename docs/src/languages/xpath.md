@@ -24,14 +24,14 @@ An XPath 1.0 expression and predicate language over `sxd-document` and `sxd-xpat
         xpath: "/catalog/book[1]/title"
     - to: log:all-books?showBody=true&showHeaders=true
     - filter:
-        xpath: "/catalog/book[@in-stock='true']"
+        xpath: "boolean(/catalog/book[@in-stock='true'])"
         steps:
           - to: log:in-stock?showBody=true&showHeaders=true
 ```
 
 </details>
 
-You register `xpath` into `CamelContext` by name, then build expressions and predicates up front. The included example constructs one expression (`/catalog/book[1]/title`) and one predicate (`/catalog/book[@in-stock='true']`) before the route. Expressions extract values from the XML body. Predicates gate filter steps.
+You register `xpath` into `CamelContext` by name, then build expressions and predicates up front. The included example constructs one expression (`/catalog/book[1]/title`) and one predicate (`boolean(/catalog/book[@in-stock='true'])`) before the route. Expressions extract values from the XML body. Predicates gate filter steps and must yield a boolean under the strict-bool predicate contract (`language-value-boundary`, sealed Q3), so a match test is wrapped in `boolean()`.
 
 The XPath query is trusted operator configuration. The XML body is untrusted, adversary-controlled data under ADR-0032. Exchange data never enters the query string. `max_input_bytes` bounds the raw XML body before parsing. The default is 1 MiB. Both `sxd-document` and `sxd-xpath` are pure Rust and register no filesystem or network resolver. The parser has no `<!ENTITY>` declaration handler. Recursive entity expansion, including a billion-laughs payload, is structurally unavailable. External entity declarations cannot trigger a file or network fetch.
 

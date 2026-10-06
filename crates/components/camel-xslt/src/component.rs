@@ -13,12 +13,62 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
 
+/// Seam for starting (or restarting) the xml-bridge process.
+///
+/// Production uses [`RealBridgeStarter`], which resolves and spawns the real
+/// xml-bridge binary. Tests inject a fake so the restart/reconnect path can be
+/// exercised hermetically: `cargo test --workspace` runs without a built or
+/// downloadable xml-bridge, so the runtime must not require the real binary.
+///
+/// Returning `None` for the process means "no managed child to stop" — the
+/// channel is still used for the reconnect re-seed.
+#[async_trait::async_trait]
+pub trait XsltBridgeStarter: Send + Sync + std::fmt::Debug {
+    async fn start(
+        &self,
+        config: &XsltComponentConfig,
+    ) -> Result<(Option<BridgeProcess>, tonic::transport::Channel), XsltError>;
+}
+
+/// Production starter: resolves the xml-bridge binary and connects a channel.
+#[derive(Debug)]
+struct RealBridgeStarter;
+
+#[async_trait::async_trait]
+impl XsltBridgeStarter for RealBridgeStarter {
+    async fn start(
+        &self,
+        config: &XsltComponentConfig,
+    ) -> Result<(Option<BridgeProcess>, tonic::transport::Channel), XsltError> {
+        let binary_path = match &config.bridge_binary_path {
+            Some(path) => path.clone(),
+            None => ensure_binary_for_spec(
+                &XML_BRIDGE,
+                &config.bridge_version,
+                &config.bridge_cache_dir,
+            )
+            .await
+            .map_err(|e| XsltError::Bridge(format!("failed to resolve xml-bridge binary: {e}")))?,
+        };
+
+        let (process, channel) = BridgeProcess::start_and_connect(&BridgeProcessConfig::xml(
+            binary_path,
+            config.bridge_start_timeout_ms,
+        ))
+        .await
+        .map_err(|e| XsltError::Bridge(format!("failed to start xml-bridge process: {e}")))?;
+
+        Ok((Some(process), channel))
+    }
+}
+
 pub struct XsltBridgeRuntime {
     config: XsltComponentConfig,
     process: Arc<Mutex<Option<BridgeProcess>>>,
     state_tx: watch::Sender<BridgeState>,
     state_rx: Arc<watch::Receiver<BridgeState>>,
     start_lock: Arc<Mutex<()>>,
+    starter: Arc<dyn XsltBridgeStarter>,
 }
 
 impl XsltBridgeRuntime {
@@ -28,12 +78,29 @@ impl XsltBridgeRuntime {
         state_tx: watch::Sender<BridgeState>,
         state_rx: Arc<watch::Receiver<BridgeState>>,
     ) -> Self {
+        Self::with_starter(
+            config,
+            process,
+            state_tx,
+            state_rx,
+            Arc::new(RealBridgeStarter),
+        )
+    }
+
+    pub(crate) fn with_starter(
+        config: XsltComponentConfig,
+        process: Arc<Mutex<Option<BridgeProcess>>>,
+        state_tx: watch::Sender<BridgeState>,
+        state_rx: Arc<watch::Receiver<BridgeState>>,
+        starter: Arc<dyn XsltBridgeStarter>,
+    ) -> Self {
         Self {
             config,
             process,
             state_tx,
             state_rx,
             start_lock: Arc::new(Mutex::new(())),
+            starter,
         }
     }
 
@@ -70,8 +137,8 @@ impl XsltBridgeRuntime {
             return Ok(());
         }
 
-        let (process, channel) = self.start_bridge_process().await?;
-        {
+        let (process, channel) = self.starter.start(&self.config).await?;
+        if let Some(process) = process {
             let mut process_guard = self.process.lock().await;
             *process_guard = Some(process);
         }
@@ -100,8 +167,8 @@ impl XsltBridgeRuntime {
             let _ = process.stop().await;
         }
 
-        let (process, channel) = self.start_bridge_process().await?;
-        {
+        let (process, channel) = self.starter.start(&self.config).await?;
+        if let Some(process) = process {
             let mut process_guard = self.process.lock().await;
             *process_guard = Some(process);
         }
@@ -179,30 +246,6 @@ impl XsltBridgeRuntime {
             tracing::warn!("Failed to stop XSLT bridge process: {}", e);
         }
     }
-
-    async fn start_bridge_process(
-        &self,
-    ) -> Result<(BridgeProcess, tonic::transport::Channel), XsltError> {
-        let binary_path = match &self.config.bridge_binary_path {
-            Some(path) => path.clone(),
-            None => ensure_binary_for_spec(
-                &XML_BRIDGE,
-                &self.config.bridge_version,
-                &self.config.bridge_cache_dir,
-            )
-            .await
-            .map_err(|e| XsltError::Bridge(format!("failed to resolve xml-bridge binary: {e}")))?,
-        };
-
-        let (process, channel) = BridgeProcess::start_and_connect(&BridgeProcessConfig::xml(
-            binary_path,
-            self.config.bridge_start_timeout_ms,
-        ))
-        .await
-        .map_err(|e| XsltError::Bridge(format!("failed to start xml-bridge process: {e}")))?;
-
-        Ok((process, channel))
-    }
 }
 
 pub struct XsltComponent {
@@ -244,6 +287,29 @@ impl XsltComponent {
             Arc::new(Mutex::new(None)),
             state_tx,
             state_rx,
+        ));
+
+        Self { runtime, client }
+    }
+
+    /// Like [`Self::with_client_for_testing`], but also injects the bridge
+    /// process starter so restart/reconnect tests do not spawn a real
+    /// xml-bridge binary.
+    #[allow(dead_code)]
+    pub fn with_client_and_starter_for_testing(
+        config: XsltComponentConfig,
+        state_tx: watch::Sender<BridgeState>,
+        state_rx: watch::Receiver<BridgeState>,
+        client: Arc<XsltBridgeClient>,
+        starter: Arc<dyn XsltBridgeStarter>,
+    ) -> Self {
+        let state_rx = Arc::new(state_rx);
+        let runtime = Arc::new(XsltBridgeRuntime::with_starter(
+            config,
+            Arc::new(Mutex::new(None)),
+            state_tx,
+            state_rx,
+            starter,
         ));
 
         Self { runtime, client }

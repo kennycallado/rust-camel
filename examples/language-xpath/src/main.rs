@@ -28,8 +28,10 @@ async fn main() -> Result<(), CamelError> {
         .create_expression("/catalog/book[1]/title")
         .expect("valid expression"); // allow-unwrap
 
+    // Strict-bool predicate contract (language-value-boundary, sealed Q3): a
+    // bare nodeset is a TypeMismatch, so wrap the match test in boolean().
     let in_stock_pred = lang
-        .create_predicate("/catalog/book[@in-stock='true']")
+        .create_predicate("boolean(/catalog/book[@in-stock='true'])")
         .expect("valid predicate"); // allow-unwrap
 
     let title_expr = Arc::new(title_expr);
@@ -96,7 +98,7 @@ async fn main() -> Result<(), CamelError> {
     println!("XPath Language example running.");
     println!("Producing 6 book catalog entries cycling through 3 titles.");
     println!("- /catalog/book[1]/title expression extracts the book title");
-    println!("- /catalog/book[@in-stock='true'] predicate filters to in-stock only");
+    println!("- boolean(/catalog/book[@in-stock='true']) predicate filters to in-stock only");
 
     tokio::signal::ctrl_c()
         .await

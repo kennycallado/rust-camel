@@ -2320,6 +2320,32 @@ steps:
 }
 
 #[test]
+fn rschema_embedded_with_default_not_flagged() {
+    // Negative boundary for the embedded scan: an embedded token WITH a
+    // default resolves in the interpolated validation copy, so the
+    // unresolved-Error scan must stay silent. Only the no-default arm
+    // (see `rschema_embedded_no_default_flagged`) flags — this pins that
+    // the corpus fixtures' hits are no-default tokens, not a blanket
+    // "any env placeholder in a URI" rejection.
+    let source = "\
+id: svc-ok
+from: direct:start
+steps:
+  - to: ${env:EMBED_DEF:-http://partner}/order
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "embedded token with a default must not produce an unresolved Error; got: {errors:?}"
+    );
+}
+
+#[test]
 fn rschema_arg_no_default_flagged() {
     // jobargs Task 2.1: the lint tree has no argument context, so a
     // whole-scalar `${arg:NAME}` Unresolved-fails exactly like an

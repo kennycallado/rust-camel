@@ -342,4 +342,43 @@
         "examples/container-nginx/routes/route.yaml",
         [("R-URI-known:unverified-scheme", "info")],
     ),
+
+    // Scenario-tier partner fixture (itest history-shape asserts, 5bfdc835;
+    // swept by the cifull gate, rc-ghx16). The producer URI is
+    // `${env:PARTNER_URL}/order`: the scheme head is an interpolation
+    // placeholder, so the catalog cannot verify it and unverified-scheme
+    // Info is by-design — identical to retry-route.yaml and
+    // outbound/routes/bridge.yaml above.
+    // R-SCHEMA Error: PARTNER_URL bound via partner harness (partner_verification_test.rs harness_provisioned); harness-bound no-default env token; any new R-SCHEMA row must name its binding source
+    (
+        "crates/camel-integration-test/tests/fixtures/partner-shape-retry-route.yaml",
+        [
+            ("R-URI-known:unverified-scheme", "info"),
+            ("R-SCHEMA", "error"),
+        ],
+    ),
+
+    // Redis state tier (aceef9d4; swept by the cifull gate, rc-ghx16). The
+    // producer URI is the whole-scalar token `${env:REDIS_PRODUCER_URI}`:
+    // the scheme head is a placeholder the catalog cannot resolve (the
+    // scenario harness sets the variable at boot), so unverified-scheme
+    // Info is by-design — same class as inbound/routes/consumer.yaml.
+    // R-SCHEMA Error: REDIS_PRODUCER_URI bound via redis harness (redis_state_test.rs LayeredEnv harness tier); harness-bound no-default env token; any new R-SCHEMA row must name its binding source
+    (
+        "crates/camel-integration-test/tests/fixtures/redis_state/routes/order.yaml",
+        [
+            ("R-URI-known:unverified-scheme", "info"),
+            ("R-SCHEMA", "error"),
+        ],
+    ),
+
+    // SurrealDB state tier (aaaf2768; swept by the cifull gate, rc-ghx16).
+    // The `surrealdb:` scheme registers only under flavor-full; the corpus
+    // gate runs flavor-regular by design (FLAVOR PIN above), so
+    // unverified-scheme Info is by-design — same kafka/containers precedent
+    // (rc-qsenm). No env placeholder here, so no R-SCHEMA entry.
+    (
+        "crates/camel-integration-test/tests/fixtures/surreal_state/routes/order.yaml",
+        [("R-URI-known:unverified-scheme", "info")],
+    ),
 ]
