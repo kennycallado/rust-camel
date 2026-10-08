@@ -1771,8 +1771,11 @@ fn check_ts_drift(ts_dir: &std::path::Path, temp_files: &[(String, String)]) -> 
 /// Schema envelope for the public DSL surface.
 ///
 /// Excludes templates (which use `noyalib::compat::serde_yaml::Value` —
-/// a type that does not implement JsonSchema). Templates are internal
-/// machinery; the public SDK schema is `{routes: [...]}` plus
+/// a reexport of the native Value, whose `schemars::JsonSchema` impl is
+/// gated behind noyalib's `schema` feature; the workspace consumes
+/// noyalib with `compat-serde-yaml` only, which does not enable it, so
+/// the impl is unavailable here). Templates are internal machinery; the
+/// public SDK schema is `{routes: [...]}` plus
 /// `{rest: [...]}` and `{mcp: [...]}` blocks (rc-p86s/rc-6pikg —
 /// modeled so R-SCHEMA validates rest/mcp-form documents instead of
 /// false-positive wrapping them as bare routes).

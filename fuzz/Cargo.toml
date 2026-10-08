@@ -12,7 +12,7 @@ camel-dsl = { path = "../crates/camel-dsl" }
 camel-api = { path = "../crates/camel-api" }
 libfuzzer-sys = "0.4"
 serde_json = "1"
-noyalib = { version = "0.0.29", features = ["compat-serde-yaml"] }
+noyalib = { version = "=0.0.54", features = ["compat-serde-yaml"] }
 
 [[bin]]
 name = "dsl_yaml"

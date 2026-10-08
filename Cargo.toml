@@ -269,7 +269,7 @@ syn = "3"
 jsonschema = { version = "0.58", default-features = false, features = ["resolve-file"] }
 ariadne = "0.6"
 ron = "0.12"
-noyalib = { version = "0.0.29", features = ["compat-serde-yaml"] }
+noyalib = { version = "=0.0.54", features = ["compat-serde-yaml"] }
 toml = "1"
 percent-encoding = "2.3"
 schemars = "1"

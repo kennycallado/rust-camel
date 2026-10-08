@@ -97,9 +97,8 @@ impl Document {
     /// syntax error.
     ///
     /// Returns `Err` ONLY for structural problems that prevent applying the
-    /// edit at all: an out-of-bounds range, a non-character-boundary offset,
-    /// or (when the CST path is used) a `replace_span` rejection. On `Err`
-    /// the document is left unchanged.
+    /// edit at all: an out-of-bounds range or a non-character-boundary
+    /// offset. On `Err` the document is left unchanged.
     ///
     /// This is the low-level edit primitive. [`apply_fix`](Document::apply_fix)
     /// delegates to it for the byte replacement but adds a transactional
@@ -112,36 +111,21 @@ impl Document {
     ) -> Result<(), LintError> {
         // Try the CST path first: it preserves span fidelity. When the
         // current source cannot be parsed (e.g. during an in-progress editor
-        // edit), fall back to raw string manipulation.
+        // edit), or when the CST editor rejects the edit because the RESULT
+        // is invalid YAML (noyalib >=0.0.54 validates the edited document,
+        // mirroring an editor's live state), fall back to raw string
+        // manipulation — the always-commits contract requires applying
+        // edits even when they break syntax (spec scenarios
+        // "apply_edit recovers invalid→valid" and the syntax-breaking
+        // edit test) so R-SYN can report the new parse failure.
         let new_raw = match cst::parse_document(&self.raw) {
-            Ok(mut cst_doc) => {
-                cst_doc
-                    .replace_span(start, end, replacement)
-                    .map_err(|e| LintError::Internal(format!("apply_edit edit rejected: {e}")))?;
-                cst_doc.source().to_string()
-            }
+            Ok(mut cst_doc) => match cst_doc.replace_span(start, end, replacement) {
+                Ok(()) => cst_doc.source().to_string(),
+                Err(_) => Self::splice_raw(&self.raw, start, end, replacement)?,
+            },
             Err(_) => {
-                // CST parse failed (source currently has parse_failure). The
-                // always-commits contract requires applying edits even to broken
-                // documents (spec scenario "apply_edit recovers invalid→valid"),
-                // so fall back to raw byte-splicing instead of returning Err.
-                if start > self.raw.len() || end > self.raw.len() || start > end {
-                    return Err(LintError::Internal(format!(
-                        "apply_edit edit rejected: range ({start}, {end}) out of bounds for source length {}",
-                        self.raw.len()
-                    )));
-                }
-                if !self.raw.is_char_boundary(start) || !self.raw.is_char_boundary(end) {
-                    return Err(LintError::Internal(format!(
-                        "apply_edit edit rejected: range ({start}, {end}) not on character boundary"
-                    )));
-                }
-                let mut s =
-                    String::with_capacity(self.raw.len() - (end - start) + replacement.len());
-                s.push_str(&self.raw[..start]);
-                s.push_str(replacement);
-                s.push_str(&self.raw[end..]);
-                s
+                // CST parse failed (source currently has parse_failure).
+                Self::splice_raw(&self.raw, start, end, replacement)?
             }
         };
 
@@ -150,6 +134,34 @@ impl Document {
         self.route_view = reparsed.route_view;
         self.parse_failure = reparsed.parse_failure;
         Ok(())
+    }
+
+    /// Raw byte-range splice used when the CST editor cannot represent the
+    /// edit (unparsable source, or a noyalib >=0.0.54 validity rejection of
+    /// the edited result). Validates bounds and character boundaries against
+    /// `raw` and returns the spliced text.
+    fn splice_raw(
+        raw: &str,
+        start: usize,
+        end: usize,
+        replacement: &str,
+    ) -> Result<String, LintError> {
+        if start > raw.len() || end > raw.len() || start > end {
+            return Err(LintError::Internal(format!(
+                "apply_edit edit rejected: range ({start}, {end}) out of bounds for source length {}",
+                raw.len()
+            )));
+        }
+        if !raw.is_char_boundary(start) || !raw.is_char_boundary(end) {
+            return Err(LintError::Internal(format!(
+                "apply_edit edit rejected: range ({start}, {end}) not on character boundary"
+            )));
+        }
+        let mut s = String::with_capacity(raw.len() - (end - start) + replacement.len());
+        s.push_str(&raw[..start]);
+        s.push_str(replacement);
+        s.push_str(&raw[end..]);
+        Ok(s)
     }
 
     /// Apply a suggested [`Fix`] to this document.
