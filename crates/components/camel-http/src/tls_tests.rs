@@ -359,6 +359,13 @@ fn test_no_verify_verifier_accepts_any_certificate() {
     );
 }
 
+/// Apple gate (rc-97uah): rustls-platform-verifier 0.7.0 never consults
+/// `SSL_CERT_FILE`/`SSL_CERT_DIR` on apple targets — `Verifier::new` is
+/// infallible there (Security.framework supplies trust at verify time) —
+/// so the env window below cannot empty the store and the primary build
+/// cannot fail. Mirrors the verifier crate's own `target_vendor =
+/// "apple"` cfg.
+#[cfg(not(target_vendor = "apple"))]
 #[test]
 fn test_build_client_falls_back_on_empty_platform_ca_store() {
     // Serialize against the primary-path test: the env window below
@@ -450,10 +457,12 @@ fn test_build_client_primary_path_when_platform_store_non_empty() {
     // The webpki set is a FALLBACK, never a replacement for platform
     // roots (managed fleets keep OS root-program control). Hermetic:
     // SSL_CERT_FILE pinned to a parseable fixture root makes the
-    // native store non-empty on ANY host — including genuinely
-    // CA-less ones — so the no-fallback assertion cannot depend on
-    // the build machine. Serialized against the CA-less sibling test
-    // by the CA-store mutex (its env window forces the fallback).
+    // native store non-empty on any host that honors the env probe
+    // (Linux — including genuinely CA-less ones). Apple ignores the
+    // env vars but its verifier is infallible, so the no-fallback
+    // assertion holds on every host either way (rc-97uah).
+    // Serialized against the CA-less sibling test by the CA-store
+    // mutex (its env window forces the fallback).
     let _ca_guard = lock_ca_store_test_mutex();
     let ca_dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
     let ca_file = ca_dir.path().join("hermetic-root.pem");
@@ -626,7 +635,10 @@ fn test_build_client_forced_fallback_strict_material_rejection_classes() {
             tls: Some(case.tls),
             ..Default::default()
         };
-        let err = forced_fallback_env(|| match build_client(&config, None) {
+        // Seam entry (rc-97uah): the empty-env window only starves the
+        // native-root probe on Linux; the force seam reaches the same
+        // fallback path on every platform.
+        let err = force_webpki_fallback(|| match build_client(&config, None) {
             Err(e) => e,
             Ok(_) => panic!("strict case '{}' must fail closed", case.name),
         });
@@ -649,7 +661,9 @@ fn test_build_client_forced_fallback_nonstrict_bad_ca_still_builds() {
         ..Default::default()
     };
 
-    let (_client, fallbacks_taken) = forced_fallback_env(|| {
+    // Seam entry (rc-97uah): platform-agnostic fallback forcing — the
+    // env window only starves the native-root probe on Linux.
+    let (_client, fallbacks_taken) = force_webpki_fallback(|| {
         let fallbacks_before = build_client_fallback_count();
         let client = build_client(&config, None)
             .expect("non-strict bad CA must degrade per-item and still build"); // allow-unwrap(test)
@@ -720,22 +734,26 @@ fn test_http_component_new_no_panic_on_empty_ca_store() {
 // handshake against a server certified ONLY by the configured CA.
 //
 // Path forcing (e_glm adjudication, rc-hl9cn — Task 1.3 deviation
-// note in openspec/changes/castrict/tasks.md): rustls-platform-
-// verifier 0.7.0 merges configured extra roots into the platform
-// store FIRST and hard-errors only when the merged store is EMPTY,
-// so on Linux an empty `SSL_CERT_FILE`/`SSL_CERT_DIR` window plus a
-// valid configured CA keeps the PRIMARY build succeeding (extra-
-// roots rescue); the fallback-with-valid-material path is real only
-// on verifier-hard-error platforms (android/apple — the Termux
-// case). The material-carrying tests below therefore run
-// `build_client` under the `force_webpki_fallback` seam (primary
-// skipped, fallback entered directly; the trigger warn's error
-// field reads "forced webpki fallback entry (test)") and prove path
-// control with a `build_client_fallback_count()` delta of exactly
-// one. The material-free test keeps the REAL env window — no extra
-// roots exist to rescue the verifier, so its fallback entry is
-// genuine. Every send is timeout-bounded, so a broken harness
-// fails fast instead of hanging.
+// note in openspec/changes/castrict/tasks.md; platform facts
+// corrected rc-97uah): on Linux an empty `SSL_CERT_FILE`/
+// `SSL_CERT_DIR` window plus a valid configured CA keeps the PRIMARY
+// build succeeding — rustls-platform-verifier 0.7.0 merges extra
+// roots first and its non-apple `others.rs` hard-errors only when
+// the merged store is EMPTY. On apple targets the env window is a
+// no-op: the verifier loads no roots at build time (`Verifier::new`
+// is infallible; Security.framework supplies trust at verify time),
+// so the primary build never fails there. The fallback-with-valid-
+// material path is therefore unreachable through real triggers on
+// any regular host, and the tests below run `build_client` under
+// the `force_webpki_fallback` seam (primary skipped, fallback
+// entered directly; the trigger warn's error field reads "forced
+// webpki fallback entry (test)") and prove path control with a
+// `build_client_fallback_count()` delta of exactly one — the
+// material-free test included, because the env window is Linux-
+// only. Genuine env-window entries stay covered by the
+// `#[cfg(not(target_vendor = "apple"))]`-gated tests. Every send is
+// timeout-bounded, so a broken harness fails fast instead of
+// hanging.
 
 #[tracing_test::traced_test]
 #[tokio::test]
@@ -798,9 +816,11 @@ async fn tls_handshake_strict_material_free_fails_same_server() {
         }),
         ..Default::default()
     };
-    let client = forced_fallback_env(|| {
-        build_client(&config, None).expect("client must build") // allow-unwrap(test)
-    });
+    // Seam build (rc-97uah): the fallback entry must be forced on every
+    // platform — the env window is Linux-only — and
+    // `build_under_seam` proves the path with a fallback-count delta
+    // of exactly one.
+    let client = build_under_seam(&config);
 
     let send_result = tokio::time::timeout(
         Duration::from_secs(15),
@@ -984,15 +1004,20 @@ async fn tls_handshake_nonstrict_valid_ca_carried() {
 /// Option C, weakened variant): strict mTLS identity WITHOUT
 /// `ca_cert_path`, verification ON, under the REAL env window — no
 /// force seam, and no extra roots exist to rescue the verifier, so
-/// the primary genuinely fails. The prescribed 200-ok variant is
-/// architecturally unreachable: reqwest's `!certs_verification`
-/// branch constructs the NoVerifier verifier and never builds the
-/// platform verifier, so a verify-off config cannot genuinely fail
-/// the primary on ANY platform; and every verify-on genuine fallback
-/// trusts only Mozilla ∪ custom roots, which cannot handshake with a
-/// hermetic rcgen CA. Handshake-level identity proof therefore lives
-/// in the seam tests, which share all downstream code from
-/// `fallback_client_config` onward.
+/// the primary genuinely fails. Apple-gated (rc-97uah): the env
+/// window only starves the native-root probe on Linux; apple's
+/// verifier is infallible and ignores the vars entirely, so a genuine
+/// env-window fallback entry is unreachable there — mirroring
+/// rustls-platform-verifier's own `target_vendor = "apple"` cfg. The
+/// prescribed 200-ok variant is architecturally unreachable: reqwest's
+/// `!certs_verification` branch constructs the NoVerifier verifier and
+/// never builds the platform verifier, so a verify-off config cannot
+/// genuinely fail the primary on ANY platform; and every verify-on
+/// genuine fallback trusts only Mozilla ∪ custom roots, which cannot
+/// handshake with a hermetic rcgen CA. Handshake-level identity proof
+/// therefore lives in the seam tests, which share all downstream code
+/// from `fallback_client_config` onward.
+#[cfg(not(target_vendor = "apple"))]
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn tls_handshake_mtls_identity_only_genuine_fallback_anchor() {

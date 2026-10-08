@@ -172,8 +172,9 @@ fn fallback_client_config_builder()
 /// webpki-roots feature, `Certificate::from_der` needs full DER
 /// certificates while webpki-roots ships pre-parsed `TrustAnchor`s, and
 /// `tls_certs_merge` still routes through rustls-platform-verifier
-/// (which hard-errors on android/apple targets when extra roots are
-/// set). `tls_backend_preconfigured` swaps the whole TLS backend; on
+/// (whose native-root probe hard-fails on CA-less platforms such as
+/// Android/Termux, rc-3j4mq — apple targets do not fail at build time
+/// at all, rc-97uah). `tls_backend_preconfigured` swaps the whole TLS backend; on
 /// reqwest 0.13.4 the preconfigured path builds its connector without
 /// consulting platform roots, so the empty-CA-store builder error cannot
 /// recur there.

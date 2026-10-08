@@ -32,4 +32,8 @@ jobs:
       - name: Build
         run: cargo build --workspace
       - name: Test (unit only — no Docker required)
-        run: cargo test --workspace --lib
+        # --no-fail-fast: one failing crate must not mask the rest.
+        # Fail-fast hid camel-http TLS failures behind an earlier
+        # camel-cli failure in weekly runs 36381085170 and 37267949557
+        # before 37521367094 exposed them (rc-97uah).
+        run: cargo test --workspace --lib --no-fail-fast

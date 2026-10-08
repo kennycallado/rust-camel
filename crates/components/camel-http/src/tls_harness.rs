@@ -219,9 +219,13 @@ pub(crate) async fn spawn_tls_server(
 /// existing-but-empty `SSL_CERT_FILE` plus an existing-but-empty
 /// `SSL_CERT_DIR` make rustls-native-certs load zero roots — the exact
 /// condition routing `build_client` through the webpki fallback.
-/// Holds the CA-store mutex for the whole window and restores the
-/// previous env even when `body` panics; assertions belong AFTER
-/// this helper returns.
+/// Linux-side only (rc-97uah): the env probe is honored by
+/// openssl-probe hosts; apple targets never consult these vars
+/// (rustls-platform-verifier's `Verifier::new` is infallible there),
+/// so the window is a no-op on apple — apple-portable forcing uses
+/// [`force_webpki_fallback`] instead. Holds the CA-store mutex for
+/// the whole window and restores the previous env even when `body`
+/// panics; assertions belong AFTER this helper returns.
 pub(crate) fn forced_fallback_env<R>(body: impl FnOnce() -> R) -> R {
     let _ca_guard = crate::lock_ca_store_test_mutex();
     let empty_ca_dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
