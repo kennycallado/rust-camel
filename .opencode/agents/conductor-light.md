@@ -224,11 +224,19 @@ For each task in the current phase-group (or all tasks, if single-phase):
 
 a. Read the task's full block (files/steps/tests/AC above the checkbox)
 
-b. **Assess complexity** → choose worker tier:
-   - Straightforward (config, docs, simple impl) → `@workers/w_fast`
-   - Multi-file logic, trait impls, async → `@workers/w_balanced`
-   - Deep system interaction, cross-crate → `@workers/w_heavy`
-   - Test design complexity also raises tier
+b. **Assess complexity** → choose worker tier (W_FAST-FIRST POLICY,
+   owner directive 2026-10-08: w_balanced runs on the glm sub and burns
+   shared quota — treat it as SCARCE):
+   - DEFAULT: `@workers/w_fast` — covers config, docs, simple impl,
+     AND most multi-file mechanical work, trait impls, and async wiring.
+     Decompose the task into smaller w_fast dispatches when feasible.
+   - `@workers/w_balanced` — ONLY when a single task genuinely needs
+     sustained cross-file reasoning that w_fast demonstrably failed at
+     (one retry at w_fast first for borderline calls). Justify the
+     w_balanced choice in the task's review verdict line.
+   - `@workers/w_heavy` — deep system interaction / cross-crate redesign;
+     justify likewise.
+   - Test design complexity alone does NOT raise the tier.
 
 c. **Dispatch worker** with `cwd: "$WT"`:
    - Pass: the task block from tasks.md (files/steps/tests/AC)
