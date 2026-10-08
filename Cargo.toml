@@ -151,6 +151,7 @@ tokio-tungstenite = "0.30"
 tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
 prost = { version = "0.14" }
 prost-reflect = { version = "0.16", features = ["serde"] }
+protox = "=0.9.1"
 tonic-build = { version = "0.14" }
 tonic-prost-build = { version = "0.14" }
 tonic-prost = { version = "0.14" }

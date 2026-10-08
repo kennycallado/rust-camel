@@ -10,11 +10,15 @@ homepage.workspace = true
 [dependencies]
 prost = { workspace = true }
 prost-reflect = { workspace = true }
-protoc-bin-vendored = { workspace = true }
+protox = { workspace = true }
+libc = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tempfile = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

@@ -1,6 +1,6 @@
 # Protobuf
 
-The protobuf data format converts between JSON and binary protobuf wire format. It uses `prost-reflect` for dynamic message descriptors that the format compiles at runtime, so it requires no compile-time code generation. A `protoc` binary must exist at runtime. It ships as a separate crate, `camel-dataformat-protobuf`.
+The protobuf data format converts between JSON and binary protobuf wire format. It uses `prost-reflect` for dynamic message descriptors that the format compiles at runtime, so it requires no compile-time code generation. The compiler is built in. It is pure Rust and needs no external tool. It ships as a separate crate, `camel-dataformat-protobuf`.
 
 Marshal converts `Body::Json` to `Body::Bytes`. Unmarshal reverses the conversion and returns `Body::Json`. The round trip preserves field values through the JSON bridge.
 
@@ -20,19 +20,36 @@ let df = ProtobufDataFormat::new("protos/helloworld.proto", "helloworld.HelloReq
 
 The constructor compiles the proto file at runtime through `camel-proto-compiler`. Pass a shared `ProtoCache` to `new_with_cache` to reuse the compiled descriptor pool across formats.
 
-## Protoc resolution
+## Compilation
 
-`camel-proto-compiler` resolves the `protoc` binary in a fixed order:
+`camel-proto-compiler` compiles `.proto` files in-process with `protox`, a pure Rust parser. Compilation needs no `protoc` binary and reads no `PROTOC` variable. It writes no temporary file. It works on every platform and in a `FROM scratch` image.
 
-1. The `PROTOC` environment variable. The value is honored verbatim and never re-resolved. A broken value surfaces the ordinary execution error from running it.
-2. The vendored `protoc` embedded in standard builds.
-3. When neither yields a binary, compilation fails with a typed error whose display starts with `protoc unavailable:` and ends with the `Set PROTOC` remedy.
+## Precompiled descriptor sets
 
-Set the override when the embedded binary is missing or unsuitable:
+Every place that accepts a `.proto` path also accepts a precompiled `FileDescriptorSet` file. The extension selects the input: `.binpb`, `.pb`, `.desc`, or `.protoset`. The compiler ignores include paths for this input. The set must contain its imports.
+
+Produce a set with one of these commands:
 
 ```console
-export PROTOC=/path/to/protoc
+protoc --include_imports --descriptor_set_out=schema.binpb schema.proto
+buf build -o schema.binpb
 ```
+
+## Limits
+
+Protobuf editions are unsupported. A source file with `edition = "2023"` or a descriptor set with `syntax = "editions"` fails with a typed error. The error says to rewrite the schema as `proto3` or `proto2`. `prost-reflect` 0.16 cannot load editions.
+
+The compiler rejects bracket nesting deeper than 64. It rejects any single schema input larger than 16 MiB, source file or descriptor set alike.
+
+Source imports carry two source-only bounds: at most 256 distinct include-resolved `.proto` files and at most 64 MiB of cumulative source bytes. Embedded well-known types count toward neither bound and do not count toward the source file count. A descriptor set has no separate file-count limit. Its size, import chain and traversal work bound it instead.
+
+Every dependency graph, from source or from a descriptor set, must keep its longest import chain at or below 256 files and its public-import traversal work `W` at or below 100 000. Work is `W = N + sum E(d)`. `N` is the file count. The sum runs over every direct import occurrence `d` of every file, private imports included, and never deduplicates. `E(v) = 1 + sum E(d)` over every public import occurrence of `v`. A source graph must also keep its lifetime `(N + 1) * W` at or below 100 000, because protox builds its internal pool incrementally. These are conservative bounds on traversal calls, not exact counts of every scanning operation.
+
+The compiler preloads the reachable source import closure into an immutable snapshot before it builds any pool. Missing imports stay frozen in that snapshot, and no filesystem or embedded well-known type is read again after validation.
+
+The compiler follows symbolic links, as protoc does. The link target must be a regular file. Any other kind is a typed error.
+
+Syntax and semantic errors in `.proto` sources report the position as `file:line:column`. I/O and descriptor-decode errors do not carry a position.
 
 ## Route usage
 

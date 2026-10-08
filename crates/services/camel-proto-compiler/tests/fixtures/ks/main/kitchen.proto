@@ -1,0 +1,50 @@
+syntax = "proto3";
+package kitchen.v1;
+import "common/types.proto";
+import "opts.proto";
+import "legacy.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/wrappers.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/field_mask.proto";
+option java_package = "io.camel.kitchen";
+option go_package = "example.com/kitchen;kitchen";
+option optimize_for = SPEED;
+message Order {
+  option (opts.audited) = true;
+  string id = 1 [(opts.redact) = "full"];
+  optional string note = 2;
+  common.Status status = 3;
+  common.Address ship_to = 4;
+  common.Money total = 5;
+  map<string, common.Money> per_item = 6;
+  map<int64, string> tags = 7;
+  repeated Line lines = 8;
+  oneof payment { string card = 9; string iban = 10; google.protobuf.Empty cash = 11; }
+  google.protobuf.Timestamp created = 12;
+  google.protobuf.Duration ttl = 13;
+  google.protobuf.Any detail = 14;
+  google.protobuf.Struct meta = 15;
+  google.protobuf.StringValue alias = 16;
+  google.protobuf.FieldMask mask = 17;
+  google.protobuf.Value dyn = 18;
+  legacy.Legacy legacy = 19;
+  repeated double weights = 20 [packed = false];
+  bytes blob = 21;
+  fixed64 f64 = 22; sfixed32 sf32 = 23; sint64 s64 = 24; uint32 u32 = 25; float fl = 26; bool b = 27;
+  message Line { string sku = 1; uint32 qty = 2; Order parent = 3; message Deep { enum Lvl { LVL_UNSPECIFIED = 0; HIGH = 1; } Lvl lvl = 1; } Deep deep = 4; }
+  enum Priority { PRIORITY_UNSPECIFIED = 0; LOW = 1; HIGH = 2; }
+  Priority priority = 28;
+  reserved 99; reserved "legacy_field";
+  int32 old = 30 [deprecated = true];
+}
+service OrderService {
+  option deprecated = false;
+  rpc Get(Order) returns (Order) { option (opts.timeout_ms) = 500; option idempotency_level = NO_SIDE_EFFECTS; }
+  rpc Watch(Order) returns (stream Order);
+  rpc Upload(stream Order) returns (google.protobuf.Empty);
+  rpc Chat(stream Order) returns (stream Order);
+}

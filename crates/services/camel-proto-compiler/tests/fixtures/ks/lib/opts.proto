@@ -1,0 +1,6 @@
+syntax = "proto3";
+package opts;
+import "google/protobuf/descriptor.proto";
+extend google.protobuf.FieldOptions { string redact = 50001; }
+extend google.protobuf.MessageOptions { bool audited = 50002; }
+extend google.protobuf.MethodOptions { int32 timeout_ms = 50003; }

@@ -1,0 +1,3 @@
+syntax = "proto3";
+import "nope/missing.proto";
+message M { string x = 1; }

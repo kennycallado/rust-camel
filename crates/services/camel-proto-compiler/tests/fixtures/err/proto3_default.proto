@@ -1,0 +1,2 @@
+syntax = "proto3";
+message M { string a = 1 [default = "x"]; }

@@ -20,7 +20,7 @@ pub struct ProtoCache {
 
 /// R4-L6: hash ordered include paths with length-delimited framing.
 /// On canonicalize failure, fall back to the supplied path (don't reject
-/// paths protoc accepts). Debug-log the fallback.
+/// paths the compiler accepts). Debug-log the fallback.
 fn hash_ordered_include_paths(paths: &[std::path::PathBuf]) -> String {
     let mut hasher = DefaultHasher::new();
     for p in paths {

@@ -1,0 +1,13 @@
+syntax = "proto2";
+package legacy;
+message Legacy {
+  required string id = 1;
+  optional int32 count = 2 [default = 7];
+  optional string label = 3 [default = "none"];
+  repeated int32 values = 4 [packed = true];
+  optional group Extra = 5 { optional string note = 6; }
+  extensions 100 to 199;
+  enum Kind { A = 1; B = 2; }
+  optional Kind kind = 7 [default = B];
+}
+extend Legacy { optional string ext_field = 100; }

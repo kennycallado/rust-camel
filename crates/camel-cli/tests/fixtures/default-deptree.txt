@@ -148,6 +148,8 @@ base64 v0.23.1
 base64ct feature "alloc"
 base64ct feature "default"
 base64ct v1.8.3
+beef feature "default"
+beef v0.5.2
 bit-set feature "std"
 bit-set v0.8.0
 bit-vec feature "std"
@@ -1108,6 +1110,18 @@ log feature "alloc"
 log feature "default"
 log feature "std"
 log v0.4.34
+logos feature "default"
+logos feature "export_derive"
+logos feature "logos-derive"
+logos feature "std"
+logos v0.15.1
+logos v0.16.1
+logos-codegen feature "default"
+logos-codegen v0.15.1
+logos-codegen v0.16.1
+logos-derive feature "default"
+logos-derive v0.15.1 (proc-macro)
+logos-derive v0.16.1 (proc-macro)
 lru feature "default"
 lru feature "hashbrown"
 lru v0.18.4
@@ -1130,6 +1144,11 @@ memo-map feature "default"
 memo-map v0.3.4
 micromap feature "default"
 micromap v0.3.0
+miette feature "default"
+miette feature "derive"
+miette v7.6.0
+miette-derive feature "default"
+miette-derive v7.6.0 (proc-macro)
 mime feature "default"
 mime v0.3.17
 mime_guess v2.0.5
@@ -1451,7 +1470,9 @@ prost-build v0.14.4
 prost-derive feature "default"
 prost-derive v0.14.4 (proc-macro)
 prost-reflect feature "default"
+prost-reflect feature "miette"
 prost-reflect feature "serde"
+prost-reflect feature "text-format"
 prost-reflect v0.16.5
 prost-types feature "default"
 prost-types feature "std"
@@ -1478,6 +1499,10 @@ protoc-bin-vendored-macos-x86_64 feature "default"
 protoc-bin-vendored-macos-x86_64 v3.2.0
 protoc-bin-vendored-win32 feature "default"
 protoc-bin-vendored-win32 v3.2.0
+protox feature "default"
+protox v0.9.1
+protox-parse feature "default"
+protox-parse v0.9.0
 pulldown-cmark v0.13.4
 pulldown-cmark-to-cmark feature "default"
 pulldown-cmark-to-cmark v22.0.1
@@ -1579,6 +1604,7 @@ regex feature "unicode-script"
 regex feature "unicode-segment"
 regex v1.13.1
 regex-automata feature "alloc"
+regex-automata feature "default"
 regex-automata feature "dfa"
 regex-automata feature "dfa-build"
 regex-automata feature "dfa-onepass"

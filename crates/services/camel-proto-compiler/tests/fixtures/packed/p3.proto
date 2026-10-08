@@ -1,0 +1,3 @@
+syntax = "proto3";
+package p3;
+message P { repeated double w = 1 [packed = false]; repeated double d = 2; }

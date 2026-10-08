@@ -1,0 +1,5 @@
+syntax = "proto3";
+package common;
+import public "common/money.proto";
+enum Status { option allow_alias = true; STATUS_UNSPECIFIED = 0; ACTIVE = 1; ENABLED = 1; DELETED = 2 [deprecated = true]; }
+message Address { string street = 1; string city = 2 [json_name = "town"]; reserved 3, 10 to 12; reserved "zip"; }

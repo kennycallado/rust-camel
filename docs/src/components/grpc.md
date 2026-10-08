@@ -1,6 +1,6 @@
 # gRPC
 
-The gRPC component produces and consumes gRPC with runtime proto resolution. No compile-time code generation is required. The component resolves `.proto` files at runtime through `camel-proto-compiler` and `prost-reflect`. It supports unary, server-streaming, client-streaming, and bidirectional streaming. The mode is auto-detected from the proto method descriptor.
+The gRPC component produces and consumes gRPC with runtime proto resolution. No compile-time code generation is required. No `protoc` binary is needed at runtime. The component resolves `.proto` files at runtime through `camel-proto-compiler` and `prost-reflect`. It supports unary, server-streaming, client-streaming, and bidirectional streaming. The mode is auto-detected from the proto method descriptor.
 
 The grpc-example wires a consumer on port 50051 and a timer-driven producer:
 
@@ -57,7 +57,7 @@ grpc://<host>:<port>/<package>.<Service>/<Method>?protoFile=<path>&transport=<mo
 
 | Parameter | Required | Default | Description |
 | --- | --- | --- | --- |
-| `protoFile` | yes | — | Path to the `.proto` file for runtime descriptor resolution |
+| `protoFile` | yes | — | Path to the `.proto` file or to a precompiled descriptor set (`.binpb`, `.pb`, `.desc`, `.protoset`) for runtime descriptor resolution |
 | `transport` | yes | — | `plaintext` or `tls` (ADR-0033) |
 | `serverCertPath` | consumer (tls) | — | Path to the server TLS certificate |
 | `serverKeyPath` | consumer (tls) | — | Path to the server TLS key |
