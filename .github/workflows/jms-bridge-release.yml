@@ -128,25 +128,29 @@ jobs:
           body: |
             ## JMS Bridge ${{ github.ref_name }}
 
-            **Breaking changes:**
-            - `failover://` URLs are rejected at validation for `artemis`
-              broker entries - they previously degraded to a plaintext
-              `localhost` connection. Migrate to a single primary URL or
-              multiple broker entries (`activemq` classic keeps native
-              failover).
-            - Unsupported Artemis sidecar URLs (`failover:(...)` wrappers,
-              `nio://`, hostless/schemeless) abort startup with remediation
-              instead of silently connecting localhost plaintext.
+            **Fixed — P0 data loss on ActiveMQ Classic (rc-trxge):**
+            - `org.apache.activemq.util.IdGenerator` statics are no longer
+              frozen into the native image. Previously every process derived
+              identical connection/message ID stems, so after a bridge
+              restart Classic rejected new messages as duplicate adds
+              ("Duplicate message add attempt rejected") — silent message
+              loss from the first restart onward.
+            - Defense-in-depth: every bridge start now derives a random
+              `connectionIDPrefix`/`clientIDPrefix`, keeping IDs unique even
+              if the native-image initialization line is ever lost again.
 
-            **Behavior changes:**
-            - `JMS_MAX_BODY_BYTES` TextMessage cap is byte-accurate (UTF-8);
-              over-cap text is rejected at the bridge with byte diagnostics.
-            - Message type fidelity: `application/xml` TextMessages surface
-              as `Body::Bytes` in Rust routes; Content-Type round-trips.
-            - Shutdown hardening: racing subscribes get `UNAVAILABLE`;
-              consumers are destroyed exactly once.
+            **Fixed — concurrent bridge processes:**
+            - Two bridge processes started from the same binary no longer
+              collide on the broker. Previously they shared frozen client
+              IDs and the broker rejected the second process's connections.
 
-            **Platforms:
+            **Tests:**
+            - New Classic regression tests (testcontainers): two same-binary
+              bridge processes coexist on one broker with distinct
+              JMSMessageIDs; message IDs stay unique across a bridge restart
+              with no dropped messages (EnqueueCount grows by 2).
+
+            **Platforms:**
             - `linux-musl-x86_64` — statically linked, any Linux (Alpine, Ubuntu, NixOS, scratch)
             - `macos-aarch64` — Apple Silicon (M1/M2/M3+)
             - `windows-x86_64` — Windows 10/11

@@ -8,6 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.jms.Connection;
@@ -175,6 +176,12 @@ public class JmsClientFactory {
   private ActiveMQConnectionFactory buildActiveMqFactory(String url, String user, String pass) {
     initNativeImageWorkarounds();
     ActiveMQConnectionFactory cf = new ActiveMQConnectionFactory(url);
+    // Keep connection and client IDs unique across processes even if the
+    // native-image IdGenerator run-time initialization setting is lost.
+    // Direct setters avoid native-image reflection requirements (rc-trxge).
+    String prefix = "jms-bridge-" + UUID.randomUUID();
+    cf.setConnectionIDPrefix(prefix);
+    cf.setClientIDPrefix(prefix);
     if (user != null) cf.setUserName(user);
     if (pass != null) cf.setPassword(pass);
     return cf;

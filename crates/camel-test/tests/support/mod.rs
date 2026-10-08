@@ -115,6 +115,9 @@ pub mod artemis;
 pub mod jms;
 
 #[cfg(feature = "integration-tests")]
+pub mod jms_bridge_procs;
+
+#[cfg(feature = "integration-tests")]
 pub mod cxf;
 
 #[cfg(feature = "integration-tests")]
