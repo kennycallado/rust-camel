@@ -42,7 +42,7 @@ default-binary behavior.
 
 ### Requirement: Slim profile excludes the controllable bridge set
 
-camel-cli SHALL provide a `slim-benchmarks` feature naming the
+camel-cli SHALL provide a `flavor-slim` feature naming the
 `--no-default-features` baseline: an http-only deployment that links the
 non-optional core plumbing (http, direct, seda, log, mock, timer, file,
 controlbus, container, validator, cron, and the DSL/config/core stack)
@@ -52,9 +52,9 @@ tower-lsp), the language runtimes gated by the `lang-*` features (js,
 rhai, jsonpath, xpath), and seven of the eight bridge chains
 (camel-component-jms, camel-component-sql, camel-component-opensearch,
 camel-component-ws, camel-component-cxf, camel-xj, camel-xslt) — when
-unselected. The historical `slim-http` name SHALL live exactly one
-release as a forwarding alias (`slim-http = ["slim-benchmarks"]`, drop
-at 0.50). `camel-component-redis` remains linked in slim through the
+unselected. The historical `slim-http` and `slim-benchmarks` names no
+longer exist: `flavor-slim` is the only slim marker. `camel-component-redis`
+remains linked in slim through the
 unconditional camel-config → camel-redis-repo path (documented
 out-of-zone deferral; the camel-cli-owned redis edge is optional as of
 this change). `camel-language-minijinja` remains linked in every
@@ -66,7 +66,7 @@ mission 115).
 
 #### Scenario: slim closure excludes the controllable set
 
-- **GIVEN** a build configured `--no-default-features --features slim-benchmarks`
+- **GIVEN** a build configured `--no-default-features --features flavor-slim`
 - **WHEN** `cargo tree -p camel-cli --no-default-features -e no-dev`
   resolves
 - **THEN** none of camel-component-{kafka,grpc,wasm,llm,mcp,mqtt,
@@ -79,7 +79,7 @@ mission 115).
 
 #### Scenario: slim build compiles and boots an http route
 
-- **GIVEN** the slim-benchmarks release binary
+- **GIVEN** the flavor-slim release binary
 - **WHEN** it boots the cold-start fixture (an http consumer route that
   must bind, plus the one-shot timer→log marker route)
 - **THEN** it reaches the route-ready marker, proving the profile is
@@ -102,8 +102,7 @@ full builds through its camel-cli feature (`kafka`, `grpc`, `wasm`,
 `llm`, `mcp`, `mqtt`, `surrealdb`, `exec`, `lsp`, `lang-js`,
 `lang-rhai`, `lang-jsonpath`, `lang-xpath`, `lang-minijinja`, and the
 eight bridge features `jms`, `sql`, `redis`, `opensearch`, `ws`, `cxf`,
-`xj`, `xslt`), composing additively with `slim-benchmarks` (and, for
-one release, the `slim-http` alias). Each camel-cli bridge feature
+`xj`, `xslt`), composing additively with `flavor-slim`. Each camel-cli bridge feature
 SHALL carry both halves of the capability: the camel-cli own-dependency
 activation (`dep:<bridge-crate>`) and the camel-bundles gate forward
 (`camel-bundles/<bridge>`), keeping the lint catalog and the
@@ -118,14 +117,14 @@ capability refinement, not a standalone surface).
 
 #### Scenario: slim plus one bridge resolves that bridge only
 
-- **GIVEN** a build configured `--no-default-features --features slim-benchmarks,grpc`
+- **GIVEN** a build configured `--no-default-features --features flavor-slim,grpc`
 - **WHEN** the dependency graph resolves
 - **THEN** the grpc stack (camel-component-grpc, tonic) is present and
   the remaining controllable set stays excluded
 
 #### Scenario: slim plus one legacy bridge resolves that bridge only
 
-- **GIVEN** a build configured `--no-default-features --features slim-benchmarks,sql`
+- **GIVEN** a build configured `--no-default-features --features flavor-slim,sql`
 - **WHEN** the dependency graph resolves
 - **THEN** camel-component-sql (with its datasource stack) is present
   and the remaining controllable set stays excluded — the other six
@@ -293,60 +292,60 @@ per-bridge gates.
   the registry, and shutdown drains the jms pool and the datasource
   catalog without the cxf pool
 
-### Requirement: slim-benchmarks profile rename
+### Requirement: Slim marker feature naming
 
-camel-cli's `slim-http` marker feature SHALL be renamed `slim-benchmarks`
-(owner ruling 2026-09-17: the slim profile is benchmark-oriented), with
-`slim-http = ["slim-benchmarks"]` retained as a one-release alias so existing
-build legs keep resolving until the alias is dropped.
+camel-cli's slim marker feature is `flavor-slim` (renamed from
+`slim-http`, then `slim-benchmarks`, during the feature-profile
+migrations). Neither historical name resolves: `[features]` declares no
+`slim-http` and no `slim-benchmarks` key, and `flavor-slim` carries its
+own curated body rather than forwarding either.
 
 #### Scenario: renamed profile excludes the controllable set
 
 - **GIVEN** camel-cli resolved with `--no-default-features --features
-  slim-benchmarks`
+  flavor-slim`
 - **WHEN** the closure is compared against the forbidden-prefix set
-- **THEN** all forbidden prefixes are absent, identical to the pre-rename
-  slim-http closure
+- **THEN** all forbidden prefixes are absent, identical to the
+  pre-rename slim closure
 
-#### Scenario: alias resolves for one release
+#### Scenario: removed legacy names fail to resolve
 
-- **GIVEN** camel-cli resolved with `--no-default-features --features
-  slim-http` (the alias)
-- **WHEN** the closure is listed
-- **THEN** it is identical to the slim-benchmarks closure (alias forwards to
-  the renamed marker; no separate surface)
+- **GIVEN** a build request using `--features slim-http` or
+  `--features slim-benchmarks`
+- **WHEN** cargo resolves the feature graph
+- **THEN** resolution fails with an error naming the unknown feature
 
 #### Scenario: golden deptree unaffected by the rename
 
-- **GIVEN** the renamed feature and alias in camel-cli's `[features]`
+- **GIVEN** the `flavor-slim` marker in camel-cli's `[features]`
 - **WHEN** `cargo tree -p camel-cli` (default features) is compared against
   the golden fixture
-- **THEN** the comparison passes without regeneration (unused marker/alias
+- **THEN** the comparison passes without regeneration (unused marker
   features render no feature lines)
 
 ### Requirement: Flavor markers are the single selection surface
 
 camel-cli SHALL expose exactly three flavor marker features —
-`flavor-slim`, `flavor-regular`, `flavor-full` — that forward to the
-profile composition and serve as the single source of truth for
-profile selection in release CI. `default` SHALL select
-`flavor-regular`. Marker bodies in this change are aliases only:
-`flavor-slim` forwards `slim-http`; `flavor-regular` forwards `full`;
-`flavor-full` forwards `full` and `kafka`. Flavor content curation
-(what each marker contains beyond these aliases) is out of scope here
-and belongs to the flavor-matrix change. When several markers are
-enabled simultaneously, the reported flavor SHALL follow the priority
+`flavor-slim`, `flavor-regular`, `flavor-full` — that serve as the
+single source of truth for profile selection in release CI. `default`
+SHALL select `flavor-regular`. Marker bodies are curated compositions,
+CHAINED so each flavor includes the marker below it: `flavor-regular`
+includes `flavor-slim`, and `flavor-full` includes `flavor-regular`;
+neither historical forwarding target (`slim-http` for slim) exists —
+the alias was dropped and the markers now carry their own bodies.
+Flavor content curation beyond the chaining is out of scope here and
+belongs to the flavor-matrix change. When several markers are enabled
+simultaneously, the reported flavor SHALL follow the priority
 full > regular > slim; builds with no marker enabled report `custom`.
 
-#### Scenario: marker closures are aliases
+#### Scenario: marker closures are chained
 
 - **GIVEN** the camel-cli feature table
-- **WHEN** `cargo tree` resolves `--features flavor-full` and
-  separately `--features full,kafka`; likewise `flavor-regular`
-  vs `full`, and `--no-default-features --features flavor-slim`
-  vs `--no-default-features --features slim-http`
-- **THEN** each marker's resolved package set is identical to its
-  forwarding target's package set
+- **WHEN** `cargo tree` resolves `--features flavor-full` against
+  `--features flavor-regular`, and `--features flavor-regular` against
+  `--no-default-features --features flavor-slim`
+- **THEN** each higher marker's resolved package set is a superset that
+  contains the lower marker's package set
 
 #### Scenario: default closure unchanged
 
@@ -359,7 +358,7 @@ full > regular > slim; builds with no marker enabled report `custom`.
 
 #### Scenario: unmarked builds report custom
 
-- **GIVEN** a build with `--no-default-features --features slim-http`
+- **GIVEN** a build with `--no-default-features --features sql`
   (raw composition, no flavor marker)
 - **WHEN** the binary reports its version
 - **THEN** the flavor suffix is `custom`
