@@ -896,6 +896,90 @@ fn build_chain(proto_path: &Path, includes: &[PathBuf]) -> ChainFileResolver {
     resolver
 }
 
+/// Include resolver over the embedded-source registry (mission 350).
+/// `resolve_path` accepts a `camel-embedded:` ref naming a registered
+/// asset; `open_file` serves the registered bytes through the SAME
+/// hardening as [`NestingGuardedInclude`]: per-file size cap, per-compile
+/// import budget, UTF-8 requirement, and the bracket-nesting scan. No
+/// shadow check is needed: the registry is the single source of truth,
+/// keyed by canonical asset name. Unregistered names yield
+/// `file_not_found` so the chain falls through (only Google well-known
+/// types follow).
+///
+/// Scope note: the resolver serves ONLY registered assets — import-tree
+/// assets beyond the declared `protoFile` are not embedded by the seal
+/// path, and this resolver does not add them.
+struct EmbeddedGuardedInclude {
+    budget: Arc<ImportBudget>,
+}
+
+impl FileResolver for EmbeddedGuardedInclude {
+    fn resolve_path(&self, path: &Path) -> Option<String> {
+        let name = crate::embedded::strip_ref(path)?;
+        crate::embedded::contains(name).then(|| name.to_owned())
+    }
+
+    fn open_file(&self, name: &str) -> Result<File, protox::Error> {
+        let Some(bytes) = crate::embedded::get(name) else {
+            return Err(protox::Error::file_not_found(name));
+        };
+        if bytes.len() > MAX_SCHEMA_BYTES {
+            return Err(protox::Error::new(SchemaTooLarge {
+                name: name.to_owned(),
+                len: bytes.len() as u64,
+            }));
+        }
+        let text = String::from_utf8(bytes.to_vec()).map_err(|err| {
+            protox::Error::new(OpenInclude {
+                name: name.to_owned(),
+                err: std::io::Error::new(std::io::ErrorKind::InvalidData, err),
+            })
+        })?;
+        self.budget.record(name, text.len())?;
+        if let Err(depth) = scan_nesting(text.as_bytes(), MAX_NESTING_DEPTH, ScanMode::ProtoSource)
+        {
+            return Err(protox::Error::new(NestingExceeded {
+                name: name.to_owned(),
+                depth,
+            }));
+        }
+        File::from_source(name, &text)
+    }
+}
+
+/// Builds the hardened resolver chain for an embedded compile: the
+/// registry resolver first, then the Google well-known types. No
+/// filesystem include directories participate.
+fn build_embedded_chain() -> ChainFileResolver {
+    let mut resolver = ChainFileResolver::new();
+    resolver.add(EmbeddedGuardedInclude {
+        budget: Arc::new(ImportBudget::default()),
+    });
+    resolver.add(GoogleFileResolver::new());
+    resolver
+}
+
+/// Compiles an embedded registry asset (a `camel-embedded:` ref) into a
+/// [`DescriptorPool`]. Descriptor-set assets decode from the registered
+/// bytes through the same containment as the disk path; source assets
+/// preload and compile through [`EmbeddedGuardedInclude`] and the shared
+/// graph validation. Nothing touches the filesystem.
+pub(crate) fn compile_proto_embedded(
+    proto_path: &Path,
+    bytes: Arc<[u8]>,
+) -> Result<DescriptorPool, ProtoCompileError> {
+    if let Some(name) = crate::embedded::strip_ref(proto_path)
+        && is_descriptor_set(Path::new(name))
+    {
+        debug!(ref = %proto_path.display(), "loading embedded descriptor set");
+        return load_descriptor_set_bytes(proto_path, &bytes);
+    }
+    contained_compile(proto_path, || {
+        let snapshot = preload_with(proto_path, &build_embedded_chain())?;
+        compile_from_snapshot(proto_path, snapshot)
+    })
+}
+
 /// Loads the root and its import closure through the guarded include chain,
 /// without building a protox pool. The returned snapshot is immutable: later
 /// compilation serves only these files.
@@ -936,8 +1020,24 @@ fn load_descriptor_set(path: &Path) -> Result<DescriptorPool, ProtoCompileError>
             return Err(ProtoCompileError::DescriptorDecode(err.detail(path)));
         }
     };
-    contained_decode(path, || {
-        let set = FileDescriptorSet::decode(bytes.as_slice())
+    load_descriptor_set_bytes(path, &bytes)
+}
+
+/// Decodes a `FileDescriptorSet` from already-loaded bytes through the
+/// SAME hardening as the disk path ([`load_descriptor_set`]): size cap,
+/// editions rejection, import-cycle rejection, descriptor-graph bounds,
+/// option-text nesting scan, and panic containment.
+fn load_descriptor_set_bytes(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<DescriptorPool, ProtoCompileError> {
+    if bytes.len() > MAX_SCHEMA_BYTES {
+        return Err(ProtoCompileError::DescriptorDecode(
+            SchemaReadError::TooLarge(bytes.len() as u64).detail(path),
+        ));
+    }
+    contained_decode(path, move || {
+        let set = FileDescriptorSet::decode(bytes)
             .map_err(|e| ProtoCompileError::DescriptorDecode(format!("{}: {e}", path.display())))?;
         if has_editions(&set) {
             return Err(ProtoCompileError::DescriptorDecode(format!(
@@ -960,7 +1060,7 @@ fn load_descriptor_set(path: &Path) -> Result<DescriptorPool, ProtoCompileError>
                 path.display()
             ))
         })?;
-        DescriptorPool::decode(bytes.as_slice())
+        DescriptorPool::decode(bytes)
             .map_err(|e| ProtoCompileError::DescriptorDecode(format!("{}: {e}", path.display())))
     })
 }
@@ -1000,7 +1100,10 @@ fn compile_source(
 /// in `includes` are used as include directories. A path whose extension is
 /// `binpb`, `pb`, `desc` or `protoset` (ASCII case-insensitive) is treated as
 /// a precompiled `FileDescriptorSet`: it must contain all its imports, and
-/// `includes` is ignored. Compilation is in process; no external compiler is
+/// `includes` is ignored. A path with the reserved `camel-embedded:` prefix
+/// resolves from the in-process embedded registry with the same
+/// source/descriptor-set split and the same hardening — the filesystem is
+/// never consulted. Compilation is in process; no external compiler is
 /// invoked.
 pub fn compile_proto<P, I>(proto_path: P, includes: I) -> Result<DescriptorPool, ProtoCompileError>
 where
@@ -1009,6 +1112,14 @@ where
     I::Item: AsRef<Path>,
 {
     let proto_path = proto_path.as_ref();
+    // Embedded references resolve from the in-process registry BEFORE any
+    // `.exists()` check; an unregistered ref fails closed naming the ref.
+    if let Some(name) = crate::embedded::strip_ref(proto_path) {
+        let bytes = crate::embedded::get(name)
+            .ok_or_else(|| ProtoCompileError::ProtoNotFound(proto_path.to_path_buf()))?;
+        debug!(ref = %proto_path.display(), "compiling embedded proto");
+        return compile_proto_embedded(proto_path, bytes);
+    }
     if !proto_path.exists() {
         return Err(ProtoCompileError::ProtoNotFound(proto_path.to_path_buf()));
     }

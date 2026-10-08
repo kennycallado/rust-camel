@@ -7,8 +7,8 @@ use std::sync::Mutex;
 
 use prost_reflect::DescriptorPool;
 
-use crate::compiler::compile_proto;
-use crate::{ProtoCompileError, hash_proto_content};
+use crate::compiler::{compile_proto, compile_proto_embedded};
+use crate::{ProtoCompileError, hash_bytes, hash_proto_content};
 
 const DEFAULT_MAX_ENTRIES: usize = 1000;
 
@@ -105,10 +105,26 @@ impl ProtoCache {
             .map(|p| p.as_ref().to_path_buf())
             .collect::<Vec<_>>();
 
+        // An embedded reference hashes the registered bytes as its cache
+        // key content hash — never the filesystem. An unregistered
+        // reference fails closed here, naming the full ref.
+        let embedded = match crate::embedded::strip_ref(proto_path) {
+            Some(name) => Some((
+                name.to_owned(),
+                crate::embedded::get(name)
+                    .ok_or_else(|| ProtoCompileError::ProtoNotFound(proto_path.to_path_buf()))?,
+            )),
+            None => None,
+        };
+        let content_hash = match &embedded {
+            Some((_, bytes)) => hash_bytes(bytes),
+            None => hash_proto_content(proto_path)?,
+        };
+
         let key = format!(
             "{}:{}:{}",
             proto_path.display(),
-            hash_proto_content(proto_path)?,
+            content_hash,
             hash_ordered_include_paths(&include_paths)
         );
 
@@ -122,7 +138,10 @@ impl ProtoCache {
             return Ok(pool);
         }
 
-        let pool = compile_proto(proto_path, &include_paths)?;
+        let pool = match &embedded {
+            Some((_, bytes)) => compile_proto_embedded(proto_path, bytes.clone())?,
+            None => compile_proto(proto_path, &include_paths)?,
+        };
         self.insert_entry(key, pool.clone());
         Ok(pool)
     }

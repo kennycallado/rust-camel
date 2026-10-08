@@ -721,3 +721,130 @@ fn source_snapshot_survives_file_replacement() {
         "the replacement contents must not be used"
     );
 }
+
+// ── Embedded-source registry (mission 350) ─────────────────────────────
+
+use crate::ProtoCache;
+use crate::embedded;
+
+/// T1: a registered `.proto` source compiles in memory through
+/// `get_or_compile`; the pool resolves the service and its method and no
+/// file was involved (registry-only resolution).
+#[test]
+fn embedded_registry_compiles_source_in_memory() {
+    let source = b"\
+syntax = \"proto3\";
+package assets_pkg;
+service AssetGreeter {
+  rpc Greet (AssetRequest) returns (AssetReply) {}
+}
+message AssetRequest { string name = 1; }
+message AssetReply { string message = 1; }
+";
+    let name = "assets/protos/hello.proto";
+    embedded::register(name, source.to_vec());
+
+    let cache = ProtoCache::new();
+    let pool = cache
+        .get_or_compile(
+            "camel-embedded:assets/protos/hello.proto",
+            std::iter::empty::<&Path>(),
+        )
+        .expect("embedded source must compile from the registry");
+    assert!(
+        pool.get_service_by_name("assets_pkg.AssetGreeter")
+            .is_some()
+    );
+    assert!(
+        pool.get_service_by_name("assets_pkg.AssetGreeter")
+            .expect("service present")
+            .methods()
+            .any(|m| m.name() == "Greet")
+    );
+    assert!(
+        pool.get_message_by_name("assets_pkg.AssetRequest")
+            .is_some()
+    );
+}
+
+/// T2: a registered descriptor-set asset (`.binpb`) decodes from the
+/// registered bytes through `get_or_compile`.
+#[test]
+fn embedded_registry_loads_descriptor_set_bytes() {
+    let bytes = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("golden")
+            .join("helloworld.binpb"),
+    )
+    .expect("read golden descriptor set");
+    let name = "assets/protos/helloworld.binpb";
+    embedded::register(name, bytes);
+
+    let cache = ProtoCache::new();
+    let pool = cache
+        .get_or_compile(
+            "camel-embedded:assets/protos/helloworld.binpb",
+            std::iter::empty::<&Path>(),
+        )
+        .expect("embedded descriptor set must load from the registry");
+    assert!(pool.get_service_by_name("helloworld.Greeter").is_some());
+    assert!(
+        pool.get_message_by_name("helloworld.HelloRequest")
+            .is_some()
+    );
+}
+
+/// T3: an unregistered `camel-embedded:` ref fails closed naming the
+/// full ref — before any filesystem probe.
+#[test]
+fn embedded_registry_rejects_unregistered_ref() {
+    let err = compile_proto(
+        "camel-embedded:assets/nope.proto",
+        std::iter::empty::<&Path>(),
+    )
+    .expect_err("unregistered ref must fail");
+    match err {
+        ProtoCompileError::ProtoNotFound(path) => {
+            assert_eq!(
+                path.to_string_lossy(),
+                "camel-embedded:assets/nope.proto",
+                "the error must name the full ref"
+            );
+        }
+        other => panic!("expected ProtoNotFound, got {other:?}"),
+    }
+}
+
+/// T4: the hostile-input hardening still fires on embedded bytes: an
+/// oversized descriptor set trips the size cap, and garbage descriptor
+/// bytes fail the decode with a typed error naming the ref.
+#[test]
+fn embedded_registry_enforces_schema_caps() {
+    let oversized = "camel-embedded:assets/protos/oversized.binpb";
+    embedded::register(
+        "assets/protos/oversized.binpb",
+        vec![0u8; MAX_SCHEMA_BYTES + 1],
+    );
+    let err = compile_proto(oversized, std::iter::empty::<&Path>())
+        .expect_err("oversized embedded descriptor set must fail");
+    match err {
+        ProtoCompileError::DescriptorDecode(s) => {
+            assert!(s.contains("exceeds the limit"), "s: {s}");
+            assert!(s.contains(oversized), "the error must name the ref: {s}");
+        }
+        other => panic!("expected DescriptorDecode, got {other:?}"),
+    }
+
+    let garbage = "camel-embedded:assets/protos/garbage.binpb";
+    embedded::register("assets/protos/garbage.binpb", vec![0xFF; 64]);
+    let err = compile_proto(garbage, std::iter::empty::<&Path>())
+        .expect_err("garbage descriptor bytes must fail");
+    match err {
+        ProtoCompileError::DescriptorDecode(s) => {
+            assert!(s.contains(garbage), "the error must name the ref: {s}");
+        }
+        other => panic!("expected DescriptorDecode, got {other:?}"),
+    }
+}

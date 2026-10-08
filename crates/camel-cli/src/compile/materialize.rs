@@ -3,9 +3,13 @@
 //! confinement discipline).
 //!
 //! Legacy path readers (TLS cert/key/CA consumers, `xslt:`, `validator:`,
-//! `sql:file:`) need a real file. Materialization writes exactly the
-//! substitution-targeted asset bytes into a random per-boot directory
-//! under [`std::env::temp_dir`]:
+//! `sql:file:`) need a real file. The `proto file` class does NOT
+//! materialize: since mission 350 its assets register into the in-process
+//! proto compiler's embedded registry and its sites rewrite to
+//! `camel-embedded:` references, so a proto-only artifact never writes to
+//! temp. Materialization writes exactly the disk-class substitution-
+//! targeted asset bytes into a random per-boot directory under
+//! [`std::env::temp_dir`]:
 //!
 //! - the directory is created exclusively at mode 0700 (private to the
 //!   booting process);

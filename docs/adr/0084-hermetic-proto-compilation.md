@@ -57,9 +57,10 @@ Protobuf editions are unsupported, in sources and in descriptor sets,
 until prost-reflect supports them. Bd `rc-sed5l` tracks the upstream work.
 Error texts follow protox.
 
-The build-time `build.rs` migration is bd `rc-x2rlm`. Two gaps stay open:
-`rc-me2ii` (cache invalidation on an imported file change) and `rc-joask`
-(sealed artifacts still extract `protoFile` to a temporary directory).
+The build-time `build.rs` migration is bd `rc-x2rlm`. Bd `rc-joask` is
+resolved by mission 350: sealed artifacts resolve `protoFile` in memory
+through the embedded-source registry. One gap stays open: `rc-me2ii`
+(cache invalidation on an imported file change).
 `camel-bridge` downloads (bd `rc-grvqh`) need their own decision.
 
 ## References

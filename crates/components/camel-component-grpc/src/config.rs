@@ -654,34 +654,38 @@ fn parse_grpc_query_params(
 
 /// Validate the `protoFile` parameter of a gRPC endpoint URI.
 ///
-/// Relative paths are the source-tree posture: examples and `camel run`
-/// resolve them against the current directory. Absolute paths exist for the
-/// sealed-artifact boot, where `camel-cli`'s materializer rewrites
-/// `protoFile` to a per-boot file under the OS temp directory
-/// (`crates/camel-cli/src/compile/materialize.rs`); such paths are accepted
-/// only when they canonicalize inside `std::env::temp_dir()`.
+/// Three accepted shapes, one per resolution posture:
 ///
-/// Any `..` component is rejected unconditionally, relative or absolute.
-/// Absolute paths that do not exist fail closed (`canonicalize` error).
+/// - `camel-embedded:<asset path>`: the sealed-artifact posture
+///   (mission 350). `camel-cli`'s boot registers the embedded asset in
+///   the in-process proto-compiler registry and rewrites `protoFile` to
+///   this reference; the descriptor resolves in memory and no file is
+///   written.
+/// - Relative paths: the source-tree posture. Examples and `camel run`
+///   resolve them against the current directory.
+///
+/// Everything else fails closed: any `..` component is rejected
+/// unconditionally, and absolute paths are rejected outright — the
+/// former per-boot materialization carve-out under
+/// `std::env::temp_dir()` has no producer since the proto class moved
+/// to in-memory resolution.
 fn proto_path_is_acceptable(proto: &str) -> Result<(), String> {
     if proto.contains("..") {
         return Err(format!(
             "proto path '{proto}' must be relative and cannot contain '..'"
         ));
     }
+    if proto.starts_with(camel_proto_compiler::EMBEDDED_REF_PREFIX) {
+        // Explicit, documented acceptance of the sealed-artifact
+        // reference: the in-process proto compiler resolves it from the
+        // embedded registry; no filesystem access happens here.
+        return Ok(());
+    }
     if proto.starts_with('/') {
-        let message = format!(
-            "proto path '{proto}' is absolute and outside the OS temp directory — \
-             only materialized per-boot paths are accepted"
-        );
-        let canonical = std::fs::canonicalize(proto).map_err(|_| {
-            format!("proto path '{proto}' does not exist or cannot be resolved — fail closed")
-        })?;
-        let temp_dir = std::env::temp_dir();
-        let temp_root = std::fs::canonicalize(&temp_dir).unwrap_or(temp_dir);
-        if !canonical.starts_with(&temp_root) {
-            return Err(message);
-        }
+        return Err(format!(
+            "proto path '{proto}' is absolute — use a relative path, or \
+             recompile the artifact so the descriptor embeds"
+        ));
     }
     Ok(())
 }
@@ -1001,7 +1005,11 @@ mod tests {
         let uri = "grpc://localhost:50051/pkg.Svc/Method?protoFile=/etc/passwd&transport=plaintext";
         let result = parse_grpc_uri(uri);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("proto path"));
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("proto path") && msg.contains("absolute"),
+            "absolute paths are rejected outright: {msg}"
+        );
     }
 
     #[test]
@@ -1013,90 +1021,41 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains(".."));
     }
 
-    /// Panic-safe cleanup for the temp-dir proto fixture: removes the file on
-    /// drop, so an earlier `expect` failing cannot leak it.
-    struct ProtoFixture(std::path::PathBuf);
-
-    impl Drop for ProtoFixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
+    /// Mission 350: the sealed-artifact reference is accepted explicitly.
+    /// The in-process proto compiler resolves it from the embedded
+    /// registry; the acceptance rule itself performs no I/O.
+    #[test]
+    fn test_parse_grpc_uri_proto_embedded_ref_accepted() {
+        let uri = "grpc://localhost:50051/helloworld.Greeter/SayHello?protoFile=camel-embedded:assets/protos/helloworld.proto&transport=plaintext";
+        let (_, _, _, _, config) = parse_grpc_uri(uri).expect("embedded ref must be accepted");
+        assert_eq!(
+            config.proto_file,
+            Some("camel-embedded:assets/protos/helloworld.proto".to_string())
+        );
     }
 
-    /// r5batteries: an absolute `protoFile` is accepted when it resolves
-    /// inside the OS temp directory — the sealed-artifact boot posture where
-    /// `camel-cli`'s materializer rewrites `protoFile` to a per-boot file
-    /// under `std::env::temp_dir()`
-    /// (`crates/camel-cli/src/compile/materialize.rs`).
+    /// Mission 350: the embedded prefix does not reopen traversal — a
+    /// `camel-embedded:` ref carrying `..` fails the unconditional `..`
+    /// rule.
     #[test]
-    fn test_parse_grpc_uri_proto_absolute_temp_path_accepted() {
-        static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "camel-proto-carveout-{}-{}.proto",
-            std::process::id(),
-            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let _fixture = ProtoFixture(path.clone());
-        std::fs::write(
-            &path,
-            r#"syntax = "proto3";
-package helloworld;
-
-service Greeter {
-  rpc SayHello (HelloRequest) returns (HelloReply) {}
-}
-
-message HelloRequest {
-  string name = 1;
-}
-
-message HelloReply {
-  string message = 1;
-}
-"#,
-        )
-        .expect("write proto fixture");
-        let uri = format!(
-            "grpc://localhost:50051/helloworld.Greeter/SayHello?protoFile={}&transport=plaintext",
-            path.display()
+    fn test_parse_grpc_uri_proto_embedded_ref_traversal_rejected() {
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?protoFile=camel-embedded:assets/../secret.proto&transport=plaintext";
+        let result = parse_grpc_uri(uri);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains(".."),
+            "traversal inside an embedded ref is rejected"
         );
+    }
+
+    /// The source-tree posture still parses: a plain relative path is
+    /// accepted and carried verbatim.
+    #[test]
+    fn test_parse_grpc_uri_proto_relative_path_accepted() {
+        let uri = "grpc://localhost:50051/pkg.Svc/Method?protoFile=protos/hello.proto&transport=plaintext";
         let (_, _, _, _, config) =
-            parse_grpc_uri(&uri).expect("absolute protoFile inside temp dir must be accepted");
-        assert_eq!(config.proto_file, Some(path.display().to_string()));
-    }
-
-    /// r5batteries: `..` is rejected unconditionally — the temp-dir carve-out
-    /// must not reopen traversal from within the materialized root.
-    #[test]
-    fn test_parse_grpc_uri_proto_temp_traversal_rejected() {
-        let uri = format!(
-            "grpc://localhost:50051/pkg.Svc/Method?protoFile={}/../etc/passwd&transport=plaintext",
-            std::env::temp_dir().display()
-        );
-        let result = parse_grpc_uri(&uri);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("proto path") && msg.contains(".."),
-            "error must mention proto path and '..': {msg}"
-        );
-    }
-
-    /// r5batteries: an absolute temp-dir path that does not exist fails
-    /// closed — `canonicalize` failure is an error, not an acceptance.
-    #[test]
-    fn test_parse_grpc_uri_proto_nonexistent_temp_path_rejected() {
-        let path = std::env::temp_dir().join("camel-proto-carveout-nonexistent.proto");
-        let uri = format!(
-            "grpc://localhost:50051/pkg.Svc/Method?protoFile={}&transport=plaintext",
-            path.display()
-        );
-        let result = parse_grpc_uri(&uri);
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("proto path"),
-            "canonicalize failure must fail closed with a proto path error"
-        );
+            parse_grpc_uri(uri).expect("relative protoFile must be accepted");
+        assert_eq!(config.proto_file, Some("protos/hello.proto".to_string()));
     }
 
     /// C1 Batch 1: `tls=true` via URI is rejected at parse time — a URI

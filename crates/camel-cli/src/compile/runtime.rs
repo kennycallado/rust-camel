@@ -447,9 +447,10 @@ enum PrepareError {
     Registry(camel_bundles::AssetRegistryError),
     /// A disk-written class needs a writable temp location and
     /// `std::env::temp_dir()` is not one. Names the class and the OS
-    /// cause (read-only contract, r2embed Task 3.2 Step 5).
+    /// cause (read-only contract, r2embed Task 3.2 Step 5; proto-class
+    /// targets never reach this — they resolve in memory, mission 350).
     TempUnavailable {
-        /// Class of the first substitution-targeted asset.
+        /// Class of the first disk-class substitution target.
         class: String,
         /// Underlying OS error.
         source: std::io::Error,
@@ -663,27 +664,74 @@ fn rewrite_store_entries(
     Ok(())
 }
 
+/// The reserved in-memory reference prefix, shared with
+/// `camel_proto_compiler::embedded::EMBEDDED_REF_PREFIX` on grpc builds.
+/// The string rewrite below MUST work in every flavor (an artifact must
+/// never carry unrewritten protoFile spans), so the non-grpc fallback
+/// keeps the literal; the grpc build reads the constant.
+#[cfg(feature = "grpc")]
+fn embedded_ref(asset: &str) -> String {
+    format!(
+        "{}{asset}",
+        camel_proto_compiler::embedded::EMBEDDED_REF_PREFIX
+    )
+}
+#[cfg(not(feature = "grpc"))]
+fn embedded_ref(asset: &str) -> String {
+    format!("camel-embedded:{asset}")
+}
+
+/// Pushes the replacement for every recorded span of `entry` into `sites`.
+///
+/// `raw` is the site value: the embedded reference for the in-memory class,
+/// or the confined path for a disk class. A `literal` site keeps the raw
+/// bytes; a `uri` site percent-encodes them.
+fn push_replacement(
+    sites: &mut BTreeMap<String, Vec<(SubstitutionSpan, Vec<u8>)>>,
+    entry: &SubstitutionEntry,
+    raw: &str,
+) {
+    let replacement = match entry.context {
+        SubstitutionContext::Literal => raw.as_bytes().to_vec(),
+        SubstitutionContext::Uri => utf8_percent_encode(raw, URI_SITE_SET)
+            .to_string()
+            .into_bytes(),
+    };
+    let site_spans = sites.entry(entry.document.clone()).or_default();
+    for span in &entry.spans {
+        site_spans.push((*span, replacement.clone()));
+    }
+}
+
 /// The pre-boot asset preparation at the DECIDED single swap point
-/// (r2embed Task 3.2): after decode, before the route/job kind dispatch.
+/// (r2embed Task 3.2; the proto class re-plumbed to in-memory resolution,
+/// mission 350): after decode, before the route/job kind dispatch.
 ///
 /// 1. The asset registry is populated from the store's entries
 ///    (positional manifest pairing, digest verification) — the
 ///    memory-served class's FS of record.
-/// 2. Every substitution site's target is a legacy path reader, so the
-///    targeted assets are the materialized set: they are written into a
-///    per-boot confined directory (static-file entries stay
-///    memory-served and never touch the filesystem).
+/// 2. Substitution targets partition by class. The `proto file` class
+///    resolves IN MEMORY: each asset registers into the in-process proto
+///    compiler's embedded registry and its site rewrites to a
+///    `camel-embedded:` reference — no disk write, so a proto-only
+///    artifact boots on a host with no writable temp directory. Every
+///    other class (TLS cert/key/CA, `xslt:`, `validator:`, `sql:file:`)
+///    is a legacy path reader: its assets materialize into a per-boot
+///    confined directory (static-file entries stay memory-served and
+///    never touch the filesystem).
 /// 3. The substitution path-safety rule is enforced at every site
-///    BEFORE anything is written; `uri` sites then receive the
-///    percent-encoded confined path, `literal` sites the raw confined
-///    path.
+///    BEFORE anything is registered or written; `uri` sites then receive
+///    the percent-encoded replacement (confined path or embedded
+///    reference), `literal` sites the raw value.
 /// 4. The recorded byte spans — and only those — are rewritten in the
 ///    store's document and config entries, applied last-offset-first.
 ///    Runtime never text-searches or canonicalizes declared strings, and
 ///    TLS-class resolution is embedded-only: no host fallback exists.
 ///
-/// Returns the materialization guard when a per-boot directory exists;
-/// dropping it removes the directory on shutdown AND boot failure.
+/// Returns the materialization guard when a per-boot directory exists —
+/// exactly when disk-class targets exist; dropping it removes the
+/// directory on shutdown AND boot failure. Proto-only artifacts return
+/// `None` with ZERO temp writes.
 fn prepare_embedded_assets(
     store: &mut VirtualDocumentStore,
     manifest_json: &str,
@@ -692,9 +740,9 @@ fn prepare_embedded_assets(
         .map_err(|e| PrepareError::Manifest(e.to_string()))?;
     populate_asset_registry(store, &manifest)?;
 
-    // The materialized set: substitution targets in canonical table
-    // order, with their relative path under the per-boot directory and
-    // their class (for the read-only diagnostic).
+    // The substitution targets in canonical table order, with their
+    // relative path under the per-boot directory and their class (for
+    // the read-only diagnostic and the boot partition below).
     let mut targets: Vec<(&SubstitutionEntry, String, String)> = Vec::new();
     for entry in &store.index.substitutions {
         let Some(rel) = entry.asset.strip_prefix("assets/") else {
@@ -721,64 +769,97 @@ fn prepare_embedded_assets(
         return Ok(None);
     }
 
-    // A disk-written class exists, so a writable temp location is
-    // required: the read-only contract's materialized-class side.
-    let first_class = targets[0].2.clone();
-    let materialization = super::materialize::Materialization::create().map_err(|source| {
-        PrepareError::TempUnavailable {
-            class: first_class,
-            source,
-        }
-    })?;
-
-    // Path-safety rule at EVERY site before anything is written.
+    // Partition FIRST: the proto class never materializes, so the
+    // materialization directory (and its writability requirement) is
+    // created only when a disk class actually needs one.
     let mut sites: BTreeMap<String, Vec<(SubstitutionSpan, Vec<u8>)>> = BTreeMap::new();
-    for (entry, rel, _class) in &targets {
-        let confined_path = materialization
-            .confined_path(rel)
-            .map_err(PrepareError::Materialize)?;
-        let Some(confined) = confined_path.to_str() else {
-            return Err(PrepareError::Rule(CompileError::InvalidDocument(format!(
-                "substitution path-safety rule violation at site '{}': the confined path is not \
-                 valid UTF-8",
-                entry.document
-            ))));
-        };
-        enforce_substitution_path_safety(&entry.document, confined, entry.context)
-            .map_err(PrepareError::Rule)?;
-        let replacement = match entry.context {
-            SubstitutionContext::Literal => confined.as_bytes().to_vec(),
-            SubstitutionContext::Uri => utf8_percent_encode(confined, URI_SITE_SET)
-                .to_string()
-                .into_bytes(),
-        };
-        let site_spans = sites.entry(entry.document.clone()).or_default();
-        for span in &entry.spans {
-            site_spans.push((*span, replacement.clone()));
+    let mut disk_targets: Vec<(&SubstitutionEntry, String, String)> = Vec::new();
+    for (entry, rel, class) in targets {
+        if class == super::policy::PROTO_ASSET_CLASS {
+            // In-memory class: rewrite the site to the reserved
+            // reference and register the bytes with the in-process proto
+            // compiler. The reference carries only `:` `/` `.` `_` `-`
+            // and alphanumerics, so a `uri` site passes the safety rule;
+            // a `literal` site fails the literal charset clause (`:` is
+            // outside `[A-Za-z0-9._/+-]`), keeping hand-crafted stores
+            // fail-closed. Proto sites are URI parameters, so the uri
+            // context is the only producer shape.
+            let reference = embedded_ref(&entry.asset);
+            enforce_substitution_path_safety(&entry.document, &reference, entry.context)
+                .map_err(PrepareError::Rule)?;
+            #[cfg(feature = "grpc")]
+            {
+                let Some(bytes) = store.read(&entry.asset) else {
+                    return Err(PrepareError::StoreInconsistent(format!(
+                        "substitution target {} is unreadable",
+                        entry.asset
+                    )));
+                };
+                camel_proto_compiler::embedded::register(&entry.asset, bytes.to_vec());
+            }
+            push_replacement(&mut sites, entry, &reference);
+        } else {
+            disk_targets.push((entry, rel, class));
         }
     }
 
-    // Write exactly the targeted assets (deduped), never the whole
-    // store.
-    let mut written: Vec<&str> = Vec::new();
-    for (entry, rel, _class) in &targets {
-        if written.contains(&entry.asset.as_str()) {
-            continue;
+    // A disk-written class exists, so a writable temp location is
+    // required: the read-only contract's materialized-class side. A
+    // proto-only artifact never reaches this branch.
+    let materialization = if disk_targets.is_empty() {
+        None
+    } else {
+        let first_class = disk_targets[0].2.clone();
+        Some(
+            super::materialize::Materialization::create().map_err(|source| {
+                PrepareError::TempUnavailable {
+                    class: first_class,
+                    source,
+                }
+            })?,
+        )
+    };
+
+    if let Some(materialization) = &materialization {
+        // Path-safety rule at EVERY disk site before anything is written.
+        for (entry, rel, _class) in &disk_targets {
+            let confined_path = materialization
+                .confined_path(rel)
+                .map_err(PrepareError::Materialize)?;
+            let Some(confined) = confined_path.to_str() else {
+                return Err(PrepareError::Rule(CompileError::InvalidDocument(format!(
+                    "substitution path-safety rule violation at site '{}': the confined path is \
+                     not valid UTF-8",
+                    entry.document
+                ))));
+            };
+            enforce_substitution_path_safety(&entry.document, confined, entry.context)
+                .map_err(PrepareError::Rule)?;
+            push_replacement(&mut sites, entry, confined);
         }
-        let Some(bytes) = store.read(&entry.asset) else {
-            return Err(PrepareError::StoreInconsistent(format!(
-                "substitution target {} is unreadable",
-                entry.asset
-            )));
-        };
-        materialization
-            .write(rel, bytes)
-            .map_err(PrepareError::Materialize)?;
-        written.push(entry.asset.as_str());
+
+        // Write exactly the targeted assets (deduped), never the whole
+        // store.
+        let mut written: Vec<&str> = Vec::new();
+        for (entry, rel, _class) in &disk_targets {
+            if written.contains(&entry.asset.as_str()) {
+                continue;
+            }
+            let Some(bytes) = store.read(&entry.asset) else {
+                return Err(PrepareError::StoreInconsistent(format!(
+                    "substitution target {} is unreadable",
+                    entry.asset
+                )));
+            };
+            materialization
+                .write(rel, bytes)
+                .map_err(PrepareError::Materialize)?;
+            written.push(entry.asset.as_str());
+        }
     }
 
     rewrite_store_entries(store, &sites).map_err(PrepareError::Rule)?;
-    Ok(Some(materialization))
+    Ok(materialization)
 }
 
 /// Self-detect a compiled artifact before any CLI parsing (Task 2.3).
@@ -2049,6 +2130,204 @@ mod tests {
             ),
             Some(super::TrustRejection::Pin),
             "the under-lock re-parse must fail closed when the pin was removed"
+        );
+    }
+
+    // ── Embedded proto boot (mission 350) ──────────────────────────────
+
+    use super::super::store::{StoreAsset, StoreDocument, StoreEntryKind};
+    use super::{
+        SubstitutionContext, SubstitutionEntry, SubstitutionSpan, URI_SITE_SET,
+        VirtualDocumentStore, utf8_percent_encode,
+    };
+
+    /// Serializes the two `prepare_embedded_assets` tests: the asset
+    /// registry is process-global and populate-once, so concurrent
+    /// preparation fixtures would race the population check.
+    static PREPARE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Byte span of the first occurrence of `declared` inside the site
+    /// text — the fixture twin of the seal-time span scan.
+    fn declared_span(text: &str, declared: &str) -> SubstitutionSpan {
+        let start = text.find(declared).expect("declared present in site") as u64;
+        SubstitutionSpan {
+            start,
+            end: start + declared.len() as u64,
+        }
+    }
+
+    /// T5: a proto-only artifact never materializes a per-boot
+    /// directory (`Ok(None)`, zero temp writes), its URI site rewrites
+    /// to the percent-encoded `camel-embedded:` reference, and the
+    /// registry holds the asset bytes for the in-process compiler.
+    #[test]
+    fn prepare_embeds_proto_assets_without_materialization() {
+        let _serial = PREPARE_LOCK.lock().expect("prepare lock");
+
+        let asset_name = "protos/hello350a.proto";
+        let proto_source =
+            "syntax = \"proto3\";\npackage p350a;\nmessage M350a { string a = 1; }\n";
+        let doc = format!(
+            "routes:\n  - id: grpc-serve\n    from: \
+             'grpc://127.0.0.1:50051/p350a.Svc/M?protoFile={asset_name}&transport=plaintext'\n    \
+             steps:\n      - log: req\n"
+        );
+        let span = declared_span(&doc, asset_name);
+        let store = VirtualDocumentStore::build_with_assets(
+            "app.yaml",
+            &[StoreDocument {
+                path: "app.yaml".to_string(),
+                kind: StoreEntryKind::Route,
+                bytes: doc.clone().into_bytes(),
+            }],
+            &[StoreAsset {
+                path: asset_name.to_string(),
+                class: Some(super::super::policy::PROTO_ASSET_CLASS.to_string()),
+                bytes: proto_source.as_bytes().to_vec(),
+            }],
+            &[],
+            &["app.yaml".to_string()],
+            &[SubstitutionEntry {
+                asset: format!("assets/{asset_name}"),
+                context: SubstitutionContext::Uri,
+                declared: asset_name.to_string(),
+                document: "app.yaml".to_string(),
+                spans: vec![span],
+            }],
+        )
+        .expect("store builds");
+        let manifest =
+            super::manifest::derive_for_store(&store, TrailerKind::Route, &[]).expect("manifest");
+        let manifest_json = manifest.to_canonical_json();
+
+        let mut store = store;
+        let prepared = super::prepare_embedded_assets(&mut store, &manifest_json)
+            .expect("prepare succeeds for a proto-only store");
+        assert!(
+            prepared.is_none(),
+            "a proto-only artifact must not create a per-boot directory"
+        );
+
+        let rewritten =
+            String::from_utf8(store.read("app.yaml").expect("site entry present").to_vec())
+                .expect("site entry is UTF-8");
+        let expected = utf8_percent_encode(
+            &super::embedded_ref("assets/protos/hello350a.proto"),
+            URI_SITE_SET,
+        )
+        .to_string();
+        assert!(
+            rewritten.contains(&expected),
+            "the URI site must carry the embedded reference ({expected}): {rewritten}"
+        );
+
+        #[cfg(feature = "grpc")]
+        assert_eq!(
+            &camel_proto_compiler::embedded::get("assets/protos/hello350a.proto")
+                .expect("asset registered")[..],
+            proto_source.as_bytes(),
+            "the registry must hold the embedded proto bytes"
+        );
+    }
+
+    /// T6: mixed classes materialize ONLY the disk-class asset (the
+    /// proto asset never touches disk), the disk site rewrites to the
+    /// percent-encoded confined path, and the proto site rewrites to the
+    /// embedded reference.
+    #[test]
+    fn prepare_materializes_disk_classes_alongside_embedded_proto() {
+        let _serial = PREPARE_LOCK.lock().expect("prepare lock");
+
+        let proto_asset = "protos/hello350b.proto";
+        let proto_source =
+            "syntax = \"proto3\";\npackage p350b;\nmessage M350b { string a = 1; }\n";
+        let cert_asset = "grpc/server350b.crt";
+        let cert_source = "-----BEGIN CERTIFICATE-----\nfixture350b\n-----END CERTIFICATE-----\n";
+        let doc = format!(
+            "routes:\n  - id: grpc-serve\n    from: \
+             'grpc://127.0.0.1:50051/p350b.Svc/M?protoFile={proto_asset}&transport=tls&\
+             serverCertPath={cert_asset}'\n    steps:\n      - log: req\n"
+        );
+        let proto_span = declared_span(&doc, proto_asset);
+        let cert_span = declared_span(&doc, cert_asset);
+        let store = VirtualDocumentStore::build_with_assets(
+            "app.yaml",
+            &[StoreDocument {
+                path: "app.yaml".to_string(),
+                kind: StoreEntryKind::Route,
+                bytes: doc.into_bytes(),
+            }],
+            &[
+                StoreAsset {
+                    path: cert_asset.to_string(),
+                    class: Some("certificate".to_string()),
+                    bytes: cert_source.as_bytes().to_vec(),
+                },
+                StoreAsset {
+                    path: proto_asset.to_string(),
+                    class: Some(super::super::policy::PROTO_ASSET_CLASS.to_string()),
+                    bytes: proto_source.as_bytes().to_vec(),
+                },
+            ],
+            &[],
+            &["app.yaml".to_string()],
+            &[
+                SubstitutionEntry {
+                    asset: format!("assets/{proto_asset}"),
+                    context: SubstitutionContext::Uri,
+                    declared: proto_asset.to_string(),
+                    document: "app.yaml".to_string(),
+                    spans: vec![proto_span],
+                },
+                SubstitutionEntry {
+                    asset: format!("assets/{cert_asset}"),
+                    context: SubstitutionContext::Uri,
+                    declared: cert_asset.to_string(),
+                    document: "app.yaml".to_string(),
+                    spans: vec![cert_span],
+                },
+            ],
+        )
+        .expect("store builds");
+        let manifest =
+            super::manifest::derive_for_store(&store, TrailerKind::Route, &[]).expect("manifest");
+        let manifest_json = manifest.to_canonical_json();
+
+        let mut store = store;
+        let guard = super::prepare_embedded_assets(&mut store, &manifest_json)
+            .expect("prepare succeeds for the mixed store")
+            .expect("disk classes materialize a per-boot directory");
+
+        // ONLY the TLS asset is on disk; the proto asset is absent.
+        assert!(
+            guard.path().join(cert_asset).is_file(),
+            "the certificate asset must materialize"
+        );
+        assert!(
+            !guard.path().join("protos").exists(),
+            "the proto asset must never touch disk"
+        );
+
+        let rewritten =
+            String::from_utf8(store.read("app.yaml").expect("site entry present").to_vec())
+                .expect("site entry is UTF-8");
+        let embedded_expected = utf8_percent_encode(
+            &super::embedded_ref("assets/protos/hello350b.proto"),
+            URI_SITE_SET,
+        )
+        .to_string();
+        assert!(
+            rewritten.contains(&embedded_expected),
+            "the proto site must carry the embedded reference ({embedded_expected}): {rewritten}"
+        );
+        let confined = guard
+            .confined_path(cert_asset)
+            .expect("confined path computes");
+        let confined_expected =
+            utf8_percent_encode(confined.to_str().expect("utf-8"), URI_SITE_SET).to_string();
+        assert!(
+            rewritten.contains(&confined_expected),
+            "the TLS site must carry the confined path ({confined_expected}): {rewritten}"
         );
     }
 }

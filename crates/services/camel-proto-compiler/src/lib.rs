@@ -5,17 +5,23 @@
 //! descriptor set (`.binpb`, `.pb`, `.desc`, `.protoset`) is accepted wherever
 //! a `.proto` path is accepted. Protobuf editions are unsupported.
 //!
+//! A path with the reserved `camel-embedded:` prefix resolves from the
+//! process-global embedded-source registry (`embedded`) instead of the
+//! filesystem, with the same hardening as the disk path.
+//!
 //! Main types: `ProtoCache`, `ProtoCompileError`, `compile_proto`.
-//! Main modules: `cache`, `compiler`.
+//! Main modules: `cache`, `compiler`, `embedded`.
 
 mod cache;
 mod compiler;
+pub mod embedded;
 mod nesting;
 
 use std::path::{Path, PathBuf};
 
 pub use cache::ProtoCache;
 pub use compiler::compile_proto;
+pub use embedded::EMBEDDED_REF_PREFIX;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
@@ -42,10 +48,16 @@ fn hash_proto_content(path: &Path) -> Result<String, ProtoCompileError> {
             });
         }
     };
+    Ok(hash_bytes(&bytes))
+}
+
+/// Lowercase-hex SHA-256 over `bytes`; the cache-key content hash for
+/// both disk and embedded inputs.
+fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let digest = hasher.finalize();
-    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

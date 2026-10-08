@@ -2557,6 +2557,79 @@ fn route_server_serves_grpc_listener_until_sigterm() {
     with_bind_race_retry(grpc_serve_flow);
 }
 
+// ── mission 350: sealed proto artifact on an unwritable temp ──────────
+
+/// The exact test named by the harness-child spawn of
+/// [`sealed_proto_notemp_flow`].
+const SEALED_PROTO_NOTEMP_TEST: &str = "sealed_proto_artifact_boots_without_writable_temp";
+
+/// One sealed-proto no-temp flow (mission 350): fresh port → doc + proto
+/// → compile → deploy → spawn with `--report` and `TMPDIR` pointed at a
+/// NONEXISTENT directory → boot → the grpc readiness marker (logged only
+/// after descriptor resolution AND listener bind) → a wire-level h2
+/// SETTINGS exchange on the listener (needs nothing but TCP, so the full
+/// roundtrip bar stays reachable without extra infra) → SIGTERM →
+/// exit 0. `Err` carries the failure text; the [`BIND_RACE_MARK`]
+/// signature makes the caller retry the whole flow once.
+fn sealed_proto_notemp_flow() -> Result<(), String> {
+    let port = free_port();
+    let (deploy, artifact) = compile_and_deploy_listener_files(&[
+        ("doc.yaml", &grpc_listener_doc(port)),
+        ("protos/helloworld.proto", hello_world_proto()),
+    ])?;
+    let mut child = spawn_child(
+        SEALED_PROTO_NOTEMP_TEST,
+        deploy.path(),
+        &artifact,
+        &["--report", "notemp-report.json"],
+        &[("TMPDIR", "/nonexistent-dir-350")],
+    );
+    let drained = spawn_drained(&mut child);
+    if !wait_for_marker(&drained, "context started", Duration::from_secs(60)) {
+        return Err(format!(
+            "sealed proto artifact never booted:\n{}",
+            drained.captured()
+        ));
+    }
+    if !wait_for_marker(
+        &drained,
+        "grpc consumer started, waiting for requests",
+        Duration::from_secs(20),
+    ) {
+        return Err(format!(
+            "grpc consumer never became ready without writable temp (descriptors must \
+             resolve in memory):\n{}",
+            drained.captured()
+        ));
+    }
+    if h2_settings_probe(port).is_none() {
+        return Err(format!(
+            "grpc listener must answer the h2 preface with a SETTINGS frame:\n{}",
+            drained.captured()
+        ));
+    }
+    send_signal(&child.0, "-TERM");
+    let code = wait_exit_code(&mut child, Duration::from_secs(30));
+    if code != 0 {
+        return Err(format!(
+            "SIGTERM must shut down the serving artifact gracefully (exit 0), got {code}:\n{}",
+            drained.captured()
+        ));
+    }
+    Ok(())
+}
+
+/// The sealed artifact carrying ONLY the proto class boots and serves on
+/// a host with no writable temp directory (mission 350): the descriptor
+/// resolves IN MEMORY through the embedded registry, so boot succeeds
+/// with `TMPDIR` pointed at a nonexistent directory — the old
+/// extract-to-temp path fails this exact environment.
+#[test]
+fn sealed_proto_artifact_boots_without_writable_temp() {
+    child_guard();
+    with_bind_race_retry(sealed_proto_notemp_flow);
+}
+
 /// The exact test named by the harness-child spawn of
 /// [`drain_inflight_flow`] (same re-entry mechanism as [`SERVE_TEST`]).
 const DRAIN_TEST: &str = "route_server_drains_inflight_request";

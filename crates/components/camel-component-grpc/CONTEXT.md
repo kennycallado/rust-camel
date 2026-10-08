@@ -65,12 +65,13 @@ an incomplete mTLS identity, and a TLS/plaintext mismatch on a shared listener.
 
 - `protoFile` parse rule (`proto_path_is_acceptable`): relative paths are the
   source-tree posture — examples and `camel run` resolve them against the
-  current directory. Any `..` component is rejected unconditionally, relative
-  or absolute. Absolute paths are accepted only when they canonicalize inside
-  `std::env::temp_dir()`: the sealed-artifact per-boot materialization posture,
-  where `camel-cli`'s materializer (`crates/camel-cli/src/compile/materialize.rs`)
-  rewrites `protoFile` to a per-boot file under the OS temp directory at boot.
-  A `canonicalize` failure fails closed (nonexistent path is not accepted).
+  current directory. `camel-embedded:<asset path>` is the sealed-artifact
+  posture: `camel-cli`'s boot registers the embedded asset in the in-process
+  proto-compiler registry and rewrites `protoFile` to the reference; the
+  descriptor resolves in memory and no file is written. Any `..` component is
+  rejected unconditionally (including inside an embedded reference), and
+  absolute paths are rejected outright — the former per-boot materialization
+  carve-out under `std::env::temp_dir()` has no producer.
 
 ## Log-level policy
 

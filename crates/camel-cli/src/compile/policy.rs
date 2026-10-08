@@ -112,6 +112,14 @@ fn forbidden_field(key: &str, allow_route_sources: bool) -> Option<&'static str>
 /// compare against this constant, never a literal.
 pub(crate) const SECRET_ASSET_CLASS: &str = "private key";
 
+/// Asset class of the gRPC `protoFile` descriptor. The boot partition
+/// ([`super::runtime`] `prepare_embedded_assets`) keys on this constant:
+/// the class resolves IN MEMORY through the in-process proto compiler
+/// (`camel-embedded:` refs into the embedded registry) and is never
+/// materialized to disk. All sites MUST compare against this constant,
+/// never a literal.
+pub(crate) const PROTO_ASSET_CLASS: &str = "proto file";
+
 /// Asset class for a collected document field key, or `None`. The
 /// certificate/key/CA family only counts inside a TLS or listener
 /// context ([`is_asset_context`]); elsewhere a `key:`/`cert:` field is
@@ -200,7 +208,9 @@ fn uri_operand_class(scheme: &str) -> Option<(&'static str, bool)> {
 /// client-side (`caCertPath`/`clientCertPath`/`clientKeyPath`) spellings
 /// (`camel-component-grpc/src/config.rs:484-490`). `protoFile` is the
 /// gRPC proto-descriptor parameter — a non-secret file class embedded
-/// and substituted like the TLS family.
+/// and substituted at boot to a `camel-embedded:` reference that the
+/// in-process proto compiler resolves from the embedded registry
+/// (mission 350); the class never materializes to disk.
 fn tls_uri_param_class(scheme: &str, name: &str) -> Option<&'static str> {
     let httpish = matches!(scheme, "http" | "https" | "ws" | "wss");
     let grpc = scheme == "grpc";
@@ -216,7 +226,7 @@ fn tls_uri_param_class(scheme: &str, name: &str) -> Option<&'static str> {
         "caCertPath" if grpc => Some("client CA"),
         "clientCertPath" if grpc => Some("certificate"),
         "clientKeyPath" if grpc => Some(SECRET_ASSET_CLASS),
-        "protoFile" if grpc => Some("proto file"),
+        "protoFile" if grpc => Some(PROTO_ASSET_CLASS),
         _ => None,
     }
 }
