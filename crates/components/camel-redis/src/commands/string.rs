@@ -28,12 +28,24 @@ pub(crate) fn is_string_command(cmd: &RedisCommand) -> bool {
     )
 }
 
-pub(crate) fn resolve_timeout_seconds(exchange: &Exchange) -> u64 {
-    get_u64_header(exchange, "CamelRedis.Timeout").unwrap_or(0)
+/// Resolves the `SETEX` TTL in seconds.
+///
+/// `CamelRedis.Timeout` is REQUIRED and must be positive: Redis rejects
+/// `SETEX` with a zero TTL, so defaulting a missing header to `0` produced
+/// a confusing server-side error instead of a local, actionable one. Use
+/// `DEL` to delete a key. (The `SETEX` TTL is a `u64` end to end, so no
+/// `u64 -> i64` narrowing happens here.)
+pub(crate) fn resolve_timeout_seconds(exchange: &Exchange) -> Result<u64, CamelError> {
+    const HEADER: &str = "CamelRedis.Timeout";
+    super::require_positive(
+        get_u64_header(exchange, HEADER)?,
+        HEADER,
+        "a positive TTL in seconds is required for SETEX; set a positive value or use DEL to delete a key",
+    )
 }
 
-pub(crate) fn resolve_increment(exchange: &Exchange) -> i64 {
-    get_i64_header(exchange, "CamelRedis.Increment").unwrap_or(1)
+pub(crate) fn resolve_increment(exchange: &Exchange) -> Result<i64, CamelError> {
+    Ok(get_i64_header(exchange, "CamelRedis.Increment")?.unwrap_or(1))
 }
 
 pub(crate) fn resolve_mget_keys(exchange: &Exchange) -> Result<Vec<String>, CamelError> {
@@ -106,7 +118,7 @@ pub(crate) fn build_redis_cmd(
         RedisCommand::Setex => {
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
-            let ttl = resolve_timeout_seconds(exchange);
+            let ttl = resolve_timeout_seconds(exchange)?;
             let mut c = redis::cmd("SETEX");
             c.arg(key).arg(ttl).arg(value_to_redis_arg(&value));
             c
@@ -135,7 +147,7 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Incrby => {
             let key = require_key(exchange)?;
-            let by = resolve_increment(exchange);
+            let by = resolve_increment(exchange)?;
             let mut c = redis::cmd("INCRBY");
             c.arg(key).arg(by);
             c
@@ -148,7 +160,7 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Decrby => {
             let key = require_key(exchange)?;
-            let by = resolve_increment(exchange);
+            let by = resolve_increment(exchange)?;
             let mut c = redis::cmd("DECRBY");
             c.arg(key).arg(by);
             c
@@ -219,7 +231,7 @@ pub async fn dispatch(
         RedisCommand::Setex => {
             let key = require_key(exchange)?;
             let value = require_value(exchange)?;
-            let ttl = resolve_timeout_seconds(exchange);
+            let ttl = resolve_timeout_seconds(exchange)?;
             conn.set_ex::<_, _, ()>(&key, value_to_redis_arg(&value), ttl)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("SETEX", e))?;
@@ -250,7 +262,7 @@ pub async fn dispatch(
         }
         RedisCommand::Incrby => {
             let key = require_key(exchange)?;
-            let by = resolve_increment(exchange);
+            let by = resolve_increment(exchange)?;
             let n: i64 = conn
                 .incr(&key, by)
                 .await
@@ -267,7 +279,7 @@ pub async fn dispatch(
         }
         RedisCommand::Decrby => {
             let key = require_key(exchange)?;
-            let by = resolve_increment(exchange);
+            let by = resolve_increment(exchange)?;
             let n: i64 = conn
                 .decr(&key, by)
                 .await
@@ -340,16 +352,47 @@ mod tests {
         assert!(!is_string_command(&RedisCommand::Sadd));
     }
 
+    /// Task 354: a missing or zero `CamelRedis.Timeout` is a data-loss trap
+    /// (Redis rejects `SETEX` with a zero TTL; `EXPIRE 0` deletes the key).
+    /// Both cases must fail closed locally with an actionable named error.
+    fn assert_ttl_error(err: &CamelError) {
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Timeout"), "{msg}");
+        assert!(msg.contains("positive"), "{msg}");
+        assert!(msg.contains("DEL"), "{msg}");
+    }
+
     #[test]
-    fn test_resolve_timeout_seconds_defaults_to_zero() {
-        let ex = Exchange::new(Message::default());
-        assert_eq!(resolve_timeout_seconds(&ex), 0);
+    fn test_resolve_timeout_seconds_rejects_missing_and_zero() {
+        for ex in [
+            Exchange::new(Message::default()),
+            ex_with(&[("CamelRedis.Timeout", serde_json::json!(0u64))]),
+            ex_with(&[("CamelRedis.Timeout", serde_json::json!("0"))]),
+        ] {
+            let err = resolve_timeout_seconds(&ex).expect_err("missing/zero TTL must fail closed");
+            assert_ttl_error(&err);
+        }
     }
 
     #[test]
     fn test_resolve_timeout_seconds_from_header() {
         let ex = ex_with(&[("CamelRedis.Timeout", serde_json::json!(15))]);
-        assert_eq!(resolve_timeout_seconds(&ex), 15);
+        assert_eq!(resolve_timeout_seconds(&ex).unwrap(), 15);
+    }
+
+    #[test]
+    fn test_resolve_timeout_seconds_from_numeric_string_header() {
+        let ex = ex_with(&[("CamelRedis.Timeout", serde_json::json!(" 15 "))]);
+        assert_eq!(resolve_timeout_seconds(&ex).unwrap(), 15);
+    }
+
+    #[test]
+    fn test_resolve_timeout_seconds_garbage_is_named_error() {
+        let ex = ex_with(&[("CamelRedis.Timeout", serde_json::json!("abc"))]);
+        let err = resolve_timeout_seconds(&ex).expect_err("garbage must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Timeout"), "{msg}");
+        assert!(msg.contains("abc"), "{msg}");
     }
 
     #[test]
@@ -371,10 +414,22 @@ mod tests {
     #[test]
     fn test_resolve_increment_defaults_and_values() {
         let ex_default = Exchange::new(Message::default());
-        assert_eq!(resolve_increment(&ex_default), 1);
+        assert_eq!(resolve_increment(&ex_default).unwrap(), 1);
 
         let ex = ex_with(&[("CamelRedis.Increment", serde_json::json!(7))]);
-        assert_eq!(resolve_increment(&ex), 7);
+        assert_eq!(resolve_increment(&ex).unwrap(), 7);
+
+        let ex_str = ex_with(&[("CamelRedis.Increment", serde_json::json!(" -2 "))]);
+        assert_eq!(resolve_increment(&ex_str).unwrap(), -2);
+    }
+
+    #[test]
+    fn test_resolve_increment_garbage_is_named_error() {
+        let ex = ex_with(&[("CamelRedis.Increment", serde_json::json!("nope"))]);
+        let err = resolve_increment(&ex).expect_err("garbage must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Increment"), "{msg}");
+        assert!(msg.contains("nope"), "{msg}");
     }
 
     #[test]
@@ -692,5 +747,79 @@ mod tests {
     fn test_build_redis_cmd_rejects_non_string() {
         let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("k"))]);
         assert!(build_redis_cmd(&RedisCommand::Sadd, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_setex_garbage_timeout_fails_before_construction() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            (HEADER_VALUE, serde_json::json!("hello")),
+            ("CamelRedis.Timeout", serde_json::json!("abc")),
+        ]);
+        let err = build_redis_cmd(&RedisCommand::Setex, &ex)
+            .expect_err("garbage timeout must fail before SETEX construction");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Timeout"), "{msg}");
+        assert!(msg.contains("abc"), "{msg}");
+    }
+
+    #[test]
+    fn test_build_redis_cmd_setex_numeric_string_timeout_ok() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            (HEADER_VALUE, serde_json::json!("hello")),
+            ("CamelRedis.Timeout", serde_json::json!(" 60 ")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Setex, &ex).unwrap();
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "60", "hello"]);
+    }
+
+    // ── 354 task 2: SETEX rejects absent/zero TTL ───────────────────────────
+
+    #[test]
+    fn test_build_redis_cmd_setex_rejects_absent_zero_timeout() {
+        for timeout in [
+            None,
+            Some(serde_json::json!(0u64)),
+            Some(serde_json::json!("0")),
+        ] {
+            let mut headers = vec![
+                ("CamelRedis.Key", serde_json::json!("mykey")),
+                (HEADER_VALUE, serde_json::json!("hello")),
+            ];
+            if let Some(value) = &timeout {
+                headers.push(("CamelRedis.Timeout", value.clone()));
+            }
+            let ex = ex_with(&headers);
+            let err = build_redis_cmd(&RedisCommand::Setex, &ex)
+                .expect_err("SETEX with absent/zero TTL must fail before construction");
+            assert_ttl_error(&err);
+        }
+    }
+
+    #[test]
+    fn test_build_redis_cmd_setex_numeric_string_timeout_encodes_ttl() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            (HEADER_VALUE, serde_json::json!("hello")),
+            ("CamelRedis.Timeout", serde_json::json!(" 45 ")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Setex, &ex)
+            .expect("trimmed numeric string TTL must be accepted");
+        assert_eq!(cmd_name(&cmd), "SETEX");
+        assert_eq!(cmd_args(&cmd), vec!["mykey", "45", "hello"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_incrby_garbage_increment_fails_before_construction() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Increment", serde_json::json!("abc")),
+        ]);
+        let err = build_redis_cmd(&RedisCommand::Incrby, &ex)
+            .expect_err("garbage increment must fail before INCRBY construction");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Increment"), "{msg}");
+        assert!(msg.contains("abc"), "{msg}");
     }
 }

@@ -36,9 +36,8 @@ fn validate_latitude(v: f64) -> Result<(), CamelError> {
 }
 
 fn require_f64_header(exchange: &Exchange, name: &str) -> Result<f64, CamelError> {
-    get_f64_header(exchange, name).ok_or_else(|| {
-        CamelError::ProcessorError(format!("Missing or non-numeric required header: {name}"))
-    })
+    get_f64_header(exchange, name)?
+        .ok_or_else(|| CamelError::ProcessorError(format!("Missing required header: {name}")))
 }
 
 fn validate_positive(v: f64, header: &'static str) -> Result<(), CamelError> {
@@ -57,12 +56,7 @@ enum GeoSearchShape {
 }
 
 fn numeric_shape_header(exchange: &Exchange, name: &str) -> Result<Option<f64>, CamelError> {
-    if exchange.input.header(name).is_none() {
-        return Ok(None);
-    }
     get_f64_header(exchange, name)
-        .map(Some)
-        .ok_or_else(|| CamelError::ProcessorError(format!("{name} must be a number")))
 }
 
 fn resolve_geo_search_shape(exchange: &Exchange) -> Result<GeoSearchShape, CamelError> {
@@ -373,7 +367,7 @@ async fn execute_geosearch(
     let unit = resolve_geo_unit(exchange)?;
     let with_dist = get_bool_header(exchange, "CamelRedis.WithDist").unwrap_or(false);
     let with_coord = get_bool_header(exchange, "CamelRedis.WithCoord").unwrap_or(false);
-    let count = get_i64_header(exchange, "CamelRedis.Count").filter(|n| *n > 0);
+    let count = get_i64_header(exchange, "CamelRedis.Count")?.filter(|n| *n > 0);
     let cmd = build_geosearch_cmd(
         &key, longitude, latitude, &shape, unit, with_dist, with_coord, count,
     );
@@ -703,7 +697,9 @@ mod tests {
         let latitude = require_f64_header(&ex, "CamelRedis.Latitude").expect("latitude present");
         let shape = resolve_geo_search_shape(&ex).expect("shape resolves");
         let unit = resolve_geo_unit(&ex).expect("unit defaults to meters");
-        let count = get_i64_header(&ex, "CamelRedis.Count").filter(|n| *n > 0);
+        let count = get_i64_header(&ex, "CamelRedis.Count")
+            .expect("count header parses")
+            .filter(|n| *n > 0);
         let cmd = build_geosearch_cmd(&key, longitude, latitude, &shape, unit, false, false, count);
         cmd.args_iter()
             .map(|arg| match arg {

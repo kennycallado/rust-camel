@@ -40,7 +40,7 @@ pub(crate) fn resolve_destination(exchange: &Exchange) -> Result<String, CamelEr
         .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Destination".into()))
 }
 
-pub(crate) fn resolve_random_member_count(exchange: &Exchange) -> Option<i64> {
+pub(crate) fn resolve_random_member_count(exchange: &Exchange) -> Result<Option<i64>, CamelError> {
     get_i64_header(exchange, "CamelRedis.Count")
 }
 
@@ -181,7 +181,7 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Srandmember => {
             let key = require_key(exchange)?;
-            let count = resolve_random_member_count(exchange);
+            let count = resolve_random_member_count(exchange)?;
             let mut c = redis::cmd("SRANDMEMBER");
             c.arg(key);
             if let Some(cnt) = count {
@@ -311,7 +311,7 @@ pub async fn dispatch(
         }
         RedisCommand::Srandmember => {
             let key = require_key(exchange)?;
-            let count = resolve_random_member_count(exchange);
+            let count = resolve_random_member_count(exchange)?;
             match count {
                 Some(c) => {
                     let members: Vec<String> = conn
@@ -408,10 +408,22 @@ mod tests {
     #[test]
     fn test_resolve_random_member_count() {
         let ex_none = Exchange::new(Message::default());
-        assert_eq!(resolve_random_member_count(&ex_none), None);
+        assert_eq!(resolve_random_member_count(&ex_none).unwrap(), None);
 
         let ex = ex_with(&[("CamelRedis.Count", serde_json::json!(3))]);
-        assert_eq!(resolve_random_member_count(&ex), Some(3));
+        assert_eq!(resolve_random_member_count(&ex).unwrap(), Some(3));
+
+        let ex_str = ex_with(&[("CamelRedis.Count", serde_json::json!(" 3 "))]);
+        assert_eq!(resolve_random_member_count(&ex_str).unwrap(), Some(3));
+    }
+
+    #[test]
+    fn test_resolve_random_member_count_garbage_is_named_error() {
+        let ex = ex_with(&[("CamelRedis.Count", serde_json::json!("abc"))]);
+        let err = resolve_random_member_count(&ex).expect_err("garbage count must fail");
+        let text = err.to_string();
+        assert!(text.contains("CamelRedis.Count"), "{text}");
+        assert!(text.contains("abc"), "{text}");
     }
 
     #[test]

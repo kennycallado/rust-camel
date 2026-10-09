@@ -89,12 +89,60 @@ redis://host:port?command=<cmd>[&key=<key>][&channels=<list>][&timeout=<secs>][&
 | `command` | no | `SET` | Redis command to execute |
 | `key` | per-command | none | Redis key for the operation |
 | `channels` | Pub/Sub | empty | Comma-separated channel names |
-| `timeout` | blocking | `1` | Blocking timeout in seconds |
+| `timeout` | queue Consumer | `1` | Blocking pop timeout in seconds |
 | `password` | no | none | Redis password |
 | `db` | no | `0` | Redis database number (0-16383) |
 | `ssl` | no | auto | Force TLS on or off |
 
 The `command` parameter picks the Redis command at Endpoint creation. Exchange data never becomes a command name. Dynamic values like keys, fields, values, channels, and scores cross the trust boundary as length-prefixed Redis protocol arguments. Argument contents cannot inject a second command or change the selected command (CONTEXT "Trust boundary"). Missing required headers return `CamelError`.
+
+## Header values and timeouts
+
+The Producer reads command arguments from `CamelRedis.*` headers. A numeric header accepts a JSON number or a trimmed numeric string. The numeric-string form makes the natural `${env:...}` path work, because environment interpolation always yields a string.
+
+A header that is present but invalid fails the step with a named error. The error names the header and the received value. An absent header keeps its documented default. The component never silently defaults a misconfigured numeric header to zero. A non-negative header rejects a negative value. A value above `i64::MAX` is never wrapped into a negative number.
+
+### Expiration
+
+Redis reads a zero expiry argument as an immediate key deletion. `SETEX` rejects a zero TTL outright. The component refuses a missing or zero expiry before it sends any command, so no key deletion can result from a missing or zero value.
+
+| Command | Header | Unit | Rule |
+| --- | --- | --- | --- |
+| `SETEX` | `CamelRedis.Timeout` | seconds | positive required |
+| `EXPIRE` | `CamelRedis.Timeout` | seconds | positive required |
+| `PEXPIRE` | `CamelRedis.Timeout` | milliseconds | positive required |
+| `EXPIREAT` | `CamelRedis.Timestamp` | seconds | positive required |
+| `PEXPIREAT` | `CamelRedis.Timestamp` | milliseconds | positive required |
+
+`CamelRedis.Timestamp` must fit in a signed 64-bit integer. A larger value would wrap to a negative number, which Redis reads as an already-past timestamp, so the component rejects it. A positive past timestamp keeps the Redis deletion semantics. Use a future timestamp for a real expiry. Use `DEL` to delete a key on purpose.
+
+### Blocking pops
+
+`BLPOP` and `BRPOP` accept an optional `CamelRedis.Timeout` in seconds. An absent value or `0` blocks indefinitely, which is the Redis command meaning. A non-numeric value fails with a named error.
+
+On the Consumer, the URI `timeout` parameter sets the block duration and defaults to `1` second.
+
+### Sorted-set score bounds
+
+`CamelRedis.Min` and `CamelRedis.Max` are optional score bounds. An absent bound is unbounded. The component rejects an explicit `inf`, `-inf`, or `NaN`. Omit the header to mean unbounded.
+
+### Environment values
+
+`${env:VAR}` interpolation always produces a string. The component parses a trimmed numeric string, so the common case works directly:
+
+```yaml
+- set_header:
+    key: CamelRedis.Timeout
+    value: "${env:TTL_SECONDS:-45}"
+```
+
+For a computed value, use a Rhai expression. `parse_int` converts the string to an integer, and `parse_float` does the same for a decimal. Interpolation runs before evaluation, so the expression sees the concrete value:
+
+```yaml
+- set_header:
+    key: CamelRedis.Timeout
+    rhai: 'parse_int("${env:TTL_MINUTES:-5}") * 60'
+```
 
 ## Commands
 
@@ -153,7 +201,7 @@ The Producer is a Tower `Service<Exchange>`. It composes with any pipeline step 
 
 `redis://host:port?command=SUBSCRIBE&channels=foo,bar` subscribes to one or more Pub/Sub channels. The Consumer submits one Exchange per published message. The `CamelRedis.Channel` header carries the channel name. `CamelRedis.Pattern` carries the matched pattern for `PSUBSCRIBE`.
 
-`redis://host:port?command=BLPOP&key=jobs&timeout=5` blocks on a list key and submits one Exchange per popped item. The `CamelRedis.Key` header carries the list key. The `timeout` parameter is the block duration in seconds. Use `BLPOP` for left pop and `BRPOP` for right pop.
+`redis://host:port?command=BLPOP&key=jobs&timeout=5` blocks on a list key and submits one Exchange per popped item. The `CamelRedis.Key` header carries the list key. The `timeout` parameter is the block duration in seconds, and `0` blocks indefinitely. Use `BLPOP` for left pop and `BRPOP` for right pop. A Producer `BLPOP`/`BRPOP` reads the timeout from the `CamelRedis.Timeout` header instead. See [Blocking pops](#blocking-pops).
 
 The Consumer's mode comes from the URI command. `SUBSCRIBE` and `PSUBSCRIBE` use Pub/Sub mode. `BLPOP` and `BRPOP` use queue mode. A command that fits neither returns an error at consumer creation. The component does not silently fall back to BLPOP (REDIS-003).
 

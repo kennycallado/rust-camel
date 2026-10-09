@@ -53,8 +53,8 @@ pub(crate) fn resolve_hash_values_map(
         .collect::<Vec<_>>())
 }
 
-pub(crate) fn resolve_hash_increment(exchange: &Exchange) -> i64 {
-    get_i64_header(exchange, "CamelRedis.Increment").unwrap_or(1)
+pub(crate) fn resolve_hash_increment(exchange: &Exchange) -> Result<i64, CamelError> {
+    Ok(get_i64_header(exchange, "CamelRedis.Increment")?.unwrap_or(1))
 }
 
 pub(crate) fn resolve_hash_field_operands(
@@ -168,7 +168,7 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Hincrby => {
             let (key, field) = resolve_hash_field_operands(exchange)?;
-            let by = resolve_hash_increment(exchange);
+            let by = resolve_hash_increment(exchange)?;
             let mut c = redis::cmd("HINCRBY");
             c.arg(key).arg(field).arg(by);
             c
@@ -290,7 +290,7 @@ pub async fn dispatch(
         }
         RedisCommand::Hincrby => {
             let (key, field) = resolve_hash_field_operands(exchange)?;
-            let by = resolve_hash_increment(exchange);
+            let by = resolve_hash_increment(exchange)?;
             let n: i64 = conn
                 .hincr(&key, field, by)
                 .await
@@ -368,7 +368,7 @@ mod tests {
             ("CamelRedis.Increment", serde_json::json!(5i64)),
         ]);
         assert_eq!(
-            crate::commands::get_i64_header(&ex, "CamelRedis.Increment"),
+            crate::commands::get_i64_header(&ex, "CamelRedis.Increment").unwrap(),
             Some(5)
         );
     }
@@ -412,12 +412,28 @@ mod tests {
     #[test]
     fn test_resolve_hash_increment_default_and_value() {
         let ex_default = Exchange::new(Message::default());
-        assert_eq!(resolve_hash_increment(&ex_default), 1);
+        assert_eq!(resolve_hash_increment(&ex_default).unwrap(), 1);
 
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Increment", serde_json::json!(9));
         let ex = Exchange::new(msg);
-        assert_eq!(resolve_hash_increment(&ex), 9);
+        assert_eq!(resolve_hash_increment(&ex).unwrap(), 9);
+
+        let mut smsg = Message::default();
+        smsg.set_header("CamelRedis.Increment", serde_json::json!(" 9 "));
+        let sex = Exchange::new(smsg);
+        assert_eq!(resolve_hash_increment(&sex).unwrap(), 9);
+    }
+
+    #[test]
+    fn test_resolve_hash_increment_garbage_is_named_error() {
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Increment", serde_json::json!("abc"));
+        let ex = Exchange::new(msg);
+        let err = resolve_hash_increment(&ex).expect_err("garbage increment must fail");
+        let text = err.to_string();
+        assert!(text.contains("CamelRedis.Increment"), "{text}");
+        assert!(text.contains("abc"), "{text}");
     }
 
     #[test]
@@ -692,6 +708,20 @@ mod tests {
         ]);
         let cmd = build_redis_cmd(&RedisCommand::Hincrby, &ex).unwrap();
         assert_eq!(cmd_args(&cmd), vec!["mykey", "counter", "1"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_hincrby_garbage_increment_fails_before_construction() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Field", serde_json::json!("counter")),
+            ("CamelRedis.Increment", serde_json::json!("abc")),
+        ]);
+        let err = build_redis_cmd(&RedisCommand::Hincrby, &ex)
+            .expect_err("garbage increment must fail before HINCRBY construction");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Increment"), "{msg}");
+        assert!(msg.contains("abc"), "{msg}");
     }
 
     #[test]

@@ -1,4 +1,7 @@
-use super::{get_str_header, get_str_vec_header, get_u64_header, require_key};
+use super::{
+    get_str_header, get_str_vec_header, get_u64_header, require_key, require_positive,
+    u64_to_i64_checked,
+};
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
@@ -38,20 +41,49 @@ pub(crate) fn resolve_destination(exchange: &Exchange) -> Result<String, CamelEr
         .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Destination".into()))
 }
 
-pub(crate) fn resolve_move_db(exchange: &Exchange) -> i64 {
-    exchange
-        .input
-        .header("CamelRedis.Db")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as i64
+/// Resolves the `MOVE` destination database index.
+///
+/// A missing `CamelRedis.Db` deliberately defaults to `0` (the default
+/// database is a valid MOVE target, not a deletion trap). The `u64 -> i64`
+/// conversion IS guarded: `MOVE key >i64::MAX` must not wrap into a
+/// negative db index (Task 354).
+pub(crate) fn resolve_move_db(exchange: &Exchange) -> Result<i64, CamelError> {
+    const HEADER: &str = "CamelRedis.Db";
+    let db = get_u64_header(exchange, HEADER)?.unwrap_or(0);
+    u64_to_i64_checked(db, HEADER)
 }
 
-pub(crate) fn resolve_expire_timeout(exchange: &Exchange) -> i64 {
-    get_u64_header(exchange, "CamelRedis.Timeout").unwrap_or(0) as i64
+/// Resolves the `EXPIRE`/`PEXPIRE` TTL.
+///
+/// `CamelRedis.Timeout` is REQUIRED and must be positive: a zero TTL makes
+/// Redis delete the key immediately. Deletion is an explicit `DEL`, never a
+/// misconfigured zero. The `u64 -> i64` conversion is guarded so an
+/// oversized TTL cannot wrap into a negative (already-past) expiration.
+pub(crate) fn resolve_expire_timeout(exchange: &Exchange) -> Result<i64, CamelError> {
+    const HEADER: &str = "CamelRedis.Timeout";
+    let timeout = require_positive(
+        get_u64_header(exchange, HEADER)?,
+        HEADER,
+        "a positive TTL is required for EXPIRE/PEXPIRE; set a positive value or use DEL to delete a key",
+    )?;
+    u64_to_i64_checked(timeout, HEADER)
 }
 
-pub(crate) fn resolve_expire_timestamp(exchange: &Exchange) -> i64 {
-    get_u64_header(exchange, "CamelRedis.Timestamp").unwrap_or(0) as i64
+/// Resolves the `EXPIREAT`/`PEXPIREAT` absolute expiry timestamp.
+///
+/// `CamelRedis.Timestamp` is REQUIRED and must be positive: a zero
+/// timestamp is in the past, so Redis deletes the key immediately. Explicit
+/// positive past timestamps keep Redis semantics (an intentional expiry).
+/// The `u64 -> i64` conversion is guarded so an oversized timestamp cannot
+/// wrap into a negative value.
+pub(crate) fn resolve_expire_timestamp(exchange: &Exchange) -> Result<i64, CamelError> {
+    const HEADER: &str = "CamelRedis.Timestamp";
+    let timestamp = require_positive(
+        get_u64_header(exchange, HEADER)?,
+        HEADER,
+        "a positive future Unix timestamp is required for EXPIREAT/PEXPIREAT",
+    )?;
+    u64_to_i64_checked(timestamp, HEADER)
 }
 
 pub(crate) fn resolve_keys_pattern(exchange: &Exchange) -> String {
@@ -65,7 +97,7 @@ pub(crate) fn resolve_rename_operands(exchange: &Exchange) -> Result<(String, St
 }
 
 pub(crate) fn resolve_move_operands(exchange: &Exchange) -> Result<(String, i64), CamelError> {
-    Ok((require_key(exchange)?, resolve_move_db(exchange)))
+    Ok((require_key(exchange)?, resolve_move_db(exchange)?))
 }
 
 pub(crate) fn json_from_move_result(result: i64) -> serde_json::Value {
@@ -98,28 +130,28 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Expire => {
             let key = require_key(exchange)?;
-            let secs = resolve_expire_timeout(exchange);
+            let secs = resolve_expire_timeout(exchange)?;
             let mut c = redis::cmd("EXPIRE");
             c.arg(key).arg(secs);
             c
         }
         RedisCommand::Expireat => {
             let key = require_key(exchange)?;
-            let ts = resolve_expire_timestamp(exchange);
+            let ts = resolve_expire_timestamp(exchange)?;
             let mut c = redis::cmd("EXPIREAT");
             c.arg(key).arg(ts);
             c
         }
         RedisCommand::Pexpire => {
             let key = require_key(exchange)?;
-            let ms = resolve_expire_timeout(exchange);
+            let ms = resolve_expire_timeout(exchange)?;
             let mut c = redis::cmd("PEXPIRE");
             c.arg(key).arg(ms);
             c
         }
         RedisCommand::Pexpireat => {
             let key = require_key(exchange)?;
-            let ts = resolve_expire_timestamp(exchange);
+            let ts = resolve_expire_timestamp(exchange)?;
             let mut c = redis::cmd("PEXPIREAT");
             c.arg(key).arg(ts);
             c
@@ -206,7 +238,7 @@ pub async fn dispatch(
         }
         RedisCommand::Expire => {
             let key = require_key(exchange)?;
-            let secs = resolve_expire_timeout(exchange);
+            let secs = resolve_expire_timeout(exchange)?;
             let ok: bool = conn
                 .expire(&key, secs)
                 .await
@@ -215,7 +247,7 @@ pub async fn dispatch(
         }
         RedisCommand::Expireat => {
             let key = require_key(exchange)?;
-            let ts = resolve_expire_timestamp(exchange);
+            let ts = resolve_expire_timestamp(exchange)?;
             let ok: bool = conn
                 .expire_at(&key, ts)
                 .await
@@ -224,7 +256,7 @@ pub async fn dispatch(
         }
         RedisCommand::Pexpire => {
             let key = require_key(exchange)?;
-            let ms = resolve_expire_timeout(exchange);
+            let ms = resolve_expire_timeout(exchange)?;
             let ok: bool = conn
                 .pexpire(&key, ms)
                 .await
@@ -233,7 +265,7 @@ pub async fn dispatch(
         }
         RedisCommand::Pexpireat => {
             let key = require_key(exchange)?;
-            let ts = resolve_expire_timestamp(exchange);
+            let ts = resolve_expire_timestamp(exchange)?;
             let ok: bool = conn
                 .pexpire_at(&key, ts)
                 .await
@@ -329,6 +361,25 @@ mod tests {
         Exchange::new(msg)
     }
 
+    /// Task 354: a missing or zero `CamelRedis.Timeout` deletes a key under
+    /// `EXPIRE`/`PEXPIRE` semantics, so it must fail closed locally naming
+    /// the header and pointing at the explicit `DEL` command.
+    fn assert_ttl_error(err: &CamelError) {
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Timeout"), "{msg}");
+        assert!(msg.contains("positive"), "{msg}");
+        assert!(msg.contains("DEL"), "{msg}");
+    }
+
+    /// Task 354: a missing or zero `CamelRedis.Timestamp` deletes a key under
+    /// `EXPIREAT`/`PEXPIREAT` semantics (a zero timestamp is in the past), so
+    /// it must fail closed locally with guidance for a positive timestamp.
+    fn assert_timestamp_error(err: &CamelError) {
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Timestamp"), "{msg}");
+        assert!(msg.contains("positive"), "{msg}");
+    }
+
     fn cmd_args(cmd: &redis::Cmd) -> Vec<String> {
         cmd.args_iter()
             .skip(1)
@@ -378,7 +429,18 @@ mod tests {
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Db", serde_json::json!(3u64));
         let ex = Exchange::new(msg);
-        assert_eq!(resolve_move_db(&ex), 3);
+        assert_eq!(resolve_move_db(&ex).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_move_db_garbage_is_named_error() {
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Db", serde_json::json!("abc"));
+        let ex = Exchange::new(msg);
+        let err = resolve_move_db(&ex).expect_err("garbage db must fail");
+        let text = err.to_string();
+        assert!(text.contains("CamelRedis.Db"), "{text}");
+        assert!(text.contains("abc"), "{text}");
     }
 
     #[test]
@@ -413,25 +475,104 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_expire_timeout_defaults_and_values() {
-        let ex_default = Exchange::new(Message::default());
-        assert_eq!(resolve_expire_timeout(&ex_default), 0);
-
-        let mut msg = Message::default();
-        msg.set_header("CamelRedis.Timeout", serde_json::json!(9));
-        let ex = Exchange::new(msg);
-        assert_eq!(resolve_expire_timeout(&ex), 9);
+    fn test_resolve_expire_timeout_rejects_missing_and_zero() {
+        for ex in [
+            Exchange::new(Message::default()),
+            ex_with(&[("CamelRedis.Timeout", serde_json::json!(0u64))]),
+            ex_with(&[("CamelRedis.Timeout", serde_json::json!("0"))]),
+        ] {
+            let err = resolve_expire_timeout(&ex).expect_err("missing/zero TTL must fail closed");
+            assert_ttl_error(&err);
+        }
     }
 
     #[test]
-    fn test_resolve_expire_timestamp_defaults_and_values() {
-        let ex_default = Exchange::new(Message::default());
-        assert_eq!(resolve_expire_timestamp(&ex_default), 0);
+    fn test_resolve_expire_timeout_values() {
+        let ex = ex_with(&[("CamelRedis.Timeout", serde_json::json!(9))]);
+        assert_eq!(resolve_expire_timeout(&ex).unwrap(), 9);
 
+        let sex = ex_with(&[("CamelRedis.Timeout", serde_json::json!(" 9 "))]);
+        assert_eq!(resolve_expire_timeout(&sex).unwrap(), 9);
+    }
+
+    /// Task 354: a `u64` TTL above `i64::MAX` must be rejected, never cast
+    /// with `as i64` (which wraps to a negative value Redis reads as an
+    /// already-past, immediate-deletion expiration).
+    #[test]
+    fn test_resolve_expire_timeout_rejects_above_i64_max() {
+        for raw in [
+            serde_json::json!(9223372036854775808u64),
+            serde_json::json!("9223372036854775808"),
+        ] {
+            let ex = ex_with(&[("CamelRedis.Timeout", raw.clone())]);
+            let err = resolve_expire_timeout(&ex)
+                .expect_err("u64 TTL above i64::MAX must not wrap into a negative expiration");
+            let msg = err.to_string();
+            assert!(msg.contains("CamelRedis.Timeout"), "{msg}");
+            assert!(msg.contains("i64"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn test_resolve_expire_timeout_garbage_is_named_error() {
         let mut msg = Message::default();
-        msg.set_header("CamelRedis.Timestamp", serde_json::json!(123));
+        msg.set_header("CamelRedis.Timeout", serde_json::json!("abc"));
         let ex = Exchange::new(msg);
-        assert_eq!(resolve_expire_timestamp(&ex), 123);
+        let err = resolve_expire_timeout(&ex).expect_err("garbage timeout must fail");
+        let text = err.to_string();
+        assert!(text.contains("CamelRedis.Timeout"), "{text}");
+        assert!(text.contains("abc"), "{text}");
+    }
+
+    #[test]
+    fn test_resolve_expire_timestamp_rejects_missing_and_zero() {
+        for ex in [
+            Exchange::new(Message::default()),
+            ex_with(&[("CamelRedis.Timestamp", serde_json::json!(0u64))]),
+            ex_with(&[("CamelRedis.Timestamp", serde_json::json!("0"))]),
+        ] {
+            let err =
+                resolve_expire_timestamp(&ex).expect_err("missing/zero timestamp must fail closed");
+            assert_timestamp_error(&err);
+        }
+    }
+
+    #[test]
+    fn test_resolve_expire_timestamp_values() {
+        let ex = ex_with(&[("CamelRedis.Timestamp", serde_json::json!(123))]);
+        assert_eq!(resolve_expire_timestamp(&ex).unwrap(), 123);
+
+        let sex = ex_with(&[("CamelRedis.Timestamp", serde_json::json!(" 123 "))]);
+        assert_eq!(resolve_expire_timestamp(&sex).unwrap(), 123);
+    }
+
+    /// Task 354: a `u64` timestamp above `i64::MAX` must be rejected, never
+    /// cast with `as i64` (the wrap goes negative, which Redis reads as an
+    /// already-past timestamp and deletes the key).
+    #[test]
+    fn test_resolve_expire_timestamp_rejects_above_i64_max() {
+        for raw in [
+            serde_json::json!(9223372036854775808u64),
+            serde_json::json!("9223372036854775808"),
+        ] {
+            let ex = ex_with(&[("CamelRedis.Timestamp", raw.clone())]);
+            let err = resolve_expire_timestamp(&ex)
+                .expect_err("u64 timestamp above i64::MAX must not wrap negative");
+            let msg = err.to_string();
+            assert!(msg.contains("CamelRedis.Timestamp"), "{msg}");
+            assert!(msg.contains("i64"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn test_resolve_expire_timestamp_garbage_is_named_error() {
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Timestamp", serde_json::json!("soon"));
+        let ex = Exchange::new(msg);
+        let err = resolve_expire_timestamp(&ex).expect_err("garbage timestamp must fail");
+        let text = err.to_string();
+        assert!(text.contains("CamelRedis.Timestamp"), "{text}");
+        assert!(text.contains("soon"), "{text}");
     }
 
     #[test]
@@ -518,16 +659,180 @@ mod tests {
     }
 
     #[test]
-    fn test_build_redis_cmd_expire_default_timeout() {
+    fn test_build_redis_cmd_expire_missing_timeout_fails_before_construction() {
         let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("mykey"))]);
-        let cmd = build_redis_cmd(&RedisCommand::Expire, &ex).unwrap();
-        assert_eq!(cmd_args(&cmd), vec!["mykey", "0"]);
+        let err = build_redis_cmd(&RedisCommand::Expire, &ex)
+            .expect_err("EXPIRE with a missing TTL must fail before construction");
+        assert_ttl_error(&err);
+    }
+
+    // ── 354 task 2: EXPIRE/PEXPIRE reject absent/zero TTL ───────────────────
+
+    #[test]
+    fn test_build_redis_cmd_expire_family_rejects_absent_zero_timeout() {
+        for cmd in [RedisCommand::Expire, RedisCommand::Pexpire] {
+            for timeout in [
+                None,
+                Some(serde_json::json!(0u64)),
+                Some(serde_json::json!("0")),
+            ] {
+                let mut headers = vec![("CamelRedis.Key", serde_json::json!("mykey"))];
+                if let Some(value) = &timeout {
+                    headers.push(("CamelRedis.Timeout", value.clone()));
+                }
+                let ex = ex_with(&headers);
+                let err = build_redis_cmd(&cmd, &ex).expect_err(
+                    "EXPIRE/PEXPIRE with absent/zero TTL must fail before construction",
+                );
+                assert_ttl_error(&err);
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_redis_cmd_expire_family_numeric_string_timeout_encodes_ttl() {
+        for cmd in [RedisCommand::Expire, RedisCommand::Pexpire] {
+            let ex = ex_with(&[
+                ("CamelRedis.Key", serde_json::json!("mykey")),
+                ("CamelRedis.Timeout", serde_json::json!(" 45 ")),
+            ]);
+            let built =
+                build_redis_cmd(&cmd, &ex).expect("trimmed numeric string TTL must be accepted");
+            let expected = match cmd {
+                RedisCommand::Expire => "EXPIRE",
+                RedisCommand::Pexpire => "PEXPIRE",
+                other => panic!("unexpected command in table: {other:?}"),
+            };
+            assert_eq!(cmd_name(&built), expected);
+            assert_eq!(cmd_args(&built), vec!["mykey", "45"]);
+        }
+    }
+
+    #[test]
+    fn test_build_redis_cmd_expire_family_rejects_above_i64_max() {
+        for cmd in [RedisCommand::Expire, RedisCommand::Pexpire] {
+            for raw in [
+                serde_json::json!(9223372036854775808u64),
+                serde_json::json!("9223372036854775808"),
+            ] {
+                let ex = ex_with(&[
+                    ("CamelRedis.Key", serde_json::json!("mykey")),
+                    ("CamelRedis.Timeout", raw.clone()),
+                ]);
+                let err = build_redis_cmd(&cmd, &ex)
+                    .expect_err("TTL above i64::MAX must not wrap into a negative expiration");
+                let msg = err.to_string();
+                assert!(msg.contains("CamelRedis.Timeout"), "{msg}");
+                assert!(msg.contains("i64"), "{msg}");
+            }
+        }
+    }
+
+    // ── 354 task 2: EXPIREAT/PEXPIREAT reject absent/zero/overflowing ts ────
+
+    #[test]
+    fn test_build_redis_cmd_expireat_family_rejects_absent_zero_timestamp() {
+        for cmd in [RedisCommand::Expireat, RedisCommand::Pexpireat] {
+            for timestamp in [
+                None,
+                Some(serde_json::json!(0u64)),
+                Some(serde_json::json!("0")),
+            ] {
+                let mut headers = vec![("CamelRedis.Key", serde_json::json!("mykey"))];
+                if let Some(value) = &timestamp {
+                    headers.push(("CamelRedis.Timestamp", value.clone()));
+                }
+                let ex = ex_with(&headers);
+                let err = build_redis_cmd(&cmd, &ex).expect_err(
+                    "EXPIREAT/PEXPIREAT with absent/zero timestamp must fail before construction",
+                );
+                assert_timestamp_error(&err);
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_redis_cmd_expireat_family_rejects_timestamp_above_i64_max() {
+        for cmd in [RedisCommand::Expireat, RedisCommand::Pexpireat] {
+            for raw in [
+                serde_json::json!(9223372036854775808u64),
+                serde_json::json!("9223372036854775808"),
+            ] {
+                let ex = ex_with(&[
+                    ("CamelRedis.Key", serde_json::json!("mykey")),
+                    ("CamelRedis.Timestamp", raw.clone()),
+                ]);
+                let err = build_redis_cmd(&cmd, &ex)
+                    .expect_err("timestamp above i64::MAX must not wrap negative");
+                let msg = err.to_string();
+                assert!(msg.contains("CamelRedis.Timestamp"), "{msg}");
+                assert!(msg.contains("i64"), "{msg}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_redis_cmd_expireat_family_valid_positive_timestamp_succeeds() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Timestamp", serde_json::json!(1700000000u64)),
+        ]);
+        let built = build_redis_cmd(&RedisCommand::Expireat, &ex)
+            .expect("positive EXPIREAT timestamp must be accepted");
+        assert_eq!(cmd_name(&built), "EXPIREAT");
+        assert_eq!(cmd_args(&built), vec!["mykey", "1700000000"]);
+
+        let sex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Timestamp", serde_json::json!("1700000000000")),
+        ]);
+        let sbuilt = build_redis_cmd(&RedisCommand::Pexpireat, &sex)
+            .expect("positive PEXPIREAT numeric-string timestamp must be accepted");
+        assert_eq!(cmd_name(&sbuilt), "PEXPIREAT");
+        assert_eq!(cmd_args(&sbuilt), vec!["mykey", "1700000000000"]);
+    }
+
+    // ── 354 task 2: MOVE Db u64 -> i64 overflow ─────────────────────────────
+
+    #[test]
+    fn test_resolve_move_db_rejects_above_i64_max() {
+        let ex = ex_with(&[("CamelRedis.Db", serde_json::json!(9223372036854775808u64))]);
+        let err = resolve_move_db(&ex).expect_err("Db above i64::MAX must not wrap negative");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Db"), "{msg}");
+        assert!(msg.contains("i64"), "{msg}");
+    }
+
+    #[test]
+    fn test_build_redis_cmd_move_rejects_db_above_i64_max() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Db", serde_json::json!("9223372036854775808")),
+        ]);
+        let err = build_redis_cmd(&RedisCommand::Move, &ex)
+            .expect_err("MOVE with Db above i64::MAX must fail before construction");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Db"), "{msg}");
+        assert!(msg.contains("i64"), "{msg}");
     }
 
     #[test]
     fn test_build_redis_cmd_expire_missing_key() {
         let ex = Exchange::new(Message::default());
         assert!(build_redis_cmd(&RedisCommand::Expire, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_expire_garbage_timeout_fails_before_construction() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("mykey")),
+            ("CamelRedis.Timeout", serde_json::json!("abc")),
+        ]);
+        let err = build_redis_cmd(&RedisCommand::Expire, &ex)
+            .expect_err("garbage timeout must fail before EXPIRE construction");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Timeout"), "{msg}");
+        assert!(msg.contains("abc"), "{msg}");
     }
 
     #[test]

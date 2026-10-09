@@ -45,23 +45,29 @@ pub(crate) fn resolve_linsert_mode(exchange: &Exchange) -> &'static str {
     }
 }
 
-pub(crate) fn resolve_blocking_timeout(exchange: &Exchange) -> f64 {
-    get_u64_header(exchange, "CamelRedis.Timeout").unwrap_or(0) as f64
+/// Resolves the `BLPOP`/`BRPOP` blocking timeout in seconds.
+///
+/// A missing or zero `CamelRedis.Timeout` DELIBERATELY means "block
+/// forever": `0` is Redis's documented infinite-wait sentinel for
+/// `BLPOP`/`BRPOP`. Unlike the EXPIRE family, `0` here does not delete
+/// anything, so the default is retained on purpose (Task 354 timeout audit).
+pub(crate) fn resolve_blocking_timeout(exchange: &Exchange) -> Result<f64, CamelError> {
+    Ok(get_u64_header(exchange, "CamelRedis.Timeout")?.unwrap_or(0) as f64)
 }
 
-pub(crate) fn resolve_index(exchange: &Exchange) -> isize {
-    get_i64_header(exchange, "CamelRedis.Index").unwrap_or(0) as isize
+pub(crate) fn resolve_index(exchange: &Exchange) -> Result<isize, CamelError> {
+    Ok(get_i64_header(exchange, "CamelRedis.Index")?.unwrap_or(0) as isize)
 }
 
-pub(crate) fn resolve_range_bounds(exchange: &Exchange) -> (isize, isize) {
-    (
-        get_i64_header(exchange, "CamelRedis.Start").unwrap_or(0) as isize,
-        get_i64_header(exchange, "CamelRedis.End").unwrap_or(-1) as isize,
-    )
+pub(crate) fn resolve_range_bounds(exchange: &Exchange) -> Result<(isize, isize), CamelError> {
+    Ok((
+        get_i64_header(exchange, "CamelRedis.Start")?.unwrap_or(0) as isize,
+        get_i64_header(exchange, "CamelRedis.End")?.unwrap_or(-1) as isize,
+    ))
 }
 
-pub(crate) fn resolve_lrem_count(exchange: &Exchange) -> isize {
-    get_i64_header(exchange, "CamelRedis.Count").unwrap_or(0) as isize
+pub(crate) fn resolve_lrem_count(exchange: &Exchange) -> Result<isize, CamelError> {
+    Ok(get_i64_header(exchange, "CamelRedis.Count")?.unwrap_or(0) as isize)
 }
 
 pub(crate) fn resolve_linsert_operands(
@@ -138,14 +144,14 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Blpop => {
             let key = require_key(exchange)?;
-            let timeout = resolve_blocking_timeout(exchange);
+            let timeout = resolve_blocking_timeout(exchange)?;
             let mut c = redis::cmd("BLPOP");
             c.arg(key).arg(timeout);
             Ok(c)
         }
         RedisCommand::Brpop => {
             let key = require_key(exchange)?;
-            let timeout = resolve_blocking_timeout(exchange);
+            let timeout = resolve_blocking_timeout(exchange)?;
             let mut c = redis::cmd("BRPOP");
             c.arg(key).arg(timeout);
             Ok(c)
@@ -158,14 +164,14 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Lrange => {
             let key = require_key(exchange)?;
-            let (start, end) = resolve_range_bounds(exchange);
+            let (start, end) = resolve_range_bounds(exchange)?;
             let mut c = redis::cmd("LRANGE");
             c.arg(key).arg(start).arg(end);
             Ok(c)
         }
         RedisCommand::Lindex => {
             let key = require_key(exchange)?;
-            let idx = resolve_index(exchange);
+            let idx = resolve_index(exchange)?;
             let mut c = redis::cmd("LINDEX");
             c.arg(key).arg(idx);
             Ok(c)
@@ -183,7 +189,7 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Lset => {
             let key = require_key(exchange)?;
-            let idx = resolve_index(exchange);
+            let idx = resolve_index(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("LSET");
             c.arg(key).arg(idx).arg(value_to_redis_arg(&value));
@@ -191,7 +197,7 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Lrem => {
             let key = require_key(exchange)?;
-            let count = resolve_lrem_count(exchange);
+            let count = resolve_lrem_count(exchange)?;
             let value = require_value(exchange)?;
             let mut c = redis::cmd("LREM");
             c.arg(key).arg(count).arg(value_to_redis_arg(&value));
@@ -199,7 +205,7 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Ltrim => {
             let key = require_key(exchange)?;
-            let (start, end) = resolve_range_bounds(exchange);
+            let (start, end) = resolve_range_bounds(exchange)?;
             let mut c = redis::cmd("LTRIM");
             c.arg(key).arg(start).arg(end);
             Ok(c)
@@ -279,7 +285,7 @@ pub async fn dispatch(
         }
         RedisCommand::Blpop => {
             let key = require_key(exchange)?;
-            let timeout = resolve_blocking_timeout(exchange);
+            let timeout = resolve_blocking_timeout(exchange)?;
             let val: Option<(String, String)> = conn
                 .blpop(&key, timeout)
                 .await
@@ -288,7 +294,7 @@ pub async fn dispatch(
         }
         RedisCommand::Brpop => {
             let key = require_key(exchange)?;
-            let timeout = resolve_blocking_timeout(exchange);
+            let timeout = resolve_blocking_timeout(exchange)?;
             let val: Option<(String, String)> = conn
                 .brpop(&key, timeout)
                 .await
@@ -305,7 +311,7 @@ pub async fn dispatch(
         }
         RedisCommand::Lrange => {
             let key = require_key(exchange)?;
-            let (start, end) = resolve_range_bounds(exchange);
+            let (start, end) = resolve_range_bounds(exchange)?;
             let vals: Vec<String> = conn
                 .lrange(&key, start, end)
                 .await
@@ -314,7 +320,7 @@ pub async fn dispatch(
         }
         RedisCommand::Lindex => {
             let key = require_key(exchange)?;
-            let idx = resolve_index(exchange);
+            let idx = resolve_index(exchange)?;
             let val: Option<String> = conn
                 .lindex(&key, idx)
                 .await
@@ -338,7 +344,7 @@ pub async fn dispatch(
         }
         RedisCommand::Lset => {
             let key = require_key(exchange)?;
-            let idx = resolve_index(exchange);
+            let idx = resolve_index(exchange)?;
             let value = require_value(exchange)?;
             conn.lset::<_, _, ()>(&key, idx, value_to_redis_arg(&value))
                 .await
@@ -347,7 +353,7 @@ pub async fn dispatch(
         }
         RedisCommand::Lrem => {
             let key = require_key(exchange)?;
-            let count = resolve_lrem_count(exchange);
+            let count = resolve_lrem_count(exchange)?;
             let value = require_value(exchange)?;
             let n: usize = conn
                 .lrem(&key, count, value_to_redis_arg(&value))
@@ -357,7 +363,7 @@ pub async fn dispatch(
         }
         RedisCommand::Ltrim => {
             let key = require_key(exchange)?;
-            let (start, end) = resolve_range_bounds(exchange);
+            let (start, end) = resolve_range_bounds(exchange)?;
             conn.ltrim::<_, ()>(&key, start, end)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("LTRIM", e))?;
@@ -409,8 +415,8 @@ mod tests {
         msg.set_header("CamelRedis.Start", serde_json::json!(0));
         msg.set_header("CamelRedis.End", serde_json::json!(-1));
         let ex = Exchange::new(msg);
-        assert_eq!(get_i64_header(&ex, "CamelRedis.Start"), Some(0));
-        assert_eq!(get_i64_header(&ex, "CamelRedis.End"), Some(-1));
+        assert_eq!(get_i64_header(&ex, "CamelRedis.Start").unwrap(), Some(0));
+        assert_eq!(get_i64_header(&ex, "CamelRedis.End").unwrap(), Some(-1));
     }
 
     #[test]
@@ -431,7 +437,7 @@ mod tests {
         msg.set_header("CamelRedis.Key", serde_json::json!("myqueue"));
         msg.set_header("CamelRedis.Timeout", serde_json::json!(5));
         let ex = Exchange::new(msg);
-        assert_eq!(get_u64_header(&ex, "CamelRedis.Timeout"), Some(5));
+        assert_eq!(get_u64_header(&ex, "CamelRedis.Timeout").unwrap(), Some(5));
     }
 
     #[test]
@@ -474,46 +480,67 @@ mod tests {
     #[test]
     fn test_resolve_blocking_timeout_defaults_and_values() {
         let ex_default = Exchange::new(Message::default());
-        assert_eq!(resolve_blocking_timeout(&ex_default), 0.0);
+        assert_eq!(resolve_blocking_timeout(&ex_default).unwrap(), 0.0);
 
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Timeout", serde_json::json!(7));
         let ex = Exchange::new(msg);
-        assert_eq!(resolve_blocking_timeout(&ex), 7.0);
+        assert_eq!(resolve_blocking_timeout(&ex).unwrap(), 7.0);
+
+        let mut smsg = Message::default();
+        smsg.set_header("CamelRedis.Timeout", serde_json::json!(" 7 "));
+        let sex = Exchange::new(smsg);
+        assert_eq!(resolve_blocking_timeout(&sex).unwrap(), 7.0);
+    }
+
+    #[test]
+    fn test_resolve_blocking_timeout_garbage_is_named_error() {
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Timeout", serde_json::json!("abc"));
+        let ex = Exchange::new(msg);
+        let err = resolve_blocking_timeout(&ex).expect_err("garbage timeout must fail");
+        let text = err.to_string();
+        assert!(text.contains("CamelRedis.Timeout"), "{text}");
+        assert!(text.contains("abc"), "{text}");
     }
 
     #[test]
     fn test_resolve_index_default_and_value() {
         let ex_default = Exchange::new(Message::default());
-        assert_eq!(resolve_index(&ex_default), 0);
+        assert_eq!(resolve_index(&ex_default).unwrap(), 0);
 
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Index", serde_json::json!(4));
         let ex = Exchange::new(msg);
-        assert_eq!(resolve_index(&ex), 4);
+        assert_eq!(resolve_index(&ex).unwrap(), 4);
+
+        let mut smsg = Message::default();
+        smsg.set_header("CamelRedis.Index", serde_json::json!(" -1 "));
+        let sex = Exchange::new(smsg);
+        assert_eq!(resolve_index(&sex).unwrap(), -1);
     }
 
     #[test]
     fn test_resolve_range_bounds_defaults_and_values() {
         let ex_default = Exchange::new(Message::default());
-        assert_eq!(resolve_range_bounds(&ex_default), (0, -1));
+        assert_eq!(resolve_range_bounds(&ex_default).unwrap(), (0, -1));
 
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Start", serde_json::json!(2));
         msg.set_header("CamelRedis.End", serde_json::json!(5));
         let ex = Exchange::new(msg);
-        assert_eq!(resolve_range_bounds(&ex), (2, 5));
+        assert_eq!(resolve_range_bounds(&ex).unwrap(), (2, 5));
     }
 
     #[test]
     fn test_resolve_lrem_count_default_and_value() {
         let ex_default = Exchange::new(Message::default());
-        assert_eq!(resolve_lrem_count(&ex_default), 0);
+        assert_eq!(resolve_lrem_count(&ex_default).unwrap(), 0);
 
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Count", serde_json::json!(3));
         let ex = Exchange::new(msg);
-        assert_eq!(resolve_lrem_count(&ex), 3);
+        assert_eq!(resolve_lrem_count(&ex).unwrap(), 3);
     }
 
     #[test]

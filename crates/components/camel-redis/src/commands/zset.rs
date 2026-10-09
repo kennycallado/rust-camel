@@ -49,39 +49,41 @@ pub(crate) fn resolve_zstore_keys(exchange: &Exchange) -> Result<Vec<String>, Ca
     }
 }
 
-pub(crate) fn resolve_range_bounds(exchange: &Exchange) -> (isize, isize) {
-    (
-        get_i64_header(exchange, "CamelRedis.Start").unwrap_or(0) as isize,
-        get_i64_header(exchange, "CamelRedis.End").unwrap_or(-1) as isize,
-    )
+pub(crate) fn resolve_range_bounds(exchange: &Exchange) -> Result<(isize, isize), CamelError> {
+    Ok((
+        get_i64_header(exchange, "CamelRedis.Start")?.unwrap_or(0) as isize,
+        get_i64_header(exchange, "CamelRedis.End")?.unwrap_or(-1) as isize,
+    ))
 }
 
-pub(crate) fn resolve_score_bounds(exchange: &Exchange) -> (f64, f64) {
-    (
-        get_f64_header(exchange, "CamelRedis.Min").unwrap_or(f64::NEG_INFINITY),
-        get_f64_header(exchange, "CamelRedis.Max").unwrap_or(f64::INFINITY),
-    )
+pub(crate) fn resolve_score_bounds(exchange: &Exchange) -> Result<(f64, f64), CamelError> {
+    Ok((
+        get_f64_header(exchange, "CamelRedis.Min")?.unwrap_or(f64::NEG_INFINITY),
+        get_f64_header(exchange, "CamelRedis.Max")?.unwrap_or(f64::INFINITY),
+    ))
 }
 
 pub(crate) fn resolve_with_scores(exchange: &Exchange) -> bool {
     get_bool_header(exchange, "CamelRedis.WithScore").unwrap_or(false)
 }
 
-pub(crate) fn resolve_zadd_score(exchange: &Exchange) -> f64 {
-    get_f64_header(exchange, "CamelRedis.Score").unwrap_or(0.0)
+pub(crate) fn resolve_zadd_score(exchange: &Exchange) -> Result<f64, CamelError> {
+    Ok(get_f64_header(exchange, "CamelRedis.Score")?.unwrap_or(0.0))
 }
 
-pub(crate) fn resolve_zincr_increment(exchange: &Exchange) -> f64 {
-    get_f64_header(exchange, "CamelRedis.Increment").unwrap_or(1.0)
+pub(crate) fn resolve_zincr_increment(exchange: &Exchange) -> Result<f64, CamelError> {
+    Ok(get_f64_header(exchange, "CamelRedis.Increment")?.unwrap_or(1.0))
 }
 
-pub(crate) fn resolve_zremrange_rank_bounds(exchange: &Exchange) -> (isize, isize) {
+pub(crate) fn resolve_zremrange_rank_bounds(
+    exchange: &Exchange,
+) -> Result<(isize, isize), CamelError> {
     resolve_range_bounds(exchange)
 }
 
-pub(crate) fn resolve_revrange_score_bounds(exchange: &Exchange) -> (f64, f64) {
-    let (min, max) = resolve_score_bounds(exchange);
-    (max, min)
+pub(crate) fn resolve_revrange_score_bounds(exchange: &Exchange) -> Result<(f64, f64), CamelError> {
+    let (min, max) = resolve_score_bounds(exchange)?;
+    Ok((max, min))
 }
 
 pub(crate) fn resolve_zstore_operands(
@@ -124,7 +126,7 @@ pub(crate) fn build_redis_cmd(
     match cmd {
         RedisCommand::Zadd => {
             let key = require_key(exchange)?;
-            let score = resolve_zadd_score(exchange);
+            let score = resolve_zadd_score(exchange)?;
             let member = require_value(exchange)?;
             let mut c = redis::Cmd::new();
             c.arg("ZADD")
@@ -142,7 +144,7 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Zrange => {
             let key = require_key(exchange)?;
-            let (start, end) = resolve_range_bounds(exchange);
+            let (start, end) = resolve_range_bounds(exchange)?;
             let with_scores = resolve_with_scores(exchange);
             let mut c = redis::Cmd::new();
             c.arg("ZRANGE").arg(key).arg(start).arg(end);
@@ -153,7 +155,7 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Zrevrange => {
             let key = require_key(exchange)?;
-            let (start, end) = resolve_range_bounds(exchange);
+            let (start, end) = resolve_range_bounds(exchange)?;
             let with_scores = resolve_with_scores(exchange);
             let mut c = redis::Cmd::new();
             c.arg("ZREVRANGE").arg(key).arg(start).arg(end);
@@ -191,7 +193,7 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Zincrby => {
             let key = require_key(exchange)?;
-            let increment = resolve_zincr_increment(exchange);
+            let increment = resolve_zincr_increment(exchange)?;
             let member = require_value(exchange)?;
             let mut c = redis::Cmd::new();
             c.arg("ZINCRBY")
@@ -202,14 +204,14 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Zcount => {
             let key = require_key(exchange)?;
-            let (min, max) = resolve_score_bounds(exchange);
+            let (min, max) = resolve_score_bounds(exchange)?;
             let mut c = redis::Cmd::new();
             c.arg("ZCOUNT").arg(key).arg(min).arg(max);
             Ok(c)
         }
         RedisCommand::Zrangebyscore => {
             let key = require_key(exchange)?;
-            let (min, max) = resolve_score_bounds(exchange);
+            let (min, max) = resolve_score_bounds(exchange)?;
             let with_scores = resolve_with_scores(exchange);
             let mut c = redis::Cmd::new();
             c.arg("ZRANGEBYSCORE").arg(key).arg(min).arg(max);
@@ -220,7 +222,7 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Zrevrangebyscore => {
             let key = require_key(exchange)?;
-            let (max, min) = resolve_revrange_score_bounds(exchange);
+            let (max, min) = resolve_revrange_score_bounds(exchange)?;
             let with_scores = resolve_with_scores(exchange);
             let mut c = redis::Cmd::new();
             c.arg("ZREVRANGEBYSCORE").arg(key).arg(max).arg(min);
@@ -231,14 +233,14 @@ pub(crate) fn build_redis_cmd(
         }
         RedisCommand::Zremrangebyrank => {
             let key = require_key(exchange)?;
-            let (start, end) = resolve_zremrange_rank_bounds(exchange);
+            let (start, end) = resolve_zremrange_rank_bounds(exchange)?;
             let mut c = redis::Cmd::new();
             c.arg("ZREMRANGEBYRANK").arg(key).arg(start).arg(end);
             Ok(c)
         }
         RedisCommand::Zremrangebyscore => {
             let key = require_key(exchange)?;
-            let (min, max) = resolve_score_bounds(exchange);
+            let (min, max) = resolve_score_bounds(exchange)?;
             let mut c = redis::Cmd::new();
             c.arg("ZREMRANGEBYSCORE").arg(key).arg(min).arg(max);
             Ok(c)
@@ -279,7 +281,7 @@ pub async fn dispatch(
     let result: serde_json::Value = match cmd {
         RedisCommand::Zadd => {
             let key = require_key(exchange)?;
-            let score = resolve_zadd_score(exchange);
+            let score = resolve_zadd_score(exchange)?;
             let member = require_value(exchange)?;
             let n: i64 = conn
                 .zadd(&key, value_to_redis_arg(&member), score)
@@ -298,7 +300,7 @@ pub async fn dispatch(
         }
         RedisCommand::Zrange => {
             let key = require_key(exchange)?;
-            let (start, end) = resolve_range_bounds(exchange);
+            let (start, end) = resolve_range_bounds(exchange)?;
             let with_scores = resolve_with_scores(exchange);
             if with_scores {
                 let vals: Vec<(String, f64)> = conn
@@ -316,7 +318,7 @@ pub async fn dispatch(
         }
         RedisCommand::Zrevrange => {
             let key = require_key(exchange)?;
-            let (start, end) = resolve_range_bounds(exchange);
+            let (start, end) = resolve_range_bounds(exchange)?;
             let with_scores = resolve_with_scores(exchange);
             if with_scores {
                 let vals: Vec<(String, f64)> = conn
@@ -369,7 +371,7 @@ pub async fn dispatch(
         }
         RedisCommand::Zincrby => {
             let key = require_key(exchange)?;
-            let increment = resolve_zincr_increment(exchange);
+            let increment = resolve_zincr_increment(exchange)?;
             let member = require_value(exchange)?;
             let new_score: f64 = conn
                 .zincr(&key, value_to_redis_arg(&member), increment)
@@ -379,7 +381,7 @@ pub async fn dispatch(
         }
         RedisCommand::Zcount => {
             let key = require_key(exchange)?;
-            let (min, max) = resolve_score_bounds(exchange);
+            let (min, max) = resolve_score_bounds(exchange)?;
             let n: i64 = conn
                 .zcount(&key, min, max)
                 .await
@@ -388,7 +390,7 @@ pub async fn dispatch(
         }
         RedisCommand::Zrangebyscore => {
             let key = require_key(exchange)?;
-            let (min, max) = resolve_score_bounds(exchange);
+            let (min, max) = resolve_score_bounds(exchange)?;
             let with_scores = resolve_with_scores(exchange);
             if with_scores {
                 let vals: Vec<(String, f64)> = conn
@@ -407,7 +409,7 @@ pub async fn dispatch(
         }
         RedisCommand::Zrevrangebyscore => {
             let key = require_key(exchange)?;
-            let (max, min) = resolve_revrange_score_bounds(exchange);
+            let (max, min) = resolve_revrange_score_bounds(exchange)?;
             let with_scores = resolve_with_scores(exchange);
             if with_scores {
                 let vals: Vec<(String, f64)> = conn
@@ -427,7 +429,7 @@ pub async fn dispatch(
         }
         RedisCommand::Zremrangebyrank => {
             let key = require_key(exchange)?;
-            let (start, end) = resolve_zremrange_rank_bounds(exchange);
+            let (start, end) = resolve_zremrange_rank_bounds(exchange)?;
             let n: usize = conn
                 .zremrangebyrank(&key, start, end)
                 .await
@@ -436,7 +438,7 @@ pub async fn dispatch(
         }
         RedisCommand::Zremrangebyscore => {
             let key = require_key(exchange)?;
-            let (min, max) = resolve_score_bounds(exchange);
+            let (min, max) = resolve_score_bounds(exchange)?;
             // Use raw command since method doesn't exist in redis-rs
             let n: i64 = redis::cmd("ZREMRANGEBYSCORE")
                 .arg(&key)
@@ -498,7 +500,7 @@ mod tests {
         ]);
         assert_eq!(crate::commands::require_key(&ex).unwrap(), "myzset");
         assert_eq!(
-            crate::commands::get_f64_header(&ex, "CamelRedis.Score"),
+            crate::commands::get_f64_header(&ex, "CamelRedis.Score").unwrap(),
             Some(10.5)
         );
         assert_eq!(
@@ -520,11 +522,11 @@ mod tests {
             Some(true)
         );
         assert_eq!(
-            crate::commands::get_i64_header(&ex, "CamelRedis.Start"),
+            crate::commands::get_i64_header(&ex, "CamelRedis.Start").unwrap(),
             Some(0)
         );
         assert_eq!(
-            crate::commands::get_i64_header(&ex, "CamelRedis.End"),
+            crate::commands::get_i64_header(&ex, "CamelRedis.End").unwrap(),
             Some(-1)
         );
     }
@@ -537,11 +539,11 @@ mod tests {
             ("CamelRedis.Max", serde_json::json!(100.0)),
         ]);
         assert_eq!(
-            crate::commands::get_f64_header(&ex, "CamelRedis.Min"),
+            crate::commands::get_f64_header(&ex, "CamelRedis.Min").unwrap(),
             Some(0.0)
         );
         assert_eq!(
-            crate::commands::get_f64_header(&ex, "CamelRedis.Max"),
+            crate::commands::get_f64_header(&ex, "CamelRedis.Max").unwrap(),
             Some(100.0)
         );
     }
@@ -597,19 +599,25 @@ mod tests {
     #[test]
     fn test_resolve_range_bounds_defaults_and_values() {
         let ex_default = Exchange::new(Message::default());
-        assert_eq!(resolve_range_bounds(&ex_default), (0, -1));
+        assert_eq!(resolve_range_bounds(&ex_default).unwrap(), (0, -1));
 
         let ex = ex_with(&[
             ("CamelRedis.Start", serde_json::json!(2)),
             ("CamelRedis.End", serde_json::json!(8)),
         ]);
-        assert_eq!(resolve_range_bounds(&ex), (2, 8));
+        assert_eq!(resolve_range_bounds(&ex).unwrap(), (2, 8));
+
+        let ex_str = ex_with(&[
+            ("CamelRedis.Start", serde_json::json!(" 2 ")),
+            ("CamelRedis.End", serde_json::json!(" 8 ")),
+        ]);
+        assert_eq!(resolve_range_bounds(&ex_str).unwrap(), (2, 8));
     }
 
     #[test]
     fn test_resolve_score_bounds_defaults_and_values() {
         let ex_default = Exchange::new(Message::default());
-        let (min, max) = resolve_score_bounds(&ex_default);
+        let (min, max) = resolve_score_bounds(&ex_default).unwrap();
         assert_eq!(min, f64::NEG_INFINITY);
         assert_eq!(max, f64::INFINITY);
 
@@ -617,7 +625,22 @@ mod tests {
             ("CamelRedis.Min", serde_json::json!(1.5)),
             ("CamelRedis.Max", serde_json::json!(9.5)),
         ]);
-        assert_eq!(resolve_score_bounds(&ex), (1.5, 9.5));
+        assert_eq!(resolve_score_bounds(&ex).unwrap(), (1.5, 9.5));
+
+        let ex_str = ex_with(&[
+            ("CamelRedis.Min", serde_json::json!(" 1.5 ")),
+            ("CamelRedis.Max", serde_json::json!(" 9.5 ")),
+        ]);
+        assert_eq!(resolve_score_bounds(&ex_str).unwrap(), (1.5, 9.5));
+    }
+
+    #[test]
+    fn test_resolve_score_bounds_nonfinite_is_named_error() {
+        let ex = ex_with(&[("CamelRedis.Min", serde_json::json!("NaN"))]);
+        let err = resolve_score_bounds(&ex).expect_err("NaN score bound must fail");
+        let text = err.to_string();
+        assert!(text.contains("CamelRedis.Min"), "{text}");
+        assert!(text.contains("NaN"), "{text}");
     }
 
     #[test]
@@ -632,31 +655,34 @@ mod tests {
     #[test]
     fn test_resolve_zadd_score_defaults_and_values() {
         let ex_default = Exchange::new(Message::default());
-        assert_eq!(resolve_zadd_score(&ex_default), 0.0);
+        assert_eq!(resolve_zadd_score(&ex_default).unwrap(), 0.0);
 
         let ex = ex_with(&[("CamelRedis.Score", serde_json::json!(3.25))]);
-        assert_eq!(resolve_zadd_score(&ex), 3.25);
+        assert_eq!(resolve_zadd_score(&ex).unwrap(), 3.25);
+
+        let ex_str = ex_with(&[("CamelRedis.Score", serde_json::json!(" 3.25 "))]);
+        assert_eq!(resolve_zadd_score(&ex_str).unwrap(), 3.25);
     }
 
     #[test]
     fn test_resolve_zincr_increment_defaults_and_values() {
         let ex_default = Exchange::new(Message::default());
-        assert_eq!(resolve_zincr_increment(&ex_default), 1.0);
+        assert_eq!(resolve_zincr_increment(&ex_default).unwrap(), 1.0);
 
         let ex = ex_with(&[("CamelRedis.Increment", serde_json::json!(2.5))]);
-        assert_eq!(resolve_zincr_increment(&ex), 2.5);
+        assert_eq!(resolve_zincr_increment(&ex).unwrap(), 2.5);
     }
 
     #[test]
     fn test_resolve_zremrange_rank_bounds_uses_range_defaults() {
         let ex_default = Exchange::new(Message::default());
-        assert_eq!(resolve_zremrange_rank_bounds(&ex_default), (0, -1));
+        assert_eq!(resolve_zremrange_rank_bounds(&ex_default).unwrap(), (0, -1));
 
         let ex = ex_with(&[
             ("CamelRedis.Start", serde_json::json!(4)),
             ("CamelRedis.End", serde_json::json!(9)),
         ]);
-        assert_eq!(resolve_zremrange_rank_bounds(&ex), (4, 9));
+        assert_eq!(resolve_zremrange_rank_bounds(&ex).unwrap(), (4, 9));
     }
 
     #[test]
@@ -665,7 +691,7 @@ mod tests {
             ("CamelRedis.Min", serde_json::json!(1.0)),
             ("CamelRedis.Max", serde_json::json!(8.0)),
         ]);
-        assert_eq!(resolve_revrange_score_bounds(&ex), (8.0, 1.0));
+        assert_eq!(resolve_revrange_score_bounds(&ex).unwrap(), (8.0, 1.0));
     }
 
     #[test]
@@ -725,6 +751,32 @@ mod tests {
     fn test_build_redis_cmd_zadd_missing_member() {
         let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("myzset"))]);
         assert!(build_redis_cmd(&RedisCommand::Zadd, &ex).is_err());
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zadd_garbage_score_fails_before_construction() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Score", serde_json::json!("abc")),
+            (HEADER_VALUE, serde_json::json!("member1")),
+        ]);
+        let err = build_redis_cmd(&RedisCommand::Zadd, &ex)
+            .expect_err("garbage score must fail before ZADD construction");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Score"), "{msg}");
+        assert!(msg.contains("abc"), "{msg}");
+    }
+
+    #[test]
+    fn test_build_redis_cmd_zadd_numeric_string_score_ok() {
+        let ex = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("myzset")),
+            ("CamelRedis.Score", serde_json::json!(" 10.5 ")),
+            (HEADER_VALUE, serde_json::json!("member1")),
+        ]);
+        let cmd = build_redis_cmd(&RedisCommand::Zadd, &ex).unwrap();
+        assert_cmd_name(&cmd, "ZADD");
+        assert!(packed_contains(&cmd, "10.5"));
     }
 
     #[test]
