@@ -34,6 +34,7 @@ camel-component-jms = { workspace = true, optional = true }
 camel-component-log.workspace = true
 camel-component-mock.workspace = true
 camel-component-opensearch = { workspace = true, optional = true }
+camel-component-rabbitmq = { workspace = true, optional = true }
 camel-component-redis = { workspace = true, optional = true }
 camel-component-seda.workspace = true
 camel-component-sql = { workspace = true, optional = true }
@@ -74,7 +75,7 @@ chrono.workspace = true
 jsonwebtoken.workspace = true
 
 [features]
-default = ["grpc", "wasm", "http-static", "llm", "surrealdb", "mqtt", "mcp", "jms", "sql", "redis", "opensearch", "ws", "cxf", "xj", "xslt"]
+default = ["grpc", "wasm", "http-static", "llm", "surrealdb", "mqtt", "rabbitmq", "mcp", "jms", "sql", "redis", "opensearch", "ws", "cxf", "xj", "xslt"]
 # http-static gates the HttpStaticBundle registration only (its pre-115
 # meaning); the eight bridges are per-bridge gates forwarded by camel-cli
 # (mission 121, rc-9720m).
@@ -93,6 +94,7 @@ kafka = ["dep:camel-component-kafka"]
 # camel-function (function⇒container per ADR-0005).
 containers = ["dep:camel-component-container"]
 mqtt = ["dep:camel-component-mqtt"]
+rabbitmq = ["dep:camel-component-rabbitmq"]
 surrealdb = ["dep:camel-component-surrealdb"]
 grpc = ["dep:camel-component-grpc"]
 llm = ["dep:camel-component-llm"]

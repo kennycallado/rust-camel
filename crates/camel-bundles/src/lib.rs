@@ -372,6 +372,25 @@ pub async fn boot(
     register_bundle::<camel_component_kafka::KafkaBundle>(ctx, config)?;
     #[cfg(feature = "mqtt")]
     register_bundle::<camel_component_mqtt::MqttBundle>(ctx, config)?;
+    // RabbitMQ needs a slot-bound lifecycle context (Wasm pattern) so its
+    // per-broker managers resolve the CURRENT runtime shutdown token across
+    // stop/start. The plain `register_bundle` seam cannot inject it.
+    #[cfg(feature = "rabbitmq")]
+    {
+        let lifecycle: Arc<dyn camel_component_api::ComponentContext> = Arc::new(
+            camel_core::RegistryComponentContext::new(
+                ctx.registry_arc(),
+                Some(ctx.metrics()),
+                camel_component_api::ComponentContext::component_metrics_enabled(&*ctx),
+            )
+            .with_shutdown_slot(ctx.shutdown_token_slot()),
+        );
+        let bundle = bundle_from_config::<camel_component_rabbitmq::RabbitMqBundle>(config)?
+            .with_lifecycle_context(lifecycle);
+        <camel_component_rabbitmq::RabbitMqBundle as camel_component_api::ComponentBundle>::register_all(
+            bundle, ctx,
+        );
+    }
     register_bundle::<camel_master::MasterBundle>(ctx, config)?;
     #[cfg(feature = "opensearch")]
     register_bundle::<camel_component_opensearch::OpenSearchBundle>(ctx, config)?;
@@ -536,6 +555,11 @@ mod tests {
             ctx.registry().get("container").is_none(),
             "scheme 'container' must NOT register without the containers feature"
         );
+        #[cfg(feature = "rabbitmq")]
+        assert!(
+            ctx.registry().get("rabbitmq").is_some(),
+            "scheme 'rabbitmq' must resolve after boot"
+        );
     }
 
     /// Slim polarity of the boot cascade: with the per-bridge features off
@@ -565,6 +589,11 @@ mod tests {
         assert!(
             ctx.registry().get("jms").is_none(),
             "bridge scheme 'jms' must be absent without the jms feature"
+        );
+        #[cfg(not(feature = "rabbitmq"))]
+        assert!(
+            ctx.registry().get("rabbitmq").is_none(),
+            "scheme 'rabbitmq' must stay absent without the rabbitmq feature"
         );
         handle
             .shutdown(&mut ctx)

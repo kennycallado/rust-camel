@@ -69,6 +69,7 @@
     - [Kafka](components/kafka.md)
     - [JMS](components/jms.md)
     - [MQTT](components/mqtt.md)
+    - [RabbitMQ](components/rabbitmq.md)
   - [Data stores](components/datastores.md)
     - [Redis](components/redis.md)
     - [Database (SQL)](components/database.md)

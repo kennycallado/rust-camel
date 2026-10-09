@@ -147,6 +147,10 @@ name = "camel-component-opensearch"
 state = "registered"
 
 [[crates]]
+name = "camel-component-rabbitmq"
+state = "new-unpublished"
+
+[[crates]]
 name = "camel-component-seda"
 state = "registered"
 

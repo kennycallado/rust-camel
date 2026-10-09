@@ -111,6 +111,7 @@ camel-component-redis = { path = "crates/components/camel-redis", version = "=0.
 camel-component-kafka = { path = "crates/components/camel-kafka", version = "=0.57.0" }
 camel-component-mqtt = { path = "crates/components/camel-mqtt", version = "=0.57.0" }
 camel-component-jms = { path = "crates/components/camel-jms", version = "=0.57.0" }
+camel-component-rabbitmq = { path = "crates/components/camel-rabbitmq", version = "=0.57.0" }
 camel-component-sql = { path = "crates/components/camel-sql", version = "=0.57.0" }
 camel-component-controlbus = { path = "crates/components/camel-controlbus", version = "=0.57.0" }
 camel-component-validator = { path = "crates/components/camel-validator", version = "=0.57.0" }
@@ -210,6 +211,14 @@ moka = { version = "0.12", features = ["future"] }
 redb = "4"
 redis = "1"
 rumqttc = { version = "0.33.3", package = "rumqttc-v4-next", default-features = false }
+# RabbitMQ AMQP client. Feature list verified against lapin 4.12.0's feature
+# table (task 1.3): `tokio` = tokio runtime integration, `rustls--ring` = rustls
+# with the ring provider, `rustls-native-certs` = system root store. The bare
+# `rustls` feature maps to `amq-protocol/rustls` and MUST NOT be used: it
+# selects rustls' default aws-lc-rs provider. lapin adds no aws-lc-rs edge from
+# camel-component-rabbitmq; pre-existing workspace reachability via
+# camel-component-api/rustls defaults is tracked in bd rc-2bofp (master ruling 1).
+lapin = { version = "4.12", default-features = false, features = ["tokio", "rustls--ring", "rustls-native-certs"] }
 rustls = { version = "0.23", features = ["ring"] }
 axum = { version = "0.8" }
 http = "1"

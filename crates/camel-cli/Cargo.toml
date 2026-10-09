@@ -66,6 +66,7 @@ camel-component-http.workspace = true
 camel-component-jms = { workspace = true, optional = true }
 camel-component-kafka = { workspace = true, optional = true }
 camel-component-mqtt = { workspace = true, optional = true }
+camel-component-rabbitmq = { workspace = true, optional = true }
 camel-component-grpc = { workspace = true, optional = true }
 camel-component-log.workspace = true
 camel-component-mock.workspace = true
@@ -152,7 +153,7 @@ default = ["flavor-regular"]
 # start from `--no-default-features`.
 # Historical closure list, kept for compose-users; its closure no longer
 # wires function/container (gated behind `containers`) — prefer flavor-full.
-full = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "mcp", "integration-http", "integration-sql", "integration-surreal", "integration-redis", "security", "redis-tls", "lsp", "lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath", "lang-minijinja", "jms", "sql", "redis", "opensearch", "ws", "cxf", "xj", "xslt"]
+full = ["otel", "grpc", "wasm", "http-static", "llm", "surrealdb", "exec", "mqtt", "rabbitmq", "mcp", "integration-http", "integration-sql", "integration-surreal", "integration-redis", "security", "redis-tls", "lsp", "lang-js", "lang-rhai", "lang-jsonpath", "lang-xpath", "lang-minijinja", "jms", "sql", "redis", "opensearch", "ws", "cxf", "xj", "xslt"]
 # LSP server surface (`camel lsp`): tower-lsp transport + camel-lsp backend.
 lsp = ["dep:camel-lsp", "dep:tower-lsp"]
 # kubernetes forwards camel-config's platform wiring (pod identity,
@@ -174,7 +175,7 @@ lang-minijinja = ["camel-core/lang-minijinja"]
 # execution, ADR-0037), containers (infrastructure-daemon client:
 # camel-function + camel-component-container as ONE feature).
 flavor-slim = ["mqtt", "mqtt-tls", "http-static", "sql", "lang-jsonpath", "lang-rhai"]
-flavor-regular = ["flavor-slim", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]
+flavor-regular = ["flavor-slim", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]
 flavor-full = ["flavor-regular", "exec", "kafka", "surrealdb", "integration-surreal", "integration-redis", "containers"]
 # otel instruments http (always linked) and ws. The ws/otel forward
 # activates the optional camel-component-ws dep without the `ws`
@@ -231,6 +232,9 @@ dynamic-linking = ["kafka", "camel-component-kafka/dynamic-linking"]
 # Use mqtt-tls to enable TLS support (mqtts:// URIs).
 mqtt = ["dep:camel-component-mqtt", "camel-bundles/mqtt"]
 mqtt-tls = ["mqtt", "camel-component-mqtt/tls"]
+# RabbitMQ (AMQP 0-9-1): activates the component, its lint-catalog
+# registration and the boot cascade bundle. Regular-only (not slim).
+rabbitmq = ["dep:camel-component-rabbitmq", "camel-bundles/rabbitmq"]
 # Redis TLS, default-on: the component auto-upgrades non-loopback hosts to
 # TLS (secure-by-default), so a binary without TLS support hard-fails against
 # every remote Redis instance. Pure-rust webpki roots — no native deps, so

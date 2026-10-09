@@ -1,0 +1,58 @@
+[package]
+name = "camel-component-rabbitmq"
+description = "RabbitMQ AMQP 0-9-1 component for rust-camel"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["camel", "rabbitmq", "amqp", "messaging"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+camel-component-api = { workspace = true }
+camel-api           = { workspace = true }
+tokio               = { workspace = true }
+tokio-util          = { workspace = true }
+tower               = { workspace = true }
+async-trait         = { workspace = true }
+tracing             = { workspace = true }
+bytes               = { workspace = true }
+serde               = { workspace = true }
+serde_json          = { workspace = true }
+toml                = { workspace = true }
+thiserror           = { workspace = true }
+futures             = { workspace = true }
+url                 = { workspace = true }
+dashmap             = { workspace = true }
+uuid                = { workspace = true }
+# lapin 4.12.0 feature list verified against its published feature table
+# (crates.io + docs.rs) on 2026-10-08: `tokio` (runtime), `rustls--ring`
+# (ring TLS provider), `rustls-native-certs` (system root store). The bare
+# `rustls` feature maps to `amq-protocol/rustls` and MUST NOT be used: it
+# selects rustls' default crypto provider (aws-lc-rs). Component-owned edge
+# evidence: `cargo tree -p camel-component-rabbitmq -e features -i aws-lc-rs`
+# shows `rustls feature "aws_lc_rs"` entering ONLY via camel-component-api's
+# `rustls feature "default"`, while lapin's `rustls--ring` selects only
+# `rustls feature "ring"`. Pre-existing workspace aws-lc-rs reachability is
+# tracked in bd rc-2bofp (master ruling 1).
+lapin.workspace = true
+
+[dev-dependencies]
+# `start_paused` (deterministic timeout tests) requires tokio's test-util
+# feature, which the workspace `full` set does not include.
+tokio = { workspace = true, features = ["full", "test-util"] }
+# `RecordingRuntimeObservability` (publish-outcome mapping) lives behind the
+# component-api `test-support` feature and must never reach production.
+camel-component-api = { workspace = true, features = ["test-support"] }
+# Lifecycle-context tests implement `ComponentContext`, whose `resolve_language`
+# return type names `camel_language_api::Language`. Test-only, never production.
+camel-language-api.workspace = true
+# The reconnect tests assert on captured AMQP protocol-error logs (the engine
+# logs the structured `error` field); a global recording subscriber is required
+# because the engine runs on spawned tasks.
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

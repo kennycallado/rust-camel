@@ -5,3 +5,4 @@ These components exchange messages through a broker. A broker decouples the prod
 - [Kafka](kafka.md). Broker producer and consumer.
 - [JMS](jms.md). Java bridge consumer and producer.
 - [MQTT](mqtt.md). MQTT 3.1.1 broker producer and consumer.
+- [RabbitMQ](rabbitmq.md). Native AMQP 0-9-1 broker producer and consumer.
