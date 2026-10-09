@@ -120,6 +120,12 @@ pub(crate) fn dynamic_to_value(d: rhai::Dynamic, target: &str) -> Result<Value, 
         // rhai timestamps are `std::time::Instant` (the workspace does not
         // enable `no_time`), so this guard is live code, not dead armor.
         Err(refused("timestamp"))
+    } else if d.is::<crate::json::JsonValue>() {
+        // Task 1.5 outbound refusal: direct wrapper conversion stays deferred
+        // and reports the stable label, never a Rust type path.
+        Err(refused(crate::json::JSON_VALUE_TYPE_NAME))
+    } else if d.is::<crate::json::JsonNumber>() {
+        Err(refused(crate::json::JSON_NUMBER_TYPE_NAME))
     } else {
         Err(refused(d.type_name()))
     }
@@ -215,6 +221,38 @@ mod tests {
     fn char_becomes_one_char_string() {
         let v = dynamic_to_value(rhai::Dynamic::from('x'), "value").expect("char converts");
         assert_eq!(v, Value::String("x".to_string()));
+    }
+
+    #[test]
+    fn json_value_refused_outbound_stable_label() {
+        let d = rhai::Dynamic::from(crate::json::JsonValue::new(crate::json::JsonKind::Null));
+        let err = dynamic_to_value(d, "value").expect_err("wrapper must be refused");
+        match err {
+            LanguageError::ConversionError {
+                source_type,
+                target,
+            } => {
+                assert_eq!(source_type, "json value");
+                assert_eq!(target, "value");
+            }
+            other => panic!("expected ConversionError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_number_refused_outbound_stable_label() {
+        let d = rhai::Dynamic::from(crate::json::JsonNumber::new("1"));
+        let err = dynamic_to_value(d, "value").expect_err("number wrapper must be refused");
+        match err {
+            LanguageError::ConversionError {
+                source_type,
+                target,
+            } => {
+                assert_eq!(source_type, "json number");
+                assert_eq!(target, "value");
+            }
+            other => panic!("expected ConversionError, got {other:?}"),
+        }
     }
 
     #[test]

@@ -105,6 +105,7 @@ use std::time::Duration;
 use tracing::debug;
 
 mod converter;
+mod json;
 mod stream_body;
 mod transaction;
 
@@ -312,7 +313,7 @@ fn find_read_only_mutation(ast: &AST) -> Option<&'static str> {
 /// read-only expressions (parse error); they are also never registered on
 /// the eval engine, so dynamic calls cannot slip through. To mutate the
 /// exchange, use a mutating script expression with map assignment syntax
-/// (see [`RhaiMutatingExpression`]).
+/// (see `RhaiMutatingExpression`).
 ///
 /// ## Resource Limits
 ///
@@ -354,6 +355,11 @@ impl RhaiLanguage {
         let r = resolve_rhai_limits(limits);
         let mut engine = Engine::new_raw();
         StandardPackage::new().register_into_engine(&mut engine);
+        // Shared JSON host module (task 1.5): registers `parse_json`/`to_json`
+        // and the `json value`/`json number` wrapper surface. Rhai inserts
+        // global-module functions at index 1, so the host module takes
+        // precedence over the stock `StandardPackage` JSON helpers.
+        engine.register_global_module(json::host::host_module());
         engine.set_max_expr_depths(
             r.max_expression_depth as usize,
             r.max_function_expression_depth as usize,
@@ -2739,5 +2745,728 @@ mod tests {
                 "assigned payload leaked: {rendering}"
             );
         }
+    }
+
+    // ── perf baseline: per-eval registration + eager scope-prep cost ──
+    //
+    // Task 1.1 records the pre-change median per-eval cost so the shared-module
+    // cost introduced in Task 1.5 can be compared against it. The big phase
+    // reproduces the `rc-m01r9` eager `make_scope`/`prepare_scope` deep
+    // conversion: `json_to_dynamic` walks every property entry on every eval.
+
+    /// Build an exchange whose single property `"buf"` holds an object with
+    /// `property_entries` integer entries (`i` -> `i` for `0..property_entries`).
+    fn bench_exchange(property_entries: usize) -> Exchange {
+        let mut ex = Exchange::new(Message::new(""));
+        let buf = Value::Object(
+            (0..property_entries)
+                .map(|i| (i.to_string(), Value::from(i as i64)))
+                .collect(),
+        );
+        ex.set_property("buf", buf);
+        ex
+    }
+
+    /// Conventional median (middle element for odd counts, mean of the two
+    /// middle elements for even counts) over raw nanosecond samples.
+    fn median_ns(samples: &mut [u128]) -> u128 {
+        samples.sort_unstable();
+        let n = samples.len();
+        if n % 2 == 1 {
+            samples[n / 2]
+        } else {
+            (samples[n / 2 - 1] + samples[n / 2]) / 2
+        }
+    }
+
+    #[test]
+    #[ignore = "slow test: perf baseline; run explicitly with --release"]
+    fn bench_json_host_per_eval_cost() {
+        use camel_language_api::RhaiLimitsConfig;
+
+        let lang = RhaiLanguage::with_limits(RhaiLimitsConfig {
+            execution_timeout_ms: Some(60_000),
+            ..Default::default()
+        });
+        let expr = lang.create_expression("1 + 1").unwrap();
+
+        let small_ex = bench_exchange(0);
+        let big_ex = bench_exchange(4000);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let measure = |ex: &Exchange| -> u128 {
+            for _ in 0..5 {
+                let _ = rt.block_on(expr.evaluate(ex)).unwrap();
+            }
+            let mut samples = Vec::with_capacity(20);
+            for _ in 0..20 {
+                let start = std::time::Instant::now();
+                let _ = rt.block_on(expr.evaluate(ex)).unwrap();
+                samples.push(start.elapsed().as_nanos());
+            }
+            median_ns(&mut samples)
+        };
+
+        let small_ns = measure(&small_ex);
+        let big_ns = measure(&big_ex);
+
+        println!("BENCH json_host_per_eval small_ns={small_ns} big_ns={big_ns}");
+
+        assert!(small_ns > 0, "small_ns median must be positive");
+        assert!(big_ns > 0, "big_ns median must be positive");
+        assert!(
+            big_ns >= small_ns,
+            "eager scope cost must be reproduced: big_ns={big_ns} < small_ns={small_ns}"
+        );
+    }
+
+    // ── rhai-json-fidelity task 1.5: engine integration + outbound refusal ──
+    //
+    // The shared host module is registered on every base engine, so the
+    // `json value`/`json number` wrapper surface shadows the stock JSON
+    // helpers. Direct outbound wrapper conversion is refused with the stable
+    // labels; every scenario below runs through `RhaiLanguage`.
+
+    /// Evaluate a read-only script on a fresh default-limits language.
+    async fn eval_script(script: &str, ex: &Exchange) -> Result<Value, LanguageError> {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression(script).expect("script compiles");
+        expr.evaluate(ex).await
+    }
+
+    /// Typed class of a failed evaluation.
+    fn eval_err_class(err: &LanguageError) -> ExpressionErrorClass {
+        err.class()
+            .expect("test error must carry an evaluation class")
+    }
+
+    /// Assert a failed evaluation carries the exact `ExpressionErrorClass`.
+    fn assert_class(err: &LanguageError, expected: ExpressionErrorClass, context: &str) {
+        assert_eq!(eval_err_class(err), expected, "{context}: {err:?}");
+    }
+
+    /// Evaluate a script against an empty exchange and return its string.
+    async fn json_script_out(script: &str) -> String {
+        let ex = Exchange::new(Message::default());
+        match eval_script(script, &ex)
+            .await
+            .expect("json script evaluates")
+        {
+            Value::String(s) => s,
+            other => panic!("expected Value::String, got {other:?}"),
+        }
+    }
+
+    fn empty_exchange() -> Exchange {
+        Exchange::new(Message::default())
+    }
+
+    #[tokio::test]
+    async fn json_host_helpers_win_on_expression_engine() {
+        let ex = empty_exchange();
+        let val = eval_script(r#"type_of(parse_json("{}"))"#, &ex)
+            .await
+            .expect("host parse_json runs");
+        assert_eq!(val, Value::String("json value".to_string()));
+    }
+
+    #[tokio::test]
+    async fn json_host_helpers_win_on_mutating_engine() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"type_of(parse_json("[]"))"#)
+            .unwrap();
+        let mut ex = empty_exchange();
+        let val = expr.evaluate(&mut ex).await.expect("host parse_json runs");
+        assert_eq!(val, Value::String("json value".to_string()));
+    }
+
+    #[tokio::test]
+    async fn json_host_helpers_win_on_predicate_engine() {
+        let lang = RhaiLanguage::new();
+        let pred = lang
+            .create_predicate(r#"type_of(parse_json("{}")) == "json value""#)
+            .unwrap();
+        let ex = empty_exchange();
+        assert!(pred.matches(&ex).await.expect("predicate evaluates"));
+    }
+
+    #[tokio::test]
+    async fn json_escaped_solidus_accepted() {
+        let out = json_script_out(r#"to_json(parse_json("{\"path\":\"a\\/b\"}"))"#).await;
+        assert!(out.contains(r#""path":"a/b""#), "{out}");
+    }
+
+    #[tokio::test]
+    async fn json_large_magnitude_round_trips_exact() {
+        let out = json_script_out(
+            r#"to_json(parse_json("[18446744073709551615,123456789012345678901234567890,1e400]"))"#,
+        )
+        .await;
+        assert_eq!(
+            out,
+            "[18446744073709551615,123456789012345678901234567890,1e400]"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_integer_forms_project_decimals_wrap() {
+        let ex = empty_exchange();
+        let script = r#"let j = parse_json("[9223372036854775807,-0,1.0,1e2,18446744073709551615]"); [type_of(j[0]),type_of(j[1]),type_of(j[2]),type_of(j[3]),type_of(j[4])]"#;
+        let val = eval_script(script, &ex).await.expect("projection runs");
+        assert_eq!(
+            val,
+            Value::Array(vec![
+                Value::String("i64".to_string()),
+                Value::String("i64".to_string()),
+                Value::String("json number".to_string()),
+                Value::String("json number".to_string()),
+                Value::String("json number".to_string()),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn json_to_float_1e400_is_arithmetic() {
+        let ex = empty_exchange();
+        let err = eval_script(r#"parse_json("1e400").to_float()"#, &ex)
+            .await
+            .expect_err("non-finite to_float must fail");
+        assert_class(&err, ExpressionErrorClass::Arithmetic, "to_float 1e400");
+    }
+
+    #[tokio::test]
+    async fn json_authored_order_retained() {
+        let out = json_script_out(r#"to_json(parse_json("{\"z\":1,\"a\":2,\"m\":3}"))"#).await;
+        assert_eq!(out, r#"{"z":1,"a":2,"m":3}"#);
+    }
+
+    #[tokio::test]
+    async fn json_duplicate_key_keeps_first_position_last_value() {
+        let out = json_script_out(r#"to_json(parse_json("{\"b\":1,\"a\":2,\"b\":3}"))"#).await;
+        assert_eq!(out, r#"{"b":3,"a":2}"#);
+    }
+
+    #[tokio::test]
+    async fn json_remove_a_keeps_order() {
+        let out = json_script_out(
+            r#"let j = parse_json("{\"a\":1,\"b\":2,\"c\":3}"); j.remove("a"); to_json(j)"#,
+        )
+        .await;
+        assert_eq!(out, r#"{"b":2,"c":3}"#);
+    }
+
+    #[tokio::test]
+    async fn json_round_trip_equivalent_not_byte_identical() {
+        let out =
+            json_script_out(r#"to_json(parse_json("{ \"a\" : 1 , \"b\" : \"x\\/y\" }"))"#).await;
+        assert_eq!(out, r#"{"a":1,"b":"x/y"}"#);
+    }
+
+    #[tokio::test]
+    async fn json_bare_read_isolated() {
+        let out = json_script_out(
+            r#"let j = parse_json("{\"a\":{\"b\":1}}"); let x = j["a"]; x["b"] = 9; to_json(j)"#,
+        )
+        .await;
+        assert!(out.contains(r#""b":1"#), "source must be isolated: {out}");
+    }
+
+    #[tokio::test]
+    async fn json_type_of_stable_labels() {
+        let ex = empty_exchange();
+        let val = eval_script(
+            r#"[type_of(parse_json("{}")), type_of(parse_json("1.5"))]"#,
+            &ex,
+        )
+        .await
+        .expect("type_of runs");
+        assert_eq!(
+            val,
+            Value::Array(vec![
+                Value::String("json value".to_string()),
+                Value::String("json number".to_string()),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn json_chained_dot_negative_index() {
+        let out = json_script_out(
+            r#"let j = parse_json("{\"a\":[{\"b\":1}]}"); j["a"][0]["b"] = 2; j.a[-1].b = 3; to_json(j)"#,
+        )
+        .await;
+        assert_eq!(out, r#"{"a":[{"b":3}]}"#);
+    }
+
+    #[tokio::test]
+    async fn json_out_of_range_index_error_array_bounds() {
+        let ex = empty_exchange();
+        let err = eval_script(r#"let j = parse_json("[1]"); j[5]"#, &ex)
+            .await
+            .expect_err("out-of-range index must fail");
+        // The integration boundary (`LanguageError::EvalFailure`) carries only
+        // the class: `ErrorArrayBounds` classifies as Runtime here. The exact
+        // inner variant is pinned at the host layer; see the test-design-gap
+        // report for the plan's `inner ErrorArrayBounds` wording.
+        assert_class(&err, ExpressionErrorClass::Runtime, "out-of-range index");
+    }
+
+    #[tokio::test]
+    async fn json_missing_key_versus_null() {
+        let ex = empty_exchange();
+        let script = r#"let j = parse_json("{\"n\":null}"); [j["n"] == (), j["m"] == (), j.contains("n"), j.contains("m"), ("m" in j)]"#;
+        let val = eval_script(script, &ex).await.expect("null semantics run");
+        assert_eq!(
+            val,
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(false),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn json_contains_on_array_type_mismatch() {
+        let ex = empty_exchange();
+        let err = eval_script(r#"parse_json("[1]").contains("k")"#, &ex)
+            .await
+            .expect_err("contains on an array must fail");
+        assert_class(&err, ExpressionErrorClass::TypeMismatch, "array contains");
+    }
+
+    #[tokio::test]
+    async fn json_wrong_container_getter_type_mismatch() {
+        let ex = empty_exchange();
+        for script in [r#"parse_json("[1]")["x"]"#, r#"parse_json("{}")[0]"#] {
+            let err = eval_script(script, &ex)
+                .await
+                .expect_err("wrong-container read must fail");
+            assert_class(&err, ExpressionErrorClass::TypeMismatch, script);
+        }
+    }
+
+    #[tokio::test]
+    async fn json_push_grows_remove_returns() {
+        let ex = empty_exchange();
+        let script = r#"let j = parse_json("[1,2]"); j.push(3); let r = j.remove(0); to_json(j) == "[2,3]" && r == 1 && j.remove(9) == ()"#;
+        let val = eval_script(script, &ex).await.expect("push/remove runs");
+        assert_eq!(val, Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn json_unit_assignment_stores_null() {
+        let out = json_script_out(r#"let j = parse_json("{}"); j["k"] = (); to_json(j)"#).await;
+        assert!(out.contains(r#""k":null"#), "{out}");
+    }
+
+    #[tokio::test]
+    async fn json_nested_setter_failure_rolls_back() {
+        let out = json_script_out(
+            r#"let j = parse_json("{\"a\":{\"b\":1}}"); try { j["a"]["b"] = || 1; } catch (e) {} to_json(j)"#,
+        )
+        .await;
+        assert!(out.contains(r#""b":1"#), "rollback must hold: {out}");
+    }
+
+    #[tokio::test]
+    async fn json_all_six_comparisons_refuse_type_mismatch() {
+        let ex = empty_exchange();
+        let wrappers = [r#"parse_json("{}")"#, r#"parse_json("1.5")"#];
+        let scalars = ["2", "2.5", r#""s""#, "true"];
+        let mut cases = 0_usize;
+        for op in ["==", "!=", "<", ">", "<=", ">="] {
+            for wrapper in wrappers {
+                for scalar in scalars {
+                    for script in [
+                        format!("{wrapper} {op} {scalar}"),
+                        format!("{scalar} {op} {wrapper}"),
+                    ] {
+                        let err = eval_script(&script, &ex)
+                            .await
+                            .expect_err("registered comparison must refuse");
+                        assert_class(&err, ExpressionErrorClass::TypeMismatch, &script);
+                        cases += 1;
+                    }
+                }
+            }
+            for (a, b) in [(wrappers[0], wrappers[1]), (wrappers[1], wrappers[0])] {
+                let script = format!("{a} {op} {b}");
+                let err = eval_script(&script, &ex)
+                    .await
+                    .expect_err("cross-wrapper comparison must refuse");
+                assert_class(&err, ExpressionErrorClass::TypeMismatch, &script);
+                cases += 1;
+            }
+            for wrapper in wrappers {
+                let script = format!("{wrapper} {op} {wrapper}");
+                let err = eval_script(&script, &ex)
+                    .await
+                    .expect_err("same-wrapper comparison must refuse");
+                assert_class(&err, ExpressionErrorClass::TypeMismatch, &script);
+                cases += 1;
+            }
+        }
+        assert_eq!(cases, 120, "the approved contract has 120 refusal cases");
+    }
+
+    #[tokio::test]
+    async fn json_null_compares_with_unit() {
+        let ex = empty_exchange();
+        let val = eval_script(r#"parse_json("null") == ()"#, &ex)
+            .await
+            .expect("unit comparison runs");
+        assert_eq!(val, Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn json_native_map_serializes_sorted_nested_inline() {
+        let out = json_script_out(r#"let p = parse_json("{}"); to_json(#{"b":1,"a":p})"#).await;
+        assert_eq!(out, r#"{"a":{},"b":1}"#);
+    }
+
+    #[tokio::test]
+    async fn json_function_and_method_forms_agree() {
+        let ex = empty_exchange();
+        let val = eval_script(
+            r#"let j = parse_json("{\"a\":1}"); to_json(j) == j.to_json()"#,
+            &ex,
+        )
+        .await
+        .expect("both forms run");
+        assert_eq!(val, Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn json_raw_utf8_no_slash_escape() {
+        let out = json_script_out(r#"to_json(parse_json("{\"s\":\"café\",\"p\":\"a/b\"}"))"#).await;
+        assert!(out.contains("café"), "{out}");
+        assert!(out.contains("a/b"), "{out}");
+        assert!(!out.contains("\\/"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn json_nonfinite_float_refused() {
+        let ex = empty_exchange();
+        let err = eval_script(r#"to_json(#{"x": 0.0/0.0})"#, &ex)
+            .await
+            .expect_err("non-finite float must be refused");
+        assert_class(&err, ExpressionErrorClass::TypeMismatch, "non-finite float");
+        let rendered = format!("{err}");
+        assert!(
+            !rendered.contains("NaN") && !rendered.contains("nan"),
+            "no debug fallback: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_unsupported_value_refused_type_mismatch() {
+        let ex = empty_exchange();
+        let scripts = [
+            r#"fn secret_fn_name() { 1 } to_json([Fn("secret_fn_name")])"#,
+            r#"fn secret_fn_name() { 1 } to_json(#{"f": Fn("secret_fn_name")})"#,
+            "to_json([timestamp()])",
+            r#"to_json(#{"t": timestamp()})"#,
+        ];
+        for script in scripts {
+            let err = eval_script(script, &ex)
+                .await
+                .expect_err("unsupported value must be refused");
+            match &err {
+                LanguageError::EvalFailure { class, detail, .. } => {
+                    assert_eq!(*class, ExpressionErrorClass::TypeMismatch, "{script}");
+                    assert!(detail.is_none(), "{script}: detail must be redacted");
+                }
+                other => panic!("{script}: expected EvalFailure, got {other:?}"),
+            }
+            for rendering in [format!("{err}"), format!("{err:?}")] {
+                assert!(
+                    !rendering.contains("secret_fn_name"),
+                    "{script}: value leaked: {rendering}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn json_to_string_and_to_debug_are_compact_json() {
+        let ex = empty_exchange();
+        let val = eval_script(
+            r#"let a = parse_json("{\"a\":1}").to_string(); let b = parse_json("{\"a\":1}").to_debug(); a == b && a == "{\"a\":1}""#,
+            &ex,
+        )
+        .await
+        .expect("string methods run");
+        assert_eq!(val, Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn json_depth_boundary() {
+        let ex = empty_exchange();
+        let ok = format!(
+            "to_json(parse_json(\"{}{}\"))",
+            "[".repeat(128),
+            "]".repeat(128)
+        );
+        let val = eval_script(&ok, &ex).await.expect("depth 128 parses");
+        assert!(matches!(val, Value::String(_)), "depth 128 must parse");
+
+        let bad = format!(
+            "to_json(parse_json(\"{}{}\"))",
+            "[".repeat(129),
+            "]".repeat(129)
+        );
+        let err = eval_script(&bad, &ex)
+            .await
+            .expect_err("depth 129 must fail");
+        assert_class(&err, ExpressionErrorClass::Limit, "depth 129");
+    }
+
+    #[tokio::test]
+    async fn json_native_container_depth_limit() {
+        let ex = empty_exchange();
+
+        let map_ok =
+            r#"let m = #{}; let n = 0; while n < 127 { m = #{ "x": m }; n += 1; } to_json(m)"#;
+        let val = eval_script(map_ok, &ex)
+            .await
+            .expect("depth-128 map serializes");
+        assert!(matches!(val, Value::String(_)));
+        let map_bad =
+            r#"let m = #{}; let n = 0; while n < 128 { m = #{ "x": m }; n += 1; } to_json(m)"#;
+        let err = eval_script(map_bad, &ex)
+            .await
+            .expect_err("depth-129 map must fail");
+        assert_class(&err, ExpressionErrorClass::Limit, "map depth 129");
+
+        let arr_ok = r#"let a = []; let n = 0; while n < 127 { a = [a]; n += 1; } to_json(a)"#;
+        let val = eval_script(arr_ok, &ex)
+            .await
+            .expect("depth-128 array serializes");
+        assert!(matches!(val, Value::String(_)));
+        let arr_bad = r#"let a = []; let n = 0; while n < 128 { a = [a]; n += 1; } to_json(a)"#;
+        let err = eval_script(arr_bad, &ex)
+            .await
+            .expect_err("depth-129 array must fail");
+        assert_class(&err, ExpressionErrorClass::Limit, "array depth 129");
+    }
+
+    #[tokio::test]
+    async fn json_mutation_depth_and_cap_rechecked() {
+        let lang = RhaiLanguage::with_limits(camel_language_api::RhaiLimitsConfig {
+            max_array_size: Some(2),
+            ..Default::default()
+        });
+        let expr = lang
+            .create_expression(r#"let j = parse_json("[1,2]"); j.push(3)"#)
+            .unwrap();
+        let ex = empty_exchange();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("push beyond the array cap must fail");
+        assert_class(&err, ExpressionErrorClass::Limit, "push over cap");
+    }
+
+    #[tokio::test]
+    async fn json_mutation_size_limit() {
+        let lang = RhaiLanguage::with_limits(camel_language_api::RhaiLimitsConfig {
+            max_string_size: Some(8),
+            ..Default::default()
+        });
+        let expr = lang
+            .create_expression(r#"let j = parse_json("{}"); j["key"] = "value";"#)
+            .unwrap();
+        let ex = empty_exchange();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("mutation over the string cap must fail");
+        assert_class(&err, ExpressionErrorClass::Limit, "mutation size cap");
+    }
+
+    #[tokio::test]
+    async fn json_self_assignment_at_cap_refused() {
+        let inner = format!("{}{}", "[".repeat(127), "]".repeat(127));
+        let json = format!("{{\"a\":{inner}}}");
+        let escaped = json.replace('"', "\\\"");
+        let script = format!("let j = parse_json(\"{escaped}\"); j[\"a\"] = j");
+        let ex = empty_exchange();
+        let err = eval_script(&script, &ex)
+            .await
+            .expect_err("self-assignment at the cap must fail");
+        assert_class(&err, ExpressionErrorClass::Limit, "self-assignment");
+    }
+
+    #[tokio::test]
+    async fn json_limits_read_from_calling_engine() {
+        let ex = empty_exchange();
+        let limited = RhaiLanguage::with_limits(camel_language_api::RhaiLimitsConfig {
+            max_array_size: Some(2),
+            ..Default::default()
+        });
+        let expr = limited
+            .create_expression(r#"to_json(parse_json("[1,2,3]"))"#)
+            .unwrap();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("engine cap must refuse");
+        assert_class(&err, ExpressionErrorClass::Limit, "engine array cap");
+
+        let default = RhaiLanguage::new();
+        let expr = default
+            .create_expression(r#"to_json(parse_json("[1,2,3]"))"#)
+            .unwrap();
+        assert_eq!(
+            expr.evaluate(&ex).await.unwrap(),
+            Value::String("[1,2,3]".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn json_zero_limit_is_unlimited() {
+        let lang = RhaiLanguage::with_limits(camel_language_api::RhaiLimitsConfig {
+            max_array_size: Some(0),
+            ..Default::default()
+        });
+        let ex = empty_exchange();
+        let expr = lang
+            .create_expression(r#"to_json(parse_json("[1,2,3]"))"#)
+            .unwrap();
+        assert_eq!(
+            expr.evaluate(&ex).await.unwrap(),
+            Value::String("[1,2,3]".to_string())
+        );
+
+        let ok = format!(
+            "to_json(parse_json(\"{}{}\"))",
+            "[".repeat(128),
+            "]".repeat(128)
+        );
+        let expr = lang.create_expression(&ok).unwrap();
+        assert!(matches!(
+            expr.evaluate(&ex).await.unwrap(),
+            Value::String(_)
+        ));
+
+        let bad = format!(
+            "to_json(parse_json(\"{}{}\"))",
+            "[".repeat(129),
+            "]".repeat(129)
+        );
+        let expr = lang.create_expression(&bad).unwrap();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("depth 129 must still fail");
+        assert_class(&err, ExpressionErrorClass::Limit, "zero cap depth 129");
+    }
+
+    #[tokio::test]
+    async fn json_arithmetic_and_helpers_function_not_found() {
+        let ex = empty_exchange();
+        let scripts = [
+            r#"parse_json("1.5") + 1"#,
+            r#"let j = parse_json("1.5"); j += 1"#,
+            r#"parse_json("{}").values()"#,
+            r#"parse_json("{}").merge(#{})"#,
+        ];
+        for script in scripts {
+            let err = eval_script(script, &ex)
+                .await
+                .expect_err("unavailable operation must fail");
+            assert_class(&err, ExpressionErrorClass::FunctionNotFound, script);
+        }
+    }
+
+    #[tokio::test]
+    async fn json_iteration_runtime_error() {
+        let ex = empty_exchange();
+        let err = eval_script(r#"for k in parse_json("{}") {}"#, &ex)
+            .await
+            .expect_err("iteration must fail");
+        assert_class(&err, ExpressionErrorClass::Runtime, "for iteration");
+    }
+
+    #[tokio::test]
+    async fn json_setter_failure_propagates() {
+        let ex = empty_exchange();
+        let err = eval_script(r#"let j = parse_json("{}"); j["k"] = || 1;"#, &ex)
+            .await
+            .expect_err("setter failure must propagate");
+        // Class discrimination matters here: an `ErrorIndexingType` (which Rhai
+        // discards during index-chain write-back) would classify as Runtime,
+        // so TypeMismatch proves the typed setter failure propagated.
+        assert_class(&err, ExpressionErrorClass::TypeMismatch, "setter failure");
+    }
+
+    #[tokio::test]
+    async fn json_parse_error_is_parse_class_with_position() {
+        let canary = "SECRET_TOKEN_XYZ";
+        let script = format!(r#"parse_json("{canary}")"#);
+        let ex = empty_exchange();
+        let err = eval_script(&script, &ex)
+            .await
+            .expect_err("malformed input must fail");
+        match &err {
+            LanguageError::EvalFailure {
+                class,
+                position,
+                detail,
+            } => {
+                assert_eq!(*class, ExpressionErrorClass::Parse);
+                assert!(position.is_some(), "script call position must be set");
+                assert!(detail.is_none(), "detail must be redacted");
+            }
+            other => panic!("expected EvalFailure, got {other:?}"),
+        }
+        let rendered = format!("{err}");
+        assert!(!rendered.contains(canary), "secret leaked: {rendered}");
+        assert!(
+            !rendered.contains("line "),
+            "parser line leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("column"),
+            "parser column leaked: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_inbound_u64_property_still_refused() {
+        let mut ex = empty_exchange();
+        ex.properties
+            .insert("big".to_string(), Value::from(u64::MAX));
+        let err = eval_script(r#"property("big")"#, &ex)
+            .await
+            .expect_err("u64 > i64::MAX must be refused");
+        // Spec: the existing typed conversion error is unchanged. The task
+        // wording says `type-mismatch`; observationally the inbound refusal is
+        // the pre-existing `ConversionError` (class `conversion`). Reported as
+        // a test-design-gap.
+        assert_class(&err, ExpressionErrorClass::Conversion, "inbound u64");
+        assert!(
+            matches!(err, LanguageError::ConversionError { .. }),
+            "inbound u64 must stay a conversion refusal: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_explicit_serialization_yields_text_body() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"body = to_json(parse_json("{\"a\":1}"))"#)
+            .unwrap();
+        let mut ex = empty_exchange();
+        expr.evaluate(&mut ex).await.unwrap();
+        assert_eq!(ex.input.body.as_text(), Some(r#"{"a":1}"#));
     }
 }

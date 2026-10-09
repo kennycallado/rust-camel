@@ -98,6 +98,113 @@ Read-only expressions and predicates compile twice. The first compilation uses `
 
 Use Rhai for complex logic in pipeline steps: branching, computation, and multi-step mutation. For flat header and body access, [Simple](simple.md) is lighter and needs no engine. For JavaScript-syntax scripting, use [JavaScript](js.md).
 
+## JSON helpers
+
+`parse_json` and `to_json` are host functions. A shared host module registers
+them on every sandbox engine after the standard package, so they shadow the
+stock Rhai JSON built-ins on the read-only, mutating, and expression engines. The
+two wrapper types use the stable labels `json value` and `json number`.
+
+### Parsing
+
+`parse_json` accepts the full RFC 8259 grammar for any JSON value (object,
+array, or scalar). It accepts the `\/` escape and refuses an unpaired surrogate
+escape. A malformed input fails with a redacted `parse` error. That error holds
+only the class and the script call position. It holds no input text and no parser
+line or column.
+
+`parse_json` stores every number as its exact source token. It does not convert a
+number to `f64`. An integer-form token (no fraction and no exponent) that fits in
+`i64` projects to a native `INT`, and `-0` normalizes to `0`. A decimal, an
+exponent, and an integer outside the `i64` range each become a `json number`
+wrapper. That wrapper keeps the exact token, so a large magnitude round-trips
+without `f64` rounding.
+
+`JsonNumber.to_float()` is the only number conversion. It returns a finite
+`f64`, or an `arithmetic` error when the result is not finite (for example
+`1e400`).
+
+Object keys keep their authored insertion order. A duplicate key takes the last
+value and keeps the position of its first occurrence. Replacing the value at an
+existing key retains that key's position. `remove` shifts, so the remaining keys
+keep their relative order.
+
+### Serializing
+
+`to_json` accepts a wrapper, a native `Map`, a native `Array`, a string, a
+`bool`, an `i64`, a finite `f64`, and unit. The method form `value.to_json()`
+matches the function form `to_json(value)`. `to_string` and `to_debug` on a
+wrapper return the same compact JSON, and for a `json number` they return the
+number token.
+
+Output is compact JSON with raw UTF-8 (non-ASCII bytes are emitted directly). It
+does not escape `/`. It escapes control characters. It emits keys in stored
+order. Native `Map` keys are sorted, and a wrapper nested inside a native `Map`
+or `Array` is inlined.
+
+An unsupported value (function pointer, closure, timestamp, custom type) and a
+non-finite float each fail with a `type-mismatch` error. That error does not use a
+`Debug`/`Display` fallback and does not include the value.
+
+### Wrapper surface
+
+A wrapper supports string-key and integer-index get and set, including chained
+assignment. Dot-property access falls back to string-key indexing. A negative
+array index counts from the end, and an out-of-range index raises
+`ErrorArrayBounds`. The helper surface is `len`, `contains`, `keys`, `remove`,
+and `push`. `contains` accepts a string key on an object; a call on an array
+fails with `type-mismatch`. `push` only appends and rechecks the array cap.
+`remove` returns the removed value, or unit when the key or index is absent.
+Assigning unit stores JSON `null`. A missing key and a JSON `null` both read as
+unit. `contains` and the `in` operator distinguish a present key from an absent
+one.
+
+The wrapper has no iteration. A `for` loop over a wrapper fails with a `runtime`
+error. Arithmetic (`+`, `+=`) and the container helpers `values` and `merge`
+fail with `function-not-found`.
+
+Every registered comparison between a wrapper and a native `i64`, `f64`,
+`String`, or `bool`, in both operand orders, and between two wrappers, fails with
+`type-mismatch`. There is no exact numeric comparison engine. Call `to_float()`
+for an explicit lossy comparison. JSON `null` projects to unit, so
+`parse_json("null") == ()` is true. Comparisons outside the registered set keep
+Rhai builtin behavior.
+
+### Bounds
+
+Parsing enforces `max-string-size` on the input before descent. It enforces
+`max-array-size` and `max-map-size` on each container. A cap of `0` keeps the
+Rhai unlimited meaning for that cap.
+
+The depth cap is 128. A top-level scalar has depth 0, and a top-level container
+has depth 1. Depth 128 is accepted, and depth 129 fails with a `limit` error.
+The cap is invariant across parsing, mutation, and serialization. Every set,
+push, conversion, and `to_json` of a native container checks the depth of the
+target path plus the depth of the inserted value. It fails with `limit` before
+it applies when the total would exceed 128. A self-assignment such as
+`j["a"] = j` that would exceed the cap is refused. A mutation that would exceed
+`max-string-size` fails with `limit` before it applies. A bound violation
+commits no Exchange change.
+
+### Compatibility break
+
+Decimal and exponent JSON numbers are now `json number`, not `f64`. A script that
+did arithmetic on them, or that expected `f64`, breaks. Use `to_float()` for an
+explicit lossy comparison.
+
+Direct outbound conversion of a wrapper is deferred. Assigning a wrapper to a
+body fails as an explicit compatibility break: `body = parse_json(...)` (or
+`set_body(parse_json(...))`) does not work. Persist parsed JSON with `to_json` or
+a native leaf. `body = to_json(j)` yields a text body that holds valid JSON.
+
+`to_json(parse_json(s))` is semantically equivalent, not byte-for-byte identical.
+It preserves the value, the numeric magnitude, and the key order. It does not
+preserve whitespace, indentation, or escape spelling. Wrapped number tokens stay
+exact, and a native `i64` spelling may normalize, including `-0` to `0`.
+
+The inbound exchange conversion is unchanged. A JSON integer greater than
+`i64::MAX` on that path is still refused.
+
 ## String methods mutate in place
 
 Rhai string methods such as `replace`, `trim`, and `pad` mutate the subject in place and return unit `()`. They do not return a new string. This differs from JavaScript, Python, and Rust.

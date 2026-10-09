@@ -25,6 +25,31 @@ The sandbox has no configuration opt-out. Timing functions from
 `StandardPackage` remain available. Resource limits, not the sandbox boundary,
 bound their use.
 
+## JSON host module
+
+A private `json` module holds a process-wide host `rhai::Module`. Every sandbox
+engine registers it globally after `StandardPackage`, so `parse_json` and
+`to_json` shadow the stock Rhai built-ins on the read-only, mutating, and
+expression engines. The helpers read `max-string-size`, `max-array-size`, and
+`max-map-size` from the calling engine.
+
+`parse_json` is strict RFC 8259 and stores exact number tokens. Integer-form
+tokens that fit `i64` project to a native `INT`; decimals, exponents, and
+out-of-`i64` integers are the `json number` wrapper. Objects keep insertion order
+in an `IndexMap`. The wrapper has an `Arc` copy-on-write tree, a depth cap of
+128, and no iteration.
+
+`to_json`, `to_string`, and `to_debug` emit compact JSON in stored order with raw
+UTF-8 and no `/` escape. Native `Map` keys are sorted.
+
+The outbound converter `dynamic_to_value` refuses `JsonValue` and `JsonNumber`
+with the stable labels `json value` and `json number`. Direct outbound wrapper
+conversion is deferred, so persisting parsed JSON uses `to_json` or a native
+leaf. The inbound converter and `make_scope`/`prepare_scope` are unchanged.
+
+Authority: bd rc-qka42. `rc-m01r9` (eager scope conversion) and `rc-141om`
+(inbound u64 refusal) remain out of scope.
+
 ## Resource limits
 
 `[languages.rhai.limits]` configures seven limits. `None` selects the rust-camel
@@ -75,3 +100,4 @@ SPI trait objects. No public signature exposes a Rhai type.
 - ADR-0033: security defaults
 - ADR-0051: credential redaction at diagnostic boundaries
 - bd rc-dip6: expose the Rhai call-level limit
+- bd rc-qka42: strict bounded Rhai JSON host helpers
