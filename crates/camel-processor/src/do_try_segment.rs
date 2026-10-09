@@ -92,25 +92,27 @@ async fn run_finally_body(
     }
 }
 
-/// Surface a failed catch-predicate error after running finally.
+/// Surface `failure` after running finally.
 ///
-/// The chained predicate error becomes the main failure (Camel parity: a
-/// throwing finally body restores it; Stop in finally still stops the outer
-/// route; a failed finally `on_when` predicate supersedes it).
-async fn fail_after_predicate_error(
+/// Used both for a failed catch predicate (the predicate error surfaced as the
+/// main failure) and for the no-catch-matched path (the original try error).
+/// `failure` becomes the main failure (Camel parity: a throwing finally body
+/// restores it; Stop in finally still stops the outer route; a failed finally
+/// `on_when` predicate supersedes it).
+async fn fail_after_finally(
     finally: &mut Option<FinallyClauseSegment>,
     ex: Exchange,
-    chained: CamelError,
+    failure: CamelError,
 ) -> PipelineOutcome {
     match run_finally_body(finally, ex).await {
-        Ok(_) => PipelineOutcome::Failed(chained),
+        Ok(_) => PipelineOutcome::Failed(failure),
         Err(FinallyOutcome::Stopped(e)) => PipelineOutcome::Stopped(*e),
         Err(FinallyOutcome::Failed(_finally_err)) => {
             tracing::warn!(
-                error = %chained,
-                "doFinally threw after catch predicate failure; restoring chained error"
+                error = %failure,
+                "doFinally threw; restoring previous error (Camel parity)"
             );
-            PipelineOutcome::Failed(chained)
+            PipelineOutcome::Failed(failure)
         }
         Err(FinallyOutcome::PredicateFailed(pred_err)) => PipelineOutcome::Failed(pred_err),
     }
@@ -143,17 +145,17 @@ impl OutcomePipeline for DoTrySegment {
                     // original error (preserved as `cause`) and fails the scope.
                     let mut current_ex = exchange_for_unmatched;
                     current_ex.set_error(err.clone());
+                    // Distinguishes "a catch handled the error" (loop breaks
+                    // with `current_ex` = catch output) from "the loop
+                    // exhausted with no match" (must propagate the original).
+                    let mut catch_matched = false;
                     for catch in self.catches.iter_mut() {
                         let matched = match catch.matcher.matches(&err, &current_ex).await {
                             Ok(m) => m,
                             Err(pred_err) => {
                                 let chained = chain_predicate_error(pred_err, err);
-                                return fail_after_predicate_error(
-                                    &mut self.finally,
-                                    current_ex,
-                                    chained,
-                                )
-                                .await;
+                                return fail_after_finally(&mut self.finally, current_ex, chained)
+                                    .await;
                             }
                         };
                         if !matched {
@@ -165,7 +167,7 @@ impl OutcomePipeline for DoTrySegment {
                                 Ok(false) => continue,
                                 Err(pred_err) => {
                                     let chained = chain_predicate_error(pred_err, err);
-                                    return fail_after_predicate_error(
+                                    return fail_after_finally(
                                         &mut self.finally,
                                         current_ex,
                                         chained,
@@ -184,10 +186,12 @@ impl OutcomePipeline for DoTrySegment {
                                 match catch.disposition {
                                     ExceptionDisposition::Handled => {
                                         current_ex = next;
+                                        catch_matched = true;
                                         break;
                                     }
                                     ExceptionDisposition::Continued => {
                                         current_ex = next;
+                                        catch_matched = true;
                                         break;
                                     }
                                     // Propagate and any future variant run finally then
@@ -239,7 +243,18 @@ impl OutcomePipeline for DoTrySegment {
                             }
                         }
                     }
-                    current_ex
+                    if catch_matched {
+                        // A catch handled the error: continue to the shared
+                        // finally path and return its exchange as Completed.
+                        current_ex
+                    } else {
+                        // No catch matched: run finally, then propagate the
+                        // original try error as `Failed`. Falling through to the
+                        // shared finally path would return `Completed` and
+                        // swallow the error, letting the route continue past
+                        // the scope (mirrors `DoTryService`'s no-match arm).
+                        return fail_after_finally(&mut self.finally, current_ex, err).await;
+                    }
                 }
             };
             // 3. Run finally if present (skip if try/catch returned Stopped —
@@ -674,6 +689,57 @@ mod tests {
             finally_call.load(Ordering::SeqCst),
             0,
             "finally body must not run when its on_when predicate errors"
+        );
+    }
+
+    // ── No-catch-matched path (mission 353) ──
+
+    /// doTry with no matching catch must run finally and propagate the
+    /// original try error as `Failed` — the segment counterpart of
+    /// `DoTryService::no_clause_matches_propagates_original`. Guards against
+    /// regressing back to `Completed(bugged_swallow)`.
+    #[tokio::test]
+    async fn no_clause_matches_runs_finally_and_propagates_original() {
+        let catch_call = Arc::new(AtomicU32::new(0));
+        let finally_call = Arc::new(AtomicU32::new(0));
+
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::EndpointCreationFailed(
+                "direct endpoint 'direct:does-not-exist' not registered".into(),
+            )),
+            catches: vec![CatchClauseSegment {
+                matcher: CatchMatcher::ByVariant(vec!["Io".into()]),
+                on_when: None,
+                body: seg_record(catch_call.clone()),
+                disposition: ExceptionDisposition::Handled,
+            }],
+            finally: Some(FinallyClauseSegment {
+                on_when: None,
+                body: seg_record(finally_call.clone()),
+            }),
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        match result {
+            PipelineOutcome::Failed(CamelError::EndpointCreationFailed(msg)) => {
+                assert!(
+                    msg.contains("does-not-exist"),
+                    "propagated error must be the original try error, got: {msg}"
+                );
+            }
+            other => {
+                panic!("no catch matched: expected Failed(EndpointCreationFailed), got {other:?}")
+            }
+        }
+        assert_eq!(
+            finally_call.load(Ordering::SeqCst),
+            1,
+            "finally must run exactly once when no catch matches"
+        );
+        assert_eq!(
+            catch_call.load(Ordering::SeqCst),
+            0,
+            "the unmatched catch body must not run"
         );
     }
 }

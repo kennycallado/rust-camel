@@ -12,9 +12,14 @@ use camel_api::body::Body;
 use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::test_support::acquire_deadline;
+use camel_component_http::HttpComponent;
 use camel_dsl::parse_yaml;
+use camel_language_rhai::RhaiLanguage;
 use camel_test::CamelTestContext;
 use tower::ServiceExt;
+
+mod support;
+use support::stage_http_listener;
 
 fn test_rt() -> Arc<dyn camel_component_api::RuntimeObservability> {
     Arc::new(camel_component_api::NoOpComponentContext)
@@ -748,4 +753,221 @@ fn do_try_catch_failure_compensation_route_logs_original() {
         catch_error.contains("compensation-down"),
         "catch_error must carry the CATCH error, got: {catch_error}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Mission 353: doTry with NO matching catch must propagate the original error
+// out of the scope (route fails / HTTP 500), not swallow it as Completed.
+// ---------------------------------------------------------------------------
+
+/// Register `rhai` before `add_route` (route compilation resolves the language
+/// registry at add time). Idempotent.
+async fn register_rhai_for_http(h: &CamelTestContext) {
+    let mut ctx = acquire_deadline(
+        h.ctx(),
+        "camel context (register_rhai_for_http)",
+        Duration::from_secs(10),
+    )
+    .await;
+    let _ = ctx.register_language("rhai", Box::new(RhaiLanguage::new()));
+}
+
+/// Regression (mission 353): the team's YAML repro over real HTTP.
+///
+/// HTTP POST route → `do_try { steps: [to: direct:does-not-exist],
+/// catch: [{exception: [Io], steps: [to: mock:unmatched-catch]}] }` →
+/// `set_body REACHED-AFTER-DO_TRY` → `to mock:after-do-try`.
+///
+/// `direct:does-not-exist` has no consumer, so the try body fails
+/// `EndpointCreationFailed`; the sole catch clause matches `Io` only and must
+/// NOT fire. Expected: HTTP 500, the unmatched catch body never runs, and the
+/// step after the doTry never runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn do_try_unmatched_catch_propagates_http_500() {
+    let port = stage_http_listener("127.0.0.1").await;
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
+
+    let yaml = format!(
+        r#"routes:
+  - id: "dotry-unmatched-catch"
+    from: "http://127.0.0.1:{port}/dotry-unmatched"
+    steps:
+      - do_try:
+          steps:
+            - to: "direct:does-not-exist"
+          catch:
+            - exception: ["Io"]
+              disposition: handled
+              steps:
+                - to: "mock:unmatched-catch"
+      - set_body: "REACHED-AFTER-DO_TRY"
+      - to: "mock:after-do-try"
+"#
+    );
+    for route in parse_yaml(&yaml).expect("YAML parse failed") {
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/dotry-unmatched"))
+        .body("payload")
+        .send()
+        .await
+        .expect("request should reach the HTTP consumer");
+    assert_eq!(
+        resp.status(),
+        500,
+        "an unmatched doTry error must propagate out of the scope (HTTP 500)"
+    );
+
+    h.mock()
+        .get_endpoint("unmatched-catch")
+        .unwrap()
+        .assert_exchange_count(0)
+        .await;
+    h.mock()
+        .get_endpoint("after-do-try")
+        .unwrap()
+        .assert_exchange_count(0)
+        .await;
+
+    h.stop().await;
+}
+
+/// Regression (mission 353): a rhai throw inside `do_try` whose error matches
+/// no catch clause must fail the route the same way as the endpoint error —
+/// HTTP 500, no catch body, no continuation past the doTry.
+#[tokio::test(flavor = "multi_thread")]
+async fn do_try_unmatched_catch_rhai_throw_propagates_http_500() {
+    let port = stage_http_listener("127.0.0.1").await;
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
+    register_rhai_for_http(&h).await;
+
+    let yaml = format!(
+        r#"routes:
+  - id: "dotry-rhai-unmatched"
+    from: "http://127.0.0.1:{port}/dotry-rhai-unmatched"
+    steps:
+      - do_try:
+          steps:
+            - set_property:
+                name: x
+                rhai: |-
+                  "no-es-un-numero".parse_float()
+          catch:
+            - exception: ["Io"]
+              disposition: handled
+              steps:
+                - to: "mock:unmatched-catch-rhai"
+      - set_body: "REACHED-AFTER-DO_TRY"
+      - to: "mock:after-do-try-rhai"
+"#
+    );
+    for route in parse_yaml(&yaml).expect("YAML parse failed") {
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/dotry-rhai-unmatched"))
+        .body("payload")
+        .send()
+        .await
+        .expect("request should reach the HTTP consumer");
+    assert_eq!(
+        resp.status(),
+        500,
+        "an unmatched rhai throw inside doTry must propagate (HTTP 500)"
+    );
+
+    h.mock()
+        .get_endpoint("unmatched-catch-rhai")
+        .unwrap()
+        .assert_exchange_count(0)
+        .await;
+    h.mock()
+        .get_endpoint("after-do-try-rhai")
+        .unwrap()
+        .assert_exchange_count(0)
+        .await;
+
+    h.stop().await;
+}
+
+/// Control (mission 353): a catch clause that DOES match the try error must
+/// still fire. Guards the no-match fix against over-propagation.
+///
+/// Same `direct:does-not-exist` trigger, but the catch matches
+/// `EndpointCreationFailed`, so the catch body runs and the Handled disposition
+/// lets the route continue past the doTry (HTTP 200).
+#[tokio::test(flavor = "multi_thread")]
+async fn do_try_matching_catch_still_catches() {
+    let port = stage_http_listener("127.0.0.1").await;
+    let h = CamelTestContext::builder()
+        .with_component(HttpComponent::new())
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
+
+    let yaml = format!(
+        r#"routes:
+  - id: "dotry-matching-catch"
+    from: "http://127.0.0.1:{port}/dotry-matching"
+    steps:
+      - do_try:
+          steps:
+            - to: "direct:does-not-exist"
+          catch:
+            - exception: ["EndpointCreationFailed"]
+              disposition: handled
+              steps:
+                - to: "mock:matching-catch"
+      - set_body: "REACHED-AFTER-DO_TRY"
+      - to: "mock:after-do-try-matching"
+"#
+    );
+    for route in parse_yaml(&yaml).expect("YAML parse failed") {
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/dotry-matching"))
+        .body("payload")
+        .send()
+        .await
+        .expect("request should reach the HTTP consumer");
+    assert_eq!(
+        resp.status(),
+        200,
+        "a matching Handled catch absorbs the error; route continues (HTTP 200)"
+    );
+
+    h.mock()
+        .get_endpoint("matching-catch")
+        .unwrap()
+        .assert_exchange_count(1)
+        .await;
+    h.mock()
+        .get_endpoint("after-do-try-matching")
+        .unwrap()
+        .assert_exchange_count(1)
+        .await;
+
+    h.stop().await;
 }
