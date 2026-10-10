@@ -148,7 +148,7 @@ state = "registered"
 
 [[crates]]
 name = "camel-component-rabbitmq"
-state = "new-unpublished"
+state = "registered"
 
 [[crates]]
 name = "camel-component-seda"
