@@ -169,14 +169,16 @@ lang-minijinja = ["camel-core/lang-minijinja"]
 # only `flavor-*` markers. Bodies are CHAINED: each flavor includes the
 # marker of the flavor below it, so slim ⊆ regular ⊆ full is structural.
 # Priority when several are enabled is full > regular > slim; a build with
-# no marker reports `custom`. Regular excludes ONLY the four principled
+# no marker reports `custom`. Regular excludes ONLY the three build-level
 # items: kafka (C dependency, unportable to musl), surrealdb (BUSL-1.1, the
-# only non-OSI license in the graph), exec (arbitrary host-binary
-# execution, ADR-0037), containers (infrastructure-daemon client:
-# camel-function + camel-component-container as ONE feature).
+# only non-OSI license in the graph), and containers
+# (infrastructure-daemon client: camel-function + camel-component-container
+# as ONE feature). exec ships in regular since ADR-0037-A1: its capability
+# gate is the operator-owned runtime profile allowlist, not the build
+# flavor; slim stays exec-free by policy.
 flavor-slim = ["mqtt", "mqtt-tls", "http-static", "sql", "lang-jsonpath", "lang-rhai"]
-flavor-regular = ["flavor-slim", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]
-flavor-full = ["flavor-regular", "exec", "kafka", "surrealdb", "integration-surreal", "integration-redis", "containers"]
+flavor-regular = ["flavor-slim", "exec", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]
+flavor-full = ["flavor-regular", "kafka", "surrealdb", "integration-surreal", "integration-redis", "containers"]
 # otel instruments http (always linked) and ws. The ws/otel forward
 # activates the optional camel-component-ws dep without the `ws`
 # capability gate — pre-existing shape: telemetry-on does not imply

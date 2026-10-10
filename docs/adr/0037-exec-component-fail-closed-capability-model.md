@@ -236,3 +236,26 @@ default no-op behavior. The exec component needs monotonic counters
   methods. These metrics are silently dropped in production until the backends override
   them (tracked as a follow-up). Only `record_exchange_duration`/`record_circuit_breaker_change`
   are wired today.
+
+## Amendment: A1 — distribution follows the runtime capability gate (2026-10-10)
+
+**Status:** Accepted
+**Context:** exec shipped flavor-full-only as a distribution-level intent
+signal. The runtime already fails closed: zero profiles → boot error; URIs
+pin operator-declared profiles only; shells denied unless `allow_shell`;
+arguments deny-by-default (Decision above). Job users need exec for host
+tooling on the default (`flavor-regular`) install, and declaring
+`[components.exec]` profiles in Camel.toml is a stronger intent signal
+than a build-time feature flag.
+
+**Decision:** exec joins flavor-regular; the capability gate remains the
+operator-owned runtime profile allowlist, not the build flavor. Startup
+logs the active profile set (name + canonical executable) at `info`.
+Slim stays exec-free by policy. Flavor exclusions now encode build-level
+facts only (kafka C dependency, surrealdb BUSL-1.1 license, containers
+infrastructure-daemon client).
+
+**Consequences:** Default installs can run exec once Camel.toml opts in —
+no rebuild needed for `camel job` host-tooling routes. `args = { allow =
+"any" }` remains the operator's documented risk. The active surface is
+visible in boot logs.

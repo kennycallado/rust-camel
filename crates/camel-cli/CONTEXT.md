@@ -342,18 +342,21 @@ it, so slim ⊆ regular ⊆ full is structural (asserted by
   "lang-jsonpath", "lang-rhai"]` — the edge pack on top of the base
   components (core, direct, seda, log, file, timer, http, template,
   master, cron, controlbus, mock, validator, camel test harness).
-- `flavor-regular = ["flavor-slim", "otel", "grpc", "wasm", "llm",
-  "mcp", "security", "redis", "redis-tls", "jms", "cxf", "xj", "xslt",
-  "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp",
-  "kubernetes", "integration-http", "integration-sql"]`.
-- `flavor-full = ["flavor-regular", "exec", "kafka", "surrealdb",
-  "containers"]`.
+- `flavor-regular = ["flavor-slim", "exec", "otel", "grpc", "wasm", "llm",
+  "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj",
+  "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja",
+  "lsp", "kubernetes", "integration-http", "integration-sql"]`.
+- `flavor-full = ["flavor-regular", "kafka", "surrealdb",
+  "integration-surreal", "integration-redis", "containers"]`.
 
-Regular excludes ONLY the four principled items: kafka (C dependency,
+Regular excludes ONLY the three build-level items: kafka (C dependency,
 unportable to musl), surrealdb (BUSL-1.1, the only non-OSI license in
-the graph), exec (arbitrary host-binary execution, ADR-0037), and
-containers (infrastructure-daemon client: camel-function +
-camel-component-container as ONE feature). The contract sets in
+the graph), and containers (infrastructure-daemon client: camel-function +
+camel-component-container as ONE feature). exec ships in regular since
+ADR-0037-A1: the exec capability gate is the operator-owned runtime
+profile allowlist (zero profiles = boot fails closed), not the build
+flavor; the active profile set is logged at startup, and slim stays
+exec-free by policy. The contract sets in
 `tests/feature_profiles.rs` (`SLIM_FORBIDDEN_PREFIXES`,
 `REGULAR_FORBIDDEN_PREFIXES`, `REGULAR_REQUIRED_PREFIXES`,
 `FULL_REQUIRED_PREFIXES`) gate the closures, and `full_covers_universe`

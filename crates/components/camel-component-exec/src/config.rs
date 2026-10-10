@@ -205,6 +205,18 @@ impl ExecGlobalConfig {
             confine(&canonical_root, &p.working_dir)
                 .map_err(|e| camel_api::CamelError::Config(format!("profile {:?}: {e}", p.name)))?;
         }
+
+        // ADR-0037-A1: distribution no longer signals capability (exec
+        // ships in flavor-regular), so the active surface must be visible
+        // to operators at boot. Profile names + canonical executables
+        // only — never args or env values.
+        for p in &self.profiles {
+            tracing::info!(
+                profile = p.name,
+                exe = ?p.canonical_executable,
+                "exec profile active"
+            );
+        }
         Ok(())
     }
 

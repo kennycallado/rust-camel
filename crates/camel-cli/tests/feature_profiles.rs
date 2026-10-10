@@ -312,18 +312,14 @@ fn default_closure_matches_golden() {
                 "default closure must still contain `{prefix}`"
             );
         }
-        // Default = flavor-regular: the four principled exclusions must
+        // Default = flavor-regular: the three principled exclusions must
         // stay out of the default closure (kafka is covered by
-        // REGULAR_FORBIDDEN_PREFIXES in regular_closure_satisfies_contract).
+        // REGULAR_FORBIDDEN_PREFIXES in regular_closure_satisfies_contract;
+        // exec is IN regular since ADR-0037-A1).
         assert_absent(
             &actual,
-            &[
-                EXEC_PREFIX,
-                SURREALDB_PREFIX,
-                FUNCTION_PREFIX,
-                CONTAINER_PREFIX,
-            ],
-            "default (flavor-regular) closure must exclude the four principled exclusions",
+            &[SURREALDB_PREFIX, FUNCTION_PREFIX, CONTAINER_PREFIX],
+            "default (flavor-regular) closure must exclude the three principled exclusions",
         );
         return;
     }
@@ -406,12 +402,13 @@ const CONTAINER_PREFIX: &str = "camel-component-container v";
 const RABBITMQ_PREFIX: &str = "camel-component-rabbitmq v";
 const SECURITY_PREFIX: &str = "camel-component-keycloak v";
 
-// Slim's exclusion set in the final model: the four principled exclusions
-// from regular (kafka: C dependency unportable to musl; exec: arbitrary
-// host-binary execution, ADR-0037; surrealdb: BUSL-1.1, the only non-OSI
-// license in the graph; containers: infrastructure-daemon client, one
-// feature with camel-function) plus the language runtimes and the security
-// stack slim deliberately drops (lang-js, lang-xpath, security). The old
+// Slim's exclusion set in the final model: the three build-fact exclusions
+// from regular (kafka: C dependency unportable to musl; surrealdb:
+// BUSL-1.1, the only non-OSI license in the graph; containers:
+// infrastructure-daemon client, one feature with camel-function) PLUS exec
+// (arbitrary host-binary execution — slim stays exec-free by policy,
+// ADR-0037-A1) plus the language runtimes and the security stack slim
+// deliberately drops (lang-js, lang-xpath, security). The old
 // controllable-set entries (mqtt, sql, jsonpath, rhai, the bridges, lsp,
 // wasm/llm/mcp/grpc) are IN slim or regular now and no longer forbidden —
 // explicitly dropped here: SQL_PREFIX and the jsonpath crate. RabbitMQ is
@@ -428,25 +425,26 @@ const SLIM_FORBIDDEN_PREFIXES: &[&str] = &[
     SECURITY_PREFIX,
 ];
 
-// Regular excludes ONLY the four principled items — lang-js, rhai and
-// lang-xpath are IN regular (owner ruling, design.md Decision 2).
+// Regular excludes ONLY the three build-level items — kafka, surrealdb,
+// containers(+camel-function) — and lang-js, rhai and lang-xpath are IN
+// regular (owner ruling, design.md Decision 2). exec ships in regular
+// (ADR-0037-A1): the capability gate is the operator-owned runtime
+// profile allowlist, not the build flavor.
 const REGULAR_FORBIDDEN_PREFIXES: &[&str] = &[
     KAFKA_PREFIX,
-    EXEC_PREFIX,
     SURREALDB_PREFIX,
     FUNCTION_PREFIX,
     CONTAINER_PREFIX,
 ];
 
-// Full = regular plus exactly the four principled deltas; every delta must
+// Full = regular plus exactly the three build-fact deltas; every delta must
 // be reachable in the full closure (the historical kafka-less-full defect
-// stays fixed).
+// stays fixed). exec is no longer a delta — it arrives via regular.
 const FULL_REQUIRED_PREFIXES: &[&str] = &[
     KAFKA_PREFIX,
     SURREALDB_PREFIX,
     FUNCTION_PREFIX,
     CONTAINER_PREFIX,
-    EXEC_PREFIX,
 ];
 
 // Capabilities regular must resolve — REAL crate names observed via
@@ -475,6 +473,7 @@ const REGULAR_REQUIRED_PREFIXES: &[&str] = &[
     "wasmtime v",
     RABBITMQ_PREFIX,
     SECURITY_PREFIX,
+    EXEC_PREFIX,
 ];
 
 /// Panic naming the first missing prefix unless every prefix has at least
@@ -713,8 +712,8 @@ fn flavor_marker_table() {
         vec![
             r#"default = ["flavor-regular"]"#,
             r#"flavor-slim = ["mqtt", "mqtt-tls", "http-static", "sql", "lang-jsonpath", "lang-rhai"]"#,
-            r#"flavor-regular = ["flavor-slim", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]"#,
-            r#"flavor-full = ["flavor-regular", "exec", "kafka", "surrealdb", "integration-surreal", "integration-redis", "containers"]"#,
+            r#"flavor-regular = ["flavor-slim", "exec", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]"#,
+            r#"flavor-full = ["flavor-regular", "kafka", "surrealdb", "integration-surreal", "integration-redis", "containers"]"#,
         ],
         "the flavor marker table must be exactly the four declared lines"
     );
