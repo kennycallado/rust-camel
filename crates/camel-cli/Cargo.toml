@@ -177,8 +177,8 @@ lang-minijinja = ["camel-core/lang-minijinja"]
 # gate is the operator-owned runtime profile allowlist, not the build
 # flavor; slim stays exec-free by policy.
 flavor-slim = ["mqtt", "mqtt-tls", "http-static", "sql", "lang-jsonpath", "lang-rhai"]
-flavor-regular = ["flavor-slim", "exec", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]
-flavor-full = ["flavor-regular", "kafka", "surrealdb", "integration-surreal", "integration-redis", "containers"]
+flavor-regular = ["flavor-slim", "exec", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql", "integration-redis"]
+flavor-full = ["flavor-regular", "kafka", "surrealdb", "integration-surreal", "containers"]
 # otel instruments http (always linked) and ws. The ws/otel forward
 # activates the optional camel-component-ws dep without the `ws`
 # capability gate — pre-existing shape: telemetry-on does not imply

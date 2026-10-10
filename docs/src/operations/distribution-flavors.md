@@ -8,7 +8,7 @@ The `camel` CLI ships in three flavors: slim, regular, and full. Each flavor is 
 |-------|-----------|---------|----------------|
 | Base (unconditional) | core, direct, seda, log, file, timer, stream (in/out/err), http (server and client, REST DSL, health and metrics, ADR-0052), template (minijinja), master, cron, controlbus, mock, validator, camel test harness | every flavor, every target | none (no separate artifact) |
 | Edge pack (slim additions) | mqtt, mqtt-tls, http-static, sql, lang-jsonpath, lang-rhai | x86_64-unknown-linux-musl, aarch64-unknown-linux-musl | `camel-slim-<target>.tar.gz` |
-| Regular additions | otel, grpc, wasm, llm, mcp, security, redis, redis-tls, jms, cxf, xj, xslt, opensearch, ws, lang-xpath, lang-js (boa), lang-minijinja, lsp, kubernetes, integration-http, integration-sql | the 4 Linux targets (gnu ×2, musl ×2) | `camel-<target>.tar.gz` |
+| Regular additions | otel, grpc, wasm, llm, mcp, security, redis, redis-tls, jms, cxf, xj, xslt, opensearch, ws, lang-xpath, lang-js (boa), lang-minijinja, lsp, kubernetes, integration-http, integration-sql, integration-redis | the 4 Linux targets (gnu ×2, musl ×2) | `camel-<target>.tar.gz` |
 | Full additions | exec, kafka, surrealdb, containers | gnu ×2, macOS ×2, Windows — desktop platforms ship full only | `camel-full-<target>.tar.gz` |
 
 Each asset has a matching `.tar.gz.sha256` sidecar that stores the tarball checksum.

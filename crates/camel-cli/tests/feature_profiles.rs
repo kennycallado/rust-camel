@@ -712,8 +712,8 @@ fn flavor_marker_table() {
         vec![
             r#"default = ["flavor-regular"]"#,
             r#"flavor-slim = ["mqtt", "mqtt-tls", "http-static", "sql", "lang-jsonpath", "lang-rhai"]"#,
-            r#"flavor-regular = ["flavor-slim", "exec", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql"]"#,
-            r#"flavor-full = ["flavor-regular", "kafka", "surrealdb", "integration-surreal", "integration-redis", "containers"]"#,
+            r#"flavor-regular = ["flavor-slim", "exec", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql", "integration-redis"]"#,
+            r#"flavor-full = ["flavor-regular", "kafka", "surrealdb", "integration-surreal", "containers"]"#,
         ],
         "the flavor marker table must be exactly the four declared lines"
     );

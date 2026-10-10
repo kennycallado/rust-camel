@@ -345,9 +345,10 @@ it, so slim ⊆ regular ⊆ full is structural (asserted by
 - `flavor-regular = ["flavor-slim", "exec", "otel", "grpc", "wasm", "llm",
   "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj",
   "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja",
-  "lsp", "kubernetes", "integration-http", "integration-sql"]`.
+  "lsp", "kubernetes", "integration-http", "integration-sql",
+  "integration-redis"]`.
 - `flavor-full = ["flavor-regular", "kafka", "surrealdb",
-  "integration-surreal", "integration-redis", "containers"]`.
+  "integration-surreal", "containers"]`.
 
 Regular excludes ONLY the three build-level items: kafka (C dependency,
 unportable to musl), surrealdb (BUSL-1.1, the only non-OSI license in

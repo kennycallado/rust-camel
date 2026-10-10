@@ -2,7 +2,7 @@
 
 A Redis validate target reads a key through a named datasource.
 Enable `integration-redis` in `camel-cli`, or `redis` in `camel-integration-test`.
-The default CLI does not activate this assertion executor.
+The default CLI (`flavor-regular`) and `flavor-full` activate this assertion executor; `flavor-slim` does not.
 Without the feature, a valid Redis target returns a named verdict failure.
 
 This family provides assertions only. There is no `redis:` scenario prepare action.

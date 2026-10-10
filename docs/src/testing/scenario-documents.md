@@ -70,7 +70,7 @@ Scenario documents run through one of two execution paths. The build selects the
 | Build | Endpoint schemes | Execution path |
 |-------|------------------|----------------|
 | `--no-default-features` | `fake:` only | No-boot smoke path. Any other scheme reports `infra-unavailable`, names the adapter, and exits 2. |
-| default (`integration-http`, `integration-sql`) | `fake:`, `direct:`, `http:`; `sql:` actions | Embedded full boot. Real composition root, real wire, harness partner listeners. Any other scheme reports `infra-unavailable`, names the adapter, and exits 2. |
+| default (`integration-http`, `integration-sql`, `integration-redis`) | `fake:`, `direct:`, `http:`; `sql:` actions | Embedded full boot. Real composition root, real wire, harness partner listeners. Any other scheme reports `infra-unavailable`, names the adapter, and exits 2. |
 | `integration-http` | `fake:`, `direct:`, `http:` | Embedded full boot. Real composition root, real wire, harness partner listeners. Any other scheme reports `infra-unavailable`, names the adapter, and exits 2. |
 | `integration-sql` | no scenario endpoint references required; `sql:` actions | Embedded full boot. An `sql:`-only document runs without `integration-http`. |
 
