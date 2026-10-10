@@ -8,19 +8,22 @@ The `camel` CLI ships in three flavors: slim, regular, and full. Each flavor is 
 |-------|-----------|---------|----------------|
 | Base (unconditional) | core, direct, seda, log, file, timer, stream (in/out/err), http (server and client, REST DSL, health and metrics, ADR-0052), template (minijinja), master, cron, controlbus, mock, validator, camel test harness | every flavor, every target | none (no separate artifact) |
 | Edge pack (slim additions) | mqtt, mqtt-tls, http-static, sql, lang-jsonpath, lang-rhai | x86_64-unknown-linux-musl, aarch64-unknown-linux-musl | `camel-slim-<target>.tar.gz` |
-| Regular additions | otel, grpc, wasm, llm, mcp, security, redis, redis-tls, jms, cxf, xj, xslt, opensearch, ws, lang-xpath, lang-js (boa), lang-minijinja, lsp, kubernetes, integration-http, integration-sql, integration-redis | the 4 Linux targets (gnu ×2, musl ×2) | `camel-<target>.tar.gz` |
-| Full additions | exec, kafka, surrealdb, containers | gnu ×2, macOS ×2, Windows — desktop platforms ship full only | `camel-full-<target>.tar.gz` |
+| Regular additions | otel, grpc, wasm, llm, mcp, security, exec, redis, redis-tls, jms, cxf, xj, xslt, opensearch, ws, lang-xpath, lang-js (boa), lang-minijinja, lsp, kubernetes, integration-http, integration-sql, integration-redis | the 4 Linux targets (gnu ×2, musl ×2) | `camel-<target>.tar.gz` |
+| Full additions | kafka, surrealdb, integration-surreal, containers | gnu ×2, macOS ×2, Windows — desktop platforms ship full only | `camel-full-<target>.tar.gz` |
 
 Each asset has a matching `.tar.gz.sha256` sidecar that stores the tarball checksum.
 
 The bodies are chained. Each flavor includes the marker of the flavor below it. `slim ⊆ regular ⊆ full` is structural, not tested-in. `camel lint` is part of the base set, so it works in every flavor.
 
-Regular excludes only four items, each by a named principle:
+Regular excludes only three items, each by a named principle:
 
 - `kafka`: a C dependency (librdkafka) that cannot build for musl targets.
 - `surrealdb`: BUSL-1.1, the only non-OSI license in the dependency graph.
-- `exec`: arbitrary host-binary execution, rejected by ADR-0037.
 - `containers`: an infrastructure-daemon client (camel-function and camel-component-container as one feature).
+
+`exec` ships in regular since ADR-0037-A1: its capability gate is the
+operator-owned runtime profile allowlist, not the build flavor. Slim stays
+exec-free by policy.
 
 ## Docker tag map
 
