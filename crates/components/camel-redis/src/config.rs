@@ -2,6 +2,7 @@ use camel_component_api::CamelError;
 use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::parse_uri;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use serde::Deserialize;
 use std::str::FromStr;
 
 use crate::sentinel_config::{SentinelConfig, TopologyKind};
@@ -260,6 +261,13 @@ pub struct RedisConfig {
     pub host: String,
     pub port: u16,
     /// Redis password for authentication. Default: None.
+    ///
+    /// An unset or blank (empty/whitespace-only) value means "no AUTH"; a
+    /// blank config value normalizes to `None` through
+    /// [`normalize_password`], so `password = "${env:REDIS_PASSWORD:-}"`
+    /// works when the variable is unset. An explicit URI `password=` and the
+    /// `with_password` builder are not normalized.
+    #[serde(default, deserialize_with = "deserialize_password")]
     pub password: Option<String>,
     /// Enable TLS connections. Default: false.
     pub tls: bool,
@@ -282,6 +290,29 @@ pub struct RedisConfig {
     /// Cluster node URLs. Empty means single-node mode. Feature-gated behind `cluster`.
     #[cfg(feature = "cluster")]
     pub cluster_nodes: Vec<String>,
+}
+
+/// Normalize a config-supplied password for the no-AUTH case.
+///
+/// An absent password and a blank (empty or whitespace-only) password both
+/// mean "no AUTH". A blank value would otherwise reach `set_password("")` and
+/// the percent-encoded connection URL as an empty AUTH and fail against a
+/// passwordless server. This makes the `password = "${env:REDIS_PASSWORD:-}"`
+/// spelling usable: an unset variable interpolates to `""`, which now maps to
+/// `None`.
+pub(crate) fn normalize_password(raw: Option<String>) -> Option<String> {
+    raw.filter(|p| !p.trim().is_empty())
+}
+
+/// `deserialize_with` for the config `password` fields: see
+/// [`normalize_password`].
+pub(crate) fn deserialize_password<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(normalize_password(Option::<String>::deserialize(
+        deserializer,
+    )?))
 }
 
 fn redacted_opt(opt: &Option<String>) -> Option<&'static str> {
@@ -1664,6 +1695,46 @@ mod tests {
         assert_eq!(cfg.password, Some("secret".to_string()));
         assert!(cfg.tls);
         assert_eq!(cfg.tls_ca_cert, Some("/path/to/ca.pem".to_string()));
+    }
+
+    // rc-4d9ip: blank config password means "no AUTH", not empty AUTH.
+    #[test]
+    fn toml_blank_password_normalizes_to_none() {
+        let empty: RedisConfig = toml::from_str("password = \"\"").unwrap();
+        assert!(empty.password.is_none(), "empty password must normalize");
+        let whitespace: RedisConfig = toml::from_str("password = \"   \"").unwrap();
+        assert!(
+            whitespace.password.is_none(),
+            "whitespace-only password must normalize"
+        );
+    }
+
+    #[test]
+    fn toml_nonblank_password_preserved() {
+        let cfg: RedisConfig = toml::from_str("password = \"secret\"").unwrap();
+        assert_eq!(cfg.password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn blank_config_password_build_url_has_no_auth() {
+        let cfg: RedisConfig = toml::from_str("password = \"\"").unwrap();
+        let url = cfg.build_url().unwrap();
+        assert!(
+            !url.contains('@'),
+            "blank config password must not emit AUTH: {url}"
+        );
+        assert_eq!(url, "redis://localhost:6379/0");
+    }
+
+    #[test]
+    fn blank_config_password_apply_defaults_keeps_endpoint_none() {
+        let defaults: RedisConfig = toml::from_str("password = \"  \"").unwrap();
+        let mut endpoint = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
+        endpoint.apply_defaults(&defaults);
+        assert!(
+            endpoint.password.is_none(),
+            "blank config password must not become an endpoint password"
+        );
     }
 
     // REDIS-015: Password with special characters is percent-encoded in build_url()

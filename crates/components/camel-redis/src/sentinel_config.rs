@@ -25,7 +25,10 @@ pub struct SentinelConfig {
     pub master_name: String,
     /// Optional username for sentinel authentication.
     pub username: Option<String>,
-    /// Optional password for sentinel authentication.
+    /// Optional password for sentinel authentication. An unset or blank
+    /// (empty/whitespace-only) value means "no AUTH"; blank normalizes to
+    /// `None` (see `crate::config::normalize_password`).
+    #[serde(default, deserialize_with = "crate::config::deserialize_password")]
     pub password: Option<String>,
 }
 
@@ -239,6 +242,13 @@ pub fn validate_topology(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // rc-4d9ip: a blank sentinel password means "no AUTH".
+    #[test]
+    fn sentinel_blank_password_normalizes_to_none() {
+        let cfg: SentinelConfig = toml::from_str("password = \"   \"").unwrap();
+        assert!(cfg.password.is_none());
+    }
 
     #[test]
     fn redis_sentinel_uri_parses_to_sentinel_topology() {

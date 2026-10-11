@@ -118,6 +118,29 @@ async fn standalone_topology_password_raw() {
     );
 }
 
+// rc-4d9ip: a blank config password resolves to a connection with no AUTH
+// (`Client::open` is lazy, so this needs no server).
+#[tokio::test]
+async fn standalone_blank_config_password_resolves_no_auth() {
+    let defaults: crate::config::RedisConfig = toml::from_str("password = \"   \"").unwrap();
+    let mut cfg =
+        RedisEndpointConfig::from_uri("redis://127.0.0.1:6379?command=GET").expect("valid uri");
+    cfg.apply_defaults(&defaults);
+    cfg.resolve_defaults();
+
+    let topology = StandaloneTopology::new(&cfg);
+    let client = topology
+        .resolve(ServerKind::Master)
+        .await
+        .expect("resolve should succeed");
+
+    assert_eq!(
+        client.get_connection_info().redis_settings().password(),
+        None,
+        "a blank config password must resolve to no AUTH"
+    );
+}
+
 #[tokio::test]
 async fn fake_topology_returns_address_sequence() {
     let topology = FakeTopology::addrs(vec!["redis://a:6379".into(), "redis://b:6379".into()]);

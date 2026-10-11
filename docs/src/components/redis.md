@@ -222,6 +222,8 @@ A build without a TLS feature (`tls-rustls-webpki-roots`, `tls-rustls-native-cer
 
 The component redacts passwords in `Debug` output. Passwords with special characters (`@`, `:`, `/`) are percent-encoded in the connection URL. The `safe_endpoint()` helper returns a credential-free identifier for tracing.
 
+An unset `password` and a blank (empty or whitespace-only) `password` both mean no `AUTH`. A blank value in the `[components.redis]` block, or in a `[components.redis.sentinel]` block, normalizes to unset, so `password = "${env:REDIS_PASSWORD:-}"` connects without `AUTH` when the variable is unset or empty. An explicit URI `password=` is taken literally and is not normalized.
+
 ### TLS CA trust
 
 `tls_ca_cert` names a PEM file that holds the CA certificate. The field lives in the global `[components.redis]` block; it is not a URI parameter. `apply_defaults()` copies the global value onto each endpoint, and an endpoint-level value wins over the global one.
