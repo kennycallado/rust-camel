@@ -271,12 +271,13 @@ fn failing_steps(key: &str) -> Vec<BuilderStep> {
             value: ValueSourceDef::Expression(rhai(PARSE_FLOAT)),
         }],
         // A language WITHOUT MutatingExpression degrades to the read-only
-        // Expression -> SetBody fallback; the simple comparison coerces a
-        // non-numeric header and fails as type-mismatch.
+        // Expression -> SetBody fallback. The `${nosuchlang:x}` slot is a
+        // language delegate whose language is unregistered, so it compiles and
+        // fails at evaluation time (class `runtime`), never at parse time.
         "script_readonly" => vec![
             set_header_literal("secret", "abc"),
             BuilderStep::DeclarativeScript {
-                expression: expr("simple", "${header.secret} > 1"),
+                expression: expr("simple", "${nosuchlang:x}"),
             },
         ],
         // Rhai owns a MutatingExpression: the ScriptMutator path throws.
@@ -406,12 +407,7 @@ fn failing_steps(key: &str) -> Vec<BuilderStep> {
 /// The E3 (language, verb, class, position) tuple a table key expects.
 fn verb_diagnostics(key: &str) -> (&'static str, &'static str, ExpressionErrorClass, Pos) {
     match key {
-        "script_readonly" => (
-            "simple",
-            "script",
-            ExpressionErrorClass::TypeMismatch,
-            Pos::None,
-        ),
+        "script_readonly" => ("simple", "script", ExpressionErrorClass::Runtime, Pos::None),
         "script_mutating" => ("rhai", "script", ExpressionErrorClass::Runtime, Pos::Some),
         "set_property" => (
             "rhai",
@@ -536,6 +532,14 @@ async fn assert_fails_step(key: &str) {
     let err = result.expect_err("route must fail with ExpressionFailed");
     let (language, verb, class, pos) = verb_diagnostics(key);
     assert_expression_failed(&err, &route_id, language, verb, class, pos);
+    // No operand value from the exchange may enter the diagnostic. Only the
+    // `script_readonly` row seeds `secret=abc`; no other row's legitimate text
+    // carries those literals, so this holds table-wide.
+    let rendered = format!("{err} | {err:?}");
+    assert!(
+        !rendered.contains("abc") && !rendered.contains("secret"),
+        "expression error leaked an operand value: {rendered}"
+    );
 }
 
 /// Handler visibility (a): the same failing row inside
@@ -785,13 +789,14 @@ verb_on_exception_test!(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cross_language_simple_and_jsonpath_rows() {
-    // simple through set_property: a non-numeric header in a numeric
-    // comparison fails with TypeMismatch and no operand leaks.
+    // simple through set_property: an unregistered language delegate compiles
+    // (template mode) and fails at evaluation with class Runtime; no operand
+    // leaks into the diagnostic.
     let steps = vec![
         set_header_literal("x", "abc"),
         BuilderStep::DeclarativeSetProperty {
             key: "p".to_string(),
-            value_source: ValueSourceDef::Expression(expr("simple", "${header.x} > 1")),
+            value_source: ValueSourceDef::Expression(expr("simple", "${nosuchlang:x}")),
         },
     ];
     let (result, _mock) = run_route("xlang-simple-prop", steps, None).await;
@@ -801,8 +806,13 @@ async fn cross_language_simple_and_jsonpath_rows() {
         "xlang-simple-prop",
         "simple",
         "set_property",
-        ExpressionErrorClass::TypeMismatch,
+        ExpressionErrorClass::Runtime,
         Pos::None,
+    );
+    let rendered = format!("{err} | {err:?}");
+    assert!(
+        !rendered.contains("abc"),
+        "set_property error leaked the operand value: {rendered}"
     );
 
     // simple through filter: the predicate form of the same coercion.
@@ -1223,4 +1233,70 @@ async fn inbound_scope_refusal_keeps_generic_target() {
         }
         other => panic!("expected conversion detail on ExpressionFailed, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Template-looking literals and env slots (task 2.2)
+// ---------------------------------------------------------------------------
+
+/// A bare value source that merely LOOKS like a template (`echo ${HOME}`) is a
+/// compile-time failure at route add: `${HOME}` is neither a lookup path nor a
+/// `lang:expr` delegate, so template parsing rejects it with `unrecognized
+/// token`. The route never compiles, so this cannot use `run_route` (which
+/// asserts compilation success).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn route_add_fails_on_template_looking_literal() {
+    let (ctx, _mock) = new_context().await;
+    let steps = vec![BuilderStep::DeclarativeSetBody {
+        value: ValueSourceDef::Expression(expr("simple", "echo ${HOME}")),
+    }];
+    let def = RouteDefinition::new("direct:template-looking-literal", steps)
+        .with_route_id("template-looking-literal");
+    let err = ctx
+        .add_route_definition(def)
+        .await
+        .expect_err("template-looking literal must fail at route add");
+    assert!(
+        err.to_string().contains("unrecognized token"),
+        "expected an `unrecognized token` parse error, got: {err}"
+    );
+}
+
+/// A real `${header.h}` slot in a mixed template substitutes the header value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn substituted_env_slot_runtime() {
+    let steps = vec![
+        set_header_literal("h", "B"),
+        BuilderStep::DeclarativeSetBody {
+            value: ValueSourceDef::Expression(expr("simple", "Hello ${header.h}")),
+        },
+    ];
+    let (result, _mock) = run_route("substituted-env-slot", steps, None).await;
+    let exchange = result.expect("template interpolation must succeed");
+    match &exchange.input.body {
+        camel_api::body::Body::Text(text) => assert_eq!(text, "Hello B"),
+        other => panic!("expected Text body `Hello B`, got {other:?}"),
+    }
+}
+
+/// `$$` is NOT a Simple-template escape at the source level: `$${env:NAME}`
+/// reaches the evaluator as `$` plus a live `${env:NAME}` delegate. `env` is
+/// unregistered, so the step fails at runtime (class Runtime, position absent).
+/// The failure detail is discarded by `to_expression_failed` (`cause: None`), so
+/// no error text is asserted here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn escaped_env_slot_fails_at_runtime() {
+    let steps = vec![BuilderStep::DeclarativeSetBody {
+        value: ValueSourceDef::Expression(expr("simple", "$${env:NAME}")),
+    }];
+    let (result, _mock) = run_route("escaped-env-slot", steps, None).await;
+    let err = result.expect_err("unregistered env language must fail at runtime");
+    assert_expression_failed(
+        &err,
+        "escaped-env-slot",
+        "simple",
+        "set_body",
+        ExpressionErrorClass::Runtime,
+        Pos::None,
+    );
 }

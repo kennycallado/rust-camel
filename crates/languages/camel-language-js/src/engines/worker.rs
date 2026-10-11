@@ -64,7 +64,6 @@ use crate::{
     value::{ArrayDetector, js_to_value_with_detector},
 };
 
-#[cfg(test)]
 use serde_json::Value;
 
 /// Bounded capacity of the job queue feeding the worker thread.
@@ -418,6 +417,10 @@ impl WorkerState {
         // always evaluate against the same realm.
         self.ctx.enter_realm(self.realm.clone());
 
+        // The inbound body is the read-only fallback for `body_snapshot`; the
+        // mutating path captures the installed `camel.body` instead.
+        let inbound_body = exchange.body.clone();
+
         // Install fresh bindings and verify the protected invariants. A
         // rejected global set (spoofed non-writable binding) or a failed
         // verify recycles the realm, rechecks the job deadline (a recycle
@@ -457,7 +460,7 @@ impl WorkerState {
             });
         }
 
-        let outcome = self.eval_cached(source, sentinel.as_ref());
+        let outcome = self.eval_cached(source, sentinel.as_ref(), inbound_body);
 
         // Integrity verification runs after the eval regardless of its
         // outcome; drift recycles the realm for the NEXT job. The current
@@ -479,6 +482,7 @@ impl WorkerState {
         &mut self,
         source: &str,
         sentinel: Option<&ReadOnlySentinel>,
+        inbound_body: Value,
     ) -> Result<JsEvalResult, JsLanguageError> {
         // Field split so the cache, the context, and the detector can be
         // borrowed disjointly.
@@ -488,6 +492,16 @@ impl WorkerState {
             array_detector,
             ..
         } = self;
+
+        // Changed-only write-back needs the pre-run body. Capture it from the
+        // installed `camel.body` ONLY for mutating evaluation (`sentinel` is
+        // `None`), immediately before the script runs, using the same
+        // conversion the post-run body passes through. Read-only evaluation
+        // does not capture and falls back to the inbound body.
+        let body_snapshot = match sentinel {
+            None => bindings::extract_body_snapshot(ctx, array_detector.as_ref())?,
+            Some(_) => inbound_body,
+        };
 
         let key: Arc<str> = Arc::from(source);
 
@@ -517,6 +531,7 @@ impl WorkerState {
             headers: modified.headers,
             body: modified.body,
             properties: modified.properties,
+            body_snapshot,
         })
     }
 
@@ -653,6 +668,7 @@ impl WorkerState {
             headers: HashMap::new(),
             body: Value::Null,
             properties: HashMap::new(),
+            body_snapshot: Value::Null,
         })
     }
 

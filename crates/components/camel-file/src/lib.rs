@@ -2749,6 +2749,54 @@ mod tests {
         );
     }
 
+    /// mission359 regression: the Simple template tokenizer must keep the
+    /// `-01.txt` suffix after a slot as literal text. The old predicate
+    /// tokenizer split operators anywhere, so `${header.id}-01.txt` no longer
+    /// resolved to the exact `X-01.txt`. Assert the exact resolved name and the
+    /// real on-disk bytes written into a tempdir.
+    #[tokio::test]
+    async fn test_file_producer_filename_simple_language_exact_suffix() {
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+
+        let component = FileComponent::new();
+        let ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(&format!("file:{dir_path}"), &ctx)
+            .unwrap();
+        let ctx = test_producer_ctx();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        let mut exchange = Exchange::new(Message::new("payload"));
+        exchange
+            .input
+            .set_header("id", serde_json::Value::String("X".to_string()));
+        exchange.input.set_header(
+            "CamelFileName",
+            serde_json::Value::String("${header.id}-01.txt".to_string()),
+        );
+
+        producer.oneshot(exchange).await.unwrap();
+
+        let produced = dir.path().join("X-01.txt");
+        assert!(
+            produced.exists(),
+            "fileName `${{header.id}}-01.txt` must resolve to the exact name X-01.txt"
+        );
+        let content = std::fs::read_to_string(&produced).unwrap();
+        assert_eq!(content, "payload");
+
+        // No mangled variant (for example `X3.0-01.txt`) may be produced.
+        let mut entries: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, vec!["X-01.txt".to_string()]);
+    }
+
     #[tokio::test]
     async fn test_file_producer_filename_literal_without_expression() {
         use tower::ServiceExt;

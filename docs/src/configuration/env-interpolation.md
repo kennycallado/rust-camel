@@ -53,6 +53,48 @@ credentials or connection secrets reject the escaped full form. On
 There is no legitimate reason for a credential field to hold the literal
 text of a placeholder.
 
+## Route-value interaction
+
+Route-source substitution handles `${env:NAME}` only. It does not substitute
+`${arg:NAME}`. An unescaped `${arg:NAME}` in a route source fails to load with
+an unresolved name error. Job arguments are substituted only on the `camel-cli`
+job path (`crates/camel-cli/src/commands/job/document.rs`).
+
+Substitution runs before route parsing and is trusted (ADR-0032). A substituted
+`${...}` token therefore becomes a Simple template slot. In a bare top-level
+string value, the route loader treats every `${...}` as a slot through one
+value gate. See [Basic steps](../yaml-dsl/step-verbs/basic.md). The escape
+`$${env:VAR}` yields the literal text `${env:VAR}`, which the gate then reads
+as a `lang:` slot. The route compiles, but the step fails at runtime with
+`Language 'env' not found`.
+
+`$$` is not a Simple-template escape. At the Simple source level after
+substitution, `$${header.h}` is a literal `$` followed by the live
+`${header.h}` slot. In a route file the environment pass first turns `$$` into
+`$`, so `$${header.h}` reaches Simple as the whole slot `${header.h}` and keeps
+its native value. Write `$$$${header.h}` in a route file to render `$` plus a
+slot.
+
+### Literal `${...}` workaround
+
+Preserving an authored or substituted literal `${...}` is deferred to rc-luew6.
+Until then, emit the literal through an explicit `language:` and `source:`
+value with a quoted rhai or js string. Escape environment and argument tokens
+as `$$`, because interpolation walks every string in the route. A non-env token
+needs no escape.
+
+```yaml
+# '"$${env:X}"' -> literal ${env:X}
+- set_body:
+    language: rhai
+    source: '"$${env:X}"'
+
+# '"${header.h}"' -> literal ${header.h} (no env/arg token, no escape)
+- set_body:
+    language: rhai
+    source: '"${header.h}"'
+```
+
 ## Fail-closed
 
 Both surfaces fail closed. An unset variable without a default aborts:

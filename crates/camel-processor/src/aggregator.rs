@@ -834,7 +834,7 @@ async fn evaluate_completion_predicate(
 ) -> Result<bool, CamelError> {
     let mut satisfied = false;
     for (expr, language) in iter_predicate_exprs(mode) {
-        let expression = {
+        let predicate = {
             let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
             let lang = reg.get(language).ok_or_else(|| {
                 CamelError::ProcessorError(format!(
@@ -842,14 +842,17 @@ async fn evaluate_completion_predicate(
                     language
                 ))
             })?;
-            lang.create_expression(expr)
+            // Predicate grammar, not template mode: completion conditions are
+            // strict booleans. A non-bool result is a `LanguageError`
+            // (type mismatch) surfaced as `ProcessorError`.
+            lang.create_predicate(expr)
                 .map_err(|e| CamelError::ProcessorError(e.to_string()))?
         }; // registry guard dropped here — safe to await below
-        let value = expression
-            .evaluate(incoming)
+        let matched = predicate
+            .matches(incoming)
             .await
             .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
-        if value.as_bool().unwrap_or(false) {
+        if matched {
             satisfied = true;
         }
     }
@@ -2509,6 +2512,66 @@ mod tests {
         let result = evaluate_completion_predicate(&mode, &incoming, &registry).await;
         assert!(result.is_ok(), "eval must succeed: {:?}", result);
         assert!(!result.unwrap(), "predicate does not match");
+    }
+
+    #[tokio::test]
+    async fn completion_predicate_non_bool_is_error() {
+        use camel_api::aggregator::{CompletionCondition, CompletionMode};
+        use camel_language_api::Language;
+        use std::collections::HashMap;
+
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        registry.lock().unwrap().insert(
+            "simple".to_string(),
+            Arc::new(camel_language_simple::SimpleLanguage::new()) as Arc<dyn Language>,
+        );
+
+        // A bare slot is a value, not a boolean. Completion predicates are
+        // strict: the Simple predicate reports a type mismatch (expected bool)
+        // instead of coercing the string to false.
+        let mode = CompletionMode::Single(CompletionCondition::PredicateExpr {
+            expr: "${body}".to_string(),
+            language: "simple".to_string(),
+        });
+        let incoming = make_exchange("k", "X", "x");
+        let err = evaluate_completion_predicate(&mode, &incoming, &registry)
+            .await
+            .expect_err("non-bool predicate must error, not coerce to false");
+        // Redacted diagnostic: type names only, asserted via the "bool" text,
+        // never the runtime body value. The aggregator has no `EvalMeta`, so
+        // there is no `ExpressionFailed` class to assert.
+        assert!(
+            matches!(&err, CamelError::ProcessorError(msg) if msg.contains("bool")),
+            "error must carry the type-mismatch text naming bool: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_predicate_eval_error_propagates() {
+        use camel_api::aggregator::{CompletionCondition, CompletionMode};
+        use camel_language_api::Language;
+        use std::collections::HashMap;
+
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        registry.lock().unwrap().insert(
+            "simple".to_string(),
+            Arc::new(camel_language_simple::SimpleLanguage::new()) as Arc<dyn Language>,
+        );
+
+        // `${body} > 1` over a non-numeric body is an evaluation error. The
+        // aggregator has no `EvalMeta`, so it surfaces as `ProcessorError`.
+        let mode = CompletionMode::Single(CompletionCondition::PredicateExpr {
+            expr: "${body} > 1".to_string(),
+            language: "simple".to_string(),
+        });
+        let incoming = make_exchange("k", "X", "hello");
+        let err = evaluate_completion_predicate(&mode, &incoming, &registry)
+            .await
+            .expect_err("evaluation error must propagate, not coerce to false");
+        assert!(
+            matches!(err, CamelError::ProcessorError(_)),
+            "eval error must be a ProcessorError: {err:?}"
+        );
     }
 
     #[tokio::test]

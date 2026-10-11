@@ -76,7 +76,9 @@ impl Language for SimpleLanguage {
     }
 
     fn create_expression(&self, script: &str) -> Result<Box<dyn Expression>, LanguageError> {
-        let ast = parser::parse(script)?;
+        // Template mode: literal text plus `${}` slots. Predicate grammar stays
+        // on `create_predicate`/`parser::parse` (change `language-value-boundary`).
+        let ast = parser::parse_template(script)?;
         Ok(Box::new(SimpleExpression {
             expr: ast,
             resolver: self.resolver.clone(),
@@ -290,48 +292,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_string_literal_expression() {
+    async fn test_raw_quoted_literal_is_verbatim() {
+        // Template mode has no string-literal grammar: quotes are raw text.
         let lang = SimpleLanguage::new();
         let expr = lang.create_expression("'hello'").unwrap();
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(val, Value::String("hello".to_string()));
+        assert_eq!(val, Value::String("'hello'".to_string()));
     }
 
     #[tokio::test]
-    async fn test_double_quoted_literal_unescapes_newline() {
+    async fn test_raw_double_quoted_newline_text() {
+        // `\n` is not an escape in template mode: the two-char text stays raw.
         let lang = SimpleLanguage::new();
         let expr = lang.create_expression("\"line1\\nline2\"").unwrap();
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(val, Value::String("line1\nline2".to_string()));
+        assert_eq!(val, Value::String("\"line1\\nline2\"".to_string()));
     }
 
     #[tokio::test]
-    async fn test_double_quoted_literal_unescapes_tab_and_quote() {
+    async fn test_raw_double_quoted_tab_and_quote_text() {
         let lang = SimpleLanguage::new();
         let expr = lang.create_expression("\"col1\\t\\\"quoted\\\"\"").unwrap();
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(val, Value::String("col1\t\"quoted\"".to_string()));
+        assert_eq!(val, Value::String("\"col1\\t\\\"quoted\\\"\"".to_string()));
     }
 
     #[tokio::test]
-    async fn test_double_quoted_literal_unescapes_backspace_formfeed_and_slash() {
+    async fn test_raw_double_quoted_backspace_formfeed_slash_text() {
         let lang = SimpleLanguage::new();
         let expr = lang.create_expression("\"a\\bb\\fc\\/d\"").unwrap();
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(val, Value::String("a\u{0008}b\u{000C}c/d".to_string()));
+        assert_eq!(val, Value::String("\"a\\bb\\fc\\/d\"".to_string()));
     }
 
     #[tokio::test]
-    async fn test_null_expression() {
+    async fn test_raw_null_word_is_literal() {
+        // `null` is not a keyword in template mode: it stays the text "null".
         let lang = SimpleLanguage::new();
         let expr = lang.create_expression("null").unwrap();
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(val, Value::Null);
+        assert_eq!(val, Value::String("null".to_string()));
     }
 
     #[tokio::test]
@@ -378,11 +383,12 @@ mod tests {
     #[tokio::test]
     async fn simple_coercion_error_has_no_operand() {
         // The rejected operand (exchange data) must not appear in the error.
+        // A comparison is predicate-shaped, so it stays on `create_predicate`.
         let secret = "SECRETVAL";
         let lang = SimpleLanguage::new();
-        let expr = lang.create_expression("${header.secret} > 1").unwrap();
+        let pred = lang.create_predicate("${header.secret} > 1").unwrap();
         let ex = exchange_with_header("secret", secret);
-        let err = expr.evaluate(&ex).await.expect_err("must fail");
+        let err = pred.matches(&ex).await.expect_err("must fail");
         match &err {
             LanguageError::TypeMismatch {
                 expected,
@@ -490,9 +496,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_operator_inside_string_literal_not_split() {
-        // The string literal 'a>=b' contains '>=' but must NOT be parsed as a
-        // BinOp split — the whole thing is a StringLit atom.
+    async fn test_raw_operator_inside_quotes_is_literal() {
+        // Template mode copies quotes and the `>=` verbatim; nothing is split.
         let lang = SimpleLanguage::new();
         let result = lang.create_expression("'a>=b'");
         let val = result
@@ -502,8 +507,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             val,
-            Value::String("a>=b".to_string()),
-            "string literal 'a>=b' should be parsed as a plain string, not split on >="
+            Value::String("'a>=b'".to_string()),
+            "raw quoted text 'a>=b' must be preserved verbatim, not split on >="
         );
     }
 
@@ -663,30 +668,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_double_quoted_string_with_operator() {
+    async fn test_raw_double_quoted_operator_text() {
         let lang = SimpleLanguage::new();
         let expr = lang.create_expression("\"a >= b\"").unwrap();
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(val, Value::String("a >= b".to_string()));
+        assert_eq!(val, Value::String("\"a >= b\"".to_string()));
     }
 
     #[tokio::test]
-    async fn test_bool_literal_true() {
+    async fn test_raw_true_word_is_literal() {
+        // `true` is not a keyword in template mode: it stays the text "true".
         let lang = SimpleLanguage::new();
         let expr = lang.create_expression("true").unwrap();
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(val, Value::Bool(true));
+        assert_eq!(val, Value::String("true".to_string()));
     }
 
     #[tokio::test]
-    async fn test_bool_literal_false() {
+    async fn test_raw_false_word_is_literal() {
+        // `false` is not a keyword in template mode: it stays the text "false".
         let lang = SimpleLanguage::new();
         let expr = lang.create_expression("false").unwrap();
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(val, Value::Bool(false));
+        assert_eq!(val, Value::String("false".to_string()));
     }
 
     #[tokio::test]
@@ -785,8 +792,9 @@ mod tests {
     #[tokio::test]
     async fn test_non_finite_number_parse_error() {
         let lang = SimpleLanguage::new();
-        // Very long digit string that overflows f64 to infinity
-        let result = lang.create_expression(
+        // Very long digit string that overflows f64 to infinity. Number parsing
+        // is predicate grammar, so the check uses `create_predicate`.
+        let result = lang.create_predicate(
             "9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999",
         );
         assert!(result.is_err(), "non-finite number should be a parse error");
@@ -1203,12 +1211,12 @@ mod body_field_eval_tests {
         let mut ex = Exchange::default();
         ex.input.body = Body::Json(json!({"status": "active"}));
         let result = lang
-            .create_expression("${body.status} == 'active'")
+            .create_predicate("${body.status} == 'active'")
             .unwrap()
-            .evaluate(&ex)
+            .matches(&ex)
             .await
             .unwrap();
-        assert_eq!(result, Value::Bool(true));
+        assert!(result);
     }
 
     #[tokio::test]
@@ -1217,12 +1225,12 @@ mod body_field_eval_tests {
         let mut ex = Exchange::default();
         ex.input.body = Body::Json(json!({"status": "inactive"}));
         let result = lang
-            .create_expression("${body.status} == 'active'")
+            .create_predicate("${body.status} == 'active'")
             .unwrap()
-            .evaluate(&ex)
+            .matches(&ex)
             .await
             .unwrap();
-        assert_eq!(result, Value::Bool(false));
+        assert!(!result);
     }
 
     #[tokio::test]
@@ -1251,17 +1259,17 @@ mod body_field_eval_tests {
     #[tokio::test]
     async fn body_field_numeric_predicate() {
         // JSON number 42.0 compares equal to the parsed number 42 from the
-        // Simple Language expression, because both resolve to the same f64.
+        // Simple Language predicate expression, because both resolve to the same f64.
         let lang = SimpleLanguage::new();
         let mut ex = Exchange::default();
         ex.input.body = Body::Json(json!({"score": 42.0}));
         let result = lang
-            .create_expression("${body.score} == 42")
+            .create_predicate("${body.score} == 42")
             .unwrap()
-            .evaluate(&ex)
+            .matches(&ex)
             .await
             .unwrap();
-        assert_eq!(result, Value::Bool(true));
+        assert!(result);
     }
 
     #[tokio::test]

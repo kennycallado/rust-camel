@@ -29,6 +29,21 @@
 //! Interpolated mapping keys that collide after interpolation collapse
 //! last-wins, matching the loader's own duplicate-key behavior (parity
 //! with the raw-splice outcome class).
+//!
+//! # Route-surface `${}` gate (rc-yhvag, rc-veg9m)
+//!
+//! Route-source substitution handles `${env:NAME}` ONLY: the parse-tree walk
+//! passes an EMPTY argument lookup, so an unescaped `${arg:NAME}` fails to load
+//! (job arguments are substituted only on the `camel-cli` job path,
+//! `crates/camel-cli/src/commands/job/document.rs`). Interpolation runs BEFORE
+//! route parsing and is trusted (ADR-0032), so a substituted `${...}` token
+//! becomes a Simple template slot in a bare top-level string value. The
+//! `$${env:X}` and `$${arg:X}` escapes preserve `${env:X}` and `${arg:X}`,
+//! respectively. The value gate treats each as a `lang:` slot: the route
+//! compiles, but the step fails at runtime with `Language 'env' not found`
+//! or `Language 'arg' not found`, respectively (preserving a
+//! substituted literal `${...}` is deferred to rc-luew6). See the escape tests
+//! `escape_full_form_yields_literal` and `escape_arg_form_yields_literal`.
 
 //! SYNC: the whole-text splice arm ([`interpolate_env_with`]) is mirrored by
 //! camel-lint::env_interpolation (rc-93wct); crate purity forbids the dependency.

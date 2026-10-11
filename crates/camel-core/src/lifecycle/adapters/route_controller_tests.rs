@@ -2577,6 +2577,40 @@ async fn resequencer_compile_route_returns_ack_and_posts_to_continuation() {
     }
 }
 
+/// The resequencer correlation/sort/sequence sources are VALUE uses: they go
+/// through `compile_language_expression` (template mode), so a mixed-template
+/// correlation like `X-${header.id}-01` compiles instead of failing the
+/// predicate grammar.
+#[tokio::test]
+async fn resequence_correlation_template_source() {
+    let mut controller = build_controller_with_components();
+    register_simple_language(&mut controller);
+
+    let route = RouteDefinition::new(
+        "mock:in",
+        vec![BuilderStep::Resequence {
+            policy_config: camel_api::ResequencePolicyConfig {
+                mode: camel_api::ResequenceMode::Batch {
+                    correlation: "X-${header.id}-01".into(),
+                    sort: "${header.id}".into(),
+                    completion: camel_api::BatchCompletion::Size(1),
+                },
+            },
+        }],
+    )
+    .with_route_id("reseq-correlation-template");
+
+    let compiled = controller
+        .compile_route_definition_pipeline(route, 1)
+        .expect("resequence correlation template source must compile");
+
+    for lc in &compiled.lifecycle {
+        lc.shutdown(camel_api::StepShutdownReason::RouteStop)
+            .await
+            .expect("lifecycle shutdown should succeed");
+    }
+}
+
 #[tokio::test]
 async fn resequencer_batch_e2e_sort_and_emit() {
     use camel_api::body::Body;

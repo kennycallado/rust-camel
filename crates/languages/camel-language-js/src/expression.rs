@@ -395,22 +395,29 @@ fn snapshot_exchange(exchange: &Exchange) -> Result<JsExchange, LanguageError> {
 }
 
 /// Apply [`JsEvalResult`] mutations back onto a mutable [`Exchange`].
+///
+/// The body is written back only when the post-run body differs from the
+/// normalized pre-run [`JsEvalResult::body_snapshot`]. An unchanged value that
+/// merely changes representation (for example a JSON `10.0` surviving
+/// JavaScript as an integral number) compares equal and leaves the original
+/// [`Body`] variant bit-identical.
 fn apply_result_to_exchange(result: &JsEvalResult, exchange: &mut Exchange) {
     exchange.input.headers = result.headers.clone();
     exchange.properties = result.properties.clone();
 
-    let original_was_representable = matches!(
-        &exchange.input.body,
-        Body::Json(_) | Body::Text(_) | Body::Xml(_)
-    );
-    if result.body != Value::Null || original_was_representable {
+    if result.body != result.body_snapshot {
         exchange.input.body = value_to_body(&result.body);
     }
 }
 
 /// Convert a `Value` to a `Body`.
+///
+/// A JS `null` body maps to [`Body::Empty`] (not `Body::Json(Null)`); on a JS
+/// `Bytes`/`Empty` body the null snapshot compares equal, so this conversion is
+/// never reached for those variants.
 fn value_to_body(v: &Value) -> Body {
     match v {
+        Value::Null => Body::Empty,
         Value::String(s) => Body::from(s.as_str()),
         other => Body::from(other.clone()),
     }
@@ -627,6 +634,7 @@ mod tests {
             Ok(JsEvalResult {
                 return_value: json!("done"),
                 headers: exchange.headers,
+                body_snapshot: exchange.body.clone(),
                 body: exchange.body,
                 properties: exchange.properties,
             })
@@ -845,6 +853,126 @@ mod tests {
             "Body should be updated when JS explicitly sets camel.body"
         );
         assert_eq!(ex.input.body.as_text(), Some("replaced"));
+    }
+
+    /// A header-only `script:` step must not rewrite the body. The pre-run
+    /// normalized snapshot is compared against the post-run body and equal
+    /// values are left untouched, so the `Xml` variant survives.
+    #[tokio::test]
+    async fn js_header_only_preserves_xml_body() {
+        let expr =
+            JsMutatingExpression::new("camel.headers.set('x','1')".to_string(), engine(), 5_000);
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::Xml("<order/>".to_string());
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        match &ex.input.body {
+            Body::Xml(s) => assert_eq!(s, "<order/>"),
+            other => panic!("header-only JS must preserve the XML body variant, got {other:?}"),
+        }
+    }
+
+    /// An integral float in a JSON body survives JavaScript as an integral
+    /// number through the same conversion on both sides, so the body compares
+    /// equal and is not rewritten to an integer.
+    #[tokio::test]
+    async fn js_header_only_preserves_integral_float_json_body() {
+        let expr =
+            JsMutatingExpression::new("camel.headers.set('x','1')".to_string(), engine(), 5_000);
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::Json(json!({"n": 10.0}));
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        match &ex.input.body {
+            Body::Json(v) => assert_eq!(v, &json!({"n": 10.0})),
+            other => panic!("expected Body::Json with 10.0 preserved, got {other:?}"),
+        }
+    }
+
+    /// A nested in-place mutation on an object body is a real change and is
+    /// written back.
+    #[tokio::test]
+    async fn js_nested_mutation_writes_body() {
+        let expr = JsMutatingExpression::new("camel.body.a = 2".to_string(), engine(), 5_000);
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::Json(json!({"a": 1}));
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        match &ex.input.body {
+            Body::Json(v) => assert_eq!(v["a"], json!(2)),
+            other => panic!("expected Body::Json with mutated a, got {other:?}"),
+        }
+    }
+
+    /// `camel.body = null` on a representable body is a real change from the
+    /// pre-run snapshot and yields `Body::Empty`.
+    #[tokio::test]
+    async fn js_null_body_becomes_empty() {
+        let expr = JsMutatingExpression::new("camel.body = null".to_string(), engine(), 5_000);
+        let mut ex = make_exchange();
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        assert!(
+            matches!(ex.input.body, Body::Empty),
+            "null assignment must yield Body::Empty, got {:?}",
+            ex.input.body
+        );
+    }
+
+    /// JavaScript exposes `Bytes` as `null`, so `camel.body = null` on a
+    /// `Bytes` body compares equal to the snapshot and is a no-op.
+    #[tokio::test]
+    async fn js_null_on_bytes_is_noop() {
+        let expr = JsMutatingExpression::new("camel.body = null".to_string(), engine(), 5_000);
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::from(b"binary".to_vec());
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        assert!(
+            matches!(ex.input.body, Body::Bytes(_)),
+            "null on a Bytes body must be a no-op, got {:?}",
+            ex.input.body
+        );
+    }
+
+    /// JavaScript exposes `Empty` as `null` too, so the same assignment on an
+    /// already-empty body is a no-op.
+    #[tokio::test]
+    async fn js_null_on_empty_is_noop() {
+        let expr = JsMutatingExpression::new("camel.body = null".to_string(), engine(), 5_000);
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::Empty;
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        assert!(
+            matches!(ex.input.body, Body::Empty),
+            "null on an Empty body must stay Empty, got {:?}",
+            ex.input.body
+        );
+    }
+
+    /// JS map writes are observed live by subsequent reads within the same
+    /// script (unlike the rhai pre-run snapshot readers).
+    #[tokio::test]
+    async fn js_reader_sees_live_mutation() {
+        let expr = JsMutatingExpression::new(
+            "camel.headers.set('k','new'); camel.headers.get('k')".to_string(),
+            engine(),
+            5_000,
+        );
+        let mut ex = Exchange::new(Message::default());
+        ex.input.headers.insert("k".to_string(), json!("old"));
+
+        let value = expr.evaluate(&mut ex).await.unwrap();
+
+        assert_eq!(value, json!("new"));
+        assert_eq!(ex.input.headers.get("k"), Some(&json!("new")));
     }
 
     #[tokio::test]

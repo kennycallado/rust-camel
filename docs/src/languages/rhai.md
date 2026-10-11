@@ -40,11 +40,30 @@ A Rhai implementation of the Language SPI. It provides `Expression`, `Predicate`
 
 </details>
 
-You register `rhai` into `CamelContext` by name, then build expressions and predicates up front. The included example constructs two expressions and one predicate before the route. Read-only expressions and predicates expose `body` and `headers` variables plus the `header()` and `property()` readers. `set_header()` and `set_property()` are rejected at create time with a hint to use a `script:` step; the read-only engine never registers them, so a dynamic call cannot slip through. A `MutatingExpression` exposes `body`, `headers`, and `properties` as mutable scope variables. Its write-back is a validate-all-then-commit transaction: only changed entries and an assigned body are written, and the Exchange is untouched unless the whole evaluation succeeds.
+You register `rhai` into `CamelContext` by name, then build expressions and predicates up front. The included example constructs two expressions and one predicate before the route.
 
 Rhai integrates with Rust types without a foreign-function boundary. Exchange values bind directly as Rhai values, and the engine has no external runtime dependency. The sandbox closes filesystem, module, and network access through independent layers. The workspace enables Rhai's `no_module` feature, each evaluation uses `Engine::new_raw()`, and `disable_symbol` blocks `eval` and `import`. The sandbox has no configuration opt-out. Rhai source is trusted operator configuration. Exchange data is untrusted under ADR-0032 and never evaluated as source code.
 
 Resource limits bound CPU and memory use. Defaults are 100,000 max operations, 1 MiB max string size, 10,000 max array elements, 10,000 max map entries, 64 max expression depth, 32 max function-expression depth, 64 max call levels, and a 5,000 ms execution timeout. The timeout wraps synchronous evaluation in `spawn_blocking`. It returns control to the route after five seconds but cannot cancel the blocking task. The operation limit eventually stops a CPU-bound script.
+
+## Read surface
+
+Read-only expressions and predicates expose `body`, `headers`, and `properties` variables plus the `header()` and `property()` readers. A `MutatingExpression` (a `script:` step) exposes `body`, `headers`, and `properties` as mutable scope variables and also provides `header()` and `property()`. Its write-back is a validate-all-then-commit transaction: only changed entries and an assigned body are written, and the Exchange is untouched unless the whole evaluation succeeds.
+
+Both modes expose the same five names. The `script:` readers differ in freshness:
+
+- Read-only mode rejects mutation at create time (see [Read-only mutation rejection](#read-only-mutation-rejection)).
+- Script-step `header(name)` and `property(name)` read the **pre-run snapshot** of the maps. After `headers["k"] = "new"`, a later `header("k")` still returns the pre-run value, while the mutated map propagates back to the Exchange. JavaScript is different: `camel.headers.get("k")` observes the live mutated map.
+- `has_header(name)` and `has_property(name)` are not registered (rc-w1mds). Distinguish an absent key from a stored `null` through the map surface, for example `"k" in headers`.
+
+### Read-only mutation rejection
+
+A read-only expression or predicate rejects mutation at create time, before the route builds:
+
+- `set_header()` and `set_property()` calls.
+- Any assignment whose root variable is `body`, `headers`, or `properties`, including index and dot targets and compound operators: `headers["x"] = "1"`, `body = "changed"`, `properties["a"]["b"] = "c"`, `headers["x"] += 1`, `headers.foo = "1"`.
+
+The rejection is conservative. No scope analysis runs, so a local that shadows one of those names is rejected too: `let headers = #{}; headers["x"] = 1` fails at create time. A read-only local cannot affect the Exchange, so this is a documented false positive. Reading is unrestricted: `headers["x"]`, `body.len`, and `let x = headers; x` all compile. The read-only engine never registers `set_header()`/`set_property()`, so a dynamic call cannot slip through; the rhai hint names the working map-assignment surface for a `script:` step. Method-call mutations on those roots (`headers.clear()`, `headers.remove(x)`) are a known remaining gap (rc-qpjps), not caught by the create-time walk.
 
 ## Values across the boundary
 
@@ -94,7 +113,7 @@ A `Stream` body is not copied into the script. Both read-only expressions and pr
 
 ### Two-AST compile discipline
 
-Read-only expressions and predicates compile twice. The first compilation uses `OptimizationLevel::None`. The AST walk rejects `set_header()` and `set_property()` calls in read-only expressions at create time; that AST is discarded after the check. The second compilation uses `OptimizationLevel::Simple`. Its AST is cached and evaluated. Constant folding at this level can optimize away a discarded statement, which the stream-body rules account for.
+Read-only expressions and predicates compile twice. The first compilation uses `OptimizationLevel::None`. The AST walk rejects `set_header()` and `set_property()` calls, and assignments whose root variable is `body`, `headers`, or `properties`, in read-only expressions at create time; that AST is discarded after the check. The second compilation uses `OptimizationLevel::Simple`. Its AST is cached and evaluated. Constant folding at this level can optimize away a discarded statement, which the stream-body rules account for.
 
 Use Rhai for complex logic in pipeline steps: branching, computation, and multi-step mutation. For flat header and body access, [Simple](simple.md) is lighter and needs no engine. For JavaScript-syntax scripting, use [JavaScript](js.md).
 
@@ -205,18 +224,79 @@ exact, and a native `i64` spelling may normalize, including `-0` to `0`.
 The inbound exchange conversion is unchanged. A JSON integer greater than
 `i64::MAX` on that path is still refused.
 
-## String methods mutate in place
+## Emitting a literal `${...}`
 
-Rhai string methods such as `replace`, `trim`, and `pad` mutate the subject in place and return unit `()`. They do not return a new string. This differs from JavaScript, Python, and Rust.
+To emit a literal `${...}` that must not be parsed as a [Simple](simple.md) template slot, use an explicit `language:` and `source:` value with a quoted rhai or JavaScript string. Escape environment and job-argument tokens as `$$`:
 
-Call the method as a bare statement. The statement form mutates the body in place:
+```yaml
+- set_body:
+    language: rhai
+    source: '"$${env:X}"'    # literal ${env:X}
+- set_body:
+    language: rhai
+    source: '"${header.h}"'  # literal ${header.h}; no escape needed
+```
+
+`$$` is not a Simple-template escape. At the Simple source level, `$${header.h}` is a literal `$` followed by a live slot. In a route file, the environment pass runs first and turns each `$$` into `$`, so `$${header.h}` reaches Simple as the whole slot `${header.h}` and keeps its native value. Write `$$$${header.h}` in a route file for a literal `$` plus a slot. See [Environment variable interpolation](../configuration/env-interpolation.md).
+
+## String methods: mutation and pure alternatives
+
+`trim()` is **pure**: it returns the trimmed string and leaves the subject
+unchanged. Write `let trimmed = text.trim();`.
+
+```rhai
+let text = "  hello  ";
+let trimmed = text.trim();   // "hello"
+// text is still "  hello  "
+```
+
+This is a **breaking change** for scripts written against stock Rhai, where
+`trim()` was an in-place method returning unit `()` (so `let x = "   ";
+x.trim() != ""` was always true). rust-camel registers a pure `trim()` after
+the standard package, which shadows the mutating one in both read-only
+expressions and script steps.
+
+The remaining string methods still mutate the subject in place and return unit
+`()`. They do not return a new string. This differs from JavaScript, Python,
+and Rust.
+
+| In-place method | Effect | Pure alternative |
+| --- | --- | --- |
+| `make_upper()` | Upper-cases the subject | `to_upper()` returns a new string |
+| `make_lower()` | Lower-cases the subject | `to_lower()` returns a new string |
+| `crop(...)` | Cuts the subject to a range | `sub_string(...)` returns a new string |
+| `truncate(len)` | Cuts the subject to `len` chars | `sub_string(0, len)` |
+| `replace(from, to)` | Replaces occurrences | none — copy then mutate |
+| `pad(len, ch)` | Pads the subject | none — copy then mutate |
+| `remove(sub)` | Removes occurrences of a substring | none — copy then mutate |
+| `clear()` | Empties the subject | none — assign `""` |
+
+For the methods with no pure alternative, copy the subject first and mutate the
+copy:
+
+```rhai
+let source = headers["url"];
+let y = source;
+y.replace(",", "%2C");
+headers["url"] = y;
+```
+
+Call an in-place method as a bare statement so the mutation lands on the
+subject:
 
 ```rhai
 body.replace(",", "%2C");
 ```
 
-Never write `body = body.replace(...)`. The right-hand side is unit, so the assignment stores unit: the body is cleared to `Empty` (unit maps back to the empty body). The same applies to headers: `headers["k"] = headers["k"].replace(...)` writes unit into the map entry, and the value becomes `Null`. The failure is silent. No error is raised.
+Never write `body = body.replace(...)`. The right-hand side is unit, so the
+assignment stores unit: the body is cleared to `Empty` (unit maps back to the
+empty body). The same applies to headers: `headers["k"] = headers["k"].replace(...)` writes unit into the map entry, and the value becomes `Null`. The failure is silent. No error is raised.
 
-The `rhai_replace_*` characterization tests in the Rhai crate pin this behavior.
+The `trim_start`/`trim_end` methods and the `*_ascii` and `trim_to_string`
+variants are **not present** in the Rhai 1.26.1 `StandardPackage`, so there is
+nothing to shadow for those names.
+
+The `rhai_replace_*` characterization tests in the Rhai crate pin the in-place
+behavior.
 
 **Reference**: [Language SPI](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-api/CONTEXT.md) · [Rhai crate](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-rhai/CONTEXT.md)

@@ -15,11 +15,13 @@ fn bench_expression_eval(c: &mut Criterion) {
     ex.input.set_header("foo", Value::String("bar".to_string()));
     ex.input.set_header("count", Value::Number(42.into()));
 
+    // Value templates only. The obsolete comparison scripts
+    // (`header_eq`/`header_gt`/`body_contains`) already live in the predicate
+    // bench; expression evaluation is measured on slots/raw text here.
     let expressions = [
         ("header_value", "${header.foo}"),
-        ("header_eq", "${header.foo} == 'bar'"),
-        ("header_gt", "${header.count} > 10"),
-        ("body_contains", "${body} contains 'world'"),
+        ("header_count", "${header.count}"),
+        ("body_value", "${body}"),
         (
             "complex",
             "route-${header.foo}-${header.count}-payload:${body}",

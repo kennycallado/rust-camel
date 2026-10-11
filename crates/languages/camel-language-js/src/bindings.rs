@@ -388,6 +388,43 @@ pub fn extract_camel_state(
     })
 }
 
+/// Extract the installed `camel.body` alone, converted with the SAME
+/// [`js_to_value_with_detector`] conversion the post-run body uses.
+///
+/// This is the body-only pre-run snapshot for changed-only write-back: unlike
+/// [`extract_camel_state`] it does not touch `headers`/`properties` and does
+/// not reuse the state-wide extraction. It is called immediately before the
+/// script runs (mutating evaluation only).
+pub fn extract_body_snapshot(
+    ctx: &mut Context,
+    detector: Option<&ArrayDetector>,
+) -> Result<Value, JsLanguageError> {
+    let camel_val = ctx
+        .global_object()
+        .get(js_string!("camel"), ctx)
+        .map_err(|e| JsLanguageError::ExchangeAccess {
+            message: e.to_string(),
+        })?;
+
+    let camel = match camel_val.as_object() {
+        Some(obj) => obj,
+        None => {
+            return Err(JsLanguageError::ExchangeAccess {
+                message: "camel global is not an object".to_string(),
+            });
+        }
+    };
+
+    let body_js =
+        camel
+            .get(js_string!("body"), ctx)
+            .map_err(|e| JsLanguageError::ExchangeAccess {
+                message: e.to_string(),
+            })?;
+
+    js_to_value_with_detector(&body_js, ctx, detector)
+}
+
 /// Extract `HashMap<String, Value>` from a map object (reads its `__data` property).
 fn extract_map(
     map_val: &JsValue,

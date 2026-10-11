@@ -23,15 +23,41 @@ headers, properties, and errors are untrusted data. The parser keeps source sepa
 data. Delegation passes the configured nested source to the selected Language, whose own trust and
 resource limits apply.
 
-## Null and predicate semantics
+## Expression and predicate modes
+
+`SimpleLanguage::create_expression` parses in TEMPLATE mode. `SimpleLanguage::create_predicate`
+parses the comparison grammar. Predicate mode is unchanged by template mode.
+
+**Simple template mode**:
+`create_expression` source is literal text plus `${...}` interpolation slots. Text outside a slot
+stays verbatim: `=`, `<`, `null`, `true`, quotes, and whitespace are not special. Exactly one whole
+`${...}` source returns the existing slot value (native number, array, or null from headers or
+body fields). A whole `${body}` slot renders a JSON body as serialized text. Any other source
+returns a string. A source with no slot is a raw string, so `'abc'`, `true`, `42`, and `null` stay
+text. Template mode is Simple's own grammar, NOT the MiniJinja template engine (ADR-0047) and NOT
+route-template `{{...}}` JSON-tree substitution (ADR-0008).
+_Avoid_: MiniJinja, Jinja, route templates, `{{...}}`
+
+**Simple predicate mode**:
+`create_predicate` source is the comparison grammar (`==`, `!=`, `>`, `contains`, `&&`, `||`).
+`SimplePredicate::matches` requires a real `Value::Bool`. Any other value (including `null`, an
+empty string, or the string `"true"`) returns `LanguageError::TypeMismatch`. There is no
+truthiness coercion.
+_Avoid_: truthiness, `as_bool` coercion, non-boolean predicate
+
+## Null and comparison semantics
 
 - Missing headers, properties, exception messages, and JSON body fields evaluate to `Value::Null`.
 - A body-field path against a non-JSON body evaluates to `Value::Null`.
-- Null interpolation adds an empty string.
-- At the `Predicate::matches` boundary, null is false and booleans keep their value. All other
-  values, including an empty string, are true.
-- Within `&&` and `||`, null and empty strings are false. Ordering and `contains` comparisons with
-  null are false.
+- Null interpolation adds an empty string. A whole-slot missing value is `Value::Null`.
+- `&&` and `||` use Simple's own truthiness rule for their operands: null and empty strings are
+  false, booleans keep their value, and everything else is true. This rule does not apply to the
+  final predicate result, which must be a real boolean.
+- `==` compares by value and coerces a string to a number (and the reverse) by parsing the string
+  as a number. It does not coerce between a string and a boolean, so `${header.approved} == true`
+  is false when the header is the string `"true"`. Compare against `'true'` or store a boolean
+  header.
+- Ordering and `contains` comparisons with null are false.
 
 ## Authority
 

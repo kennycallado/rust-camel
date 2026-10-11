@@ -39,6 +39,22 @@ pub struct JsEvalResult {
     pub body: Value,
     /// Possibly-modified properties after execution.
     pub properties: HashMap<String, Value>,
+    /// The body as it was immediately before the script ran, converted with
+    /// the SAME value conversion [`body`](Self::body) passes through.
+    ///
+    /// A caller compares `body` against `body_snapshot` after normalization to
+    /// decide whether the script observably changed the body: an unchanged
+    /// value that only changes representation (for example a JSON `10.0`
+    /// surviving JavaScript as an integral number) compares equal and must not
+    /// be written back, so the original `Body` variant is preserved.
+    ///
+    /// This field is meaningful only for mutating evaluation. Read-only
+    /// evaluation does not capture it and sets it to the inbound body.
+    ///
+    /// An external [`JsEngine`] implementation that cannot reproduce this
+    /// conversion SHALL set `body_snapshot` to the inbound body. The worst
+    /// case is then an extra write-back; it is never data loss.
+    pub body_snapshot: Value,
 }
 
 /// Abstraction over a JavaScript engine capable of evaluating expressions

@@ -961,7 +961,7 @@ pub(crate) fn route_step_to_declarative_step(
         }
         RouteDslStep::SetBody(SetBodyStep { set_body }) => {
             let value = match set_body {
-                SetBodyData::Literal(value) => ValueSourceDef::Literal(value),
+                SetBodyData::Literal(value) => bare_string_value_source(value),
                 SetBodyData::Config(SetBodyConfig {
                     value,
                     language,
@@ -978,7 +978,7 @@ pub(crate) fn route_step_to_declarative_step(
         }
         RouteDslStep::Transform(TransformStep { transform }) => {
             let value = match transform {
-                SetBodyData::Literal(value) => ValueSourceDef::Literal(value),
+                SetBodyData::Literal(value) => bare_string_value_source(value),
                 SetBodyData::Config(SetBodyConfig {
                     value,
                     language,
@@ -2050,6 +2050,24 @@ fn parse_loop_while_expr(
     Ok(LanguageExpressionDef { language, source })
 }
 
+/// Gate a bare **top-level** string value source behind the `${}` template
+/// rule (Task 1.3, mission359-languagep1wave).
+///
+/// A top-level `Value::String` containing `"${"` compiles to a Simple template
+/// expression; everything else (a plain string, a non-string value, or a string
+/// nested inside an object/array literal) stays a literal. One helper serves the
+/// YAML and JSON route compilers.
+fn bare_string_value_source(value: serde_json::Value) -> ValueSourceDef {
+    let source = match &value {
+        serde_json::Value::String(source) if source.contains("${") => source.clone(),
+        _ => return ValueSourceDef::Literal(value),
+    };
+    ValueSourceDef::Expression(LanguageExpressionDef {
+        language: "simple".to_string(),
+        source,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_value_source(
     literal: Option<serde_json::Value>,
@@ -2094,7 +2112,7 @@ fn parse_value_source(
     }
 
     if let Some(value) = literal {
-        return Ok(ValueSourceDef::Literal(value));
+        return Ok(bare_string_value_source(value));
     }
     if let (Some(language), Some(source)) = (language, source) {
         return Ok(ValueSourceDef::Expression(LanguageExpressionDef {
@@ -3557,6 +3575,31 @@ routes:
         assert_eq!(
             format!("{:?}", routes_t[0].steps[0]),
             format!("{:?}", routes_s[0].steps[0])
+        );
+    }
+
+    /// `SetHeaderIfAbsent` shares `SetHeaderStep`/`parse_value_source` but is
+    /// REST-lowered (`#[serde(skip_deserializing)]`), so it cannot be authored
+    /// through a YAML parse. Assert the shared gate directly on the seam.
+    #[test]
+    fn set_header_if_absent_shares_value_gate() {
+        let value = parse_value_source(
+            Some(serde_json::Value::String("Hi ${header.h}".to_string())),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "set_header_if_absent",
+        )
+        .expect("set_header_if_absent value source parses");
+        assert_eq!(
+            value,
+            ValueSourceDef::Expression(LanguageExpressionDef {
+                language: "simple".to_string(),
+                source: "Hi ${header.h}".to_string(),
+            })
         );
     }
 

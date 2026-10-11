@@ -300,6 +300,7 @@ mod tests {
                 Ok(JsEvalResult {
                     return_value: json!("writable"),
                     headers: exchange.headers,
+                    body_snapshot: exchange.body.clone(),
                     body: exchange.body,
                     properties: exchange.properties,
                 })

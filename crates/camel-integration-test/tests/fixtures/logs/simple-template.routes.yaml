@@ -1,0 +1,15 @@
+# Task 2.4 fixture (mission 359): template interpolation end to end.
+# `set_body` carries a top-level Simple slot; the file producer resolves
+# its `fileName` Simple template (`${header.id}-01.txt` -> `X-01.txt`);
+# the `log:` marker then observes the post-file body. `OUT_DIR` resolves
+# from the document `env:` tier. The harness context already registers
+# the Simple language and the file/log components through camel-bundles,
+# so this fixture registers neither.
+routes:
+  - id: simple-template
+    from: direct:start
+    steps:
+      - set_body: "X-${header.id}"
+      - to: "file:${env:OUT_DIR}?fileName=${header.id}-01.txt"
+      - set_body: "Got -> ${header.id}"
+      - to: "log:marker?level=INFO&showBody=true"

@@ -3,7 +3,10 @@
 Convert, marshal, script, and enrich the message body.
 
 ## `transform`
-Alias for `set_body`. Same forms and fields.
+Alias for `set_body`. Same forms and fields, including the top-level `${}`
+value gate. A bare top-level string containing `${...}` compiles to a Simple
+template. A nested literal string stays literal. See
+[Basic steps](basic.md) for the gate.
 
 ```yaml
 - transform:

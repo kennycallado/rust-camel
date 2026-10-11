@@ -2,6 +2,36 @@
 
 Send to endpoints, log, set message fields, and call beans.
 
+## Value sources and `${}` interpolation
+
+A bare **top-level** string value that contains `${...}` compiles to a Simple
+template. This applies to `set_body`, `transform`, `set_header.value`,
+`set_property.value`, and a `log` message. A top-level string without a
+`${...}` slot stays a literal, except `log`, whose bare string is always a
+Simple expression with or without a slot. A string nested inside an object or
+array literal stays literal.
+
+```yaml
+- set_body: "Got ${header.h}"                    # template, renders "Got B"
+- set_body: "order"                              # literal string "order"
+- set_body:
+    value: "Got ${header.h}"                     # object value form, template
+- set_body:
+    value:
+      nested: "${header.h}"                      # nested string stays literal
+```
+
+This gate is breaking for a formerly-literal string that merely contains
+`${...}`. For example, `set_body: "echo ${HOME}"` now fails to compile with an
+`unrecognized token` error, because `${HOME}` is not a Simple atom. The `$$`
+escape does not preserve a literal either. Escaped `${env:...}` or `${arg:...}`
+text becomes a `lang:` slot that fails at runtime. Other unrecognized escaped
+tokens still fail to compile. See
+[Environment variable interpolation](../../configuration/env-interpolation.md).
+
+`set_header_if_absent` shares the same gate, but REST lowering produces it. It
+is not an authorable step.
+
 ## `to`
 Send the exchange to an endpoint URI.
 
@@ -24,6 +54,10 @@ Log the exchange state.
 
 The `message` field accepts a bare string or an expression object (`simple`,
 `rhai`, `jsonpath`, `xpath`, or `language`+`source`). `level` is optional.
+A bare `log: "..."` string and a plain `message: "..."` string are always
+Simple expressions, with or without a `${...}` slot. The nested
+`message: { value: ... }` form goes through the same top-level gate as the
+other value sources.
 
 ```yaml
 - log: "Processing exchange"

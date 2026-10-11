@@ -6,10 +6,12 @@
 //! route-surface semantics: set-variable interpolation, fail-closed missing
 //! variables, and the `$$` escape forms introduced by Task 1.
 //!
-//! Body surface: the `set_body` step (`BuilderStep::DeclarativeSetBody` with a
-//! `ValueSourceDef::Literal`) is the closest real "step body" carrier in the
-//! route model — the same field type the existing env unit tests exercise
-//! through `interpolate_env` directly.
+//! Body surface: the `set_body` step (`BuilderStep::DeclarativeSetBody`) is the
+//! closest real "step body" carrier in the route model — the same field type
+//! the existing env unit tests exercise through `interpolate_env` directly. A
+//! surviving `${...}` slot in the substituted text is gated to a Simple
+//! `ValueSourceDef::Expression`; plain substituted text stays
+//! `ValueSourceDef::Literal`.
 
 use camel_api::ValueSourceDef;
 use camel_core::BuilderStep;
@@ -111,7 +113,7 @@ fn route_env_missing_fails_discovery() {
 }
 
 #[test]
-fn route_escape_yields_literal_in_body() {
+fn route_escape_yields_simple_slot_in_body() {
     let _guard = EnvGuard::unset("RUST_CAMEL_TEST_ROUTE_B");
     let routes = discover(&route_yaml_with_body("$${env:RUST_CAMEL_TEST_ROUTE_B}"))
         .expect("escaped placeholder should not be resolved");
@@ -120,10 +122,11 @@ fn route_escape_yields_literal_in_body() {
     assert_eq!(steps.len(), 1);
     match &steps[0] {
         BuilderStep::DeclarativeSetBody { value } => match value {
-            ValueSourceDef::Literal(v) => {
-                assert_eq!(v.as_str().unwrap(), "${env:RUST_CAMEL_TEST_ROUTE_B}");
+            ValueSourceDef::Expression(expr) => {
+                assert_eq!(expr.language, "simple");
+                assert_eq!(expr.source, "${env:RUST_CAMEL_TEST_ROUTE_B}");
             }
-            other => panic!("expected ValueSourceDef::Literal, got {other:?}"),
+            other => panic!("expected ValueSourceDef::Expression, got {other:?}"),
         },
         other => panic!("expected BuilderStep::DeclarativeSetBody, got {other:?}"),
     }

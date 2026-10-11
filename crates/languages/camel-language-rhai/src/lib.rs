@@ -1,9 +1,9 @@
 //! camel-language-rhai — Rhai script language for Camel Rust.
 //!
 //! Main types: `RhaiLanguage`, `RhaiExpression`, `RhaiPredicate`, `RhaiMutatingExpression`.
-//! Read-only scripts access `body`, `headers`, `header()`, and `property()`;
-//! `set_header()`/`set_property()` calls are rejected at create time — use a
-//! mutating script expression (`headers["k"] = ...`) instead.
+//! Read-only scripts access `body`, `headers`, `properties`, `header()`, and
+//! `property()`; `set_header()`/`set_property()` calls are rejected at create
+//! time — use a mutating script expression (`headers["k"] = ...`) instead.
 //!
 //! # Resource Limits
 //!
@@ -81,9 +81,12 @@
 //!   body binds as an access-aware refusal marker — any materializing read
 //!   of it fails with a typed conversion error; the stream itself is never
 //!   touched. See `docs/src/languages/rhai.md`.
-//! - String methods such as `replace`, `trim`, and `pad` mutate the subject in
-//!   place and return unit `()`. They do NOT return a new string. Call them as
-//!   statements (`body.replace(",", "%2C");`). Never write
+//! - `trim()` is PURE: it returns the trimmed string and leaves the subject
+//!   unchanged (`let y = x.trim();`). This is a breaking change from the stock
+//!   `StandardPackage` in-place behavior (see task 3.2). Other string methods
+//!   such as `replace` and `pad` still mutate the subject in place and return
+//!   unit `()`. They do NOT return a new string. Call them as statements
+//!   (`body.replace(",", "%2C");`). Never write
 //!   `body = body.replace(...)` or `headers["k"] = headers["k"].replace(...)`:
 //!   the right-hand side is unit, so the assignment stores unit. The body is
 //!   cleared to `Empty` (unit maps back to the empty body) and a header entry
@@ -100,13 +103,14 @@ use rhai::{
     packages::{Package, StandardPackage},
 };
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
 
 mod converter;
 mod json;
 mod stream_body;
+mod string_shadow;
 mod transaction;
 
 use converter::{dynamic_to_value, json_to_dynamic};
@@ -269,34 +273,116 @@ fn value_type_name(v: &Value) -> &'static str {
 /// expressions and predicates (change `language-value-boundary`, B4).
 const READ_ONLY_MUTATION_FNS: [&str; 2] = ["set_property", "set_header"];
 
+/// Root variable names whose **assignment** mutates the exchange — forbidden
+/// in read-only expressions and predicates (task 3.4, rc-y0c8c).
+///
+/// This is deliberately conservative: no scope analysis is attempted, so a
+/// local that shadows one of these names is rejected too. A read-only
+/// expression cannot affect the exchange through a shadowing local, but the
+/// false positive is documented and keeps the walk simple.
+const READ_ONLY_MUTATION_ROOTS: [&str; 3] = ["body", "headers", "properties"];
+
+/// A read-only-surface mutation found by [`find_read_only_mutation`].
+///
+/// The two shapes carry distinct diagnostics: a forbidden callee and a
+/// forbidden assignment must not share wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadOnlyMutation {
+    /// A forbidden setter callee (`set_property`/`set_header`).
+    Callee(&'static str),
+    /// An assignment whose root variable is a read-only container.
+    Assignment(&'static str),
+}
+
+/// Look up a forbidden read-only callee by name, if any.
+///
+/// Shared by both call shapes the walk can see (`Expr::FnCall`/`MethodCall`
+/// and the bare-statement `Stmt::FnCall`), so the denylist is checked once.
+fn forbidden_callee(name: &str) -> Option<&'static str> {
+    READ_ONLY_MUTATION_FNS.iter().copied().find(|f| *f == name)
+}
+
+/// Resolve the root variable name of an assignment target.
+///
+/// Descends assignment sugar: `Expr::Variable` is the root; `Expr::Index`
+/// and `Expr::Dot` borrow their `lhs` as the next link. Returns the root
+/// name or `None` when the target is neither (for example a function-call
+/// result, which cannot be an assignment target anyway).
+fn assignment_root(expr: &rhai::Expr) -> Option<&str> {
+    match expr {
+        rhai::Expr::Variable(x, ..) => Some(x.1.as_str()),
+        rhai::Expr::Index(x, ..) | rhai::Expr::Dot(x, ..) => assignment_root(&x.lhs),
+        _ => None,
+    }
+}
+
 /// Walk the whole AST (statements, expressions, nested script-function
 /// bodies, blocks, `if`/`switch`/loop bodies) and return the first forbidden
-/// mutation callee found, if any.
+/// mutation found, if any.
+///
+/// The walk must run on an **unoptimized** AST (see [`RhaiLanguage::compile_read_only`],
+/// which compiles the walk-AST at `OptimizationLevel::None`): an optimizer
+/// pass could otherwise fold away or reorder an assignment before the check.
 ///
 /// Uses the rhai `internals` walker (`AST::walk`), which recurses through
 /// every `Stmt`/`Expr` shape including dotted chains and method calls.
-fn find_read_only_mutation(ast: &AST) -> Option<&'static str> {
-    let mut found: Option<&'static str> = None;
+///
+/// Method-call mutations on these roots (`headers.clear()`,
+/// `headers.remove(x)`) are the known remaining gap rc-qpjps, not covered
+/// here.
+fn find_read_only_mutation(ast: &AST) -> Option<ReadOnlyMutation> {
+    let mut found: Option<ReadOnlyMutation> = None;
     ast.walk(&mut |path: &[rhai::ASTNode]| {
         for node in path {
-            let callee = match node {
+            match node {
                 rhai::ASTNode::Expr(
                     rhai::Expr::FnCall(call, ..) | rhai::Expr::MethodCall(call, ..),
-                ) => Some(call.name.as_str()),
-                rhai::ASTNode::Stmt(rhai::Stmt::FnCall(call, ..)) => Some(call.name.as_str()),
-                _ => None,
-            };
-            let Some(callee) = callee else { continue };
-            for forbidden in READ_ONLY_MUTATION_FNS {
-                if callee == forbidden {
-                    found = Some(forbidden);
-                    return false;
+                ) => {
+                    if let Some(forbidden) = forbidden_callee(call.name.as_str()) {
+                        found = Some(ReadOnlyMutation::Callee(forbidden));
+                        return false;
+                    }
                 }
+                rhai::ASTNode::Stmt(rhai::Stmt::FnCall(call, ..)) => {
+                    if let Some(forbidden) = forbidden_callee(call.name.as_str()) {
+                        found = Some(ReadOnlyMutation::Callee(forbidden));
+                        return false;
+                    }
+                }
+                rhai::ASTNode::Stmt(rhai::Stmt::Assignment(x, ..)) => {
+                    if let Some(root) = assignment_root(&x.1.lhs)
+                        && let Some(forbidden) =
+                            READ_ONLY_MUTATION_ROOTS.iter().find(|r| **r == root)
+                    {
+                        found = Some(ReadOnlyMutation::Assignment(forbidden));
+                        return false;
+                    }
+                }
+                _ => {}
             }
         }
         true
     });
     found
+}
+
+/// Build the create-time rejection reason for a read-only mutation.
+///
+/// Two distinct shapes, two distinct texts: a callee rejection names the
+/// `set_*()` call, an assignment rejection names the container assignment.
+/// Both keep the `script:` hint that points at the mutating surface.
+fn read_only_mutation_reason(mutation: ReadOnlyMutation) -> String {
+    match mutation {
+        ReadOnlyMutation::Callee(callee) => format!(
+            "{callee}() cannot be used in a read-only expression; use a script: step and assign \
+             with headers[\"k\"] = value, properties[\"k\"] = value, or body = value instead"
+        ),
+        ReadOnlyMutation::Assignment(root) => format!(
+            "assignment to `{root}` is not allowed in a read-only expression; use a script: step \
+             and assign with headers[\"k\"] = value, properties[\"k\"] = value, or body = value \
+             instead"
+        ),
+    }
 }
 
 /// Rhai scripting language for rust-camel.
@@ -306,6 +392,7 @@ fn find_read_only_mutation(ast: &AST) -> Option<&'static str> {
 ///   unit); a streaming body binds as a refusal marker that fails any
 ///   materializing read
 /// - `headers` — exchange headers as a Rhai Map
+/// - `properties` — exchange properties as a Rhai Map
 /// - `header(name)` — look up a header value by name
 /// - `property(name)` — look up an exchange property by name
 ///
@@ -377,6 +464,10 @@ impl RhaiLanguage {
         // operators over marker/scalar shapes). Compile-time engines get
         // them too — registrations have no effect on parsing or folding.
         stream_body::register_stream_guards(&mut engine);
+        // Pure `trim` shadow (task 3.2): replaces the `StandardPackage`
+        // in-place `trim(&mut ImmutableString)` so `trim()` returns the
+        // trimmed string instead of mutating the subject and returning unit.
+        string_shadow::register(&mut engine);
         engine
     }
 
@@ -457,32 +548,34 @@ impl RhaiLanguage {
         properties: rhai::Map,
     ) -> Engine {
         let mut engine = Self::create_base_engine(limits);
-
-        let h = Arc::new(RwLock::new(headers));
-
-        let h_read = h.clone();
-        engine.register_fn("header", move |name: String| -> rhai::Dynamic {
-            h_read
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(name.as_str())
-                .cloned()
-                .unwrap_or(rhai::Dynamic::UNIT)
-        });
-
-        let p = Arc::new(RwLock::new(properties));
-
-        let p_read = p.clone();
-        engine.register_fn("property", move |name: String| -> rhai::Dynamic {
-            p_read
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(name.as_str())
-                .cloned()
-                .unwrap_or(rhai::Dynamic::UNIT)
-        });
-
+        Self::register_snapshot_readers(&mut engine, headers, properties);
         engine
+    }
+
+    /// Register the `header(name)`/`property(name)` snapshot readers on an
+    /// engine. The readers are backed by the supplied maps, captured at
+    /// snapshot time, so a later map assignment in a mutating script does not
+    /// change what the readers return (task 3.3, M7): after
+    /// `headers["k"] = "new"` a call to `header("k")` still returns the
+    /// pre-run value, whereas the mutated map is what propagates back to the
+    /// exchange.
+    fn register_snapshot_readers(engine: &mut Engine, headers: rhai::Map, properties: rhai::Map) {
+        // The snapshot maps are immutable after registration, so the readers
+        // own them directly (no `Arc`/`RwLock` indirection). Each closure is
+        // `Fn` and only reads.
+        engine.register_fn("header", move |name: String| -> rhai::Dynamic {
+            headers
+                .get(name.as_str())
+                .cloned()
+                .unwrap_or(rhai::Dynamic::UNIT)
+        });
+
+        engine.register_fn("property", move |name: String| -> rhai::Dynamic {
+            properties
+                .get(name.as_str())
+                .cloned()
+                .unwrap_or(rhai::Dynamic::UNIT)
+        });
     }
 
     /// Compile a read-only expression or predicate under the two-AST
@@ -492,7 +585,8 @@ impl RhaiLanguage {
     ///    compile-scoped engine so no constant folding can hide or reorder a
     ///    forbidden setter call. The AST is walked
     ///    ([`find_read_only_mutation`]) and any `set_property`/`set_header`
-    ///    call is rejected at create time.
+    ///    call — or assignment whose root variable is `body`, `headers`, or
+    ///    `properties` — is rejected at create time.
     /// 2. **Exec-AST** — a SECOND compilation at `OptimizationLevel::Simple`
     ///    (explicit Simple). This
     ///    is the AST that is cached and evaluated; task 2.2's
@@ -512,12 +606,10 @@ impl RhaiLanguage {
         #[cfg(test)]
         COMPILE_COUNT.with(|c| c.set(c.get() + 1));
 
-        if let Some(callee) = find_read_only_mutation(&walk_ast) {
+        if let Some(mutation) = find_read_only_mutation(&walk_ast) {
             return Err(LanguageError::ParseError {
                 expr: script.to_string(),
-                reason: format!(
-                    "{callee}() cannot be used in a read-only expression; use a script: step instead"
-                ),
+                reason: read_only_mutation_reason(mutation),
             });
         }
 
@@ -557,6 +649,7 @@ impl RhaiLanguage {
         let stream = StreamCounters::of_dynamic(&body);
         scope.push("body", body);
         scope.push("headers", headers_map.clone());
+        scope.push("properties", properties_map.clone());
 
         let engine = Self::create_eval_engine(limits, headers_map, properties_map);
 
@@ -623,8 +716,16 @@ impl RhaiLanguage {
         scope.push_dynamic("body", body_dyn);
 
         // 3. Run the pre-compiled AST (no re-parse per eval). The engine is
-        // reused below as the frozen scalar-comparison engine.
-        let engine = RhaiLanguage::create_base_engine(limits);
+        // reused below as the frozen scalar-comparison engine. Register the
+        // snapshot readers so script steps get `header()`/`property()` backed
+        // by the PRE-eval snapshot maps (task 3.3): an in-script map
+        // assignment does not change what the readers return.
+        let mut engine = RhaiLanguage::create_base_engine(limits);
+        RhaiLanguage::register_snapshot_readers(
+            &mut engine,
+            pre_headers.clone(),
+            pre_properties.clone(),
+        );
         let result: rhai::Dynamic = engine
             .eval_ast_with_scope(&mut scope, ast)
             .map_err(|e| eval_error(&e, "value"))?;
@@ -822,15 +923,19 @@ impl Predicate for RhaiPredicate {
 ///
 /// # Note on API differences
 ///
-/// Unlike non-mutating Rhai expressions, this engine does NOT provide
-/// `header()`, `set_header()`, `property()`, or `set_property()` functions.
-/// Use direct map assignment syntax instead:
+/// This engine provides the `header()` and `property()` readers, backed by the
+/// pre-run snapshot of the exchange maps. A reader therefore returns the
+/// pre-run value even after the script mutates the corresponding map: after
+/// `headers["k"] = "new"`, `header("k")` still returns the pre-run value while
+/// the mutated map is what propagates back to the exchange. `set_header()` and
+/// `set_property()` are NOT provided; use direct map assignment syntax instead:
 ///
 /// ```rhai
 /// headers["tenant"] = "acme";       // set header
 /// properties["trace"] = "enabled";  // set property
 /// body = "new content";             // set body
-/// let v = headers["existing"];      // read header
+/// let v = header("existing");       // read header (pre-run snapshot)
+/// let p = property("trace");        // read property (pre-run snapshot)
 /// ```
 struct RhaiMutatingExpression {
     ast: Arc<AST>,

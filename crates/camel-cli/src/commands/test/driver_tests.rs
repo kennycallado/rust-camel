@@ -2143,10 +2143,13 @@ expects:
     };
     assert_eq!(
         header_value(&defs),
-        &camel_api::declarative::ValueSourceDef::Literal(serde_json::Value::String(
-            "${env:B:-x}literal".to_string()
-        )),
-        "fixture value text must land verbatim, never re-interpolated"
+        &camel_api::declarative::ValueSourceDef::Expression(
+            camel_api::declarative::LanguageExpressionDef {
+                language: "simple".to_string(),
+                source: "${env:B:-x}literal".to_string(),
+            }
+        ),
+        "fixture value text must land verbatim as a simple template, never re-interpolated"
     );
 }
 

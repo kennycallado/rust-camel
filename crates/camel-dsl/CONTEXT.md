@@ -56,6 +56,23 @@ passes the URI through byte-identical; a key overlapping the query string or (fo
 form) the inner config map fails closed with `EndpointUriError::DuplicateKey`.
 _Avoid_: endpoint options (that is the lint/runtime concept), query params
 
+**bare top-level string value gate**:
+A bare **top-level** string value source containing `${` compiles to a Simple
+template expression (`LanguageExpressionDef { language: "simple", .. }`),
+whichever verb carries it (`log:`, `set_body:`, `set_header.value`,
+`set_property.value`, `transform:`), through one shared helper
+(`yaml.rs::bare_string_value_source`) used by both the YAML and JSON route
+compilers. A top-level string without a `${` slot stays
+`ValueSourceDef::Literal`, and a string nested inside an object or array
+literal is never gated. `log:` keeps its bare-string → Simple arm
+(`LogMessageData::Literal`); only `log: {message: {value: ...}}` reaches the
+gate. This is a BREAKING gate: a formerly-literal top-level string that merely
+contains `${}` (for example `set_body: "echo ${HOME}"`) now compiles as a
+Simple template and fails with `unrecognized token` instead of passing through
+as a literal.
+_Avoid_: template every bare string (only top-level `${}`-bearing strings are
+gated; nested strings and plain top-level strings are byte-identical)
+
 **route discovery (env-injected)**:
 `discover_routes_with_threshold_security_and_env(patterns,
 stream_cache_threshold, security_ctx, env_lookup)`: the hermetic discovery

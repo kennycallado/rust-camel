@@ -75,16 +75,37 @@ in debug, 64 in release) — rc-dip6.
 
 ## Mutation model
 
-Read-only expressions and predicates expose `body` and `headers` variables plus
-the `header()` and `property()` readers. `set_header()` and `set_property()` are
-rejected at create time (the parse error names a `script:` step as the
-alternative); the read-only engine never registers them.
+Read-only expressions and predicates expose `body`, `headers`, and `properties`
+variables plus the `header()` and `property()` readers. `set_header()` and
+`set_property()` calls, and assignments whose root variable is `body`,
+`headers`, or `properties`, are rejected at create time (the parse error names a
+`script:` step as the alternative). The rejection is conservative: no scope
+analysis runs, so a local that shadows one of those names is rejected too. The
+read-only engine never registers the setters, so a dynamic call cannot slip
+through.
 
 A `MutatingExpression` exposes `body`, `headers`, and `properties` as mutable
-scope variables. Its write-back is a validate-all-then-commit transaction: the
-post-eval scope is compared with the pre-eval snapshot, only changed entries and
-an assigned body are converted, and the Exchange is untouched unless the whole
-evaluation succeeds. An error leaves the Exchange unchanged.
+scope variables and also provides `header()`/`property()`. Its write-back is a
+validate-all-then-commit transaction: the post-eval scope is compared with the
+pre-eval snapshot, only changed entries and an assigned body are converted, and
+the Exchange is untouched unless the whole evaluation succeeds. An error leaves
+the Exchange unchanged.
+
+The script-step `header()`/`property()` readers are backed by the **pre-run**
+snapshot: after `headers["k"] = "new"` a reader still returns the pre-run value,
+while the mutated map propagates back. JavaScript differs: `camel.headers.get`
+observes the live mutated map.
+
+`has_header()`/`has_property()` (rc-w1mds) and method-call mutations on the
+read-only roots (rc-qpjps) are deferred.
+
+## Literal `${...}`
+
+To emit a literal `${...}` that must not be parsed as a Simple template slot,
+use an explicit `language:` and `source:` with a quoted rhai or JavaScript
+string, escaping environment and argument tokens as `$$`. `$$` is not a
+Simple-template escape: the route environment pass turns `$$` into `$` before
+Simple parses the source. See `docs/src/languages/rhai.md` for examples.
 
 ## Rhai boundary
 

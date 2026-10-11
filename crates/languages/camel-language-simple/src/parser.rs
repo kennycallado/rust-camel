@@ -111,6 +111,87 @@ pub fn parse(input: &str) -> Result<Expr, LanguageError> {
     }
 }
 
+/// Parse a value/expression source in TEMPLATE mode: literal text plus
+/// `${...}` interpolation slots only.
+///
+/// Characters and words outside a slot (`=`, `<`, `>`, quotes, `null`,
+/// `true`, `contains`, whitespace, …) stay verbatim and are never interpreted
+/// as predicate grammar. A whole `${...}` slot spanning the outer-trimmed
+/// source returns its atom unchanged (native value); a source with no slot is
+/// a raw [`Expr::StringLit`] of the trimmed text. See mission359 design §A.
+pub fn parse_template(input: &str) -> Result<Expr, LanguageError> {
+    let src = input.trim();
+    if src.is_empty() {
+        return Err(LanguageError::ParseError {
+            expr: String::new(),
+            reason: "empty expression".to_string(),
+        });
+    }
+
+    // Whole-slot rule: exactly one `${...}` spanning the trimmed source.
+    if let Some(slot) = whole_slot_source(src) {
+        return parse_expr_atom(slot);
+    }
+
+    let mut parts: Vec<InterpolatedPart> = Vec::new();
+    let mut literal = String::new();
+    let mut completed_slot = false;
+    let mut i = 0usize;
+
+    while i < src.len() {
+        let rest = &src[i..];
+
+        if rest.starts_with("${") {
+            let start = i + 2;
+            let Some(rel_end) = src[start..].find('}') else {
+                // Unclosed interpolation. With no completed slot and preceding
+                // text the remainder is literal; a leading token, or one after
+                // a completed slot, is a parse error.
+                if completed_slot || i == 0 {
+                    return Err(LanguageError::ParseError {
+                        expr: src.to_string(),
+                        reason: "unclosed interpolation: missing '}'".to_string(),
+                    });
+                }
+                literal.push_str(&src[i..]);
+                i = src.len();
+                continue;
+            };
+            if !literal.is_empty() {
+                parts.push(InterpolatedPart::Literal(std::mem::take(&mut literal)));
+            }
+            let end = start + rel_end;
+            parts.push(InterpolatedPart::Expr(Box::new(parse_expr_atom(
+                &src[start..end],
+            )?)));
+            completed_slot = true;
+            i = end + 1;
+            continue;
+        }
+
+        let ch = rest.chars().next().unwrap(); // allow-unwrap
+        literal.push(ch);
+        i += ch.len_utf8();
+    }
+
+    if !completed_slot {
+        // No `${}` slot: the whole trimmed source is a raw string literal.
+        return Ok(Expr::StringLit(src.to_string()));
+    }
+    if !literal.is_empty() {
+        parts.push(InterpolatedPart::Literal(literal));
+    }
+    Ok(Expr::Interpolated(parts))
+}
+
+/// Return the inner source of a string that is exactly one `${...}` token
+/// spanning it, else `None`.
+fn whole_slot_source(src: &str) -> Option<&str> {
+    let rest = src.strip_prefix("${")?;
+    let close = rest.find('}')?;
+    (2 + close + 1 == src.len()).then(|| &rest[..close])
+}
+
 fn tokenize(input: &str) -> Result<Vec<Token>, LanguageError> {
     let mut tokens = Vec::new();
     let mut i = 0usize;
@@ -729,5 +810,111 @@ mod tests {
         // Trailing dot must still be rejected.
         assert!(parse("${body.}").is_err());
         assert!(parse("${header.}").is_err());
+    }
+
+    #[test]
+    fn parse_template_operator_text_is_literal() {
+        assert_eq!(
+            parse_template("Got -> ${header.h}").unwrap(),
+            Expr::Interpolated(vec![
+                InterpolatedPart::Literal("Got -> ".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::Header("h".to_string()))),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_template_whole_slot_returns_atom() {
+        assert_eq!(
+            parse_template("${header.h}").unwrap(),
+            Expr::Header("h".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_template_whole_quoted_literal_is_raw() {
+        assert_eq!(
+            parse_template("'abc'").unwrap(),
+            Expr::StringLit("'abc'".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_template_preserves_whitespace() {
+        assert_eq!(
+            parse_template("${header.h} 3 items").unwrap(),
+            Expr::Interpolated(vec![
+                InterpolatedPart::Expr(Box::new(Expr::Header("h".to_string()))),
+                InterpolatedPart::Literal(" 3 items".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_template_outer_trim() {
+        assert_eq!(
+            parse_template("Got ${header.h}\n").unwrap(),
+            Expr::Interpolated(vec![
+                InterpolatedPart::Literal("Got ".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::Header("h".to_string()))),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_template_empty_is_error() {
+        assert!(parse_template("").is_err());
+        assert!(parse_template("   ").is_err());
+    }
+
+    #[test]
+    fn parse_template_unclosed_after_slot_is_error() {
+        assert!(parse_template("${header.h} ${").is_err());
+    }
+
+    #[test]
+    fn parse_template_unclosed_without_slot_is_literal() {
+        assert_eq!(
+            parse_template("Got ${body").unwrap(),
+            Expr::StringLit("Got ${body".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_template_unknown_slot_is_error() {
+        assert!(matches!(
+            parse_template("${unknown}"),
+            Err(LanguageError::ParseError { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_template_adjacent_literal_and_slot() {
+        assert_eq!(
+            parse_template("Got${body}").unwrap(),
+            Expr::Interpolated(vec![
+                InterpolatedPart::Literal("Got".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::Body)),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_template_unclosed_at_start_is_error() {
+        assert!(matches!(
+            parse_template("${error"),
+            Err(LanguageError::ParseError { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_template_adjacent_two_slots() {
+        assert_eq!(
+            parse_template("${header.a}${header.b}").unwrap(),
+            Expr::Interpolated(vec![
+                InterpolatedPart::Expr(Box::new(Expr::Header("a".to_string()))),
+                InterpolatedPart::Expr(Box::new(Expr::Header("b".to_string()))),
+            ])
+        );
     }
 }

@@ -552,6 +552,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compile_language_expression_is_template() {
+        let languages = languages_with_simple().await;
+        let expression = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "Got ${header.h}".into(),
+        };
+
+        let compiled = compile_language_expression(&languages, &expression).unwrap();
+
+        let mut msg = camel_api::message::Message::default();
+        msg.set_header("h", Value::String("B".into()));
+        let exchange = Exchange::new(msg);
+
+        assert_eq!(
+            compiled.evaluate(&exchange).await.unwrap(),
+            Value::String("Got B".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn compile_value_source_is_template() {
+        use crate::lifecycle::adapters::step_compilers::CompilationContext;
+
+        let languages = languages_with_simple().await;
+        let producer_ctx = ProducerContext::new();
+        let beans = Arc::new(std::sync::Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> =
+            Arc::new(camel_component_api::NoOpComponentContext);
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(camel_component_api::NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent = crate::IdempotentRegistry::new();
+        let claim_check = crate::ClaimCheckRegistry::new();
+        let cache = crate::CacheRegistry::new();
+
+        let ctx = CompilationContext {
+            producer_ctx: &producer_ctx,
+            rt,
+            languages: &languages,
+            beans: &beans,
+            function_invoker: None,
+            component_ctx,
+            route_id: Some("r1"),
+            staging_mode: &staging,
+            idempotent_repositories: &idempotent,
+            claim_check_repositories: &claim_check,
+            cache_repositories: &cache,
+            intercept: crate::intercept::InterceptRules::default(),
+        };
+
+        let expression = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "Got ${header.h}".into(),
+        };
+        let value_source =
+            compile_value_source(&ctx, &expression, "set_body", 0, Some("body".into()))
+                .expect("value source compiles");
+
+        let mut msg = camel_api::message::Message::default();
+        msg.set_header("h", Value::String("B".into()));
+        let exchange = Exchange::new(msg);
+
+        assert_eq!(
+            value_source.evaluate(&exchange).await.unwrap(),
+            Value::String("Got B".into())
+        );
+    }
+
+    fn eval_meta_for(verb: &str) -> EvalMeta {
+        EvalMeta {
+            language: "simple".into(),
+            route_id: "r1".into(),
+            step_id: format!("{verb}#0"),
+            verb: verb.into(),
+            target: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn compile_sort_expression_is_template() {
+        let languages = languages_with_simple().await;
+        let expression = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "X-${body.id}".into(),
+        };
+
+        let source = compile_sort_expression(&languages, &expression, eval_meta_for("sort"))
+            .expect("sort expression compiles");
+
+        // The synthetic sort element exchange carries NO headers; the key must
+        // come from the element body.
+        let key = source
+            .key(&serde_json::json!({ "id": "7" }))
+            .await
+            .expect("sort key evaluates");
+        assert_eq!(key.0, serde_json::json!("X-7"));
+    }
+
+    #[tokio::test]
+    async fn compile_message_id_expression_is_template() {
+        let languages = languages_with_simple().await;
+        let expression = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "m-${header.id}".into(),
+        };
+
+        let source = compile_message_id_expression(
+            &languages,
+            &expression,
+            eval_meta_for("idempotent_consumer"),
+        )
+        .expect("message id expression compiles");
+
+        let mut msg = camel_api::message::Message::default();
+        msg.set_header("id", Value::String("k".into()));
+        let exchange = Exchange::new(msg);
+
+        assert_eq!(
+            source.message_id(&exchange).await.unwrap(),
+            Some("m-k".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn compile_key_expression_is_template() {
+        let languages = languages_with_simple().await;
+        let expression = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "k-${header.id}".into(),
+        };
+
+        let source = compile_key_expression(&languages, &expression, eval_meta_for("claim_check"))
+            .expect("claim key expression compiles");
+
+        let mut msg = camel_api::message::Message::default();
+        msg.set_header("id", Value::String("k".into()));
+        let exchange = Exchange::new(msg);
+
+        assert_eq!(source.key(&exchange).await.unwrap(), "k-k");
+    }
+
+    #[tokio::test]
+    async fn compile_language_predicate_still_compares() {
+        let languages = languages_with_simple().await;
+        let expression = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${header.h} == 'B'".into(),
+        };
+
+        let predicate = compile_language_predicate(&languages, &expression).unwrap();
+
+        let mut msg = camel_api::message::Message::default();
+        msg.set_header("h", Value::String("B".into()));
+        let exchange = Exchange::new(msg);
+
+        assert!(predicate.matches(&exchange).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn compile_language_expression_propagates_template_errors() {
+        let languages = languages_with_simple().await;
+        let bad = LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${header.}".into(),
+        };
+
+        assert!(
+            compile_language_expression(&languages, &bad).is_err(),
+            "an empty header key must fail at compile time"
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_steps_covers_non_endpoint_variants() {
         use camel_api::FilterPredicate;
         use camel_api::splitter::{AggregationStrategy, SplitterConfig, split_body_lines};
