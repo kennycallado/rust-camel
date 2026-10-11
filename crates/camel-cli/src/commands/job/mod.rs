@@ -360,6 +360,17 @@ fn jobs_roots(
     config_path: &str,
     camel_config: &camel_config::config::CamelConfig,
 ) -> Result<Vec<(String, PathBuf)>, String> {
+    // rc-ijian cross-profile shadowing: the profile merge is key-by-key, so
+    // [default.jobs] dirs + [<profile>.jobs] dir can leave both keys on the
+    // merged table. resolved_dirs() honors dirs per spec; surface the ignored
+    // legacy dir here at the direct-stderr diagnostic surface, which runs
+    // before the tracing subscriber is installed (a tracing::warn! at this
+    // phase is dropped).
+    if camel_config.jobs.dir.is_some() && camel_config.jobs.dirs.is_some() {
+        eprintln!(
+            "camel job: [jobs].dir is ignored because [jobs].dirs is set (possibly merged from another profile); move it into [jobs].dirs"
+        );
+    }
     crate::commands::run::try_canonical_project_root(Path::new(config_path))
         .map(|root| {
             let mut roots: Vec<(String, PathBuf)> = Vec::new();

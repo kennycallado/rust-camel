@@ -109,6 +109,53 @@ fn jobs_overlay_overrides_default() {
 }
 
 #[test]
+fn merged_profile_keeps_both_keys_dirs_wins() {
+    // Cross-profile additive-merge shape (dossier jobconfig-findings): the
+    // profile merge is key-by-key, so [default.jobs] dirs + [development.jobs]
+    // dir leaves BOTH keys on the merged table. resolved_dirs() honors dirs
+    // per spec; the CLI warns about the ignored dir at its stderr diagnostic
+    // surface (jobs_roots), not here.
+    let _env_guard = env_lock();
+    unset_env("CAMEL_PROFILE");
+
+    let tree = toml::from_str(
+        r#"
+[default.jobs]
+dirs = ["first", "second"]
+
+[development.jobs]
+dir = "legacy"
+"#,
+    )
+    .expect("fixture must be valid TOML");
+
+    let cfg = build_from_toml_value_inner(
+        tree,
+        Some("development"),
+        false,
+        Vec::new(),
+        &super::ambient_lookup(),
+    )
+    .expect("merged profile config must build");
+
+    assert_eq!(
+        cfg.jobs.dir.as_deref(),
+        Some("legacy"),
+        "additive merge must keep the profile-scoped legacy dir"
+    );
+    assert_eq!(
+        cfg.jobs.dirs,
+        Some(vec!["first".to_string(), "second".to_string()]),
+        "additive merge must keep the default dirs list"
+    );
+    assert_eq!(
+        cfg.jobs.resolved_dirs(),
+        ["first", "second"],
+        "dirs must win post-merge"
+    );
+}
+
+#[test]
 fn jobs_table_no_unselected_profile_warning() {
     let _env_guard = env_lock();
     unset_env("CAMEL_PROFILE");
