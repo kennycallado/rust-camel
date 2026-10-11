@@ -2,7 +2,7 @@
 //! shutdown-budget contracts, split out of `mod.rs` for file-size
 //! hygiene. Behavior and test names are unchanged.
 
-use super::{JobArgs, run_job};
+use super::{JobArgs, jobs_roots, resolve_job_path, run_job};
 
 // ---- jobargs Task 3.1 harness -------------------------------------------
 //
@@ -1773,4 +1773,49 @@ mod store_plan_tests {
             Some("other.job.yaml".to_string())
         );
     }
+}
+
+/// Regression for rc-zrcud: an identical duplicate `[jobs].dirs` entry
+/// must collapse to ONE discovery root, so a bare name reached through
+/// that root is not reported as a cross-root collision.
+#[test]
+fn duplicate_job_dirs_entries_resolve_bare_name_once() {
+    use camel_config::config::{CamelConfig, JobsCamelConfig};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("Camel.toml"), "").expect("write Camel.toml");
+    std::fs::create_dir_all(dir.path().join("jobs")).expect("mkdir jobs");
+    std::fs::write(
+        dir.path().join("jobs/probe.job.yaml"),
+        "description: probe\nexecute:\n  mode: one-shot\n  timeout: 30s\n  send:\n    to: direct:tap\n",
+    )
+    .expect("write job doc");
+
+    let config_path = dir.path().join("Camel.toml");
+    let config = CamelConfig {
+        jobs: JobsCamelConfig {
+            dir: None,
+            dirs: Some(vec!["jobs".to_string(), "jobs".to_string()]),
+        },
+        ..CamelConfig::default()
+    };
+
+    let roots =
+        jobs_roots(config_path.to_str().expect("utf-8"), &config).expect("project root resolves");
+    assert_eq!(
+        roots.len(),
+        1,
+        "identical dirs entries collapse to one root; got {roots:?}"
+    );
+
+    let resolved = resolve_job_path(std::path::Path::new("probe"), &roots)
+        .expect("bare name resolves through the single deduped root");
+    assert_eq!(
+        resolved,
+        dir.path()
+            .canonicalize()
+            .expect("canonical root")
+            .join("jobs/probe.job.yaml"),
+        "bare-name probe targets the deduped root"
+    );
 }

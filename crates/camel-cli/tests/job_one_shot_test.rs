@@ -1505,6 +1505,28 @@ fn configured_job_dirs_are_scanned_in_order() {
     );
 }
 
+/// The same root listed twice in `[jobs].dirs` lists its jobs once
+/// (rc-zrcud): identical entries collapse before the walk, so the
+/// header is printed a single time and listing exits 0.
+#[test]
+fn duplicate_job_dirs_entries_list_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_config_with_jobs(dir.path(), "dirs = [\"team-a\", \"team-a\"]");
+    std::fs::create_dir_all(dir.path().join("team-a")).expect("mkdir team-a");
+    write_listing_job(&dir.path().join("team-a/zulu.job.yaml"), "team a job");
+
+    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    assert_eq!(
+        code, 0,
+        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        vec!["Jobs in team-a/:", "zulu — team a job"],
+        "duplicate dirs entries list the root once; got:\n{stdout}"
+    );
+}
+
 /// `dirs` wins over legacy `dir` when both exist: only `first` and
 /// `second` are scanned, and the legacy-only file never appears.
 #[test]

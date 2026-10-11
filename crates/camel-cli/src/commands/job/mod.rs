@@ -353,21 +353,24 @@ const LISTING_MAX_FILES: usize = 512;
 /// project the run actually targets. A dangling `--config` parent is
 /// an error for the caller to map — this never inherits `camel run`'s
 /// exit-1 convention, and never silently falls back to the CWD.
+/// Identical entries (same joined path) collapse to their first
+/// occurrence, preserving declaration order, so a root listed twice is
+/// scanned and probed once instead of colliding with itself.
 fn jobs_roots(
     config_path: &str,
     camel_config: &camel_config::config::CamelConfig,
 ) -> Result<Vec<(String, PathBuf)>, String> {
     crate::commands::run::try_canonical_project_root(Path::new(config_path))
         .map(|root| {
-            camel_config
-                .jobs
-                .resolved_dirs()
-                .into_iter()
-                .map(|label| {
-                    let path = root.join(&label);
-                    (label, path)
-                })
-                .collect()
+            let mut roots: Vec<(String, PathBuf)> = Vec::new();
+            for label in camel_config.jobs.resolved_dirs() {
+                let path = root.join(&label);
+                if roots.iter().any(|(_, existing)| existing == &path) {
+                    continue;
+                }
+                roots.push((label, path));
+            }
+            roots
         })
         .map_err(|e| format!("cannot resolve project root from --config {config_path}: {e}"))
 }
