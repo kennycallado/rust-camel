@@ -78,11 +78,19 @@ enum Commands {
         otel: bool,
 
         /// OTLP endpoint URL (implies --otel)
-        #[arg(long, value_name = "URL")]
+        #[arg(
+            long,
+            value_name = "URL",
+            value_parser = clap::builder::NonEmptyStringValueParser::new()
+        )]
         otel_endpoint: Option<String>,
 
         /// OTel service name (implies --otel)
-        #[arg(long, value_name = "NAME")]
+        #[arg(
+            long,
+            value_name = "NAME",
+            value_parser = clap::builder::NonEmptyStringValueParser::new()
+        )]
         service_name: Option<String>,
 
         /// Override health server port (starts standalone health server)
@@ -253,6 +261,63 @@ async fn main() {
             let code = commands::compile::run_compile(&args);
             std::process::exit(code);
         }
+    }
+}
+
+#[cfg(test)]
+mod run_otel_flags_tests {
+    use super::Cli;
+    use clap::CommandFactory as _;
+    use clap::error::ErrorKind;
+
+    /// rc-f8n9w: an explicit empty `--otel-endpoint=` must be rejected at the
+    /// clap boundary with the flag named, instead of silently enabling OTel
+    /// with an empty endpoint.
+    #[test]
+    fn empty_otel_endpoint_is_rejected_naming_the_flag() {
+        let err = Cli::command()
+            .try_get_matches_from(["camel", "run", "--otel-endpoint="])
+            .expect_err("empty --otel-endpoint= must be rejected");
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+        assert!(
+            err.to_string().contains("--otel-endpoint"),
+            "error must name the flag: {err}"
+        );
+    }
+
+    /// rc-f8n9w: same guard for `--service-name=`.
+    #[test]
+    fn empty_service_name_is_rejected_naming_the_flag() {
+        let err = Cli::command()
+            .try_get_matches_from(["camel", "run", "--service-name="])
+            .expect_err("empty --service-name= must be rejected");
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+        assert!(
+            err.to_string().contains("--service-name"),
+            "error must name the flag: {err}"
+        );
+    }
+
+    /// rc-f8n9w: non-empty values keep the current behavior (parsed through).
+    #[test]
+    fn non_empty_otel_flags_are_accepted() {
+        let parsed = Cli::command()
+            .try_get_matches_from([
+                "camel",
+                "run",
+                "--otel-endpoint=http://localhost:4317",
+                "--service-name=checkout",
+            ])
+            .expect("non-empty otel flags parse");
+        let run = parsed.subcommand_matches("run").expect("run matched");
+        assert_eq!(
+            run.get_one::<String>("otel_endpoint").map(String::as_str),
+            Some("http://localhost:4317")
+        );
+        assert_eq!(
+            run.get_one::<String>("service_name").map(String::as_str),
+            Some("checkout")
+        );
     }
 }
 
