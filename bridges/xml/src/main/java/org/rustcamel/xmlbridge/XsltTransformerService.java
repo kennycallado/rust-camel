@@ -157,6 +157,10 @@ public class XsltTransformerService extends MutinyXsltTransformerGrpc.XsltTransf
         return existing;
       }
       var config = new Configuration();
+      // Saxon applies accessExternalDTD / DTD-validation settings to our hardened
+      // Xerces reader, which does not recognize them and warns on every parse.
+      // Drop exactly those two benign warnings; see BenignParserWarningLogger.
+      config.setLogger(new BenignParserWarningLogger());
       // Deny-all secondary resolvers: defense-in-depth on top of the JAXP
       // URIResolver wrap below. Saxon 12 already routes some access (e.g.
       // unparsed-text()) through that wrap, but these hooks close the dedicated

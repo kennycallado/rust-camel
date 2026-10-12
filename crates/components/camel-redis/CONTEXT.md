@@ -157,6 +157,25 @@ PubSub delivery is best-effort. A failover or reconnect can lose in-flight
 messages, and subscription replay after reconnect can redeliver messages
 already seen (duplicates possible). Consumers must tolerate both.
 
+### Queue consumer delivery guarantee (bd rc-mqoxp)
+
+Queue consumption is **at-most-once**. `fn run_queue_consumer` supports `BLPOP`
+and `BRPOP` (both `QueuePopCommand` variants) through one code path and one
+`deliver` closure. The pop command removes the item from the Redis list before
+the route processes it. The `deliver` closure then hands the exchange to the
+pipeline with `ctx.send` and does not await the route outcome: there is no ack
+and no re-queue. If the route fails, or the process dies after the pop, the item
+is lost unless the route preserves it itself.
+
+Inside the per-item `deliver` closure, the only failure metric is
+`b-prime:redis:blpop-channel-closed`, emitted when `ctx.send` fails because the
+pipeline channel has closed. It does not track route outcomes. (The
+reconnect-budget metrics `e:redis:message-transient-budget` and
+`e:redis:message-non-transient` cover the pop loop, not route outcomes.)
+
+Outcome-gated delivery (for example an `LMOVE` reliable-queue mode that returns
+an item to the list on failure) is not implemented and is out of scope.
+
 ### Test seams
 
 - **Producer**: `RedisTopology` + `RedisCommandExecutor` (fake executor) drive

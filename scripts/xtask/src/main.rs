@@ -2737,39 +2737,57 @@ fn validate_inline_escape_markers(
     violations
 }
 
-/// Check if an error! site is structurally excluded from ADR-0012 lint.
-///
-/// Structural exclusions are symbol-bound (NOT file-bound): the lint checks
-/// whether the error! falls inside a specific `impl ... for Type` block.
-///
-/// Current exclusions:
-/// - camel-log LogProducer: user-output mechanism, NOT framework telemetry.
-///   Per oracle ruling ses_16262b201ffeCmO67e3T6qa73b.
+/// Structural ADR-0012 exclusions, symbol-bound (NOT file-bound): (file path
+/// fragment, `impl ... for Type` header). User-output mechanisms, NOT
+/// framework telemetry:
+/// - camel-log LogProducer. Per oracle ruling ses_16262b201ffeCmO67e3T6qa73b.
+/// - camel-processor `log` step (LogProcessor, DynamicLog): the route selects
+///   the level, so `level: error` must emit ERROR (bd rc-kuxdm).
+const STRUCTURAL_EXCLUSIONS: &[(&str, &str)] = &[
+    (
+        "camel-log/src/lib.rs",
+        "impl Service<Exchange> for LogProducer",
+    ),
+    (
+        "camel-processor/src/log.rs",
+        "impl Service<Exchange> for LogProcessor",
+    ),
+    (
+        "camel-processor/src/log.rs",
+        "impl Service<Exchange> for DynamicLog",
+    ),
+];
+
+/// Check if an error! site is structurally excluded from ADR-0012 lint: the
+/// line must fall inside one of the `STRUCTURAL_EXCLUSIONS` impl blocks.
 fn is_structurally_excluded(file_rel: &str, lines: &[&str], line_idx: usize) -> bool {
     use scan_state::{Brace, ScanState, scan_line};
-    // camel-log LogProducer — symbol-bound inside `impl Service<Exchange> for LogProducer`
-    if file_rel.contains("camel-log/src/lib.rs") {
-        let impl_start = lines
-            .iter()
-            .position(|l| l.contains("impl Service<Exchange> for LogProducer"));
-        if let Some(start) = impl_start {
-            // Literal/comment-aware brace counting (rc-xkx42): a '}' inside
-            // a string/char literal or comment in the impl body must not
-            // truncate the exclusion window early.
-            let mut state = ScanState::Normal;
-            let mut depth: i32 = 0;
-            let mut seen_open = false;
-            for (i, line) in lines.iter().enumerate().skip(start) {
-                scan_line(line.trim(), &mut state, &mut |brace| match brace {
-                    Brace::Open => {
-                        depth += 1;
-                        seen_open = true;
-                    }
-                    Brace::Close => depth -= 1,
-                });
-                if seen_open && depth <= 0 {
-                    return line_idx >= start && line_idx <= i;
+    for (file_suffix, impl_marker) in STRUCTURAL_EXCLUSIONS {
+        if !file_rel.contains(file_suffix) {
+            continue;
+        }
+        let Some(start) = lines.iter().position(|l| l.contains(impl_marker)) else {
+            continue;
+        };
+        // Literal/comment-aware brace counting (rc-xkx42): a '}' inside
+        // a string/char literal or comment in the impl body must not
+        // truncate the exclusion window early.
+        let mut state = ScanState::Normal;
+        let mut depth: i32 = 0;
+        let mut seen_open = false;
+        for (i, line) in lines.iter().enumerate().skip(start) {
+            scan_line(line.trim(), &mut state, &mut |brace| match brace {
+                Brace::Open => {
+                    depth += 1;
+                    seen_open = true;
                 }
+                Brace::Close => depth -= 1,
+            });
+            if seen_open && depth <= 0 {
+                if line_idx >= start && line_idx <= i {
+                    return true;
+                }
+                break;
             }
         }
     }
@@ -5894,6 +5912,40 @@ fn next_item() {}"#;
             let violations = lint_log_levels(&ws).unwrap();
             assert_eq!(violations.len(), 1);
             assert!(violations[0].snippet.contains("error!"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// rc-kuxdm: the `log` step's `error!` arms are excluded symbol-bound
+        /// (inside the LogProcessor / DynamicLog impls), NOT file-bound.
+        #[test]
+        fn log_step_error_arms_excluded_symbol_bound() {
+            let ws = tmp_workspace_log(&[(
+                "crates/camel-processor/src/log.rs",
+                "impl Service<Exchange> for LogProcessor {\n\
+                     fn call(&mut self) { error!(\"in processor\"); }\n\
+                 }\n\
+                 impl Service<Exchange> for DynamicLog {\n\
+                     fn call(&mut self) { error!(\"in dynamic\"); }\n\
+                 }\n\
+                 fn other() { error!(\"outside impl\"); }\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
+            assert!(violations[0].snippet.contains("outside impl"));
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        /// rc-kuxdm: the same impl text in another file is NOT excluded.
+        #[test]
+        fn log_step_exclusion_is_file_scoped() {
+            let ws = tmp_workspace_log(&[(
+                "crates/other/src/log.rs",
+                "impl Service<Exchange> for LogProcessor {\n\
+                     fn call(&mut self) { error!(\"elsewhere\"); }\n\
+                 }\n",
+            )]);
+            let violations = lint_log_levels(&ws).unwrap();
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
             fs::remove_dir_all(&ws).unwrap();
         }
 

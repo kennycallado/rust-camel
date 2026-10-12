@@ -247,7 +247,7 @@ If a concrete design question about divergence from Camel emerges for either EIP
 
 ## ADR-0012 log-policy sites
 
-The crate has 13 annotated log-policy sites. Nine **(a) handler-owned** sites use `warn!` because
+The crate has 11 annotated log-policy sites. Seven **(a) handler-owned** sites use `warn!` because
 the route ErrorHandler owns ERROR responsibility. Three **system-broken** sites use `error!`. One
 post-ack best-effort site uses `warn!` and reports a metric under ADR-0029.
 
@@ -255,8 +255,6 @@ post-ack best-effort site uses `warn!` and reports a metric under ADR-0029.
 |------|---------------|----------|------------|
 | `aggregator.rs` | `AggregatorService::force_complete_all` | (a) handler-owned | `// log-policy: handler-owned` — force-complete aggregation failed |
 | `aggregator.rs` | `fn spawn_timeout_task` | (a) handler-owned | `// log-policy: handler-owned` — timeout aggregation failed |
-| `log.rs` | `LogProcessor::call`, `LogLevel::Error` arm | (a) handler-owned | `// log-policy: handler-owned` — default Error level |
-| `log.rs` | `DynamicLog::call`, `LogLevel::Error` arm | (a) handler-owned | `// log-policy: handler-owned` — default Error level |
 | `wire_tap.rs` | `WireTapService::call` | (a) handler-owned | `// log-policy: handler-owned` — processing error |
 | `resequencer/batch.rs` | `BatchPolicy::accept` | (a) handler-owned | `// log-policy: handler-owned` — correlation expression failed |
 | `error_handler.rs` | `fn execute_on_steps` | (a) handler-owned | `// log-policy: handler-owned` — on-steps pipeline failed |
@@ -266,6 +264,11 @@ post-ack best-effort site uses `warn!` and reports a metric under ADR-0029.
 | `error_handler.rs` | `fn send_to_handler`, no producer | system-broken | `// log-policy: system-broken` — no error handler configured |
 | `error_handler.rs` | `fn send_to_handler`, producer not ready | system-broken | `// log-policy: system-broken` — DLC/handler not ready |
 | `error_handler.rs` | `fn send_to_handler`, producer call failed | system-broken | `// log-policy: system-broken` — DLC/handler call failed |
+
+The `log` step (`LogProcessor`, `DynamicLog` in `log.rs`) is **not** an annotated site. It is a
+user-output mechanism: the route author selects the level, so `level: error` emits `error!`
+(bd rc-kuxdm). The `lint-log-levels` exclusion is symbol-bound (`STRUCTURAL_EXCLUSIONS` in
+`scripts/xtask/src/main.rs`), the same way as `camel-log` `LogProducer`.
 
 ## Metrics
 

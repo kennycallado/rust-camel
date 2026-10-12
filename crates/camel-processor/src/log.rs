@@ -3,7 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tower::Service;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -63,8 +63,11 @@ impl Service<Exchange> for LogProcessor {
             LogLevel::Debug => debug!(exchange_id = %exchange_id, "{}", msg),
             LogLevel::Info => info!(exchange_id = %exchange_id, "{}", msg),
             LogLevel::Warn => warn!(exchange_id = %exchange_id, "{}", msg),
-            // log-policy: handler-owned
-            LogLevel::Error => warn!(exchange_id = %exchange_id, "{}", msg),
+            // Deliberately unannotated: the `log` step is a user-output
+            // mechanism — the route selects this level — so the call sits
+            // outside ADR-0012's operational convention. The lint-log-levels
+            // exclusion is symbol-bound (structural, in scripts/xtask).
+            LogLevel::Error => error!(exchange_id = %exchange_id, "{}", msg),
         }
         self.inner.call(exchange)
     }
@@ -122,8 +125,9 @@ impl Service<Exchange> for DynamicLog {
                 LogLevel::Debug => debug!(exchange_id = %exchange_id, "{}", msg),
                 LogLevel::Info => info!(exchange_id = %exchange_id, "{}", msg),
                 LogLevel::Warn => warn!(exchange_id = %exchange_id, "{}", msg),
-                // log-policy: handler-owned
-                LogLevel::Error => warn!(exchange_id = %exchange_id, "{}", msg),
+                // Deliberately unannotated: user-output mechanism, see
+                // `LogProcessor::call` (symbol-bound lint exclusion).
+                LogLevel::Error => error!(exchange_id = %exchange_id, "{}", msg),
             }
             Ok(exchange)
         })
@@ -263,5 +267,78 @@ mod tests {
         let exchange = Exchange::default();
         let result = svc.oneshot(exchange).await;
         assert!(result.is_ok());
+    }
+
+    /// Run `f` with a thread-local subscriber and return the captured output.
+    fn capture_logs<F: FnOnce()>(f: F) -> String {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b); // allow-unwrap
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Buf {
+                self.clone()
+            }
+        }
+
+        let buf = Buf(Arc::new(Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.0.lock().unwrap().clone(); // allow-unwrap
+        String::from_utf8(bytes).unwrap() // allow-unwrap
+    }
+
+    #[test]
+    fn log_processor_error_level_emits_error_not_warn() {
+        let out = capture_logs(|| {
+            let mut p = LogProcessor::new(LogLevel::Error, "boom-static".into());
+            drop(p.call(Exchange::default()));
+        });
+        assert!(
+            out.contains("ERROR") && out.contains("boom-static"),
+            "level error must emit ERROR, got: {out}"
+        );
+        assert!(!out.contains("WARN"), "must not downgrade to WARN: {out}");
+    }
+
+    #[test]
+    fn dynamic_log_error_level_emits_error_not_warn() {
+        let out = capture_logs(|| {
+            let mut svc = DynamicLog::new(
+                LogLevel::Error,
+                sync_source(|_ex: &Exchange| camel_api::Value::String("boom-dynamic".into())),
+            );
+            let fut = svc.call(Exchange::default());
+            futures::executor::block_on(fut).unwrap(); // allow-unwrap
+        });
+        assert!(
+            out.contains("ERROR") && out.contains("boom-dynamic"),
+            "level error must emit ERROR, got: {out}"
+        );
+        assert!(!out.contains("WARN"), "must not downgrade to WARN: {out}");
+    }
+
+    #[test]
+    fn log_processor_warn_level_still_emits_warn() {
+        let out = capture_logs(|| {
+            let mut p = LogProcessor::new(LogLevel::Warn, "w-static".into());
+            drop(p.call(Exchange::default()));
+        });
+        assert!(out.contains("WARN") && !out.contains("ERROR"), "got: {out}");
     }
 }

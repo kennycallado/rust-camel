@@ -148,6 +148,56 @@ let route = RouteBuilder::from("redis://localhost:6379?command=BLPOP&key=jobqueu
     .build()?;
 ```
 
+#### Delivery guarantee
+
+The queue consumer gives **at-most-once** delivery. It supports `BLPOP` and
+`BRPOP`; both go through the same `run_queue_consumer` path and the same
+`deliver` closure.
+
+The command pops the item from the Redis list **before** the route processes it.
+The consumer then passes the exchange to the pipeline with `ctx.send` and does
+not wait for the route outcome. There is no ack and no re-queue.
+
+Consequence: if the route fails, or the process crashes after the pop, the item
+is gone from the list. The only way to keep it is for the route itself to
+preserve it. Outcome-gated delivery (for example an `LMOVE` reliable-queue mode)
+is **not implemented** and is out of scope.
+
+#### Dead-letter pattern
+
+Because delivery is at-most-once, preserve failed items in the route. Use the
+route dead-letter channel (`RouteBuilder::dead_letter_channel`) and send the
+failed exchange to a second route that pushes it onto a dead-letter list.
+
+The consumer sets the header `CamelRedis.Key` to the source list (`jobs`). The
+dead-letter route must set `CamelRedis.Key` and `CamelRedis.Value` itself;
+otherwise `LPUSH` would write the item back to the source list.
+
+```rust
+use camel_api::Value;
+use camel_builder::{RouteBuilder, StepAccumulator};
+
+let jobs = RouteBuilder::from("redis://localhost:6379?command=BLPOP&key=jobs&timeout=30")
+    .route_id("jobs")
+    .dead_letter_channel("direct:jobs-dead")
+    .process(|ex| async move {
+        // Process the job. Returning Err sends the failed exchange to the DLC.
+        Ok(ex)
+    })
+    .build()?;
+
+let jobs_dead = RouteBuilder::from("direct:jobs-dead")
+    .route_id("jobs-dead")
+    .set_header("CamelRedis.Key", Value::String("jobs:dead".into()))
+    .set_header_fn("CamelRedis.Value", |ex| {
+        // Body is the popped item (Text). If the route rewrites the body,
+        // copy the item to a header first.
+        Value::String(ex.input.body.as_text().unwrap_or_default().to_string())
+    })
+    .to("redis://localhost:6379?command=LPUSH")
+    .build()?;
+```
+
 ### With Authentication
 
 ```rust
@@ -234,6 +284,11 @@ let consumer = RouteBuilder::from("redis://localhost:6379?command=BLPOP&key=jobs
     })
     .build()?;
 ```
+
+This example processes jobs but does not preserve them: a failed job is lost.
+See "Delivery guarantee" and "Dead-letter pattern" above. A production job queue
+should add a dead-letter channel so failed jobs survive for inspection and
+replay.
 
 ## Global Configuration
 
