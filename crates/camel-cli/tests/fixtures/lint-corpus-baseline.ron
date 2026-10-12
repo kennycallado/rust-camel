@@ -381,4 +381,22 @@
         "crates/camel-integration-test/tests/fixtures/surreal_state/routes/order.yaml",
         [("R-URI-known:unverified-scheme", "info")],
     ),
+
+    // Simple-template log wave fixture (ddc6ce7d). The producer URI is
+    // `file:${env:OUT_DIR}?fileName=...`; the scenario document `env:` tier
+    // supplies OUT_DIR, so the no-default token is honest deterministic-lint
+    // semantics — same class as inbound/routes/consumer.yaml.
+    // R-SCHEMA Error: OUT_DIR bound via scenario document env tier (simple_template_wave_test.rs document `env:`); harness-bound no-default env token; any new R-SCHEMA row must name its binding source
+    // missing-required-option Error: camel-file FileConfig declares `maxDepth`
+    // as non-Option with no default, so the macro marks it required, while
+    // from_uri treats it as optional (u64::MAX). Known metadata defect, same
+    // entry as examples/file-pollenrich/routes.yaml; remove both when fixed
+    // (rc-twzg9).
+    (
+        "crates/camel-integration-test/tests/fixtures/logs/simple-template.routes.yaml",
+        [
+            ("R-SCHEMA", "error"),
+            ("R-URI-known:missing-required-option", "error"),
+        ],
+    ),
 ]

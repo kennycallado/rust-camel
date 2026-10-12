@@ -72,7 +72,7 @@ Omit `ttl` when expiry is not part of the assertion.
 | Declared type | Inherent columns | Row order |
 |---|---|---|
 | `string` | `value` | One value row |
-| `hash` | `field`, `value` | Field order |
+| `hash` | `field`, `value` | Sorted by field name, not insertion order |
 | `list` | `index`, `value` | Numeric index order |
 | `set` | `member` | Lexicographic member order |
 | `zset` | `member`, `score` | Ascending rank order |
@@ -88,6 +88,8 @@ expectation:
 
 Unknown columns and row-width mismatches are load errors, even without explicit `columns`.
 `rows` uses the shared cell matchers, including `{ignore: null}` to match any cell.
+Redis cells are strings or numbers, never JSON objects. A `jsonSubset` cell therefore loads without error but never matches.
+Use `equals`, `regex`, `contains`, `startsWith`, or `endsWith` on redis cells.
 `unordered: true` ignores row order but retains the declared column order.
 Use exactly one row shape: `rows`, `count`, `atLeast`, `atMost`, or a paired `atLeast`/`atMost` range.
 Count bounds apply to projected rows, not columns.

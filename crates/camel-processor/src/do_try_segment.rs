@@ -94,8 +94,9 @@ async fn run_finally_body(
 
 /// Surface `failure` after running finally.
 ///
-/// Used both for a failed catch predicate (the predicate error surfaced as the
-/// main failure) and for the no-catch-matched path (the original try error).
+/// Used for a failed catch predicate (the predicate error surfaced as the
+/// main failure), the no-catch-matched path, and the Propagate / fail-closed
+/// path (the original try error).
 /// `failure` becomes the main failure (Camel parity: a throwing finally body
 /// restores it; Stop in finally still stops the outer route; a failed finally
 /// `on_when` predicate supersedes it).
@@ -197,26 +198,8 @@ impl OutcomePipeline for DoTrySegment {
                                     // Propagate and any future variant run finally then
                                     // surface the original error (fail-closed).
                                     _ => {
-                                        match run_finally_body(&mut self.finally, next).await {
-                                            Ok(_) => {}
-                                            Err(FinallyOutcome::Stopped(e)) => {
-                                                return PipelineOutcome::Stopped(*e);
-                                            }
-                                            Err(FinallyOutcome::Failed(_finally_err)) => {
-                                                tracing::warn!(
-                                                    error = %err,
-                                                    "doFinally threw during Propagate; \
-                                                     restoring original"
-                                                );
-                                                return PipelineOutcome::Failed(err);
-                                            }
-                                            // Failed finally `on_when` predicate:
-                                            // the typed error fails the segment.
-                                            Err(FinallyOutcome::PredicateFailed(pred_err)) => {
-                                                return PipelineOutcome::Failed(pred_err);
-                                            }
-                                        }
-                                        return PipelineOutcome::Failed(err);
+                                        return fail_after_finally(&mut self.finally, next, err)
+                                            .await;
                                     }
                                 }
                             }
