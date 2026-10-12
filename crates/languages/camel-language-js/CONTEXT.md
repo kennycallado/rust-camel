@@ -23,8 +23,11 @@ Isolation contract per evaluation:
 
 - Each evaluation receives fresh `camel` and `console` bindings and a fresh
   declarative environment for lexical declarations.
-- Configurable global additions are removed, and named intrinsic roots are
-  verified between evaluations.
+- Configurable global additions (top-level `var`/`function`/`async function`,
+  undeclared assignment) are removed between evaluations WITHOUT triggering a
+  recycle; a non-configurable addition, a vanished baseline key, or an
+  unreadable added-global descriptor does. The named intrinsic roots and the
+  `eval` identity are verified between evaluations.
 - JavaScript evaluations do not receive realm isolation: global properties,
   intrinsic state outside the named integrity set, heap state, and
   engine-internal state may survive across exchanges and routes until realm
@@ -44,7 +47,15 @@ bindings `camel` and `console` are excluded from value-identity comparison
 value identity against the freshly installed bindings are enforced by
 install verification. On any drift the worker recycles the whole realm — a
 fresh realm, a fresh baseline, and a dropped wrapper cache. The worker never
-attempts restoration of drifted state.
+attempts restoration of drifted state. Recycle triggers are not limited to
+global keys: `eval` identity drift (or a missing `eval` baseline) and
+descriptor/prototype drift in the named `Object`/`Array`/`Function` roots also
+recycle, enforced by the protected-invariant install-verify plus the integrity
+check. Promise jobs enqueued by `script:` evaluation are discarded at enqueue
+and never retained: `script:` is synchronous (ADR-0006) and their callbacks do
+not run. Persistence non-guarantee: a script that now scrubs-and-reuses instead
+of recycling keeps its untracked state within the realm generation, exactly as
+existing `camel.body`-style scripts already do.
 
 All host-created JavaScript objects in `bindings.rs` use
 `JsObject::with_null_proto()`. This includes `camel`, `console`, map wrappers,

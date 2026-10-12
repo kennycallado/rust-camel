@@ -6,7 +6,7 @@ pub enum JsLanguageError {
     /// The JavaScript source failed to parse or execute.
     ///
     /// `message` is engine diagnostic text and may embed exchange data. It is
-    /// redacted at the [`LanguageError`] boundary in `expression.rs`; never
+    /// redacted at the `LanguageError` boundary in `expression.rs`; never
     /// forward it into a `CamelError`, log record, or DLC payload.
     #[error("JS execution error: {message}")]
     Execution { message: String },

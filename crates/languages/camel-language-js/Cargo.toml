@@ -28,6 +28,7 @@ camel-language-api.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tower.workspace = true
 serde_json.workspace = true
+tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 [lints]
 workspace = true

@@ -8,6 +8,12 @@
 //! drift the worker recycles the whole realm — it never attempts
 //! restoration.
 //!
+//! Configurable global additions made by eval code (top-level `var`,
+//! `function`, `async function`, undeclared assignment) are excluded from the
+//! key-set drift check: the pre-eval scrub removes them, so they never force a
+//! rebuild. A non-configurable addition, a vanished baseline key, and an
+//! unreadable added-global descriptor still drift.
+//!
 //! Named root set: the `globalThis` baseline own keys, the `eval`
 //! function, and the prototypes of `Object`, `Array`, and `Function`.
 //! The `String`/`Number`/`Boolean` prototype trio was the declared shrink
@@ -181,16 +187,36 @@ impl IntegrityBaseline {
     pub(super) fn verify(&self, ctx: &mut Context) -> bool {
         let global = ctx.global_object();
         let keys = global.own_property_keys(ctx).unwrap_or_default();
-        if !key_sets_equal(&keys, &self.global_keys) {
+        // Every baseline key must still be present.
+        let current: HashSet<&PropertyKey> = keys.iter().collect();
+        if self.global_keys.iter().any(|key| !current.contains(key)) {
+            tracing::debug!("JS realm integrity drift detected: global key set");
             return false;
         }
+        // Added keys are drift UNLESS their descriptor is configurable: the
+        // pre-eval scrub removes configurable additions, so they never force a
+        // rebuild. An unreadable descriptor fails closed as drift.
+        for key in &keys {
+            if self.global_keys.contains(key) {
+                continue;
+            }
+            let desc = global.borrow().properties().get(key);
+            if added_global_is_drift(desc.as_ref()) {
+                tracing::debug!("JS realm integrity drift detected: global key set");
+                return false;
+            }
+        }
         let Some(eval_object) = self.eval_object() else {
+            tracing::debug!("JS realm integrity drift detected: eval baseline missing");
             return false;
         };
         let eval_object = eval_object.clone();
         match global.get(js_string!("eval"), ctx) {
             Ok(value) if value.strict_equals(&JsValue::from(eval_object)) => {}
-            _ => return false,
+            _ => {
+                tracing::debug!("JS realm integrity drift detected: eval identity");
+                return false;
+            }
         }
         for root in &self.roots {
             if !root.matches(ctx) {
@@ -209,6 +235,16 @@ fn key_sets_equal(current: &[PropertyKey], baseline: &[PropertyKey]) -> bool {
     let current: HashSet<&PropertyKey> = current.iter().collect();
     let baseline: HashSet<&PropertyKey> = baseline.iter().collect();
     current == baseline
+}
+
+/// Classify a global key added after the baseline. A configurable addition is
+/// removed by the pre-eval scrub and is NOT drift; a non-configurable addition
+/// is drift; an unreadable (absent) descriptor fails closed as drift.
+fn added_global_is_drift(desc: Option<&PropertyDescriptor>) -> bool {
+    match desc {
+        Some(desc) => desc.configurable() != Some(true),
+        None => true,
+    }
 }
 
 /// Identity comparison of a `[[Prototype]]` pair.
@@ -285,4 +321,54 @@ fn descriptors_hash(
         }
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IntegrityBaseline, added_global_is_drift};
+    use boa_engine::JsValue;
+    use boa_engine::property::PropertyDescriptor;
+
+    fn data_desc(configurable: bool) -> PropertyDescriptor {
+        PropertyDescriptor::builder()
+            .value(JsValue::undefined())
+            .writable(true)
+            .enumerable(true)
+            .configurable(configurable)
+            .build()
+    }
+
+    #[test]
+    fn configurable_added_global_is_not_drift() {
+        assert!(!added_global_is_drift(Some(&data_desc(true))));
+    }
+
+    #[test]
+    fn nonconfigurable_added_global_is_drift() {
+        assert!(added_global_is_drift(Some(&data_desc(false))));
+    }
+
+    #[test]
+    fn absent_added_global_descriptor_is_drift() {
+        assert!(added_global_is_drift(None));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn empty_eval_root_verify_logs_eval_baseline_missing() {
+        // Degenerate baseline: current global keys but no `eval` root, so the
+        // key check passes and the check fails at the missing-eval-baseline
+        // branch (a bare `empty()` baseline would instead trip the
+        // non-configurable builtin keys at the first step).
+        let mut ctx = boa_engine::Context::default();
+        let keys = ctx.global_object().own_property_keys(&mut ctx).unwrap();
+        let baseline = IntegrityBaseline {
+            global_keys: keys,
+            roots: Vec::new(),
+        };
+        assert!(!baseline.verify(&mut ctx));
+        assert!(logs_contain(
+            "JS realm integrity drift detected: eval baseline missing"
+        ));
+    }
 }

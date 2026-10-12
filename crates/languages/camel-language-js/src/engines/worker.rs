@@ -19,8 +19,14 @@
 //! the prototypes of `Object`, `Array`, and `Function`; see
 //! `integrity.rs` for the measured Requirement-4 shrink) is verified
 //! against a baseline captured right after the initial `camel`/`console`
-//! install. Any drift, a failed install-verify, or a panic recycles the whole realm (fresh realm, fresh baseline,
-//! dropped wrapper cache); the worker never attempts restoration. State
+//! install. Configurable global additions (top-level `var`/`function`/`async
+//! function`, undeclared assignment) are eval-code bindings: the scrub removes
+//! them and they are NOT drift; a non-configurable addition or a vanished
+//! baseline key still is. Enqueued promise jobs are discarded by the context's
+//! job executor (`DiscardingJobExecutor`): `script:` is synchronous (ADR-0006)
+//! and their callbacks do not run. Any drift, a failed install-verify, or a
+//! panic recycles the whole realm (fresh realm, fresh baseline, dropped wrapper
+//! cache); the worker never attempts restoration. State
 //! OUTSIDE the named integrity set (for example `Date.prototype`
 //! mutations, retained object graphs, engine-internal state) may survive
 //! across evals, exchanges, and routes until a recycle — see the crate
@@ -43,11 +49,17 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
 
+#[cfg(test)]
+use std::cell::Cell;
+
+use boa_engine::context::ContextBuilder;
+use boa_engine::job::{Job, JobExecutor};
 use boa_engine::property::PropertyKey;
 use boa_engine::realm::Realm;
 use boa_engine::{
@@ -321,6 +333,36 @@ fn install_bindings(
     })
 }
 
+/// Job executor that discards enqueued promise/async jobs instead of
+/// retaining them. `script:` evaluation is synchronous (ADR-0006): its
+/// promise jobs must not accumulate across evaluations, and their callbacks
+/// do not run. The test-gated counter proves the enqueue path is exercised
+/// while memory stays flat.
+#[derive(Default)]
+struct DiscardingJobExecutor {
+    #[cfg(test)]
+    dropped: Cell<u64>,
+}
+
+impl JobExecutor for DiscardingJobExecutor {
+    fn enqueue_job(self: Rc<Self>, _job: Job, _context: &mut Context) {
+        #[cfg(test)]
+        self.dropped.set(self.dropped.get() + 1);
+    }
+
+    fn run_jobs(self: Rc<Self>, _context: &mut Context) -> boa_engine::JsResult<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl DiscardingJobExecutor {
+    /// Number of jobs discarded since construction (test observability only).
+    fn dropped_count(&self) -> u64 {
+        self.dropped.get()
+    }
+}
+
 /// Worker-thread-local engine state. Never crosses a thread boundary; tests
 /// may build it directly and call the same methods the worker loop calls.
 pub(super) struct WorkerState {
@@ -364,7 +406,15 @@ impl WorkerState {
     /// empty, the next eval's install-verify fails, and the recycle path
     /// rebuilds a healthy state.
     pub(super) fn new(limits: ResolvedJsLimits) -> Self {
-        let mut ctx = Context::default();
+        // `Context::default()` panics when its builder fails; preserve that
+        // exact behavior. Never fall back to `Context::default()` here — it
+        // installs the retaining `SimpleJobExecutor` and would reintroduce the
+        // promise-job accumulation this executor exists to bound.
+        let executor = Rc::new(DiscardingJobExecutor::default());
+        let mut ctx = ContextBuilder::new()
+            .job_executor(executor)
+            .build()
+            .expect("Building the worker JS context should not fail"); // allow-unwrap
         apply_runtime_limits(&mut ctx, &limits);
         let realm = ctx.realm().clone();
         ctx.enter_realm(realm.clone());
@@ -612,6 +662,7 @@ impl WorkerState {
     /// worker never attempts restoration of drifted state.
     fn recycle(&mut self) {
         self.recycle_count += 1;
+        tracing::debug!(recycle_count = self.recycle_count, "JS realm recycled");
         let limits = self.limits.clone();
         if let Ok(realm) = self.ctx.create_realm() {
             // `create_realm` binds default globals on the new realm but
@@ -1341,6 +1392,249 @@ mod tests {
             state.recycle_count, 0,
             "steady-state evals must not trigger realm recycles"
         );
+    }
+
+    #[test]
+    fn var_global_does_not_recycle_realm() {
+        let mut state = worker_state();
+        for _ in 0..100 {
+            eval_now(&mut state, "var y = 1; y", JsExchange::default()).unwrap();
+        }
+        assert_eq!(
+            state.recycle_count, 0,
+            "a top-level var must not rebuild the realm"
+        );
+    }
+
+    #[test]
+    fn function_global_does_not_recycle_realm() {
+        let mut state = worker_state();
+        for _ in 0..100 {
+            eval_now(&mut state, "function f() {}; 0", JsExchange::default()).unwrap();
+        }
+        assert_eq!(
+            state.recycle_count, 0,
+            "a top-level function must not rebuild the realm"
+        );
+    }
+
+    #[test]
+    fn undeclared_global_does_not_recycle_realm() {
+        let mut state = worker_state();
+        for _ in 0..100 {
+            eval_now(&mut state, "z = 1; z", JsExchange::default()).unwrap();
+        }
+        assert_eq!(
+            state.recycle_count, 0,
+            "an undeclared assignment must not rebuild the realm"
+        );
+    }
+
+    #[test]
+    fn async_global_does_not_recycle_realm() {
+        let mut state = worker_state();
+        for _ in 0..100 {
+            eval_now(
+                &mut state,
+                "async function af() {}; 0",
+                JsExchange::default(),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            state.recycle_count, 0,
+            "a top-level async function must not rebuild the realm"
+        );
+    }
+
+    #[test]
+    fn configurable_globals_are_scrubbed_between_evals() {
+        let mut state = worker_state();
+        eval_now(&mut state, "var y = 1; z = 2; 0", JsExchange::default()).unwrap();
+        let r = eval_now(
+            &mut state,
+            "[typeof y, typeof z].join(',')",
+            JsExchange::default(),
+        )
+        .unwrap();
+        assert_eq!(r.return_value.as_str(), Some("undefined,undefined"));
+        assert_eq!(
+            state.recycle_count, 0,
+            "configurable additions must be scrubbed, not recycled"
+        );
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn drift_and_recycle_emit_debug_without_user_data() {
+        let mut state = worker_state();
+        eval_now(
+            &mut state,
+            "Object.defineProperty(globalThis, 'pwn', { value: 1, configurable: false }); 0",
+            JsExchange::default(),
+        )
+        .unwrap();
+        assert!(logs_contain(
+            "JS realm integrity drift detected: global key set"
+        ));
+        assert!(logs_contain("JS realm recycled"));
+        assert!(!logs_contain("pwn"));
+        assert!(!logs_contain("Object.defineProperty"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn eval_identity_drift_emits_debug_without_user_data() {
+        let mut state = worker_state();
+        eval_now(&mut state, "eval = 1; 0", JsExchange::default()).unwrap();
+        assert!(logs_contain(
+            "JS realm integrity drift detected: eval identity"
+        ));
+        assert!(logs_contain("JS realm recycled"));
+        assert!(!logs_contain("eval = 1"));
+    }
+
+    #[test]
+    fn discarding_executor_installed() {
+        let state = worker_state();
+        assert!(
+            state
+                .ctx
+                .downcast_job_executor::<DiscardingJobExecutor>()
+                .is_some(),
+            "the worker context must use the discarding job executor"
+        );
+    }
+
+    #[test]
+    fn context_rebuild_reinstalls_discarding_executor() {
+        let mut state = worker_state();
+        for _ in 0..10 {
+            eval_now(
+                &mut state,
+                "Promise.resolve(1).then(() => {}); 0",
+                JsExchange::default(),
+            )
+            .unwrap();
+        }
+        let before = state
+            .ctx
+            .downcast_job_executor::<DiscardingJobExecutor>()
+            .unwrap();
+        assert!(before.dropped_count() > 0);
+        drop(before);
+        // The same reconstruction the panic path uses (worker_loop).
+        state = WorkerState::new(resolve_js_limits(&JsLimitsConfig::default()));
+        let exec = state
+            .ctx
+            .downcast_job_executor::<DiscardingJobExecutor>()
+            .unwrap();
+        assert_eq!(
+            exec.dropped_count(),
+            0,
+            "a rebuilt context must reinstall the discarding executor"
+        );
+    }
+
+    #[test]
+    fn then_jobs_dropped_exactly_n_with_zero_recycles() {
+        const N: u64 = 50;
+        let mut state = worker_state();
+        let baseline = state
+            .ctx
+            .downcast_job_executor::<DiscardingJobExecutor>()
+            .unwrap()
+            .dropped_count();
+        assert_eq!(baseline, 0);
+        for _ in 0..N {
+            eval_now(
+                &mut state,
+                "Promise.resolve(1).then(() => {}); 0",
+                JsExchange::default(),
+            )
+            .unwrap();
+        }
+        let dropped = state
+            .ctx
+            .downcast_job_executor::<DiscardingJobExecutor>()
+            .unwrap()
+            .dropped_count();
+        assert_eq!(dropped - baseline, N, "exactly one job per eval is dropped");
+        assert_eq!(state.recycle_count, 0);
+    }
+
+    #[test]
+    fn then_drops_after_forced_recycle() {
+        const N: u64 = 50;
+        let mut state = worker_state();
+        // Fetch the executor BEFORE the forced recycle so same-instance
+        // survival across create_realm is proven, not just re-installation.
+        let exec_before = state
+            .ctx
+            .downcast_job_executor::<DiscardingJobExecutor>()
+            .unwrap();
+        eval_now(
+            &mut state,
+            "Object.defineProperty(globalThis, 'pwn', { value: 1, configurable: false }); 0",
+            JsExchange::default(),
+        )
+        .unwrap();
+        assert_eq!(state.recycle_count, 1);
+        let before = exec_before.dropped_count();
+        for _ in 0..N {
+            eval_now(
+                &mut state,
+                "Promise.resolve(1).then(() => {}); 0",
+                JsExchange::default(),
+            )
+            .unwrap();
+        }
+        let exec_after = state
+            .ctx
+            .downcast_job_executor::<DiscardingJobExecutor>()
+            .unwrap();
+        assert!(
+            Rc::ptr_eq(&exec_before, &exec_after),
+            "recycle must keep the same executor instance"
+        );
+        assert_eq!(exec_after.dropped_count() - before, N);
+        assert_eq!(state.recycle_count, 1, "no recycle beyond the forced one");
+    }
+
+    #[test]
+    fn error_path_jobs_are_dropped() {
+        let mut state = worker_state();
+        let baseline = state
+            .ctx
+            .downcast_job_executor::<DiscardingJobExecutor>()
+            .unwrap()
+            .dropped_count();
+        let result = eval_now(
+            &mut state,
+            "Promise.resolve(1).then(() => {}); throw new Error('boom')",
+            JsExchange::default(),
+        );
+        assert!(result.is_err());
+        let dropped = state
+            .ctx
+            .downcast_job_executor::<DiscardingJobExecutor>()
+            .unwrap()
+            .dropped_count();
+        assert_eq!(dropped - baseline, 1);
+        assert_eq!(state.recycle_count, 0);
+    }
+
+    #[test]
+    fn then_callbacks_do_not_mutate_body() {
+        let mut state = worker_state();
+        let result = eval_now(
+            &mut state,
+            "camel.body = 'assigned'; Promise.resolve().then(() => { camel.body = 'from-then'; }); 'done'",
+            JsExchange::default(),
+        )
+        .unwrap();
+        assert_eq!(result.body.as_str(), Some("assigned"));
+        assert_eq!(state.recycle_count, 0);
     }
 
     #[test]
