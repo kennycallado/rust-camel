@@ -1,6 +1,6 @@
 # Log-Level Convention: Handler-Contract Boundaries
 
-Adopt a project-wide log-level convention based on **handler-contract boundaries**: emitters *inside* a contract boundary where a downstream handler will own the failure (taxonomy categories **(a)** Producer/Processor inside a pipeline, **(b-bridged)** Consumer→pipeline with `bridge_error_handler=true`) MUST log at `warn!` or below; emitters *outside* any handler contract (categories **(b′)** consumer side-effect failure after `send_and_wait`, **(g)** unrecoverable Producer/Endpoint creation failure, **(e)** transient server accept/retry loops) MAY log at `error!` but MUST pair the call with a signal replacement — `MetricsCollector::increment_errors(route_id, "<category>:<component>:<site>")` for (b′)/(e), `HealthCheckRegistry::force_unhealthy_for_route(route_id, name, reason)` for (g); emitters in **system-broken** categories — corruption, panic-equivalent, contract violation (**c** supervisor, **d** CLI/bootstrap, **f** corruption, **h** pre-pipeline authz fault) — MUST log at `error!` with no replacement required. The convention is enforced by `xtask lint-log-levels` requiring every `error!` in non-test code to carry one of three preceding annotations: `// log-policy: system-broken | outside-contract | handler-owned` (the last forbidding `error!` outright).
+Adopt a project-wide log-level convention based on **handler-contract boundaries**: emitters *inside* a contract boundary where a downstream handler will own the failure (taxonomy categories **(a)** Producer/Processor inside a pipeline, **(b-bridged)** Consumer→pipeline with `bridge_error_handler=true`) MUST log at `warn!` or below; emitters *outside* any handler contract (categories **(b′)** consumer side-effect failure after `send_and_wait`, **(g)** unrecoverable Producer/Endpoint creation failure, **(e)** transient server accept/retry loops) MAY log at `error!` but MUST pair the call with a signal replacement — `MetricsCollector::increment_errors(route_id, "<category>:<component>:<site>")` for (b′)/(e), `HealthCheckRegistry::force_unhealthy_for_route(route_id, name, reason)` for (g); emitters in **system-broken** categories — corruption, panic-equivalent, contract violation (**c** supervisor, **d** CLI/bootstrap, **f** corruption, **h** pre-pipeline authz fault) — MUST log at `error!` with no replacement required. The convention is enforced by `xtask lint-log-levels` requiring every `error!` in non-test code (except the structural exclusions listed below) to carry one of three preceding annotations: `// log-policy: system-broken | outside-contract | handler-owned` (the last forbidding `error!` outright).
 
 ## Background
 
@@ -55,7 +55,7 @@ A regression test at `crates/camel-processor/src/error_handler.rs` (or sibling) 
 
 ## Lint annotations
 
-Every `error!(...)` in non-test code MUST be preceded by exactly one of:
+Except for the structural exclusions listed in "Structural exclusions (user-output mechanisms)" below, every `error!(...)` in non-test code MUST be preceded by exactly one of:
 
 ```rust,ignore
 // log-policy: system-broken
@@ -79,6 +79,28 @@ Enforced by `xtask lint-log-levels` (pattern at `scripts/xtask/src/main.rs:868` 
 2. **Inline escape** (`// allow-log-levels` on the same line as `error!`) — counted across all `src/**/*.rs` files. Paired `allow-inline.max` enforces `count <= max`; migrations adding deferred sites MUST bump `allow-inline.max` atomically in the same commit.
 
 Every inline escape MUST be preceded (within 3 lines) by a `TODO(ADR-0012-<flavor>): ... via bd <id>` marker where `<flavor>` ∈ `{e-metrics, g, ...}` and `<id>` is a live bd chore id. Lint fails if the TODO marker is missing or the bd id is absent. (Liveness of the bd id is enforced by periodic CI job; the lint verifies format only.) This prevents deferred sites from becoming invisible and permanent — every escape is traceable to a deferral chore.
+
+## Structural exclusions (user-output mechanisms)
+
+The log step and log endpoint emit at the level the user configured. A route
+with `level: error` must produce an ERROR event: that event is the product's
+output, not an operational failure signal. No handler-contract annotation
+applies, and `handler-owned` — which forbids `error!` outright — cannot
+coexist with this behavior.
+
+Three impls are excluded:
+
+- `LogProducer` (camel-log, `crates/components/camel-log/src/lib.rs`,
+  `impl Service<Exchange> for LogProducer`).
+- `LogProcessor` and `DynamicLog` (camel-processor,
+  `crates/camel-processor/src/log.rs`).
+
+The exclusion is bound to the impl blocks (not to the file) via
+`STRUCTURAL_EXCLUSIONS` in `scripts/xtask/src/main.rs` (lint-log-levels), and a
+regression test in
+`crates/camel-processor/tests/transform_handler_owned_regression.rs` fails if
+the camel-processor bindings are removed. Adding a new exclusion requires
+amending this ADR.
 
 ## Migration scope (informational)
 
