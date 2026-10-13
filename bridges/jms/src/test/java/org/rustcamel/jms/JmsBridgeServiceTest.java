@@ -20,6 +20,7 @@ import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import jakarta.enterprise.inject.Instance;
 import java.lang.reflect.Field;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
@@ -73,7 +74,10 @@ class JmsBridgeServiceTest {
     // test uses an empty destination (treated as a queue), so the map must be a valid, trusted
     // configured journal: owner-private directory plus a 32-hex broker key. Otherwise the new
     // queue contract would fail every subscribe with FAILED_PRECONDITION before registration.
-    Files.setPosixFilePermissions(tempDir, PosixFilePermissions.fromString("rwx------"));
+    // Windows has no POSIX mode; startup validation skips the privacy check there.
+    if (FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
+      Files.setPosixFilePermissions(tempDir, PosixFilePermissions.fromString("rwx------"));
+    }
     service = new JmsBridgeService();
     service.consumerFactory = instance;
     service.config =

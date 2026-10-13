@@ -35,6 +35,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -44,10 +46,10 @@ import org.junit.jupiter.api.io.TempDir;
  * is verified against independently constructed bytes rather than its own writer.
  *
  * <p>The owner-private permission assertions and the lock-file inode check are POSIX syscall
- * assertions and run on Linux (the suite runs in a Linux container). The busy-lock and
- * concurrent-acquire tests use bounded waits: the busy path asserts a bounded elapsed interval and
- * the concurrent path bounds {@code ExecutorService.invokeAll}, so a regression fails fast instead
- * of hanging.
+ * assertions; they are disabled on Windows, which has no POSIX mode and no file key. The busy-lock
+ * and concurrent-acquire tests use bounded waits: the busy path asserts a bounded elapsed interval
+ * and the concurrent path bounds {@code ExecutorService.invokeAll}, so a regression fails fast
+ * instead of hanging.
  */
 @DisplayName("JournalService framing, replay, and torn tail")
 class JournalServiceTest {
@@ -165,6 +167,7 @@ class JournalServiceTest {
   }
 
   @Test
+  @DisabledOnOs(OS.WINDOWS)
   void lock_file_is_never_replaced() throws Exception {
     JournalService service = newService();
     Path lockFile = tempDir.resolve("broker-a").resolve("queue-a.lock");
@@ -179,6 +182,7 @@ class JournalServiceTest {
   }
 
   @Test
+  @DisabledOnOs(OS.WINDOWS)
   void journal_files_are_owner_private() throws Exception {
     JournalService service = newService();
     JournalService.JournalHandle handle = service.acquire("broker-a", "queue-a", 1000L);

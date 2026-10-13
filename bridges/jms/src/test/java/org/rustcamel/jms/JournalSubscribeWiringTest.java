@@ -16,6 +16,7 @@ import static org.mockito.Mockito.when;
 
 import io.grpc.Status;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
@@ -54,6 +55,10 @@ class JournalSubscribeWiringTest {
   private static final long AWAIT_SECONDS = 15L;
 
   @TempDir Path tempDir;
+
+  private static boolean posixSupported() {
+    return FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
+  }
 
   /** A consumer wired to fresh mocked JMS and a real journal runtime. */
   private record Wired(
@@ -331,20 +336,23 @@ class JournalSubscribeWiringTest {
                     KEY)),
         "an unresolved directory must fail before readiness");
 
-    Path lax =
-        Files.createDirectory(
-            tempDir.resolve("lax"),
-            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwxr-xr-x")));
-    assertThrows(
-        JournalPermanentException.class,
-        () ->
-            PortAnnouncer.validateJournalStartup(
-                Map.of(
-                    JournalService.JOURNAL_DIRECTORY_ENV,
-                    lax.toString(),
-                    JournalService.BROKER_KEY_ENV,
-                    KEY)),
-        "a group-accessible directory is not owner-private");
+    // Windows has no POSIX mode, so a group-accessible directory cannot be expressed there.
+    if (posixSupported()) {
+      Path lax =
+          Files.createDirectory(
+              tempDir.resolve("lax"),
+              PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwxr-xr-x")));
+      assertThrows(
+          JournalPermanentException.class,
+          () ->
+              PortAnnouncer.validateJournalStartup(
+                  Map.of(
+                      JournalService.JOURNAL_DIRECTORY_ENV,
+                      lax.toString(),
+                      JournalService.BROKER_KEY_ENV,
+                      KEY)),
+          "a group-accessible directory is not owner-private");
+    }
 
     assertEquals(
         announcementsBefore,
@@ -374,9 +382,11 @@ class JournalSubscribeWiringTest {
   @Test
   void readiness_opens_no_journal() throws Exception {
     Path root =
-        Files.createDirectory(
-            tempDir.resolve("root"),
-            PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+        posixSupported()
+            ? Files.createDirectory(
+                tempDir.resolve("root"),
+                PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
+            : Files.createDirectory(tempDir.resolve("root"));
 
     JournalService.validateStartup(root.toString(), KEY);
     PortAnnouncer.validateJournalStartup(

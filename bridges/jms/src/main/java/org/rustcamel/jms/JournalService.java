@@ -1016,8 +1016,15 @@ public final class JournalService {
    * Fsyncs a directory so a completed rename within it is durable. Linux supports opening a
    * directory read-only and forcing it; a failure is not swallowed, because a compaction that
    * cannot make its rename durable must fail closed.
+   *
+   * <p>Windows (the non-POSIX default filesystem) cannot open a directory as a channel: the JDK
+   * raises {@code AccessDeniedException}, and no directory flush exists. NTFS journals the rename
+   * metadata itself, so the step is skipped there instead of poisoning every compaction.
    */
   private static void fsyncDirectory(Path directory) throws IOException {
+    if (!posixSupported()) {
+      return;
+    }
     try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
       channel.force(true);
     }
