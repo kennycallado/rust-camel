@@ -2,8 +2,7 @@
 description: balanced - balanced implementation worker for simple tasks.
 mode: subagent
 temperature: 0.1
-model: zai-coding-plan/glm-5.3-flash
-variant: high
+model: opencode-go/mimo-v2.6-pro
 tools:
   write: true
   edit: true

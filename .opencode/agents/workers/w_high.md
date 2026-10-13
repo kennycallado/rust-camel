@@ -2,7 +2,7 @@
 description: high - reasoning implementation worker for complex tasks.
 mode: subagent
 temperature: 0.1
-model: zai-coding-plan/glm-5.3
+model: zai-coding-plan/glm-5.3-flash
 variant: high
 tools:
   write: true

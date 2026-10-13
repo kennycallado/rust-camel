@@ -47,7 +47,7 @@ artifacts:
     description: Detailed implementation plan + progress tracker — each task has files, steps, tests, acceptance criteria, ending with a checkbox
     instruction: |
       Create a DETAILED implementation plan. This is not a simple checklist —
-      it is the document that enables cheap/fast worker subagents (w_fast)
+      it is the document that enables cheap/fast worker subagents (w_low)
       to execute without needing to figure out details.
 
       For EACH task include:
@@ -79,8 +79,8 @@ apply:
 
     IMPLEMENTATION (subagent-driven pattern):
     - For each task: read its full block (files/steps/tests/AC) from tasks.md
-    - Dispatch @workers/w_fast with the task details (default)
-    - Bump to @workers/w_balanced or @workers/w_heavy if complex
+    - Dispatch @workers/w_low with the task details (default)
+    - Bump to @workers/w_balanced or @workers/w_high if complex
     - After each task: dispatch @reviewers/r_glm to review the change
     - Do NOT advance past a task with critical/important issues
     - Resolve minor issues or file bd follow-ups before advancing
