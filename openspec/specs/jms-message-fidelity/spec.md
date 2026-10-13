@@ -81,47 +81,49 @@ still belongs to the stream being cleaned up.
 ### Requirement: Non-Bytes/Text JMS message types forward empty under a documented policy
 
 The JMS bridge SHALL forward `ObjectMessage`, `MapMessage`, and
-`StreamMessage` with an empty body and preserved headers, acknowledging them
-via session `AUTO_ACKNOWLEDGE` receipt with no explicit `acknowledge()` call,
-and SHALL never invoke body accessors (`getObject` on ObjectMessage;
-`getMapNames`/`getObject(String)` on MapMessage; `readInt`/`readString`/
-`readBytes` on StreamMessage) on those messages. The
+`StreamMessage` with an empty body and preserved headers. It SHALL open the
+consumer session with `CLIENT_ACKNOWLEDGE` and SHALL acknowledge each such
+message only through the completion settlement path, after the Rust route
+reports success. The single exception SHALL be the terminal reject-then-log
+discard: when the message reaches `JMS_MAX_DELIVERY_ATTEMPTS`, the bridge SHALL
+acknowledge it without route success, and SHALL still never invoke a body
+accessor. It SHALL never invoke body accessors (`getObject` on
+ObjectMessage; `getMapNames`/`getObject(String)` on MapMessage;
+`readInt`/`readString`/`readBytes` on StreamMessage) on those messages. The
 policy SHALL be recorded in an ADR and a per-type table in
-`bridges/jms/README.md`.
+`bridges/jms/README.md`, including the terminal-discard exception.
 
 #### Scenario: ObjectMessage forwarded empty and never deserialized
 
-- Given a broker message of type `ObjectMessage`
-- When the consumer forwards it
-- Then the `JmsMessage` body is empty, headers are preserved
-- And `getObject()` was never invoked
-- And the session ran with `AUTO_ACKNOWLEDGE` (receipt acknowledges)
-- And no explicit `acknowledge()` call was made
+- **GIVEN** a broker message of type `ObjectMessage`
+- **WHEN** the consumer forwards it
+- **THEN** the `JmsMessage` body SHALL be empty and headers SHALL be preserved
+- **AND** `getObject()` SHALL never be invoked
+- **AND** the session SHALL run with `CLIENT_ACKNOWLEDGE`
+- **AND** no `acknowledge()` call SHALL be made before the route reports success, except the terminal reject-then-log discard
 
 #### Scenario: MapMessage forwarded empty without map access
 
-- Given a broker message of type `MapMessage`
-- When the consumer forwards it
-- Then the `JmsMessage` body is empty, headers are preserved
-- And `getMapNames()` and `getObject(String)` were never invoked
-- And the session ran with `AUTO_ACKNOWLEDGE` (receipt acknowledges)
-- And no explicit `acknowledge()` call was made
+- **GIVEN** a broker message of type `MapMessage`
+- **WHEN** the consumer forwards it
+- **THEN** the `JmsMessage` body SHALL be empty and headers SHALL be preserved
+- **AND** `getMapNames()` and `getObject(String)` SHALL never be invoked
+- **AND** the session SHALL run with `CLIENT_ACKNOWLEDGE`
+- **AND** no `acknowledge()` call SHALL be made before the route reports success, except the terminal reject-then-log discard
 
 #### Scenario: StreamMessage forwarded empty without stream reads
 
-- Given a broker message of type `StreamMessage`
-- When the consumer forwards it
-- Then the `JmsMessage` body is empty, headers are preserved
-- And `readInt()`, `readString()`, and `readBytes(...)` were never invoked
-- And the session ran with `AUTO_ACKNOWLEDGE` (receipt acknowledges)
-- And no explicit `acknowledge()` call was made
+- **GIVEN** a broker message of type `StreamMessage`
+- **WHEN** the consumer forwards it
+- **THEN** the `JmsMessage` body SHALL be empty and headers SHALL be preserved
+- **AND** `readInt()`, `readString()`, and `readBytes(...)` SHALL never be invoked
+- **AND** the session SHALL run with `CLIENT_ACKNOWLEDGE`
+- **AND** no `acknowledge()` call SHALL be made before the route reports success, except the terminal reject-then-log discard
 
 #### Scenario: Policy is documented
 
-- Given the forwarding policy decision
-- When a reader consults `bridges/jms/README.md`
-- Then a per-type table states, for Object/Map/Stream, the body
-  representation (empty) and the security rationale (no deserialization)
-- And an ADR records the decision inputs including the rejected MapMessage
-  flattening alternative
+- **GIVEN** the forwarding policy decision
+- **WHEN** a reader consults `bridges/jms/README.md`
+- **THEN** a per-type table SHALL state, for Object, Map, and Stream, the body representation (empty), the security rationale (no deserialization), and the terminal reject-then-log discard exception
+- **AND** an ADR SHALL record the decision inputs including the rejected MapMessage flattening alternative
 
