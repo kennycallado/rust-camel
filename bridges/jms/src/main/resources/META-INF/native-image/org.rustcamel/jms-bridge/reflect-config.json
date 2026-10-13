@@ -1,0 +1,6 @@
+[
+{
+  "name":"org.apache.activemq.ActiveMQConnectionFactory",
+  "allPublicMethods":true
+}
+]

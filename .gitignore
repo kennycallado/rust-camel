@@ -19,6 +19,7 @@ bridges/*/build/
 bridges/*/.gradle/
 bridges/*/.gradle-docker-cache/
 bridges/*/.gradle-container-cache/
+/.gradle-user/
 benchmarks/**/target/
 benchmarks/**/build/
 benchmarks/**/.gradle/

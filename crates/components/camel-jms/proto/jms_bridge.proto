@@ -5,6 +5,7 @@ service BridgeService {
   rpc Send(SendRequest) returns (SendResponse);
   rpc Subscribe(SubscribeRequest) returns (stream JmsMessage);
   rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Complete(CompletionRequest) returns (CompletionResponse);
 }
 
 message SendRequest {
@@ -31,6 +32,9 @@ message JmsMessage {
   bytes body = 5;
   map<string, string> headers = 6;
   string content_type = 7;
+  string delivery_token = 8;
+  uint64 subscription_generation = 9;
+  uint32 reservation_count = 10;
 }
 
 message HealthRequest {}
@@ -39,4 +43,21 @@ message HealthResponse {
   bool healthy = 1;
   bool broker_connected = 2;
   string message = 3;
+}
+
+enum CompletionOutcome {
+  COMPLETION_OUTCOME_UNSPECIFIED = 0;
+  COMMIT = 1;
+  ROLLBACK = 2;
+}
+
+message CompletionRequest {
+  string subscription_id = 1;
+  uint64 subscription_generation = 2;
+  string delivery_token = 3;
+  CompletionOutcome outcome = 4;
+}
+
+message CompletionResponse {
+  bool accepted = 1;
 }

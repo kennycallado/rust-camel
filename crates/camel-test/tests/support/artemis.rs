@@ -12,6 +12,11 @@ use tokio::sync::OnceCell;
 use tokio::time::{Instant, sleep};
 
 pub const ARTEMIS_PORT: u16 = 61616;
+/// Explicit credentials for the dedicated Artemis test fixture (mandatory
+/// auth). The Phase-5 crash proof passes these to both the probe and the
+/// producer bridge; it never relies on ambient ANONYMOUS_LOGIN.
+pub const ARTEMIS_USER: &str = "artemis";
+pub const ARTEMIS_PASSWORD: &str = "artemis";
 
 async fn wait_for_broker_port(port: u16, timeout: Duration) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
@@ -71,8 +76,8 @@ pub async fn shared_artemis() -> &'static (ContainerAsync<GenericImage>, String)
             let image = GenericImage::new("apache/activemq-artemis", "2.36.0-alpine")
                 .with_exposed_port(ContainerPort::Tcp(ARTEMIS_PORT))
                 .with_wait_for(WaitFor::message_on_stdout("AMQ221020"))
-                .with_env_var("ARTEMIS_USER", "artemis")
-                .with_env_var("ARTEMIS_PASSWORD", "artemis")
+                .with_env_var("ARTEMIS_USER", ARTEMIS_USER)
+                .with_env_var("ARTEMIS_PASSWORD", ARTEMIS_PASSWORD)
                 .with_env_var("ANONYMOUS_LOGIN", "true")
                 .with_startup_timeout(Duration::from_secs(120));
 
@@ -105,8 +110,8 @@ pub async fn shared_artemis_auth() -> &'static (ContainerAsync<GenericImage>, St
             let image = GenericImage::new("apache/activemq-artemis", "2.36.0-alpine")
                 .with_exposed_port(ContainerPort::Tcp(ARTEMIS_PORT))
                 .with_wait_for(WaitFor::message_on_stdout("AMQ221020"))
-                .with_env_var("ARTEMIS_USER", "artemis")
-                .with_env_var("ARTEMIS_PASSWORD", "artemis")
+                .with_env_var("ARTEMIS_USER", ARTEMIS_USER)
+                .with_env_var("ARTEMIS_PASSWORD", ARTEMIS_PASSWORD)
                 // ANONYMOUS_LOGIN intentionally not set → mandatory auth
                 .with_startup_timeout(Duration::from_secs(120));
 
@@ -127,4 +132,50 @@ pub async fn shared_artemis_auth() -> &'static (ContainerAsync<GenericImage>, St
             (container, broker_url)
         })
         .await
+}
+
+/// A dedicated Artemis broker (its own container, mandatory auth).
+///
+/// Mirrors [`super::activemq::ActiveMqBroker`]: tests that must assert exact
+/// broker-side/destination state for a single queue use an isolated broker so a
+/// shared container's other connections cannot perturb the observation. The
+/// fixture requires authentication (`ARTEMIS_USER`/`ARTEMIS_PASSWORD`), so the
+/// bridge must present these credentials explicitly — there is no
+/// `ANONYMOUS_LOGIN` fallback.
+pub struct ArtemisBroker {
+    // Held only to keep the container alive for the test's lifetime.
+    _container: ContainerAsync<GenericImage>,
+    pub broker_url: String,
+}
+
+impl ArtemisBroker {
+    /// Starts an isolated Artemis container and blocks until the broker port
+    /// accepts connections.
+    pub async fn start() -> Self {
+        let image = GenericImage::new("apache/activemq-artemis", "2.36.0-alpine")
+            .with_exposed_port(ContainerPort::Tcp(ARTEMIS_PORT))
+            .with_wait_for(WaitFor::message_on_stdout("AMQ221020"))
+            .with_env_var("ARTEMIS_USER", ARTEMIS_USER)
+            .with_env_var("ARTEMIS_PASSWORD", ARTEMIS_PASSWORD)
+            .with_startup_timeout(Duration::from_secs(120));
+
+        let container = image
+            .start()
+            .await
+            .expect("dedicated Artemis container failed to start");
+        let port = container
+            .get_host_port_ipv4(ARTEMIS_PORT)
+            .await
+            .expect("dedicated Artemis broker port not available");
+        wait_for_broker_port(port, Duration::from_secs(30))
+            .await
+            .expect("dedicated Artemis broker did not become reachable");
+
+        let broker_url = format!("tcp://127.0.0.1:{port}");
+        eprintln!("dedicated Artemis ready at: {broker_url}");
+        Self {
+            _container: container,
+            broker_url,
+        }
+    }
 }

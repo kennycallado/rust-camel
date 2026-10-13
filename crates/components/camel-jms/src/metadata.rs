@@ -44,6 +44,9 @@ pub(super) struct JmsMetadataDescriptor {
 
     #[uri_param(name = "exchangePattern", default = "InOnly")]
     pub _exchange_pattern: String,
+
+    #[uri_param(name = "jmsHeaderAllowlist")]
+    pub _jms_header_allowlist: Option<String>,
 }
 
 #[cfg(test)]
@@ -71,6 +74,7 @@ mod tests {
             "broker",
             "concurrentConsumers",
             "exchangePattern",
+            "jmsHeaderAllowlist",
             "mapJmsHeaders",
             "messageSelector",
             "persistentDelivery",
@@ -89,6 +93,7 @@ mod tests {
 
         // Option<String> fields — never required
         assert!(!find(&meta.uri_options, "broker").required);
+        assert!(!find(&meta.uri_options, "jmsHeaderAllowlist").required);
         assert!(!find(&meta.uri_options, "messageSelector").required);
         assert!(!find(&meta.uri_options, "timeToLive").required);
         assert!(!find(&meta.uri_options, "priority").required);
@@ -128,5 +133,11 @@ mod tests {
             Some("true")
         );
         assert!(!find(&meta.uri_options, "mapJmsHeaders").required);
+    }
+
+    #[test]
+    fn metadata_has_jms_header_allowlist_option() {
+        let meta: ComponentMetadata = JmsMetadataDescriptor::metadata();
+        find(&meta.uri_options, "jmsHeaderAllowlist");
     }
 }

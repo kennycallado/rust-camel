@@ -62,19 +62,66 @@ pub fn require_jms_bridge_binary() -> PathBuf {
 /// admin/admin — matches the shared testcontainer credentials) and returns
 /// the process handle plus a connected mTLS channel.
 ///
+/// Rust owns the attempt-journal directory and broker key. Each spawned
+/// process gets its own 0700 temp journal root plus a stable key derived
+/// from the broker triple, because a queue subscribe requires both env
+/// values and a journal domain allows only one live owning process.
+///
+/// This per-spawn root is deliberate for the ID-uniqueness and process-
+/// coexistence regressions, which never need to inherit counts. It is WRONG
+/// for the phase-5 crash proof: a fresh root loses the recorded reservation
+/// count and the survivor cannot acquire the same journal. The crash test
+/// MUST pin one stable explicit domain instead — set `XDG_STATE_HOME` (the
+/// only Rust-side channel; there is no operator override) to a fixed test
+/// root for both probe and survivor and keep the broker name, type, and URL
+/// identical so both derive the same broker key.
+///
 /// Dropping the returned `BridgeProcess` kills the OS process — this is how
 /// tests simulate a bridge restart.
 pub async fn spawn_jms_bridge(
     binary: &std::path::Path,
     broker_url: &str,
 ) -> (BridgeProcess, Channel) {
+    spawn_jms_bridge_configured(binary, broker_url, BrokerType::ActiveMq, "admin", "admin").await
+}
+
+/// Spawns one jms-bridge process against `broker_url` for an explicit broker
+/// type and credentials, returning the process handle plus a connected mTLS
+/// channel.
+///
+/// This mirrors [`spawn_jms_bridge`] (Classic, admin/admin) but lets the Phase-5
+/// crash proof send through an Artemis producer with the dedicated fixture's
+/// explicit credentials. Each spawned process gets its own 0700 temp journal
+/// root plus a stable key derived from the broker triple, as in the Classic
+/// helper; producers never need to inherit counts.
+pub async fn spawn_jms_bridge_configured(
+    binary: &std::path::Path,
+    broker_url: &str,
+    broker_type: BrokerType,
+    username: &str,
+    password: &str,
+) -> (BridgeProcess, Channel) {
+    let journal_root = tempfile::TempDir::new()
+        .expect("create temp attempt-journal root")
+        .keep();
+    let journal_dir = journal_root.join("journal");
+    camel_component_jms::config::ensure_attempt_journal_dir(&journal_dir)
+        .expect("create 0700 attempt-journal dir");
+    let broker_key = camel_component_jms::config::attempt_journal_broker_key(
+        "jms-bridge-test",
+        &broker_type,
+        broker_url,
+    );
+
     let config = BridgeProcessConfig::jms(
         binary.to_path_buf(),
         broker_url.to_string(),
-        BrokerType::ActiveMq,
-        Some("admin".to_string()),
-        Some(Redacted::new("admin".to_string())),
+        broker_type,
+        Some(username.to_string()),
+        Some(Redacted::new(password.to_string())),
         90_000,
+        Some(journal_dir.to_string_lossy().into_owned()),
+        Some(broker_key),
     );
     BridgeProcess::start_and_connect(&config)
         .await

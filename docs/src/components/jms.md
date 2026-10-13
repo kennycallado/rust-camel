@@ -85,6 +85,7 @@ artemis:<name>       # shorthand, defaults to queue
 | `priority` | — | Message priority 0-9 (9 is highest) |
 | `persistentDelivery` | `true` | PERSISTENT or NON_PERSISTENT delivery mode |
 | `mapJmsHeaders` | `true` | Map JMS headers and properties to Exchange headers |
+| `jmsHeaderAllowlist` | empty | Comma-separated allowlist of outgoing business header names |
 | `exchangePattern` | `InOnly` | `InOnly` or `InOut` (InOut is not yet implemented) |
 
 Credentials and the broker URL are not URI parameters. They live in the `[components.jms.brokers.<name>]` table.
@@ -126,9 +127,52 @@ The Producer uses a semaphore for backpressure. The default concurrency limit is
 
 A successful send returns the Exchange unchanged. The `JMSMessageID` header carries the broker-assigned message ID. A send failure on a gRPC transport error refreshes the channel. The original send is not retried. A retry on a non-idempotent write would cause duplicates. The caller decides whether to retry.
 
+## Header forwarding
+
+The Producer forwards an exchange header only when `jmsHeaderAllowlist` names it. The option takes a comma-separated list. The list is empty by default.
+
+This default is a breaking change. The Producer no longer forwards user headers unless you allowlist them. Add each business header name to `jmsHeaderAllowlist` to keep it. Example: `jms:queue:orders?jmsHeaderAllowlist=traceId,orderId`.
+
+Denial runs before the allowlist check. The Producer denies reserved JMS names, the `jms` and `camel` framework namespaces, and credential-shaped names even when the allowlist names them. It forwards only string values. A denied name such as `api-key` or `Authorization` never reaches the broker.
+
+Use valid JMS property names, such as `traceId` and `orderId`. The Producer does not sanitize property names. Artemis can drop a hyphenated name (`rc-ooczk`). This release declares that inherited gap. It does not fix it.
+
+`Content-Type` stays a dedicated protocol field. Inbound mapping (the `mapJmsHeaders` option) is unchanged.
+
+## Settlement and durable reservations
+
+The Consumer runs the bridge session with `CLIENT_ACKNOWLEDGE` and holds one unacknowledged delivery per session. `acknowledgementMode` and `transactionMode` do not change this bridge-managed settlement. `transactionMode=Session` logs a warning.
+
+The Rust consumer submits the route with `send_and_wait`. Route success sends `COMMIT` and acknowledges once. A handled error and a `Stop` count as success and commit. A propagated `Err` and a closed pipeline channel (`ChannelClosed`) send `ROLLBACK` and recover the session.
+
+A cancel, a stop, or a disconnect before the decision prevents any acknowledgement. The same event after the decision does not undo it. A lost `COMMIT` response stands. The consumer does not retry it. A healthy slow route has no completion deadline.
+
+The bridge records each delivery as a durable reservation before handoff. It caps each `JMSMessageID` at `JMS_MAX_DELIVERY_ATTEMPTS` reservations (default 6). The seventh receipt takes the terminal reject-then-log policy: the bridge acknowledges once, logs at `error!` with the message ID and the count only, and never logs the body or headers. It does not forward to a dead-letter destination. This discard is the explicit terminal exception to at-least-once, applied to every message type.
+
+Journal ownership is lazy and per destination. The domain is the tuple of directory, broker key, and destination key. The bridge acquires the lock at the first subscribe and releases it when the last subscription ends. Producers and topic subscribers never lock. A busy lock waits a bounded time, then the subscribe fails with `FAILED_PRECONDITION`. A new owner inherits the recorded counts through lock handoff.
+
+Rust owns the default directory and the broker key. The default directory is `$XDG_STATE_HOME/rust-camel/jms-bridge`, else `$HOME/.local/state/rust-camel/jms-bridge`. Rust passes the directory as `JMS_ATTEMPT_JOURNAL_DIR` and the key as `JMS_BRIDGE_BROKER_KEY`. These are Rust outputs, not operator inputs. When either is unset, a queue subscribe fails with `FAILED_PRECONDITION`. Producers and topic subscribers keep working.
+
+The cap is not absolute. At compaction the bridge retires entries untouched longer than the retention window (default 24 hours). Retirement never applies to the current in-flight reservation. The bridge never evicts a live reservation to admit another. Duplicates across separate journal domains are bounded at N times the cap, where N is the number of distinct journal domains that consume the queue within one retention window.
+
+Topic subscribers use a per-subscription volatile counter. The topic cap is not crash-stable, and the counter resets on disconnect. Durable topic subscribers are unsupported.
+
+### Operator recovery
+
+A startup directory failure parks the bridge slot. The slot stays parked until an operator acts. A subscribe-time permanent failure fails only that route and leaves the slot ready.
+
+Operator recovery is a strict sequence.
+
+1. Stop the route and its context.
+2. Confirm that bridge and journal ownership has ended before you edit any file. The last subscription for the affected domain must be released, so its reference count reaches 0. Wait for the bridge process and its file lock to be released.
+3. Only then repair or remove the corrupt journal or the unkeyable source for the affected domain.
+4. Restart the context.
+
+Do not edit a live journal file while a route or bridge holds the lock. An unkeyable broker message has no usable `JMSMessageID`. The bridge preserves it for redelivery and does not acknowledge it.
+
 ## Java bridge
 
-The component does not speak JMS. A native Java bridge process handles the JMS protocol and the TCP connection. The component talks to the bridge over gRPC. The bridge binary is a `jlink` image. The host does not need a Java runtime.
+The component does not speak JMS. A native Java bridge process handles the JMS protocol and the TCP connection. The component talks to the bridge over gRPC. The bridge binary is a GraalVM native executable. The host does not need a Java runtime.
 
 The bridge pool assigns one bridge per broker. The first send or consume starts the bridge. The bridge's ephemeral gRPC port comes from its stdout. A health monitor pings the bridge every `healthCheckIntervalMs` (default 5s). A failed health check moves the slot to `Degraded`, then `Restarting`. Restarts use exponential backoff capped at 120 seconds. After 10 failed restart attempts the slot stays `Degraded`.
 
@@ -142,13 +186,29 @@ Credentials cross the gRPC boundary in plain text for the username and through a
 
 ## Error handling
 
-ADR-0007 governs Consumer shutdown. `JmsConsumer::stop` cancels the `CancellationToken` and waits up to 5 seconds for the consumer tasks to finish. Tasks that do not exit in that window are aborted. An in-flight `ConsumerContext::send` completes before the loop checks cancellation. The Consumer does not restart itself. Route supervision owns restart.
+ADR-0007 governs Consumer shutdown. `JmsConsumer::stop` cancels the requested-shutdown token. It waits up to 5 seconds for each owned consumer task, then aborts the stragglers. Abort authority stays component-owned, so no worker is detached. Cancellation races the in-flight `send_and_wait` and the completion RPC. A cancel before the terminal decision drops the pending wait and the subscription without a speculative acknowledgement, so the broker or provider redelivers the message. A decision already made stands. The Consumer does not restart itself. Route supervision owns restart.
 
 ADR-0012 classifies log sites as outside-contract or system-broken. A consumer-side `ctx.send` failure increments the `b-prime:jms:consumer-send` metric and logs at `error!`. A bridge restart that exhausts the attempt cap logs at `error!` and leaves the slot in `Degraded`.
 
+## Redelivery and terminal disposition
+
+The Consumer settles each delivery through the bridge with `CLIENT_ACKNOWLEDGE` and one terminal decision per reservation. A route error (`Err`, including a closed pipeline channel) settles as `ROLLBACK`: the bridge recovers the session and the broker or provider makes the message available again. A completed route (`Ok`) settles as `COMMIT` and acknowledges once. A rolled-back message is not promised to return to the source queue; the bridge asserts only that it was not acknowledged and is made available again.
+
+Durable reservation accounting caps each `JMSMessageID` at `JMS_MAX_DELIVERY_ATTEMPTS` reservations (validated, default 6). The receipt whose recorded count has already reached the cap applies the terminal **reject-then-log** policy: the bridge acknowledges the message once and logs at `error!` with the provider message ID and the recorded count only — never the body, headers, or credential values. It does not forward to a dead-letter destination. This discard is an explicit terminal exception to at-least-once, applied to every message type. Repeated crashes before handoff can exhaust the budget before any route runs.
+
+The bridge cap is the documented terminal only where it fires before a provider or broker native redelivery or expiry limit. Where the native limit fires first, it takes precedence and the bridge does not claim its terminal policy ran. The limits were **observed with default broker and provider configuration only**; no URI option was assumed to change a broker limit. Lowering a native limit below the cap to exercise a native-first ordering was not exercised.
+
+| Broker fixture (defaults) | Provider/broker native limit | Bridge terminal cap | Terminal that fired first | Observed destination |
+| --- | --- | --- | --- | --- |
+| ActiveMQ Classic 5.18.3 | provider redelivery policy default (6 redeliveries) | 6 reservations | bridge cap, on the 7th receipt | acknowledged and removed; `ActiveMQ.DLQ` `EnqueueCount` 0 |
+| ActiveMQ Artemis 2.36.0 | broker `max-delivery-attempts` default (10) | 6 reservations | bridge cap, on the 7th receipt | **not observed** — the testcontainer fixture exposes no stable management query; filed as test-design gap `rc-5c6yv` |
+
+Observed durable evidence for each run: six `RESERVE` frames, six `ROLLBACK` frames, and one terminal `COMMIT` frame for the same `JMSMessageID`; exactly six accepted route handoffs; and exactly one native `ERROR` record from `org.rustcamel.jms.JmsConsumer` carrying the provider message ID and count only. ActiveMQ Classic additionally reported numeric source `QueueSize` 0 and `ActiveMQ.DLQ` `EnqueueCount` 0.
+
+A missing bridge terminal is not by itself read as the native limit. A native-first ordering is reported only with stable broker evidence (ActiveMQ Classic source queue empty and a non-zero `ActiveMQ.DLQ` `EnqueueCount`); otherwise the disposition is recorded as unknown. The Artemis broker-side destination is unobserved and tracked as `rc-5c6yv`. Only the observed runs above are verified. Other native-first orderings and dead-letter queries are not verified.
+
 ## Limitations
 
-- The bridge uses `AUTO_ACKNOWLEDGE`. Messages are acknowledged on delivery, not after processing. A failed route cannot request redelivery.
 - Durable topic subscribers are not supported.
 - IBM MQ is not supported.
 - The `InOut` exchange pattern and `Session` transaction mode log a warning and fall back to the default.

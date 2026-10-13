@@ -127,6 +127,9 @@ impl Service<Exchange> for JmsProducer {
 
         // JMS-018: gate header extraction behind config flag
         let map_headers = self.endpoint_config.map_jms_headers;
+        // Header allowlist is moved into the 'static future, matching the
+        // copied scalar config fields above.
+        let header_allowlist = self.endpoint_config.jms_header_allowlist.clone();
 
         // JMS-013: QoS options
         let time_to_live = self.endpoint_config.time_to_live;
@@ -144,7 +147,7 @@ impl Service<Exchange> for JmsProducer {
 
             let body = Self::body_to_bytes(&exchange.input.body)?;
             let headers = if map_headers {
-                extract_send_headers(&exchange)
+                extract_send_headers(&exchange, &header_allowlist)
             } else {
                 Default::default()
             };

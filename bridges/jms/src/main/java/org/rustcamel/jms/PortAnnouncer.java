@@ -4,6 +4,7 @@ import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.eclipse.microprofile.config.ConfigProvider;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -37,6 +38,9 @@ public class PortAnnouncer {
   /** Ready lines emitted at startup; observable by tests as protocol evidence. */
   static final List<String> ANNOUNCEMENTS = new CopyOnWriteArrayList<>();
 
+  /** Reserved exit code for a startup permanent failure (never a ready exit). */
+  static final int PERMANENT_FAILURE_EXIT_CODE = 78;
+
   private static final long AWAIT_NANOS = 60_000_000_000L;
   private static final long POLL_MILLIS = 5;
 
@@ -47,6 +51,18 @@ public class PortAnnouncer {
   String serverCertPath;
 
   void onStart(@Observes StartupEvent ev) {
+    // Journal startup validation runs before the announcer thread: a set-but-invalid directory,
+    // broker key, or numeric bound is a startup permanent failure that must never reach readiness.
+    try {
+      validateJournalStartup(System.getenv());
+    } catch (JournalPermanentException e) {
+      // Machine-readable permanent-failure signal on stdout, then the reserved exit code. The
+      // Rust supervisor (camel-bridge process.rs) parses this line and must never see a ready line.
+      System.out.println(permanentFailureLine(e.getMessage()));
+      System.out.flush();
+      System.exit(PERMANENT_FAILURE_EXIT_CODE);
+      return;
+    }
     if (sslPort > 0 && serverCertPath != null && serverCertPath.contains("placeholder-")) {
       throw new RuntimeException(
           "Bridge started with placeholder TLS certs — runtime env vars not set. Aborting.");
@@ -54,6 +70,69 @@ public class PortAnnouncer {
     Thread announcer = new Thread(PortAnnouncer::announceWhenBound, "bridge-port-announcer");
     announcer.setDaemon(true);
     announcer.start();
+  }
+
+  /**
+   * Validates the journal startup configuration from an explicit environment. Unset values pass:
+   * readiness succeeds and a queue subscribe later fails {@code FAILED_PRECONDITION}. A set but
+   * invalid directory, broker key, or numeric bound throws, and {@link #onStart} exits before any
+   * ready line.
+   *
+   * <p>A subscribe-time {@code FAILED_PRECONDITION} is route-only and never emits this startup
+   * signal; only {@link #onStart} does, once, before readiness.
+   *
+   * @param env the environment to read; production passes {@code System.getenv()}
+   * @throws JournalPermanentException when a set journal value is invalid
+   */
+  static void validateJournalStartup(Map<String, String> env) throws JournalPermanentException {
+    JournalService.validateStartup(
+        env.get(JournalService.JOURNAL_DIRECTORY_ENV), env.get(JournalService.BROKER_KEY_ENV));
+    // The four numeric journal bounds are frozen at startup too: an out-of-range or non-numeric
+    // value is a permanent configuration failure, not a per-route error. The accessors validate on
+    // read and throw; their parsed values are not needed here.
+    BridgeConfig config = new BridgeConfig(env);
+    config.journalRetentionMs();
+    config.journalLockWaitMs();
+    config.journalMaxBytes();
+    config.maxDeliveryAttempts();
+  }
+
+  /**
+   * Builds the one-line startup permanent-failure signal. The reason is JSON-escaped so a bridge
+   * message can never break the protocol line; it names the environment variable only and never
+   * echoes the raw setting.
+   *
+   * @param reason the failure reason; may be {@code null}
+   * @return the {@code {"status":"permanent-failure","reason":"..."}} line
+   */
+  static String permanentFailureLine(String reason) {
+    String text = reason == null ? "bridge startup failed" : reason;
+    return "{\"status\":\"permanent-failure\",\"reason\":\"" + jsonEscape(text) + "\"}";
+  }
+
+  /** Escapes one string for embedding in a JSON string literal. */
+  private static String jsonEscape(String value) {
+    StringBuilder out = new StringBuilder(value.length() + 16);
+    for (int i = 0; i < value.length(); i++) {
+      char c = value.charAt(i);
+      switch (c) {
+        case '"' -> out.append("\\\"");
+        case '\\' -> out.append("\\\\");
+        case '\n' -> out.append("\\n");
+        case '\r' -> out.append("\\r");
+        case '\t' -> out.append("\\t");
+        case '\b' -> out.append("\\b");
+        case '\f' -> out.append("\\f");
+        default -> {
+          if (c < 0x20) {
+            out.append(String.format("\\u%04x", (int) c));
+          } else {
+            out.append(c);
+          }
+        }
+      }
+    }
+    return out.toString();
   }
 
   /**

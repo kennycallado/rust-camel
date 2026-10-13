@@ -58,6 +58,15 @@ camel-matchers.workspace = true
 camel-redis-repo = { workspace = true, optional = true }
 camel-auth.workspace = true
 serde_json.workspace = true
+# Normal (not dev) dependency: the jms_crash_probe binary is a fresh process
+# that must install the process-level rustls CryptoProvider itself. Tests
+# install it in-process; a spawned probe cannot inherit that.
+rustls.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Integration tests spawn the crash probe in its own process group and kill the
+# whole group so the probe's Java bridge child is never orphaned.
+libc = { workspace = true }
 
 [dev-dependencies]
 camel-master = { workspace = true }
@@ -99,7 +108,6 @@ zip.workspace = true
 camel-bridge.workspace = true
 rcgen = { workspace = true }
 tonic = { workspace = true }
-rustls.workspace = true
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 jsonwebtoken.workspace = true
@@ -134,6 +142,11 @@ integration-tests = [
     "dep:camel-redis-repo",
     "camel-redis-repo/tls",
 ]
+
+[[bin]]
+name = "jms_crash_probe"
+path = "src/bin/jms_crash_probe.rs"
+required-features = ["integration-tests"]
 
 [lints]
 workspace = true

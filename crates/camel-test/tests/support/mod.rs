@@ -118,6 +118,12 @@ pub mod jms;
 pub mod jms_bridge_procs;
 
 #[cfg(feature = "integration-tests")]
+pub mod jms_crash_probe;
+
+#[cfg(feature = "integration-tests")]
+pub mod jms_journal;
+
+#[cfg(feature = "integration-tests")]
 pub mod cxf;
 
 #[cfg(feature = "integration-tests")]

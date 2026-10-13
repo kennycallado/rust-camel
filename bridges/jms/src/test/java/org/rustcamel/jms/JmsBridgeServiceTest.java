@@ -1,12 +1,15 @@
 package org.rustcamel.jms;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -17,6 +20,11 @@ import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import jakarta.enterprise.inject.Instance;
 import java.lang.reflect.Field;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
@@ -30,8 +38,10 @@ import jms_bridge.SubscribeRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
+import org.mockito.MockedStatic;
 import org.mockito.MockitoAnnotations;
 
 /**
@@ -50,15 +60,29 @@ class JmsBridgeServiceTest {
   @Mock StreamObserver<JmsMessage> obsA;
   @Mock StreamObserver<JmsMessage> obsB;
 
+  @TempDir Path tempDir;
+
   JmsBridgeService service;
 
   private AutoCloseable mocks;
 
   @BeforeEach
-  void setUp() {
+  void setUp() throws Exception {
     mocks = MockitoAnnotations.openMocks(this);
+    // The bridge resolves one shared journal runtime from BridgeConfig. Every subscribe in this
+    // test uses an empty destination (treated as a queue), so the map must be a valid, trusted
+    // configured journal: owner-private directory plus a 32-hex broker key. Otherwise the new
+    // queue contract would fail every subscribe with FAILED_PRECONDITION before registration.
+    Files.setPosixFilePermissions(tempDir, PosixFilePermissions.fromString("rwx------"));
     service = new JmsBridgeService();
     service.consumerFactory = instance;
+    service.config =
+        new BridgeConfig(
+            Map.of(
+                JournalService.JOURNAL_DIRECTORY_ENV,
+                tempDir.toString(),
+                JournalService.BROKER_KEY_ENV,
+                "0123456789abcdef0123456789abcdef"));
   }
 
   @AfterEach
@@ -279,6 +303,69 @@ class JmsBridgeServiceTest {
       executor.shutdownNow();
       assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
     }
+  }
+
+  /**
+   * A pending transport-close future completes first; the later cancel must reuse the same {@code
+   * finished} CAS, so stop/destroy run exactly once.
+   */
+  @Test
+  void transportCloseRunsCleanupOnce() throws Exception {
+    when(instance.get()).thenReturn(consumerA);
+    stubbingSubscribe(consumerA);
+    ServerCallStreamObserver<JmsMessage> serverObs = mock(ServerCallStreamObserver.class);
+    ArgumentCaptor<Runnable> cancelHandler = ArgumentCaptor.forClass(Runnable.class);
+    doNothing().when(serverObs).setOnCancelHandler(cancelHandler.capture());
+
+    CompletableFuture<Void> transportClose = new CompletableFuture<>();
+    try (MockedStatic<TransportCloseFilter> mocked = mockStatic(TransportCloseFilter.class)) {
+      mocked.when(TransportCloseFilter::current).thenReturn(transportClose);
+
+      service.subscribe(req("s1"), serverObs);
+
+      transportClose.complete(null);
+      verify(consumerA, times(1)).stop();
+      verify(instance, times(1)).destroy(consumerA);
+      assertTrue(activeConsumersOf(service).isEmpty());
+
+      // The cancel path loses the finished CAS and must not release a second time.
+      cancelHandler.getValue().run();
+      verify(consumerA, times(1)).stop();
+      verify(instance, times(1)).destroy(consumerA);
+    }
+  }
+
+  /**
+   * A healthy stream emits and completes normally, with no cancel and no socket cut. Cleanup runs
+   * exactly once through the stream-end path, and the transport future stays pending so it cannot
+   * trigger early cleanup.
+   */
+  @Test
+  void normalStreamDoesNotCleanupEarly() throws Exception {
+    when(instance.get()).thenReturn(consumerA);
+    AtomicReference<StreamObserver<JmsMessage>> inner = stubbingSubscribe(consumerA);
+
+    CompletableFuture<Void> transportClose = new CompletableFuture<>();
+    try (MockedStatic<TransportCloseFilter> mocked = mockStatic(TransportCloseFilter.class)) {
+      mocked.when(TransportCloseFilter::current).thenReturn(transportClose);
+
+      service.subscribe(req("s1"), obsA);
+
+      assertSame(consumerA, activeConsumersOf(service).get("s1"));
+      verify(consumerA, never()).stop();
+
+      JmsMessage msg = JmsMessage.newBuilder().setDestination("queue:test").build();
+      inner.get().onNext(msg);
+      inner.get().onCompleted();
+      verify(obsA).onNext(msg);
+      verify(obsA).onCompleted();
+    }
+
+    assertFalse(
+        transportClose.isDone(), "transport future must stay pending on a normal stream end");
+    verify(consumerA, times(1)).stop();
+    verify(instance, times(1)).destroy(consumerA);
+    assertTrue(activeConsumersOf(service).isEmpty());
   }
 
   private static SubscribeRequest req(String subId) {

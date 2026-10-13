@@ -1,15 +1,122 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 
 use camel_component_api::NetworkRetryPolicy;
+use sha2::{Digest, Sha256};
 
 use crate::BrokerType;
 
 pub fn default_bridge_cache_dir() -> PathBuf {
     camel_bridge::download::default_cache_dir()
+}
+
+// ── Attempt-journal directory and broker key ────────────────────────────────
+//
+// Rust is the single source of the default resolution of the durable
+// attempt-journal directory (jms spec, task 3.6). The resolved directory and
+// the derived broker key travel to the Java bridge through the named env vars
+// `JMS_ATTEMPT_JOURNAL_DIR` and `JMS_BRIDGE_BROKER_KEY`; Java never re-derives
+// the default.
+
+/// A usable state/home root: non-empty and absolute. An empty or relative
+/// value counts as unset so a bare `$XDG_STATE_HOME=state` never resolves
+/// against an arbitrary current directory.
+fn absolute_non_empty(value: &OsString) -> Option<&Path> {
+    let path = Path::new(value);
+    if value.is_empty() || !path.is_absolute() {
+        return None;
+    }
+    Some(path)
+}
+
+/// Pure resolver for the default attempt-journal directory.
+///
+/// Order: `$XDG_STATE_HOME/rust-camel/jms-bridge` when `XDG_STATE_HOME` is
+/// set to a usable value, else `$HOME/.local/state/rust-camel/jms-bridge`.
+/// An empty or relative `XDG_STATE_HOME` counts as unset. Errors when neither
+/// variable resolves, which is a startup error — never a fallback to the
+/// current directory.
+///
+/// Takes the two env values as arguments so tests stay free of
+/// `std::env::set_var` (unsafe in edition 2024).
+pub fn resolve_attempt_journal_dir(
+    xdg_state_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf, camel_component_api::CamelError> {
+    if let Some(root) = xdg_state_home.as_ref().and_then(absolute_non_empty) {
+        return Ok(root.join("rust-camel").join("jms-bridge"));
+    }
+    if let Some(root) = home.as_ref().and_then(absolute_non_empty) {
+        return Ok(root
+            .join(".local")
+            .join("state")
+            .join("rust-camel")
+            .join("jms-bridge"));
+    }
+    Err(camel_component_api::CamelError::Config(
+        "cannot resolve the attempt journal directory: neither XDG_STATE_HOME nor HOME \
+         is set to an absolute path"
+            .to_string(),
+    ))
+}
+
+/// Thin environment wrapper over [`resolve_attempt_journal_dir`].
+pub fn default_attempt_journal_dir() -> Result<PathBuf, camel_component_api::CamelError> {
+    resolve_attempt_journal_dir(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
+}
+
+/// Create `dir` and any missing ancestors, mode `0o700` on POSIX. An
+/// existing directory is never touched, so its mode is never changed. Rust
+/// only creates the path; the Java bridge performs the owner-private check
+/// and fails closed when it does not hold (the permanent-failure classifier
+/// lands in phase 4). Non-POSIX platforms create the path with default
+/// permissions; the bridge skips the privacy-bit check there.
+pub fn ensure_attempt_journal_dir(dir: &Path) -> Result<(), camel_component_api::CamelError> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(dir) {
+        Ok(()) => Ok(()),
+        // The directory already exists: leave its ownership and mode as-is.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(camel_component_api::CamelError::Config(format!(
+            "cannot create attempt journal directory {}: {e}",
+            dir.display()
+        ))),
+    }
+}
+
+/// Stable 32-lowercase-hex broker key: the first 16 bytes of SHA-256 over the
+/// configured broker name, the resolved broker type, and the *untruncated*
+/// redacted broker URL. The redaction drops credentials but keeps transport
+/// policy; it must not be the 256-byte diagnostic truncation, which would
+/// conflate two long URLs that share a prefix but differ in the address after
+/// the cap.
+pub fn attempt_journal_broker_key(
+    broker_name: &str,
+    broker_type: &BrokerType,
+    broker_url: &str,
+) -> String {
+    let redacted = camel_api::redact::redact_url_with_query_allowlist_untruncated(
+        broker_url,
+        BROKER_SENSITIVE_KEY_SUBSTRINGS,
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(broker_name.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(broker_type.as_env_str().as_bytes());
+    hasher.update([0u8]);
+    hasher.update(redacted.as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(&digest[..16])
 }
 
 fn default_max_bridges() -> usize {
@@ -224,6 +331,11 @@ pub struct JmsEndpointConfig {
 
     // JMS-005: Message exchange pattern (default: InOnly).
     pub exchange_pattern: ExchangePattern,
+
+    // Credential-safe producer header filtering (default: empty). Only exchange
+    // headers whose normalized name appears here reach the bridge; an empty
+    // list forwards no user headers.
+    pub jms_header_allowlist: Vec<String>,
 }
 
 impl JmsEndpointConfig {
@@ -287,6 +399,7 @@ impl JmsEndpointConfig {
         let mut persistent_delivery = true;
         let mut map_jms_headers = true;
         let mut exchange_pattern = ExchangePattern::default();
+        let mut jms_header_allowlist: Vec<String> = Vec::new();
 
         if let Some(q) = query {
             for kv in q.split('&') {
@@ -361,6 +474,14 @@ impl JmsEndpointConfig {
                     "exchangePattern" | "exchange_pattern" => {
                         exchange_pattern = ExchangePattern::from_str(v)?;
                     }
+                    "jmsHeaderAllowlist" | "jms_header_allowlist" => {
+                        jms_header_allowlist = v
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .collect();
+                    }
                     _ => {} // ignore unknown params
                 }
             }
@@ -379,8 +500,18 @@ impl JmsEndpointConfig {
             persistent_delivery,
             map_jms_headers,
             exchange_pattern,
+            jms_header_allowlist,
         })
     }
+}
+
+/// Normalize a JMS header name for allowlist/denylist comparison: casefold,
+/// then remove `-`, `_`, and `.` separators.
+pub(crate) fn normalize_header_name(key: &str) -> String {
+    key.to_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '-' | '_' | '.'))
+        .collect()
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize)]
@@ -394,7 +525,7 @@ pub struct BrokerConfig {
 /// Sensitive query-key substrings for broker URL redaction (7 entries,
 /// same order as the landed `redact_broker_url` list): a pair whose
 /// lowercased key contains any of these renders as `k=<redacted>`.
-const BROKER_SENSITIVE_KEY_SUBSTRINGS: &[&str] = &[
+pub(crate) const BROKER_SENSITIVE_KEY_SUBSTRINGS: &[&str] = &[
     "password",
     "passwd",
     "secret",
@@ -1393,5 +1524,165 @@ mod tests {
         let component = default_bridge_cache_dir();
         assert_eq!(component, delegated);
         assert_ne!(component, PathBuf::default());
+    }
+
+    #[test]
+    fn jms_header_allowlist_parses_comma_list() {
+        let cfg = JmsEndpointConfig::from_uri("jms:queue:orders?jmsHeaderAllowlist=a,b").unwrap();
+        assert_eq!(
+            cfg.jms_header_allowlist,
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn jms_header_allowlist_defaults_empty() {
+        let cfg = JmsEndpointConfig::from_uri("jms:queue:orders").unwrap();
+        assert!(cfg.jms_header_allowlist.is_empty());
+    }
+
+    #[test]
+    fn normalize_header_name_folds_separators() {
+        assert_eq!(normalize_header_name("api-key"), "apikey");
+        assert_eq!(normalize_header_name("API_KEY"), "apikey");
+        assert_eq!(normalize_header_name("api_key"), "apikey");
+    }
+
+    // ── Task 3.6: Rust-owned journal directory and broker key ───────────
+
+    /// The pure resolver takes the env values as arguments, so it never
+    /// calls `std::env::set_var` (unsafe in edition 2024).
+    #[test]
+    fn resolve_attempt_journal_dir_uses_xdg_then_home() {
+        let xdg = OsString::from("/var/lib/state");
+        let home = OsString::from("/home/alice");
+        let xdg_path = PathBuf::from("/var/lib/state/rust-camel/jms-bridge");
+        let home_path = PathBuf::from("/home/alice/.local/state/rust-camel/jms-bridge");
+
+        assert_eq!(
+            resolve_attempt_journal_dir(Some(xdg.clone()), Some(home.clone())).unwrap(),
+            xdg_path
+        );
+        // Empty XDG counts as unset.
+        assert_eq!(
+            resolve_attempt_journal_dir(Some(OsString::from("")), Some(home.clone())).unwrap(),
+            home_path
+        );
+        // Relative XDG counts as unset.
+        assert_eq!(
+            resolve_attempt_journal_dir(Some(OsString::from("state")), Some(home.clone())).unwrap(),
+            home_path
+        );
+        // HOME only.
+        assert_eq!(
+            resolve_attempt_journal_dir(None, Some(home.clone())).unwrap(),
+            home_path
+        );
+        // XDG wins even when HOME is absent.
+        assert_eq!(
+            resolve_attempt_journal_dir(Some(xdg), None).unwrap(),
+            xdg_path
+        );
+
+        // No-home error (never a fallback to the current directory).
+        let err = resolve_attempt_journal_dir(None, None).unwrap_err();
+        assert!(
+            err.to_string().contains("XDG_STATE_HOME") || err.to_string().contains("HOME"),
+            "error must name the missing variables: {err}"
+        );
+        assert!(
+            resolve_attempt_journal_dir(None, Some(OsString::from("home/alice"))).is_err(),
+            "relative HOME is not a usable root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_attempt_journal_dir_creates_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let child = tmp.path().join("nested").join("jms-bridge");
+        ensure_attempt_journal_dir(&child).unwrap();
+        assert!(child.is_dir(), "missing directory must be created");
+        let mode = std::fs::metadata(&child).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "created dir must be owner-private");
+
+        // An existing directory is never chmodded.
+        let existing = tmp.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_attempt_journal_dir(&existing).unwrap();
+        let mode = std::fs::metadata(&existing).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "existing dir mode must be preserved");
+    }
+
+    #[test]
+    fn broker_key_hash_is_stable() {
+        let a = attempt_journal_broker_key("primary", &BrokerType::ActiveMq, "tcp://h:61616");
+        let b = attempt_journal_broker_key("primary", &BrokerType::ActiveMq, "tcp://h:61616");
+        assert_eq!(a, b, "same inputs must hash equal");
+        assert_eq!(a.len(), 32, "key must be 32 hex chars");
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "key must be lowercase hex: {a}"
+        );
+
+        assert_ne!(
+            a,
+            attempt_journal_broker_key("secondary", &BrokerType::ActiveMq, "tcp://h:61616"),
+            "broker name must participate in the key"
+        );
+        assert_ne!(
+            a,
+            attempt_journal_broker_key("primary", &BrokerType::Artemis, "tcp://h:61616"),
+            "broker type must participate in the key"
+        );
+        assert_ne!(
+            a,
+            attempt_journal_broker_key("primary", &BrokerType::ActiveMq, "tcp://h:61617"),
+            "broker URL must participate in the key"
+        );
+    }
+
+    /// Two long URLs that share a 256-byte prefix but differ after it must
+    /// not collide: the key hashes the untruncated redaction.
+    #[test]
+    fn broker_key_distinguishes_long_urls_past_diagnostic_cap() {
+        let shared = format!(
+            "tcp://h:61616?keepAlive=true&brokerName={}",
+            "a".repeat(300)
+        );
+        let url_a = format!("{shared}&distinctAddressA=1");
+        let url_b = format!("{shared}&distinctAddressB=2");
+        assert_ne!(
+            attempt_journal_broker_key("primary", &BrokerType::ActiveMq, &url_a),
+            attempt_journal_broker_key("primary", &BrokerType::ActiveMq, &url_b),
+            "distinct addresses after the diagnostic cap must produce distinct keys"
+        );
+    }
+
+    /// Credentials must not leak into the derived key: the hash input is the
+    /// redacted URL, and the key is pure lowercase hex. Same credentials on
+    /// the same broker are stable.
+    #[test]
+    fn broker_key_is_credential_free() {
+        let a = attempt_journal_broker_key(
+            "primary",
+            &BrokerType::ActiveMq,
+            "tcp://admin:secret@h:61616",
+        );
+        let b = attempt_journal_broker_key(
+            "primary",
+            &BrokerType::ActiveMq,
+            "tcp://admin:secret@h:61616",
+        );
+        assert_eq!(a, b, "same redacted input must hash equal");
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "key must be lowercase hex: {a}"
+        );
     }
 }

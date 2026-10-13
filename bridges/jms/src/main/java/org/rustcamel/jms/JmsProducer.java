@@ -44,7 +44,9 @@ public class JmsProducer {
       }
       for (var entry : headers.entrySet()) {
         String key = entry.getKey();
-        if (key.startsWith("JMS") && !key.startsWith("JMSX")) continue;
+        // Backstop: never write a reserved, framework, or credential name as a
+        // JMS property, even if the Rust producer forwarded it.
+        if (HeaderPolicy.isDenied(key)) continue;
         try {
           msg.setStringProperty(key, entry.getValue());
         } catch (Exception e) {

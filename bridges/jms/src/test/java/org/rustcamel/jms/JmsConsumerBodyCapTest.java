@@ -3,14 +3,18 @@ package org.rustcamel.jms;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import io.grpc.stub.StreamObserver;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.concurrent.CountDownLatch;
@@ -28,6 +32,7 @@ import jms_bridge.JmsMessage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
@@ -51,6 +56,8 @@ class JmsConsumerBodyCapTest {
   @Mock MessageConsumer messageConsumer;
   @Mock Queue queue;
 
+  @TempDir Path tempDir;
+
   JmsConsumer consumer;
 
   private AutoCloseable mocks;
@@ -61,12 +68,24 @@ class JmsConsumerBodyCapTest {
 
     consumer = new JmsConsumer();
     consumer.factory = factory;
+    // A queue delivery is keyed and reserved, so install a legitimately configured journal: one
+    // shared service rooted at a trusted temp dir plus a valid broker key. This mirrors production
+    // configuration instead of bypassing it.
+    consumer.configureJournal(
+        new JournalService(
+            tempDir,
+            BridgeConfig.JOURNAL_MAX_BYTES_DEFAULT,
+            BridgeConfig.JOURNAL_RETENTION_MS_DEFAULT,
+            System::currentTimeMillis),
+        "0123456789abcdef0123456789abcdef",
+        1000L,
+        null);
     // Deterministic cap: the pin bypasses JMS_MAX_BODY_BYTES resolution entirely.
     consumer.pinnedMaxBodyBytes = TEST_CAP_BYTES;
 
     when(factory.createDedicatedConnection()).thenReturn(connection);
     org.mockito.Mockito.doAnswer(inv -> null).when(connection).start();
-    when(connection.createSession(false, Session.AUTO_ACKNOWLEDGE)).thenReturn(session);
+    when(connection.createSession(false, Session.CLIENT_ACKNOWLEDGE)).thenReturn(session);
     when(session.createQueue("test")).thenReturn(queue);
     when(session.createConsumer(any(Queue.class))).thenReturn(messageConsumer);
   }
@@ -81,9 +100,15 @@ class JmsConsumerBodyCapTest {
    * stops.
    */
   private RecordingObserver subscribeOnce(javax.jms.Message msg) throws JMSException {
+    // Idle between polls: a mocked receive returns instantly, so a bare null would spin the owner
+    // thread (and record millions of Mockito invocations) until the test stops the consumer.
     when(messageConsumer.receive(org.mockito.ArgumentMatchers.anyLong()))
         .thenReturn(msg)
-        .thenReturn(null);
+        .thenAnswer(
+            invocation -> {
+              Thread.sleep(200);
+              return null;
+            });
     RecordingObserver obs = new RecordingObserver();
     consumer.subscribe(DESTINATION, SUBSCRIPTION_ID, obs, new AtomicBoolean(false));
     return obs;
@@ -91,7 +116,7 @@ class JmsConsumerBodyCapTest {
 
   /** Common header/property stubbing; convertMessage touches these before the type branch. */
   private static void stubCommonAttributes(javax.jms.Message msg) throws JMSException {
-    when(msg.getJMSMessageID()).thenReturn(null);
+    when(msg.getJMSMessageID()).thenReturn("ID:test");
     when(msg.getJMSCorrelationID()).thenReturn(null);
     when(msg.getJMSTimestamp()).thenReturn(0L);
     when(msg.getPropertyNames()).thenReturn(Collections.emptyEnumeration());
@@ -113,18 +138,16 @@ class JmsConsumerBodyCapTest {
             });
 
     RecordingObserver obs = subscribeOnce(big);
-    assertTrue(obs.errored.await(15, TimeUnit.SECONDS), "oversized body must yield an error");
+    // Conversion failure is a reservation failure: recover before the next receive, never
+    // terminate the healthy stream, and never acknowledge a message the route never saw.
+    verify(session, timeout(5000)).recover();
 
     assertFalse(bodyRead.get(), "readBytes must NEVER be called for an oversized body");
     assertEquals(0, obs.nextCount, "oversized body must not be delivered");
-    Throwable t = obs.error.get();
-    assertNotNull(t, "error outcome must be carried");
-    assertTrue(
-        String.valueOf(t.getMessage()).contains(CAP_ENV_VAR),
-        "error must name " + CAP_ENV_VAR + ": " + t.getMessage());
-    assertTrue(
-        String.valueOf(t.getMessage()).contains("4096"),
-        "error must report the actual length: " + t.getMessage());
+    assertEquals(
+        1, consumer.reservationFailureCount(), "one conversion failure is one reservation failure");
+    assertNull(obs.error.get(), "a recoverable conversion failure must not terminate the stream");
+    verify(big, never()).acknowledge();
   }
 
   @Test
@@ -143,15 +166,14 @@ class JmsConsumerBodyCapTest {
             });
 
     RecordingObserver obs = subscribeOnce(bogus);
-    assertTrue(obs.errored.await(15, TimeUnit.SECONDS), "negative length must yield an error");
+    verify(session, timeout(5000)).recover();
 
     assertFalse(bodyRead.get(), "readBytes must NEVER be called for a negative body length");
     assertEquals(0, obs.nextCount, "negative-length body must not be delivered");
-    Throwable t = obs.error.get();
-    assertNotNull(t, "error outcome must be carried");
-    assertTrue(
-        String.valueOf(t.getMessage()).contains("-1"),
-        "error must report the actual length: " + t.getMessage());
+    assertEquals(
+        1, consumer.reservationFailureCount(), "one conversion failure is one reservation failure");
+    assertNull(obs.error.get(), "a recoverable conversion failure must not terminate the stream");
+    verify(bogus, never()).acknowledge();
   }
 
   @Test
@@ -189,20 +211,13 @@ class JmsConsumerBodyCapTest {
     when(big.getText()).thenReturn(new String(chars));
 
     RecordingObserver obs = subscribeOnce(big);
-    assertTrue(obs.errored.await(15, TimeUnit.SECONDS), "oversized text must yield an error");
+    verify(session, timeout(5000)).recover();
 
     assertEquals(0, obs.nextCount, "oversized text must not be delivered");
-    Throwable t = obs.error.get();
-    assertNotNull(t, "error outcome must be carried");
-    assertTrue(
-        String.valueOf(t.getMessage()).contains(CAP_ENV_VAR),
-        "error must name " + CAP_ENV_VAR + ": " + t.getMessage());
-    assertTrue(
-        String.valueOf(t.getMessage()).contains("2048"),
-        "error must report the actual length: " + t.getMessage());
-    assertTrue(
-        String.valueOf(t.getMessage()).contains("bytes"),
-        "error must report the length in bytes: " + t.getMessage());
+    assertEquals(
+        1, consumer.reservationFailureCount(), "one conversion failure is one reservation failure");
+    assertNull(obs.error.get(), "a recoverable conversion failure must not terminate the stream");
+    verify(big, never()).acknowledge();
   }
 
   @Test
@@ -214,17 +229,13 @@ class JmsConsumerBodyCapTest {
     when(cjk.getText()).thenReturn("\u4e2d".repeat(Math.toIntExact(TEST_CAP_BYTES)));
 
     RecordingObserver obs = subscribeOnce(cjk);
-    assertTrue(obs.errored.await(15, TimeUnit.SECONDS), "UTF-8-oversized text must yield an error");
+    verify(session, timeout(5000)).recover();
 
     assertEquals(0, obs.nextCount, "UTF-8-oversized text must not be delivered");
-    Throwable t = obs.error.get();
-    assertNotNull(t, "error outcome must be carried");
-    assertTrue(
-        String.valueOf(t.getMessage()).contains("3072"),
-        "error must report the UTF-8 size in bytes: " + t.getMessage());
-    assertTrue(
-        String.valueOf(t.getMessage()).contains("bytes"),
-        "error must use byte units: " + t.getMessage());
+    assertEquals(
+        1, consumer.reservationFailureCount(), "one conversion failure is one reservation failure");
+    assertNull(obs.error.get(), "a recoverable conversion failure must not terminate the stream");
+    verify(cjk, never()).acknowledge();
   }
 
   @Test

@@ -4,6 +4,7 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -22,6 +23,7 @@ import org.apache.activemq.pool.PooledConnectionFactory;
 import org.apache.activemq.transport.TransportFactory;
 import org.apache.activemq.transport.tcp.TcpTransportFactory;
 import org.apache.activemq.util.FactoryFinder;
+import org.apache.activemq.util.URISupport;
 import org.messaginghub.pooled.jms.JmsPoolConnectionFactory;
 
 @ApplicationScoped
@@ -173,18 +175,82 @@ public class JmsClientFactory {
     }
   }
 
-  private ActiveMQConnectionFactory buildActiveMqFactory(String url, String user, String pass) {
+  // Package-private (not private) so JmsClientFactoryPrefixTest can exercise the effective prefix;
+  // mirrors the existing transportConfig testability seam.
+  ActiveMQConnectionFactory buildActiveMqFactory(String url, String user, String pass) {
     initNativeImageWorkarounds();
     ActiveMQConnectionFactory cf = new ActiveMQConnectionFactory(url);
-    // Keep connection and client IDs unique across processes even if the
-    // native-image IdGenerator run-time initialization setting is lost.
-    // Direct setters avoid native-image reflection requirements (rc-trxge).
-    String prefix = "jms-bridge-" + UUID.randomUUID();
-    cf.setConnectionIDPrefix(prefix);
-    cf.setClientIDPrefix(prefix);
+    // Keep connection and client IDs unique across processes even if the native-image IdGenerator
+    // run-time initialization setting is lost (rc-trxge). An explicit jms.connectionIDPrefix /
+    // jms.clientIDPrefix is preserved as the base and the per-process token is appended; without
+    // one the token stands alone. ActiveMQ 5.19.x has no getConnectionIDPrefix() getter (the
+    // client getter does exist), so the explicit connection option is read from the URI with
+    // ActiveMQ's own parser while the client base comes from the factory. Direct setters avoid
+    // native-image reflection requirements.
+    cf.setConnectionIDPrefix(withProcessToken(explicitUriOption(url, "jms.connectionIDPrefix")));
+    cf.setClientIDPrefix(withProcessToken(cf.getClientIDPrefix()));
     if (user != null) cf.setUserName(user);
     if (pass != null) cf.setPassword(pass);
     return cf;
+  }
+
+  /**
+   * Per-JVM-process token, generated lazily on first use. It must NOT be a static final initialized
+   * in {@code <clinit>}: GraalVM would fold that value into the image heap, so every process would
+   * share one token and the rc-trxge duplicate-ID regression would return. Lazily assigned static
+   * state stays runtime-only. Within a process the per-factory IdGenerator counter still keeps
+   * individual connections distinct.
+   */
+  private static volatile String processIdToken;
+
+  private static String processIdToken() {
+    String token = processIdToken;
+    if (token == null) {
+      synchronized (JmsClientFactory.class) {
+        token = processIdToken;
+        if (token == null) {
+          token = "jms-bridge-" + UUID.randomUUID();
+          processIdToken = token;
+        }
+      }
+    }
+    return token;
+  }
+
+  /**
+   * Appends the per-process token to an explicit prefix base, or uses the token alone when the base
+   * is unset. The spec's condition is non-null and non-empty, so a whitespace-only base is a real
+   * explicit prefix and is preserved ({@code isEmpty}, not {@code isBlank}). ActiveMQ Classic's
+   * default is null.
+   */
+  private static String withProcessToken(String base) {
+    String token = processIdToken();
+    return (base == null || base.isEmpty()) ? token : base + "-" + token;
+  }
+
+  /**
+   * Reads an explicit {@code jms.*} broker-URL option exactly as {@link ActiveMQConnectionFactory}
+   * parses it in {@code setBrokerURL}, via {@link URISupport#parseParameters(URI)}: that method
+   * dispatches on {@code URISupport.isCompositeURI} — a composite URI ({@code failover:}/{@code
+   * fanout:}) contributes its outer parameters, a plain URI contributes its query, and a plain URI
+   * with no query contributes nothing. Composite parsing must never run on a plain URI: {@code
+   * parseComposite} strips {@code //} and reparses the scheme-specific part as a URI, so a plain
+   * IP-literal URL ({@code tcp://127.0.0.1:61616}) fails with "Illegal character in scheme name".
+   * Used only for the connection prefix — ActiveMQ 5.19.x exposes no {@code
+   * getConnectionIDPrefix()} getter; {@code getClientIDPrefix()} does exist and is used instead for
+   * the client base.
+   */
+  private static String explicitUriOption(String url, String option) {
+    try {
+      URI uri = URI.create(url);
+      Map<String, String> params = URISupport.parseParameters(uri);
+      return params.get(option);
+    } catch (URISyntaxException e) {
+      // Nominally unreachable: the ActiveMQConnectionFactory constructor parses the same URL first
+      // and rejects unapplied jms.* options. Never echo the raw URL — it can carry jms.password or
+      // other credentials. Preserve the cause.
+      throw new IllegalArgumentException("Invalid broker URL query for option " + option, e);
+    }
   }
 
   /**

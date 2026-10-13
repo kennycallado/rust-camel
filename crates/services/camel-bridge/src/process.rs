@@ -47,6 +47,7 @@ impl<T> Deref for Redacted<T> {
 }
 
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum BridgeError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -66,6 +67,11 @@ pub enum BridgeError {
     Transport(String),
     #[error("Config error: {0}")]
     Config(String),
+    /// A startup permanent failure announced by the bridge (`{"status":
+    /// "permanent-failure","reason":"..."}`) or inferred from the reserved exit
+    /// code 78. Never retried (phase 4 parks the slot).
+    #[error("Bridge permanent failure: {0}")]
+    PermanentFailure(String),
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
@@ -215,6 +221,13 @@ impl fmt::Debug for BridgeProcessConfig {
 
 impl BridgeProcessConfig {
     /// Constructor for the JMS bridge.
+    ///
+    /// `journal_dir` and `broker_key` are the Rust-resolved attempt-journal
+    /// root (`JMS_ATTEMPT_JOURNAL_DIR`) and the derived broker key
+    /// (`JMS_BRIDGE_BROKER_KEY`). Either may be `None`, which leaves the
+    /// variable unset so the bridge defers a queue subscribe to a
+    /// `FAILED_PRECONDITION`; producer-only and topic paths still work.
+    #[allow(clippy::too_many_arguments)]
     pub fn jms(
         binary_path: PathBuf,
         broker_url: String,
@@ -222,6 +235,8 @@ impl BridgeProcessConfig {
         username: Option<String>,
         password: Option<Redacted<String>>,
         start_timeout_ms: u64,
+        journal_dir: Option<String>,
+        broker_key: Option<String>,
     ) -> Self {
         let mut env_vars = vec![
             ("BRIDGE_BROKER_URL".to_string(), broker_url.clone()),
@@ -235,6 +250,12 @@ impl BridgeProcessConfig {
         }
         if let Some(p) = &password {
             env_vars.push(("BRIDGE_PASSWORD".to_string(), (**p).clone()));
+        }
+        if let Some(dir) = journal_dir {
+            env_vars.push(("JMS_ATTEMPT_JOURNAL_DIR".to_string(), dir));
+        }
+        if let Some(key) = broker_key {
+            env_vars.push(("JMS_BRIDGE_BROKER_KEY".to_string(), key));
         }
         Self {
             spec: &JMS_BRIDGE,
@@ -378,6 +399,113 @@ async fn drain_stdout<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, token: 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Ready-line classification (phase 4.1 permanent-failure signal)
+// ---------------------------------------------------------------------------
+
+/// One classified bridge startup stdout line.
+#[derive(Debug, PartialEq, Eq)]
+enum ReadyLine {
+    /// `{"status":"ready","port":N}` with a usable port.
+    Ready(u16),
+    /// `{"status":"permanent-failure","reason":"..."}`.
+    PermanentFailure(String),
+    /// `{"status":"ready"}` without a usable port.
+    MalformedReady,
+}
+
+/// Classifies one complete startup line. `None` is an unrelated bridge log
+/// line, which the handshake skips.
+fn parse_ready_line(line: &str) -> Option<ReadyLine> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    match value.get("status").and_then(|s| s.as_str())? {
+        "ready" => match value.get("port").and_then(|p| p.as_u64()) {
+            Some(port) => Some(ReadyLine::Ready(port as u16)),
+            None => Some(ReadyLine::MalformedReady),
+        },
+        "permanent-failure" => Some(ReadyLine::PermanentFailure(
+            value
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("bridge reported a permanent startup failure")
+                .to_string(),
+        )),
+        _ => None,
+    }
+}
+
+/// Reads bridge stdout until the ready line, a permanent-failure line, or EOF.
+///
+/// Bounded per line at 64 KiB. Returns [`BridgeError::StdoutClosed`] on EOF so
+/// the caller can apply the reserved-exit-code mapping.
+async fn read_ready_port<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> Result<u16, BridgeError> {
+    use tokio::io::AsyncBufReadExt;
+
+    let mut buf_acc: Vec<u8> = Vec::new();
+    const READY_MAX_LINE: usize = 64 * 1024;
+    while let Ok(chunk) = reader.fill_buf().await {
+        if chunk.is_empty() {
+            break; // EOF
+        }
+        let newline_pos = chunk.iter().position(|&b| b == b'\n');
+        let take = match newline_pos {
+            Some(i) => i + 1,
+            None => chunk.len(),
+        };
+        if buf_acc.len() + take <= READY_MAX_LINE {
+            buf_acc.extend_from_slice(&chunk[..take]);
+        }
+        reader.consume(take);
+        if newline_pos.is_some() {
+            let line = String::from_utf8_lossy(&buf_acc);
+            let line_trimmed = line.trim_end_matches('\n');
+            match parse_ready_line(line_trimmed) {
+                Some(ReadyLine::Ready(port)) => return Ok(port),
+                Some(ReadyLine::PermanentFailure(reason)) => {
+                    return Err(BridgeError::PermanentFailure(reason));
+                }
+                Some(ReadyLine::MalformedReady) => {
+                    // log-policy: system-broken
+                    tracing::error!("bridge ready message malformed: {line_trimmed}");
+                    return Err(BridgeError::BadReadyMessage(line_trimmed.to_string()));
+                }
+                None => {}
+            }
+            buf_acc.clear();
+        }
+    }
+    // log-policy: system-broken
+    tracing::error!("bridge stdout closed before ready message");
+    Err(BridgeError::StdoutClosed)
+}
+
+/// Waits (bounded, 2 s) for a child that closed stdout before readiness. Exit
+/// code `78` is the reserved permanent-failure code; any other exit, or a child
+/// that does not exit, stays [`BridgeError::StdoutClosed`].
+///
+/// The 2 s exit classification is separate from cleanup: a child that does not
+/// exit is killed and reaped *after* classification, bounded at another 2 s, so
+/// a known signal is never delayed by teardown.
+async fn eof_exit_error(child: &mut tokio::process::Child) -> BridgeError {
+    use tokio::time::{Duration, timeout};
+
+    match timeout(Duration::from_secs(2), child.wait()).await {
+        Ok(Ok(status)) if status.code() == Some(78) => BridgeError::PermanentFailure(
+            "bridge exited with code 78 before announcing readiness".to_string(),
+        ),
+        Ok(_) => BridgeError::StdoutClosed,
+        Err(_) => {
+            // Closed stdout but still running: terminate and reap so no process
+            // leaks. This cleanup runs after classification and is bounded.
+            let _ = child.start_kill();
+            let _ = timeout(Duration::from_secs(2), child.wait()).await;
+            BridgeError::StdoutClosed
+        }
+    }
+}
+
 pub struct BridgeProcess {
     child: tokio::process::Child,
     grpc_port: u16,
@@ -417,7 +545,6 @@ impl BridgeProcess {
     /// application.yml; only runtime cert paths and the SSL port mode are
     /// passed via env vars.
     pub async fn start(config: &BridgeProcessConfig) -> Result<Self, BridgeError> {
-        use tokio::io::AsyncBufReadExt;
         use tokio::process::Command;
         use tokio::time::{Duration, timeout};
 
@@ -463,6 +590,9 @@ impl BridgeProcess {
 
         let mut command = Command::new(&config.binary_path);
         command
+            // Cancellation-safe ownership: if this future is dropped (outer
+            // timeout or abort) the raw child is killed instead of orphaned.
+            .kill_on_drop(true)
             .env("QUARKUS_HTTP_SSL_PORT", free_port.to_string())
             .env(
                 "QUARKUS_TLS_BRIDGE_KEY_STORE_PEM_0_CERT",
@@ -489,52 +619,39 @@ impl BridgeProcess {
         // --- Ready-detection phase (bounded by outer timeout + bounded line) ---
         // R4-L7: use fill_buf()/consume() instead of Lines::next_line() to avoid
         // unbounded buffer growth on lines without newlines.
-        let port = timeout(Duration::from_millis(config.start_timeout_ms), async {
-            let mut buf_acc: Vec<u8> = Vec::new();
-            const READY_MAX_LINE: usize = 64 * 1024;
-            while let Ok(chunk) = reader.fill_buf().await {
-                if chunk.is_empty() {
-                    break; // EOF
-                }
-                let newline_pos = chunk.iter().position(|&b| b == b'\n');
-                let take = match newline_pos {
-                    Some(i) => i + 1,
-                    None => chunk.len(),
-                };
-                if buf_acc.len() + take <= READY_MAX_LINE {
-                    buf_acc.extend_from_slice(&chunk[..take]);
-                }
-                reader.consume(take);
-                if newline_pos.is_some() {
-                    let line = String::from_utf8_lossy(&buf_acc);
-                    let line_trimmed = line.trim_end_matches('\n');
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line_trimmed)
-                        && v.get("status").and_then(|s| s.as_str()) == Some("ready")
-                    {
-                        if let Some(p) = v.get("port").and_then(|p| p.as_u64()) {
-                            return Ok(p as u16);
-                        }
-                        // log-policy: system-broken
-                        tracing::error!("bridge ready message malformed: {line_trimmed}");
-                        return Err(BridgeError::BadReadyMessage(line_trimmed.to_string()));
-                    }
-                    buf_acc.clear();
-                }
+        let ready = timeout(
+            Duration::from_millis(config.start_timeout_ms),
+            read_ready_port(&mut reader),
+        )
+        .await;
+
+        let port = match ready {
+            Ok(Ok(port)) => port,
+            Ok(Err(BridgeError::StdoutClosed)) => {
+                // EOF before ready: a reserved exit code 78 is a permanent
+                // startup failure; any other exit stays the transient EOF error.
+                // Classification is separate from cleanup: `eof_exit_error`
+                // terminates and reaps a still-running child after classifying.
+                return Err(eof_exit_error(&mut child).await);
             }
-            // log-policy: system-broken
-            tracing::error!("bridge stdout closed before ready message");
-            Err(BridgeError::StdoutClosed)
-        })
-        .await
-        .map_err(|_| {
-            let msg = format!(
-                "{} failed to start: health check timeout after {}ms",
-                config.spec.name, config.start_timeout_ms
-            );
-            // log-policy: system-broken
-            tracing::error!("{msg}");
-            BridgeError::Timeout(msg)
-        })??;
+            Ok(Err(error)) => {
+                // Permanent-failure line or malformed ready line: return the
+                // observed signal immediately. The child is dropped at function
+                // exit, and `kill_on_drop` terminates it without blocking the
+                // handshake deadline.
+                return Err(error);
+            }
+            Err(_) => {
+                let msg = format!(
+                    "{} failed to start: health check timeout after {}ms",
+                    config.spec.name, config.start_timeout_ms
+                );
+                // log-policy: system-broken
+                tracing::error!("{msg}");
+                // The stuck child is dropped here; `kill_on_drop` reaps it.
+                return Err(BridgeError::Timeout(msg));
+            }
+        };
 
         // --- Post-ready bounded drain (R4-L7) ---
         // Never stop reading: the OS pipe must stay drained (stopping = pipe fill
@@ -660,8 +777,74 @@ mod tests {
             Some("user".to_string()),
             Some(Redacted::new("pass".to_string())),
             1000,
+            Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
+            Some("0123456789abcdef0123456789abcdef".to_string()),
         );
         assert_eq!(cfg.spec.name, "jms-bridge");
+    }
+
+    /// Task 3.6: the Rust-resolved journal directory and broker key travel to
+    /// the bridge on the initial launch and every restart, because both go
+    /// through this one constructor.
+    #[test]
+    fn journal_env_passed_on_launch_and_restart() {
+        let dir = "/var/lib/state/rust-camel/jms-bridge".to_string();
+        let key = "0123456789abcdef0123456789abcdef".to_string();
+
+        let initial = BridgeProcessConfig::jms(
+            PathBuf::from("/tmp/jms-bridge"),
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            1000,
+            Some(dir.clone()),
+            Some(key.clone()),
+        );
+        let restart = BridgeProcessConfig::jms(
+            PathBuf::from("/tmp/jms-bridge"),
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            1000,
+            Some(dir.clone()),
+            Some(key.clone()),
+        );
+
+        for cfg in [&initial, &restart] {
+            assert!(
+                cfg.env_vars
+                    .iter()
+                    .any(|(k, v)| k == "JMS_ATTEMPT_JOURNAL_DIR" && v == &dir),
+                "JMS_ATTEMPT_JOURNAL_DIR must be present"
+            );
+            assert!(
+                cfg.env_vars
+                    .iter()
+                    .any(|(k, v)| k == "JMS_BRIDGE_BROKER_KEY" && v == &key),
+                "JMS_BRIDGE_BROKER_KEY must be present"
+            );
+        }
+
+        // Unset stays unset (producer-only path).
+        let unset = BridgeProcessConfig::jms(
+            PathBuf::from("/tmp/jms-bridge"),
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            1000,
+            None,
+            None,
+        );
+        assert!(
+            !unset
+                .env_vars
+                .iter()
+                .any(|(k, _)| k == "JMS_ATTEMPT_JOURNAL_DIR" || k == "JMS_BRIDGE_BROKER_KEY"),
+            "unset journal env must not be injected"
+        );
     }
 
     #[test]
@@ -883,6 +1066,8 @@ mod tests {
             None,
             None,
             0,
+            None,
+            None,
         );
         let result = config.validate();
         assert!(result.is_err());
@@ -897,6 +1082,8 @@ mod tests {
             None,
             None,
             0,
+            None,
+            None,
         );
         assert!(config.validate().is_err());
     }
@@ -968,6 +1155,8 @@ mod tests {
             Some("user".to_string()),
             Some(Redacted::new("super_secret".to_string())),
             1000,
+            None,
+            None,
         );
         // The Redacted<T> password field must show [REDACTED] in debug output.
         // env_vars is a separate Vec<(String, String)> used for process injection
@@ -1244,5 +1433,159 @@ mod tests {
             result.is_ok(),
             "drain task should complete — trailing bytes preserved through handoff"
         );
+    }
+
+    // --- Phase 4.1: permanent-failure startup signal ---
+
+    /// Pure protocol classification; platform-independent.
+    #[test]
+    fn parses_permanent_failure_status_line() {
+        assert_eq!(
+            parse_ready_line(
+                r#"{"status":"permanent-failure","reason":"JMS_ATTEMPT_JOURNAL_DIR is not owner-private"}"#
+            ),
+            Some(ReadyLine::PermanentFailure(
+                "JMS_ATTEMPT_JOURNAL_DIR is not owner-private".to_string()
+            )),
+            "a permanent-failure line must classify as PermanentFailure"
+        );
+        // A ready line never classifies as permanent.
+        assert!(matches!(
+            parse_ready_line(r#"{"status":"ready","port":8080}"#),
+            Some(ReadyLine::Ready(8080))
+        ));
+        // Unrelated lines are skipped.
+        assert_eq!(parse_ready_line("just a log line"), None);
+    }
+
+    /// Writes an executable stub bridge script into `dir`.
+    #[cfg(unix)]
+    fn write_stub(dir: &std::path::Path, name: &str, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join(name);
+        std::fs::write(&path, script).expect("write stub bridge");
+        let mut perms = std::fs::metadata(&path)
+            .expect("stat stub bridge")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod stub bridge");
+        path
+    }
+
+    /// A minimal JMS `BridgeProcessConfig` whose binary is the given stub.
+    #[cfg(unix)]
+    fn stub_config(binary: PathBuf, start_timeout_ms: u64) -> BridgeProcessConfig {
+        BridgeProcessConfig {
+            spec: &JMS_BRIDGE,
+            binary_path: binary,
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            username: None,
+            password: None,
+            start_timeout_ms,
+            env_vars: vec![],
+        }
+    }
+
+    /// Bounded (external, no Rust sleep) check that `pid` is gone.
+    #[cfg(unix)]
+    fn wait_pid_gone(pid: u32) -> bool {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "i=0; while [ $i -lt 100 ]; do kill -0 {pid} 2>/dev/null || exit 0; i=$((i+1)); sleep 0.05; done; exit 1"
+            ))
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// Reads a PID file written by a stub.
+    #[cfg(unix)]
+    fn read_pid(path: &std::path::Path) -> u32 {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Task 4.1: an EOF before ready with exit code 78 maps to a permanent
+    /// failure, using a real bounded child.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn eof_with_exit_78_maps_to_permanent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = write_stub(dir.path(), "stub-bridge.sh", "#!/bin/sh\nexit 78\n");
+
+        let result = BridgeProcess::start(&stub_config(stub, 5_000)).await;
+        match result {
+            Err(BridgeError::PermanentFailure(reason)) => {
+                assert!(
+                    reason.contains("78"),
+                    "reason must name the reserved exit code: {reason}"
+                );
+            }
+            Err(other) => panic!("expected PermanentFailure from exit 78, got: {other:?}"),
+            Ok(_) => panic!("exit 78 before ready must never start a bridge"),
+        }
+    }
+
+    /// A child that closes stdout without exiting is a bounded transient error,
+    /// and the still-running child is terminated on drop (no leak).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn eof_closed_stdout_child_is_bounded_other_and_killed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("child.pid");
+        let stub = write_stub(
+            dir.path(),
+            "stub-bridge.sh",
+            &format!(
+                "#!/bin/sh\necho $$ > '{}'\nexec 1>&-\nexec sleep 30\n",
+                pidfile.display()
+            ),
+        );
+
+        let result = BridgeProcess::start(&stub_config(stub, 5_000)).await;
+        assert!(
+            matches!(result, Err(BridgeError::StdoutClosed)),
+            "a non-exiting child must surface the bounded EOF error"
+        );
+
+        let pid = read_pid(&pidfile);
+        assert!(pid > 0, "stub must have written its pid");
+        assert!(wait_pid_gone(pid), "child {pid} must be terminated");
+    }
+
+    /// A permanent-failure line returns promptly (not delayed by cleanup) and
+    /// the still-running child is terminated on drop.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn permanent_line_returns_prompt_and_kills_child() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("child.pid");
+        let stub = write_stub(
+            dir.path(),
+            "stub-bridge.sh",
+            &format!(
+                "#!/bin/sh\necho $$ > '{}'\nprintf '%s\\n' '{{\"status\":\"permanent-failure\",\"reason\":\"JMS_ATTEMPT_JOURNAL_DIR is not owner-private\"}}'\nexec sleep 30\n",
+                pidfile.display()
+            ),
+        );
+
+        // The startup budget is short so a delayed cleanup would blow it.
+        let result = BridgeProcess::start(&stub_config(stub, 300)).await;
+        match result {
+            Err(BridgeError::PermanentFailure(reason)) => {
+                assert!(reason.contains("JMS_ATTEMPT_JOURNAL_DIR"), "{reason}");
+            }
+            Err(other) => panic!("expected PermanentFailure, got: {other:?}"),
+            Ok(_) => panic!("a permanent-failure line must never start a bridge"),
+        }
+
+        let pid = read_pid(&pidfile);
+        assert!(pid > 0, "stub must have written its pid");
+        assert!(wait_pid_gone(pid), "child {pid} must be terminated");
     }
 }

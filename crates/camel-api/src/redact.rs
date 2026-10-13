@@ -311,6 +311,32 @@ pub fn redact_url_fail_closed(raw: &str) -> String {
 /// `#[redacted]` sentinel. The result is capped at 256 bytes on a UTF-8
 /// char boundary. String-based; no URL parser.
 pub fn redact_url_with_query_allowlist(raw: &str, sensitive_key_substrings: &[&str]) -> String {
+    redact_url_with_query_allowlist_impl(raw, sensitive_key_substrings, Some(256))
+}
+
+/// Untruncated variant of [`redact_url_with_query_allowlist`]: identical
+/// windowed userinfo masking, per-key query redaction, and fragment
+/// suppression, but WITHOUT the 256-byte diagnostic cap. Callers that use
+/// the redacted string as stable identity material (for example a
+/// broker-key hash) MUST use this variant: the 256-byte cap conflates two
+/// long URLs that share a prefix but differ in a distinct address after
+/// the cap. Never use it as a rendered diagnostic surface.
+pub fn redact_url_with_query_allowlist_untruncated(
+    raw: &str,
+    sensitive_key_substrings: &[&str],
+) -> String {
+    redact_url_with_query_allowlist_impl(raw, sensitive_key_substrings, None)
+}
+
+/// Shared implementation for the truncating and untruncated variants.
+/// `cap` is `Some(256)` for the diagnostic surface and `None` for stable
+/// identity material. When capped, the fragment sentinel is reserved before
+/// the cut so the cap never splits it (e_gpt stage-4).
+fn redact_url_with_query_allowlist_impl(
+    raw: &str,
+    sensitive_key_substrings: &[&str],
+    cap: Option<usize>,
+) -> String {
     // 1) Mask userinfo in every authority window (see [`mask_authority_windows`]).
     let after_userinfo = mask_authority_windows(raw);
     // 2) Redact sensitive query params, keep the rest for diagnosability.
@@ -349,10 +375,14 @@ pub fn redact_url_with_query_allowlist(raw: &str, sensitive_key_substrings: &[&s
     // (e_gpt stage-4); the kept query content is part of the base.
     if let Some(i) = out.find('#') {
         out.truncate(i);
-        truncate_utf8_safe(&mut out, 256 - 11);
+        if let Some(cap) = cap {
+            truncate_utf8_safe(&mut out, cap - 11);
+        }
         out.push_str("#[redacted]");
     }
-    truncate_utf8_safe(&mut out, 256);
+    if let Some(cap) = cap {
+        truncate_utf8_safe(&mut out, cap);
+    }
     out
 }
 
@@ -777,6 +807,30 @@ mod tests {
             redacted.ends_with("?[redacted]"),
             "sentinel must render intact: {redacted}"
         );
+    }
+
+    /// The untruncated variant must keep every byte that the 256-byte
+    /// diagnostic cap would otherwise drop, so it can serve as stable
+    /// identity material without conflating two long URLs that share a
+    /// prefix.
+    #[test]
+    fn redact_url_with_query_allowlist_untruncated_keeps_full_length() {
+        let long = format!(
+            "tcp://h:61616?keepAlive=true&brokerName={}",
+            "segment".repeat(60)
+        );
+        assert!(long.len() > 256);
+        let capped = redact_url_with_query_allowlist(&long, &[]);
+        let full = redact_url_with_query_allowlist_untruncated(&long, &[]);
+        assert!(capped.len() <= 256, "len={}", capped.len());
+        assert_eq!(full, long, "untruncated must preserve the whole string");
+        assert!(full.len() > capped.len());
+        // Redaction still applies without the cap.
+        let mut secret = String::from("tcp://admin:secret@h:61616?keepAlive=true&padding=");
+        secret.push_str(&"x".repeat(300));
+        let redacted = redact_url_with_query_allowlist_untruncated(&secret, &["password", "user"]);
+        assert!(!redacted.contains("secret"));
+        assert!(redacted.len() > 256);
     }
 
     // ── Migrated: camel-jms config.rs broker allowlist tests ────────────

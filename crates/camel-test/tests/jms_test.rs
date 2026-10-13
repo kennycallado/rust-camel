@@ -11,13 +11,38 @@
 
 mod support;
 
+// Phase-5 crash-probe scenarios live in a focused submodule; the `jms_crash`
+// filter still selects them. Run with the qualified path for `--exact`.
+#[path = "support/jms_crash_probe_cases.rs"]
+mod jms_crash_cases;
+
+// Task 5.4 threshold and redelivery-disposition scenarios live in a focused
+// submodule; the test names are still selected by
+// `cargo test ... --test jms_test <name>`.
+#[path = "support/jms_disposition_cases.rs"]
+mod jms_disposition_cases;
+
+// Task 5.5 credential broker-property negative scenario lives in its own
+// focused submodule; the test name is still selected by
+// `cargo test ... --test jms_test <name>`.
+#[path = "support/jms_credentials_cases.rs"]
+mod jms_credentials_cases;
+
+// Task 6.5 native broker-identity proof and its focused identity-parser units
+// live in their own focused submodule; the test names are still selected by
+// `cargo test ... --test jms_test <name>`.
+#[path = "support/jms_native_uri_cases.rs"]
+mod jms_native_uri_cases;
+
 use std::collections::HashMap;
 use std::time::Duration;
 
 use camel_api::Value;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_jms::proto::bridge_service_client::BridgeServiceClient;
-use camel_component_jms::proto::{HealthRequest, JmsMessage, SendRequest, SubscribeRequest};
+use camel_component_jms::proto::{
+    CompletionOutcome, CompletionRequest, HealthRequest, JmsMessage, SendRequest, SubscribeRequest,
+};
 use camel_test::CamelTestContext;
 use support::activemq::ActiveMqBroker;
 use support::install_crypto_provider;
@@ -257,7 +282,7 @@ async fn jms_headers_propagated() {
         RouteBuilder::from("timer:headers-inject?period=300&delay=500&repeatCount=1")
             .set_body("header-check".to_string())
             .set_header("x-custom-header", Value::String("custom-value".to_string()))
-            .to("jms:queue:test-headers")
+            .to("jms:queue:test-headers?jmsHeaderAllowlist=x-custom-header")
             .route_id("jms-headers-producer")
             .build()
             .unwrap();
@@ -485,6 +510,38 @@ async fn next_message(stream: &mut tonic::Streaming<JmsMessage>, what: &str) -> 
         .unwrap_or_else(|| panic!("subscription stream ended before {what} arrived"))
 }
 
+/// Receives the next message and reports `COMMIT` for it before returning.
+///
+/// The bridge holds at most one unacknowledged delivery per consumer session,
+/// so a session that reads two messages without settling the first deadlocks
+/// the second read. Tests that collect several messages from one subscription
+/// MUST settle each one through this helper.
+async fn next_message_committed(
+    client: &mut BridgeServiceClient<tonic::transport::Channel>,
+    subscription_id: &str,
+    stream: &mut tonic::Streaming<JmsMessage>,
+    what: &str,
+) -> JmsMessage {
+    let message = next_message(stream, what).await;
+    let response = tokio::time::timeout(
+        Duration::from_secs(15),
+        client.complete(CompletionRequest {
+            subscription_id: subscription_id.to_string(),
+            subscription_generation: message.subscription_generation,
+            delivery_token: message.delivery_token.clone(),
+            outcome: CompletionOutcome::Commit as i32,
+        }),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("timed out committing {what}"))
+    .unwrap_or_else(|e| panic!("completion RPC failed for {what}: {e}"));
+    assert!(
+        response.into_inner().accepted,
+        "bridge rejected COMMIT for {what}"
+    );
+    message
+}
+
 /// Sends one text message through `client` (single shot — no retries, so the
 /// exact-count assertions below stay sound).
 async fn send_one(
@@ -571,26 +628,30 @@ async fn wait_for_distinct_client_ids(broker: &ActiveMqBroker, min: usize) -> Ve
     ids
 }
 
-/// Issues the subscribe RPC with a bounded await. The bridge's gRPC server can
-/// hold the response headers until the first message arrives on the queue, so
-/// an unbounded `await` on an empty queue risks hanging the whole test. Tests
-/// therefore queue their messages before subscribing, and bound this call too.
+/// Issues the subscribe RPC with a bounded await and returns the
+/// subscription id together with the message stream. The bridge's gRPC server
+/// can hold the response headers until the first message arrives on the queue,
+/// so an unbounded `await` on an empty queue risks hanging the whole test.
+/// Tests therefore queue their messages before subscribing, and bound this
+/// call too. The returned id is what `next_message_committed` needs to settle
+/// deliveries on a shared session.
 async fn subscribe_bounded(
     consumer: &mut BridgeServiceClient<tonic::transport::Channel>,
     queue: &str,
     subscription_id: &str,
-) -> tonic::Streaming<JmsMessage> {
+) -> (String, tonic::Streaming<JmsMessage>) {
+    let subscription_id = subscription_id.to_string();
     let response = tokio::time::timeout(
         Duration::from_secs(30),
         consumer.subscribe(SubscribeRequest {
             destination: queue.to_string(),
-            subscription_id: subscription_id.to_string(),
+            subscription_id: subscription_id.clone(),
         }),
     )
     .await
     .unwrap_or_else(|_| panic!("timed out subscribing consumer to {queue}"))
     .expect("subscribe via consumer bridge process");
-    response.into_inner()
+    (subscription_id, response.into_inner())
 }
 
 /// Two bridge processes started from the SAME native binary must coexist on
@@ -648,10 +709,25 @@ async fn jms_two_bridge_processes_same_binary_coexist() {
          rc-trxge)"
     );
 
-    // Messages are queued; now attach the consumer and collect both.
-    let mut stream = subscribe_bounded(&mut consumer, queue, "two-procs-consumer").await;
-    let msg1 = next_message(&mut stream, "message from bridge process 1").await;
-    let msg2 = next_message(&mut stream, "message from bridge process 2").await;
+    // Messages are queued; now attach the consumer and collect both. Settle
+    // each delivery before reading the next: the bridge allows one
+    // unacknowledged delivery per session.
+    let (subscription_id, mut stream) =
+        subscribe_bounded(&mut consumer, queue, "two-procs-consumer").await;
+    let msg1 = next_message_committed(
+        &mut consumer,
+        &subscription_id,
+        &mut stream,
+        "message from bridge process 1",
+    )
+    .await;
+    let msg2 = next_message_committed(
+        &mut consumer,
+        &subscription_id,
+        &mut stream,
+        "message from bridge process 2",
+    )
+    .await;
     let mut bodies: Vec<String> = [msg1.body, msg2.body]
         .iter()
         .map(|b| String::from_utf8_lossy(b).to_string())
@@ -744,9 +820,24 @@ async fn jms_message_ids_unique_across_bridge_restart() {
     );
 
     // Both messages are queued; now attach the consumer and collect them.
-    let mut stream = subscribe_bounded(&mut consumer, queue, "restart-consumer").await;
-    let msg1 = next_message(&mut stream, "pre-restart message").await;
-    let msg2 = next_message(&mut stream, "post-restart message").await;
+    // Settle each delivery before reading the next: the bridge allows one
+    // unacknowledged delivery per session.
+    let (subscription_id, mut stream) =
+        subscribe_bounded(&mut consumer, queue, "restart-consumer").await;
+    let msg1 = next_message_committed(
+        &mut consumer,
+        &subscription_id,
+        &mut stream,
+        "pre-restart message",
+    )
+    .await;
+    let msg2 = next_message_committed(
+        &mut consumer,
+        &subscription_id,
+        &mut stream,
+        "post-restart message",
+    )
+    .await;
     let mut delivered: Vec<(String, String)> = [
         (
             String::from_utf8_lossy(&msg1.body).to_string(),

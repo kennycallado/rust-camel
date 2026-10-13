@@ -11,8 +11,10 @@
 //!   `ARTEMIS_PASSWORD`); `ANONYMOUS_LOGIN` is intentionally **not set** so the
 //!   broker rejects unauthenticated connections. `BrokerConfig` passes
 //!   `username`/`password` so the bridge can authenticate.
-//! - **Custom JMS headers**: producer sets `x-order-id` and `x-priority` on
-//!   every message so downstream consumers and filters can act on them.
+//! - **Custom JMS headers**: producer sets `orderId` and `priority` on every
+//!   message and forwards them with `jmsHeaderAllowlist=orderId,priority`.
+//!   Since bridge 0.8.0 the producer forwards no user header unless the
+//!   allowlist names it. Use valid JMS property names (no hyphens).
 //! - **Competing consumers**: two independent consumer routes (`consumer-a` and
 //!   `consumer-b`) both subscribe to the same `orders` queue. Artemis
 //!   distributes messages between them automatically (round-robin).
@@ -22,16 +24,14 @@
 //! - **Topic fan-out**: a timer publishes to `jms:topic:events`; two topic
 //!   consumers each receive every message independently.
 //!
-//! ## Known limitation — no JMS redelivery
+//! ## Acknowledgement (bridge 0.8.0)
 //!
-//! The bridge uses `Session.AUTO_ACKNOWLEDGE`: the broker marks a message as
-//! consumed the moment it is delivered to the bridge, **before** the Rust
-//! processor runs. If the processor fails the message is already gone from the
-//! broker — it cannot be redelivered. Camel's Dead Letter Channel handles the
-//! failure on the Rust side but does not put the message back in the queue.
-//! True JMS redelivery would require `CLIENT_ACKNOWLEDGE` + a bidirectional
-//! Ack RPC in the bridge proto — a deliberate out-of-scope decision for this
-//! branch.
+//! The bridge acknowledges a message only after the route completes. An `Ok`
+//! route result (including an error handled by the Dead Letter Channel)
+//! acknowledges it; an unhandled `Err` rolls it back so the broker redelivers
+//! it. After six delivery attempts the bridge discards the message and logs
+//! its ID. In `consumer-b` the DLC handles the error, so the message is
+//! acknowledged once and not redelivered.
 //!
 //! ## Running
 //!
@@ -195,11 +195,12 @@ async fn main() -> Result<(), CamelError> {
     // Route 1 — Queue producer
     //
     // Fires every 2 seconds. Sets two custom JMS headers on each message:
-    //   x-order-id  — monotonically increasing order identifier
-    //   x-priority  — alternates between "high" and "normal"
+    //   orderId   — monotonically increasing order identifier
+    //   priority  — alternates between "high" and "normal"
     //
-    // These headers survive the round-trip through the broker and are visible
-    // in the consumer log output (showHeaders=true).
+    // `jmsHeaderAllowlist` forwards these headers through the broker; without
+    // it bridge 0.8.0 drops every user header. They are visible in the
+    // consumer log output (showHeaders=true).
     // -----------------------------------------------------------------------
 
     let order_counter = Arc::new(AtomicU64::new(0));
@@ -221,14 +222,14 @@ async fn main() -> Result<(), CamelError> {
                 ));
                 exchange
                     .input
-                    .set_header("x-order-id", Value::Number(serde_json::Number::from(n)));
+                    .set_header("orderId", Value::Number(serde_json::Number::from(n)));
                 exchange
                     .input
-                    .set_header("x-priority", Value::String(priority.to_string()));
+                    .set_header("priority", Value::String(priority.to_string()));
                 Ok(exchange)
             }
         })
-        .to("jms:queue:orders")
+        .to("jms:queue:orders?jmsHeaderAllowlist=orderId,priority")
         .build()?;
 
     // -----------------------------------------------------------------------
@@ -244,12 +245,12 @@ async fn main() -> Result<(), CamelError> {
         .process(|exchange| async move {
             let order_id = exchange
                 .input
-                .header("x-order-id")
+                .header("orderId")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "?".to_string());
             let priority = exchange
                 .input
-                .header("x-priority")
+                .header("priority")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "?".to_string());
             println!("[consumer-a] received order-id={order_id} priority={priority}");
@@ -266,10 +267,9 @@ async fn main() -> Result<(), CamelError> {
     // exchange to `log:dlc-sink` — demonstrating the Dead Letter Channel EIP
     // with JMS consumers.
     //
-    // ⚠ LIMITATION: Because the bridge uses AUTO_ACKNOWLEDGE, the broker
-    // considers the message delivered the moment consumer-b receives it.
-    // The DLC runs on the Rust/Camel side only — the message is NOT put back
-    // into the queue for redelivery. This is a known, intentional trade-off.
+    // The DLC handles the error, so the route result is `Ok` and the bridge
+    // acknowledges the message once. Without the DLC the unhandled `Err`
+    // would roll it back and the broker would redeliver it.
     // -----------------------------------------------------------------------
 
     let consumer_b = RouteBuilder::from("jms:queue:orders")
@@ -277,7 +277,7 @@ async fn main() -> Result<(), CamelError> {
         .process(|exchange| async move {
             let order_id = exchange
                 .input
-                .header("x-order-id")
+                .header("orderId")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "?".to_string());
             println!("[consumer-b] received order-id={order_id} — simulating processing failure");
@@ -369,14 +369,14 @@ fn print_banner() {
     println!("Patterns demonstrated:");
     println!("  - Pinned Docker image (apache/activemq-artemis:2.36.0-alpine)");
     println!("  - Mandatory broker auth (ARTEMIS_USER/PASSWORD, no ANONYMOUS_LOGIN)"); // allow-secret
-    println!("  - Custom JMS headers (x-order-id, x-priority)");
+    println!("  - Custom JMS headers (orderId, priority) via jmsHeaderAllowlist");
     println!("  - Competing consumers (consumer-a and consumer-b share orders queue)");
     println!("  - Dead Letter Channel on consumer-b failure");
     println!("  - Topic fan-out (both topic consumers receive every message)");
     println!();
-    println!("Known limitation:");
-    println!("  The bridge uses AUTO_ACKNOWLEDGE — DLC runs on the Rust side only.");
-    println!("  Failed messages are NOT redelivered by the broker.");
+    println!("Acknowledgement:");
+    println!("  The bridge acknowledges after the route completes; an unhandled");
+    println!("  error rolls back for broker redelivery (capped at 6 attempts).");
     println!();
     println!("Running for 30 seconds...");
     println!();

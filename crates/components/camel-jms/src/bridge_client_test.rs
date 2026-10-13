@@ -13,16 +13,44 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use camel_component_api::{Body, Exchange, Message, Value};
 use futures::Stream;
 use tonic::{Request, Response, Status};
+use tower::Service;
 
 use crate::component::bridge_service_client;
+use crate::config::JmsEndpointConfig;
+use crate::producer::JmsProducer;
 use crate::proto::{
-    HealthRequest, HealthResponse, JmsMessage, SendRequest, SendResponse, SubscribeRequest,
+    CompletionRequest, CompletionResponse, HealthRequest, HealthResponse, JmsMessage, SendRequest,
+    SendResponse, SubscribeRequest,
     bridge_service_server::{BridgeService, BridgeServiceServer},
 };
 
 const NEAR_CAP_BODY_SIZE: usize = 15 * 1024 * 1024;
+
+/// The two copies of the JMS bridge wire contract. Task 3.1 keeps them
+/// byte-identical except the Java `option` lines in the bridge copy.
+const CRATE_PROTO: &str = include_str!("../proto/jms_bridge.proto");
+const BRIDGE_PROTO: &str = include_str!("../../../../bridges/jms/src/main/proto/jms_bridge.proto");
+
+/// Apply the same normalization as the task's `diff` command: drop `option `
+/// lines and blank lines.
+fn normalize_proto_wire(src: &str) -> String {
+    src.lines()
+        .filter(|line| !line.starts_with("option ") && !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn protos_have_identical_wire_additions() {
+    assert_eq!(
+        normalize_proto_wire(CRATE_PROTO),
+        normalize_proto_wire(BRIDGE_PROTO),
+        "crate-local and Java bridge protos must be identical except option lines"
+    );
+}
 
 /// Deterministic non-uniform pattern so the assertion compares real bytes
 /// instead of an all-zero or all-same payload.
@@ -35,6 +63,7 @@ struct MockJmsBridge {
     subscribe_message: Option<JmsMessage>,
     active_ids: Arc<Mutex<HashSet<String>>>,
     captured_send: Arc<Mutex<Option<tonic::metadata::MetadataMap>>>,
+    captured_send_request: Arc<Mutex<Option<SendRequest>>>,
     captured_subscribe: Arc<Mutex<Option<tonic::metadata::MetadataMap>>>,
     captured_health: Arc<Mutex<Option<tonic::metadata::MetadataMap>>>,
 }
@@ -46,6 +75,10 @@ impl BridgeService for MockJmsBridge {
             .captured_send
             .lock()
             .expect("captured_send mutex poisoned") = Some(request.metadata().clone());
+        *self
+            .captured_send_request
+            .lock()
+            .expect("captured_send_request mutex poisoned") = Some(request.into_inner());
         Ok(Response::new(SendResponse::default()))
     }
 
@@ -91,6 +124,15 @@ impl BridgeService for MockJmsBridge {
             message: "ok".to_string(),
         }))
     }
+
+    async fn complete(
+        &self,
+        _request: Request<CompletionRequest>,
+    ) -> Result<Response<CompletionResponse>, Status> {
+        // Task 3.1: the mock bridge accepts every completion. Real settlement
+        // semantics arrive with the Java owner thread in task 3.2.
+        Ok(Response::new(CompletionResponse { accepted: true }))
+    }
 }
 
 /// Metadata captured by the mock bridge per RPC shape, so tests can assert on
@@ -99,6 +141,7 @@ impl BridgeService for MockJmsBridge {
 struct CapturedMetadata {
     port: u16,
     send: Arc<Mutex<Option<tonic::metadata::MetadataMap>>>,
+    send_request: Arc<Mutex<Option<SendRequest>>>,
     subscribe: Arc<Mutex<Option<tonic::metadata::MetadataMap>>>,
     health: Arc<Mutex<Option<tonic::metadata::MetadataMap>>>,
 }
@@ -109,10 +152,12 @@ async fn spawn_mock_bridge(message: JmsMessage) -> std::io::Result<CapturedMetad
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
     let captured_send = Arc::new(Mutex::new(None));
+    let captured_send_request = Arc::new(Mutex::new(None));
     let captured_subscribe = Arc::new(Mutex::new(None));
     let captured_health = Arc::new(Mutex::new(None));
 
     let mock_send = captured_send.clone();
+    let mock_send_request = captured_send_request.clone();
     let mock_subscribe = captured_subscribe.clone();
     let mock_health = captured_health.clone();
 
@@ -122,6 +167,7 @@ async fn spawn_mock_bridge(message: JmsMessage) -> std::io::Result<CapturedMetad
                 subscribe_message: Some(message),
                 active_ids: Arc::new(Mutex::new(HashSet::new())),
                 captured_send: mock_send,
+                captured_send_request: mock_send_request,
                 captured_subscribe: mock_subscribe,
                 captured_health: mock_health,
             }))
@@ -135,6 +181,7 @@ async fn spawn_mock_bridge(message: JmsMessage) -> std::io::Result<CapturedMetad
     Ok(CapturedMetadata {
         port,
         send: captured_send,
+        send_request: captured_send_request,
         subscribe: captured_subscribe,
         health: captured_health,
     })
@@ -151,6 +198,7 @@ async fn near_cap_body_decodes_end_to_end() {
         body,
         headers: std::collections::HashMap::new(),
         content_type: "application/octet-stream".to_string(),
+        ..Default::default()
     };
 
     let captured = spawn_mock_bridge(message).await.expect("spawn mock bridge");
@@ -268,6 +316,35 @@ fn bridge_decode_limit_above_cap() {
     assert!(
         crate::component::bridge_decode_limit() > 19 * 1024 * 1024,
         "decode limit must exceed the 19 MiB JMS_MAX_BODY_BYTES ceiling"
+    );
+}
+
+/// Task 3.1: the generated proto module exposes the completion symbols and the
+/// mock bridge service implements the new `Complete` RPC.
+#[tokio::test]
+async fn mock_services_implement_complete() {
+    use crate::proto::CompletionOutcome;
+
+    // Compile-time symbols: request default, enum variant, response type.
+    let request = CompletionRequest {
+        outcome: CompletionOutcome::Commit as i32,
+        ..Default::default()
+    };
+
+    let mock = MockJmsBridge {
+        subscribe_message: None,
+        active_ids: Arc::new(Mutex::new(HashSet::new())),
+        captured_send: Arc::new(Mutex::new(None)),
+        captured_send_request: Arc::new(Mutex::new(None)),
+        captured_subscribe: Arc::new(Mutex::new(None)),
+        captured_health: Arc::new(Mutex::new(None)),
+    };
+    let response = BridgeService::complete(&mock, Request::new(request))
+        .await
+        .expect("mock complete must be accepted");
+    assert!(
+        response.into_inner().accepted,
+        "mock bridge must accept the completion"
     );
 }
 
@@ -421,4 +498,115 @@ async fn no_traceparent_without_active_context() {
             "{name} rpc must not carry traceparent without an active context"
         );
     }
+}
+
+/// QoS headers are written to the exchange *after* header extraction, so an
+/// empty allowlist must not drop them even though the user header beside them
+/// is dropped. Drives the real `JmsProducer::call` against a mock that captures
+/// the actual `SendRequest`, so the assertion is about the wire payload, not a
+/// helper's return value.
+#[tokio::test]
+async fn qos_headers_set_after_extraction() {
+    let captured = spawn_mock_bridge(JmsMessage::default())
+        .await
+        .expect("spawn mock bridge");
+    let endpoint =
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", captured.port))
+            .expect("valid endpoint uri");
+    let channel = tokio::time::timeout(Duration::from_secs(5), endpoint.connect())
+        .await
+        .expect("connect to mock bridge within 5s")
+        .expect("mock bridge connection ok");
+
+    let config =
+        JmsEndpointConfig::from_uri("jms:queue:orders?timeToLive=30000&priority=5").unwrap();
+    assert!(
+        config.jms_header_allowlist.is_empty(),
+        "precondition: no allowlist configured"
+    );
+    let mut producer = JmsProducer::with_concurrency(channel, config, 1);
+
+    let mut ex = Exchange::new(Message::new(Body::Empty));
+    ex.input
+        .set_header("x-custom", Value::String("val".to_string()));
+    let result = producer.call(ex).await.expect("send accepted");
+
+    assert_eq!(
+        result.input.header("JMSExpiration").unwrap().as_str(),
+        Some("30000")
+    );
+    assert_eq!(
+        result.input.header("JMSPriority").unwrap().as_str(),
+        Some("5")
+    );
+
+    let sent = captured.send_request.lock().expect("send_request mutex");
+    let sent = sent.as_ref().expect("send request captured");
+    assert!(
+        !sent.headers.contains_key("JMSExpiration") && !sent.headers.contains_key("JMSPriority"),
+        "QoS headers must be written after extraction, not sent as properties: {:?}",
+        sent.headers
+    );
+    assert!(
+        !sent.headers.contains_key("x-custom"),
+        "empty allowlist must drop the user header"
+    );
+}
+
+/// Credential absence on the wire: a non-empty allowlist naming both a benign
+/// header and credential-shaped names forwards only the benign one, and no
+/// credential name or value appears in the actual `SendRequest`.
+#[tokio::test]
+async fn wire_payload_omits_credentials_and_keeps_trace_id() {
+    let captured = spawn_mock_bridge(JmsMessage::default())
+        .await
+        .expect("spawn mock bridge");
+    let endpoint =
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", captured.port))
+            .expect("valid endpoint uri");
+    let channel = tokio::time::timeout(Duration::from_secs(5), endpoint.connect())
+        .await
+        .expect("connect to mock bridge within 5s")
+        .expect("mock bridge connection ok");
+
+    let config = JmsEndpointConfig::from_uri(
+        "jms:queue:orders?jmsHeaderAllowlist=password,Authorization,api-key,traceId",
+    )
+    .unwrap();
+    let mut producer = JmsProducer::with_concurrency(channel, config, 1);
+
+    let mut ex = Exchange::new(Message::new(Body::Empty));
+    ex.input
+        .set_header("password", Value::String("hunter2".to_string()));
+    ex.input
+        .set_header("Authorization", Value::String("Bearer hunter2".to_string()));
+    ex.input
+        .set_header("api-key", Value::String("k-hunter2".to_string()));
+    ex.input
+        .set_header("traceId", Value::String("trace-1".to_string()));
+    producer.call(ex).await.expect("send accepted");
+
+    let sent = captured.send_request.lock().expect("send_request mutex");
+    let sent = sent.as_ref().expect("send request captured");
+    assert_eq!(
+        sent.headers.get("traceId"),
+        Some(&"trace-1".to_string()),
+        "the listed benign header must reach the wire"
+    );
+    for denied in ["password", "Authorization", "api-key"] {
+        assert!(
+            !sent.headers.contains_key(denied),
+            "denied credential name reached the wire: {denied}"
+        );
+    }
+    assert!(
+        !sent.headers.values().any(|v| v.contains("hunter2")),
+        "credential value reached the wire: {:?}",
+        sent.headers
+    );
+    let payload = format!("{sent:?}");
+    assert!(
+        !payload.contains("hunter2"),
+        "denied value appears in the serialized SendRequest: {payload}"
+    );
 }

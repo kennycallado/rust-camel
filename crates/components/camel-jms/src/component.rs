@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use camel_bridge::{
     download::ensure_binary,
     health::wait_for_health,
-    process::{BridgeProcess, BridgeProcessConfig, BrokerType},
+    process::{BridgeError, BridgeProcess, BridgeProcessConfig, BrokerType},
 };
 use camel_component_api::{
     BoxProcessor, CamelError, Component, Consumer, Endpoint, Exchange, NetworkRetryPolicy,
@@ -22,7 +22,10 @@ use tonic::transport::Channel;
 use tower::Service;
 use tracing::{info, warn};
 
-use crate::config::{BrokerConfig, JmsEndpointConfig, JmsPoolConfig};
+use crate::config::{
+    BrokerConfig, JmsEndpointConfig, JmsPoolConfig, attempt_journal_broker_key,
+    default_attempt_journal_dir, ensure_attempt_journal_dir,
+};
 use crate::consumer::JmsConsumer;
 use crate::health::JmsHealthCheck;
 use crate::producer::JmsProducer;
@@ -85,12 +88,48 @@ pub(crate) fn bridge_service_client(
 
 // ── BridgeState ──────────────────────────────────────────────────────────────
 
+/// Outcome of starting a bridge process, before the caller selects a
+/// [`BridgeState`].
+///
+/// `Permanent` is a config-class rejection that must never be retried; phase 4
+/// maps it to `BridgeState::Parked`. Every other failure keeps the historical
+/// transient `CamelError` path.
+#[derive(Debug)]
+pub(crate) enum StartBridgeError {
+    /// A permanent startup rejection carrying the bridge's reason.
+    Permanent(String),
+    /// A transient failure that the existing restart policy handles.
+    Other(CamelError),
+}
+
+/// Maps a startup [`BridgeError`] into the typed start outcome.
+///
+/// The permanent variant is matched before any string formatting, so the
+/// classification never depends on message substrings.
+fn classify_start_error(error: BridgeError) -> StartBridgeError {
+    match error {
+        BridgeError::PermanentFailure(reason) => StartBridgeError::Permanent(reason),
+        other => StartBridgeError::Other(CamelError::ProcessorError(format!(
+            "JMS bridge start failed: {other}"
+        ))),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum BridgeState {
     Starting,
-    Ready { channel: Channel },
+    Ready {
+        channel: Channel,
+    },
     Degraded(String),
-    Restarting { attempt: u32, next_at: Instant },
+    Restarting {
+        attempt: u32,
+        next_at: Instant,
+    },
+    /// Terminal. The bridge rejected startup permanently; the slot never
+    /// retries, never respawns, and stays here until the operator repairs the
+    /// cause and restarts the context (tasks 4.3/4.7).
+    Parked(String),
     Stopped,
 }
 
@@ -117,6 +156,63 @@ impl std::fmt::Debug for BridgeSlot {
             .field("broker_url", &self.broker_url)
             .field("broker_type", &self.broker_type)
             .finish()
+    }
+}
+
+impl BridgeSlot {
+    /// Atomically publishes `next` unless the slot already reached a terminal
+    /// state.
+    ///
+    /// `Parked` and `Stopped` are never overwritten by a late state
+    /// transition (a delayed `Ready`, `Degraded`, or `Restarting`). The
+    /// decision and the write share one watch write lock, so a concurrent
+    /// terminal publication cannot be lost. Returns `true` when published.
+    ///
+    /// A transport-driven `Restarting` publication must go through the same
+    /// closure so it cannot resurrect a terminal slot either.
+    fn publish_unless_terminal(&self, next: BridgeState) -> bool {
+        self.state_tx.send_if_modified(|cur| {
+            if matches!(cur, BridgeState::Parked(_) | BridgeState::Stopped) {
+                false
+            } else {
+                *cur = next;
+                true
+            }
+        })
+    }
+
+    /// Shutdown is the sole publisher allowed to override `Parked`: it
+    /// unconditionally publishes `Stopped` and returns the previous state.
+    ///
+    /// This runs *before* shutdown takes the process mutex, so a concurrent
+    /// `install_ready_process` that already published `Ready` is still
+    /// overridden and its child reaped by the shutdown `process.take()`.
+    fn publish_shutdown(&self) -> BridgeState {
+        self.state_tx.send_replace(BridgeState::Stopped)
+    }
+
+    /// Installs `process` under the process mutex and atomically publishes
+    /// `Ready`, unless a terminal state won the race.
+    ///
+    /// When terminal wins, the process is not stored and is returned so the
+    /// caller can `stop()` it outside both locks.
+    ///
+    /// Lock order: `process` first, then the watch write lock inside
+    /// [`Self::publish_unless_terminal`]. Shutdown takes the watch write lock
+    /// (in [`Self::publish_shutdown`]) and releases it *before* taking
+    /// `process`, so the two orders never nest and cannot deadlock.
+    async fn install_ready_process(
+        &self,
+        process: BridgeProcess,
+        channel: Channel,
+    ) -> Result<(), Box<BridgeProcess>> {
+        let mut guard = self.process.lock().await;
+        if self.publish_unless_terminal(BridgeState::Ready { channel }) {
+            *guard = Some(process);
+            Ok(())
+        } else {
+            Err(Box::new(process))
+        }
     }
 }
 
@@ -294,39 +390,75 @@ impl JmsBridgePool {
             &self.bridge_version,
             &self.bridge_cache_dir,
             self.bridge_start_timeout_ms,
+            broker_name,
             &broker_url,
             &broker_type,
             &credentials,
         )
         .await;
 
-        match start_result {
-            Ok((process, channel)) => {
-                {
-                    let mut guard = slot.process.lock().await;
-                    *guard = Some(process);
-                }
-                let _ = slot.state_tx.send(BridgeState::Ready { channel });
-            }
-            Err(e) => {
-                let _ = slot
-                    .state_tx
-                    .send(BridgeState::Degraded(format!("Initial start failed: {e}")));
-            }
-        }
+        Self::apply_initial_start_result(&slot, start_result).await;
 
         self.spawn_health_monitor(Arc::clone(&slot)).await;
 
         Ok(slot)
     }
 
+    /// Applies a completed initial start attempt to `slot`, publishing the
+    /// resulting state atomically.
+    ///
+    /// A permanent rejection parks the slot (terminal); any other failure
+    /// degrades it, and the health monitor retries. A terminal state published
+    /// concurrently (shutdown `Stopped`) always wins. Extracted from
+    /// `get_or_create_slot` so tests can inject a trusted [`StartBridgeError`]
+    /// and observe the published watch state without spawning a process.
+    async fn apply_initial_start_result(
+        slot: &BridgeSlot,
+        result: Result<(BridgeProcess, Channel), StartBridgeError>,
+    ) {
+        match result {
+            Ok((process, channel)) => {
+                if let Err(process) = slot.install_ready_process(process, channel).await {
+                    // Shutdown won the race: the child must not survive.
+                    let _ = process.stop().await;
+                }
+            }
+            Err(StartBridgeError::Permanent(reason)) => {
+                let _ = slot.publish_unless_terminal(BridgeState::Parked(reason));
+            }
+            Err(StartBridgeError::Other(e)) => {
+                let _ = slot.publish_unless_terminal(BridgeState::Degraded(format!(
+                    "Initial start failed: {e}"
+                )));
+            }
+        }
+    }
+
     /// Signal a slot to restart (called by producers on transport errors).
+    ///
+    /// The eligibility check and the `Restarting` publication are one atomic
+    /// watch mutation: a terminal slot (`Parked`/`Stopped`) is never
+    /// resurrected, and a terminal publication racing this call cannot be
+    /// overwritten. Operator repair plus a context restart (tasks 4.3/4.7) is
+    /// the only clearing path.
     pub fn restart_slot(&self, broker_name: &str) {
         if let Some(slot) = self.slots.get(broker_name) {
-            let _ = slot.state_tx.send(BridgeState::Restarting {
-                attempt: 0,
-                next_at: Instant::now(),
+            let published = slot.state_tx.send_if_modified(|cur| match cur {
+                BridgeState::Parked(_) | BridgeState::Stopped => false,
+                _ => {
+                    *cur = BridgeState::Restarting {
+                        attempt: 0,
+                        next_at: Instant::now(),
+                    };
+                    true
+                }
             });
+            if !published {
+                warn!(
+                    "JMS broker '{}' is terminal (parked/stopped); ignoring restart request",
+                    broker_name
+                );
+            }
         }
     }
 
@@ -363,7 +495,15 @@ impl JmsBridgePool {
             })?
         };
 
-        let _ = slot.state_tx.send(BridgeState::Ready { channel });
+        // The check and the `Ready` publication are one atomic watch mutation:
+        // a terminal state published while `connect()` awaited (shutdown) is
+        // never overwritten by this delayed refresh.
+        if !slot.publish_unless_terminal(BridgeState::Ready { channel }) {
+            return Err(CamelError::ProcessorError(format!(
+                "JMS broker '{}' became terminal during channel refresh",
+                broker_name
+            )));
+        }
         Ok(())
     }
 
@@ -379,8 +519,9 @@ impl JmsBridgePool {
 
         for name in names {
             if let Some((_, slot)) = self.slots.remove(&name) {
-                // Signal the health monitor to stop.
-                let _ = slot.state_tx.send(BridgeState::Stopped);
+                // Signal the health monitor to stop. Shutdown is the only
+                // publisher allowed to override a parked slot.
+                let _ = slot.publish_shutdown();
 
                 // Stop the bridge process.
                 let process = {
@@ -454,7 +595,8 @@ impl JmsBridgePool {
                                     "Health check failed for broker '{}': {e}. Marking Degraded.",
                                     slot.name
                                 );
-                                let _ = slot.state_tx.send(BridgeState::Degraded(e.to_string()));
+                                let _ = slot
+                                    .publish_unless_terminal(BridgeState::Degraded(e.to_string()));
                             }
                             Err(_) => {
                                 let msg = format!(
@@ -465,14 +607,11 @@ impl JmsBridgePool {
                                     "Health check timed out for broker '{}': {}. Marking Degraded.",
                                     slot.name, msg
                                 );
-                                let _ = slot.state_tx.send(BridgeState::Degraded(msg));
+                                let _ = slot.publish_unless_terminal(BridgeState::Degraded(msg));
                             }
                         }
                     }
                     BridgeState::Degraded(_) | BridgeState::Starting => {
-                        if matches!(*slot.state_rx.borrow(), BridgeState::Stopped) {
-                            break;
-                        }
                         if shutting_down.load(Ordering::SeqCst) {
                             tracing::info!(
                                 "Pool shutting down — not restarting bridge for broker '{}'",
@@ -480,10 +619,24 @@ impl JmsBridgePool {
                             );
                             break;
                         }
-                        let _ = slot.state_tx.send(BridgeState::Restarting {
+                        // Atomic: a terminal state published after the loop's
+                        // state read wins and ends the monitor.
+                        if !slot.publish_unless_terminal(BridgeState::Restarting {
                             attempt: 0,
                             next_at: Instant::now(),
-                        });
+                        }) {
+                            break;
+                        }
+                    }
+                    BridgeState::Parked(_) => {
+                        // Terminal: a permanent startup rejection is never
+                        // retried. Only an operator repair plus a context
+                        // restart (tasks 4.3/4.7) can clear it.
+                        info!(
+                            "Health monitor for '{}' exiting (Parked, permanent failure)",
+                            slot.name
+                        );
+                        break;
                     }
                     BridgeState::Restarting { attempt, next_at } => {
                         if shutting_down.load(Ordering::SeqCst) {
@@ -512,7 +665,7 @@ impl JmsBridgePool {
                                 attempt,
                                 broker_name
                             );
-                            let _ = slot.state_tx.send(BridgeState::Degraded(format!(
+                            let _ = slot.publish_unless_terminal(BridgeState::Degraded(format!(
                                 "max restart attempts ({}) exceeded",
                                 attempt
                             )));
@@ -531,6 +684,7 @@ impl JmsBridgePool {
                             &bridge_version,
                             &bridge_cache_dir,
                             start_timeout_ms,
+                            &slot.name,
                             &slot.broker_url,
                             &slot.broker_type,
                             &slot.credentials,
@@ -539,35 +693,43 @@ impl JmsBridgePool {
 
                         match start_result {
                             Ok((process, channel)) => {
-                                // Guard: don't resurrect a stopped slot (shutdown may have run
-                                // while this async bridge start was in-flight).
-                                if matches!(*slot.state_rx.borrow(), BridgeState::Stopped) {
+                                // Atomic install + publication: if shutdown
+                                // published `Stopped` while this start was
+                                // in-flight, the child is returned, not stored.
+                                if let Err(process) =
+                                    slot.install_ready_process(process, channel).await
+                                {
                                     let _ = process.stop().await;
                                     break;
                                 }
-                                {
-                                    let mut guard = slot.process.lock().await;
-                                    *guard = Some(process);
-                                }
-                                let _ = slot.state_tx.send(BridgeState::Ready { channel });
                                 info!("Broker '{}' bridge restarted successfully", slot.name);
                             }
-                            Err(e) => {
-                                // Guard: don't schedule retries after shutdown.
-                                if matches!(*slot.state_rx.borrow(), BridgeState::Stopped) {
-                                    break;
-                                }
+                            Err(StartBridgeError::Permanent(reason)) => {
+                                warn!(
+                                    "Bridge for '{}' rejected restart permanently: {reason}. Parking slot.",
+                                    slot.name
+                                );
+                                // Atomic: a shutdown `Stopped` is preserved.
+                                let _ = slot.publish_unless_terminal(BridgeState::Parked(reason));
+                                break;
+                            }
+                            Err(StartBridgeError::Other(err)) => {
+                                let reason = err.to_string();
                                 let delay_secs = std::cmp::min(5 * 2u64.pow(attempt), 120);
                                 let next = Instant::now() + Duration::from_secs(delay_secs);
                                 warn!(
-                                    "Failed to restart bridge for '{}' (attempt {}): {e}. Retry in {delay_secs}s",
+                                    "Failed to restart bridge for '{}' (attempt {}): {reason}. Retry in {delay_secs}s",
                                     slot.name,
                                     attempt + 1
                                 );
-                                let _ = slot.state_tx.send(BridgeState::Restarting {
+                                // Atomic: a shutdown `Stopped` ends the retry
+                                // instead of being overwritten.
+                                if !slot.publish_unless_terminal(BridgeState::Restarting {
                                     attempt: attempt + 1,
                                     next_at: next,
-                                });
+                                }) {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -584,10 +746,11 @@ impl JmsBridgePool {
         bridge_version: &str,
         bridge_cache_dir: &std::path::Path,
         start_timeout_ms: u64,
+        broker_name: &str,
         broker_url: &str,
         broker_type: &BrokerType,
         credentials: &Option<(String, String)>,
-    ) -> Result<(BridgeProcess, Channel), CamelError> {
+    ) -> Result<(BridgeProcess, Channel), StartBridgeError> {
         info!(
             "Starting JMS bridge process for {}...",
             redact_url(broker_url)
@@ -595,8 +758,27 @@ impl JmsBridgePool {
         let binary_path = ensure_binary(bridge_version, bridge_cache_dir)
             .await
             .map_err(|e| {
-                CamelError::ProcessorError(format!("JMS bridge binary unavailable: {e}"))
+                // A download/transport failure is transient: keep the restart path.
+                StartBridgeError::Other(CamelError::ProcessorError(format!(
+                    "JMS bridge binary unavailable: {e}"
+                )))
             })?;
+
+        // Rust owns the default attempt-journal directory and derives the
+        // broker key; both travel to the bridge by env on this launch and on
+        // every restart (same name, type, and redacted URL => same key). A root
+        // that cannot be resolved or created is a config-class permanent
+        // failure, never a transient retry.
+        let journal_dir = default_attempt_journal_dir().map_err(|e| {
+            StartBridgeError::Permanent(format!("attempt journal directory resolution failed: {e}"))
+        })?;
+        ensure_attempt_journal_dir(&journal_dir).map_err(|e| {
+            StartBridgeError::Permanent(format!(
+                "attempt journal directory creation failed for {}: {e}",
+                journal_dir.display()
+            ))
+        })?;
+        let broker_key = attempt_journal_broker_key(broker_name, broker_type, broker_url);
 
         let process_config = BridgeProcessConfig::jms(
             binary_path,
@@ -607,13 +789,34 @@ impl JmsBridgePool {
                 .as_ref()
                 .map(|(_, p)| camel_bridge::process::Redacted::new(p.clone())),
             start_timeout_ms,
+            Some(journal_dir.to_string_lossy().into_owned()),
+            Some(broker_key),
         );
 
+        Self::start_bridge_process_with_config(&process_config, start_timeout_ms).await
+    }
+
+    /// Starts the configured bridge process and connects, classifying a
+    /// permanent startup rejection before it can be flattened into a transient
+    /// string.
+    async fn start_bridge_process_with_config(
+        process_config: &BridgeProcessConfig,
+        start_timeout_ms: u64,
+    ) -> Result<(BridgeProcess, Channel), StartBridgeError> {
+        // Phase 1: spawn and read the ready handshake. `BridgeProcess::start`
+        // bounds this internally by `start_timeout_ms` and returns a permanent
+        // failure unmodified, so the observed signal is never erased by a
+        // second deadline. On error the raw child is dropped (`kill_on_drop`).
+        let process = BridgeProcess::start(process_config)
+            .await
+            .map_err(classify_start_error)?;
+
+        // Phase 2: TLS connect and health, bounded separately by the configured
+        // startup budget. The child is owned by `process`; if this phase fails
+        // or the future is cancelled, `BridgeProcess::drop` kills it.
         let total_timeout = Duration::from_millis(start_timeout_ms);
-        let result = tokio::time::timeout(total_timeout, async {
-            let (process, channel) = BridgeProcess::start_and_connect(&process_config)
-                .await
-                .map_err(|e| CamelError::ProcessorError(format!("JMS bridge start failed: {e}")))?;
+        let channel = tokio::time::timeout(total_timeout, async {
+            let channel = process.connect().await.map_err(classify_start_error)?;
 
             wait_for_health(&channel, Duration::from_secs(10), |ch| {
                 let mut client = bridge_service_client(ch);
@@ -624,20 +827,21 @@ impl JmsBridgePool {
             })
             .await
             .map_err(|e| {
-                CamelError::ProcessorError(format!("JMS bridge health check failed: {e}"))
+                StartBridgeError::Other(CamelError::ProcessorError(format!(
+                    "JMS bridge health check failed: {e}"
+                )))
             })?;
 
-            Ok::<(BridgeProcess, Channel), CamelError>((process, channel))
+            Ok::<Channel, StartBridgeError>(channel)
         })
         .await
         .map_err(|_| {
-            CamelError::ProcessorError(format!(
-                "JMS bridge start timed out after {}ms",
-                start_timeout_ms
-            ))
+            StartBridgeError::Other(CamelError::ProcessorError(format!(
+                "JMS bridge start timed out after {start_timeout_ms}ms"
+            )))
         })??;
 
-        Ok(result)
+        Ok((process, channel))
     }
 }
 
@@ -664,8 +868,9 @@ impl Drop for JmsBridgePool {
                 // Dropping the JoinHandle detaches the task — it runs to completion.
                 drop(handle.spawn(async move {
                     for (_name, slot) in slots {
-                        // Signal the health monitor to stop.
-                        let _ = slot.state_tx.send(BridgeState::Stopped);
+                        // Signal the health monitor to stop. Shutdown is the
+                        // only publisher allowed to override a parked slot.
+                        let _ = slot.publish_shutdown();
 
                         // Stop the bridge process.
                         let process = {
@@ -880,6 +1085,10 @@ impl Service<Exchange> for LazyJmsProducer {
                         self.broker_name, reason
                     ))));
                 }
+                BridgeState::Parked(reason) => {
+                    // Fail closed: a parked slot is terminal, never Ready.
+                    return Poll::Ready(Err(parked_operator_error(&self.broker_name, reason)));
+                }
                 BridgeState::Stopped => {
                     return Poll::Ready(Err(CamelError::ConsumerStopping));
                 }
@@ -937,6 +1146,10 @@ impl Service<Exchange> for LazyJmsProducer {
                             broker_name, reason
                         )));
                     }
+                    BridgeState::Parked(reason) => {
+                        // Fail closed: a parked slot is terminal, never Ready.
+                        return Err(parked_operator_error(&broker_name, &reason));
+                    }
                     BridgeState::Stopped => {
                         return Err(CamelError::ProcessorError(format!(
                             "JMS broker '{}' is stopped",
@@ -958,6 +1171,28 @@ impl Service<Exchange> for LazyJmsProducer {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Operator repair guidance appended to every permanent JMS error.
+///
+/// A parked slot never recovers on its own and a route-only permanent failure
+/// is terminal for that route, so every permanent error must name the action
+/// an operator has to take. Shared by `await_ready_channel`, the consumer
+/// pre-flight probe, the lazy producer, and the route-only gRPC
+/// `FAILED_PRECONDITION` paths so the repair text has a single source (tasks
+/// 4.3/4.7). It carries no payload or header bytes.
+pub(crate) const OPERATOR_REPAIR_HINT: &str = "stop the route, repair or remove the corrupt journal or the unkeyable source, \
+     then restart the context";
+
+/// Builds the terminal error returned to every waiter on a `Parked` slot
+/// (tasks 4.3/4.7). The message keeps the bridge-reported `reason` — a safe,
+/// local startup/config value, never a payload or header — and adds the
+/// operator repair action.
+pub(crate) fn parked_operator_error(broker_name: &str, reason: &str) -> CamelError {
+    CamelError::ProcessorError(format!(
+        "JMS broker '{broker_name}' is parked and cannot serve requests: {reason}. \
+         Operator repair required: {OPERATOR_REPAIR_HINT}"
+    ))
+}
 
 /// Redact credentials from a broker URL for safe logging. Delegates to the
 /// canonical [`camel_api::redact::redact_url`] (bd rc-eh49): userinfo in
@@ -1670,6 +1905,79 @@ mod tests {
         );
     }
 
+    /// Task 4.3: a `Parked` slot is terminal — `poll_ready` must fail fast
+    /// with an error naming the operator repair instead of pending forever.
+    #[tokio::test]
+    async fn lazy_producer_poll_ready_parked_fails_fast() {
+        use tokio::sync::watch;
+        use tower::Service;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::ActiveMq,
+            ))
+            .unwrap(),
+        );
+
+        let (state_tx, state_rx) =
+            watch::channel(BridgeState::Parked("corrupt journal".to_string()));
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        pool.slots.insert("default".to_string(), slot);
+
+        let endpoint_config = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
+        let mut producer = LazyJmsProducer {
+            pool: Arc::clone(&pool),
+            broker_name: "default".to_string(),
+            endpoint_config,
+            resolved_broker_type: BrokerType::ActiveMq,
+        };
+
+        let result = producer.poll_ready(&mut Context::from_waker(futures::task::noop_waker_ref()));
+        let err = match result {
+            Poll::Ready(Err(e)) => e.to_string(),
+            other => panic!("poll_ready must fail fast on Parked; got: {other:?}"),
+        };
+        assert!(
+            err.contains("corrupt journal"),
+            "error must carry the park reason: {err}"
+        );
+        assert!(
+            err.contains("repair") && err.contains("restart the context"),
+            "error must name the operator repair: {err}"
+        );
+    }
+
+    /// Task 4.7: every permanent error names the operator action. The parked
+    /// (terminal) error must tell the operator to stop the route, repair or
+    /// remove the corrupt journal or the unkeyable source, then restart the
+    /// context — and must not interpolate any payload or header bytes.
+    #[test]
+    fn permanent_error_names_operator_action() {
+        let err = parked_operator_error("default", "corrupt journal").to_string();
+        for needle in [
+            "stop the route",
+            "repair or remove",
+            "corrupt journal",
+            "unkeyable source",
+            "restart the context",
+        ] {
+            assert!(
+                err.contains(needle),
+                "permanent error must name '{needle}': {err}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn poll_ready_returns_ready_when_slot_ready() {
         use tokio::sync::watch;
@@ -2227,5 +2535,462 @@ mod tests {
             wait_monitor_exit(&monitor_exited, std::time::Duration::from_secs(2)).await,
             "health monitor should have exited after pool drop (Stopped signal sent by Drop)"
         );
+    }
+
+    /// Task 4.1 (platform-independent): `classify_start_error` keeps a
+    /// permanent failure typed and maps every other error to the transient path.
+    #[test]
+    fn classify_start_error_maps_permanent() {
+        match classify_start_error(BridgeError::PermanentFailure("boom".to_string())) {
+            StartBridgeError::Permanent(reason) => assert_eq!(reason, "boom"),
+            StartBridgeError::Other(e) => panic!("permanent was flattened: {e}"),
+        }
+        match classify_start_error(BridgeError::Transport("refused".to_string())) {
+            StartBridgeError::Other(_) => {}
+            StartBridgeError::Permanent(reason) => {
+                panic!("transient mapped to permanent: {reason}")
+            }
+        }
+    }
+
+    /// Task 4.2: a permanent startup rejection parks the slot instead of
+    /// degrading it into the restart loop. Drives the same private mapping the
+    /// pool startup path uses and observes the published watch state.
+    #[tokio::test]
+    async fn startup_permanent_failure_parks_slot() {
+        use tokio::sync::watch;
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
+        let slot = BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx: state_rx.clone(),
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+
+        JmsBridgePool::apply_initial_start_result(
+            &slot,
+            Err(StartBridgeError::Permanent(
+                "JMS_ATTEMPT_JOURNAL_DIR is not owner-private".to_string(),
+            )),
+        )
+        .await;
+        match &*state_rx.borrow() {
+            BridgeState::Parked(reason) => assert!(
+                reason.contains("JMS_ATTEMPT_JOURNAL_DIR"),
+                "parked reason must carry the bridge text: {reason}"
+            ),
+            other => panic!("expected Parked, got: {other:?}"),
+        }
+
+        // A transient failure on a fresh slot keeps the historical
+        // degraded/retry path.
+        let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
+        let transient = BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx: state_rx.clone(),
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        JmsBridgePool::apply_initial_start_result(
+            &transient,
+            Err(StartBridgeError::Other(CamelError::ProcessorError(
+                "connection refused".to_string(),
+            ))),
+        )
+        .await;
+        assert!(
+            matches!(&*state_rx.borrow(), BridgeState::Degraded(_)),
+            "a transient failure must degrade the slot"
+        );
+    }
+
+    /// Task 4.2: once parked, the slot is terminal — the health monitor exits,
+    /// a restart request is refused, and the existing-slot lookup never spawns
+    /// a new process.
+    #[tokio::test]
+    async fn parked_slot_is_not_respawned() {
+        use tokio::sync::watch;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::ActiveMq,
+            ))
+            .unwrap(),
+        );
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx: state_rx.clone(),
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        JmsBridgePool::apply_initial_start_result(
+            slot.as_ref(),
+            Err(StartBridgeError::Permanent("corrupt journal".to_string())),
+        )
+        .await;
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        // The monitor must treat `Parked` as terminal and exit without a
+        // restart attempt.
+        pool.spawn_health_monitor(Arc::clone(&slot)).await;
+        let handle = slot
+            .health_monitor_handle
+            .lock()
+            .await
+            .take()
+            .expect("health monitor handle stored");
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("a parked monitor must exit, not loop")
+            .expect("the health monitor task must not panic");
+        assert!(
+            matches!(&*state_rx.borrow(), BridgeState::Parked(_)),
+            "the monitor must leave the slot parked"
+        );
+
+        // A producer/consumer restart request must not resurrect the slot.
+        pool.restart_slot("default");
+        assert!(
+            matches!(&*state_rx.borrow(), BridgeState::Parked(_)),
+            "restart_slot must not respawn a parked slot"
+        );
+
+        // An existing-slot lookup returns the parked slot without starting.
+        let got = pool.get_or_create_slot("default").await.unwrap();
+        assert!(
+            matches!(&*got.state_rx.borrow(), BridgeState::Parked(_)),
+            "existing-slot lookup must return the parked slot unchanged"
+        );
+        assert!(
+            got.process.lock().await.is_none(),
+            "no bridge process may be spawned for a parked slot"
+        );
+    }
+
+    /// Task 4.2 race: shutdown publishes `Stopped` before an in-flight initial
+    /// start completes with a permanent failure. The late `Parked` must not
+    /// overwrite `Stopped`.
+    #[tokio::test]
+    async fn shutdown_before_initial_completion_preserves_stopped() {
+        use tokio::sync::watch;
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
+        let slot = BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx: state_rx.clone(),
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+
+        slot.publish_shutdown();
+        JmsBridgePool::apply_initial_start_result(
+            &slot,
+            Err(StartBridgeError::Permanent("late permanent".to_string())),
+        )
+        .await;
+
+        assert!(
+            matches!(&*state_rx.borrow(), BridgeState::Stopped),
+            "a late Parked must not overwrite Stopped"
+        );
+    }
+
+    /// Task 4.2 race: the same guard for a late transient `Degraded`.
+    #[tokio::test]
+    async fn shutdown_before_initial_transient_failure_preserves_stopped() {
+        use tokio::sync::watch;
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
+        let slot = BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx: state_rx.clone(),
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+
+        slot.publish_shutdown();
+        JmsBridgePool::apply_initial_start_result(
+            &slot,
+            Err(StartBridgeError::Other(CamelError::ProcessorError(
+                "late transient".to_string(),
+            ))),
+        )
+        .await;
+
+        assert!(
+            matches!(&*state_rx.borrow(), BridgeState::Stopped),
+            "a late Degraded must not overwrite Stopped"
+        );
+    }
+
+    /// Task 4.2 race: a delayed refresh (`Ready`) or restart (`Restarting`)
+    /// publication must not overwrite `Parked`. Exercises the exact guard used
+    /// by `refresh_slot_channel` / `restart_slot`.
+    #[tokio::test]
+    async fn late_ready_or_restart_publication_preserves_parked() {
+        use tokio::sync::watch;
+        use tonic::transport::Endpoint as TonicEndpoint;
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
+        let slot = BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx: state_rx.clone(),
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+
+        JmsBridgePool::apply_initial_start_result(
+            &slot,
+            Err(StartBridgeError::Permanent("parked".to_string())),
+        )
+        .await;
+        assert!(matches!(&*state_rx.borrow(), BridgeState::Parked(_)));
+
+        let channel = TonicEndpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        assert!(
+            !slot.publish_unless_terminal(BridgeState::Ready { channel }),
+            "a delayed Ready must be refused on a parked slot"
+        );
+        assert!(
+            !slot.publish_unless_terminal(BridgeState::Restarting {
+                attempt: 0,
+                next_at: Instant::now(),
+            }),
+            "a delayed Restarting must be refused on a parked slot"
+        );
+        assert!(
+            matches!(&*state_rx.borrow(), BridgeState::Parked(_)),
+            "the delayed publications must not have overwritten Parked"
+        );
+    }
+
+    /// Task 4.2 race: `restart_slot` eligibility and publication are atomic, so
+    /// a transport-triggered restart cannot overwrite a terminal `Stopped`.
+    #[tokio::test]
+    async fn restart_slot_does_not_overwrite_stopped() {
+        use tokio::sync::watch;
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::ActiveMq,
+            ))
+            .unwrap(),
+        );
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx: state_rx.clone(),
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        slot.publish_shutdown();
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        pool.restart_slot("default");
+
+        assert!(
+            matches!(&*state_rx.borrow(), BridgeState::Stopped),
+            "restart_slot must not overwrite Stopped"
+        );
+    }
+
+    /// Task 4.2 race with an actual child: a successful restart result that
+    /// loses to a shutdown `Stopped` must not be stored, and its process must be
+    /// terminated rather than leaked.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn successful_restart_losing_shutdown_race_disposes_process() {
+        use tokio::sync::watch;
+        use tonic::transport::Endpoint as TonicEndpoint;
+
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let pidfile = dir.path().join("child.pid");
+        let stub = write_stub(
+            dir.path(),
+            "stub-bridge.sh",
+            &format!(
+                "#!/bin/sh\necho $$ > '{}'\nprintf '%s\\n' '{{\"status\":\"ready\",\"port\":1}}'\nexec sleep 30\n",
+                pidfile.display()
+            ),
+        );
+
+        let config = BridgeProcessConfig::jms(
+            stub,
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            300,
+            Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
+            Some("0123456789abcdef0123456789abcdef".to_string()),
+        );
+        let process = BridgeProcess::start(&config)
+            .await
+            .expect("stub must reach the ready line");
+
+        let (state_tx, state_rx) = watch::channel(BridgeState::Starting);
+        let slot = BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx: state_rx.clone(),
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        // Shutdown wins before the restart result is installed.
+        slot.publish_shutdown();
+        let dead_channel = TonicEndpoint::from_static("http://127.0.0.1:1").connect_lazy();
+
+        let process = slot
+            .install_ready_process(process, dead_channel)
+            .await
+            .expect_err("a stopped slot must refuse a Ready publication");
+
+        assert!(
+            slot.process.lock().await.is_none(),
+            "a losing process must not be stored"
+        );
+        assert!(
+            matches!(&*state_rx.borrow(), BridgeState::Stopped),
+            "Stopped must be preserved"
+        );
+
+        process.stop().await.expect("stop the losing process");
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        assert!(pid > 0, "stub must have written its pid");
+        assert!(
+            wait_pid_gone(pid).await,
+            "the losing child {pid} must be terminated, not leaked"
+        );
+    }
+
+    /// Writes an executable stub bridge script into `dir`.
+    #[cfg(unix)]
+    fn write_stub(dir: &std::path::Path, name: &str, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join(name);
+        std::fs::write(&path, script).expect("write stub bridge");
+        let mut perms = std::fs::metadata(&path)
+            .expect("stat stub bridge")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod stub bridge");
+        path
+    }
+
+    /// Bounded (no Rust busy-wait) check that `pid` is gone, done with yielding
+    /// async polling so the current-thread runtime keeps running and can reap a
+    /// `kill_on_drop` child. A synchronous `Command::status` here would starve
+    /// the runtime for the whole window, leaving the killed child a zombie that
+    /// `kill -0` still reports as present.
+    #[cfg(unix)]
+    async fn wait_pid_gone(pid: u32) -> bool {
+        for _ in 0..100 {
+            let alive = tokio::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// Task 4.1: a permanent bridge startup line observed within the startup
+    /// budget is returned as `StartBridgeError::Permanent` and is never erased
+    /// by a second deadline; the still-running child is terminated.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn start_bridge_error_maps_permanent() {
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let pidfile = dir.path().join("child.pid");
+        let stub = write_stub(
+            dir.path(),
+            "stub-bridge.sh",
+            &format!(
+                "#!/bin/sh\necho $$ > '{}'\nprintf '%s\\n' '{{\"status\":\"permanent-failure\",\"reason\":\"JMS_ATTEMPT_JOURNAL_DIR is not owner-private\"}}'\nexec sleep 30\n",
+                pidfile.display()
+            ),
+        );
+
+        // A short budget: a delayed cleanup would blow it and erase the signal.
+        let config = BridgeProcessConfig::jms(
+            stub,
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            300,
+            Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
+            Some("0123456789abcdef0123456789abcdef".to_string()),
+        );
+
+        let result = JmsBridgePool::start_bridge_process_with_config(&config, 300).await;
+        match result {
+            Err(StartBridgeError::Permanent(reason)) => {
+                assert!(
+                    reason.contains("JMS_ATTEMPT_JOURNAL_DIR"),
+                    "permanent reason must carry the bridge text: {reason}"
+                );
+            }
+            Err(StartBridgeError::Other(e)) => {
+                panic!("permanent startup failure was erased by the budget: {e}")
+            }
+            Ok(_) => panic!("a permanent-failure line must never start a bridge"),
+        }
+
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        assert!(pid > 0, "stub must have written its pid");
+        assert!(wait_pid_gone(pid).await, "child {pid} must be terminated");
     }
 }

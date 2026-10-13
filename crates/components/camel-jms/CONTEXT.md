@@ -24,11 +24,88 @@ future acquires the concurrency semaphore permit. A closed semaphore surfaces
 
 ### Consumer shutdown
 
-`JmsConsumer::stop` follows ADR-0007. It cancels the `CancellationToken` and
-allows five seconds for all `task_handles` to finish. It then aborts tasks that
-remain. `consumer_loop` observes cancellation through `tokio::select!`. An
-in-flight `ConsumerContext::send` completes before the loop checks cancellation
-again. The Consumer does not restart itself. Route supervision owns restart.
+`JmsConsumer::stop` follows ADR-0007. It cancels the requested-shutdown token
+first. It then allows five seconds per owned `task_handle`, and aborts any
+straggler. Abort authority stays component-owned through `worker_aborts` and the
+supervisor drop guard, so no worker is detached. `consumer_loop` races shutdown
+against `send_and_wait` and against the completion RPC. A cancel before the
+terminal decision drops the pending wait and the subscription without a
+speculative acknowledgement, so the broker redelivers. A decision already made
+stands. On a task failure, sibling consumers get a bounded three-second drain
+before the component aborts them. The Consumer does not restart itself. Route
+supervision owns restart.
+
+## Settlement and attempt journal
+
+The bridge session runs with `CLIENT_ACKNOWLEDGE` and holds one unacknowledged
+delivery per session. Settlement is completion-driven, not receipt-driven.
+`acknowledgementMode` and `transactionMode` do not change it. The Rust consumer
+submits with `send_and_wait`. `Ok`, including a handled error and a `Stop`,
+sends `COMMIT` and acknowledges once. A propagated `Err` and a closed pipeline
+channel send `ROLLBACK` and recover the session. A cancel before the decision
+prevents acknowledgement. The same event after the decision does not undo it. A
+lost `COMMIT` response stands and is not retried. A healthy slow route has no
+completion deadline.
+
+The bridge records each delivery as a durable reservation before handoff. It
+caps each `JMSMessageID` at `JMS_MAX_DELIVERY_ATTEMPTS` (default 6). The seventh
+receipt is the terminal reject-then-log discard: one acknowledgement and one
+`error!` log with the message ID and the count only. The bridge does not forward
+to a dead-letter destination.
+This discard is the explicit exception to at-least-once, applied to every
+message type.
+
+### Journal ownership
+
+Ownership is lazy and per destination. The domain is the tuple of directory,
+broker key, and destination key. `JmsBridgePool` never locks a journal. Producer
+and topic paths never acquire one. The bridge acquires the lock at the first
+queue subscribe and releases it when the last subscription ends. A busy lock
+waits a bounded time, then the subscribe fails with `FAILED_PRECONDITION`. A new
+owner inherits the recorded counts through lock handoff.
+
+The `resolve_attempt_journal_dir` and `attempt_journal_broker_key` helpers in
+`config.rs` derive the Rust-owned directory and key. The component passes them
+as `JMS_ATTEMPT_JOURNAL_DIR` and `JMS_BRIDGE_BROKER_KEY`. They are not operator
+inputs. Unset values defer the failure to a queue subscribe with
+`FAILED_PRECONDITION`.
+
+The cap is not absolute. Compaction retires entries untouched past the
+retention window (default 24 hours). The current reservation is never retired,
+and no live reservation is evicted. Duplicates across distinct domains are
+bounded at N times the cap, where N is the number of domains within one
+retention window. Topic subscribers use a per-subscription volatile counter,
+which resets on disconnect. Durable topic subscribers are unsupported.
+
+### Operator recovery
+
+On a permanent failure, follow a strict sequence.
+
+1. Stop the route and its context.
+2. Confirm that bridge and journal ownership has ended before you edit any file.
+   The last subscription for the affected domain must be released, so its
+   reference count reaches 0. Wait for the bridge process and its file lock to
+   be released.
+3. Only then repair or remove the corrupt journal or the unkeyable source for
+   the affected domain.
+4. Restart the context.
+
+Do not edit a live journal file while a route or bridge holds the lock.
+
+## Producer header allowlist
+
+`JmsEndpointConfig::jms_header_allowlist` holds the endpoint
+`jmsHeaderAllowlist` (alias `jms_header_allowlist`). The producer forwards an
+outgoing exchange header only when the normalized allowlist names it. The list
+is empty by default. This is a breaking change: user headers are not forwarded
+unless allowlisted.
+
+Denial runs before the allowlist check. Reserved JMS names, the `jms` and
+`camel` framework namespaces, and credential substrings are denied even when
+listed. QoS headers are set after extraction. `Content-Type` stays a dedicated
+field, and inbound mapping is unchanged. Use valid JMS property names, such as
+`traceId` and `orderId`. The producer does not sanitize property names, and
+Artemis can drop a hyphenated name (`rc-ooczk`).
 
 ## Trust boundary and credential redaction
 
@@ -75,6 +152,16 @@ rg '#\[derive.*Debug' crates/components/camel-jms/src/
 Bridge restart stays inside `JmsBridgePool`. Consumer task failure remains
 route-supervised. `JmsConsumer::stop` cancels, joins with a five-second grace,
 and then aborts remaining tasks. This shutdown sequence complies with ADR-0007.
+
+## Broker-native precedence
+
+The bridge cap is terminal only when it fires before a provider or broker
+native redelivery or expiry limit. Where the native limit fires first,
+it takes precedence, and the bridge does not claim its terminal policy ran.
+Redelivery is not promised to the source queue. Observed with default ActiveMQ
+Classic configuration: the bridge cap fired first, the source queue was empty,
+and `ActiveMQ.DLQ` `EnqueueCount` was 0. Artemis destinations were not observed
+(`rc-5c6yv`). Not every native-first ordering or dead-letter query is verified.
 
 ## Trace context propagation
 

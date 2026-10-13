@@ -2,20 +2,29 @@ package org.rustcamel.jms;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.jms.BytesMessage;
 import javax.jms.Connection;
+import javax.jms.JMSException;
 import javax.jms.MessageConsumer;
 import javax.jms.Queue;
 import javax.jms.Session;
@@ -24,6 +33,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
@@ -45,6 +56,8 @@ class JmsConsumerContentTypeTest {
   @Mock MessageConsumer messageConsumer;
   @Mock Queue queue;
 
+  @TempDir Path tempDir;
+
   JmsConsumer consumer;
 
   private AutoCloseable mocks;
@@ -55,10 +68,20 @@ class JmsConsumerContentTypeTest {
 
     consumer = new JmsConsumer();
     consumer.factory = factory;
+    // A queue delivery is keyed and reserved, so install a legitimately configured journal.
+    consumer.configureJournal(
+        new JournalService(
+            tempDir,
+            BridgeConfig.JOURNAL_MAX_BYTES_DEFAULT,
+            BridgeConfig.JOURNAL_RETENTION_MS_DEFAULT,
+            System::currentTimeMillis),
+        "0123456789abcdef0123456789abcdef",
+        1000L,
+        null);
 
     when(factory.createDedicatedConnection()).thenReturn(connection);
     doAnswer(inv -> null).when(connection).start();
-    when(connection.createSession(false, Session.AUTO_ACKNOWLEDGE)).thenReturn(session);
+    when(connection.createSession(false, Session.CLIENT_ACKNOWLEDGE)).thenReturn(session);
     when(session.createQueue("test")).thenReturn(queue);
     when(session.createConsumer(any(Queue.class))).thenReturn(messageConsumer);
   }
@@ -74,7 +97,7 @@ class JmsConsumerContentTypeTest {
 
   /** Common header/property stubbing; convertMessage touches these before the type branch. */
   private static void stubCommonAttributes(javax.jms.Message msg) throws Exception {
-    when(msg.getJMSMessageID()).thenReturn(null);
+    when(msg.getJMSMessageID()).thenReturn("ID:test");
     when(msg.getJMSCorrelationID()).thenReturn(null);
     when(msg.getJMSTimestamp()).thenReturn(0L);
     when(msg.getPropertyNames()).thenReturn(Collections.emptyEnumeration());
@@ -87,6 +110,79 @@ class JmsConsumerContentTypeTest {
     consumer.subscribe(DESTINATION, SUBSCRIPTION_ID, obs, new AtomicBoolean(false));
     assertTrue(obs.next.await(15, TimeUnit.SECONDS), "message must be forwarded");
     consumer.stop();
+    // A successful conversion is not a reservation failure: recover only runs on conversion
+    // failure, so a forwarded message never recovers the session.
+    verify(session, never()).recover();
+  }
+
+  /**
+   * A conversion failure is a reservation failure, not a route error. The owner thread must recover
+   * the session before it receives another message and must never acknowledge a message the route
+   * never saw. A recover failure is the only terminal outcome.
+   */
+  @Test
+  void conversion_failure_recovers_before_next_receive() throws Exception {
+    javax.jms.Message poison = mock(javax.jms.Message.class);
+    // A keyable message id lets the durable reservation run first; the conversion then fails on a
+    // later accessor, so the same attempt is rolled back and the session recovered.
+    when(poison.getJMSMessageID()).thenReturn("ID:poison");
+    when(poison.getJMSCorrelationID()).thenThrow(new JMSException("bad conversion"));
+    when(messageConsumer.receive(anyLong()))
+        .thenReturn(poison)
+        .thenAnswer(
+            invocation -> {
+              Thread.sleep(200);
+              return null;
+            });
+
+    JmsConsumerBodyCapTest.RecordingObserver obs = new JmsConsumerBodyCapTest.RecordingObserver();
+    consumer.subscribe(DESTINATION, SUBSCRIPTION_ID, obs, new AtomicBoolean(false));
+
+    // Wait until the owner thread has received once, recovered, and received again, then assert
+    // the ordering receive -> recover -> next receive without a polling in-order verification.
+    verify(session, timeout(15000)).recover();
+    verify(messageConsumer, timeout(15000).times(2)).receive(anyLong());
+    InOrder inOrder = inOrder(messageConsumer, session);
+    inOrder.verify(messageConsumer).receive(anyLong());
+    inOrder.verify(session).recover();
+    inOrder.verify(messageConsumer).receive(anyLong());
+
+    assertEquals(
+        1, consumer.reservationFailureCount(), "one conversion failure is one reservation failure");
+    verify(poison, never()).acknowledge();
+    assertEquals(0, obs.nextCount, "the poison message must not be forwarded");
+    assertNull(obs.error.get(), "a recoverable conversion failure must not terminate the stream");
+    consumer.stop();
+  }
+
+  @Test
+  void conversion_failure_recover_failure_closes_without_ack() throws Exception {
+    javax.jms.Message poison = mock(javax.jms.Message.class);
+    when(poison.getJMSMessageID()).thenReturn("ID:poison");
+    when(poison.getJMSCorrelationID()).thenThrow(new JMSException("bad conversion"));
+    doThrow(new JMSException("recover failed")).when(session).recover();
+    when(messageConsumer.receive(anyLong()))
+        .thenReturn(poison)
+        .thenAnswer(
+            invocation -> {
+              Thread.sleep(200);
+              return null;
+            });
+
+    JmsConsumerBodyCapTest.RecordingObserver obs = new JmsConsumerBodyCapTest.RecordingObserver();
+    consumer.subscribe(DESTINATION, SUBSCRIPTION_ID, obs, new AtomicBoolean(false));
+
+    assertTrue(obs.errored.await(15, TimeUnit.SECONDS), "a recover failure must fail the stream");
+    assertNotNull(obs.error.get(), "the recover failure must reach the observer");
+    assertEquals(
+        1, consumer.reservationFailureCount(), "one conversion failure is one reservation failure");
+    verify(session, times(1)).recover();
+    verify(poison, never()).acknowledge();
+    // Recover failed: no second receive, and the owner closes every resource on its own thread.
+    verify(messageConsumer, times(1)).receive(anyLong());
+    verify(messageConsumer, timeout(5000)).close();
+    verify(session, timeout(5000)).close();
+    verify(connection, timeout(5000)).close();
   }
 
   @Test

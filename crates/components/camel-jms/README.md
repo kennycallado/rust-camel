@@ -28,6 +28,7 @@ Using `activemq:` or `artemis:` as scheme locks the `broker_type` automatically 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `broker` | `default_broker` from config | Named broker to use (must exist in the broker map) |
+| `jmsHeaderAllowlist` | empty | Producer only. Comma-separated exchange header names to forward as JMS properties. **Breaking in 0.8.0:** with the empty default no user header is forwarded. Credential, reserved `JMS*`, `jms`, and `camel` names are always denied. Use valid JMS property names (for example `orderId`, not `order-id`). |
 
 > `brokerUrl`, `username`, and `password` are **not** URI parameters — credentials live in `Camel.toml` or programmatic config. `broker_type` is inferred from the scheme (`activemq:` → ActiveMQ Classic, `artemis:` → Artemis) or from the broker config entry.
 
@@ -94,7 +95,7 @@ let route = RouteBuilder::from("timer:tick?period=1000")
 
 ## How It Works
 
-The component manages a Java bridge process (jlink native binary) internally:
+The component manages a Java bridge process (GraalVM native executable) internally:
 
 1. On first use, downloads the bridge binary from GitHub releases (SHA256-verified, cached at `~/.cache/rust-camel/jms-bridge/`).
 2. Spawns the bridge with broker config passed via environment variables.
@@ -163,7 +164,7 @@ cargo run -p jms-example
 
 - IBM MQ not supported (planned for a future release)
 - No durable topic subscribers yet
-- Bridge uses `AUTO_ACKNOWLEDGE` — messages are acknowledged on delivery, not after processing. Failed messages cannot be redelivered by the broker.
+- Queue messages are acknowledged after the route completes (bridge 0.8.0). An `Ok` result acknowledges; an unhandled `Err` rolls back and the broker redelivers. After 6 delivery attempts (`JMS_MAX_DELIVERY_ATTEMPTS`) the bridge acknowledges and discards the message, logging only its ID — no dead-letter forwarding. A broker-native redelivery limit that fires first takes precedence. Attempt counts persist under `$XDG_STATE_HOME/rust-camel/jms-bridge` (else `$HOME/.local/state/rust-camel/jms-bridge`); see `docs/src/components/jms.md` in the repository.
 
 ## Installation
 
