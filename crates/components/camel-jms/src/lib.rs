@@ -38,7 +38,7 @@ pub use config::{
 pub use health::JmsHealthCheck;
 
 /// Version of the Java bridge binary this crate is compatible with.
-pub const BRIDGE_VERSION: &str = "0.8.0";
+pub const BRIDGE_VERSION: &str = "0.8.1";
 
 /// Serializes tests that mutate `CAMEL_JMS_BRIDGE_BINARY_PATH` via
 /// `std::env::set_var`. Process-global env vars race under parallel test
@@ -60,10 +60,10 @@ mod bridge_client_test;
 #[cfg(test)]
 mod bridge_version_test {
     #[test]
-    fn bridge_version_pin_is_0_8_0() {
+    fn bridge_version_pin_is_0_8_1() {
         assert_eq!(
             crate::BRIDGE_VERSION,
-            "0.8.0",
+            "0.8.1",
             "BRIDGE_VERSION must match the Gradle default fallback (task 6.3)"
         );
     }
