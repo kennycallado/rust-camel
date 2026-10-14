@@ -1333,6 +1333,7 @@ fn endpoint_with_config_overrides(
             PINNED_CLIENT_MAX_ENTRIES,
         )),
         http_config: HttpConfig::default(),
+        listener_gate: ListenerGate::default(),
     }
 }
 
@@ -4165,6 +4166,7 @@ fn test_create_consumer_rejects_oversized_max_inflight() {
             PINNED_CLIENT_MAX_ENTRIES,
         )),
         http_config: HttpConfig::default(),
+        listener_gate: ListenerGate::default(),
     };
     match endpoint.create_consumer(rt()) {
         Err(CamelError::Config(msg)) => {
@@ -8442,6 +8444,7 @@ fn https_consumer_without_tls_cert_errors() {
             PINNED_CLIENT_MAX_ENTRIES,
         )),
         http_config: HttpConfig::default(),
+        listener_gate: ListenerGate::default(),
     };
     let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
     let result = endpoint.create_consumer(rt);
@@ -8467,6 +8470,7 @@ fn http_consumer_with_tls_config_errors() {
             PINNED_CLIENT_MAX_ENTRIES,
         )),
         http_config: HttpConfig::default(),
+        listener_gate: ListenerGate::default(),
     };
     let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
     let result = endpoint.create_consumer(rt);
@@ -8497,6 +8501,7 @@ fn https_consumer_with_partial_tls_cert_only_errors() {
             PINNED_CLIENT_MAX_ENTRIES,
         )),
         http_config: HttpConfig::default(),
+        listener_gate: ListenerGate::default(),
     };
     let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
     let result = endpoint.create_consumer(rt);
@@ -9523,6 +9528,7 @@ fn endpoint_with_shared_cache(
         client: plain_http_test_client(),
         pinned_cache: Arc::clone(pinned_cache),
         http_config: HttpConfig::default(),
+        listener_gate: ListenerGate::default(),
     }
 }
 

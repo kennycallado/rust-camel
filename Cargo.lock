@@ -1859,6 +1859,7 @@ dependencies = [
  "camel-auth",
  "camel-component-api",
  "camel-core",
+ "camel-language-api",
  "camel-otel",
  "flate2",
  "futures",

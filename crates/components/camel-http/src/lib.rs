@@ -3,6 +3,8 @@ pub(crate) mod client_cache;
 pub mod config;
 mod header_policy;
 pub mod health;
+#[cfg(test)]
+mod health_wiring_tests;
 pub mod registry;
 pub(crate) mod rest_match;
 pub(crate) mod ssrf;
@@ -21,6 +23,7 @@ pub(crate) use client_cache::{
 };
 pub use config::HttpConfig;
 pub use health::HttpHealthCheck;
+use health::ListenerGate;
 pub use registry::HttpRouteRegistry;
 pub use static_config::HttpStaticConfig;
 pub use static_endpoint::{HttpStaticComponent, HttpStaticConsumer, HttpStaticEndpoint};
@@ -2364,9 +2367,12 @@ impl Component for HttpComponent {
         self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
-        ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
+        // Inert until `create_consumer` opens the gate (rc-hcica).
+        let listener_gate = ListenerGate::default();
+        ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::gated(
             server_config.host.clone(),
             server_config.port,
+            listener_gate.clone(),
         )));
         self.pinned_cache
             .wire(HttpComponentKind::Http, ctx.metrics());
@@ -2377,6 +2383,7 @@ impl Component for HttpComponent {
             client: self.client.clone(),
             pinned_cache: std::sync::Arc::clone(&self.pinned_cache),
             http_config: self.config.clone(),
+            listener_gate,
         }))
     }
 }
@@ -2460,9 +2467,12 @@ impl Component for HttpsComponent {
         self.config.validate()?;
         let config = HttpEndpointConfig::from_uri_with_defaults(uri, &self.config)?;
         let server_config = HttpServerConfig::from_uri_with_defaults(uri, &self.config)?;
-        ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::new(
+        // Inert until `create_consumer` opens the gate (rc-hcica).
+        let listener_gate = ListenerGate::default();
+        ctx.register_current_route_health_check(Arc::new(HttpHealthCheck::gated(
             server_config.host.clone(),
             server_config.port,
+            listener_gate.clone(),
         )));
         self.pinned_cache
             .wire(HttpComponentKind::Https, ctx.metrics());
@@ -2473,6 +2483,7 @@ impl Component for HttpsComponent {
             client: self.client.clone(),
             pinned_cache: std::sync::Arc::clone(&self.pinned_cache),
             http_config: self.config.clone(),
+            listener_gate,
         }))
     }
 }
@@ -2488,6 +2499,8 @@ struct HttpEndpoint {
     client: reqwest::Client,
     pinned_cache: std::sync::Arc<PinnedClientCache>,
     http_config: HttpConfig,
+    /// Opened by `create_consumer`; gates the listener health check.
+    listener_gate: ListenerGate,
 }
 
 impl Endpoint for HttpEndpoint {
@@ -2519,6 +2532,7 @@ impl Endpoint for HttpEndpoint {
         // the inflight semaphore panics above the primitive bound
         // (mirror of grpc consumer_concurrency_limit, commit 101327e5).
         max_inflight_requests_limit(self.server_config.max_inflight_requests)?;
+        self.listener_gate.open();
         Ok(Box::new(HttpConsumer::new(self.server_config.clone(), rt)))
     }
 

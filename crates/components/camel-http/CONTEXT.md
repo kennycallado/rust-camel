@@ -244,6 +244,10 @@ duplicated handwritten key lists. `connectTimeout` is promoted to metadata-only:
 it is a consumed option whose effective value comes from the global http config.
 The legacy `HTTP_CAMEL_OPTIONS` list is deleted.
 
+## Readiness contract
+
+`/readyz` reports only listeners this process owns. `HttpComponent` and `HttpsComponent` register an `http` listener check for every endpoint, because `create_endpoint` cannot tell a consumer from a producer. The check is inert (Healthy) until `create_consumer` runs on that endpoint. A producer endpoint (`to("http://remote/...")`) never probes its remote target, so a dead downstream service does not remove the pod from a Kubernetes Service (rc-hcica). Downstream dependency health is not part of readiness.
+
 ## Contract Surface
 
 Per ADR-0057 (headers) and ADR-0024 (status/body/Stop). Documents the accepted and rejected names/values for the HTTP consumer reply finaliser. Future bug reports check here first: if behaviour is in this surface, it is a feature request. If not, it is a bug.
