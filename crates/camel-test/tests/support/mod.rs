@@ -1,3 +1,4 @@
+pub mod master_probe;
 pub mod wait;
 
 /// Header name carrying the value payload for redis key/value commands.

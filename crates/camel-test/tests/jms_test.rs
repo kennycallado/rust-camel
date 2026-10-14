@@ -866,3 +866,70 @@ async fn jms_message_ids_unique_across_bridge_restart() {
     drop(proc2);
     drop(consumer_proc);
 }
+
+// ===========================================================================
+// master: over a real Explicit delegate (rc-w02ns)
+// ===========================================================================
+
+/// `master:` wrapping the JMS consumer (Explicit startup: `start()` returns
+/// after spawning the supervised consumer group). The delegate must be
+/// started once, deliver, and not be stopped until shutdown. Before the fix
+/// master stopped it right after `start()`, so the delegate was recreated
+/// every few seconds ("master leadership acquired" churn, camel-112).
+#[tokio::test(flavor = "multi_thread")]
+async fn master_keeps_jms_delegate_running() {
+    use camel_component_api::ComponentBundle;
+    use camel_component_mock::MockComponent;
+    use camel_component_timer::TimerComponent;
+    use camel_core::CamelContext;
+    use camel_master::MasterBundle;
+    use support::master_probe;
+
+    init_tracing();
+    install_crypto_provider();
+
+    let mut ctx = CamelContext::builder().build().await.unwrap();
+    MasterBundle::from_toml(toml::Value::Table(toml::map::Map::new()))
+        .unwrap()
+        .register_all(&mut ctx);
+    ctx.register_component(shared_jms_activemq().await);
+    ctx.register_component(TimerComponent::new());
+    let mock = MockComponent::new();
+    ctx.register_component(mock.clone());
+    let (mut ctx, probe) = master_probe::attach(ctx);
+
+    let consumer = RouteBuilder::from("master:jms-explicit:jms:queue:test-master-explicit")
+        .to("mock:consumed")
+        .route_id("master-jms-consumer")
+        .build()
+        .unwrap();
+    // Messages spread over ~5s keep the observation window open; the queue
+    // is durable so a late subscribe still receives them.
+    let producer = RouteBuilder::from("timer:master-jms-produce?period=1000&delay=0&repeatCount=5")
+        .set_body("master-jms".to_string())
+        .to("jms:queue:test-master-explicit")
+        .route_id("master-jms-producer")
+        .build()
+        .unwrap();
+    ctx.add_route_definition(consumer).await.unwrap();
+    ctx.add_route_definition(producer).await.unwrap();
+    ctx.start().await.unwrap();
+
+    let endpoint = mock.get_endpoint("consumed").unwrap();
+    wait_until(
+        "master-wrapped jms consumer receives 5 messages",
+        Duration::from_secs(60),
+        Duration::from_millis(200),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint.get_received_exchanges().await.len() >= 5) }
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(probe.count("started"), 1, "delegate must not churn");
+    assert_eq!(probe.count("stopped"), 0, "no stop before shutdown");
+
+    ctx.stop().await.unwrap();
+}

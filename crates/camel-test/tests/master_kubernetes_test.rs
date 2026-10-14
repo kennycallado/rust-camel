@@ -5,6 +5,8 @@
 
 #![cfg(feature = "integration-tests")]
 
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -274,4 +276,142 @@ async fn master_route_uses_kubernetes_platform_from_config() {
     .await;
 
     ctx.stop().await.expect("context should stop");
+}
+
+// ===========================================================================
+// Leader failover over a real Explicit delegate (rc-w02ns)
+// ===========================================================================
+
+fn k8s_platform(client: &kube::Client, pod: &str) -> Arc<KubernetesPlatformService> {
+    let config = KubernetesPlatformConfig {
+        namespace: "default".to_string(),
+        lease_name_prefix: "camel-".to_string(),
+        lease_duration: Duration::from_secs(10),
+        renew_deadline: Duration::from_secs(8),
+        retry_period: Duration::from_secs(1),
+        jitter_factor: 0.2,
+    };
+    let identity = PlatformIdentity::local(pod);
+    let leadership = Arc::new(
+        KubernetesLeadershipService::new(client.clone(), identity.clone(), config)
+            .expect("leadership config"),
+    );
+    Arc::new(KubernetesPlatformService::from_parts(
+        identity,
+        Arc::new(camel_api::NoopReadinessGate),
+        leadership,
+    ))
+}
+
+/// One "pod": its own platform identity, a `master:` route over the Kafka
+/// consumer (Explicit startup), its own mock sink and lifecycle probe.
+async fn kafka_master_pod(
+    client: &kube::Client,
+    pod: &str,
+    brokers: &str,
+) -> (
+    CamelContext,
+    MockComponent,
+    Arc<support::master_probe::DelegateLifecycleProbe>,
+) {
+    let mut ctx = CamelContext::builder()
+        .platform_service(k8s_platform(client, pod))
+        .build()
+        .await
+        .expect("context should build");
+    MasterBundle::from_toml(toml::Value::Table(toml::map::Map::new()))
+        .expect("master bundle")
+        .register_all(&mut ctx);
+    ctx.register_component(camel_component_kafka::KafkaComponent::new());
+    let mock = MockComponent::new();
+    ctx.register_component(mock.clone());
+    let (ctx, probe) = support::master_probe::attach(ctx);
+
+    let route = RouteBuilder::from(&format!(
+        "master:failover:kafka:test-master-failover?brokers={brokers}\
+         &groupId=master-failover-group&autoOffsetReset=earliest"
+    ))
+    .route_id(format!("master-failover-{pod}"))
+    .to("mock:out")
+    .build()
+    .expect("route should build");
+    ctx.add_route_definition(route).await.expect("route added");
+    (ctx, mock, probe)
+}
+
+/// Two pods contend for the same Lease with a Kafka delegate behind
+/// `master:`. The leader's delegate must run once without churn; when the
+/// leader stops, the standby (delegate never started) must take the Lease and
+/// run its own delegate once, delivering again.
+#[tokio::test(flavor = "multi_thread")]
+async fn master_kafka_delegate_survives_leader_failover() {
+    let (_k3s, client) = start_k3s().await;
+    let (_, brokers) = support::kafka::shared_kafka().await;
+
+    // Steady producer, independent of both pods.
+    let mut producer = CamelContext::builder()
+        .build()
+        .await
+        .expect("producer context");
+    producer.register_component(TimerComponent::new());
+    producer.register_component(camel_component_kafka::KafkaComponent::new());
+    producer
+        .add_route_definition(
+            RouteBuilder::from("timer:failover-feed?period=300")
+                .set_body(camel_api::Value::String("failover".to_string()))
+                .to(format!(
+                    "kafka:test-master-failover?brokers={brokers}&acks=all"
+                ))
+                .route_id("master-failover-producer")
+                .build()
+                .expect("producer route"),
+        )
+        .await
+        .expect("producer route added");
+    producer.start().await.expect("producer starts");
+
+    let (mut pod_a, mock_a, probe_a) = kafka_master_pod(&client, "pod-a", brokers).await;
+    let (mut pod_b, mock_b, probe_b) = kafka_master_pod(&client, "pod-b", brokers).await;
+
+    pod_a.start().await.expect("pod-a starts");
+    wait_for_leader(&client, "camel-failover", "default/pod-a", 30).await;
+    pod_b.start().await.expect("pod-b starts");
+
+    mock_a
+        .get_endpoint("out")
+        .expect("pod-a sink")
+        .await_exchanges(3, Duration::from_secs(60))
+        .await;
+    assert_eq!(
+        probe_a.count("started"),
+        1,
+        "leader delegate must not churn"
+    );
+    assert_eq!(probe_a.count("stopped"), 0);
+    assert_eq!(
+        probe_b.count("started"),
+        0,
+        "standby must not start its delegate"
+    );
+
+    // `stopped`/step_down after ctx.stop() are not asserted: master's stop()
+    // aborts the leadership task (separate bd). Takeover then waits for the
+    // Lease to expire (10s here), covered by the generous timeouts below.
+    pod_a.stop().await.expect("pod-a stops");
+
+    wait_for_leader(&client, "camel-failover", "default/pod-b", 60).await;
+    mock_b
+        .get_endpoint("out")
+        .expect("pod-b sink")
+        .await_exchanges(3, Duration::from_secs(120))
+        .await;
+    assert_eq!(
+        probe_b.count("started"),
+        1,
+        "new leader delegate must not churn"
+    );
+    assert_eq!(probe_b.count("stopped"), 0);
+
+    pod_b.stop().await.expect("pod-b stops");
+    producer.stop().await.expect("producer stops");
 }

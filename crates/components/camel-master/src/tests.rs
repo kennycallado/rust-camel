@@ -592,6 +592,8 @@ mod acquisition_budget;
 #[cfg(test)]
 mod delegate_errors;
 #[cfg(test)]
+mod explicit_delegate;
+#[cfg(test)]
 mod leadership_lifecycle;
 #[cfg(test)]
 mod leadership_state_gauge;

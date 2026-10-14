@@ -147,6 +147,40 @@ pub(crate) fn emit_lifecycle(
     );
 }
 
+/// Waits on a delegate's background task until it ends or `run_token` is
+/// cancelled (then aborts it). `None` means a blocking `start()` already
+/// finished its work. A failure while not cancelled is returned so
+/// supervision treats it like a blocking-`start()` error.
+async fn supervise_background(
+    bg: Option<tokio::task::JoinHandle<Result<(), CamelError>>>,
+    run_token: &CancellationToken,
+) -> Result<(), CamelError> {
+    let Some(mut bg) = bg else {
+        return Ok(());
+    };
+    tokio::select! {
+        result = &mut bg => match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) if !run_token.is_cancelled() => Err(err),
+            Ok(Err(err)) => {
+                debug!(error = %err, "delegate background task error during shutdown");
+                Ok(())
+            }
+            Err(join_err) if !run_token.is_cancelled() => Err(CamelError::ProcessorError(
+                format!("master delegate background task panicked: {join_err}"),
+            )),
+            Err(join_err) => {
+                debug!(error = %join_err, "delegate background task panicked during shutdown");
+                Ok(())
+            }
+        },
+        _ = run_token.cancelled() => {
+            bg.abort();
+            Ok(())
+        }
+    }
+}
+
 pub(crate) async fn stop_delegate(
     state: &mut DelegateState,
     drain_timeout: Duration,
@@ -383,10 +417,19 @@ pub(crate) async fn reconcile_event(
             if let Some(counter) = ctx.in_flight.clone() {
                 delegate_ctx = delegate_ctx.with_in_flight_counter(counter);
             }
+            let supervise_token = run_token.clone();
             let handle = tokio::spawn(async move {
                 consumer.start(delegate_ctx).await?;
+                // rc-w02ns: Explicit consumers (camel-jms, camel-kafka) return
+                // from start() right after spawning a background task. Hold
+                // the delegate alive on that task (or on cancellation) before
+                // stop(), exactly as the route controller does; stopping
+                // straight after start() killed the delegate and churned
+                // leadership.
+                let supervised =
+                    supervise_background(consumer.background_task_handle(), &supervise_token).await;
                 consumer.stop().await?;
-                Ok::<(), CamelError>(())
+                supervised
             });
 
             *state = DelegateState::Active {

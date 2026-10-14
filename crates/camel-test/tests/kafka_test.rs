@@ -258,3 +258,73 @@ async fn kafka_consumer_cooperative_sticky_strategy() {
         "Consumer with cooperativeSticky strategy should have received at least one message"
     );
 }
+
+// ===========================================================================
+// master: over a real Explicit delegate (rc-w02ns)
+// ===========================================================================
+
+/// `master:` wrapping the Kafka consumer (Explicit startup: `start()` returns
+/// after spawning the poll task). The delegate must be started once, deliver,
+/// and never be stopped until shutdown. Before the fix master stopped it right
+/// after `start()`, churning leadership.
+#[tokio::test(flavor = "multi_thread")]
+async fn master_keeps_kafka_delegate_running() {
+    use camel_component_api::ComponentBundle;
+    use camel_component_mock::MockComponent;
+    use camel_component_timer::TimerComponent;
+    use camel_core::CamelContext;
+    use camel_master::MasterBundle;
+    use support::master_probe;
+
+    let (_, brokers) = shared_kafka().await;
+
+    let mut ctx = CamelContext::builder().build().await.unwrap();
+    MasterBundle::from_toml(toml::Value::Table(toml::map::Map::new()))
+        .unwrap()
+        .register_all(&mut ctx);
+    ctx.register_component(KafkaComponent::new());
+    ctx.register_component(TimerComponent::new());
+    let mock = MockComponent::new();
+    ctx.register_component(mock.clone());
+    let (mut ctx, probe) = master_probe::attach(ctx);
+
+    let consumer = RouteBuilder::from(&format!(
+        "master:kafka-explicit:kafka:test-master-explicit?brokers={brokers}\
+         &groupId=master-explicit-group&autoOffsetReset=earliest"
+    ))
+    .to("mock:consumed")
+    .route_id("master-kafka-consumer")
+    .build()
+    .unwrap();
+    // 5 messages over ~5s keep the observation window open: churn restarts
+    // the delegate within hundreds of ms, so `started` would exceed 1.
+    let producer = RouteBuilder::from("timer:master-produce?period=1000&delay=3000&repeatCount=5")
+        .set_body(camel_api::Value::String("master-kafka".to_string()))
+        .to(format!(
+            "kafka:test-master-explicit?brokers={brokers}&acks=all"
+        ))
+        .route_id("master-kafka-producer")
+        .build()
+        .unwrap();
+    ctx.add_route_definition(consumer).await.unwrap();
+    ctx.add_route_definition(producer).await.unwrap();
+    ctx.start().await.unwrap();
+
+    let endpoint = mock.get_endpoint("consumed").unwrap();
+    wait_until(
+        "master-wrapped kafka consumer receives 5 messages",
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_millis(200),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(endpoint.get_received_exchanges().await.len() >= 5) }
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(probe.count("started"), 1, "delegate must not churn");
+    assert_eq!(probe.count("stopped"), 0, "no stop before shutdown");
+
+    ctx.stop().await.unwrap();
+}
