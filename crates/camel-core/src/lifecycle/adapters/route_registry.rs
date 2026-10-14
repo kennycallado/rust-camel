@@ -14,8 +14,16 @@ use super::route_helpers::{ManagedRoute, handle_is_running, inferred_lifecycle_l
 pub(super) const DEFAULT_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Wraps a `HashMap<String, ManagedRoute>` and provides query/mutation helpers.
+///
+/// Routes tied on `startup_order` start in definition (insertion) order and
+/// stop in the reverse order, like Camel Java. `HashMap` iteration order is
+/// random, so each route also carries an insertion sequence number.
 pub(crate) struct RouteRegistry {
     routes: HashMap<String, ManagedRoute>,
+    /// Insertion sequence per route id. Replacing a route keeps its slot;
+    /// removing it frees the slot (a later re-add goes last).
+    seq: HashMap<String, u64>,
+    next_seq: u64,
 }
 
 impl RouteRegistry {
@@ -23,6 +31,8 @@ impl RouteRegistry {
     pub(super) fn new() -> Self {
         Self {
             routes: HashMap::new(),
+            seq: HashMap::new(),
+            next_seq: 0,
         }
     }
 
@@ -45,11 +55,36 @@ impl RouteRegistry {
         route_id: String,
         managed: ManagedRoute,
     ) -> Option<ManagedRoute> {
+        if !self.seq.contains_key(&route_id) {
+            self.seq.insert(route_id.clone(), self.next_seq);
+            self.next_seq += 1;
+        }
         self.routes.insert(route_id, managed)
     }
 
     pub(super) fn remove(&mut self, route_id: &str) -> Option<ManagedRoute> {
+        self.seq.remove(route_id);
         self.routes.remove(route_id)
+    }
+
+    /// `(id, startup_order, seq)` for routes passing `keep`, sorted
+    /// ascending by `(startup_order, seq)` — a total order, so ties are
+    /// deterministic.
+    fn sorted_by_start(&self, keep: impl Fn(&ManagedRoute) -> bool) -> Vec<(String, i32)> {
+        let mut rows: Vec<(String, i32, u64)> = self
+            .routes
+            .iter()
+            .filter(|(_, r)| keep(r))
+            .map(|(id, r)| {
+                (
+                    id.clone(),
+                    r.definition.startup_order(),
+                    self.seq.get(id).copied().unwrap_or(u64::MAX),
+                )
+            })
+            .collect();
+        rows.sort_by(|a, b| (a.1, a.2, &a.0).cmp(&(b.1, b.2, &b.0)));
+        rows.into_iter().map(|(id, order, _)| (id, order)).collect()
     }
 
     #[allow(dead_code)]
@@ -86,27 +121,21 @@ impl RouteRegistry {
             .and_then(|m| m.definition.source_hash())
     }
 
-    /// Returns route IDs that should auto-start, sorted by startup order (ascending).
+    /// Returns route IDs that should auto-start, sorted by startup order
+    /// (ascending), ties in definition order.
     pub(super) fn auto_startup_route_ids(&self) -> Vec<String> {
-        let mut pairs: Vec<(String, i32)> = self
-            .routes
-            .iter()
-            .filter(|(_, managed)| managed.definition.auto_startup())
-            .map(|(id, managed)| (id.clone(), managed.definition.startup_order()))
-            .collect();
-        pairs.sort_by_key(|(_, order)| *order);
-        pairs.into_iter().map(|(id, _)| id).collect()
+        self.auto_startup_sorted()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
     }
 
-    /// Returns route IDs sorted by shutdown order (startup order descending).
+    /// Returns route IDs in shutdown order: the exact reverse of startup order.
     pub(super) fn shutdown_route_ids(&self) -> Vec<String> {
-        let mut pairs: Vec<(String, i32)> = self
-            .routes
-            .iter()
-            .map(|(id, managed)| (id.clone(), managed.definition.startup_order()))
-            .collect();
-        pairs.sort_by_key(|(_, order)| std::cmp::Reverse(*order));
-        pairs.into_iter().map(|(id, _)| id).collect()
+        self.shutdown_sorted()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
     }
 
     /// Returns the in-flight exchange count for a route, if the route has UoW tracking.
@@ -165,24 +194,13 @@ impl RouteRegistry {
 
     /// Iterate over routes with their IDs for startup (auto-startup, sorted).
     pub(super) fn auto_startup_sorted(&self) -> Vec<(String, i32)> {
-        let mut pairs: Vec<_> = self
-            .routes
-            .iter()
-            .filter(|(_, r)| r.definition.auto_startup())
-            .map(|(id, r)| (id.clone(), r.definition.startup_order()))
-            .collect();
-        pairs.sort_by_key(|(_, order)| *order);
-        pairs
+        self.sorted_by_start(|r| r.definition.auto_startup())
     }
 
-    /// Iterate over routes with their IDs for shutdown (reverse sorted).
+    /// Iterate over routes with their IDs for shutdown (reverse of startup).
     pub(super) fn shutdown_sorted(&self) -> Vec<(String, i32)> {
-        let mut pairs: Vec<_> = self
-            .routes
-            .iter()
-            .map(|(id, r)| (id.clone(), r.definition.startup_order()))
-            .collect();
-        pairs.sort_by_key(|(_, order)| std::cmp::Reverse(*order));
+        let mut pairs = self.sorted_by_start(|_| true);
+        pairs.reverse();
         pairs
     }
 }
@@ -328,6 +346,65 @@ mod tests {
         assert_eq!(shutdown[0], ("high".to_string(), 100));
         assert_eq!(shutdown[1], ("noauto".to_string(), 50));
         assert_eq!(shutdown[2], ("low".to_string(), 1));
+    }
+
+    /// rc-xd7tq: routes tied on `startup_order` start in definition order
+    /// and stop in the reverse (LIFO). Many ids make a lucky `HashMap`
+    /// iteration order (1/n!) practically impossible.
+    #[test]
+    fn route_registry_ties_follow_definition_order() {
+        let mut reg = RouteRegistry::new();
+        let ids: Vec<String> = (0..24).map(|i| format!("tied-{i}")).collect();
+        for id in &ids {
+            let managed = ManagedRoute {
+                definition: RouteDefinition::new("timer:t", vec![])
+                    .with_route_id(id.as_str())
+                    .with_auto_startup(true)
+                    .to_info(),
+                ..example_managed()
+            };
+            reg.insert(id.clone(), managed);
+        }
+        assert_eq!(reg.auto_startup_route_ids(), ids);
+        let startup: Vec<String> = reg
+            .auto_startup_sorted()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(startup, ids);
+
+        let mut reversed = ids.clone();
+        reversed.reverse();
+        assert_eq!(reg.shutdown_route_ids(), reversed);
+        let shutdown: Vec<String> = reg
+            .shutdown_sorted()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(shutdown, reversed);
+    }
+
+    /// rc-xd7tq: replacing a route (hot reload) keeps its original slot;
+    /// removing and re-adding moves it to the end.
+    #[test]
+    fn route_registry_replace_keeps_slot_remove_readds_last() {
+        let mut reg = RouteRegistry::new();
+        let make = |id: &str| ManagedRoute {
+            definition: RouteDefinition::new("timer:t", vec![])
+                .with_route_id(id)
+                .with_auto_startup(true)
+                .to_info(),
+            ..example_managed()
+        };
+        for id in ["a", "b", "c"] {
+            reg.insert(id.into(), make(id));
+        }
+        reg.insert("a".into(), make("a"));
+        assert_eq!(reg.auto_startup_route_ids(), vec!["a", "b", "c"]);
+
+        reg.remove("a");
+        reg.insert("a".into(), make("a"));
+        assert_eq!(reg.auto_startup_route_ids(), vec!["b", "c", "a"]);
     }
 
     #[test]
