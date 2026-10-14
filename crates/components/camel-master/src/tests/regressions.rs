@@ -46,11 +46,11 @@ async fn stops_retrying_delegate_start_after_max_attempts() {
     let _ = master.stop().await;
 }
 
-/// Regression test for MST-002: stop() must abort the leadership JoinHandle
-/// instead of just dropping it when the task is slow to drain.
-/// Without the fix, stop() blocks for the full drain_timeout (~500 ms)
-/// because the leadership task is stuck in stop_delegate awaiting a
-/// slow delegate. With abort-first, stop() returns almost instantly.
+/// Regression test for MST-002 (amended by rc-uszgx): stop() must stay
+/// bounded when the delegate ignores cancellation. stop() now lets the
+/// leadership task run its graceful tail, so a stuck delegate costs about one
+/// drain_timeout (~500 ms: stop_delegate aborts it), never the delegate's
+/// 60 s, and the task is aborted rather than leaked if it exceeds 3x.
 #[tokio::test]
 async fn stop_completes_quickly_when_leadership_task_is_slow() {
     // Delegate consumer that ignores its cancellation token and blocks.
@@ -143,17 +143,17 @@ async fn stop_completes_quickly_when_leadership_task_is_slow() {
         .unwrap();
     assert_eq!(msg.exchange.input.body.as_text(), Some("slow-start"));
 
-    // stop() must complete quickly because the leadership task is aborted,
-    // not just timed-out and leaked.
+    // stop() must complete quickly because the stuck delegate is aborted by
+    // stop_delegate, not awaited.
     let start = Instant::now();
     master.stop().await.unwrap();
     let elapsed = start.elapsed();
 
-    // With abort-first: ~0 ms. Without the fix: ~drain_timeout (500 ms).
-    // Assert < 250 ms to reliably distinguish the two behaviours.
+    // ~drain_timeout (500 ms) for the stuck delegate; the delegate itself
+    // would block 60 s. 1.4 s is below the 3x outer bound (1.5 s).
     assert!(
-        elapsed < Duration::from_millis(250),
-        "stop() took {:?}, expected < 250 ms (abort should be near-instant)",
+        elapsed < Duration::from_millis(1400),
+        "stop() took {:?}, expected bounded by the delegate drain timeout",
         elapsed,
     );
 

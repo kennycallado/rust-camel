@@ -15,6 +15,7 @@ pub(crate) struct MasterConsumer {
     pub(crate) drain_timeout: Duration,
     pub(crate) reconnect: NetworkRetryPolicy,
     pub(crate) leadership_task: Option<JoinHandle<Result<(), CamelError>>>,
+    pub(crate) result_rx: Option<tokio::sync::oneshot::Receiver<Result<(), String>>>,
     pub(crate) stop_token: Option<CancellationToken>,
     pub(crate) runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
@@ -40,6 +41,7 @@ impl MasterConsumer {
             drain_timeout,
             reconnect,
             leadership_task: None,
+            result_rx: None,
             stop_token: None,
             runtime,
         }

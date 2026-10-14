@@ -80,7 +80,15 @@ impl Consumer for MasterConsumer {
         let leadership_handle = handle;
         let leader_epoch = leadership_handle.leader_epoch_arc();
 
+        // The route controller aborts the handle returned by
+        // `background_task_handle()` as soon as the route context is
+        // cancelled, before the loop's graceful tail (delegate stop + lease
+        // step-down) can run (rc-uszgx). The controller therefore gets a
+        // proxy fed by this channel, and `stop()` owns the real task.
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+
         let task = tokio::spawn(async move {
+            let result = async move {
             let mut state = DelegateState::Inactive;
             let mut is_leading = false;
             let mut retry_tick = interval(DELEGATE_RETRY_INTERVAL);
@@ -295,10 +303,15 @@ impl Consumer for MasterConsumer {
             .await?;
             let _ = timeout(drain_timeout, leadership_handle.step_down()).await;
             Ok::<(), CamelError>(())
+            }
+            .await;
+            let _ = result_tx.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+            result
         });
 
         self.stop_token = Some(stop_token);
         self.leadership_task = Some(task);
+        self.result_rx = Some(result_rx);
 
         Ok(())
     }
@@ -308,41 +321,37 @@ impl Consumer for MasterConsumer {
             token.cancel();
         }
 
-        if let Some(handle) = self.leadership_task.take() {
-            if handle.is_finished() {
-                match timeout(self.drain_timeout, handle).await {
-                    Ok(Ok(Ok(()))) => {}
-                    Ok(Ok(Err(err))) => return Err(err),
-                    Ok(Err(e)) => {
-                        return Err(CamelError::ProcessorError(format!(
-                            "leadership task join failed: {e}"
-                        )));
-                    }
-                    Err(_) => {
-                        return Err(CamelError::ProcessorError(
-                            "leadership task join timed out".to_string(),
-                        ));
-                    }
-                }
-                return Ok(());
-            }
+        let Some(mut handle) = self.leadership_task.take() else {
+            return Ok(());
+        };
 
-            // Abort first so the task is guaranteed to stop; then await with
-            // a timeout as a safety-net in case abort takes a moment to land.
-            handle.abort();
-            match timeout(self.drain_timeout, handle).await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(err))) => return Err(err),
-                Ok(Err(e)) if e.is_panic() => {
-                    // log-policy: system-broken
-                    error!(lock = %self.lock_name, error = %e, "leadership task panicked");
-                }
-                Ok(Err(e)) => {
-                    warn!(lock = %self.lock_name, error = %e, "leadership task cancelled");
-                }
-                Err(_) => {
-                    warn!("master leadership loop shutdown timed out after abort");
-                }
+        // A task that already ended on its own (e.g. permanent delegate
+        // error) propagates its error. Errors raised only while the graceful
+        // tail runs (the delegate losing its sender to the same cancellation)
+        // are shutdown noise: logged, not returned.
+        let ended_before_stop = handle.is_finished();
+
+        // Let the loop run its graceful tail (delegate stop, bridge drain,
+        // lease step-down). Each phase is bounded by `drain_timeout`; the
+        // outer bound covers all three, then the task is aborted so a stuck
+        // delegate can never hang shutdown (MST-002).
+        match timeout(self.drain_timeout.saturating_mul(3), &mut handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(err))) if ended_before_stop => return Err(err),
+            Ok(Ok(Err(err))) => {
+                debug!(lock = %self.lock_name, error = %err, "delegate error during graceful shutdown");
+            }
+            Ok(Err(e)) if e.is_panic() => {
+                // log-policy: system-broken
+                error!(lock = %self.lock_name, error = %e, "leadership task panicked");
+            }
+            Ok(Err(e)) => {
+                warn!(lock = %self.lock_name, error = %e, "leadership task cancelled");
+            }
+            Err(_) => {
+                warn!(lock = %self.lock_name, "master leadership loop shutdown timed out, aborting");
+                handle.abort();
+                let _ = handle.await;
             }
         }
 
@@ -352,6 +361,17 @@ impl Consumer for MasterConsumer {
     fn background_task_handle(
         &mut self,
     ) -> Option<tokio::task::JoinHandle<Result<(), CamelError>>> {
-        self.leadership_task.take()
+        // Proxy: resolves with the real task's outcome but owns nothing, so
+        // the controller aborting it cannot cut the graceful shutdown.
+        let rx = self.result_rx.take()?;
+        Some(tokio::spawn(async move {
+            match rx.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(msg)) => Err(CamelError::ProcessorError(msg)),
+                Err(_) => Err(CamelError::ProcessorError(
+                    "master leadership task terminated without a result".to_string(),
+                )),
+            }
+        }))
     }
 }

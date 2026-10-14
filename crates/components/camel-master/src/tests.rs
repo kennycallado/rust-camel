@@ -26,6 +26,8 @@ struct FakeLeadershipService {
     /// takeover flap while the delegate stays Active.
     leader_epoch: Arc<AtomicU64>,
     initial: Option<LeadershipEvent>,
+    /// Set when the handle's `step_down()` cancels the elector loop.
+    stepped_down: Arc<AtomicBool>,
 }
 
 impl FakeLeadershipService {
@@ -36,7 +38,12 @@ impl FakeLeadershipService {
             is_leader: Arc::new(AtomicBool::new(starts_as_leader)),
             leader_epoch: Arc::new(AtomicU64::new(1)),
             initial,
+            stepped_down: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn stepped_down(&self) -> bool {
+        self.stepped_down.load(Ordering::SeqCst)
     }
 
     /// Shared handle to the epoch counter for bump-from-test access.
@@ -68,9 +75,11 @@ impl LeadershipService for FakeLeadershipService {
 
         let cancel = CancellationToken::new();
         let cancel_wait = cancel.clone();
+        let stepped_down = Arc::clone(&self.stepped_down);
         let (term_tx, term_rx) = oneshot::channel();
         tokio::spawn(async move {
             cancel_wait.cancelled().await;
+            stepped_down.store(true, Ordering::SeqCst);
             let _ = term_tx.send(());
         });
 

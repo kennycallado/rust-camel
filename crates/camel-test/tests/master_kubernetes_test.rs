@@ -394,12 +394,22 @@ async fn master_kafka_delegate_survives_leader_failover() {
         "standby must not start its delegate"
     );
 
-    // `stopped`/step_down after ctx.stop() are not asserted: master's stop()
-    // aborts the leadership task (separate bd). Takeover then waits for the
-    // Lease to expire (10s here), covered by the generous timeouts below.
+    // Graceful stop (rc-uszgx): the delegate is stopped and the Lease is
+    // released, so the standby takes over well inside lease_duration (10s)
+    // instead of waiting for expiry.
+    let stopped_at = std::time::Instant::now();
     pod_a.stop().await.expect("pod-a stops");
-
+    assert_eq!(
+        probe_a.count("stopped"),
+        1,
+        "leader delegate stopped on shutdown"
+    );
     wait_for_leader(&client, "camel-failover", "default/pod-b", 60).await;
+    assert!(
+        stopped_at.elapsed() < Duration::from_secs(8),
+        "standby took {:?}: Lease was not released on graceful stop",
+        stopped_at.elapsed()
+    );
     mock_b
         .get_endpoint("out")
         .expect("pod-b sink")

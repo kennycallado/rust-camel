@@ -218,3 +218,43 @@ async fn explicit_delegate_background_failure_propagates() {
     assert!(err.to_string().contains("bg boom"), "got: {err}");
     cancel.cancel();
 }
+
+/// rc-uszgx: the route controller aborts the handle from
+/// `background_task_handle()` the moment the context is cancelled, then calls
+/// `stop()`. The delegate's `stop()` must still run (graceful tail), exactly
+/// once, and the lease must be stepped down.
+#[tokio::test]
+async fn controller_style_abort_does_not_cut_graceful_shutdown() {
+    let leadership = Arc::new(FakeLeadershipService::new(None));
+    let platform_service = Arc::new(FakePlatformService::new(leadership.clone()));
+    let start_calls = Arc::new(AtomicUsize::new(0));
+    let stop_calls = Arc::new(AtomicUsize::new(0));
+    let mut master = build_explicit_master(
+        platform_service,
+        Arc::clone(&start_calls),
+        Arc::clone(&stop_calls),
+        None,
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "master-test-route".to_string());
+    master.start(ctx).await.unwrap();
+    leadership.emit(LeadershipEvent::StartedLeading).await;
+    timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("delegate delivers")
+        .expect("channel open");
+
+    // What the route controller does on shutdown.
+    let bg = master.background_task_handle().expect("proxy handle");
+    cancel.cancel();
+    bg.abort();
+    master.stop().await.unwrap();
+
+    assert_eq!(stop_calls.load(Ordering::SeqCst), 1, "delegate stop ran");
+    assert!(
+        leadership.stepped_down(),
+        "lease must be stepped down on graceful shutdown"
+    );
+}
