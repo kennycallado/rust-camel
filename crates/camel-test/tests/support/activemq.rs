@@ -211,8 +211,10 @@ impl ActiveMqBroker {
             .ok_or_else(|| format!("ConsumerCount missing in Jolokia response: {response}"))
     }
 
-    /// Actual broker-side `QueueSize` for `queue` (messages currently on the
-    /// queue, not dispatched). Returns 0 when the queue MBean does not exist.
+    /// Actual broker-side `QueueSize` for `queue`: messages on the queue,
+    /// including ones dispatched to a consumer but not yet acknowledged
+    /// (Classic counts them until the ack is processed). Returns 0 when the
+    /// queue MBean does not exist.
     /// A terminal reject-then-log acknowledges the message, so the source
     /// queue drains; a broker-native dead-letter move is observable through
     /// the DLQ's own queue MBean (`enqueue_count("ActiveMQ.DLQ")`).

@@ -141,6 +141,22 @@ impl DispositionBroker {
     async fn observe_destination(&self, queue: &str) -> (Option<ClassicDestination>, String) {
         match self {
             DispositionBroker::Classic(broker) => {
+                // The bridge acknowledges asynchronously: the COMMIT frame and
+                // the terminal log precede the broker applying the ack, so a
+                // one-shot read right after them can still see the message
+                // (seen on loaded CI). Wait, bounded, for the queue to drain;
+                // a real lost ack stays at 1 and is reported by the final
+                // read below.
+                let _ = wait_until(
+                    "source queue drained by the terminal acknowledgement",
+                    Duration::from_secs(30),
+                    Duration::from_millis(200),
+                    || {
+                        let broker = broker.clone();
+                        async move { broker.queue_size(queue).await.map(|n| n == 0) }
+                    },
+                )
+                .await;
                 let queue_size = broker
                     .queue_size(queue)
                     .await
@@ -427,6 +443,8 @@ async fn run_threshold(broker: &DispositionBroker, queue: &str) -> ThresholdObse
     // line BEFORE it clears the reservation (`terminalDiscard`: acknowledge →
     // log → commit), so once the COMMIT frame is visible the record is already
     // on disk. Keep a short bounded wait to absorb any filesystem lag.
+    // COMMIT does NOT mean the broker applied the ack: the client acks
+    // asynchronously (bd rc-bzqiz), which is why `observe_destination` polls.
     let bridge_log = log_dir.path().join(format!("jms-bridge-{probe_pid}.log"));
     let bridge_log_str = bridge_log.to_string_lossy().into_owned();
     let expected_message = format!(
