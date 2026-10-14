@@ -1489,12 +1489,17 @@ mod tests {
     }
 
     /// Bounded (external, no Rust sleep) check that `pid` is gone.
+    ///
+    /// A zombie counts as gone: `kill -0` still succeeds on one, and these
+    /// tests run on a current-thread runtime that this blocking call stalls,
+    /// so tokio's orphan reaper cannot collect the `kill_on_drop` child while
+    /// we wait. The child is dead (SIGKILLed); only the reap is pending.
     #[cfg(unix)]
     fn wait_pid_gone(pid: u32) -> bool {
         std::process::Command::new("sh")
             .arg("-c")
             .arg(format!(
-                "i=0; while [ $i -lt 100 ]; do kill -0 {pid} 2>/dev/null || exit 0; i=$((i+1)); sleep 0.05; done; exit 1"
+                "i=0; while [ $i -lt 100 ]; do kill -0 {pid} 2>/dev/null || exit 0; case \"$(ps -o stat= -p {pid} 2>/dev/null)\" in Z*) exit 0;; esac; i=$((i+1)); sleep 0.05; done; exit 1"
             ))
             .status()
             .map(|s| s.success())
