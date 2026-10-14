@@ -20,13 +20,13 @@ import org.junit.jupiter.api.Test;
  * {@code ?:} branch of the {@code findProperty("version")} expression. A focused test is used
  * because no runtime class exposes the fallback.
  */
-@DisplayName("Gradle default bridge version is 0.8.0")
+@DisplayName("Gradle default bridge version is 0.8.1")
 class BridgeVersionTest {
 
   private static final Pattern FALLBACK = Pattern.compile("\\?:\\s*\"([^\"]+)\"");
 
   @Test
-  void gradle_default_is_0_8_0() throws Exception {
+  void gradle_default_is_0_8_1() throws Exception {
     Path buildGradle = locateBuildGradle();
     String line = findVersionFallbackLine(buildGradle);
 
@@ -34,10 +34,10 @@ class BridgeVersionTest {
     assertTrue(matcher.find(), () -> "version fallback string missing in: " + line.trim());
 
     assertEquals(
-        "0.8.0",
+        "0.8.1",
         matcher.group(1),
         () ->
-            "Gradle default fallback must be 0.8.0 to match crate BRIDGE_VERSION; got "
+            "Gradle default fallback must be 0.8.1 to match crate BRIDGE_VERSION; got "
                 + matcher.group(1));
   }
 
