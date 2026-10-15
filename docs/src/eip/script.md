@@ -16,7 +16,7 @@ The Script step is a Message Translator from Hohpe and Woolf. It runs an inline 
     - script:
         language: rhai
         source: |
-          headers["tenant"] = "acme"
+          headers["tenant"] = "acme";
           body = body + "_processed"
     - to: log:scripted?showBody=true&showHeaders=true
 ```

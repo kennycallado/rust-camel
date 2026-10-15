@@ -2966,6 +2966,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "libc",
+ "noyalib",
  "opentelemetry",
  "opentelemetry_sdk",
  "percent-encoding",

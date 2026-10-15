@@ -28,11 +28,11 @@ routes:
   - id: index-user
     from: "direct:index-user"
     steps:
-      - set_header:
-          CamelOpenSearch.Id: "user-42"
+      - set_header: {key: CamelOpenSearch.Id, value: user-42}
       - set_body:
-          name: "Alice"
-          age: 30
+          value:
+            name: "Alice"
+            age: 30
       - to: "opensearch://localhost:9200/users?operation=INDEX"
 ```
 
@@ -64,9 +64,10 @@ routes:
     from: "direct:search-users"
     steps:
       - set_body:
-          query:
-            match:
-              name: "Alice"
+          value:
+            query:
+              match:
+                name: "Alice"
       - to: "opensearch://localhost:9200/users?operation=SEARCH&size=25&from=0"
 ```
 

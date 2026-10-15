@@ -295,10 +295,10 @@ routes:
     from: direct:start
     steps:
       - script:
-          language: "simple"
-          source: "${body}"
+          language: "rhai"
+          source: "body = \"ok\";"
 "#,
-            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"script":{"language":"simple","source":"${body}"}}]}]}"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"script":{"language":"rhai","source":"body = \"ok\";"}}]}]}"#,
         },
         ParityCase {
             name: "Multicast",

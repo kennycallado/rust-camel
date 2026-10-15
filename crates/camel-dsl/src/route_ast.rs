@@ -736,17 +736,39 @@ pub struct TransformStep {
     pub transform: SetBodyData,
 }
 
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[cfg_attr(feature = "schema", derive(ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
-#[cfg_attr(feature = "schema", schemars(untagged))]
 pub enum SetBodyData {
+    // A mapping under `set_body`/`transform` is always value-source
+    // `SetBodyConfig`, never an implicit literal object: the JSON schema
+    // restricts the Literal branch to non-object types, and an object literal
+    // body requires the explicit wrapper `set_body: { value: { ... } }`.
+    //
     // Config must be tried BEFORE Literal: serde_json::Value matches any YAML value (including
     // objects), so it would greedily swallow `{ simple: "..." }` as a Literal JSON object
     // instead of a SetBodyConfig. By placing Config first, structured forms like
     // `set_body: { simple: "..." }` deserialize correctly.
     Config(SetBodyConfig),
     Literal(serde_json::Value),
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for SetBodyData {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SetBodyData".into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        concat!(module_path!(), "::SetBodyData").into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let config = generator.subschema_for::<SetBodyConfig>();
+        schemars::json_schema!({
+            "anyOf": [ config, { "type": ["string", "number", "boolean", "array", "null"] } ]
+        })
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -2349,6 +2371,32 @@ rest:
         assert!(
             !json.contains("set_header_if_absent"),
             "JSON schema must NOT contain set_header_if_absent"
+        );
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn schema_set_body_data_restricts_literal_branch() {
+        let value = serde_json::to_value(schemars::schema_for!(RouteDslStep)).unwrap();
+        let any_of = value
+            .pointer("/$defs/SetBodyData/anyOf")
+            .and_then(serde_json::Value::as_array)
+            .expect("$defs/SetBodyData/anyOf must be an array");
+        assert_eq!(
+            any_of.len(),
+            2,
+            "SetBodyData must have exactly two branches"
+        );
+        assert_eq!(
+            any_of[1]["type"],
+            serde_json::json!(["string", "number", "boolean", "array", "null"]),
+            "literal branch must be restricted to non-object JSON types"
+        );
+        assert!(
+            any_of
+                .iter()
+                .all(|branch| branch != &serde_json::Value::Bool(true)),
+            "SetBodyData must not contain a free-form `true` branch"
         );
     }
 

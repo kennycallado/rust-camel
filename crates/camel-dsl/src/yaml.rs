@@ -961,7 +961,7 @@ pub(crate) fn route_step_to_declarative_step(
         }
         RouteDslStep::SetBody(SetBodyStep { set_body }) => {
             let value = match set_body {
-                SetBodyData::Literal(value) => bare_string_value_source(value),
+                SetBodyData::Literal(value) => literal_value_source(value, "set_body")?,
                 SetBodyData::Config(SetBodyConfig {
                     value,
                     language,
@@ -978,7 +978,7 @@ pub(crate) fn route_step_to_declarative_step(
         }
         RouteDslStep::Transform(TransformStep { transform }) => {
             let value = match transform {
-                SetBodyData::Literal(value) => bare_string_value_source(value),
+                SetBodyData::Literal(value) => literal_value_source(value, "transform")?,
                 SetBodyData::Config(SetBodyConfig {
                     value,
                     language,
@@ -2050,6 +2050,78 @@ fn parse_loop_while_expr(
     Ok(LanguageExpressionDef { language, source })
 }
 
+/// The valid value-source alternatives, in the order the error messages list
+/// them. Shared by every rejection message so the wording cannot drift.
+const VALUE_SOURCE_ALTERNATIVES: &str =
+    "`value`, `language`+`source`, `simple`, `rhai`, `jsonpath`, `xpath`";
+
+/// The keys a value-source mapping accepts. Any other key makes the mapping an
+/// unknown-key rejection instead of an implicit literal object.
+const VALUE_SOURCE_CONFIG_KEYS: [&str; 7] = [
+    "value", "language", "source", "simple", "rhai", "jsonpath", "xpath",
+];
+
+/// Fixed declaration order for wrong-type diagnostics: the first present field
+/// whose value is neither a string nor null is the one reported.
+const VALUE_SOURCE_FIELD_ORDER: [&str; 6] =
+    ["language", "source", "simple", "rhai", "jsonpath", "xpath"];
+
+/// Lower a `SetBodyData::Literal` into a value source. A JSON object is never a
+/// literal body: it is a value-source mapping that failed `SetBodyConfig`
+/// deserialization and must be rejected. Every other variant keeps the existing
+/// top-level `${}` gate.
+fn literal_value_source(
+    value: serde_json::Value,
+    verb: &str,
+) -> Result<ValueSourceDef, CamelError> {
+    match value {
+        serde_json::Value::Object(map) => Err(reject_bare_map(&map, verb)),
+        other => Ok(bare_string_value_source(other)),
+    }
+}
+
+/// Build the rejection error for an object that reached the literal branch.
+///
+/// Unknown keys take priority and are reported lexicographically. Otherwise the
+/// first wrong-typed field in declaration order is named. Values are never
+/// formatted into the message.
+fn reject_bare_map(map: &serde_json::Map<String, serde_json::Value>, verb: &str) -> CamelError {
+    let hint = format!(
+        "expected exactly one of {VALUE_SOURCE_ALTERNATIVES}. To set an object literal body, wrap it: `{verb}: {{ value: {{ ... }} }}`"
+    );
+
+    let mut unknown: Vec<&str> = map
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !VALUE_SOURCE_CONFIG_KEYS.contains(key))
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort_unstable();
+        let keys = unknown
+            .iter()
+            .map(|key| format!("`{key}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return CamelError::RouteError(format!(
+            "{verb}: unknown key(s) {keys} in value-source mapping; {hint}"
+        ));
+    }
+
+    let wrong_type = VALUE_SOURCE_FIELD_ORDER.iter().copied().find(|field| {
+        map.get(*field).is_some_and(|value| {
+            !matches!(
+                value,
+                serde_json::Value::String(_) | serde_json::Value::Null
+            )
+        })
+    });
+    if let Some(field) = wrong_type {
+        return CamelError::RouteError(format!("{verb}: wrong type for key `{field}`; {hint}"));
+    }
+
+    CamelError::RouteError(format!("{verb}: invalid value-source mapping; {hint}"))
+}
+
 /// Gate a bare **top-level** string value source behind the `${}` template
 /// rule (Task 1.3, mission359-languagep1wave).
 ///
@@ -2611,8 +2683,8 @@ routes:
           completion_size: 2
       - wire_tap: "mock:tap"
       - script:
-          language: "simple"
-          source: "${body}"
+          language: "rhai"
+          source: 'body = "ok";'
 "#;
 
         let routes = parse_yaml_to_canonical(yaml, false).unwrap();
@@ -3417,8 +3489,8 @@ routes:
             - to: "mock:left"
             - to: "mock:right"
       - script:
-          language: "simple"
-          source: "${body}"
+          language: "rhai"
+          source: 'body = "ok";'
       - stop: true
 "#;
 

@@ -24,7 +24,7 @@ let expr = lang.create_expression(
     - set_header:
         key: name
         value: World
-    - script:
+    - transform:
         language: minijinja
         source: |
           {% autoescape "html" %}

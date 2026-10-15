@@ -155,8 +155,9 @@ routes:
     from: direct:echo
     steps:
       - set_body:
-          status: ok
-          seq: 7
+          value:
+            status: ok
+            seq: 7
 "#,
         r#"
 routeFiles: [routes.yaml]

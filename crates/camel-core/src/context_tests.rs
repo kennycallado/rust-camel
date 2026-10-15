@@ -231,6 +231,17 @@ async fn test_add_route_definition_uses_runtime_registered_language() {
         }
     }
 
+    struct DummyMutatingExpression;
+    #[async_trait::async_trait]
+    impl camel_language_api::MutatingExpression for DummyMutatingExpression {
+        async fn evaluate(
+            &self,
+            _exchange: &mut camel_api::Exchange,
+        ) -> Result<camel_api::Value, LanguageError> {
+            Ok(camel_api::Value::Null)
+        }
+    }
+
     struct RuntimeLang;
     impl camel_language_api::Language for RuntimeLang {
         fn name(&self) -> &'static str {
@@ -243,6 +254,13 @@ async fn test_add_route_definition_uses_runtime_registered_language() {
 
         fn create_predicate(&self, _script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
             Ok(Box::new(DummyPredicate))
+        }
+
+        fn create_mutating_expression(
+            &self,
+            _script: &str,
+        ) -> Result<Box<dyn camel_language_api::MutatingExpression>, LanguageError> {
+            Ok(Box::new(DummyMutatingExpression))
         }
     }
 

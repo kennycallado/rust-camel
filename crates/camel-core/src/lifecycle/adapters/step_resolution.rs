@@ -60,6 +60,86 @@ pub(crate) fn resolve_language(
     })
 }
 
+/// Test-only language that opts in to mutating expressions. Registered as
+/// `"testmut"`; evaluating it records that it ran by setting the `testmut`
+/// exchange property.
+#[cfg(test)]
+pub(crate) struct MutatingTestLanguage;
+
+#[cfg(test)]
+impl Language for MutatingTestLanguage {
+    fn name(&self) -> &'static str {
+        "testmut"
+    }
+
+    fn create_expression(
+        &self,
+        _script: &str,
+    ) -> Result<Box<dyn Expression>, camel_language_api::LanguageError> {
+        Ok(Box::new(MutatingTestStubExpression))
+    }
+
+    fn create_predicate(
+        &self,
+        _script: &str,
+    ) -> Result<Box<dyn Predicate>, camel_language_api::LanguageError> {
+        Ok(Box::new(MutatingTestStubPredicate))
+    }
+
+    fn create_mutating_expression(
+        &self,
+        _script: &str,
+    ) -> Result<Box<dyn camel_language_api::MutatingExpression>, camel_language_api::LanguageError>
+    {
+        Ok(Box::new(MutatingTestExpr))
+    }
+}
+
+#[cfg(test)]
+struct MutatingTestStubExpression;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl Expression for MutatingTestStubExpression {
+    async fn evaluate(
+        &self,
+        _exchange: &Exchange,
+    ) -> Result<camel_api::Value, camel_language_api::LanguageError> {
+        Ok(camel_api::Value::Null)
+    }
+}
+
+#[cfg(test)]
+struct MutatingTestStubPredicate;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl Predicate for MutatingTestStubPredicate {
+    async fn matches(
+        &self,
+        _exchange: &Exchange,
+    ) -> Result<bool, camel_language_api::LanguageError> {
+        Ok(false)
+    }
+}
+
+/// Test-only mutating expression that sets the `testmut` property to `"ran"`
+/// and returns `Value::Null`.
+#[cfg(test)]
+pub(crate) struct MutatingTestExpr;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl camel_language_api::MutatingExpression for MutatingTestExpr {
+    async fn evaluate(
+        &self,
+        exchange: &mut Exchange,
+    ) -> Result<camel_api::Value, camel_language_api::LanguageError> {
+        exchange.set_property("testmut", camel_api::Value::String("ran".into()));
+        Ok(camel_api::Value::Null)
+    }
+}
+
 pub(crate) fn compile_language_expression(
     languages: &SharedLanguageRegistry,
     expression: &LanguageExpressionDef,
@@ -326,6 +406,7 @@ mod tests {
             "simple".to_string(),
             Arc::new(camel_language_simple::SimpleLanguage::new()),
         );
+        map.insert("testmut".to_string(), Arc::new(super::MutatingTestLanguage));
         Arc::new(std::sync::Mutex::new(map))
     }
 
@@ -789,7 +870,10 @@ mod tests {
                 otherwise: Some(vec![BuilderStep::Stop]),
             },
             BuilderStep::DeclarativeScript {
-                expression: expr("${header.k}"),
+                expression: LanguageExpressionDef {
+                    language: "testmut".into(),
+                    source: "${header.k}".into(),
+                },
             },
             BuilderStep::Split {
                 config: SplitterConfig::new(split_body_lines())

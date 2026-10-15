@@ -2763,7 +2763,15 @@
         {
           "$ref": "#/$defs/SetBodyConfig"
         },
-        true
+        {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "array",
+            "null"
+          ]
+        }
       ]
     },
     "SetBodyStep": {

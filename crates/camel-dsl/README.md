@@ -404,7 +404,7 @@ Produces JSON Schema and TypeScript types in `schemas/`.
 | `log` | Log message | `- log: "Processing"` |
 | `set_header` | Set header | `- set_header: { key: "x", value: "y" }` |
 | `set_body` | Set body | `- set_body: { value: "content" }` |
-| `transform` | Transform body | `- transform: { simple: "${body}" }` |
+| `transform` | Transform body | `- transform: { language: "simple", source: "${body}" }` |
 | `marshal` | Serialize body using a data format (e.g., Json → Text) | `- marshal: json` |
 | `unmarshal` | Deserialize body using a data format (e.g., Text → Json) | `- unmarshal: xml` |
 | `filter` | Filter messages | `- filter: { simple: "${header.type} == 'allowed'", steps: [...] }` |
@@ -416,7 +416,7 @@ Produces JSON Schema and TypeScript types in `schemas/`.
 | `multicast` | Fan-out to multiple | `- multicast: { steps: [...] }` |
 | `recipient_list` | Dynamic recipient list | `- recipient_list: { simple: "${header.destinations}" }` |
 | `stop` | Stop pipeline | `- stop: true` |
-| `script` | Execute script | `- script: { language: "simple", source: "${body}" }` |
+| `script` | Execute script (mutating language) | `- script: { language: "rhai", source: "body = \"ok\";" }` |
 | `bean` | Invoke bean method | `- bean: { name: "orderService", method: "process" }` |
 
 ### Marshal/Unmarshal Example

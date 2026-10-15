@@ -251,6 +251,74 @@ fn schema_validation_accepts_cache_coalesce_misses() {
 }
 
 #[test]
+fn schema_rejects_bare_map_both_verbs() {
+    let schema = load_json(&schema_path());
+    let validator = validator_for(&schema).expect("schema compiles");
+
+    for step in [
+        serde_json::json!({ "set_body": { "constant": "ok" } }),
+        serde_json::json!({ "transform": { "constant": "ok" } }),
+    ] {
+        let route = serde_json::json!({
+            "routes": [
+                { "id": "bare-map", "from": "direct:start", "steps": [ step ] }
+            ]
+        });
+        let errors: Vec<_> = validator.iter_errors(&route).collect();
+        assert!(
+            !errors.is_empty(),
+            "bare map under set_body/transform must be rejected, got none for {route}"
+        );
+    }
+}
+
+#[test]
+fn schema_accepts_wrapped_object_both_verbs() {
+    let schema = load_json(&schema_path());
+    let validator = validator_for(&schema).expect("schema compiles");
+
+    for step in [
+        serde_json::json!({ "set_body": { "value": { "constant": "ok" } } }),
+        serde_json::json!({ "transform": { "value": { "constant": "ok" } } }),
+    ] {
+        let route = serde_json::json!({
+            "routes": [
+                { "id": "wrapped-object", "from": "direct:start", "steps": [ step ] }
+            ]
+        });
+        let errors: Vec<_> = validator.iter_errors(&route).collect();
+        assert!(
+            errors.is_empty(),
+            "wrapped object under set_body/transform must validate, got: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn schema_accepts_valid_configs_both_verbs() {
+    let schema = load_json(&schema_path());
+    let validator = validator_for(&schema).expect("schema compiles");
+
+    for step in [
+        serde_json::json!({ "set_body": { "simple": "${body}" } }),
+        serde_json::json!({ "transform": { "simple": "${body}" } }),
+        serde_json::json!({ "set_body": { "language": "simple", "source": "${body}" } }),
+        serde_json::json!({ "transform": { "language": "simple", "source": "${body}" } }),
+    ] {
+        let route = serde_json::json!({
+            "routes": [
+                { "id": "valid-config", "from": "direct:start", "steps": [ step ] }
+            ]
+        });
+        let errors: Vec<_> = validator.iter_errors(&route).collect();
+        assert!(
+            errors.is_empty(),
+            "valid config under set_body/transform must validate, got: {errors:?}"
+        );
+    }
+}
+
+#[test]
 fn cache_invalidate_both_key_and_key_prefix_rejected_at_compile() {
     let yaml = r#"
 routes:

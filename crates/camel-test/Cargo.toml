@@ -72,6 +72,7 @@ libc = { workspace = true }
 camel-master = { workspace = true }
 camel-config = { workspace = true, features = ["kubernetes"] }
 toml.workspace = true
+noyalib.workspace = true
 camel-language-api.workspace = true
 camel-language-rhai.workspace = true
 camel-language-jsonpath.workspace = true

@@ -250,9 +250,8 @@ fn assert_language_verb(err: &CamelError, route_id: &str, language: &str, verb: 
 
 /// Build the minimal steps that make `key` fail at language evaluation.
 ///
-/// One entry per verb from task 1.9 step 1. `script_readonly` and
-/// `script_mutating` are distinct table keys that both surface as verb
-/// `script`.
+/// One entry per verb from task 1.9 step 1. `script_mutating` is the
+/// mutating-language table key that surfaces as verb `script`.
 fn failing_steps(key: &str) -> Vec<BuilderStep> {
     match key {
         "set_property" => vec![BuilderStep::DeclarativeSetProperty {
@@ -267,17 +266,10 @@ fn failing_steps(key: &str) -> Vec<BuilderStep> {
             key: "h".to_string(),
             value: ValueSourceDef::Expression(rhai(PARSE_FLOAT)),
         }],
-        "set_body" => vec![BuilderStep::DeclarativeSetBody {
-            value: ValueSourceDef::Expression(rhai(PARSE_FLOAT)),
-        }],
-        // A language WITHOUT MutatingExpression degrades to the read-only
-        // Expression -> SetBody fallback. The `${nosuchlang:x}` slot is a
-        // language delegate whose language is unregistered, so it compiles and
-        // fails at evaluation time (class `runtime`), never at parse time.
-        "script_readonly" => vec![
+        "set_body" => vec![
             set_header_literal("secret", "abc"),
-            BuilderStep::DeclarativeScript {
-                expression: expr("simple", "${nosuchlang:x}"),
+            BuilderStep::DeclarativeSetBody {
+                value: ValueSourceDef::Expression(rhai(PARSE_FLOAT)),
             },
         ],
         // Rhai owns a MutatingExpression: the ScriptMutator path throws.
@@ -407,7 +399,6 @@ fn failing_steps(key: &str) -> Vec<BuilderStep> {
 /// The E3 (language, verb, class, position) tuple a table key expects.
 fn verb_diagnostics(key: &str) -> (&'static str, &'static str, ExpressionErrorClass, Pos) {
     match key {
-        "script_readonly" => ("simple", "script", ExpressionErrorClass::Runtime, Pos::None),
         "script_mutating" => ("rhai", "script", ExpressionErrorClass::Runtime, Pos::Some),
         "set_property" => (
             "rhai",
@@ -533,7 +524,7 @@ async fn assert_fails_step(key: &str) {
     let (language, verb, class, pos) = verb_diagnostics(key);
     assert_expression_failed(&err, &route_id, language, verb, class, pos);
     // No operand value from the exchange may enter the diagnostic. Only the
-    // `script_readonly` row seeds `secret=abc`; no other row's legitimate text
+    // `set_body` row seeds `secret=abc`; no other row's legitimate text
     // carries those literals, so this holds table-wide.
     let rendered = format!("{err} | {err:?}");
     assert!(
@@ -664,13 +655,6 @@ verb_on_exception_test!(
 verb_fails_test!(verb_set_body_expression_error_fails_step, "set_body");
 verb_do_try_test!(verb_set_body_do_try_visible, "set_body");
 verb_on_exception_test!(verb_set_body_on_exception_visible, "set_body");
-
-verb_fails_test!(
-    verb_script_readonly_expression_error_fails_step,
-    "script_readonly"
-);
-verb_do_try_test!(verb_script_readonly_do_try_visible, "script_readonly");
-verb_on_exception_test!(verb_script_readonly_on_exception_visible, "script_readonly");
 
 verb_fails_test!(
     verb_script_mutating_expression_error_fails_step,

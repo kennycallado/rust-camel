@@ -501,45 +501,9 @@ impl StepCompiler for CoreCompiler {
                 _ => Err(CamelError::Config("unsupported value source".into())),
             },
 
-            // ── Declarative Script (graceful degradation: try mutating, fallback to SetBody) ──
+            // ── Declarative Script (requires a mutating language) ──
             BuilderStep::DeclarativeScript { expression } => {
-                let meta = eval_meta(ctx, &expression.language, "script", step_index, None);
-                let lang = resolve_language(ctx.languages, &expression.language)?;
-                match lang.create_mutating_expression(&expression.source) {
-                    Ok(mut_expr) => Ok(CompileOutcome::Matched(CompiledStep::Process {
-                        kind_hint: SpanKindHint::Internal,
-                        processor: BoxProcessor::new(ScriptMutator::with_meta(mut_expr, meta)),
-                        body_contract: None,
-                        lifecycle: None,
-                        label: None,
-                        to_uri: None,
-                    })),
-                    Err(LanguageError::NotSupported { .. }) => {
-                        // Graceful degradation: fall back to read-only Expression → SetBody.
-                        // Target is the body the fallback replaces; errors
-                        // propagate like every other verb.
-                        let source = compile_value_source(
-                            ctx,
-                            &expression,
-                            "script",
-                            step_index,
-                            Some("body".to_string()),
-                        )?;
-                        let svc = camel_processor::SetBody::new(IdentityProcessor, source);
-                        Ok(CompileOutcome::Matched(CompiledStep::Process {
-                            kind_hint: SpanKindHint::Internal,
-                            processor: BoxProcessor::new(svc),
-                            body_contract: None,
-                            lifecycle: None,
-                            label: None,
-                            to_uri: None,
-                        }))
-                    }
-                    Err(e) => Err(CamelError::RouteError(format!(
-                        "Failed to create mutating expression for language '{}': {}",
-                        expression.language, e
-                    ))),
-                }
+                compile_script(ctx, &expression.language, &expression.source, step_index)
             }
 
             // ── Function step ──
@@ -605,31 +569,9 @@ impl StepCompiler for CoreCompiler {
                 }))
             }
 
-            // ── Script (hard error on NotSupported) ──
+            // ── Script (requires a mutating language) ──
             BuilderStep::Script { language, script } => {
-                let meta = eval_meta(ctx, &language, "script", step_index, None);
-                let lang = resolve_language(ctx.languages, &language)?;
-                match lang.create_mutating_expression(&script) {
-                    Ok(mut_expr) => Ok(CompileOutcome::Matched(CompiledStep::Process {
-                        kind_hint: SpanKindHint::Internal,
-                        processor: BoxProcessor::new(ScriptMutator::with_meta(mut_expr, meta)),
-                        body_contract: None,
-                        lifecycle: None,
-                        label: None,
-                        to_uri: None,
-                    })),
-                    Err(LanguageError::NotSupported {
-                        feature,
-                        language: ref lang_name,
-                    }) => Err(CamelError::RouteError(format!(
-                        "Language '{}' does not support {} (required for .script() step)",
-                        lang_name, feature
-                    ))),
-                    Err(e) => Err(CamelError::RouteError(format!(
-                        "Failed to create mutating expression for language '{}': {}",
-                        language, e
-                    ))),
-                }
+                compile_script(ctx, &language, &script, step_index)
             }
 
             // ── ClaimCheck ──
@@ -723,12 +665,44 @@ impl StepCompiler for CoreCompiler {
     }
 }
 
+/// Compile a script step through one shared path for both `BuilderStep::Script`
+/// and `BuilderStep::DeclarativeScript`.
+///
+/// A `script` step requires its language to implement `MutatingExpression`.
+/// A read-only language is rejected with the shared capability message; the
+/// step is never silently downgraded to a `SetBody` read-only evaluation.
+fn compile_script(
+    ctx: &CompilationContext,
+    language: &str,
+    source: &str,
+    step_index: usize,
+) -> Result<CompileOutcome, CamelError> {
+    let meta = eval_meta(ctx, language, "script", step_index, None);
+    let lang = resolve_language(ctx.languages, language)?;
+    match lang.create_mutating_expression(source) {
+        Ok(mut_expr) => Ok(CompileOutcome::Matched(CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
+            processor: BoxProcessor::new(ScriptMutator::with_meta(mut_expr, meta)),
+            body_contract: None,
+            lifecycle: None,
+            label: None,
+            to_uri: None,
+        })),
+        Err(LanguageError::NotSupported { .. }) => Err(CamelError::RouteError(format!(
+            "script: language '{language}' does not support mutating expressions; a `script` step requires a language that implements MutatingExpression. To replace the body with a read-only expression, use a `set_body`/`transform` step with this language instead"
+        ))),
+        Err(e) => Err(CamelError::RouteError(format!(
+            "Failed to create mutating expression for language '{language}': {e}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
-    use camel_api::{CamelError, Exchange, LanguageExpressionDef, Message, ProducerContext};
+    use camel_api::{CamelError, Exchange, LanguageExpressionDef, Message, ProducerContext, Value};
     use camel_bean::BeanRegistry;
     use camel_component_api::{
         ComponentContext, NoOpComponentContext, RuntimeObservability,
@@ -1216,6 +1190,366 @@ mod tests {
         assert!(
             matches!(compiled, CompiledStep::Segment { .. }),
             "expected CompiledStep::Segment, got {compiled:?}"
+        );
+    }
+
+    // ---- script compiler (Task 2.1) test support ----
+
+    /// Build a `CompilationContext` with the given language registry.
+    fn script_ctx(langs: Vec<(&str, Arc<dyn Language>)>) -> CompilationContext<'static> {
+        use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
+
+        let mut map: HashMap<String, Arc<dyn Language>> = HashMap::new();
+        for (name, lang) in langs {
+            map.insert(name.to_string(), lang);
+        }
+        let languages: &'static SharedLanguageRegistry =
+            Box::leak(Box::new(Arc::new(Mutex::new(map))));
+        let producer_ctx: &'static ProducerContext =
+            Box::leak(Box::new(ProducerContext::default()));
+        let staging: &'static FunctionStagingMode =
+            Box::leak(Box::new(FunctionStagingMode::DirectAdd));
+        let beans: &'static Arc<Mutex<BeanRegistry>> =
+            Box::leak(Box::new(Arc::new(Mutex::new(BeanRegistry::new()))));
+        let idempotent: &'static crate::IdempotentRegistry =
+            Box::leak(Box::new(crate::IdempotentRegistry::new()));
+        let claim_check: &'static crate::ClaimCheckRegistry =
+            Box::leak(Box::new(crate::ClaimCheckRegistry::new()));
+        let cache: &'static crate::CacheRegistry = Box::leak(Box::new(crate::CacheRegistry::new()));
+
+        CompilationContext {
+            producer_ctx,
+            rt: Arc::new(NoopRuntimeObservability),
+            languages,
+            beans,
+            function_invoker: None,
+            component_ctx: Arc::new(NoOpComponentContext),
+            route_id: None,
+            staging_mode: staging,
+            idempotent_repositories: idempotent,
+            claim_check_repositories: claim_check,
+            cache_repositories: cache,
+            intercept: crate::intercept::InterceptRules::default(),
+        }
+    }
+
+    fn simple_language() -> Arc<dyn Language> {
+        Arc::new(camel_language_simple::SimpleLanguage::new())
+    }
+
+    fn compile_script_step(
+        reg: &StepCompilerRegistry,
+        step: BuilderStep,
+        ctx: &CompilationContext<'_>,
+    ) -> Result<CompiledStep, CamelError> {
+        reg.compile_step(step, 0, ctx)?
+            .ok_or_else(|| CamelError::Config("step was not handled by CoreCompiler".into()))
+    }
+
+    /// A test language whose `create_mutating_expression` fails before a
+    /// processor exists (`EvalError("boom")`).
+    struct CreationFailLanguage;
+
+    impl Language for CreationFailLanguage {
+        fn name(&self) -> &'static str {
+            "creationfail"
+        }
+
+        fn create_expression(
+            &self,
+            _script: &str,
+        ) -> Result<Box<dyn camel_language_api::Expression>, camel_language_api::LanguageError>
+        {
+            Ok(Box::new(ScriptStubExpression))
+        }
+
+        fn create_predicate(
+            &self,
+            _script: &str,
+        ) -> Result<Box<dyn camel_language_api::Predicate>, camel_language_api::LanguageError>
+        {
+            Ok(Box::new(ScriptStubPredicate))
+        }
+
+        fn create_mutating_expression(
+            &self,
+            _script: &str,
+        ) -> Result<
+            Box<dyn camel_language_api::MutatingExpression>,
+            camel_language_api::LanguageError,
+        > {
+            Err(camel_language_api::LanguageError::EvalError("boom".into()))
+        }
+    }
+
+    /// A test language whose mutating expression is created successfully but
+    /// fails when evaluated (`EvalError("boom")`).
+    struct EvalFailLanguage;
+
+    impl Language for EvalFailLanguage {
+        fn name(&self) -> &'static str {
+            "evalfail"
+        }
+
+        fn create_expression(
+            &self,
+            _script: &str,
+        ) -> Result<Box<dyn camel_language_api::Expression>, camel_language_api::LanguageError>
+        {
+            Ok(Box::new(ScriptStubExpression))
+        }
+
+        fn create_predicate(
+            &self,
+            _script: &str,
+        ) -> Result<Box<dyn camel_language_api::Predicate>, camel_language_api::LanguageError>
+        {
+            Ok(Box::new(ScriptStubPredicate))
+        }
+
+        fn create_mutating_expression(
+            &self,
+            _script: &str,
+        ) -> Result<
+            Box<dyn camel_language_api::MutatingExpression>,
+            camel_language_api::LanguageError,
+        > {
+            Ok(Box::new(EvalFailExpr))
+        }
+    }
+
+    struct EvalFailExpr;
+
+    #[async_trait::async_trait]
+    impl camel_language_api::MutatingExpression for EvalFailExpr {
+        async fn evaluate(
+            &self,
+            _exchange: &mut Exchange,
+        ) -> Result<Value, camel_language_api::LanguageError> {
+            Err(camel_language_api::LanguageError::EvalError("boom".into()))
+        }
+    }
+
+    struct ScriptStubExpression;
+
+    #[async_trait::async_trait]
+    impl camel_language_api::Expression for ScriptStubExpression {
+        async fn evaluate(
+            &self,
+            _exchange: &Exchange,
+        ) -> Result<Value, camel_language_api::LanguageError> {
+            Ok(Value::Null)
+        }
+    }
+
+    struct ScriptStubPredicate;
+
+    #[async_trait::async_trait]
+    impl camel_language_api::Predicate for ScriptStubPredicate {
+        async fn matches(
+            &self,
+            _exchange: &Exchange,
+        ) -> Result<bool, camel_language_api::LanguageError> {
+            Ok(false)
+        }
+    }
+
+    /// Read-only language: both builder variants must fail before execution
+    /// with the shared capability message, never silently replace the body.
+    #[test]
+    fn compile_script_rejects_non_mutating_language() {
+        let ctx = script_ctx(vec![("simple", simple_language())]);
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+
+        let err = reg
+            .compile_step(
+                BuilderStep::DeclarativeScript {
+                    expression: LanguageExpressionDef {
+                        language: "simple".into(),
+                        source: "${body}".into(),
+                    },
+                },
+                0,
+                &ctx,
+            )
+            .expect_err("a read-only language must be rejected at compile time");
+
+        const EXPECTED: &str = "script: language 'simple' does not support mutating expressions; a `script` step requires a language that implements MutatingExpression. To replace the body with a read-only expression, use a `set_body`/`transform` step with this language instead";
+        match err {
+            CamelError::RouteError(msg) => assert_eq!(msg, EXPECTED),
+            other => panic!("expected RouteError, got {other:?}"),
+        }
+    }
+
+    /// `Script` and `DeclarativeScript` share one compiler, so equivalent
+    /// read-only inputs produce byte-identical errors.
+    #[test]
+    fn compile_script_both_variants_byte_identical() {
+        let ctx = script_ctx(vec![("simple", simple_language())]);
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+
+        let err_script = reg
+            .compile_step(
+                BuilderStep::Script {
+                    language: "simple".into(),
+                    script: "${body}".into(),
+                },
+                0,
+                &ctx,
+            )
+            .expect_err("Script with a read-only language must fail");
+        let err_declarative = reg
+            .compile_step(
+                BuilderStep::DeclarativeScript {
+                    expression: LanguageExpressionDef {
+                        language: "simple".into(),
+                        source: "${body}".into(),
+                    },
+                },
+                0,
+                &ctx,
+            )
+            .expect_err("DeclarativeScript with a read-only language must fail");
+
+        assert_eq!(err_script.to_string(), err_declarative.to_string());
+    }
+
+    /// A custom mutating language compiles to a processor that really mutates
+    /// the exchange.
+    #[tokio::test]
+    async fn compile_script_custom_mutating_language_executes_mutation() {
+        use crate::lifecycle::adapters::step_resolution::MutatingTestLanguage;
+        use tower::ServiceExt;
+
+        let ctx = script_ctx(vec![(
+            "testmut",
+            Arc::new(MutatingTestLanguage) as Arc<dyn Language>,
+        )]);
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+
+        let compiled = compile_script_step(
+            &reg,
+            BuilderStep::DeclarativeScript {
+                expression: LanguageExpressionDef {
+                    language: "testmut".into(),
+                    source: "body = 1;".into(),
+                },
+            },
+            &ctx,
+        )
+        .expect("mutating language must compile");
+
+        let processor = match compiled {
+            CompiledStep::Process { processor, .. } => processor,
+            other => panic!("expected CompiledStep::Process, got {other:?}"),
+        };
+
+        let result = processor
+            .oneshot(Exchange::default())
+            .await
+            .expect("mutating script must execute");
+        assert_eq!(
+            result.property("testmut"),
+            Some(&Value::String("ran".into()))
+        );
+    }
+
+    /// A runtime evaluation failure propagates as `ExpressionFailed` carrying
+    /// the language and `script` verb from the compile-time metadata.
+    #[tokio::test]
+    async fn compile_script_mutating_eval_error_propagates_with_metadata() {
+        use tower::ServiceExt;
+
+        let ctx = script_ctx(vec![(
+            "evalfail",
+            Arc::new(EvalFailLanguage) as Arc<dyn Language>,
+        )]);
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+
+        let compiled = compile_script_step(
+            &reg,
+            BuilderStep::DeclarativeScript {
+                expression: LanguageExpressionDef {
+                    language: "evalfail".into(),
+                    source: "x".into(),
+                },
+            },
+            &ctx,
+        )
+        .expect("creation succeeds; failure happens at evaluation");
+
+        let processor = match compiled {
+            CompiledStep::Process { processor, .. } => processor,
+            other => panic!("expected CompiledStep::Process, got {other:?}"),
+        };
+
+        let result = processor.oneshot(Exchange::default()).await;
+        match result {
+            Err(CamelError::ExpressionFailed { language, verb, .. }) => {
+                assert_eq!(language, "evalfail");
+                assert_eq!(verb, "script");
+            }
+            other => panic!("expected ExpressionFailed, got {other:?}"),
+        }
+    }
+
+    /// A creation failure keeps its existing message and never builds a
+    /// processor.
+    #[test]
+    fn compile_script_creation_error_unchanged() {
+        let ctx = script_ctx(vec![(
+            "creationfail",
+            Arc::new(CreationFailLanguage) as Arc<dyn Language>,
+        )]);
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+
+        let err = reg
+            .compile_step(
+                BuilderStep::DeclarativeScript {
+                    expression: LanguageExpressionDef {
+                        language: "creationfail".into(),
+                        source: "x".into(),
+                    },
+                },
+                0,
+                &ctx,
+            )
+            .expect_err("creation failure must fail compilation");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Failed to create mutating expression for language 'creationfail'"),
+            "unexpected error: {msg}"
+        );
+        assert!(msg.contains("boom"), "unexpected error: {msg}");
+    }
+
+    /// An unknown language keeps the existing resolution error.
+    #[test]
+    fn compile_script_unknown_language_error_unchanged() {
+        let ctx = script_ctx(vec![]);
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+
+        let err = reg
+            .compile_step(
+                BuilderStep::Script {
+                    language: "nope".into(),
+                    script: "x".into(),
+                },
+                0,
+                &ctx,
+            )
+            .expect_err("unknown language must fail resolution");
+
+        assert!(
+            err.to_string().contains("not registered"),
+            "unexpected error: {err}"
         );
     }
 

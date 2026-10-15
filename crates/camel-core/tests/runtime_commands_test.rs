@@ -21,6 +21,55 @@ use camel_core::{
 };
 use tokio::sync::RwLock;
 
+/// File-local mutating language used to exercise the `script` canonical step.
+/// `simple` is read-only, so the canonical `script` step requires a language
+/// that opts in to `MutatingExpression`.
+struct TestMutLang;
+
+impl camel_language_api::Language for TestMutLang {
+    fn name(&self) -> &'static str {
+        "testmut"
+    }
+
+    fn create_expression(
+        &self,
+        _script: &str,
+    ) -> Result<Box<dyn camel_language_api::Expression>, camel_language_api::LanguageError> {
+        Err(camel_language_api::LanguageError::EvalError(
+            "testmut create_expression is not used".into(),
+        ))
+    }
+
+    fn create_predicate(
+        &self,
+        _script: &str,
+    ) -> Result<Box<dyn camel_language_api::Predicate>, camel_language_api::LanguageError> {
+        Err(camel_language_api::LanguageError::EvalError(
+            "testmut create_predicate is not used".into(),
+        ))
+    }
+
+    fn create_mutating_expression(
+        &self,
+        _script: &str,
+    ) -> Result<Box<dyn camel_language_api::MutatingExpression>, camel_language_api::LanguageError>
+    {
+        Ok(Box::new(TestMutExpr))
+    }
+}
+
+struct TestMutExpr;
+
+#[async_trait]
+impl camel_language_api::MutatingExpression for TestMutExpr {
+    async fn evaluate(
+        &self,
+        _exchange: &mut camel_api::Exchange,
+    ) -> Result<camel_api::Value, camel_language_api::LanguageError> {
+        Ok(camel_api::Value::Null)
+    }
+}
+
 fn simple_languages() -> camel_core::route_controller::SharedLanguageRegistry {
     let mut map: std::collections::HashMap<String, Arc<dyn camel_language_api::Language>> =
         std::collections::HashMap::new();
@@ -28,6 +77,7 @@ fn simple_languages() -> camel_core::route_controller::SharedLanguageRegistry {
         "simple".to_string(),
         Arc::new(camel_language_simple::SimpleLanguage::new()),
     );
+    map.insert("testmut".to_string(), Arc::new(TestMutLang));
     Arc::new(std::sync::Mutex::new(map))
 }
 
@@ -777,7 +827,7 @@ async fn register_route_accepts_advanced_canonical_steps() {
             },
             CanonicalStepSpec::Script {
                 expression: LanguageExpressionDef {
-                    language: "simple".to_string(),
+                    language: "testmut".to_string(),
                     source: "${body}".to_string(),
                 },
             },

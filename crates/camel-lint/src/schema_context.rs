@@ -594,4 +594,30 @@ mod tests {
             "step arrays remain containers"
         );
     }
+
+    #[test]
+    fn set_body_data_container_classification_unchanged() {
+        assert!(CONTAINER_KEYS.contains("set_body"));
+        assert!(CONTAINER_KEYS.contains("transform"));
+
+        let set_body_data = SCHEMA
+            .pointer("/$defs/SetBodyData")
+            .expect("SetBodyData def exists");
+        assert!(
+            is_container(set_body_data, &SCHEMA),
+            "SetBodyData stays a container"
+        );
+
+        let literal_branch = SCHEMA
+            .pointer("/$defs/SetBodyData/anyOf/1")
+            .expect("literal branch");
+        assert!(
+            !is_container(literal_branch, &SCHEMA),
+            "the literal branch is not a container"
+        );
+        assert!(
+            !is_free_form(literal_branch),
+            "the literal branch is not free-form"
+        );
+    }
 }

@@ -73,6 +73,23 @@ as a literal.
 _Avoid_: template every bare string (only top-level `${}`-bearing strings are
 gated; nested strings and plain top-level strings are byte-identical)
 
+**object literal wrapper gate**:
+A mapping directly under `set_body` or `transform` is always value-source config
+(`SetBodyConfig`), never an implicit literal object. An object body therefore
+requires the `value:` wrapper (`set_body: {value: {constant: ok}}`). A bare map
+such as `set_body: {constant: ok}` fails closed at lowering with
+`CamelError::RouteError`; the error names the unknown key, the valid
+alternatives, and the `value:` hint. Object literals nested inside arrays stay
+literal, because the gate applies only to the map directly under the verb. This
+is a BREAKING gate: a formerly accepted bare map that became a JSON body now
+fails to compile. See also **bare top-level string value gate**, the sibling
+string gate. The broad TypeScript binding `schemas/ts/SetBodyData.ts`
+(`SetBodyConfig | JsonValue`) is advisory; the generated
+`schemas/dsl/route-schema.json` is the enforcement artifact that restricts the
+literal alternative to string, number, boolean, array, and null. (rc-me8oe)
+_Avoid_: config-only set_body (bare objects remain valid only inside `value:`),
+strict SetBodyData (the TS binding is not the enforcing contract)
+
 **route discovery (env-injected)**:
 `discover_routes_with_threshold_security_and_env(patterns,
 stream_cache_threshold, security_ctx, env_lookup)`: the hermetic discovery

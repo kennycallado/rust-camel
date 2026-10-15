@@ -103,7 +103,8 @@ pub enum BuilderStep {
         whens: Vec<DeclarativeWhenStep>,
         otherwise: Option<Vec<BuilderStep>>,
     },
-    /// Declarative script step evaluated by language and written to body.
+    /// Declarative script step. The language must support mutating expressions,
+    /// and the step writes the Exchange back.
     DeclarativeScript {
         expression: LanguageExpressionDef,
     },

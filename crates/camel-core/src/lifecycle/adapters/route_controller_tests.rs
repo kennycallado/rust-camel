@@ -278,6 +278,10 @@ fn resolve_steps_covers_declarative_and_eip_variants() {
 
     let mut controller = build_controller_with_components();
     register_simple_language(&mut controller);
+    controller.languages.lock().expect("languages lock").insert(
+        "testmut".into(),
+        Arc::new(crate::lifecycle::adapters::step_resolution::MutatingTestLanguage),
+    );
 
     let expr = |source: &str| LanguageExpressionDef {
         language: "simple".into(),
@@ -316,7 +320,10 @@ fn resolve_steps_covers_declarative_and_eip_variants() {
             otherwise: Some(vec![BuilderStep::Stop]),
         },
         BuilderStep::DeclarativeScript {
-            expression: expr("${body}"),
+            expression: LanguageExpressionDef {
+                language: "testmut".into(),
+                source: "${body}".into(),
+            },
         },
         BuilderStep::Split {
             config: SplitterConfig::new(split_body_lines())
@@ -3737,6 +3744,13 @@ async fn wired_bus_and_controller(
         registry,
         Arc::new(camel_api::NoopPlatformService::default()),
     );
+    // Canonical routes can carry a `script` step whose language must be
+    // resolvable at route-add time; seed `simple` so a read-only script is
+    // rejected by capability (not by an unresolved-language error).
+    controller.languages.lock().expect("languages lock").insert(
+        "simple".into(),
+        Arc::new(camel_language_simple::SimpleLanguage::new()),
+    );
     let (ctrl_handle, _actor_join) = spawn_controller_actor(controller);
     let store = InMemoryRuntimeStore::default();
     let execution: std::sync::Arc<dyn crate::lifecycle::application::ports::RuntimeExecutionPort> =
@@ -3797,6 +3811,121 @@ async fn register_route_via_bus(
     RouteRegistrationPort::register_route(bus, def)
         .await
         .expect("register route through the bus");
+}
+
+/// A canonical `script` step whose language cannot mutate is rejected at the
+/// bus boundary. The durable aggregate is compensated to `Failed` and the
+/// runtime side effect never lands.
+#[tokio::test]
+async fn canonical_script_readonly_language_rejected_through_bus() {
+    use camel_api::runtime::CanonicalStepSpec;
+    use camel_api::{CanonicalRouteSpec, LanguageExpressionDef};
+
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    let (bus, ctrl_handle) = wired_bus_and_controller(registry).await;
+
+    let mut spec = CanonicalRouteSpec::new("canon-script", "timer:tick");
+    spec.steps = vec![CanonicalStepSpec::Script {
+        expression: LanguageExpressionDef {
+            language: "simple".into(),
+            source: "${body}".into(),
+        },
+    }];
+
+    let err = bus
+        .execute(RuntimeCommand::RegisterRoute {
+            spec,
+            command_id: "canon-script-1".into(),
+            causation_id: None,
+        })
+        .await
+        .expect_err("a read-only script language must be rejected");
+    assert!(
+        err.to_string()
+            .contains("does not support mutating expressions"),
+        "unexpected error: {err}"
+    );
+
+    // Compensation (commands.rs): the durable aggregate is marked Failed.
+    match bus
+        .ask(camel_api::RuntimeQuery::GetRouteStatus {
+            route_id: "canon-script".into(),
+        })
+        .await
+        .expect("status query")
+    {
+        camel_api::RuntimeQueryResult::RouteStatus { status, .. } => {
+            assert_eq!(status, "Failed", "compensated aggregate must be Failed")
+        }
+        other => panic!("unexpected query result: {other:?}"),
+    }
+
+    // The runtime side effect is absent. `CamelError` is not `PartialEq`, so
+    // equality against `Ok(..)` would not compile — use `matches!`.
+    assert!(
+        matches!(ctrl_handle.route_exists("canon-script").await, Ok(false)),
+        "rejected route must not be registered in the runtime"
+    );
+    assert!(
+        matches!(ctrl_handle.route_count().await, Ok(0)),
+        "rejected route must leave the route count at zero"
+    );
+}
+
+/// A rejected dry compile must not disturb the retained route: the same route
+/// id keeps its original pipeline. `compile_route_definition` stages through
+/// `DryCompile` — the same staging hot reload uses before a swap.
+#[tokio::test]
+async fn dry_compile_rejected_script_replacement_preserves_route() {
+    use camel_api::{Body, LanguageExpressionDef};
+    use tower::ServiceExt;
+
+    let mut controller = build_controller_with_components();
+    register_simple_language(&mut controller);
+
+    controller
+        .add_route(
+            RouteDefinition::new(
+                "timer:tick",
+                vec![BuilderStep::DeclarativeSetBody {
+                    value: ValueSourceDef::Literal(serde_json::json!("keep")),
+                }],
+            )
+            .with_route_id("keep"),
+        )
+        .await
+        .expect("retained route must register");
+
+    let err = controller
+        .compile_route_definition(
+            RouteDefinition::new(
+                "timer:tick",
+                vec![BuilderStep::DeclarativeScript {
+                    expression: LanguageExpressionDef {
+                        language: "simple".into(),
+                        source: "${body}".into(),
+                    },
+                }],
+            )
+            .with_route_id("keep"),
+        )
+        .expect_err("a read-only script language must be rejected");
+    assert!(
+        err.to_string()
+            .contains("does not support mutating expressions"),
+        "unexpected error: {err}"
+    );
+
+    let pipeline = controller.get_pipeline("keep").expect("route retained");
+    let out = pipeline
+        .oneshot(Exchange::new(Message::new("ignored")))
+        .await
+        .expect("retained pipeline must execute");
+    assert!(
+        matches!(&out.input.body, Body::Text(s) if s == "keep"),
+        "retained route must keep processing, got {:?}",
+        out.input.body
+    );
 }
 
 #[tokio::test]

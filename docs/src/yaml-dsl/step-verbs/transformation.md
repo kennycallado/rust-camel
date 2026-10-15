@@ -13,6 +13,10 @@ template. A nested literal string stays literal. See
     simple: "${body.field}"
 ```
 
+> **Migration (BREAKING)**. Replace `script:` that uses
+> simple/jsonpath/xpath/minijinja with `transform: {language, source}`.
+> The behavior is identical.
+
 ## `marshal`
 Serialize the body to a data format.
 
@@ -51,11 +55,11 @@ Convert the body type.
 ```
 
 ## `script`
-Run a script inline.
+Run a mutating script inline. The script writes the Exchange back.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `language` | string | yes | Script language (`rhai`, ...) |
+| `language` | string | yes | Script language; must support mutating expressions (`rhai`, `js`) |
 | `source` | string | yes | Script source |
 
 ```yaml

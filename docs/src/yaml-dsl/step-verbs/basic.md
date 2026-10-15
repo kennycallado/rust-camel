@@ -124,13 +124,18 @@ Set an exchange property. Same expression fields as `set_header` but keyed by
 ## `set_body`
 Set the exchange body.
 
+A mapping under `set_body` is always `SetBodyConfig` config, never an implicit
+literal body. The config form accepts `value` plus any expression field
+(`simple`, `rhai`, `jsonpath`, `xpath`, `language`+`source`).
+
 | Form | Syntax |
 |---|---|
-| Literal | `set_body: "value"` |
-| Config | `set_body: { value: ... }` or `set_body: { simple: "..." }` |
+| Scalar | `set_body: "value"` |
+| Config mapping | `set_body: { value: ... }` or `set_body: { simple: "..." }` |
 
-The config form accepts `value` plus any expression field (`simple`, `rhai`,
-`jsonpath`, `xpath`, `language`+`source`).
+> **Migration (BREAKING)**. Wrap object literals in `value:`
+> (`set_body: {value: {constant: ok}}`). A bare mapping such as
+> `set_body: {constant: ok}` now fails to compile.
 
 ```yaml
 - set_body: "static value"
@@ -138,6 +143,8 @@ The config form accepts `value` plus any expression field (`simple`, `rhai`,
     value: "Hello World!"
 - set_body:
     simple: "${header.foo}"
+- set_body:
+    value: { constant: ok }
 ```
 
 ## `stop`
