@@ -158,7 +158,8 @@ async fn http_static_shared_port_api_and_static() {
 
     registry
         .register_api_route("/api/hello".to_string(), api_tx)
-        .await;
+        .await
+        .expect("register API route");
 
     let client = reqwest::Client::new();
 

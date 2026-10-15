@@ -42,8 +42,7 @@ impl std::fmt::Debug for StaticMount {
 
 pub(crate) struct HttpRouteRegistryInner {
     /// Legacy path-keyed API route registry. Used for `http:` routes
-    /// registered without an `httpMethod=` URI param. Multiple routes on
-    /// the same path overwrite each other here.
+    /// registered without an `httpMethod=` URI param. Paths must be unique.
     pub api_routes: HashMap<String, mpsc::Sender<RequestEnvelope>>,
     /// Method-aware REST endpoint registry. Populated by REST-lowered
     /// `http:` routes (those whose URI carries `httpMethod=...`). Allows
@@ -111,9 +110,19 @@ impl HttpRouteRegistry {
         }
     }
 
-    pub async fn register_api_route(&self, path: String, sender: mpsc::Sender<RequestEnvelope>) {
+    pub async fn register_api_route(
+        &self,
+        path: String,
+        sender: mpsc::Sender<RequestEnvelope>,
+    ) -> Result<(), CamelError> {
         let mut inner = self.inner.write().await;
+        if inner.api_routes.contains_key(&path) {
+            return Err(CamelError::Config(format!(
+                "duplicate HTTP consumer path '{path}' on this listener"
+            )));
+        }
         inner.api_routes.insert(path, sender);
+        Ok(())
     }
 
     pub async fn unregister_api_route(&self, path: &str) {
@@ -122,26 +131,38 @@ impl HttpRouteRegistry {
     }
 
     /// Register a method-aware REST endpoint. Two endpoints on the same
-    /// path with different methods coexist; two endpoints with the same
-    /// `(method, path)` overwrite (last write wins), matching the
-    /// semantics expected for re-registration of the same logical route.
+    /// path with different methods coexist; duplicate `(method, segments)`
+    /// keys are rejected without replacing the original sender.
     pub async fn register_rest_endpoint(
         &self,
         method: String,
         segments: Vec<crate::rest_match::PathSegment>,
         sender: mpsc::Sender<RequestEnvelope>,
-    ) {
+    ) -> Result<(), CamelError> {
         let mut inner = self.inner.write().await;
-        // Drop any prior endpoint with the same (method, segments)
-        // signature so the new sender wins.
-        inner
+        if inner
             .rest_endpoints
-            .retain(|ep| !(ep.method == method && ep.segments == segments));
+            .iter()
+            .any(|ep| ep.method == method && ep.segments == segments)
+        {
+            let template = segments
+                .iter()
+                .map(|segment| match segment {
+                    crate::rest_match::PathSegment::Literal(value) => value.clone(),
+                    crate::rest_match::PathSegment::Param(name) => format!("{{{name}}}"),
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            return Err(CamelError::Config(format!(
+                "duplicate HTTP consumer endpoint '{method} /{template}' on this listener"
+            )));
+        }
         inner.rest_endpoints.push(RestEndpoint {
             method,
             segments,
             payload: sender,
         });
+        Ok(())
     }
 
     /// Remove the REST endpoint matching `(method, path_template)`.

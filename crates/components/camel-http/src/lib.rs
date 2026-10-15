@@ -1896,11 +1896,11 @@ impl Consumer for HttpConsumer {
             let segments = rest_match::parse_path_template(&self.config.path);
             registry
                 .register_rest_endpoint(method, segments, env_tx)
-                .await;
+                .await?;
         } else {
             registry
                 .register_api_route(self.config.path.clone(), env_tx)
-                .await;
+                .await?;
         }
 
         // rc-w1u9: Signal readiness AFTER (1) TcpListener::bind succeeded

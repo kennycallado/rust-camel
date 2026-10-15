@@ -7869,7 +7869,8 @@ async fn method_aware_dispatch_same_path_different_verbs() {
             vec![PathSegment::Literal("users".into())],
             get_tx,
         )
-        .await;
+        .await
+        .expect("unique HTTP registration");
 
     let (post_tx, post_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
     registry
@@ -7878,7 +7879,8 @@ async fn method_aware_dispatch_same_path_different_verbs() {
             vec![PathSegment::Literal("users".into())],
             post_tx,
         )
-        .await;
+        .await
+        .expect("unique HTTP registration");
 
     let get_handle = spawn_responder(get_rx, 200, "list".into());
     let post_handle = spawn_responder(post_rx, 201, "create".into());
@@ -7927,7 +7929,8 @@ async fn method_aware_dispatch_templated_path_extracts_params() {
             ],
             tx,
         )
-        .await;
+        .await
+        .expect("unique HTTP registration");
 
     // Spawn a responder that echoes the captured id back in the body
     // so the test can verify the param was set.
@@ -7977,7 +7980,8 @@ async fn method_aware_dispatch_unmatched_method_falls_through() {
             vec![PathSegment::Literal("users".into())],
             get_tx,
         )
-        .await;
+        .await
+        .expect("unique HTTP registration");
 
     // Drain the GET channel in the background so the consumer side
     // doesn't block (we don't expect any envelopes here).
@@ -8012,7 +8016,10 @@ async fn regression_legacy_exact_api_route_still_works() {
     let (port, registry) = spawn_test_server().await;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
-    registry.register_api_route("/legacy/path".into(), tx).await;
+    registry
+        .register_api_route("/legacy/path".into(), tx)
+        .await
+        .expect("unique HTTP registration");
 
     let handle = tokio::spawn(async move {
         match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
@@ -8109,7 +8116,8 @@ async fn deregister_one_method_keeps_sibling_verbs() {
             vec![PathSegment::Literal("users".into())],
             get_tx,
         )
-        .await;
+        .await
+        .expect("unique HTTP registration");
 
     let (post_tx, post_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
     registry
@@ -8118,7 +8126,8 @@ async fn deregister_one_method_keeps_sibling_verbs() {
             vec![PathSegment::Literal("users".into())],
             post_tx,
         )
-        .await;
+        .await
+        .expect("unique HTTP registration");
 
     // Drain GET in the background (no requests expected after deregister).
     let drain = tokio::spawn(async move {
@@ -8165,7 +8174,8 @@ async fn dispatch_exact_legacy_beats_rest_template() {
     let (exact_tx, exact_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
     registry
         .register_api_route("/api/users".into(), exact_tx)
-        .await;
+        .await
+        .expect("unique HTTP registration");
     let exact_handle = spawn_responder(exact_rx, 200, "exact".into());
 
     // Templated REST route that would ALSO match /api/users.
@@ -8179,7 +8189,8 @@ async fn dispatch_exact_legacy_beats_rest_template() {
             ],
             tpl_tx,
         )
-        .await;
+        .await
+        .expect("unique HTTP registration");
     // The templated handler must NOT receive the /api/users request. If
     // it does, it replies "template-leak" so a future assertion could
     // catch it. We do NOT await this task: the exact-match branch wins
@@ -8235,7 +8246,8 @@ async fn ambiguous_rest_templates_return_500_not_silent_404() {
             ],
             a_tx,
         )
-        .await;
+        .await
+        .expect("unique HTTP registration");
 
     let (b_tx, _b_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
     registry
@@ -8247,7 +8259,8 @@ async fn ambiguous_rest_templates_return_500_not_silent_404() {
             ],
             b_tx,
         )
-        .await;
+        .await
+        .expect("unique HTTP registration");
 
     let client = plain_http_test_client();
     let resp = client
@@ -9249,7 +9262,10 @@ async fn spawn_failing_auth_route(
         NativeCredentialStore::try_new(vec![]).unwrap(),
     ));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
-    registry.register_api_route(path.to_string(), tx).await;
+    registry
+        .register_api_route(path.to_string(), tx)
+        .await
+        .expect("unique HTTP registration");
     let path_owned = path.to_string();
     tokio::spawn(async move {
         loop {
@@ -9842,4 +9858,290 @@ fn test_dynamic_resolution_adds_no_unpinned_client_builds() {
          must reuse the component's shared unpinned client and build \
          no additional clients"
     );
+}
+
+async fn assert_consumer_reply(
+    port: u16,
+    path: &str,
+    method: reqwest::Method,
+    receiver: &mut tokio::sync::mpsc::Receiver<camel_component_api::ExchangeEnvelope>,
+    body: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let request = plain_http_test_client()
+            .request(method, format!("http://127.0.0.1:{port}{path}"))
+            .send();
+        let (response, ()) = tokio::join!(request, async {
+            let mut envelope = receiver
+                .recv()
+                .await
+                .expect("original pipeline receives request");
+            envelope.exchange.input.body = Body::Text(body.to_string());
+            envelope
+                .reply_tx
+                .expect("HTTP reply channel")
+                .send(Ok(envelope.exchange))
+                .expect("consumer awaiting pipeline reply");
+        });
+        let response = response.expect("HTTP response");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().await.expect("response body"), body);
+    })
+    .await
+    .expect("HTTP request and pipeline reply must complete");
+}
+
+async fn duplicate_consumer_preserves_original(method_aware: bool) {
+    use camel_component_api::{ConsumerContext, ExchangeEnvelope, StartupSignal};
+    use tokio_util::sync::CancellationToken;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage listener");
+    let path = if method_aware {
+        "/users/{id}"
+    } else {
+        "/duplicate"
+    };
+    let request_path = if method_aware { "/users/42" } else { path };
+    let uri = format!(
+        "http://127.0.0.1:{port}{path}{}",
+        if method_aware { "?httpMethod=GET" } else { "" }
+    );
+    let component = HttpComponent::new();
+    let make_consumer = |uri: &str| {
+        component
+            .create_endpoint(uri, &NoOpComponentContext)
+            .unwrap()
+            .create_consumer(test_rt())
+            .unwrap()
+    };
+    let spawn = |mut consumer: Box<dyn Consumer>, route_id: &str| {
+        let (tx, rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+        let token = CancellationToken::new();
+        let (signal, ready) = StartupSignal::pair();
+        let ctx =
+            ConsumerContext::new(tx, token.clone(), route_id.to_string()).with_startup(signal);
+        let task = tokio::spawn(async move { consumer.start(ctx).await });
+        (task, token, rx, ready)
+    };
+    let (original, original_token, mut original_rx, ready) = spawn(make_consumer(&uri), "original");
+    tokio::time::timeout(Duration::from_secs(2), ready.await_ready())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut sibling = if method_aware {
+        let post_uri = uri.replace("httpMethod=GET", "httpMethod=POST");
+        let (task, token, rx, ready) = spawn(make_consumer(&post_uri), "sibling");
+        tokio::time::timeout(Duration::from_secs(2), ready.await_ready())
+            .await
+            .unwrap()
+            .unwrap();
+        Some((task, token, rx))
+    } else {
+        None
+    };
+
+    let mut duplicate = make_consumer(&uri);
+    let (tx, _duplicate_rx) = tokio::sync::mpsc::channel::<ExchangeEnvelope>(16);
+    let duplicate_token = CancellationToken::new();
+    let (signal, duplicate_ready) = StartupSignal::pair();
+    let ctx = ConsumerContext::new(tx, duplicate_token.clone(), "duplicate".to_string())
+        .with_startup(signal);
+    let result = tokio::time::timeout(Duration::from_secs(2), duplicate.start(ctx)).await;
+    duplicate.stop().await.unwrap();
+    duplicate_token.cancel();
+    // Release resources before reporting the pre-fix behavioral failure.
+    if !matches!(&result, Ok(Err(_))) {
+        original_token.cancel();
+        tokio::time::timeout(Duration::from_secs(2), original)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let Some((task, token, _)) = sibling {
+            token.cancel();
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+        stop_duplicate_test_server(port).await;
+        panic!("duplicate consumer startup must return a configuration error before readiness");
+    }
+    let error = result
+        .unwrap()
+        .expect_err("duplicate consumer must fail startup");
+    assert!(matches!(error, CamelError::Config(_)), "{error:?}");
+    let message = error.to_string();
+    assert!(
+        message.contains("duplicate") && message.contains(path),
+        "{message}"
+    );
+    if method_aware {
+        assert!(message.contains("GET"), "{message}");
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), duplicate_ready.await_ready())
+            .await
+            .unwrap()
+            .is_err(),
+        "rejected consumer must never become ready"
+    );
+    assert_consumer_reply(
+        port,
+        request_path,
+        reqwest::Method::GET,
+        &mut original_rx,
+        "original",
+    )
+    .await;
+    original_token.cancel();
+    tokio::time::timeout(Duration::from_secs(2), original)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    if let Some((_, _, rx)) = sibling.as_mut() {
+        assert_consumer_reply(port, request_path, reqwest::Method::POST, rx, "sibling").await;
+    }
+
+    let (replacement, replacement_token, mut replacement_rx, ready) =
+        spawn(make_consumer(&uri), "original");
+    tokio::time::timeout(Duration::from_secs(2), ready.await_ready())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_consumer_reply(
+        port,
+        request_path,
+        reqwest::Method::GET,
+        &mut replacement_rx,
+        "replacement",
+    )
+    .await;
+    if let Some((_, _, rx)) = sibling.as_mut() {
+        assert_consumer_reply(port, request_path, reqwest::Method::POST, rx, "sibling").await;
+    }
+    replacement_token.cancel();
+    tokio::time::timeout(Duration::from_secs(2), replacement)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    if let Some((task, token, _)) = sibling {
+        token.cancel();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    stop_duplicate_test_server(port).await;
+}
+
+async fn stop_duplicate_test_server(port: u16) {
+    let cell = ServerRegistry::global()
+        .inner
+        .lock()
+        .unwrap()
+        .entries
+        .remove(&("127.0.0.1".to_string(), port))
+        .expect("test server entry");
+    let handle = Arc::try_unwrap(cell)
+        .unwrap_or_else(|_| panic!("test server no longer borrowed"))
+        .into_inner()
+        .expect("test server initialized");
+    handle.server_abort.abort();
+    tokio::time::timeout(Duration::from_secs(2), handle.monitor_task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_duplicate_legacy_consumer_preserves_original() {
+    let _guard = lock_registry_test_mutex();
+    duplicate_consumer_preserves_original(false).await;
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_duplicate_method_consumer_preserves_original() {
+    let _guard = lock_registry_test_mutex();
+    duplicate_consumer_preserves_original(true).await;
+}
+
+#[tokio::test]
+async fn test_duplicate_registry_registration_is_atomic() {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    for method_aware in [false, true] {
+        let registry = HttpRouteRegistry::new();
+        let (first_tx, mut first_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(1);
+        let (second_tx, mut second_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(1);
+        let register = |sender| {
+            let registry = &registry;
+            async move {
+                if method_aware {
+                    registry
+                        .register_rest_endpoint(
+                            "GET".into(),
+                            rest_match::parse_path_template("/users/{id}"),
+                            sender,
+                        )
+                        .await
+                } else {
+                    registry
+                        .register_api_route("/duplicate".into(), sender)
+                        .await
+                }
+            }
+        };
+        let guard = registry.inner.write().await;
+        let first = register(first_tx.clone());
+        let second = register(second_tx.clone());
+        tokio::pin!(first, second);
+        // Poll each future while the lock is held: both contenders must
+        // actually wait for the same write lock before either can insert.
+        poll_fn(|cx| {
+            assert!(first.as_mut().poll(cx).is_pending());
+            assert!(second.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(guard);
+        let (first_result, second_result) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .expect("concurrent registrations complete");
+        let (winner, rejected_result, rejected_rx) = match (first_result, second_result) {
+            (Ok(()), Err(error)) => (&first_tx, error, &mut second_rx),
+            (Err(error), Ok(())) => (&second_tx, error, &mut first_rx),
+            _ => panic!("exactly one duplicate registration must succeed"),
+        };
+        assert!(matches!(rejected_result, CamelError::Config(_)));
+        let guard = registry.inner.read().await;
+        let stored = if method_aware {
+            assert_eq!(guard.rest_endpoints.len(), 1);
+            assert!(guard.api_routes.is_empty());
+            &guard.rest_endpoints[0].payload
+        } else {
+            assert_eq!(guard.api_routes.len(), 1);
+            assert!(guard.rest_endpoints.is_empty());
+            &guard.api_routes["/duplicate"]
+        };
+        assert!(stored.same_channel(winner));
+        assert!(matches!(
+            rejected_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
 }

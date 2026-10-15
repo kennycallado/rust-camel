@@ -350,3 +350,13 @@ header-name policy as the reply finaliser (`header_policy`, ADR-0057) plus:
 
 - `stop: true` after `set_body` + `set_header("CamelHttpResponseCode", "409")` produces HTTP `409` + the body — identical to a route that reaches the end of the pipeline with the same Exchange state.
 - `stop: true` with no body and no status header produces HTTP `200` + empty body (NOT `204` — the legacy `204` default was Bug B adjacent behaviour, removed in Phase 3).
+
+## Consumer registration
+
+Each shared listener requires unique legacy path keys and unique method plus
+parsed path-template keys. Registration rejects duplicates atomically with
+`CamelError::Config` before Consumer readiness, preserving the original sender.
+Stopping a rejected Consumer leaves the original registered. Distinct methods
+coexist; orderly cancellation and completion free the key for a replacement.
+Legacy exact-path precedence and template ambiguity handling remain unchanged
+(ADR-0009, rc-om77p).
