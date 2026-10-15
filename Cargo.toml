@@ -286,8 +286,8 @@ ts-rs = "12"
 
 # WASM dependencies
 wit-bindgen = "0.61"
-wasmtime = { version = "49.0.2", features = ["component-model", "component-model-async"] }
-wasmtime-wasi = "49.0.2"
+wasmtime = { version = "49.0.3", features = ["component-model", "component-model-async"] }
+wasmtime-wasi = "49.0.3"
 
 # OpenTelemetry dependencies
 opentelemetry = { version = "0.33", features = ["trace", "logs", "metrics"] }
