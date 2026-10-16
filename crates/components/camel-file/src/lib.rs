@@ -479,7 +479,11 @@ struct FileUriConfig {
         desc = "Write timeout in milliseconds"
     )]
     write_timeout_ms: u64,
-    #[uri_param(name = "maxDepth", desc = "Maximum recursion depth for scanning")]
+    #[uri_param(
+        name = "maxDepth",
+        default = "18446744073709551615",
+        desc = "Maximum recursion depth for scanning"
+    )]
     max_depth: usize,
     #[uri_param(
         name = "minDepth",

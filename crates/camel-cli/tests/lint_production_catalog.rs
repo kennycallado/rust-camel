@@ -37,3 +37,38 @@ async fn production_catalog_reports_invalid_timer_option() {
     // The diagnostic points at the offending option key.
     assert_eq!(&source[unknown.span.start..unknown.span.end], "bogusOption");
 }
+
+/// Regression (rc-twzg9): the `file` catalog entry declared `maxDepth` as a
+/// non-`Option` field with no default, so the derive marked it required and
+/// every `file:` URI emitted a false `missing-required-option`, even though
+/// the runtime `from_uri` treats it as optional (`u64::MAX`). The attribute
+/// now carries `default = "18446744073709551615"`; a `file:` URI without
+/// `maxDepth` must lint clean.
+#[tokio::test]
+async fn production_catalog_file_without_max_depth_is_not_required() {
+    let engine = production_engine()
+        .await
+        .expect("production engine builds for catalog smoke test");
+
+    let source = "id: r1\nfrom: direct:start\nsteps:\n  - to: \"file:outbox?fileName=out.txt\"\n";
+    let diags = engine.lint(source);
+
+    // Guard against a vacuous pass: if the catalog did not know `file`, the
+    // URI would surface as an UnverifiedScheme note instead of being validated.
+    assert!(
+        !diags.iter().any(|d| matches!(
+            d.code,
+            DiagnosticCode::RUriKnown(UriKnownSubCode::UnverifiedScheme)
+        )),
+        "file scheme must be present in the production catalog; got: {diags:?}"
+    );
+
+    let missing: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == DiagnosticCode::RUriKnown(UriKnownSubCode::MissingRequiredOption))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "`file:` without maxDepth must not report missing-required-option; got: {missing:?}"
+    );
+}
