@@ -2639,6 +2639,108 @@ mod tests {
         }
     }
 
+    /// Representative [`CamelError`] for one supported exception kind, built
+    /// from the variant shape its `exception_kind_matches` arm expects.
+    /// Panics on an unknown kind so a vocabulary entry added without a
+    /// construction here fails loudly instead of silently falling through
+    /// the matcher's catch-all `_ => false`.
+    fn sample_error_for_kind(kind: &str) -> CamelError {
+        use std::sync::Arc;
+
+        match kind {
+            "ComponentNotFound" => CamelError::ComponentNotFound("x".into()),
+            "EndpointCreationFailed" => CamelError::EndpointCreationFailed("x".into()),
+            "ProcessorError" => CamelError::ProcessorError("x".into()),
+            "TypeConversionFailed" => CamelError::TypeConversionFailed("x".into()),
+            "InvalidUri" => CamelError::InvalidUri("x".into()),
+            "ChannelClosed" => CamelError::ChannelClosed,
+            "RouteError" => CamelError::RouteError("x".into()),
+            "Io" => CamelError::Io("x".into()),
+            "DeadLetterChannelFailed" => CamelError::DeadLetterChannelFailed("x".into()),
+            "CircuitOpen" => CamelError::CircuitOpen("x".into()),
+            "HttpOperationFailed" => CamelError::HttpOperationFailed {
+                method: "GET".into(),
+                url: "u".into(),
+                status_code: 500,
+                status_text: "s".into(),
+                response_body: None,
+            },
+            "ConsumerStopping" => CamelError::ConsumerStopping,
+            "Config" => CamelError::Config("x".into()),
+            "AlreadyConsumed" => CamelError::AlreadyConsumed,
+            "StreamLimitExceeded" => CamelError::StreamLimitExceeded(1),
+            "Unauthenticated" => CamelError::Unauthenticated("x".into()),
+            "Unauthorized" => CamelError::Unauthorized("x".into()),
+            "AuthProviderUnavailable" => CamelError::AuthProviderUnavailable("x".into()),
+            "UnsupportedMediaType" => CamelError::UnsupportedMediaType {
+                consumed: "text/plain".into(),
+                declared: "application/json".into(),
+            },
+            "NotAcceptable" => CamelError::NotAcceptable {
+                accept: "application/xml".into(),
+                produced: "application/json".into(),
+            },
+            "ProcessorErrorWithSource" => {
+                CamelError::ProcessorErrorWithSource("x".into(), Arc::new(DslTestSource))
+            }
+            "ValidationError" => CamelError::ValidationError("x".into()),
+            "ExpressionFailed" => CamelError::ExpressionFailed {
+                language: "rhai".into(),
+                route_id: "r1".into(),
+                step_id: "s1".into(),
+                verb: "set_body".into(),
+                class: camel_api::ExpressionErrorClass::Runtime,
+                position: None,
+                conversion: None,
+                cause: None,
+            },
+            _ => panic!("no sample error for supported kind '{kind}'"),
+        }
+    }
+
+    /// Behavior-consistency pin (bd rc-06bbx): every kind accepted by
+    /// `on_exceptions` must have a live `exception_kind_matches` arm — the
+    /// matcher's catch-all `_ => false` would otherwise accept a future
+    /// vocabulary entry that silently never matches. Also pins the
+    /// intentionally unmatchable kinds (rc-5u8co) and the pseudo-kind
+    /// "Stopped" (ADR-0024 arm removal) as absent from the vocabulary.
+    #[test]
+    fn every_supported_exception_kind_matches_some_error() {
+        for kind in supported_exception_kinds() {
+            let err = sample_error_for_kind(kind);
+            assert!(
+                exception_kind_matches(kind, &err),
+                "supported kind '{kind}' must match its representative error"
+            );
+        }
+
+        // Intentionally unmatchable, rejected as unknown kinds (rc-5u8co):
+        // startup fail-fast (ConfigValidation, EndpointUri) and deferred
+        // (TemplateReload) variants. Named literals stay explicit so a
+        // vocabulary promotion cannot slip through silently.
+        assert!(!supported_exception_kinds().contains(&"ConfigValidation"));
+        assert!(!exception_kind_matches(
+            "ConfigValidation",
+            &CamelError::ConfigValidation(
+                camel_api::ConfigValidationError::ThrottlerMaxRequestsZero
+            )
+        ));
+        assert!(!supported_exception_kinds().contains(&"EndpointUri"));
+        assert!(!exception_kind_matches(
+            "EndpointUri",
+            &CamelError::EndpointUri(camel_api::EndpointUriError::MissingScheme)
+        ));
+        assert!(!supported_exception_kinds().contains(&"TemplateReload"));
+        assert!(!exception_kind_matches(
+            "TemplateReload",
+            &CamelError::TemplateReload("x".into())
+        ));
+        // Pseudo-kind "Stopped" (ADR-0024): Stop is successful control flow,
+        // so CamelError has no Stopped variant — only vocabulary absence can
+        // be pinned.
+        assert!(!supported_exception_kinds().contains(&"Stopped"));
+    }
+
     #[test]
     fn test_compile_error_handler_http_error_kinds_match() {
         // rc-fu1of: the HTTP-relevant kinds (ValidationError → 400,
