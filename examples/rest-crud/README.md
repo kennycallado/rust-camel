@@ -118,7 +118,28 @@ rest:
     security_policy:
       roles: ["user"]
       provider: "native-demo"
-    # operations: identical to the public variant
+    operations:
+      - method: GET
+        operation_id: listUsers
+        to: direct:listUsers
+        produces: application/json
+      - method: POST
+        operation_id: createUser
+        consumes: application/json
+        produces: application/json
+        success_status: 201
+        to: direct:createUser
+      - method: PUT
+        path: /{id}
+        operation_id: updateUser
+        consumes: application/json
+        produces: application/json
+        to: direct:updateUser
+      - method: DELETE
+        path: /{id}
+        operation_id: deleteUser
+        to: direct:deleteUser
+        success_status: 204
 ```
 
 Lowering copies the block policy onto every lowered route, so all four

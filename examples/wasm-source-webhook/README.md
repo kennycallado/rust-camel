@@ -136,7 +136,7 @@ mirrors `examples/rest-crud/routes/secured.yaml`:
 
 ```yaml
 - from: wasm:wasm-source-webhook-guest.wasm?bind=127.0.0.1:8080&path=/webhook
-  route_id: webhook-source-route
+  id: webhook-source-route
   security_policy:
     roles: ["user"]
     provider: "native-demo"

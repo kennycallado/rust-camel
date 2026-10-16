@@ -6,7 +6,7 @@
 //! parser, and classifies every `script:` step by whether its language
 //! supports mutating expressions. Task 2.7 consumes the collector, the
 //! envelope selection and `classify_text` to build the per-site baseline
-//! ledger; this task supplies them plus the twenty-one `sweep_flags_*` fixtures.
+//! ledger; this task supplies them plus the `sweep_flags_*` fixtures.
 //!
 //! Envelope policy (design: `openspec/changes/364-simpleset/tasks.md`):
 //! - a mapping containing `routes`, `rest` or `mcp` is already complete;
@@ -768,7 +768,7 @@ mod sweep_io {
 }
 
 // ---------------------------------------------------------------------------
-// Regression fixtures (Task 2.6): twenty-one `sweep_flags_*` tests
+// Regression fixtures (Task 2.6): `sweep_flags_*` tests
 // ---------------------------------------------------------------------------
 
 fn parsed_scripts(text: &str, kind: DocKind) -> Vec<(String, Capability)> {
@@ -1654,38 +1654,16 @@ routes:
 /// assertion.
 ///
 /// These documents cannot yield a locally failing step because their failure is
-/// at the envelope/route level (`route_id`, a `from:` mapping, or a non-route
-/// fragment). The list is explicit and fixed — there is no blanket "skip on
-/// error" waiver. It is documented in
+/// at the envelope level: `docs/src/cli/job.md` fence 0 is a job document,
+/// valid per the `camel job` grammar but foreign to the route-DSL lens the
+/// sweep applies. The list is explicit and fixed — there is no blanket "skip
+/// on error" waiver. It is documented in
 /// `crates/camel-test/tests/fixtures/route_sweep_baseline.tsv`.
-///
-/// This is DISTINCT from `generic_parse_failure_allowed`: six of these entries
-/// MUST generic-parse and have their steps inspected; only `exec.md` fence 0 may
-/// also fail to generic-parse.
 fn key_only_baseline_keys() -> Vec<(String, String)> {
-    [
-        ("docs/src/cli/job.md", "0"),
-        ("docs/src/components/exec.md", "0"),
-        ("docs/src/yaml-dsl/top-level-blocks.md", "1"),
-        ("examples/rest-crud/README.md", "0"),
-        ("examples/hot-reload/routes/route.yaml", "file"),
-        ("examples/wasm-source-webhook/README.md", "0"),
-        ("examples/wasm-source-webhook/routes/webhook.yaml", "file"),
-    ]
-    .into_iter()
-    .map(|(path, fence)| (path.to_string(), fence.to_string()))
-    .collect()
-}
-
-/// The ONLY baseline entry whose document may fail to generic-parse:
-/// `docs/src/components/exec.md` fence 0 (a TOML-config + YAML-route mix that is
-/// not a single YAML document). Every other baseline entry MUST generic-parse
-/// and have its steps inspected.
-///
-/// This is a separate authority from `key_only_baseline_keys`: that list only
-/// waives the "at least one failing isolated step" assertion.
-fn generic_parse_failure_allowed(path: &str, fence_index: &str) -> bool {
-    path == "docs/src/components/exec.md" && fence_index == "0"
+    [("docs/src/cli/job.md", "0")]
+        .into_iter()
+        .map(|(path, fence)| (path.to_string(), fence.to_string()))
+        .collect()
 }
 
 /// Parse a document as a generic YAML/JSON value (`noyalib` is the workspace
@@ -1698,24 +1676,6 @@ fn parse_generic_value(text: &str, kind: DocKind) -> Result<serde_json::Value, S
                 serde_yml::from_str(text).map_err(|err| err.to_string())?;
             Ok(value)
         }
-    }
-}
-
-/// The guard's generic-parse handling for one entry.
-///
-/// `Ok(Some(value))` — parsed; `Ok(None)` — a generic parse failure explicitly
-/// permitted by `generic_parse_failure_allowed`; `Err(reason)` — a parse failure
-/// the guard must reject (never a silent catch-and-continue).
-fn guard_generic_value(
-    path: &str,
-    fence_index: &str,
-    text: &str,
-    kind: DocKind,
-) -> Result<Option<serde_json::Value>, String> {
-    match parse_generic_value(text, kind) {
-        Ok(value) => Ok(Some(value)),
-        Err(_) if generic_parse_failure_allowed(path, fence_index) => Ok(None),
-        Err(err) => Err(err),
     }
 }
 
@@ -1961,12 +1921,10 @@ fn baseline_entries_do_not_mask_change_owned_steps() {
             )
         });
 
-        // A generic-parse failure is permitted ONLY for `exec.md` fence 0
-        // (`generic_parse_failure_allowed`); every other entry — including the
-        // other six key-only entries — must generic-parse and be inspected.
-        let value = match guard_generic_value(&entry.path, &entry.fence_index, &raw, site.kind) {
-            Ok(Some(value)) => value,
-            Ok(None) => continue,
+        // Every baseline entry must generic-parse; a failure here is a guard
+        // error, never a silent skip.
+        let value = match parse_generic_value(&raw, site.kind) {
+            Ok(value) => value,
             Err(err) => panic!(
                 "route sweep guard: generic parse failed for baseline {}#{}: {err}",
                 entry.path, entry.fence_index
@@ -2014,40 +1972,14 @@ fn baseline_entries_do_not_mask_change_owned_steps() {
 }
 
 #[test]
-fn sweep_flags_generic_parse_exemption_is_exec_only() {
-    // Malformed YAML forces the guard's `Err` branch for every entry.
-    let malformed = "routes: [unterminated\n";
-
-    // All seven key-only entries plus `exec.md` fence 1 (a different fence of the
-    // only exempt document) must be rejected by the guard's parse branch.
-    let mut keys = key_only_baseline_keys();
-    keys.push(("docs/src/components/exec.md".to_string(), "1".to_string()));
-
-    let mut permitted = Vec::new();
-    for (path, fence_index) in &keys {
-        let expected = path == "docs/src/components/exec.md" && fence_index == "0";
-        assert_eq!(
-            generic_parse_failure_allowed(path, fence_index),
-            expected,
-            "predicate {path}#{fence_index}"
-        );
-
-        // Exercise the SAME helper the guard uses, on malformed input.
-        let outcome = guard_generic_value(path, fence_index, malformed, DocKind::Yaml);
-        let is_permitted = matches!(outcome, Ok(None));
-        assert_eq!(
-            is_permitted, expected,
-            "guard generic-parse branch {path}#{fence_index}"
-        );
-        if is_permitted {
-            permitted.push((path.clone(), fence_index.clone()));
-        }
-    }
-
+fn sweep_flags_key_only_baseline_is_job_doc_only() {
+    // The fixed key-only list is exactly the job-document entry: every other
+    // former key-only site was fixed and removed from the baseline, and the
+    // former `exec.md` fence 0 generic-parse exemption is gone with the
+    // TOML+YAML fence split.
     assert_eq!(
-        permitted,
-        vec![("docs/src/components/exec.md".to_string(), "0".to_string())],
-        "only exec.md fence 0 may be a permitted generic-parse failure"
+        key_only_baseline_keys(),
+        vec![("docs/src/cli/job.md".to_string(), "0".to_string())]
     );
 }
 

@@ -18,7 +18,8 @@ routes:
     steps:
       - set_body: "World"
       - set_header:
-          title: "Template Demo"
+          key: "title"
+          value: "Template Demo"
       - to: "template:file:///srv/templates/page.html.tmpl"
       - log: "Rendered template"
 ```

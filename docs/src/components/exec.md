@@ -61,9 +61,9 @@ async fn main() -> Result<(), CamelError> {
 ```
 
 <details>
-<summary>YAML equivalent</summary>
+<summary>Config and route equivalent</summary>
 
-```yaml
+```toml
 # Camel.toml
 [components.exec]
 workspace_root = "."
@@ -75,14 +75,16 @@ args = { allow = "any" }
 timeout_secs = 10
 working_dir = "."
 accepted_exit_codes = [0]
+```
 
+```yaml
 # Route
 routes:
   - id: exec-echo
     from: "timer:tick?period=500&repeatCount=1"
     steps:
-      - setHeader:
-          name: CamelExecArgs
+      - set_header:
+          key: CamelExecArgs
           value: ["-n", "Hello", "World"]
       - to: "exec:echo"
       - to: "log:info?showBody=true&showHeaders=true"

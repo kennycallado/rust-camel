@@ -34,7 +34,7 @@ routes:
       - loop:
           count: 3
           steps:
-            - process:
+            - script:
                 language: "rhai"
                 source: "let b = body().as_text().unwrap_or(\"\").to_string(); set_body(b + \"!\")"
       - to: "log:loop-result?showBody=true"

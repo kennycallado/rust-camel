@@ -8,11 +8,22 @@
 # Lines starting with `#` are comments. `reason` is error text only, never a raw
 # variable value.
 #
-# These 14 entries are pre-existing, change-unrelated parse failures. They are
+# These 4 entries are pre-existing, change-unrelated parse failures. They are
 # byte-identical at the change base 2b02ebde and in the working tree; none is a
 # site this change migrates. They are recorded, not fixed; tracked in bd
 # rc-b0kv3. BareMap, WrongType, NonMutating, CreationError, Unresolved and
 # complete routes this change owns are never listed here.
+#
+# The three `docs/src/components/ws-soap.md` entries remain pending mission
+# 361, which is editing that file. The other ten recorded entries were fixed
+# and removed from this baseline.
+#
+# `docs/src/cli/job.md` fence 0 is a job document: valid per the `camel job`
+# grammar (`crates/camel-cli/src/commands/job/document.rs`, which admits
+# `description`), but the sweep validates fences with the route-DSL parser,
+# which rejects the job-only `execute:`/`args:` envelope. No fence-side fix can
+# keep the document truthful, so the entry stays until the sweep grows a
+# job-document lens.
 #
 # `docs/src/components/opensearch.md` fence 0 is deliberately absent: it is the
 # migrated B2 site from Task 1.4, its remaining pre-existing `set_header` map was
@@ -22,23 +33,7 @@
 # these entries cannot yield an isolatable step, so they are checked by key only.
 # This is an explicit, fixed list, never a generic skip-on-error waiver:
 #   docs/src/cli/job.md 0
-#   docs/src/components/exec.md 0
-#   docs/src/yaml-dsl/top-level-blocks.md 1
-#   examples/rest-crud/README.md 0
-#   examples/hot-reload/routes/route.yaml file
-#   examples/wasm-source-webhook/README.md 0
-#   examples/wasm-source-webhook/routes/webhook.yaml file
 docs/src/cli/job.md	0	YAML DSL error: YAML parse error: unknown field: description
-docs/src/components/exec.md	0	YAML DSL error: YAML parse error: stray content after document — subsequent documents must start with '---' at line 3 column 1
-docs/src/components/keycloak.md	2	YAML DSL error: YAML parse error: routes[0].steps: data did not match any variant of untagged enum RouteDslStep at line 5 column 7
-docs/src/components/redis.md	0	YAML DSL error: YAML parse error: routes[0].steps: data did not match any variant of untagged enum RouteDslStep at line 5 column 7
-docs/src/components/template.md	0	YAML DSL error: YAML parse error: routes[0].steps: data did not match any variant of untagged enum RouteDslStep at line 5 column 7
 docs/src/components/ws-soap.md	0	YAML DSL error: YAML parse error: routes[1].steps: data did not match any variant of untagged enum RouteDslStep at line 9 column 7
 docs/src/components/ws-soap.md	1	YAML DSL error: YAML parse error: routes[0].from: type mismatch: expected string, found mapping at line 4 column 7
 docs/src/components/ws-soap.md	2	YAML DSL error: YAML parse error: routes[0].from: type mismatch: expected string, found mapping at line 4 column 7
-docs/src/yaml-dsl/top-level-blocks.md	1	YAML DSL error: YAML parse error: mcp: type mismatch: expected sequence, found mapping at line 2 column 3
-examples/hot-reload/routes/route.yaml	file	YAML DSL error: YAML parse error: unknown field: route_id
-examples/loop/README.md	0	YAML DSL error: YAML parse error: routes[0].steps: data did not match any variant of untagged enum RouteDslStep at line 5 column 7
-examples/rest-crud/README.md	0	YAML DSL error: rest block 0.0.0.0:9090/api/users: 'operations' must declare at least one verb (spec §6.3) — a REST block with no operations produces no routes
-examples/wasm-source-webhook/README.md	0	YAML DSL error: YAML parse error: unknown field: route_id
-examples/wasm-source-webhook/routes/webhook.yaml	file	YAML DSL error: YAML parse error: unknown field: route_id

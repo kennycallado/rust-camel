@@ -31,7 +31,7 @@ routes:
   - id: create-user
     from: "timer:tick?period=60000"
     steps:
-      - set-body: '{"username": "alice", "email": "alice@example.com", "enabled": true}'
+      - set_body: '{"username": "alice", "email": "alice@example.com", "enabled": true}'
       - to: "keycloak:admin?operation=createUser&realm=myrealm"
 ```
 

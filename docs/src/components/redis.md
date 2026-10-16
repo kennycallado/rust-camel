@@ -32,9 +32,11 @@ routes:
     from: "timer:tick?period=3000&repeatCount=3"
     steps:
       - set_header:
-          CamelRedis.Key: "greeting"
+          key: "CamelRedis.Key"
+          value: "greeting"
       - set_header:
-          CamelRedis.Value: "hello from rust-camel!"
+          key: "CamelRedis.Value"
+          value: "hello from rust-camel!"
       - to: "redis://127.0.0.1:6379?command=SET"
       - to: "log:info?showHeaders=true"
 ```

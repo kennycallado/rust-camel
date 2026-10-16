@@ -152,7 +152,7 @@ list of route objects:
 {{#include ../../../examples/hot-reload/routes/route.yaml:hot-reload-route}}
 ```
 
-Each entry uses `route_id` instead of `id` and carries `from` and `steps`. This
+Each entry uses `id` and carries `from` and `steps`. This
 list form maps to the canonical route contract the runtime exchanges over the
 control bus, not the full authoring model.
 

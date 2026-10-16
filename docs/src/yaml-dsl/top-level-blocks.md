@@ -91,20 +91,20 @@ The `mcp` key declares an MCP server catalog (ADR-0060). Each tool lowers to an 
 
 ```yaml
 mcp:
-  server:
-    name: crm
-    bind: 127.0.0.1:9100
-    security_policy: { roles: [mcp-client] }
-  tools:
-    - name: lookup
-      input_schema:
-        type: object
-        properties:
-          id: { type: string }
-        required: [id]
-  resources:
-    - name: customers
-      uri: crm://customers
+  - server:
+      name: crm
+      bind: 127.0.0.1:9100
+      security_policy: { roles: [mcp-client] }
+    tools:
+      - name: lookup
+        input_schema:
+          type: object
+          properties:
+            id: { type: string }
+          required: [id]
+    resources:
+      - name: customers
+        uri: crm://customers
 ```
 
 The input schema and resource URI travel percent-encoded on the lowered route's query string. Server runtime config (bind, TLS, caps) is owned by `Camel.toml` under `mcp.servers.<name>`; the block's server `name` must match a TOML key or the consumer start fails. The server `security_policy` propagates to every lowered route. See [MCP component](../components/mcp.md).
