@@ -100,10 +100,10 @@ impl PinnedClientCache {
     /// cached — the next call retries the build (moka `try_get_with`
     /// single-flight; `CamelError: Clone` maps the shared `Arc` back to
     /// an owned error). Only actual builds increment the build counter;
-    /// the increment sits inside the init future. When wired, each call
-    /// emits a miss (this caller ran the single-flight build) or a hit
-    /// (served by an existing entry) plus the current cache size;
-    /// unwired caches stay silent.
+    /// the increment sits inside the init future. When wired, a successful
+    /// call emits a miss (this caller ran the single-flight build) or a hit
+    /// (served by an existing entry) plus the current cache size; a failed
+    /// build emits neither hit nor miss. Unwired caches stay silent.
     pub(crate) async fn get_or_build(
         &self,
         host: &str,
@@ -123,7 +123,12 @@ impl PinnedClientCache {
             .await;
         if let Some((kind, metrics)) = self.wired.get() {
             if built.load(Ordering::Relaxed) {
-                metrics.increment_pinned_client_cache_miss(kind.as_str());
+                // The init future always sets `built` before `build()` runs,
+                // so a failed build has `built == true` yet caches nothing.
+                // Emit a miss only when the build actually succeeded.
+                if result.is_ok() {
+                    metrics.increment_pinned_client_cache_miss(kind.as_str());
+                }
             } else {
                 metrics.increment_pinned_client_cache_hit(kind.as_str());
             }
@@ -502,6 +507,32 @@ mod tests {
         assert!(
             cache.entry_count() <= 2,
             "max_capacity must bound retained entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_build_counts_neither_hit_nor_miss() {
+        let double = RecordingCollector::new();
+        let cache = PinnedClientCache::new(Duration::from_millis(50), 64);
+        cache.wire(HttpComponentKind::Http, double.clone());
+        let addr_a = addr("127.0.0.1:8081");
+        let result = cache
+            .get_or_build("api.example.com", &[addr_a], || {
+                Err(camel_api::CamelError::Config(
+                    "pinned build failed".to_string(),
+                ))
+            })
+            .await;
+        assert!(result.is_err(), "a failed pinned build must propagate");
+        assert_eq!(
+            double.count("miss:camel-http"),
+            0,
+            "a failed build caches nothing — it is not a miss"
+        );
+        assert_eq!(
+            double.count("hit:camel-http"),
+            0,
+            "a failed build serves nothing — it is not a hit"
         );
     }
 
