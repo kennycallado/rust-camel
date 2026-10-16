@@ -308,4 +308,137 @@ class SecurityProfileStoreTest {
         assertThrows(IllegalArgumentException.class, () -> createStore(env));
     assertTrue(ex.getMessage().contains("SIGNATURE_ALGORITHM"), ex.getMessage());
   }
+
+  @Test
+  @DisplayName("TLS keys are read and incomplete pairs are rejected")
+  void readsTlsKeysAndRejectsIncompletePair() {
+    // Valid: all six TLS keys parse, explicit types preserved.
+    Map<String, String> env = new HashMap<>();
+    env.put("CXF_PROFILES", "secure");
+    env.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PATH", ksFile.toString());
+    env.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PASSWORD", "kspass");
+    env.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_TYPE", "PKCS12");
+    env.put("CXF_PROFILE_SECURE_TLS_TRUSTSTORE_PATH", tsFile.toString());
+    env.put("CXF_PROFILE_SECURE_TLS_TRUSTSTORE_PASSWORD", "tspass");
+    env.put("CXF_PROFILE_SECURE_TLS_TRUSTSTORE_TYPE", "JKS");
+
+    SecurityProfile p = createStore(env).getProfile("secure");
+    assertEquals(ksFile.toString(), p.tlsKeystorePath());
+    assertEquals("kspass", p.tlsKeystorePassword());
+    assertEquals("PKCS12", p.tlsKeystoreType());
+    assertEquals(tsFile.toString(), p.tlsTruststorePath());
+    assertEquals("tspass", p.tlsTruststorePassword());
+    assertEquals("JKS", p.tlsTruststoreType());
+
+    // Type defaults to PKCS12 when omitted.
+    Map<String, String> defaults = new HashMap<>();
+    defaults.put("CXF_PROFILES", "secure");
+    defaults.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PATH", ksFile.toString());
+    defaults.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PASSWORD", "kspass");
+    assertEquals("PKCS12", createStore(defaults).getProfile("secure").tlsKeystoreType());
+
+    // Unknown type rejects before ready.
+    Map<String, String> badType = new HashMap<>();
+    badType.put("CXF_PROFILES", "secure");
+    badType.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PATH", ksFile.toString());
+    badType.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PASSWORD", "kspass");
+    badType.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_TYPE", "GARBAGE");
+    IllegalStateException typeEx =
+        assertThrows(IllegalStateException.class, () -> createStore(badType));
+    assertTrue(typeEx.getMessage().contains("GARBAGE"), typeEx.getMessage());
+
+    // Bidirectional rejection: path without password, then password without path.
+    Map<String, String> pathOnly = new HashMap<>();
+    pathOnly.put("CXF_PROFILES", "secure");
+    pathOnly.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PATH", ksFile.toString());
+    IllegalStateException pathEx =
+        assertThrows(IllegalStateException.class, () -> createStore(pathOnly));
+    assertTrue(pathEx.getMessage().contains("TLS_KEYSTORE_PASSWORD"), pathEx.getMessage());
+
+    Map<String, String> passwordOnly = new HashMap<>();
+    passwordOnly.put("CXF_PROFILES", "secure");
+    passwordOnly.put("CXF_PROFILE_SECURE_TLS_TRUSTSTORE_PASSWORD", "tspass");
+    IllegalStateException passEx =
+        assertThrows(IllegalStateException.class, () -> createStore(passwordOnly));
+    assertTrue(passEx.getMessage().contains("TLS_TRUSTSTORE_PATH"), passEx.getMessage());
+  }
+
+  /**
+   * Blank producer transport-TLS values both layers reject (N4 fail-closed parity): empty, ASCII
+   * whitespace, and Unicode White_Space members where Java's {@code String.isBlank} and Rust's
+   * {@code char::is_whitespace} disagree (NBSP U+00A0, NEL U+0085, mixed ASCII + U+202F).
+   */
+  private static final String[] BLANK_TLS_VALUES = {
+    "", " ", "\t", " \t\r\n", "\u00A0", "\u0085", " \u202F",
+  };
+
+  @Test
+  @DisplayName("producer transport TLS rejects explicitly blank store values (N4 parity)")
+  void producerTlsRejectsBlankStoreValues() {
+    // Blank keystore path beside an otherwise valid paired password.
+    for (String blank : BLANK_TLS_VALUES) {
+      Map<String, String> env = new HashMap<>();
+      env.put("CXF_PROFILES", "secure");
+      env.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PATH", blank);
+      env.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PASSWORD", "kspass");
+      IllegalStateException ex =
+          assertThrows(
+              IllegalStateException.class, () -> createStore(env), "blank keystore path: " + blank);
+      assertTrue(ex.getMessage().contains("TLS_KEYSTORE_PATH"), ex.getMessage());
+      assertTrue(ex.getMessage().contains("whitespace"), ex.getMessage());
+      // Non-echo is only meaningful for distinctive (non-ASCII) blanks; plain
+      // ASCII whitespace occurs in any message text.
+      if (blank.codePoints().anyMatch(cp -> cp > 127)) {
+        assertFalse(ex.getMessage().contains(blank), "error must not echo the value");
+      }
+    }
+
+    // Blank truststore password beside an otherwise valid paired path.
+    for (String blank : BLANK_TLS_VALUES) {
+      Map<String, String> env = new HashMap<>();
+      env.put("CXF_PROFILES", "secure");
+      env.put("CXF_PROFILE_SECURE_TLS_TRUSTSTORE_PATH", tsFile.toString());
+      env.put("CXF_PROFILE_SECURE_TLS_TRUSTSTORE_PASSWORD", blank);
+      IllegalStateException ex =
+          assertThrows(
+              IllegalStateException.class,
+              () -> createStore(env),
+              "blank truststore password: " + blank);
+      assertTrue(ex.getMessage().contains("TLS_TRUSTSTORE_PASSWORD"), ex.getMessage());
+      assertTrue(ex.getMessage().contains("whitespace"), ex.getMessage());
+      if (blank.codePoints().anyMatch(cp -> cp > 127)) {
+        assertFalse(ex.getMessage().contains(blank), "error must not echo the value");
+      }
+    }
+
+    // A both-blank pair previously passed validation and silently selected JVM
+    // store defaults on the Java side.
+    for (String blank : BLANK_TLS_VALUES) {
+      Map<String, String> env = new HashMap<>();
+      env.put("CXF_PROFILES", "secure");
+      env.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PATH", blank);
+      env.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PASSWORD", blank);
+      IllegalStateException ex =
+          assertThrows(
+              IllegalStateException.class,
+              () -> createStore(env),
+              "both-blank keystore pair: " + blank);
+      assertTrue(ex.getMessage().contains("TLS_KEYSTORE_PATH"), ex.getMessage());
+      assertTrue(ex.getMessage().contains("whitespace"), ex.getMessage());
+    }
+
+    // Genuine omission stays valid and nonblank password bytes are preserved
+    // verbatim (meaningful surrounding spaces are never trimmed).
+    Map<String, String> spaced = new HashMap<>();
+    spaced.put("CXF_PROFILES", "secure");
+    spaced.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PATH", ksFile.toString());
+    spaced.put("CXF_PROFILE_SECURE_TLS_KEYSTORE_PASSWORD", " pass word ");
+    SecurityProfile p = createStore(spaced).getProfile("secure");
+    assertEquals(" pass word ", p.tlsKeystorePassword());
+
+    Map<String, String> omitted = new HashMap<>();
+    omitted.put("CXF_PROFILES", "secure");
+    omitted.put("CXF_PROFILE_SECURE_KEYSTORE_PATH", ksFile.toString());
+    assertTrue(createStore(omitted).profiles().containsKey("secure"));
+  }
 }

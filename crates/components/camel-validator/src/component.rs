@@ -241,7 +241,11 @@ mod tests {
 
     #[async_trait]
     impl XsdBridge for MockXsdBridge {
-        async fn register(&self, _xsd_bytes: Vec<u8>) -> Result<String, ValidatorError> {
+        async fn register(
+            &self,
+            _schema_id: &str,
+            _set: &crate::schema_set::SchemaSet,
+        ) -> Result<String, ValidatorError> {
             self.register_calls.fetch_add(1, Ordering::SeqCst);
             if let Some(err) = &self.register_error {
                 return Err(err.clone());
@@ -562,6 +566,131 @@ mod tests {
         assert!(
             msg.contains("not yet supported"),
             "expected 'not yet supported' in error, got: {msg}"
+        );
+    }
+
+    // ── schemaAliases endpoint wiring ───────────────────────────────────
+
+    #[test]
+    fn xsd_mock_compiles_against_new_trait_signature() {
+        fn assert_xsd_bridge<T: XsdBridge>() {}
+        assert_xsd_bridge::<MockXsdBridge>();
+    }
+
+    #[test]
+    fn create_endpoint_rejects_malformed_alias_uri() {
+        // The XSD file exists; a malformed schemaAliases value must fail during
+        // URI parsing, BEFORE any discovery or bridge start, and name the
+        // option rather than surfacing as a missing-file error.
+        let f = xsd_file();
+        let uri = format!("validator:{}?schemaAliases=%7Bbad", f.path().display());
+        let err = ValidatorComponent::new()
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .err()
+            .expect("malformed schemaAliases must reject endpoint creation");
+        match err {
+            CamelError::InvalidUri(m) => assert!(
+                m.contains("schemaAliases"),
+                "error must name the schemaAliases option, got: {m}"
+            ),
+            other => panic!("expected InvalidUri, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn create_endpoint_rejects_alias_cap() {
+        let over_cap = crate::schema_set::MAX_SCHEMA_ALIASES + 1;
+
+        // URI surface: an over-cap `schemaAliases` JSON object must fail during
+        // URI parsing, naming the 128-entry cap before any bridge startup.
+        let mut obj = serde_json::Map::new();
+        for i in 0..over_cap {
+            obj.insert(
+                format!("urn:a{i}"),
+                serde_json::Value::String("a/parent.xsd".to_string()),
+            );
+        }
+        let json = serde_json::Value::Object(obj).to_string();
+        let encoded =
+            percent_encoding::utf8_percent_encode(&json, percent_encoding::NON_ALPHANUMERIC)
+                .to_string();
+        let uri = format!("validator:/nonexistent/root.xsd?schemaAliases={encoded}");
+        let err = ValidatorComponent::new()
+            .create_endpoint(&uri, &NoOpComponentContext)
+            .err()
+            .expect("an over-cap schemaAliases URI must reject endpoint creation");
+        match err {
+            CamelError::InvalidUri(m) => assert!(
+                m.contains("128"),
+                "parse error must name the 128-entry cap, got: {m}"
+            ),
+            other => panic!("expected InvalidUri for the URI surface, got: {other}"),
+        }
+
+        // Programmatic surface: the public `schema_aliases` field can be set
+        // past the cap on a directly constructed config. Compile must reject it
+        // through the config-level guard (a `CamelError::Config`) before it
+        // touches the filesystem, proving the guard is wired (not dead code):
+        // without it this would surface from discovery/FS as a different
+        // variant such as `EndpointCreationFailed`.
+        let mut aliases = std::collections::BTreeMap::new();
+        for i in 0..over_cap {
+            aliases.insert(format!("urn:a{i}"), "a/parent.xsd".to_string());
+        }
+        let cfg = ValidatorConfig {
+            schema_path: std::path::PathBuf::from("/nonexistent/root.xsd"),
+            schema_type: crate::config::SchemaType::Xml,
+            max_payload_bytes: None,
+            schema_cache_max_entries: crate::config::DEFAULT_SCHEMA_CACHE_MAX_ENTRIES,
+            fail_on_null_body: true,
+            header_name: None,
+            fail_on_null_header: true,
+            schema_aliases: aliases,
+        };
+        let backend = Arc::new(MockXsdBridge {
+            register_calls: AtomicUsize::new(0),
+            validate_calls: AtomicUsize::new(0),
+            register_error: None,
+            validate_error: None,
+        });
+        let err = CompiledValidator::compile(&cfg, backend)
+            .expect_err("an over-cap programmatic config must fail to compile");
+        match err {
+            CamelError::Config(m) => assert!(
+                m.contains("128"),
+                "config guard must name the 128-entry cap, got: {m}"
+            ),
+            other => panic!(
+                "expected the config-level cap guard (CamelError::Config); the \
+                 guard is unwired and this surfaced as: {other}"
+            ),
+        }
+    }
+
+    #[test]
+    fn create_endpoint_accepts_alias_uri() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("root.xsd"),
+            br#"<?xml version="1.0"?><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("a")).unwrap();
+        std::fs::write(
+            dir.path().join("a/parent.xsd"),
+            br#"<?xml version="1.0"?><xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"/>"#,
+        )
+        .unwrap();
+
+        let uri = format!(
+            "validator:{}/root.xsd?schemaAliases=%7B%22urn%3Aalias%22%3A%22a%2Fparent.xsd%22%7D",
+            dir.path().display()
+        );
+        let result = ValidatorComponent::new().create_endpoint(&uri, &NoOpComponentContext);
+        assert!(
+            result.is_ok(),
+            "a valid root with the aliased schema present must create an endpoint: {:?}",
+            result.err().map(|e| e.to_string())
         );
     }
 

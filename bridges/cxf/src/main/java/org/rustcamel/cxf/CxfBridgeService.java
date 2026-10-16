@@ -8,6 +8,7 @@ import io.quarkus.grpc.GrpcService;
 import io.smallrye.common.annotation.Blocking;
 import jakarta.annotation.PostConstruct;
 import jakarta.inject.Inject;
+import jakarta.xml.ws.soap.SOAPBinding;
 import jakarta.xml.ws.soap.SOAPFaultException;
 import java.io.StringReader;
 import java.lang.reflect.UndeclaredThrowableException;
@@ -24,6 +25,9 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
   }
 
   private static final Logger LOG = Logger.getLogger(CxfBridgeService.class.getName());
+
+  private static final String SOAP11_BINDING_ID = SOAPBinding.SOAP11HTTP_BINDING;
+  private static final String SOAP12_BINDING_ID = SOAPBinding.SOAP12HTTP_BINDING;
 
   @Inject BridgeConfig bridgeConfig;
 
@@ -70,8 +74,21 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
         return;
       }
 
-      // Resolve profile — wsdl/service/port come from profile or request overrides
-      SecurityProfile profile = profileStore.getProfile(profileName);
+      // Resolve profile — wsdl/service/port come from profile or request overrides. The lookup is
+      // the only path that maps to NOT_FOUND: a later IllegalArgumentException (for example an
+      // unknown explicit operation) is an argument problem, not a missing profile.
+      SecurityProfile profile;
+      try {
+        profile = profileStore.getProfile(profileName);
+      } catch (IllegalArgumentException e) {
+        LOG.log(Level.WARNING, "Profile not found: {0}", profileName);
+        responseObserver.onError(
+            Status.NOT_FOUND
+                .withDescription("profile not found: " + profileName)
+                .withCause(e)
+                .asException());
+        return;
+      }
 
       String wsdl = request.getWsdlPath().isBlank() ? profile.wsdlPath() : request.getWsdlPath();
       String service =
@@ -79,19 +96,50 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
       String port = request.getPortName().isBlank() ? profile.portName() : request.getPortName();
       String address = request.getAddress().isBlank() ? profile.address() : request.getAddress();
 
-      long normalizedTimeout =
-          request.getTimeoutMs() > 0 ? request.getTimeoutMs() : bridgeConfig.connectionTimeoutMs();
+      // The wire field is uint64, but the dispatch timeout is a 32-bit bound.
+      // Reject an out-of-range value before resolving the dispatch so a legacy
+      // -1 (decoded as an unsigned max) or an oversized value fails as
+      // INVALID_ARGUMENT instead of a bridge-side timeout.
+      long rawTimeout = request.getTimeoutMs();
+      if (rawTimeout < 0 || rawTimeout > 2147483647L) {
+        responseObserver.onError(
+            Status.INVALID_ARGUMENT
+                .withDescription("timeout_ms must be within [0, 2147483647], got " + rawTimeout)
+                .asException());
+        return;
+      }
+
+      long normalizedTimeout = rawTimeout > 0 ? rawTimeout : bridgeConfig.connectionTimeoutMs();
       var dispatch =
           clientManager.getDispatch(
               wsdl, address, service, port, request.getOperation(), profileName, normalizedTimeout);
 
+      // The SOAP version is a property of the selected WSDL port binding, never of a request
+      // header. Reject a binding we cannot map to an envelope version instead of silently
+      // defaulting to SOAP 1.1.
+      String bindingId = dispatch.getBinding().getBindingID();
+      if (!SOAP11_BINDING_ID.equals(bindingId) && !SOAP12_BINDING_ID.equals(bindingId)) {
+        responseObserver.onError(
+            Status.INVALID_ARGUMENT
+                .withDescription("unsupported WSDL binding ID: " + bindingId)
+                .asException());
+        return;
+      }
+
+      // Service.Mode.PAYLOAD expects the bare operation element. A payload that is already a SOAP
+      // Envelope would be nested in a second envelope on the wire, so reject it before dispatch.
       String payload = request.getPayload().toStringUtf8();
-      String soapVersion = request.getHeadersOrDefault("soap-version", "1.1");
-      String envelope = SoapEnvelopeHelper.wrapInEnvelope(payload, soapVersion);
+      if (SoapEnvelopeHelper.isSoapEnvelope(payload)) {
+        responseObserver.onError(
+            Status.INVALID_ARGUMENT
+                .withDescription("payload is already a SOAP Envelope")
+                .asException());
+        return;
+      }
 
       Source responseSource;
       try {
-        responseSource = dispatch.invoke(new StreamSource(new StringReader(envelope)));
+        responseSource = dispatch.invoke(new StreamSource(new StringReader(payload)));
       } catch (SOAPFaultException sfe) {
         // SOAP fault — surface to caller as a structured fault response.
         var fault = sfe.getFault();
@@ -143,14 +191,13 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
 
       responseObserver.onNext(builder.build());
       responseObserver.onCompleted();
-    } catch (IllegalArgumentException e) {
-      // Unknown profile from profileStore.getProfile()
-      LOG.log(Level.WARNING, "Profile not found: {0}", request.getSecurityProfile());
+    } catch (CxfClientManager.UnknownOperationException e) {
+      // Pre-wire rejection from dispatch creation: the requested operation is absent from the
+      // selected WSDL port binding. Argument-class error retaining operation/binding context so
+      // callers are not misled into treating it as a missing profile.
+      LOG.log(Level.WARNING, "Rejected invoke: {0}", e.getMessage());
       responseObserver.onError(
-          Status.NOT_FOUND
-              .withDescription("profile not found: " + request.getSecurityProfile())
-              .withCause(e)
-              .asException());
+          Status.INVALID_ARGUMENT.withDescription(e.getMessage()).withCause(e).asException());
     } catch (Throwable e) {
       if (e instanceof ExceptionInInitializerError eiie) {
         LOG.log(Level.SEVERE, "ExceptionInInitializerError cause: " + eiie.getException());
@@ -193,12 +240,14 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
 
       @Override
       public void onError(Throwable t) {
-        serverManager.cleanup();
+        // Stream lifecycle only: clear this stream's liveness (by identity) and fail its
+        // in-flight requests. The startup-published SOAP listener stays up (Task 2.7).
+        serverManager.onConsumerStreamClosed(responseObserver);
       }
 
       @Override
       public void onCompleted() {
-        serverManager.cleanup();
+        serverManager.onConsumerStreamClosed(responseObserver);
       }
     };
   }

@@ -16,7 +16,7 @@ use tracing::{error, info, warn};
 
 use camel_component_api::NetworkRetryPolicy;
 
-use crate::config::{CxfPoolConfig, validate_profile_name};
+use crate::config::{CxfListenerTls, CxfPoolConfig, CxfProfileConfig, validate_profile_name};
 use crate::error::CxfError;
 use crate::proto::{HealthRequest, cxf_bridge_client::CxfBridgeClient};
 
@@ -32,23 +32,74 @@ pub(crate) fn env_var_keys(env_vars: &[(String, String)]) -> Vec<&str> {
     env_vars.iter().map(|(k, _)| k.as_str()).collect()
 }
 
+/// Map configured profiles onto the bridge env-var carrier. Shared by the
+/// initial slot start and the health-monitor restart so both paths build
+/// identical per-profile env from one truth.
+pub(crate) fn profile_env_vars_for(profiles: &[CxfProfileConfig]) -> Vec<CxfProfileEnvVars> {
+    profiles
+        .iter()
+        .map(|p| CxfProfileEnvVars {
+            name: p.name.clone(),
+            wsdl_path: p.wsdl_path.clone(),
+            service_name: p.service_name.clone(),
+            port_name: p.port_name.clone(),
+            address: p.address.clone(),
+            keystore_path: p.security.keystore_path.clone(),
+            keystore_password: p.security.keystore_password.clone().map(Redacted::new),
+            truststore_path: p.security.truststore_path.clone(),
+            truststore_password: p.security.truststore_password.clone().map(Redacted::new),
+            sig_username: p.security.sig_username.clone(),
+            sig_password: p.security.sig_password.clone().map(Redacted::new),
+            enc_username: p.security.enc_username.clone(),
+            security_actions_out: p.security.security_actions_out.clone(),
+            security_actions_in: p.security.security_actions_in.clone(),
+            signature_algorithm: p.security.signature_algorithm.clone(),
+            signature_digest_algorithm: p.security.signature_digest_algorithm.clone(),
+            signature_c14n_algorithm: p.security.signature_c14n_algorithm.clone(),
+            signature_parts: p.security.signature_parts.clone(),
+            fault_status: p.security.fault_status,
+            tls: p.security.tls.as_ref().map(|t| t.to_env()),
+        })
+        .collect()
+}
+
 /// Build the bridge `BridgeProcessConfig` for a slot and emit the env-var
 /// trace (bd rc-2eckt). Split out of `start_bridge_inner` — which downloads
 /// the bridge binary first — so the log statement is unit-test-drivable
 /// through a capture subscriber; see `pool_env_test`.
+///
+/// The listener TLS record travels as the five `CXF_SOAP_TLS_*` pool env vars
+/// on THIS non-profile path only (never `CXF_PROFILE_<NAME>_*`), with the
+/// PKCS#12 password value redacted from `Debug` and absent from the key-only
+/// trace. `expect_soap_ready` opts in only when a SOAP bind is configured.
 pub(crate) fn bridge_config_with_env_trace(
     slot_key: &str,
     binary_path: PathBuf,
     profiles: &[CxfProfileEnvVars],
     bind_address: Option<&str>,
     start_timeout_ms: u64,
+    listener_tls: Option<&CxfListenerTls>,
 ) -> BridgeProcessConfig {
     let config = BridgeProcessConfig::cxf_profiles(binary_path, profiles, start_timeout_ms);
     let mut config = config;
+    config.expect_soap_ready = bind_address.is_some();
     if let Some(addr) = bind_address {
         config
             .env_vars
             .push(("CXF_ADDRESS".to_string(), addr.to_string()));
+    }
+    if let Some(tls) = listener_tls {
+        for (key, value) in [
+            ("CXF_SOAP_TLS_CERT_PATH", &tls.cert_path),
+            ("CXF_SOAP_TLS_KEY_PATH", &tls.key_path),
+            ("CXF_SOAP_TLS_CLIENT_CA_PATH", &tls.client_ca_path),
+            ("CXF_SOAP_TLS_PKCS12_PATH", &tls.pkcs12_path),
+            ("CXF_SOAP_TLS_PKCS12_PASSWORD", &tls.pkcs12_password),
+        ] {
+            if let Some(value) = value {
+                config.env_vars.push((key.to_string(), value.clone()));
+            }
+        }
     }
     tracing::trace!(
         key = %slot_key,
@@ -56,6 +107,28 @@ pub(crate) fn bridge_config_with_env_trace(
         "starting CXF bridge process with env vars"
     );
     config
+}
+
+/// Build the `BridgeProcessConfig` for a slot from its PERSISTED fields
+/// (`configured_profiles`, `bind_address`, `listener_tls`). This is the single
+/// builder used by both the initial start and the health-monitor restart, so a
+/// restarted mutual-TLS listener re-emits the same `CXF_SOAP_TLS_*` material,
+/// `CXF_ADDRESS`, and `expect_soap_ready` opt-in as startup instead of silently
+/// dropping them.
+pub(crate) fn bridge_config_for_slot(
+    slot: &BridgeSlot,
+    binary_path: PathBuf,
+    start_timeout_ms: u64,
+) -> BridgeProcessConfig {
+    let profiles = profile_env_vars_for(&slot.configured_profiles);
+    bridge_config_with_env_trace(
+        &slot.key,
+        binary_path,
+        &profiles,
+        slot.bind_address.as_deref(),
+        start_timeout_ms,
+        slot.listener_tls.as_ref(),
+    )
 }
 
 // ── Bridge gRPC decode limit ─────────────────────────────────────────────────
@@ -88,6 +161,16 @@ pub(crate) fn cxf_bridge_client(
 
 // ── BridgeState ──────────────────────────────────────────────────────────────
 
+/// Read-only snapshot of the running bridge process's announced metadata
+/// (Task 2.8): the gRPC port, the optional `soap-ready` SOAP port, and the
+/// child PID for owned-lifecycle operations.
+#[derive(Debug, Clone, Copy)]
+pub struct BridgeListenerInfo {
+    pub grpc_port: u16,
+    pub soap_port: Option<u16>,
+    pub pid: Option<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub enum BridgeState {
     Starting,
@@ -103,6 +186,9 @@ pub struct BridgeSlot {
     pub key: String,
     pub configured_profiles: Vec<crate::config::CxfProfileConfig>,
     pub bind_address: Option<String>,
+    /// Persisted pool-level listener TLS record (cxf-listener-tls): re-emitted
+    /// on health-monitor restart through [`bridge_config_for_slot`].
+    pub listener_tls: Option<CxfListenerTls>,
     pub state_rx: watch::Receiver<BridgeState>,
     pub(crate) state_tx: watch::Sender<BridgeState>,
     pub process: Arc<tokio::sync::Mutex<Option<BridgeProcess>>>,
@@ -117,6 +203,7 @@ impl BridgeSlot {
             key: "test-slot".to_string(),
             configured_profiles: vec![],
             bind_address: None,
+            listener_tls: None,
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
@@ -152,6 +239,7 @@ pub struct CxfBridgePool {
     pub(crate) bridge_cache_dir: PathBuf,
     pub(crate) configured_profiles: Vec<crate::config::CxfProfileConfig>,
     pub(crate) bind_address: Option<String>,
+    pub(crate) listener_tls: Option<CxfListenerTls>,
     pub(crate) reconnect: NetworkRetryPolicy,
 }
 
@@ -176,12 +264,47 @@ impl CxfBridgePool {
             bridge_cache_dir,
             configured_profiles,
             bind_address: pool_config.bind_address,
+            listener_tls: pool_config.listener_tls,
             reconnect: pool_config.reconnect,
         })
     }
 
     pub fn slot_key() -> String {
         "cxf".to_string()
+    }
+
+    /// Announced listener metadata of the CURRENT bridge process (Task 2.8).
+    /// Read-only: returns `None` when no slot exists, no process is running, or
+    /// the process lock stays busy past the pool's own startup budget — it
+    /// never creates a slot and never starts a bridge.
+    pub async fn listener_info(&self) -> Option<BridgeListenerInfo> {
+        let slot = {
+            let entry = self.slots.get(&Self::slot_key())?;
+            Arc::clone(entry.value())
+        };
+        // Bound the process-lock acquisition by the pool's own startup budget.
+        // A caller polling announcements (readiness loops call this) must never
+        // park forever behind a long-held lock (restart teardown); a deadline
+        // reports `None` (busy/unavailable) instead of hanging.
+        let guard = tokio::time::timeout(
+            Duration::from_millis(self.bridge_start_timeout_ms),
+            slot.process.lock(),
+        )
+        .await
+        .ok()?;
+        let process = guard.as_ref()?;
+        Some(BridgeListenerInfo {
+            grpc_port: process.grpc_port(),
+            soap_port: process.soap_port(),
+            pid: process.child_pid(),
+        })
+    }
+
+    /// Announced SOAP listener port of the current bridge process. `None` until
+    /// a `soap-ready` line lands (or when no bridge is running). Read-only —
+    /// never starts a bridge.
+    pub async fn announced_soap_port(&self) -> Option<u16> {
+        self.listener_info().await?.soap_port
     }
 
     #[cfg(any(test, feature = "test-util"))]
@@ -235,6 +358,7 @@ impl CxfBridgePool {
         let bridge_cache_dir = self.bridge_cache_dir.clone();
         let profiles = self.configured_profiles.clone();
         let bind_address = self.bind_address.clone();
+        let listener_tls = self.listener_tls.clone();
 
         let slot = match self.slots.entry(key_owned.clone()) {
             dashmap::Entry::Occupied(existing) => {
@@ -248,6 +372,7 @@ impl CxfBridgePool {
                     key: key_owned,
                     configured_profiles: profiles,
                     bind_address,
+                    listener_tls,
                     state_rx,
                     state_tx,
                     process: Arc::new(tokio::sync::Mutex::new(None)),
@@ -306,38 +431,7 @@ impl CxfBridgePool {
                     source: None,
                 })?;
 
-            let profile_env_vars: Vec<CxfProfileEnvVars> = slot
-                .configured_profiles
-                .iter()
-                .map(|p| CxfProfileEnvVars {
-                    name: p.name.clone(),
-                    wsdl_path: p.wsdl_path.clone(),
-                    service_name: p.service_name.clone(),
-                    port_name: p.port_name.clone(),
-                    address: p.address.clone(),
-                    keystore_path: p.security.keystore_path.clone(),
-                    keystore_password: p.security.keystore_password.clone().map(Redacted::new),
-                    truststore_path: p.security.truststore_path.clone(),
-                    truststore_password: p.security.truststore_password.clone().map(Redacted::new),
-                    sig_username: p.security.sig_username.clone(),
-                    sig_password: p.security.sig_password.clone().map(Redacted::new),
-                    enc_username: p.security.enc_username.clone(),
-                    security_actions_out: p.security.security_actions_out.clone(),
-                    security_actions_in: p.security.security_actions_in.clone(),
-                    signature_algorithm: p.security.signature_algorithm.clone(),
-                    signature_digest_algorithm: p.security.signature_digest_algorithm.clone(),
-                    signature_c14n_algorithm: p.security.signature_c14n_algorithm.clone(),
-                    signature_parts: p.security.signature_parts.clone(),
-                })
-                .collect();
-
-            let config = bridge_config_with_env_trace(
-                &slot.key,
-                binary_path,
-                &profile_env_vars,
-                slot.bind_address.as_deref(),
-                start_timeout_ms,
-            );
+            let config = bridge_config_for_slot(slot, binary_path, start_timeout_ms);
 
             let (process, channel) =
                 BridgeProcess::start_and_connect(&config)
@@ -493,7 +587,6 @@ impl CxfBridgePool {
                         }
 
                         let start_result: Result<(BridgeProcess, Channel), CxfError> = async {
-                            let profiles = &monitor_slot.configured_profiles;
                             let binary_path = ensure_binary_for_spec(
                                 &CXF_BRIDGE,
                                 &bridge_version,
@@ -506,59 +599,15 @@ impl CxfBridgePool {
                                 source: None,
                             })?;
 
-                            let profile_env_vars: Vec<CxfProfileEnvVars> = profiles
-                                .iter()
-                                .map(|p| CxfProfileEnvVars {
-                                    name: p.name.clone(),
-                                    wsdl_path: p.wsdl_path.clone(),
-                                    service_name: p.service_name.clone(),
-                                    port_name: p.port_name.clone(),
-                                    address: p.address.clone(),
-                                    keystore_path: p.security.keystore_path.clone(),
-                                    keystore_password: p
-                                        .security
-                                        .keystore_password
-                                        .clone()
-                                        .map(Redacted::new),
-                                    truststore_path: p.security.truststore_path.clone(),
-                                    truststore_password: p
-                                        .security
-                                        .truststore_password
-                                        .clone()
-                                        .map(Redacted::new),
-                                    sig_username: p.security.sig_username.clone(),
-                                    sig_password: p
-                                        .security
-                                        .sig_password
-                                        .clone()
-                                        .map(Redacted::new),
-                                    enc_username: p.security.enc_username.clone(),
-                                    security_actions_out: p.security.security_actions_out.clone(),
-                                    security_actions_in: p.security.security_actions_in.clone(),
-                                    signature_algorithm: p.security.signature_algorithm.clone(),
-                                    signature_digest_algorithm: p
-                                        .security
-                                        .signature_digest_algorithm
-                                        .clone(),
-                                    signature_c14n_algorithm: p
-                                        .security
-                                        .signature_c14n_algorithm
-                                        .clone(),
-                                    signature_parts: p.security.signature_parts.clone(),
-                                })
-                                .collect();
-
-                            let config = BridgeProcessConfig::cxf_profiles(
+                            // Single builder shared with the initial start: the
+                            // slot's persisted listener_tls/bind_address re-emit
+                            // the CXF_SOAP_TLS_* pool vars, CXF_ADDRESS, and the
+                            // soap-ready opt-in instead of dropping them here.
+                            let config = bridge_config_for_slot(
+                                &monitor_slot,
                                 binary_path,
-                                &profile_env_vars,
                                 start_timeout_ms,
                             );
-                            let mut config = config;
-                            if let Some(addr) = monitor_slot.bind_address.as_ref() {
-                                config
-                                    .env_vars
-                                    .push(("CXF_ADDRESS".to_string(), addr.clone()));
-                            }
 
                             let (process, channel) = BridgeProcess::start_and_connect(&config)
                                 .await
@@ -724,6 +773,7 @@ mod tests {
             bridge_cache_dir: None,
             version: crate::BRIDGE_VERSION.to_string(),
             bind_address: None,
+            listener_tls: None,
             reconnect: NetworkRetryPolicy::default(),
         }
     }
@@ -804,6 +854,7 @@ mod tests {
             key: "test-key".to_string(),
             configured_profiles: vec![],
             bind_address: None,
+            listener_tls: None,
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
@@ -863,6 +914,7 @@ mod tests {
             key: "stopped-slot".to_string(),
             configured_profiles: vec![],
             bind_address: None,
+            listener_tls: None,
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
@@ -928,5 +980,40 @@ mod tests {
             err.unwrap_err().to_string().contains("max_bridges"),
             "error should mention max_bridges"
         );
+    }
+
+    #[tokio::test]
+    async fn listener_info_lock_wait_is_bounded() {
+        // Short positive lock budget; the outer deadline below is much longer, so
+        // a return proves the bound is the pool's own budget, not the test's.
+        let mut pool_config = test_pool_config();
+        pool_config.bridge_start_timeout_ms = 50;
+        let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("valid config"));
+
+        let channel = Endpoint::from_static("http://127.0.0.1:50051").connect_lazy();
+        pool.insert_slot_for_test(
+            CxfBridgePool::slot_key(),
+            BridgeSlot::new_ready_for_test(channel),
+        );
+        let slot = Arc::clone(pool.slots.get(&CxfBridgePool::slot_key()).unwrap().value());
+
+        // Hold the process mutex for the duration of the probe. `try_lock` pins it
+        // without an unbounded await on an uncontended mutex.
+        let guard = slot.process.try_lock().expect("uncontended process mutex");
+
+        // The outer deadline outlasts the pool budget by two orders of magnitude:
+        // the getter must return on its OWN bound, never by the outer timeout.
+        let outer = Duration::from_secs(5);
+        let outcome = tokio::time::timeout(outer, pool.listener_info())
+            .await
+            .expect("listener_info must return on its own budget, not the outer deadline");
+        assert!(
+            outcome.is_none(),
+            "a busy process lock must report None instead of hanging"
+        );
+
+        // Releasing the lock does not resurrect a process: the slot holds none.
+        drop(guard);
+        assert!(pool.listener_info().await.is_none(), "no process => None");
     }
 }

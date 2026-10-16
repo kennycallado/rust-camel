@@ -64,6 +64,18 @@ quarkus:
 
 cxf:
   address: ${CXF_ADDRESS:}
+  soap:
+    tls:
+      cert:
+        path: ${CXF_SOAP_TLS_CERT_PATH:}
+      key:
+        path: ${CXF_SOAP_TLS_KEY_PATH:}
+      client:
+        ca:
+          path: ${CXF_SOAP_TLS_CLIENT_CA_PATH:}
+      pkcs12:
+        path: ${CXF_SOAP_TLS_PKCS12_PATH:}
+        password: ${CXF_SOAP_TLS_PKCS12_PASSWORD:}
   connection:
     timeout:
       ms: ${CXF_CONNECTION_TIMEOUT_MS:30000}

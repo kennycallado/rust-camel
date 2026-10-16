@@ -98,27 +98,6 @@ class SoapEnvelopeHelperTest {
   }
 
   @Test
-  void testWrapSoap11() throws Exception {
-    String xmlBody = "<m:ping xmlns:m=\"urn:test\"><m:id>1</m:id></m:ping>";
-    String envelope = SoapEnvelopeHelper.wrapInEnvelope(xmlBody, "1.1");
-    assertTrue(envelope.contains("http://schemas.xmlsoap.org/soap/envelope/"));
-  }
-
-  @Test
-  void testWrapSoap12() throws Exception {
-    String xmlBody = "<m:ping xmlns:m=\"urn:test\"><m:id>1</m:id></m:ping>";
-    String envelope = SoapEnvelopeHelper.wrapInEnvelope(xmlBody, "1.2");
-    assertTrue(envelope.contains("http://www.w3.org/2003/05/soap-envelope"));
-  }
-
-  @Test
-  void testWrapIncludesHeader() throws Exception {
-    String xmlBody = "<m:ping xmlns:m=\"urn:test\"><m:id>1</m:id></m:ping>";
-    String envelope = SoapEnvelopeHelper.wrapInEnvelope(xmlBody, "1.1");
-    assertTrue(envelope.contains("Header/>"));
-  }
-
-  @Test
   void testExtractBody() throws Exception {
     String envelope =
         "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\">"

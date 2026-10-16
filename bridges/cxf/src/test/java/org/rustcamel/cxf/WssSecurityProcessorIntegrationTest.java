@@ -71,7 +71,7 @@ class WssSecurityProcessorIntegrationTest {
         signed.contains("SignatureMethod"), "Signed envelope should contain SignatureMethod");
 
     // Verify it round-trips — inbound verification succeeds
-    String verified = processor.processInbound(signed);
+    String verified = processor.processInbound(signed).xml();
 
     // After verification, Security header may be stripped — body content must remain
     assertTrue(
@@ -138,7 +138,7 @@ class WssSecurityProcessorIntegrationTest {
     String soapXml = "<soap:Envelope><soap:Body><test/></soap:Envelope>";
 
     assertEquals(soapXml, processor.processOutbound(soapXml));
-    assertEquals(soapXml, processor.processInbound(soapXml));
+    assertEquals(soapXml, processor.processInbound(soapXml).xml());
     assertFalse(processor.canSignOutbound());
     assertFalse(processor.canVerifyInbound());
   }
@@ -148,7 +148,7 @@ class WssSecurityProcessorIntegrationTest {
     WssSecurityProcessor processor = createProcessor();
 
     assertNull(processor.processOutbound(null));
-    assertNull(processor.processInbound(null));
+    assertNull(processor.processInbound(null).xml());
   }
 
   @Test
@@ -156,7 +156,7 @@ class WssSecurityProcessorIntegrationTest {
     WssSecurityProcessor processor = createProcessor();
 
     assertEquals("", processor.processOutbound(""));
-    assertEquals("", processor.processInbound(""));
+    assertEquals("", processor.processInbound("").xml());
   }
 
   @Test
@@ -335,7 +335,7 @@ class WssSecurityProcessorIntegrationTest {
     assertTrue(processed.contains("EncryptedData"), "Should be encrypted");
     assertTrue(processed.contains("SignatureValue"), "Should also be signed");
 
-    String decrypted = encProcessor.processInbound(processed);
+    String decrypted = encProcessor.processInbound(processed).xml();
     assertTrue(
         decrypted.contains("Hello") && decrypted.contains("World"),
         "Decrypted message should contain original body");
@@ -486,7 +486,7 @@ class WssSecurityProcessorIntegrationTest {
     assertTrue(coveredIds.isEmpty(), "Signature must cover the 1.2 Body and Timestamp");
 
     // One inbound pass verifies cleanly (a second would trip the replay cache).
-    String verified = processor.processInbound(signed);
+    String verified = processor.processInbound(signed).xml();
     assertTrue(
         verified.contains("Hello") && verified.contains("World"),
         "Verified envelope should still contain original body content");

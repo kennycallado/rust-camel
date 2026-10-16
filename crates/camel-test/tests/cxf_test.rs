@@ -2,21 +2,48 @@
 
 mod support;
 
+// Nested module: declared by `#[path]` so it stays part of the `cxf_test`
+// target (a plain `mod wire;` would resolve to `tests/wire.rs`, and a
+// top-level `tests/wire.rs` would become its own integration target, breaking
+// the `--test cxf_test` filter).
+#[path = "cxf_test/wire.rs"]
+mod wire;
+
+// Nested module: real-native producer transport TLS integration (Task 1.7).
+// Declared by `#[path]` for the same reason as `wire`.
+#[path = "cxf_test/tls.rs"]
+mod tls;
+
+// Nested module: native signer-descriptor boundary (Task 2.5).
+// Declared by `#[path]` for the same reason as `wire`.
+#[path = "cxf_test/signer.rs"]
+mod signer;
+
+// Nested module: native consumer listener TLS + startup announcements (Task 2.7).
+// Declared by `#[path]` for the same reason as `wire`.
+#[path = "cxf_test/listener.rs"]
+mod listener;
+
 use camel_api::{Body, Exchange, Message};
-use camel_bridge::process::{BridgeProcess, BridgeProcessConfig, CxfProfileEnvVars};
-use camel_component_cxf::proto::{HealthRequest, cxf_bridge_client::CxfBridgeClient};
+use camel_bridge::process::{
+    BridgeError, BridgeProcess, BridgeProcessConfig, CxfProfileEnvVars, CxfTlsEnvVars, Redacted,
+};
+use camel_component_cxf::proto::{
+    ConsumerResponse, HealthRequest, cxf_bridge_client::CxfBridgeClient,
+};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::{Router, routing::post};
+use camel_component_cxf::config::CxfSecurityFields;
 use camel_component_cxf::{CxfBridgePool, CxfComponent, CxfPoolConfig, CxfProfileConfig};
 use camel_dsl::parse_yaml;
 use camel_test::CamelTestContext;
 use reqwest::StatusCode;
 use support::bridge_bg_rt;
-use support::cxf::require_cxf_bridge_binary;
+use support::cxf::{SOAP11_ENVELOPE_NS, SOAP12_ENVELOPE_NS, require_cxf_bridge_binary};
 use support::install_crypto_provider;
 use support::send_to_direct;
 use support::wait::wait_until;
@@ -62,6 +89,7 @@ async fn get_shared_cxf_pool() -> Arc<CxfBridgePool> {
                     bridge_cache_dir: None,
                     version: camel_component_cxf::BRIDGE_VERSION.to_string(),
                     bind_address: None,
+                    listener_tls: None,
                     reconnect: Default::default(),
                 })
                 .unwrap(),
@@ -156,6 +184,58 @@ async fn shared_cxf_component() -> CxfComponent {
     CxfComponent::new(get_shared_cxf_pool().await)
 }
 
+/// Shared bridge pool for the SOAP 1.2 producer test.
+///
+/// Uses a distinct profile name (`soap12_profile`) and the SOAP 1.2 WSDL so the
+/// bridge selects a SOAP 1.2 HTTP binding; reusing `test_profile` would let the
+/// cached SOAP 1.1 dispatch answer a `urn:custom`-free request for the same
+/// `sayHello` operation and mask a version regression.
+static SHARED_CXF_SOAP12_POOL: OnceCell<Arc<CxfBridgePool>> = OnceCell::const_new();
+
+async fn get_shared_cxf_soap12_pool() -> Arc<CxfBridgePool> {
+    SHARED_CXF_SOAP12_POOL
+        .get_or_init(|| async {
+            install_crypto_provider();
+            let wsdl_path = cxf_wsdl_path_soap12();
+            let pool = Arc::new(
+                CxfBridgePool::from_config(CxfPoolConfig {
+                    profiles: vec![CxfProfileConfig {
+                        name: "soap12_profile".to_string(),
+                        address: Some("http://localhost:8080/service".to_string()),
+                        wsdl_path,
+                        service_name: "{http://example.com/hello}HelloService".to_string(),
+                        port_name: "{http://example.com/hello}HelloPort".to_string(),
+                        security: Default::default(),
+                    }],
+                    max_bridges: 4,
+                    bridge_start_timeout_ms: 30_000,
+                    health_check_interval_ms: 5_000,
+                    bridge_cache_dir: None,
+                    version: camel_component_cxf::BRIDGE_VERSION.to_string(),
+                    bind_address: None,
+                    listener_tls: None,
+                    reconnect: Default::default(),
+                })
+                .unwrap(),
+            );
+            let pool_init = pool.clone();
+            let _ = bridge_bg_rt()
+                .spawn(async move {
+                    pool_init
+                        .get_or_create_slot(&CxfBridgePool::slot_key())
+                        .await
+                })
+                .await;
+            pool
+        })
+        .await
+        .clone()
+}
+
+async fn shared_cxf_soap12_component() -> CxfComponent {
+    CxfComponent::new(get_shared_cxf_soap12_pool().await)
+}
+
 fn cxf_component_with_bind(bind_port: Option<u16>) -> CxfComponent {
     let wsdl_path = cxf_wsdl_path();
     let pool = Arc::new(
@@ -174,6 +254,7 @@ fn cxf_component_with_bind(bind_port: Option<u16>) -> CxfComponent {
             bridge_cache_dir: None,
             version: camel_component_cxf::BRIDGE_VERSION.to_string(),
             bind_address: bind_port.map(|p| format!("http://127.0.0.1:{p}/cxf")),
+            listener_tls: None,
             reconnect: Default::default(),
         })
         .unwrap(),
@@ -191,9 +272,148 @@ fn cxf_wsdl_path() -> String {
         .to_string()
 }
 
+/// SOAP 1.2 copy of `hello.wsdl` whose binding namespace makes CXF report the
+/// `SOAPBinding.SOAP12HTTP_BINDING` (`.../soap/bindings/HTTP/`) for the port.
+fn cxf_wsdl_path_soap12() -> String {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    root.join("examples/cxf-example/wsdl/hello-soap12.wsdl")
+        .to_string_lossy()
+        .to_string()
+}
+
 fn reserve_local_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
+}
+
+/// A real PKCS12 store (password `changeit`) shipped with the test suite. The
+/// wrong-password test deliberately pairs it with a wrong password so the only
+/// failing variable is the credential, not a missing or malformed store.
+fn cxf_tls_keystore_fixture() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/cxf-tls-test-keystore.p12")
+        .to_string_lossy()
+        .to_string()
+}
+
+/// A real JKS keystore (`changeit`, alias `alice`) used as both keystore and
+/// truststore for WSS signature verification. WSS4J's Merlin crypto loads JKS
+/// only (the producer transport `.p12` fixture cannot be reused here), so the
+/// consumer WSS fault is a genuine signature-verification rejection, never a
+/// store-load false positive.
+fn cxf_wss_keystore_fixture() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/cxf-wss-test-keystore.jks")
+        .to_string_lossy()
+        .to_string()
+}
+
+/// A signed SOAP 1.2 request (Body signature, no `wsu:Timestamp`, so no expiry)
+/// generated by `SignedRequestFixtureGeneratorTest` with the JKS fixture. The
+/// consumer verifies it against the same JKS.
+fn cxf_wss_signed_request_fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cxf-wss-signed-request.xml")
+}
+
+/// Security fields for a WSS profile: same JKS as keystore and truststore, with
+/// an optional `fault_status` override.
+fn wss_security(fault_status: Option<u16>) -> CxfSecurityFields {
+    CxfSecurityFields {
+        keystore_path: Some(cxf_wss_keystore_fixture()),
+        keystore_password: Some("changeit".to_string()),
+        truststore_path: Some(cxf_wss_keystore_fixture()),
+        truststore_password: Some("changeit".to_string()),
+        sig_username: Some("alice".to_string()),
+        fault_status,
+        ..Default::default()
+    }
+}
+
+/// One WSS consumer profile in its own pool/bridge. The bridge keeps a single
+/// consumer stream (`CxfServerManager.consumerRequestObserver`), so each consumer
+/// route needs its own bridge to be reached.
+fn wss_single_profile_component(
+    name: &str,
+    fault_status: Option<u16>,
+    port: u16,
+    wsdl_path: &str,
+) -> CxfComponent {
+    let pool = Arc::new(
+        CxfBridgePool::from_config(CxfPoolConfig {
+            profiles: vec![CxfProfileConfig {
+                name: name.to_string(),
+                address: None,
+                wsdl_path: wsdl_path.to_string(),
+                service_name: "{http://example.com/hello}HelloService".to_string(),
+                port_name: "{http://example.com/hello}HelloPort".to_string(),
+                security: wss_security(fault_status),
+            }],
+            max_bridges: 4,
+            bridge_start_timeout_ms: 30_000,
+            health_check_interval_ms: 5_000,
+            bridge_cache_dir: None,
+            version: camel_component_cxf::BRIDGE_VERSION.to_string(),
+            bind_address: Some(format!("http://127.0.0.1:{port}/cxf")),
+            listener_tls: None,
+            reconnect: Default::default(),
+        })
+        .unwrap(),
+    );
+    CxfComponent::new(pool)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cxf_producer_wrong_tls_password_never_reaches_ready() {
+    init_tracing();
+    install_crypto_provider();
+    let binary = require_cxf_bridge_binary();
+
+    let profiles = vec![CxfProfileEnvVars {
+        name: "tls_wrong_password".to_string(),
+        wsdl_path: cxf_wsdl_path(),
+        service_name: "{http://example.com/hello}HelloService".to_string(),
+        port_name: "{http://example.com/hello}HelloPort".to_string(),
+        address: Some("https://127.0.0.1:1/service".to_string()),
+        keystore_path: None,
+        keystore_password: None,
+        truststore_path: None,
+        truststore_password: None,
+        sig_username: None,
+        sig_password: None,
+        enc_username: None,
+        security_actions_out: None,
+        security_actions_in: None,
+        signature_algorithm: None,
+        signature_digest_algorithm: None,
+        signature_c14n_algorithm: None,
+        signature_parts: None,
+        fault_status: None,
+        tls: Some(CxfTlsEnvVars {
+            keystore_path: Some(cxf_tls_keystore_fixture()),
+            keystore_password: Some(Redacted::new("not-the-store-password".to_string())),
+            keystore_type: Some("PKCS12".to_string()),
+            truststore_path: None,
+            truststore_password: None,
+            truststore_type: None,
+        }),
+    }];
+
+    // The bridge must never announce ready: eager store validation aborts Quarkus
+    // startup, so stdout closes before any ready line. A Timeout would instead mean
+    // the process stayed alive and healthy, which is exactly the regression this
+    // test guards against.
+    let config = BridgeProcessConfig::cxf_profiles(binary, &profiles, 30_000);
+    match BridgeProcess::start(&config).await {
+        Err(BridgeError::StdoutClosed) => {}
+        Err(other) => panic!("expected stdout EOF before ready, got: {other:?}"),
+        Ok(process) => {
+            let _ = process.stop().await;
+            panic!("bridge announced ready despite a wrong TLS store password");
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -353,6 +573,8 @@ async fn cxf_native_health_check_responds_within_5s() {
         signature_digest_algorithm: None,
         signature_c14n_algorithm: None,
         signature_parts: None,
+        fault_status: None,
+        tls: None,
     }];
 
     let config = BridgeProcessConfig::cxf_profiles(binary, &profiles, 5_000);
@@ -607,14 +829,15 @@ async fn cxf_consumer_handles_malformed_soap() {
     let client = http_client();
     let res = client
         .post(format!("http://127.0.0.1:{port}/cxf/test_profile"))
-        .header("content-type", "text/xml; charset=utf-8")
+        .header("content-type", "application/soap+xml; charset=utf-8")
         .body("this is not valid XML at all <><><>")
         .send()
         .await
         .expect("request should not panic");
 
-    // Malformed envelopes are rejected with HTTP 400 (hardened extraction,
-    // nothing forwarded); the key guarantee is a structured rejection, no crash
+    // Malformed envelopes on SOAP 1.2 are rejected with HTTP 400 (Sender fault,
+    // hardened extraction, nothing forwarded); the key guarantee is a structured
+    // rejection, no crash.
     let status = res.status();
     assert_eq!(
         status, 400,
@@ -622,6 +845,609 @@ async fn cxf_consumer_handles_malformed_soap() {
     );
 
     h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cxf_consumer_override_applies_on_soap11() {
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_cxf_bridge_binary();
+    let wsdl_path = cxf_wsdl_path();
+    let port = reserve_local_port();
+
+    let pool = Arc::new(
+        CxfBridgePool::from_config(CxfPoolConfig {
+            profiles: vec![CxfProfileConfig {
+                name: "esap".to_string(),
+                address: None,
+                wsdl_path: wsdl_path.clone(),
+                service_name: "{http://example.com/hello}HelloService".to_string(),
+                port_name: "{http://example.com/hello}HelloPort".to_string(),
+                security: wss_security(Some(400)),
+            }],
+            max_bridges: 4,
+            bridge_start_timeout_ms: 30_000,
+            health_check_interval_ms: 5_000,
+            bridge_cache_dir: None,
+            version: camel_component_cxf::BRIDGE_VERSION.to_string(),
+            bind_address: Some(format!("http://127.0.0.1:{port}/cxf")),
+            listener_tls: None,
+            reconnect: Default::default(),
+        })
+        .unwrap(),
+    );
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(CxfComponent::new(pool))
+        .build()
+        .await;
+
+    let yaml = format!(
+        "routes:\n  - id: soap11-override\n    from: \"cxf://http://127.0.0.1:{port}/cxf/esap?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile=esap\"\n    steps:\n      - set_body:\n          value:\n            constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n"
+    );
+    for route in parse_yaml(&yaml).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+
+    h.start().await;
+
+    // An unsigned SOAP 1.1 request cannot pass the required Signature action; the
+    // profile's fault_status = 400 override applies on SOAP 1.1 (the default is 500).
+    let url = format!("http://127.0.0.1:{port}/cxf/esap");
+    let unsigned = soap_envelope(
+        SOAP11_ENVELOPE_NS,
+        "<hel:sayHello xmlns:hel=\"http://example.com/hello\"><name>x</name></hel:sayHello>",
+    );
+    wait_until(
+        "soap11 WSS override status is ready",
+        Duration::from_secs(15),
+        Duration::from_millis(300),
+        || {
+            let url = url.clone();
+            let unsigned = unsigned.clone();
+            async move {
+                match try_post_soap(&url, "text/xml; charset=utf-8", "sayHello", unsigned).await {
+                    Some(res) => Ok(res.status() == StatusCode::BAD_REQUEST),
+                    None => Ok(false),
+                }
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    let res = post_soap(&url, "text/xml; charset=utf-8", "sayHello", unsigned).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "SOAP 1.1 WSS fault must honour fault_status = 400 (not the default 500)"
+    );
+    let body = res.text().await.unwrap();
+    assert!(
+        body.contains("Fault") || body.contains("fault"),
+        "expected a SOAP fault body, got: {body}"
+    );
+
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cxf_consumer_override_403_applies_to_wss_only() {
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_cxf_bridge_binary();
+    let wsdl_path = cxf_wsdl_path();
+
+    // --- Bridge A: esap, WSS with fault_status = 403 and a failing route ---
+    let port_esap = reserve_local_port();
+    let h_esap = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(wss_single_profile_component(
+            "esap",
+            Some(403),
+            port_esap,
+            &wsdl_path,
+        ))
+        .build()
+        .await;
+    // esap's route always fails (validate false) once WSS verification passes, so a
+    // signed request proves the Receiver path is a route error, not a WSS fault.
+    let yaml_esap = format!(
+        "routes:\n  - id: esap-consumer\n    from: \"cxf://http://127.0.0.1:{port_esap}/cxf/esap?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile=esap\"\n    steps:\n      - to: \"mock:esap-hit\"\n      - validate: \"${{body.size()}} > 100000000\"\n"
+    );
+    for route in parse_yaml(&yaml_esap).unwrap() {
+        h_esap.add_route(route).await.unwrap();
+    }
+    h_esap.start().await;
+
+    // --- Bridge B: cyl, WSS defaults and a success route (proves the signed path
+    // verifies WSS and completes end-to-end) ---
+    let port_cyl = reserve_local_port();
+    let h_cyl = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(wss_single_profile_component(
+            "cyl", None, port_cyl, &wsdl_path,
+        ))
+        .build()
+        .await;
+    let yaml_cyl = format!(
+        "routes:\n  - id: cyl-consumer\n    from: \"cxf://http://127.0.0.1:{port_cyl}/cxf/cyl?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile=cyl\"\n    steps:\n      - set_body:\n          value:\n            constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n"
+    );
+    for route in parse_yaml(&yaml_cyl).unwrap() {
+        h_cyl.add_route(route).await.unwrap();
+    }
+    h_cyl.start().await;
+
+    let esap_url = format!("http://127.0.0.1:{port_esap}/cxf/esap");
+    let cyl_url = format!("http://127.0.0.1:{port_cyl}/cxf/cyl");
+
+    let unsigned12 = soap_envelope(
+        SOAP12_ENVELOPE_NS,
+        "<hel:sayHello xmlns:hel=\"http://example.com/hello\"><name>x</name></hel:sayHello>",
+    );
+
+    // WSS fault on esap → 403 (override applies to WSS faults only).
+    wait_until(
+        "esap WSS override status is ready",
+        Duration::from_secs(15),
+        Duration::from_millis(300),
+        || {
+            let url = esap_url.clone();
+            let body = unsigned12.clone();
+            async move {
+                match try_post_soap(&url, "application/soap+xml", "sayHello", body).await {
+                    Some(res) => Ok(res.status() == StatusCode::FORBIDDEN),
+                    None => Ok(false),
+                }
+            }
+        },
+    )
+    .await
+    .unwrap();
+    let res = post_soap(
+        &esap_url,
+        "application/soap+xml",
+        "sayHello",
+        unsigned12.clone(),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::FORBIDDEN,
+        "esap WSS fault must honour fault_status = 403"
+    );
+    let body = res.text().await.unwrap();
+    assert!(
+        body.contains("Fault") || body.contains("fault"),
+        "esap WSS response must be a SOAP fault, got: {body}"
+    );
+
+    // Equivalent WSS fault on cyl → default Sender 400.
+    let res = post_soap(&cyl_url, "application/soap+xml", "sayHello", unsigned12).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "cyl WSS fault must keep the default 400"
+    );
+
+    // Malformed envelope on esap is a non-WSS Sender fault → 400, override untouched.
+    let res = post_soap(
+        &esap_url,
+        "application/soap+xml",
+        "sayHello",
+        "this is not valid XML <><>".to_string(),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "malformed Sender fault must stay 400 (override must not apply)"
+    );
+
+    // A missing SOAP Body on esap is also a non-WSS Sender fault → 400 (detected
+    // before WSS, so the override cannot rewrite it).
+    let no_body = "<soapenv:Envelope xmlns:soapenv=\"http://www.w3.org/2003/05/soap-envelope\">\
+                   <soapenv:Header/></soapenv:Envelope>";
+    let res = post_soap(
+        &esap_url,
+        "application/soap+xml",
+        "sayHello",
+        no_body.to_string(),
+    )
+    .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::BAD_REQUEST,
+        "missing-Body Sender fault must stay 400 (override must not apply)"
+    );
+
+    // A genuinely signed SOAP 1.2 request: WSS verification passes, so the request
+    // reaches the route. cyl's success route returns 200 (proves verification and the
+    // live consumer stream); esap's route records the hit, then fails → Receiver 500
+    // despite the WSS-only 403 override.
+    let signed_body = std::fs::read_to_string(cxf_wss_signed_request_fixture())
+        .expect("signed request fixture must be readable");
+    assert!(
+        signed_body.contains("Signature") && signed_body.contains("Security"),
+        "signed request fixture must carry a WS-Security signature"
+    );
+
+    wait_until(
+        "signed request passes WSS on cyl",
+        Duration::from_secs(20),
+        Duration::from_millis(300),
+        || {
+            let url = cyl_url.clone();
+            let signed = signed_body.clone();
+            async move {
+                match try_post_soap(&url, "application/soap+xml", "sayHello", signed).await {
+                    Some(res) => Ok(res.status() == StatusCode::OK),
+                    None => Ok(false),
+                }
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    let esap_hit = h_esap.mock().get_endpoint("esap-hit").unwrap();
+    let res = post_soap(&esap_url, "application/soap+xml", "sayHello", signed_body).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "signed request reaching the failing route must be a Receiver 500 (override must not apply)"
+    );
+    // Observe the actual route hit: the 500 is a route error, not a WSS/malformed mask.
+    wait_until(
+        "esap route observed the signed request",
+        Duration::from_secs(10),
+        Duration::from_millis(200),
+        || {
+            let esap_hit = esap_hit.clone();
+            async move { Ok(!esap_hit.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .unwrap();
+
+    // The signed fixture carries a misleading SOAP 1.1 Body nested in the Header and
+    // an unreferenced by the signature. The route must receive the direct SOAP 1.2
+    // Body (sayHello), never the nested Header payload.
+    let hits = esap_hit.get_received_exchanges().await;
+    let hit_body = hits[0].body_as::<String>().unwrap_or_default();
+    assert!(
+        hit_body.contains("sayHello"),
+        "the direct SOAP 1.2 Body operation must reach the route, got: {hit_body}"
+    );
+    assert!(
+        !hit_body.contains("header-body"),
+        "the nested Header SOAP 1.1 Body must not reach the route, got: {hit_body}"
+    );
+
+    // Task 2.5 native positive metadata chain: the same verified signer is
+    // stored as the four dedicated `camel.cxf.signer.*` properties with the
+    // known fixture certificate values, and never as an auth principal.
+    signer::assert_alice_signer_properties(&hits[0]);
+
+    h_cyl.stop().await;
+    h_esap.stop().await;
+}
+
+/// A native consumer-fault matrix row profile (no WSS: the request must reach the
+/// IPC so the crafted `ConsumerResponse` drives the HTTP status).
+fn matrix_profile(name: &str, wsdl_path: &str) -> CxfProfileEnvVars {
+    CxfProfileEnvVars {
+        name: name.to_string(),
+        wsdl_path: wsdl_path.to_string(),
+        service_name: "{http://example.com/hello}HelloService".to_string(),
+        port_name: "{http://example.com/hello}HelloPort".to_string(),
+        address: None,
+        keystore_path: None,
+        keystore_password: None,
+        truststore_path: None,
+        truststore_password: None,
+        sig_username: None,
+        sig_password: None,
+        enc_username: None,
+        security_actions_out: None,
+        security_actions_in: None,
+        signature_algorithm: None,
+        signature_digest_algorithm: None,
+        signature_c14n_algorithm: None,
+        signature_parts: None,
+        fault_status: None,
+        tls: None,
+    }
+}
+
+/// Asserts a SOAP 1.2 fault envelope's `Code/Value` is a prefixed QName whose
+/// prefix is bound to the SOAP 1.2 namespace and whose local part is `expected_local`.
+fn assert_soap12_fault_code(xml: &str, expected_local: &str) {
+    use quick_xml::NsReader;
+    use quick_xml::events::Event;
+    use quick_xml::name::ResolveResult;
+
+    let mut reader = NsReader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut in_value = false;
+    let mut value_ns: Option<String> = None;
+    let mut value_prefix: Option<String> = None;
+    let mut value_text = String::new();
+    loop {
+        match reader.read_resolved_event_into(&mut buf) {
+            Ok((resolve, Event::Start(e))) => {
+                if e.local_name().as_ref() == "Value" {
+                    in_value = true;
+                    if let ResolveResult::Bound(ns) = resolve {
+                        value_ns = Some(ns.0.to_string());
+                    }
+                    let raw = e.name().as_ref().to_string();
+                    value_prefix = raw.split_once(':').map(|(prefix, _)| prefix.to_string());
+                }
+            }
+            Ok((_, Event::Text(t))) if in_value => {
+                value_text.push_str(t.as_ref());
+            }
+            Ok((_, Event::End(e))) => {
+                if e.local_name().as_ref() == "Value" {
+                    break;
+                }
+            }
+            Ok((_, Event::Eof)) => break,
+            Err(err) => panic!("fault envelope is not well-formed XML: {err}"),
+            _ => {}
+        }
+        buf.clear();
+    }
+    assert_eq!(
+        value_ns.as_deref(),
+        Some(SOAP12_ENVELOPE_NS),
+        "Code/Value must be in the SOAP 1.2 namespace: {xml}"
+    );
+    let (prefix, local) = value_text
+        .trim()
+        .split_once(':')
+        .unwrap_or_else(|| panic!("Code/Value must be a prefixed QName: {value_text}"));
+    assert_eq!(
+        Some(prefix),
+        value_prefix.as_deref(),
+        "QName prefix must match the bound Value prefix: {value_text}"
+    );
+    assert_eq!(local, expected_local, "unexpected fault code: {value_text}");
+}
+
+/// Task 2.2 Step 5 matrix on the real native consumer IPC: typed `ConsumerResponse`
+/// fault codes and a withheld reply (timeout) drive the actual HTTP status and the
+/// rendered, namespace-correct SOAP 1.2 fault code.
+#[tokio::test(flavor = "multi_thread")]
+async fn cxf_consumer_fault_code_and_timeout_matrix() {
+    init_tracing();
+    install_crypto_provider();
+    let binary = require_cxf_bridge_binary();
+    let wsdl_path = cxf_wsdl_path();
+    let port = reserve_local_port();
+
+    let profiles: Vec<CxfProfileEnvVars> = [
+        "m_client",
+        "m_server",
+        "m_version",
+        "m_must",
+        "m_data",
+        "m_timeout",
+    ]
+    .iter()
+    .map(|name| matrix_profile(name, &wsdl_path))
+    .collect();
+
+    // Per-child env (never global): a 150 ms consumer timeout makes the withheld
+    // reply an actual production timeout.
+    let mut config = BridgeProcessConfig::cxf_profiles(binary, &profiles, 30_000);
+    config.env_vars.push((
+        "CXF_ADDRESS".to_string(),
+        format!("http://127.0.0.1:{port}/cxf"),
+    ));
+    config
+        .env_vars
+        .push(("CXF_CONSUMER_TIMEOUT_MS".to_string(), "150".to_string()));
+
+    let (process, channel) = BridgeProcess::start_and_connect(&config).await.unwrap();
+
+    let (tx, rx) = futures::channel::mpsc::unbounded::<ConsumerResponse>();
+    let arrived: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let arrived_task = Arc::clone(&arrived);
+    // `open_consumer_stream` only resolves after the bridge flushes response
+    // headers, which it defers until the first inbound SOAP request is dispatched.
+    // Spawn it so the test can POST and drive that first request.
+    tokio::spawn(async move {
+        let mut client = CxfBridgeClient::new(channel);
+        let response = client
+            .open_consumer_stream(rx)
+            .await
+            .expect("open consumer stream");
+        let mut requests = response.into_inner();
+        while let Ok(Some(req)) = requests.message().await {
+            let profile = req.security_profile.clone();
+            arrived_task
+                .lock()
+                .expect("arrived lock")
+                .push(profile.clone());
+            if profile == "m_timeout" {
+                // Withhold the reply: the publisher's consumer timeout must fire.
+                continue;
+            }
+            let code = match profile.as_str() {
+                "m_client" => "soap:Client",
+                "m_server" => "soap:Server",
+                "m_version" => "soap:VersionMismatch",
+                "m_must" => "soap:MustUnderstand",
+                "m_data" => "soap:DataEncodingUnknown",
+                _ => "soap:Server",
+            };
+            let _ = tx.unbounded_send(ConsumerResponse {
+                request_id: req.request_id.clone(),
+                payload: Vec::new(),
+                fault: true,
+                fault_code: code.to_string(),
+                fault_string: "typed fault".to_string(),
+                security_profile: profile,
+            });
+        }
+    });
+
+    let base = format!("http://127.0.0.1:{port}/cxf");
+    wait_until(
+        "matrix consumer endpoint ready",
+        Duration::from_secs(15),
+        Duration::from_millis(200),
+        || {
+            let url = format!("{base}/m_server");
+            async move {
+                match http_client().get(&url).send().await {
+                    Ok(_) => Ok(true),
+                    Err(_) => Ok(false),
+                }
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    let soap12 = soap_envelope(
+        SOAP12_ENVELOPE_NS,
+        "<hel:sayHello xmlns:hel=\"http://example.com/hello\"><name>x</name></hel:sayHello>",
+    );
+    let soap11 = soap_envelope(
+        SOAP11_ENVELOPE_NS,
+        "<hel:sayHello xmlns:hel=\"http://example.com/hello\"><name>x</name></hel:sayHello>",
+    );
+
+    for (profile, expected_local, expected_status) in [
+        ("m_client", "Sender", 400u16),
+        ("m_server", "Receiver", 500),
+        ("m_version", "VersionMismatch", 500),
+        ("m_must", "MustUnderstand", 500),
+        ("m_data", "DataEncodingUnknown", 500),
+    ] {
+        let res = post_soap(
+            &format!("{base}/{profile}"),
+            "application/soap+xml",
+            "sayHello",
+            soap12.clone(),
+        )
+        .await;
+        assert_eq!(res.status().as_u16(), expected_status, "{profile} status");
+        let ctype = res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            ctype.contains("application/soap+xml"),
+            "{profile} content-type must be SOAP 1.2, got: {ctype}"
+        );
+        let text = res.text().await.unwrap();
+        assert_soap12_fault_code(&text, expected_local);
+    }
+
+    // Timeout: real production timeout, bounded by CXF_CONSUMER_TIMEOUT_MS.
+    let started = Instant::now();
+    let res = post_soap(
+        &format!("{base}/m_timeout"),
+        "application/soap+xml",
+        "sayHello",
+        soap12.clone(),
+    )
+    .await;
+    assert_eq!(res.status().as_u16(), 500, "timeout must be a Receiver 500");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "timeout must be bounded by the consumer timeout, took {:?}",
+        started.elapsed()
+    );
+    let text = res.text().await.unwrap();
+    assert_soap12_fault_code(&text, "Receiver");
+
+    // SOAP 1.1: any fault class → 500.
+    for profile in ["m_client", "m_server"] {
+        let res = post_soap(
+            &format!("{base}/{profile}"),
+            "text/xml; charset=utf-8",
+            "sayHello",
+            soap11.clone(),
+        )
+        .await;
+        assert_eq!(
+            res.status().as_u16(),
+            500,
+            "SOAP 1.1 {profile} must be 500 regardless of fault class"
+        );
+    }
+
+    // Every profile must have observed an actual ConsumerRequest on the stream.
+    let seen = arrived.lock().expect("arrived lock").clone();
+    for profile in [
+        "m_client",
+        "m_server",
+        "m_version",
+        "m_must",
+        "m_data",
+        "m_timeout",
+    ] {
+        assert!(
+            seen.iter().any(|s| s == profile),
+            "{profile} must arrive on the consumer stream, saw {seen:?}"
+        );
+    }
+
+    process.stop().await.unwrap();
+}
+
+/// Formats a SOAP envelope in the given namespace around `body`.
+fn soap_envelope(ns: &str, body: &str) -> String {
+    format!(
+        "<soapenv:Envelope xmlns:soapenv=\"{ns}\"><soapenv:Body>{body}</soapenv:Body></soapenv:Envelope>"
+    )
+}
+
+/// POSTs a SOAP body with a hard client timeout; never panics on a protocol error.
+async fn post_soap(
+    url: &str,
+    content_type: &str,
+    soapaction: &str,
+    body: String,
+) -> reqwest::Response {
+    http_client()
+        .post(url)
+        .header("content-type", content_type)
+        .header("soapaction", soapaction)
+        .body(body)
+        .send()
+        .await
+        .expect("SOAP POST must not panic")
+}
+
+/// POSTs a SOAP body, returning `None` when the endpoint is not accepting
+/// connections yet (used by readiness waits before the bridge has bound).
+async fn try_post_soap(
+    url: &str,
+    content_type: &str,
+    soapaction: &str,
+    body: String,
+) -> Option<reqwest::Response> {
+    http_client()
+        .post(url)
+        .header("content-type", content_type)
+        .header("soapaction", soapaction)
+        .body(body)
+        .send()
+        .await
+        .ok()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -779,6 +1605,7 @@ fn multi_profile_cxf_component(port_a: u16, port_b: u16) -> CxfComponent {
             bridge_cache_dir: None,
             version: camel_component_cxf::BRIDGE_VERSION.to_string(),
             bind_address: None,
+            listener_tls: None,
             reconnect: Default::default(),
         })
         .unwrap(),

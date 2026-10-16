@@ -62,6 +62,7 @@ async fn start_consumer(
     let slot = BridgeSlot::new_ready_for_test(channel);
     let pool = CxfBridgePool::from_config(CxfPoolConfig {
         profiles: vec![],
+        listener_tls: None,
         ..CxfPoolConfig::default()
     })?;
     pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
@@ -182,6 +183,7 @@ async fn cxf_consume_success_emits_operation()
             headers: Default::default(),
             soap_action: "urn:op".to_string(),
             security_profile: String::new(),
+            signer: None,
         }))
         .await?;
 
@@ -242,6 +244,7 @@ async fn cxf_consume_route_error_emits_error_family()
             headers: Default::default(),
             soap_action: "urn:op".to_string(),
             security_profile: String::new(),
+            signer: None,
         }))
         .await?;
 
@@ -302,6 +305,7 @@ async fn cxf_consume_failure_with_lever_off_still_emits_error_family()
             headers: Default::default(),
             soap_action: "urn:op".to_string(),
             security_profile: String::new(),
+            signer: None,
         }))
         .await?;
 
@@ -358,6 +362,7 @@ async fn cxf_marshalling_failure_retains_b_prime_and_double_counts()
             headers: Default::default(),
             soap_action: "urn:op".to_string(),
             security_profile: String::new(),
+            signer: None,
         }))
         .await?;
 

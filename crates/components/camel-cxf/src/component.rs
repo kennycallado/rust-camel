@@ -170,6 +170,7 @@ mod tests {
                 bridge_cache_dir: None,
                 version: "0.1.0".to_string(),
                 bind_address: None,
+                listener_tls: None,
                 reconnect: NetworkRetryPolicy::default(),
             })
             .unwrap(),
@@ -279,6 +280,7 @@ mod tests {
                 bridge_cache_dir: None,
                 version: "0.1.0".to_string(),
                 bind_address: None,
+                listener_tls: None,
                 reconnect: NetworkRetryPolicy::default(),
             })
             .unwrap(),

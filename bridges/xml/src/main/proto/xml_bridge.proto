@@ -38,7 +38,13 @@ message BridgeError {
   string detail = 5;
 }
 
-message RegisterSchemaRequest    { string schema_id = 1; bytes schema = 2; }
+message RegisterSchemaRequest {
+  string schema_id = 1;
+  bytes schema = 2;
+  string root_system_id = 3;
+  map<string, bytes> resources = 4;
+  map<string, string> aliases = 5;
+}
 message RegisterSchemaResponse   { string schema_id = 1; optional BridgeError error = 2; }
 message ValidateWithRequest      { string schema_id = 1; bytes document = 2; }
 message UnregisterSchemaRequest  { string schema_id = 1; }

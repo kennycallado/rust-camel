@@ -1965,8 +1965,13 @@ fn baseline_entries_do_not_mask_change_owned_steps() {
         );
     }
 
+    // All ordinary baseline entries are repaired. Only the fixed key-only
+    // entries may remain without any steps to isolate.
     assert!(
-        isolated_total > 0,
+        isolated_total > 0
+            || baseline
+                .iter()
+                .all(|entry| key_only.contains(&(entry.path.clone(), entry.fence_index.clone()))),
         "route sweep guard: expected to isolate at least one step from the baseline"
     );
 }

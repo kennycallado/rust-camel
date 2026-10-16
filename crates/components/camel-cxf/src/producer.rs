@@ -147,6 +147,7 @@ impl CxfProducer {
                 bridge_cache_dir: None,
                 version: crate::BRIDGE_VERSION.to_string(),
                 bind_address: None,
+                listener_tls: None,
                 reconnect: NetworkRetryPolicy::default(),
             })
             .expect("valid test pool config"), // allow-unwrap
@@ -158,6 +159,7 @@ impl CxfProducer {
             key: key.clone(),
             configured_profiles: vec![],
             bind_address: None,
+            listener_tls: None,
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
@@ -277,6 +279,19 @@ impl Service<Exchange> for CxfProducer {
                 .or(configured_timeout_ms)
                 .unwrap_or(0);
 
+            // The wire field is `uint64`, but the bridge normalizes it through
+            // a Java `long` and its dispatch path is bounded by a 32-bit
+            // timeout. Reject an out-of-range value before building the
+            // request so the caller gets a deterministic error instead of a
+            // bridge-side INVALID_ARGUMENT. A legacy `-1` decodes to
+            // `u64::MAX` and is caught by the same check; `0` means "use the
+            // bridge default" and passes through unchanged.
+            if timeout_ms > 2_147_483_647 {
+                return Err(CamelError::ProcessorError(
+                    "cxf timeout_ms exceeds 2147483647".to_string(),
+                ));
+            }
+
             let mut headers: HashMap<String, String> = HashMap::new();
             if let Some(soap_action) = exchange
                 .input
@@ -390,6 +405,7 @@ mod tests {
             bridge_cache_dir: None,
             version: "0.1.0".to_string(),
             bind_address: None,
+            listener_tls: None,
             reconnect: Default::default(),
         };
         Arc::new(crate::pool::CxfBridgePool::from_config(pool_config).unwrap())
@@ -444,6 +460,7 @@ mod tests {
             key: CxfBridgePool::slot_key(),
             configured_profiles: vec![],
             bind_address: None,
+            listener_tls: None,
             state_rx,
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),

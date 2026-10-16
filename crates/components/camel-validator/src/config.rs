@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use camel_component_api::CamelError;
 use percent_encoding::percent_decode_str;
+
+use crate::schema_set::MAX_SCHEMA_ALIASES;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SchemaType {
@@ -38,6 +41,11 @@ pub struct ValidatorConfig {
     /// When `true` (default) and `header_name` is set, reject exchanges where
     /// the header is missing. When `false`, missing headers pass through.
     pub fail_on_null_header: bool,
+    /// Operator-supplied absolute-URI -> root-relative virtual path aliases,
+    /// parsed from the single `schemaAliases` query parameter (a
+    /// percent-encoded JSON object of string keys to string values). Empty
+    /// when the parameter is absent.
+    pub schema_aliases: BTreeMap<String, String>,
 }
 
 impl ValidatorConfig {
@@ -102,6 +110,8 @@ impl ValidatorConfig {
         let mut fail_on_null_body: bool = DEFAULT_FAIL_ON_NULL_BODY;
         let mut header_name: Option<String> = None;
         let mut fail_on_null_header: bool = DEFAULT_FAIL_ON_NULL_HEADER;
+        let mut schema_aliases: BTreeMap<String, String> = BTreeMap::new();
+        let mut schema_aliases_seen = false;
 
         if let Some(q) = query {
             for kv in q.split('&') {
@@ -129,6 +139,14 @@ impl ValidatorConfig {
                     fail_on_null_header = val.parse::<bool>().map_err(|e| {
                         CamelError::InvalidUri(format!("invalid failOnNullHeader '{val}': {e}"))
                     })?;
+                } else if let Some(val) = kv.strip_prefix("schemaAliases=") {
+                    if schema_aliases_seen {
+                        return Err(CamelError::InvalidUri(
+                            "duplicate 'schemaAliases' query parameter".to_string(),
+                        ));
+                    }
+                    schema_aliases_seen = true;
+                    schema_aliases = parse_schema_aliases(val)?;
                 }
             }
         }
@@ -141,7 +159,25 @@ impl ValidatorConfig {
             fail_on_null_body,
             header_name,
             fail_on_null_header,
+            schema_aliases,
         })
+    }
+
+    /// Rejects a config whose public `schema_aliases` field was mutated past
+    /// the [`MAX_SCHEMA_ALIASES`] cap.
+    ///
+    /// [`ValidatorConfig::from_uri`] already enforces the cap at parse time
+    /// (via [`schema_alias_cap_violation`]); this is the config-level defense
+    /// for a programmatically constructed [`ValidatorConfig`], whose fields are
+    /// public and can be set to any length. It is called by
+    /// `CompiledValidator::compile` before any schema-type dispatch or
+    /// filesystem access, so an over-cap config fails with a bounded
+    /// cap-naming error rather than a generic missing-schema error.
+    pub fn validate_schema_aliases(&self) -> Result<(), CamelError> {
+        match schema_alias_cap_violation(self.schema_aliases.len()) {
+            Some(msg) => Err(CamelError::Config(msg)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -156,6 +192,49 @@ fn detect_type_from_extension(path: &Path) -> Result<SchemaType, CamelError> {
             "cannot infer schema type from extension {ext:?}; use ?type=xml|json|yaml|rng|schematron"
         ))),
     }
+}
+
+/// Bounded diagnostic for an over-cap alias map, or `None` when within cap.
+///
+/// Single source for the cap wording and the one [`MAX_SCHEMA_ALIASES`]
+/// constant, shared by the URI parse ([`CamelError::InvalidUri`]) and the
+/// config-level guard ([`ValidatorConfig::validate_schema_aliases`],
+/// [`CamelError::Config`]).
+fn schema_alias_cap_violation(len: usize) -> Option<String> {
+    (len > MAX_SCHEMA_ALIASES).then(|| {
+        format!("invalid 'schemaAliases': {len} entries exceed the {MAX_SCHEMA_ALIASES}-entry cap")
+    })
+}
+
+/// Parses the single `schemaAliases` query value: a percent-encoded JSON
+/// object of string keys to string values.
+///
+/// Encoding is validated STRICTLY before the value is decoded exactly once, so
+/// a malformed `%ZZ` fails closed with no partial decode. A double-encoded
+/// value therefore decodes to a still-encoded string and fails JSON parsing
+/// rather than being silently decoded twice. The shared strict scanner is
+/// reused; its path-specific diagnostic is replaced by a bounded, option-named
+/// error that never echoes the raw value.
+fn parse_schema_aliases(raw: &str) -> Result<BTreeMap<String, String>, CamelError> {
+    validate_percent_encoding(raw).map_err(|_| {
+        CamelError::InvalidUri("invalid percent-encoding in 'schemaAliases'".to_string())
+    })?;
+    let decoded = percent_decode_str(raw).decode_utf8().map_err(|_| {
+        CamelError::InvalidUri(
+            "invalid 'schemaAliases': value is not valid UTF-8 after percent-decoding".to_string(),
+        )
+    })?;
+    let aliases: BTreeMap<String, String> = serde_json::from_str(&decoded).map_err(|_| {
+        CamelError::InvalidUri(
+            "invalid 'schemaAliases': value must be a percent-encoded JSON object of \
+             string keys to string values"
+                .to_string(),
+        )
+    })?;
+    if let Some(msg) = schema_alias_cap_violation(aliases.len()) {
+        return Err(CamelError::InvalidUri(msg));
+    }
+    Ok(aliases)
 }
 
 fn validate_percent_encoding(input: &str) -> Result<(), CamelError> {
@@ -337,5 +416,98 @@ mod tests {
         )
         .unwrap();
         assert!(!cfg.fail_on_null_header);
+    }
+
+    // ── schemaAliases query parameter ───────────────────────────────────
+
+    #[test]
+    fn schema_aliases_json_parsed() {
+        let uri = "validator:schemas/order.xsd?schemaAliases=%7B%22http%3A%2F%2Fexample.com%2Fparent.xsd%22%3A%22a%2Fparent.xsd%22%7D";
+        let cfg = ValidatorConfig::from_uri(uri).expect("percent-encoded JSON map must parse");
+        assert_eq!(
+            cfg.schema_aliases
+                .get("http://example.com/parent.xsd")
+                .map(String::as_str),
+            Some("a/parent.xsd"),
+            "decoded alias map must match the JSON object"
+        );
+        assert_eq!(cfg.schema_aliases.len(), 1);
+
+        // Absent parameter leaves the map empty and existing formats unchanged.
+        let plain = ValidatorConfig::from_uri("validator:schemas/order.xsd").unwrap();
+        assert!(plain.schema_aliases.is_empty());
+    }
+
+    #[test]
+    fn schema_aliases_duplicate_param_errors() {
+        let uri = "validator:schemas/order.xsd?schemaAliases=%7B%7D&schemaAliases=%7B%7D";
+        let result = ValidatorConfig::from_uri(uri);
+        assert!(
+            matches!(result, Err(CamelError::InvalidUri(_))),
+            "repeated schemaAliases query parameter must be rejected"
+        );
+    }
+
+    #[test]
+    fn schema_aliases_malformed_json_errors() {
+        // Table: not JSON at all, a JSON array, and a non-string member value.
+        for value in ["not-json", "%5B%5D", "%7B%22urn%3Aa%22%3A1%7D"] {
+            let uri = format!("validator:schemas/order.xsd?schemaAliases={value}");
+            let result = ValidatorConfig::from_uri(&uri);
+            assert!(
+                matches!(result, Err(CamelError::InvalidUri(_))),
+                "schemaAliases value '{value}' must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_aliases_malformed_percent_errors() {
+        let uri = "validator:schemas/order.xsd?schemaAliases=%7B%22urn%3Aa%22%3A%22%ZZ%22%7D";
+        let result = ValidatorConfig::from_uri(uri);
+        let Err(CamelError::InvalidUri(m)) = result else {
+            panic!("expected Err(InvalidUri) for malformed percent-encoding");
+        };
+        assert!(
+            m.contains("schemaAliases"),
+            "error must name the schemaAliases option, got: {m}"
+        );
+    }
+
+    #[test]
+    fn schema_aliases_percent_decoded_exactly_once() {
+        // Double-encoded: one decode yields the still-encoded `%7B...`, which
+        // is not JSON. The parser must decode exactly once, never twice.
+        let uri = "validator:schemas/order.xsd?schemaAliases=%257B%2522urn%253Aa%2522%253A%2522a%252Fparent.xsd%2522%257D";
+        let result = ValidatorConfig::from_uri(uri);
+        assert!(
+            matches!(result, Err(CamelError::InvalidUri(_))),
+            "a double-encoded schemaAliases value must fail after exactly one decode"
+        );
+    }
+
+    #[test]
+    fn schema_aliases_cap_enforced_at_parse() {
+        // 129 entries exceeds the 128-entry alias cap.
+        let mut obj = serde_json::Map::new();
+        for i in 0..=crate::schema_set::MAX_SCHEMA_ALIASES {
+            obj.insert(
+                format!("urn:a{i}"),
+                serde_json::Value::String("a/parent.xsd".to_string()),
+            );
+        }
+        let json = serde_json::Value::Object(obj).to_string();
+        let encoded =
+            percent_encoding::utf8_percent_encode(&json, percent_encoding::NON_ALPHANUMERIC)
+                .to_string();
+        let uri = format!("validator:schemas/order.xsd?schemaAliases={encoded}");
+        let result = ValidatorConfig::from_uri(&uri);
+        let Err(CamelError::InvalidUri(m)) = result else {
+            panic!("expected Err(InvalidUri) for an over-cap alias map");
+        };
+        assert!(
+            m.contains("128"),
+            "error must name the 128-entry cap, got: {m}"
+        );
     }
 }

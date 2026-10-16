@@ -143,7 +143,8 @@ class SecurityProfileWireTest {
             .build();
     String verified =
         new WssSecurityProcessor(verifyProfile)
-            .processInbound(SoapEnvelopeHelper.sourceToString(new DOMSource(doc)));
+            .processInbound(SoapEnvelopeHelper.sourceToString(new DOMSource(doc)))
+            .xml();
     assertTrue(
         verified.contains("Hello") && verified.contains("World"),
         "Verified envelope must retain the body content");

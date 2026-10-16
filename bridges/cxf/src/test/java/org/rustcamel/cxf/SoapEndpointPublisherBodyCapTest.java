@@ -89,6 +89,9 @@ class SoapEndpointPublisherBodyCapTest {
     when(bridgeConfig.address()).thenReturn("http://0.0.0.0:9000/cxf");
     when(bridgeConfig.connectionTimeoutMs()).thenReturn(5000);
     when(bridgeConfig.consumerTimeoutMs()).thenReturn(5000);
+    // The streaming fixtures have no real consumer stream; the mock reports one so the
+    // availability gate passes and the body-cap/payload matrix still runs (Task 2.7).
+    when(cxfServerManager.hasConsumerObserver()).thenReturn(true);
 
     SecurityProfile testProfile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
     when(profileStore.getProfile(TEST_PROFILE_NAME)).thenReturn(testProfile);
@@ -148,7 +151,7 @@ class SoapEndpointPublisherBodyCapTest {
   private void drivePost(String declaredContentLength, int streamedBodyBytes) throws Exception {
     ArgumentCaptor<Callable> callableCaptor = ArgumentCaptor.forClass(Callable.class);
     @SuppressWarnings("unchecked")
-    ArgumentCaptor<Handler<AsyncResult<String>>> resultHandlerCaptor =
+    ArgumentCaptor<Handler<AsyncResult<SoapEndpointPublisher.SoapHttpResult>>> resultHandlerCaptor =
         ArgumentCaptor.forClass(Handler.class);
     doAnswer(invocation -> null)
         .when(vertx)
@@ -208,12 +211,14 @@ class SoapEndpointPublisherBodyCapTest {
     List<Callable> callables = callableCaptor.getAllValues();
     if (!callables.isEmpty()) {
       @SuppressWarnings("unchecked")
-      Callable<String> callable = callables.get(callables.size() - 1);
-      String xml = callable.call();
-      List<Handler<AsyncResult<String>>> handlers = resultHandlerCaptor.getAllValues();
+      Callable<SoapEndpointPublisher.SoapHttpResult> callable = callables.get(callables.size() - 1);
+      SoapEndpointPublisher.SoapHttpResult result = callable.call();
+      List<Handler<AsyncResult<SoapEndpointPublisher.SoapHttpResult>>> handlers =
+          resultHandlerCaptor.getAllValues();
       @SuppressWarnings("unchecked")
-      Handler<AsyncResult<String>> resultHandler = handlers.get(handlers.size() - 1);
-      resultHandler.handle(Future.succeededFuture(xml));
+      Handler<AsyncResult<SoapEndpointPublisher.SoapHttpResult>> resultHandler =
+          handlers.get(handlers.size() - 1);
+      resultHandler.handle(Future.succeededFuture(result));
     }
   }
 
@@ -258,7 +263,7 @@ class SoapEndpointPublisherBodyCapTest {
 
     ArgumentCaptor<Callable> callableCaptor = ArgumentCaptor.forClass(Callable.class);
     @SuppressWarnings("unchecked")
-    ArgumentCaptor<Handler<AsyncResult<String>>> resultHandlerCaptor =
+    ArgumentCaptor<Handler<AsyncResult<SoapEndpointPublisher.SoapHttpResult>>> resultHandlerCaptor =
         ArgumentCaptor.forClass(Handler.class);
     doAnswer(invocation -> null)
         .when(vertx)
@@ -307,13 +312,15 @@ class SoapEndpointPublisherBodyCapTest {
     List<Callable> callables = callableCaptor.getAllValues();
     assertFalse(callables.isEmpty(), "blocking pipeline must run once");
     @SuppressWarnings("unchecked")
-    Callable<String> callable = callables.get(callables.size() - 1);
-    String xml = callable.call();
+    Callable<SoapEndpointPublisher.SoapHttpResult> callable = callables.get(callables.size() - 1);
+    SoapEndpointPublisher.SoapHttpResult result = callable.call();
     assertTrue(downstreamInvoked.get(), "normal path must reach the downstream consumer");
-    List<Handler<AsyncResult<String>>> handlers = resultHandlerCaptor.getAllValues();
+    List<Handler<AsyncResult<SoapEndpointPublisher.SoapHttpResult>>> handlers =
+        resultHandlerCaptor.getAllValues();
     @SuppressWarnings("unchecked")
-    Handler<AsyncResult<String>> resultHandler = handlers.get(handlers.size() - 1);
-    resultHandler.handle(Future.succeededFuture(xml));
+    Handler<AsyncResult<SoapEndpointPublisher.SoapHttpResult>> resultHandler =
+        handlers.get(handlers.size() - 1);
+    resultHandler.handle(Future.succeededFuture(result));
 
     assertEquals(200, statusCode.get(), "under-cap body follows the normal 200 path");
     assertNotNull(endedBody.get());

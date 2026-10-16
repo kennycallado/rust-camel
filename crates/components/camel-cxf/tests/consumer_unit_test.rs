@@ -106,6 +106,7 @@ fn test_consumer_request(
         headers: HashMap::new(),
         soap_action: soap_action.to_string(),
         security_profile: String::new(),
+        signer: None,
     }
 }
 
@@ -234,6 +235,7 @@ async fn test_request_id_correlation_multiple_concurrent()
                 headers: HashMap::new(),
                 soap_action: "urn:bulk".to_string(),
                 security_profile: String::new(),
+                signer: None,
             }))
             .await?;
     }
@@ -286,6 +288,7 @@ async fn test_consumer_receives_headers_from_request()
             headers: headers.clone(),
             soap_action: "urn:withHeaders".to_string(),
             security_profile: String::new(),
+            signer: None,
         }))
         .await?;
 
@@ -393,6 +396,7 @@ async fn test_consumer_multiple_headers_preserved()
             headers: headers.clone(),
             soap_action: "urn:multiHeaders".to_string(),
             security_profile: String::new(),
+            signer: None,
         }))
         .await?;
 
@@ -457,6 +461,7 @@ async fn test_consumer_50_concurrent_requests_correlated()
                 headers: HashMap::new(),
                 soap_action: "urn:concurrent".to_string(),
                 security_profile: String::new(),
+                signer: None,
             }))
             .await?;
     }
@@ -509,6 +514,7 @@ async fn consumer_task_exits_on_context_token_cancel()
     let slot = BridgeSlot::new_ready_for_test(channel);
     let pool = CxfBridgePool::from_config(CxfPoolConfig {
         profiles: vec![],
+        listener_tls: None,
         ..CxfPoolConfig::default()
     })?;
     pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);

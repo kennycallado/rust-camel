@@ -96,6 +96,10 @@ tempfile = { workspace = true }
 wiremock = { workspace = true }
 reqwest = { workspace = true }
 axum.workspace = true
+base64.workspace = true
+quick-xml.workspace = true
+tokio-rustls.workspace = true
+p12-keystore.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tracing.workspace = true
 redis = { workspace = true, features = ["tokio-comp", "aio"] }

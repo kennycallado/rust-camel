@@ -60,6 +60,7 @@ async fn make_pool_with_ready_slot() -> (Arc<CxfBridgePool>, MockState) {
 
     let pool_config = CxfPoolConfig {
         profiles: vec![],
+        listener_tls: None,
         ..CxfPoolConfig::default()
     };
     let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("valid config"));

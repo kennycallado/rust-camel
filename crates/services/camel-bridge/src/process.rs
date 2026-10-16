@@ -106,6 +106,46 @@ impl std::str::FromStr for BrokerType {
     }
 }
 
+/// Environment variables for a profile's producer transport TLS material,
+/// emitted as `CXF_PROFILE_<NAME>_TLS_*`. Password fields use [`Redacted`] to
+/// prevent accidental credential leakage in logs (ADR-0051).
+#[derive(Debug, Default)]
+pub struct CxfTlsEnvVars {
+    pub keystore_path: Option<String>,
+    pub keystore_password: Option<Redacted<String>>,
+    pub keystore_type: Option<String>,
+    pub truststore_path: Option<String>,
+    pub truststore_password: Option<Redacted<String>>,
+    pub truststore_type: Option<String>,
+}
+
+impl CxfTlsEnvVars {
+    /// Emit the six `TLS_*` env vars under the given `CXF_PROFILE_<NAME>_`
+    /// prefix.
+    pub fn to_env_vars(&self, prefix: &str) -> Vec<(String, String)> {
+        let mut vars = Vec::new();
+        if let Some(ref v) = self.keystore_path {
+            vars.push((format!("{prefix}TLS_KEYSTORE_PATH"), v.clone()));
+        }
+        if let Some(ref v) = self.keystore_password {
+            vars.push((format!("{prefix}TLS_KEYSTORE_PASSWORD"), (**v).clone()));
+        }
+        if let Some(ref v) = self.keystore_type {
+            vars.push((format!("{prefix}TLS_KEYSTORE_TYPE"), v.clone()));
+        }
+        if let Some(ref v) = self.truststore_path {
+            vars.push((format!("{prefix}TLS_TRUSTSTORE_PATH"), v.clone()));
+        }
+        if let Some(ref v) = self.truststore_password {
+            vars.push((format!("{prefix}TLS_TRUSTSTORE_PASSWORD"), (**v).clone()));
+        }
+        if let Some(ref v) = self.truststore_type {
+            vars.push((format!("{prefix}TLS_TRUSTSTORE_TYPE"), v.clone()));
+        }
+        vars
+    }
+}
+
 /// Environment variables for a single CXF profile, used by the bridge Java side.
 /// Password fields use [`Redacted`] to prevent accidental credential leakage in logs.
 #[derive(Debug)]
@@ -128,6 +168,11 @@ pub struct CxfProfileEnvVars {
     pub signature_digest_algorithm: Option<String>,
     pub signature_c14n_algorithm: Option<String>,
     pub signature_parts: Option<String>,
+    /// Optional per-profile HTTP status override for security (WSS) faults only,
+    /// emitted as `CXF_PROFILE_<NAME>_FAULT_STATUS`.
+    pub fault_status: Option<u16>,
+    /// Producer transport TLS material (`[profiles.security.tls]`).
+    pub tls: Option<CxfTlsEnvVars>,
 }
 
 impl CxfProfileEnvVars {
@@ -181,6 +226,12 @@ impl CxfProfileEnvVars {
         if let Some(ref v) = self.signature_parts {
             vars.push((format!("{}SIGNATURE_PARTS", prefix), v.clone()));
         }
+        if let Some(v) = self.fault_status {
+            vars.push((format!("{}FAULT_STATUS", prefix), v.to_string()));
+        }
+        if let Some(ref tls) = self.tls {
+            vars.extend(tls.to_env_vars(&prefix));
+        }
 
         vars
     }
@@ -199,6 +250,12 @@ pub struct BridgeProcessConfig {
     pub password: Option<Redacted<String>>,
     pub start_timeout_ms: u64,
     pub env_vars: Vec<(String, String)>,
+    /// When `true`, the supervisor awaits the bridge's `soap-ready` announcement
+    /// in addition to the gRPC `ready` line (either order) before `start()`
+    /// returns. Only a CXF bridge configured with a SOAP bind sets it; every
+    /// other bridge (and a CXF pool without a bind) keeps `false` and returns on
+    /// the gRPC `ready` line alone.
+    pub expect_soap_ready: bool,
 }
 
 impl fmt::Debug for BridgeProcessConfig {
@@ -215,6 +272,7 @@ impl fmt::Debug for BridgeProcessConfig {
                 "env_vars",
                 &format!("[REDACTED; {} entries]", self.env_vars.len()),
             )
+            .field("expect_soap_ready", &self.expect_soap_ready)
             .finish()
     }
 }
@@ -266,6 +324,7 @@ impl BridgeProcessConfig {
             password,
             start_timeout_ms,
             env_vars,
+            expect_soap_ready: false,
         }
     }
 
@@ -280,6 +339,7 @@ impl BridgeProcessConfig {
             password: None,
             start_timeout_ms,
             env_vars: vec![],
+            expect_soap_ready: false,
         }
     }
 
@@ -306,6 +366,7 @@ impl BridgeProcessConfig {
             password: None,
             start_timeout_ms,
             env_vars,
+            expect_soap_ready: false,
         }
     }
 
@@ -399,30 +460,39 @@ async fn drain_stdout<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, token: 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Ready-line classification (phase 4.1 permanent-failure signal)
-// ---------------------------------------------------------------------------
+/// Validate the announced port of a recognized ready line (`ready` or
+/// `soap-ready`): integer 1..=65535. Untrusted-stdout policy — a missing,
+/// non-numeric, or out-of-range port fails startup with `BadReadyMessage`
+/// instead of silently cast-wrapping into a wrong `u16` (e.g. 70000 → 4464).
+/// The reason carries the raw line, already bounded by the 64 KiB line cap.
+fn announced_port(value: &serde_json::Value, line: &str) -> Result<u16, BridgeError> {
+    match value.get("port").and_then(|p| p.as_u64()) {
+        Some(p) if (1..=u64::from(u16::MAX)).contains(&p) => Ok(p as u16),
+        _ => {
+            // log-policy: system-broken
+            tracing::error!("bridge ready message malformed: {line}");
+            Err(BridgeError::BadReadyMessage(line.to_string()))
+        }
+    }
+}
 
-/// One classified bridge startup stdout line.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 enum ReadyLine {
-    /// `{"status":"ready","port":N}` with a usable port.
     Ready(u16),
-    /// `{"status":"permanent-failure","reason":"..."}`.
+    SoapReady(u16),
     PermanentFailure(String),
-    /// `{"status":"ready"}` without a usable port.
     MalformedReady,
 }
 
-/// Classifies one complete startup line. `None` is an unrelated bridge log
-/// line, which the handshake skips.
+/// Classifies every startup status through the same strict port validator.
 fn parse_ready_line(line: &str) -> Option<ReadyLine> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     match value.get("status").and_then(|s| s.as_str())? {
-        "ready" => match value.get("port").and_then(|p| p.as_u64()) {
-            Some(port) => Some(ReadyLine::Ready(port as u16)),
-            None => Some(ReadyLine::MalformedReady),
-        },
+        status @ ("ready" | "soap-ready") => Some(match announced_port(&value, line) {
+            Ok(port) if status == "ready" => ReadyLine::Ready(port),
+            Ok(port) => ReadyLine::SoapReady(port),
+            Err(_) => ReadyLine::MalformedReady,
+        }),
         "permanent-failure" => Some(ReadyLine::PermanentFailure(
             value
                 .get("reason")
@@ -434,71 +504,73 @@ fn parse_ready_line(line: &str) -> Option<ReadyLine> {
     }
 }
 
-/// Reads bridge stdout until the ready line, a permanent-failure line, or EOF.
-///
-/// Bounded per line at 64 KiB. Returns [`BridgeError::StdoutClosed`] on EOF so
-/// the caller can apply the reserved-exit-code mapping.
+/// Reads both readiness announcements in either order, with a 64 KiB line cap.
+/// EOF classification belongs to the caller, outside the startup timeout.
+async fn read_ready_ports<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    expect_soap_ready: bool,
+) -> Result<(u16, Option<u16>), BridgeError> {
+    use tokio::io::AsyncBufReadExt;
+    const READY_MAX_LINE: usize = 64 * 1024;
+    let mut buf = Vec::new();
+    let mut oversized = false;
+    let mut grpc_port = None;
+    let mut soap_port = None;
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            return Err(BridgeError::StdoutClosed);
+        }
+        let newline = chunk.iter().position(|&b| b == b'\n');
+        let take = newline.map_or(chunk.len(), |i| i + 1);
+        if !oversized && buf.len() + take <= READY_MAX_LINE {
+            buf.extend_from_slice(&chunk[..take]);
+        } else {
+            oversized = true;
+        }
+        reader.consume(take);
+        if newline.is_some() {
+            if !oversized {
+                let line = String::from_utf8_lossy(&buf);
+                match parse_ready_line(line.trim_end_matches('\n')) {
+                    Some(ReadyLine::Ready(port)) => grpc_port = Some(port),
+                    Some(ReadyLine::SoapReady(port)) => soap_port = Some(port),
+                    Some(ReadyLine::PermanentFailure(reason)) => {
+                        return Err(BridgeError::PermanentFailure(reason));
+                    }
+                    Some(ReadyLine::MalformedReady) => {
+                        return Err(BridgeError::BadReadyMessage(line.into_owned()));
+                    }
+                    None => {}
+                }
+                if let Some(port) = grpc_port
+                    && (!expect_soap_ready || soap_port.is_some())
+                {
+                    return Ok((port, soap_port));
+                }
+            }
+            buf.clear();
+            oversized = false;
+        }
+    }
+}
+
+#[cfg(test)]
 async fn read_ready_port<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
 ) -> Result<u16, BridgeError> {
-    use tokio::io::AsyncBufReadExt;
-
-    let mut buf_acc: Vec<u8> = Vec::new();
-    const READY_MAX_LINE: usize = 64 * 1024;
-    while let Ok(chunk) = reader.fill_buf().await {
-        if chunk.is_empty() {
-            break; // EOF
-        }
-        let newline_pos = chunk.iter().position(|&b| b == b'\n');
-        let take = match newline_pos {
-            Some(i) => i + 1,
-            None => chunk.len(),
-        };
-        if buf_acc.len() + take <= READY_MAX_LINE {
-            buf_acc.extend_from_slice(&chunk[..take]);
-        }
-        reader.consume(take);
-        if newline_pos.is_some() {
-            let line = String::from_utf8_lossy(&buf_acc);
-            let line_trimmed = line.trim_end_matches('\n');
-            match parse_ready_line(line_trimmed) {
-                Some(ReadyLine::Ready(port)) => return Ok(port),
-                Some(ReadyLine::PermanentFailure(reason)) => {
-                    return Err(BridgeError::PermanentFailure(reason));
-                }
-                Some(ReadyLine::MalformedReady) => {
-                    // log-policy: system-broken
-                    tracing::error!("bridge ready message malformed: {line_trimmed}");
-                    return Err(BridgeError::BadReadyMessage(line_trimmed.to_string()));
-                }
-                None => {}
-            }
-            buf_acc.clear();
-        }
-    }
-    // log-policy: system-broken
-    tracing::error!("bridge stdout closed before ready message");
-    Err(BridgeError::StdoutClosed)
+    read_ready_ports(reader, false).await.map(|(port, _)| port)
 }
 
-/// Waits (bounded, 2 s) for a child that closed stdout before readiness. Exit
-/// code `78` is the reserved permanent-failure code; any other exit, or a child
-/// that does not exit, stays [`BridgeError::StdoutClosed`].
-///
-/// The 2 s exit classification is separate from cleanup: a child that does not
-/// exit is killed and reaped *after* classification, bounded at another 2 s, so
-/// a known signal is never delayed by teardown.
+/// Classify EOF outside the readiness deadline, then bound cleanup separately.
 async fn eof_exit_error(child: &mut tokio::process::Child) -> BridgeError {
     use tokio::time::{Duration, timeout};
-
     match timeout(Duration::from_secs(2), child.wait()).await {
         Ok(Ok(status)) if status.code() == Some(78) => BridgeError::PermanentFailure(
             "bridge exited with code 78 before announcing readiness".to_string(),
         ),
         Ok(_) => BridgeError::StdoutClosed,
         Err(_) => {
-            // Closed stdout but still running: terminate and reap so no process
-            // leaks. This cleanup runs after classification and is bounded.
             let _ = child.start_kill();
             let _ = timeout(Duration::from_secs(2), child.wait()).await;
             BridgeError::StdoutClosed
@@ -509,6 +581,10 @@ async fn eof_exit_error(child: &mut tokio::process::Child) -> BridgeError {
 pub struct BridgeProcess {
     child: tokio::process::Child,
     grpc_port: u16,
+    /// Announced SOAP listener port (`soap-ready` line). `None` when the bridge
+    /// runs without a SOAP bind. Fresh per [`BridgeProcess::start`] — a restart
+    /// builds a new process, so no stale port can survive into the next slot.
+    soap_port: Option<u16>,
     tls: crate::tls::BridgeTlsMaterial,
     token: CancellationToken,
     handle: Option<JoinHandle<()>>,
@@ -517,6 +593,16 @@ pub struct BridgeProcess {
 impl BridgeProcess {
     pub fn grpc_port(&self) -> u16 {
         self.grpc_port
+    }
+
+    /// Announced SOAP listener port; `None` without a `soap-ready` line.
+    pub fn soap_port(&self) -> Option<u16> {
+        self.soap_port
+    }
+
+    /// PID of the owned bridge child (read-only lifecycle accessor).
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.id()
     }
 
     /// Connect a mTLS tonic channel to this bridge process.
@@ -589,6 +675,9 @@ impl BridgeProcess {
             };
 
         let mut command = Command::new(&config.binary_path);
+        // Owned cleanup: any early return from start() (timeout, malformed ready
+        // line, missing stdout) drops the child handle and kills the process —
+        // no leaked bridge keeps running with stale credentials.
         command
             // Cancellation-safe ownership: if this future is dropped (outer
             // timeout or abort) the raw child is killed instead of orphaned.
@@ -616,31 +705,29 @@ impl BridgeProcess {
         let stdout = child.stdout.take().ok_or(BridgeError::StdoutClosed)?;
         let mut reader = tokio::io::BufReader::new(stdout);
 
-        // --- Ready-detection phase (bounded by outer timeout + bounded line) ---
+        // --- Ready-detection phase (bounded by ONE outer timeout + bounded line) ---
+        // Startup protocol (Task 2.8): parse the gRPC `ready` line AND the
+        // `soap-ready` line in ANY order. `config.start_timeout_ms` encloses the
+        // WHOLE wait — it is never reset per line or per chunk. With
+        // `expect_soap_ready = false` the loop returns on the gRPC `ready` line
+        // alone (a `soap-ready` seen before it is still stored when valid).
         // R4-L7: use fill_buf()/consume() instead of Lines::next_line() to avoid
         // unbounded buffer growth on lines without newlines.
         let ready = timeout(
             Duration::from_millis(config.start_timeout_ms),
-            read_ready_port(&mut reader),
+            read_ready_ports(&mut reader, config.expect_soap_ready),
         )
         .await;
-
-        let port = match ready {
-            Ok(Ok(port)) => port,
+        let (port, soap_port) = match ready {
+            Ok(Ok(ports)) => ports,
             Ok(Err(BridgeError::StdoutClosed)) => {
-                // EOF before ready: a reserved exit code 78 is a permanent
-                // startup failure; any other exit stays the transient EOF error.
-                // Classification is separate from cleanup: `eof_exit_error`
-                // terminates and reaps a still-running child after classifying.
-                return Err(eof_exit_error(&mut child).await);
-            }
-            Ok(Err(error)) => {
-                // Permanent-failure line or malformed ready line: return the
-                // observed signal immediately. The child is dropped at function
-                // exit, and `kill_on_drop` terminates it without blocking the
-                // handshake deadline.
+                // EOF classification must not lose exit 78 to the readiness deadline.
+                let error = eof_exit_error(&mut child).await;
+                // log-policy: system-broken
+                tracing::error!("bridge stdout closed before ready message");
                 return Err(error);
             }
+            Ok(Err(error)) => return Err(error),
             Err(_) => {
                 let msg = format!(
                     "{} failed to start: health check timeout after {}ms",
@@ -648,7 +735,6 @@ impl BridgeProcess {
                 );
                 // log-policy: system-broken
                 tracing::error!("{msg}");
-                // The stuck child is dropped here; `kill_on_drop` reaps it.
                 return Err(BridgeError::Timeout(msg));
             }
         };
@@ -666,6 +752,7 @@ impl BridgeProcess {
         Ok(BridgeProcess {
             child,
             grpc_port: port,
+            soap_port,
             tls,
             token,
             handle: Some(handle),
@@ -777,60 +864,44 @@ mod tests {
             Some("user".to_string()),
             Some(Redacted::new("pass".to_string())),
             1000,
-            Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
-            Some("0123456789abcdef0123456789abcdef".to_string()),
+            None,
+            None,
         );
         assert_eq!(cfg.spec.name, "jms-bridge");
     }
 
-    /// Task 3.6: the Rust-resolved journal directory and broker key travel to
-    /// the bridge on the initial launch and every restart, because both go
-    /// through this one constructor.
+    #[test]
+    fn xml_constructor_uses_xml_spec() {
+        let cfg = BridgeProcessConfig::xml(PathBuf::from("/tmp/xml-bridge"), 1000);
+        assert_eq!(cfg.spec.name, "xml-bridge");
+    }
+
     #[test]
     fn journal_env_passed_on_launch_and_restart() {
-        let dir = "/var/lib/state/rust-camel/jms-bridge".to_string();
-        let key = "0123456789abcdef0123456789abcdef".to_string();
-
-        let initial = BridgeProcessConfig::jms(
-            PathBuf::from("/tmp/jms-bridge"),
-            "tcp://localhost:61616".to_string(),
-            BrokerType::ActiveMq,
-            None,
-            None,
-            1000,
-            Some(dir.clone()),
-            Some(key.clone()),
-        );
-        let restart = BridgeProcessConfig::jms(
-            PathBuf::from("/tmp/jms-bridge"),
-            "tcp://localhost:61616".to_string(),
-            BrokerType::ActiveMq,
-            None,
-            None,
-            1000,
-            Some(dir.clone()),
-            Some(key.clone()),
-        );
-
-        for cfg in [&initial, &restart] {
-            assert!(
-                cfg.env_vars
-                    .iter()
-                    .any(|(k, v)| k == "JMS_ATTEMPT_JOURNAL_DIR" && v == &dir),
-                "JMS_ATTEMPT_JOURNAL_DIR must be present"
+        for _ in 0..2 {
+            let config = BridgeProcessConfig::jms(
+                PathBuf::from("/tmp/jms-bridge"),
+                "tcp://localhost:61616".into(),
+                BrokerType::ActiveMq,
+                None,
+                None,
+                1000,
+                Some("/var/lib/state/rust-camel/jms-bridge".into()),
+                Some("broker-key".into()),
             );
+            assert!(config.env_vars.contains(&(
+                "JMS_ATTEMPT_JOURNAL_DIR".into(),
+                "/var/lib/state/rust-camel/jms-bridge".into()
+            )));
             assert!(
-                cfg.env_vars
-                    .iter()
-                    .any(|(k, v)| k == "JMS_BRIDGE_BROKER_KEY" && v == &key),
-                "JMS_BRIDGE_BROKER_KEY must be present"
+                config
+                    .env_vars
+                    .contains(&("JMS_BRIDGE_BROKER_KEY".into(), "broker-key".into()))
             );
         }
-
-        // Unset stays unset (producer-only path).
         let unset = BridgeProcessConfig::jms(
             PathBuf::from("/tmp/jms-bridge"),
-            "tcp://localhost:61616".to_string(),
+            "tcp://localhost:61616".into(),
             BrokerType::ActiveMq,
             None,
             None,
@@ -842,15 +913,175 @@ mod tests {
             !unset
                 .env_vars
                 .iter()
-                .any(|(k, _)| k == "JMS_ATTEMPT_JOURNAL_DIR" || k == "JMS_BRIDGE_BROKER_KEY"),
-            "unset journal env must not be injected"
+                .any(|(key, _)| key == "JMS_ATTEMPT_JOURNAL_DIR" || key == "JMS_BRIDGE_BROKER_KEY")
         );
     }
 
     #[test]
-    fn xml_constructor_uses_xml_spec() {
-        let cfg = BridgeProcessConfig::xml(PathBuf::from("/tmp/xml-bridge"), 1000);
-        assert_eq!(cfg.spec.name, "xml-bridge");
+    fn parses_permanent_failure_status_line() {
+        assert_eq!(
+            parse_ready_line(
+                r#"{"status":"permanent-failure","reason":"JMS_ATTEMPT_JOURNAL_DIR is not owner-private"}"#
+            ),
+            Some(ReadyLine::PermanentFailure(
+                "JMS_ATTEMPT_JOURNAL_DIR is not owner-private".into()
+            ))
+        );
+        assert_eq!(
+            parse_ready_line(r#"{"status":"ready","port":8080}"#),
+            Some(ReadyLine::Ready(8080))
+        );
+        assert_eq!(parse_ready_line("just a log line"), None);
+        for status in ["ready", "soap-ready"] {
+            for port in ["0", "65536", "-1", "1.5", "\"123\"", "null"] {
+                assert_eq!(
+                    parse_ready_line(&format!(r#"{{"status":"{status}","port":{port}}}"#)),
+                    Some(ReadyLine::MalformedReady)
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn wait_pid_gone(pid: u32) -> bool {
+        std::process::Command::new("sh").arg("-c").arg(format!(
+            "i=0; while [ $i -lt 100 ]; do kill -0 {pid} 2>/dev/null || exit 0; case \"$(ps -o stat= -p {pid} 2>/dev/null)\" in Z*) exit 0;; esac; i=$((i+1)); sleep 0.05; done; exit 1"
+        )).status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn eof_with_exit_78_maps_to_permanent() {
+        // Exit occurs after stdout closes and after the readiness budget ends.
+        let (_dir, script) = fake_bridge_script("exec 1>&-; sleep 0.3; exit 78");
+        let result = BridgeProcess::start(&fake_bridge_config(&script, false, 150)).await;
+        assert!(
+            matches!(result, Err(BridgeError::PermanentFailure(reason)) if reason.contains("78"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn eof_with_other_exit_stays_transient() {
+        let (_dir, script) = fake_bridge_script("exit 1");
+        let result = BridgeProcess::start(&fake_bridge_config(&script, false, 5000)).await;
+        assert!(matches!(result, Err(BridgeError::StdoutClosed)));
+    }
+
+    #[tokio::test]
+    async fn oversized_ready_line_is_discarded_before_next_announcement() {
+        let mut output = vec![b' '; 64 * 1024];
+        output.extend_from_slice(b"{\"status\":\"ready\",\"port\":9999}\n");
+        output.extend_from_slice(b"{\"status\":\"ready\",\"port\":12345}\n");
+        let mut reader = tokio::io::BufReader::new(output.as_slice());
+        assert_eq!(
+            read_ready_port(&mut reader).await.expect("ready port"),
+            12345
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn eof_closed_stdout_child_is_bounded_other_and_killed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("child.pid");
+        let (_script_dir, script) = fake_bridge_script(&format!(
+            "echo $$ > '{}'; exec 1>&-; exec sleep 30",
+            pidfile.display()
+        ));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            BridgeProcess::start(&fake_bridge_config(&script, false, 5000)),
+        )
+        .await
+        .expect("bounded EOF classification");
+        assert!(matches!(result, Err(BridgeError::StdoutClosed)));
+        let pid = std::fs::read_to_string(pidfile)
+            .expect("pidfile")
+            .trim()
+            .parse()
+            .expect("pid");
+        assert!(wait_pid_gone(pid), "EOF child must be killed");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn permanent_line_returns_prompt_and_kills_child() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("child.pid");
+        let (_script_dir, script) = fake_bridge_script(&format!(
+            "echo $$ > '{}'; echo '{{\"status\":\"permanent-failure\",\"reason\":\"JMS_ATTEMPT_JOURNAL_DIR is not owner-private\"}}'; exec sleep 30",
+            pidfile.display()
+        ));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            BridgeProcess::start(&fake_bridge_config(&script, true, 300)),
+        )
+        .await
+        .expect("prompt permanent failure");
+        assert!(
+            matches!(result, Err(BridgeError::PermanentFailure(reason)) if reason.contains("JMS_ATTEMPT_JOURNAL_DIR"))
+        );
+        let pid = std::fs::read_to_string(pidfile)
+            .expect("pidfile")
+            .trim()
+            .parse()
+            .expect("pid");
+        assert!(wait_pid_gone(pid), "permanent failure child must be killed");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_cancellation_kills_child() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pidfile = dir.path().join("child.pid");
+        let (_script_dir, script) =
+            fake_bridge_script(&format!("echo $$ > '{}'; exec sleep 30", pidfile.display()));
+        let config = fake_bridge_config(&script, true, 5000);
+        let task = tokio::spawn(async move { BridgeProcess::start(&config).await });
+        let pid = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(text) = std::fs::read_to_string(&pidfile)
+                    && let Ok(pid) = text.trim().parse::<u32>()
+                {
+                    break pid;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("child starts");
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        assert!(wait_pid_gone(pid), "cancelled startup child must be killed");
+    }
+
+    #[test]
+    fn default_expect_soap_ready_is_false() {
+        let xml = BridgeProcessConfig::xml(PathBuf::from("/tmp/xml-bridge"), 1000);
+        assert!(
+            !xml.expect_soap_ready,
+            "xml bridge must not expect soap-ready"
+        );
+        let jms = BridgeProcessConfig::jms(
+            PathBuf::from("/tmp/jms-bridge"),
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            1000,
+            None,
+            None,
+        );
+        assert!(
+            !jms.expect_soap_ready,
+            "jms bridge must not expect soap-ready"
+        );
+        let cxf = BridgeProcessConfig::cxf_profiles(PathBuf::from("/tmp/cxf-bridge"), &[], 1000);
+        assert!(
+            !cxf.expect_soap_ready,
+            "a CXF pool without a SOAP bind must not expect soap-ready"
+        );
     }
 
     #[test]
@@ -875,6 +1106,8 @@ mod tests {
                 signature_digest_algorithm: None,
                 signature_c14n_algorithm: None,
                 signature_parts: None,
+                fault_status: None,
+                tls: None,
             },
             CxfProfileEnvVars {
                 name: "extremadura".to_string(),
@@ -895,6 +1128,8 @@ mod tests {
                 signature_digest_algorithm: None,
                 signature_c14n_algorithm: None,
                 signature_parts: None,
+                fault_status: None,
+                tls: None,
             },
         ];
 
@@ -997,6 +1232,8 @@ mod tests {
             signature_digest_algorithm: None,
             signature_c14n_algorithm: None,
             signature_parts: None,
+            fault_status: None,
+            tls: None,
         }];
 
         let cfg =
@@ -1036,11 +1273,13 @@ mod tests {
             signature_digest_algorithm: None,
             signature_c14n_algorithm: None,
             signature_parts: None,
+            fault_status: Some(403),
+            tls: None,
         };
 
         let env = vars.to_env_vars();
-        // 3 required + 1 address + 8 security = 12
-        assert_eq!(env.len(), 12);
+        // 3 required + 1 address + 8 security + 1 fault_status = 13
+        assert_eq!(env.len(), 13);
 
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"CXF_PROFILE_FULL_WSDL_PATH"));
@@ -1055,6 +1294,11 @@ mod tests {
         assert!(keys.contains(&"CXF_PROFILE_FULL_SIG_PASSWORD"));
         assert!(keys.contains(&"CXF_PROFILE_FULL_SECURITY_ACTIONS_OUT"));
         assert!(keys.contains(&"CXF_PROFILE_FULL_SECURITY_ACTIONS_IN"));
+        let fault_status = env
+            .iter()
+            .find(|(k, _)| k == "CXF_PROFILE_FULL_FAULT_STATUS")
+            .expect("fault_status env var emitted");
+        assert_eq!(fault_status.1, "403");
     }
 
     #[test]
@@ -1103,6 +1347,7 @@ mod tests {
         let bridge = BridgeProcess {
             child,
             grpc_port: 0,
+            soap_port: None,
             tls: crate::tls::BridgeTlsMaterial::generate().expect("test tls"),
             token: CancellationToken::new(),
             handle: None,
@@ -1186,6 +1431,7 @@ mod tests {
                 "KEYSTORE_PASSWORD".to_string(),
                 "SENTINEL-ENV-PASS".to_string(),
             )],
+            expect_soap_ready: false,
         };
         let debug_output = format!("{cfg:?}");
         assert!(
@@ -1216,6 +1462,7 @@ mod tests {
                 "KEYSTORE_PASSWORD".to_string(),
                 "SENTINEL-ENV-PASS".to_string(),
             )],
+            expect_soap_ready: false,
         };
         let debug_output = format!("{cfg:?}");
         assert!(
@@ -1252,6 +1499,8 @@ mod tests {
             signature_digest_algorithm: None,
             signature_c14n_algorithm: None,
             signature_parts: None,
+            fault_status: None,
+            tls: None,
         };
         let debug_output = format!("{profile:?}");
         assert!(
@@ -1260,6 +1509,225 @@ mod tests {
                 && !debug_output.contains("sig_secret_val"),
             "Debug must not contain passwords: {debug_output}"
         );
+    }
+
+    // --- Task 2.8: dual ready-line startup protocol tests (fake bridge) ---
+
+    /// Fake bridge binary: an executable `sh` script standing in for the native
+    /// bridge on stdout. The tempdir is returned so the script file outlives
+    /// every child the test spawns from it.
+    fn fake_bridge_script(body: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("fake bridge tempdir");
+        let path = dir.path().join("fake-bridge.sh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake bridge script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake bridge script");
+        }
+        (dir, path)
+    }
+
+    fn fake_bridge_config(
+        script: &std::path::Path,
+        expect_soap_ready: bool,
+        start_timeout_ms: u64,
+    ) -> BridgeProcessConfig {
+        let mut config =
+            BridgeProcessConfig::cxf_profiles(script.to_path_buf(), &[], start_timeout_ms);
+        config.expect_soap_ready = expect_soap_ready;
+        config
+    }
+
+    /// Task 2.8: `ready` and `soap-ready` are accepted in ANY order under the
+    /// single enclosing startup budget, and BOTH announced ports are stored.
+    #[tokio::test]
+    async fn process_dual_ready_reordered_is_accepted() {
+        use std::time::{Duration, Instant};
+
+        for (label, body, expect_soap_ready, want_soap) in [
+            (
+                "soap-ready before ready (expect=true)",
+                r#"echo '{"status":"soap-ready","port":23456}'; echo '{"status":"ready","port":12345}'"#,
+                true,
+                Some(23456u16),
+            ),
+            (
+                "ready before soap-ready (expect=true)",
+                r#"echo '{"status":"ready","port":12345}'; echo '{"status":"soap-ready","port":23456}'"#,
+                true,
+                Some(23456u16),
+            ),
+            (
+                "soap-ready before ready (expect=false still stores the valid soap port)",
+                r#"echo '{"status":"soap-ready","port":23456}'; echo '{"status":"ready","port":12345}'"#,
+                false,
+                Some(23456u16),
+            ),
+        ] {
+            let (_dir, script) = fake_bridge_script(body);
+            let config = fake_bridge_config(&script, expect_soap_ready, 10_000);
+            let started = Instant::now();
+            let process = BridgeProcess::start(&config).await.unwrap_or_else(|e| {
+                panic!("{label}: dual ready lines in any order must start: {e}")
+            });
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_millis(10_000),
+                "{label}: start must complete inside one config budget, took {elapsed:?}"
+            );
+            assert_eq!(process.grpc_port(), 12345, "{label}: gRPC port stored");
+            assert_eq!(process.soap_port(), want_soap, "{label}: soap port stored");
+            process
+                .stop()
+                .await
+                .unwrap_or_else(|e| panic!("{label}: fake bridge must stop cleanly: {e}"));
+        }
+    }
+
+    /// Task 2.8: a partial (soap-only) announcement followed by the ready line
+    /// completes within ONE `start_timeout_ms` budget — and the counterexample
+    /// row pins that the budget ENCLOSES the whole wait (it is never reset per
+    /// line). Counterexample layout: two independent gaps BOTH strictly inside
+    /// the budget (2.5s < 4s) whose SUM comfortably exceeds it (5s > 4s), so a
+    /// per-line-reset implementation would return Ok at ~5s while the correct
+    /// one times out at ~4s. A marker file proves the partial soap-ready line
+    /// was really emitted before the deadline — the timeout cannot be excused
+    /// as "the partial never arrived".
+    #[tokio::test]
+    async fn partial_ready_is_bounded_and_completes_in_one_timeout() {
+        use std::time::{Duration, Instant};
+
+        for (label, body_template, budget_ms, expect_ok, max_elapsed_ms) in [
+            (
+                "partial soap-ready then ready completes within ONE budget",
+                r#"echo '{"status":"soap-ready","port":23456}'; sleep 1; echo '{"status":"ready","port":12345}'"#,
+                6_000u64,
+                true,
+                6_000u64,
+            ),
+            (
+                "counterexample: TOTAL budget exceeded fires StartTimeout — no per-line reset",
+                r#"sleep 2.5; echo '{"status":"soap-ready","port":23456}'; touch '{marker}'; sleep 2.5; echo '{"status":"ready","port":12345}'"#,
+                4_000u64,
+                false,
+                5_000u64,
+            ),
+        ] {
+            // The counterexample proves the PARTIAL line really was emitted
+            // before the deadline: the fake bridge drops a marker right after
+            // the soap-ready print (test fixture state — no prod test hooks).
+            let marker_dir = tempfile::tempdir().expect("marker tempdir");
+            let marker = marker_dir.path().join("soap-ready-emitted");
+            let body = body_template.replace("{marker}", &marker.display().to_string());
+            let (_dir, script) = fake_bridge_script(&body);
+            let config = fake_bridge_config(&script, true, budget_ms);
+            let started = Instant::now();
+            let result = BridgeProcess::start(&config).await;
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < Duration::from_millis(max_elapsed_ms),
+                "{label}: must resolve in {max_elapsed_ms}ms (one enclosing budget), took {elapsed:?}"
+            );
+            if expect_ok {
+                let process =
+                    result.unwrap_or_else(|e| panic!("{label}: start must complete: {e}"));
+                assert_eq!(process.grpc_port(), 12345, "{label}: gRPC port");
+                assert_eq!(process.soap_port(), Some(23456), "{label}: soap port");
+                process
+                    .stop()
+                    .await
+                    .unwrap_or_else(|e| panic!("{label}: fake bridge must stop cleanly: {e}"));
+            } else {
+                match result {
+                    Err(BridgeError::Timeout(_)) => {}
+                    Err(e) => panic!("{label}: expected StartTimeout, got {e}"),
+                    Ok(_) => panic!(
+                        "{label}: start must hit the single enclosing budget instead of \
+                         waiting out per-line resets"
+                    ),
+                }
+                assert!(
+                    marker.exists(),
+                    "{label}: the partial soap-ready line must have been emitted before \
+                     the deadline — the timeout comes from the ENCLOSING budget, not \
+                     from a missing partial line"
+                );
+            }
+        }
+    }
+
+    /// Task 2.8: a recognized `soap-ready` line with a non-numeric, missing, or
+    /// out-of-range port fails startup with `BadReadyMessage` — in BOTH line
+    /// orders, with `expect_soap_ready` enabled. Port validation is 1..=65535
+    /// (untrusted stdout policy: never cast-wrap into a wrong `u16`).
+    #[tokio::test]
+    async fn malformed_soap_ready_fails_startup() {
+        let malformed = [
+            (
+                "non-numeric port",
+                r#"{"status":"soap-ready","port":"abc"}"#,
+            ),
+            ("missing port", r#"{"status":"soap-ready"}"#),
+            (
+                "port above u16 range",
+                r#"{"status":"soap-ready","port":70000}"#,
+            ),
+            ("port zero", r#"{"status":"soap-ready","port":0}"#),
+        ];
+        for (kind, soap_line) in malformed {
+            for (order, body) in [
+                (
+                    "soap-ready first",
+                    format!("echo '{soap_line}'; echo '{{\"status\":\"ready\",\"port\":12345}}'"),
+                ),
+                (
+                    "ready first",
+                    format!("echo '{{\"status\":\"ready\",\"port\":12345}}'; echo '{soap_line}'"),
+                ),
+            ] {
+                let label = format!("{kind}, {order}");
+                let (_dir, script) = fake_bridge_script(&body);
+                let config = fake_bridge_config(&script, true, 5_000);
+                match BridgeProcess::start(&config).await {
+                    Err(BridgeError::BadReadyMessage(_)) => {}
+                    Err(e) => panic!("{label}: expected BadReadyMessage, got {e}"),
+                    Ok(_) => panic!("{label}: malformed soap-ready must fail startup"),
+                }
+            }
+        }
+    }
+
+    /// Task 2.8: with `expect_soap_ready = false` the supervisor awaits ONLY the
+    /// gRPC `ready` line and returns without any second wait (no soap-ready ever
+    /// arrives — the fake bridge holds its stdout open afterwards to prove it),
+    /// and the soap port stays `None` (no stale value).
+    #[tokio::test]
+    async fn no_soap_wait_when_unbound() {
+        use std::time::{Duration, Instant};
+
+        // `exec` replaces the shell so the blocker IS the child: no orphaned
+        // grandchildren after stop().
+        let (_dir, script) =
+            fake_bridge_script(r#"echo '{"status":"ready","port":12345}'; exec tail -f /dev/null"#);
+        let config = fake_bridge_config(&script, false, 5_000);
+        let started = Instant::now();
+        let process = BridgeProcess::start(&config)
+            .await
+            .expect("start must return on the gRPC ready line alone");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(2_500),
+            "expect_soap_ready=false must not wait for a soap-ready line, took {elapsed:?}"
+        );
+        assert_eq!(process.grpc_port(), 12345);
+        assert_eq!(
+            process.soap_port(),
+            None,
+            "no soap-ready line → soap_port stays None"
+        );
+        process.stop().await.expect("fake bridge must stop cleanly");
     }
 
     // --- R4-L7: Bounded stdout drain tests ---
@@ -1372,8 +1840,6 @@ mod tests {
     /// are processed (not lost).
     #[tokio::test]
     async fn drain_handoff_preserves_trailing_bytes() {
-        use tokio::io::AsyncBufReadExt;
-
         // Child emits ready JSON + trailing log lines
         let mut child = spawn_child_with_stdout(
             r#"echo '{"status":"ready","port":12345}'; echo "trailing-1"; echo "trailing-2"; echo "trailing-3""#,
@@ -1383,37 +1849,11 @@ mod tests {
         let stdout = child.stdout.take().expect("stdout piped");
         let mut reader = tokio::io::BufReader::new(stdout);
 
-        // --- Phase 1: ready-detection (mimics start() logic) ---
-        let mut buf_acc: Vec<u8> = Vec::new();
-        const READY_MAX_LINE: usize = 64 * 1024;
-        let mut port_found = None;
-        while let Ok(chunk) = reader.fill_buf().await {
-            if chunk.is_empty() {
-                break; // EOF
-            }
-            let newline_pos = chunk.iter().position(|&b| b == b'\n');
-            let take = match newline_pos {
-                Some(i) => i + 1,
-                None => chunk.len(),
-            };
-            if buf_acc.len() + take <= READY_MAX_LINE {
-                buf_acc.extend_from_slice(&chunk[..take]);
-            }
-            reader.consume(take);
-            if newline_pos.is_some() {
-                let line = String::from_utf8_lossy(&buf_acc);
-                let line_trimmed = line.trim_end_matches('\n');
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line_trimmed)
-                    && v.get("status").and_then(|s| s.as_str()) == Some("ready")
-                    && let Some(p) = v.get("port").and_then(|p| p.as_u64())
-                {
-                    port_found = Some(p as u16);
-                    break;
-                }
-                buf_acc.clear();
-            }
-        }
-        assert_eq!(port_found, Some(12345), "ready message must be parsed");
+        // --- Phase 1: production readiness parser, not a test copy ---
+        assert_eq!(
+            read_ready_port(&mut reader).await.expect("ready port"),
+            12345
+        );
 
         // --- Phase 2: drain with the SAME reader (I-2: handoff invariant) ---
         let token = CancellationToken::new();
@@ -1433,164 +1873,5 @@ mod tests {
             result.is_ok(),
             "drain task should complete — trailing bytes preserved through handoff"
         );
-    }
-
-    // --- Phase 4.1: permanent-failure startup signal ---
-
-    /// Pure protocol classification; platform-independent.
-    #[test]
-    fn parses_permanent_failure_status_line() {
-        assert_eq!(
-            parse_ready_line(
-                r#"{"status":"permanent-failure","reason":"JMS_ATTEMPT_JOURNAL_DIR is not owner-private"}"#
-            ),
-            Some(ReadyLine::PermanentFailure(
-                "JMS_ATTEMPT_JOURNAL_DIR is not owner-private".to_string()
-            )),
-            "a permanent-failure line must classify as PermanentFailure"
-        );
-        // A ready line never classifies as permanent.
-        assert!(matches!(
-            parse_ready_line(r#"{"status":"ready","port":8080}"#),
-            Some(ReadyLine::Ready(8080))
-        ));
-        // Unrelated lines are skipped.
-        assert_eq!(parse_ready_line("just a log line"), None);
-    }
-
-    /// Writes an executable stub bridge script into `dir`.
-    #[cfg(unix)]
-    fn write_stub(dir: &std::path::Path, name: &str, script: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = dir.join(name);
-        std::fs::write(&path, script).expect("write stub bridge");
-        let mut perms = std::fs::metadata(&path)
-            .expect("stat stub bridge")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod stub bridge");
-        path
-    }
-
-    /// A minimal JMS `BridgeProcessConfig` whose binary is the given stub.
-    #[cfg(unix)]
-    fn stub_config(binary: PathBuf, start_timeout_ms: u64) -> BridgeProcessConfig {
-        BridgeProcessConfig {
-            spec: &JMS_BRIDGE,
-            binary_path: binary,
-            broker_url: "tcp://localhost:61616".to_string(),
-            broker_type: BrokerType::ActiveMq,
-            username: None,
-            password: None,
-            start_timeout_ms,
-            env_vars: vec![],
-        }
-    }
-
-    /// Bounded (external, no Rust sleep) check that `pid` is gone.
-    ///
-    /// A zombie counts as gone: `kill -0` still succeeds on one, and these
-    /// tests run on a current-thread runtime that this blocking call stalls,
-    /// so tokio's orphan reaper cannot collect the `kill_on_drop` child while
-    /// we wait. The child is dead (SIGKILLed); only the reap is pending.
-    #[cfg(unix)]
-    fn wait_pid_gone(pid: u32) -> bool {
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "i=0; while [ $i -lt 100 ]; do kill -0 {pid} 2>/dev/null || exit 0; case \"$(ps -o stat= -p {pid} 2>/dev/null)\" in Z*) exit 0;; esac; i=$((i+1)); sleep 0.05; done; exit 1"
-            ))
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-
-    /// Reads a PID file written by a stub.
-    #[cfg(unix)]
-    fn read_pid(path: &std::path::Path) -> u32 {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
-    }
-
-    /// Task 4.1: an EOF before ready with exit code 78 maps to a permanent
-    /// failure, using a real bounded child.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn eof_with_exit_78_maps_to_permanent() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let stub = write_stub(dir.path(), "stub-bridge.sh", "#!/bin/sh\nexit 78\n");
-
-        let result = BridgeProcess::start(&stub_config(stub, 5_000)).await;
-        match result {
-            Err(BridgeError::PermanentFailure(reason)) => {
-                assert!(
-                    reason.contains("78"),
-                    "reason must name the reserved exit code: {reason}"
-                );
-            }
-            Err(other) => panic!("expected PermanentFailure from exit 78, got: {other:?}"),
-            Ok(_) => panic!("exit 78 before ready must never start a bridge"),
-        }
-    }
-
-    /// A child that closes stdout without exiting is a bounded transient error,
-    /// and the still-running child is terminated on drop (no leak).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn eof_closed_stdout_child_is_bounded_other_and_killed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let pidfile = dir.path().join("child.pid");
-        let stub = write_stub(
-            dir.path(),
-            "stub-bridge.sh",
-            &format!(
-                "#!/bin/sh\necho $$ > '{}'\nexec 1>&-\nexec sleep 30\n",
-                pidfile.display()
-            ),
-        );
-
-        let result = BridgeProcess::start(&stub_config(stub, 5_000)).await;
-        assert!(
-            matches!(result, Err(BridgeError::StdoutClosed)),
-            "a non-exiting child must surface the bounded EOF error"
-        );
-
-        let pid = read_pid(&pidfile);
-        assert!(pid > 0, "stub must have written its pid");
-        assert!(wait_pid_gone(pid), "child {pid} must be terminated");
-    }
-
-    /// A permanent-failure line returns promptly (not delayed by cleanup) and
-    /// the still-running child is terminated on drop.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn permanent_line_returns_prompt_and_kills_child() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let pidfile = dir.path().join("child.pid");
-        let stub = write_stub(
-            dir.path(),
-            "stub-bridge.sh",
-            &format!(
-                "#!/bin/sh\necho $$ > '{}'\nprintf '%s\\n' '{{\"status\":\"permanent-failure\",\"reason\":\"JMS_ATTEMPT_JOURNAL_DIR is not owner-private\"}}'\nexec sleep 30\n",
-                pidfile.display()
-            ),
-        );
-
-        // The startup budget is short so a delayed cleanup would blow it.
-        let result = BridgeProcess::start(&stub_config(stub, 300)).await;
-        match result {
-            Err(BridgeError::PermanentFailure(reason)) => {
-                assert!(reason.contains("JMS_ATTEMPT_JOURNAL_DIR"), "{reason}");
-            }
-            Err(other) => panic!("expected PermanentFailure, got: {other:?}"),
-            Ok(_) => panic!("a permanent-failure line must never start a bridge"),
-        }
-
-        let pid = read_pid(&pidfile);
-        assert!(pid > 0, "stub must have written its pid");
-        assert!(wait_pid_gone(pid), "child {pid} must be terminated");
     }
 }

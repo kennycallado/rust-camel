@@ -72,6 +72,14 @@ public class SecurityProfile {
   private final String truststorePath;
   private final String truststorePassword;
 
+  // --- Producer transport TLS (nested [profiles.security.tls]) ---
+  private final String tlsKeystorePath;
+  private final String tlsKeystorePassword;
+  private final String tlsKeystoreType;
+  private final String tlsTruststorePath;
+  private final String tlsTruststorePassword;
+  private final String tlsTruststoreType;
+
   // --- Signature / encryption users ---
   private final String sigUsername;
   private final String sigPassword;
@@ -86,6 +94,13 @@ public class SecurityProfile {
   private final String signatureDigestAlgorithm;
   private final String signatureC14nAlgorithm;
   private final String signatureParts;
+
+  /**
+   * Optional per-profile HTTP status override for security (WSS) faults only. {@code null} keeps
+   * the default matrix (SOAP 1.1: 500; SOAP 1.2 Sender: 400, Receiver: 500). Validated by {@link
+   * SecurityProfileStore} to the range 400-599.
+   */
+  private final Integer faultStatus;
 
   // --- Cached Crypto (lazy, thread-safe) ---
   private volatile Crypto signatureCrypto;
@@ -102,6 +117,12 @@ public class SecurityProfile {
     this.keystorePassword = b.keystorePassword;
     this.truststorePath = b.truststorePath;
     this.truststorePassword = b.truststorePassword;
+    this.tlsKeystorePath = b.tlsKeystorePath;
+    this.tlsKeystorePassword = b.tlsKeystorePassword;
+    this.tlsKeystoreType = normalizeTlsType(b.tlsKeystoreType);
+    this.tlsTruststorePath = b.tlsTruststorePath;
+    this.tlsTruststorePassword = b.tlsTruststorePassword;
+    this.tlsTruststoreType = normalizeTlsType(b.tlsTruststoreType);
     this.sigUsername = hasText(b.sigUsername) ? b.sigUsername : "clientkey";
     this.sigPassword = b.sigPassword;
     this.encUsername = hasText(b.encUsername) ? b.encUsername : "serverkey";
@@ -111,6 +132,7 @@ public class SecurityProfile {
     this.signatureDigestAlgorithm = b.signatureDigestAlgorithm;
     this.signatureC14nAlgorithm = b.signatureC14nAlgorithm;
     this.signatureParts = b.signatureParts;
+    this.faultStatus = b.faultStatus;
   }
 
   // --- Accessors ---
@@ -151,6 +173,30 @@ public class SecurityProfile {
     return truststorePassword;
   }
 
+  public String tlsKeystorePath() {
+    return tlsKeystorePath;
+  }
+
+  public String tlsKeystorePassword() {
+    return tlsKeystorePassword;
+  }
+
+  public String tlsKeystoreType() {
+    return tlsKeystoreType;
+  }
+
+  public String tlsTruststorePath() {
+    return tlsTruststorePath;
+  }
+
+  public String tlsTruststorePassword() {
+    return tlsTruststorePassword;
+  }
+
+  public String tlsTruststoreType() {
+    return tlsTruststoreType;
+  }
+
   public String sigUsername() {
     return sigUsername;
   }
@@ -187,10 +233,20 @@ public class SecurityProfile {
     return signatureParts;
   }
 
+  /** Optional WSS-only HTTP status override (400-599), or {@code null} for the default matrix. */
+  public Integer faultStatus() {
+    return faultStatus;
+  }
+
   // --- Predicates ---
 
   public boolean hasSecurity() {
     return hasText(keystorePath) || hasText(truststorePath);
+  }
+
+  /** True when producer transport TLS material is configured for this profile. */
+  public boolean hasTls() {
+    return hasText(tlsKeystorePath) || hasText(tlsTruststorePath);
   }
 
   public boolean canSignOutbound() {
@@ -412,6 +468,12 @@ public class SecurityProfile {
     private String keystorePassword;
     private String truststorePath;
     private String truststorePassword;
+    private String tlsKeystorePath;
+    private String tlsKeystorePassword;
+    private String tlsKeystoreType;
+    private String tlsTruststorePath;
+    private String tlsTruststorePassword;
+    private String tlsTruststoreType;
     private String sigUsername;
     private String sigPassword;
     private String encUsername;
@@ -421,6 +483,7 @@ public class SecurityProfile {
     private String signatureDigestAlgorithm;
     private String signatureC14nAlgorithm;
     private String signatureParts;
+    private Integer faultStatus;
 
     private Builder(String name) {
       this.name = name;
@@ -455,6 +518,20 @@ public class SecurityProfile {
     public Builder truststore(String path, String password) {
       this.truststorePath = path;
       this.truststorePassword = password;
+      return this;
+    }
+
+    public Builder tlsKeystore(String path, String password, String type) {
+      this.tlsKeystorePath = path;
+      this.tlsKeystorePassword = password;
+      this.tlsKeystoreType = type;
+      return this;
+    }
+
+    public Builder tlsTruststore(String path, String password, String type) {
+      this.tlsTruststorePath = path;
+      this.tlsTruststorePassword = password;
+      this.tlsTruststoreType = type;
       return this;
     }
 
@@ -496,6 +573,12 @@ public class SecurityProfile {
 
     public Builder signatureParts(String v) {
       this.signatureParts = v;
+      return this;
+    }
+
+    /** Optional WSS-only HTTP status override (400-599); validated by the profile store. */
+    public Builder faultStatus(Integer v) {
+      this.faultStatus = v;
       return this;
     }
 
@@ -652,6 +735,11 @@ public class SecurityProfile {
 
   private static boolean hasText(String v) {
     return v != null && !v.isBlank();
+  }
+
+  /** Default the store type to PKCS12 when unset (spec: store type defaults). */
+  private static String normalizeTlsType(String type) {
+    return hasText(type) ? type : "PKCS12";
   }
 
   /**

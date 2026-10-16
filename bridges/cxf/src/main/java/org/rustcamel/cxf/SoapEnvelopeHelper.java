@@ -45,40 +45,30 @@ public final class SoapEnvelopeHelper {
         new ByteArrayInputStream(xml.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
   }
 
-  public static String wrapInEnvelope(String xmlBody, String soapVersion) throws Exception {
-    String ns = "1.2".equals(soapVersion) ? SOAP_NS_12 : SOAP_NS_11;
-
-    DocumentBuilderFactory dbf = SECURE_DBF.get();
-    DocumentBuilder db = dbf.newDocumentBuilder();
-
-    Document envelopeDoc = db.newDocument();
-    Element envelope = envelopeDoc.createElementNS(ns, "soapenv:Envelope");
-    Element header = envelopeDoc.createElementNS(ns, "soapenv:Header");
-    Element body = envelopeDoc.createElementNS(ns, "soapenv:Body");
-    envelopeDoc.appendChild(envelope);
-    envelope.appendChild(header);
-    envelope.appendChild(body);
-
-    Document payloadDoc =
-        db.parse(
-            new ByteArrayInputStream(xmlBody.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
-    Node imported = envelopeDoc.importNode(payloadDoc.getDocumentElement(), true);
-    body.appendChild(imported);
-
-    return sourceToString(new DOMSource(envelopeDoc), false);
+  /**
+   * Returns true when {@code xml} parses to a root element named {@code Envelope} in either SOAP
+   * envelope namespace. The producer rejects such a payload before dispatch so a pre-wrapped
+   * envelope is never nested inside a second one.
+   */
+  public static boolean isSoapEnvelope(String xml) throws Exception {
+    Document doc = parseResponse(xml);
+    Element root = doc.getDocumentElement();
+    if (root == null) {
+      return false;
+    }
+    String localName = root.getLocalName();
+    if (localName == null) {
+      localName = root.getTagName();
+    }
+    if (!"Envelope".equals(localName)) {
+      return false;
+    }
+    String namespace = root.getNamespaceURI();
+    return SOAP_NS_11.equals(namespace) || SOAP_NS_12.equals(namespace);
   }
 
   public static String extractBody(Source source) throws Exception {
-    Document doc = parseSource(source);
-    Element body = findElement(doc, "Body");
-    if (body == null) {
-      return "";
-    }
-    Element firstElement = firstElementChild(body);
-    if (firstElement == null) {
-      return "";
-    }
-    return sourceToString(new DOMSource(firstElement), true);
+    return extractBody(parseSource(source));
   }
 
   public static boolean isFault(Source source) throws Exception {
@@ -94,7 +84,7 @@ public final class SoapEnvelopeHelper {
   }
 
   public static String extractBody(Document doc) throws Exception {
-    Element body = findElement(doc, "Body");
+    Element body = directBodyElement(doc);
     if (body == null) {
       return "";
     }
@@ -103,6 +93,56 @@ public final class SoapEnvelopeHelper {
       return "";
     }
     return sourceToString(new DOMSource(firstElement), true);
+  }
+
+  /**
+   * True when {@code doc} is a SOAP {@code Envelope} root in a SOAP 1.1/1.2 namespace with a {@code
+   * Body} that is a direct child of the root in the same namespace. A non-Envelope root, a wrong
+   * root namespace, a Body in a mismatched namespace, or a Body nested inside the Header is
+   * rejected. Used by the listener before any WS-Security work so such requests are Sender faults.
+   */
+  public static boolean hasBody(Document doc) {
+    return directBodyElement(doc) != null;
+  }
+
+  /**
+   * The single authoritative Body selector: the first direct {@code Body} child of a SOAP 1.1/1.2
+   * {@code Envelope} root, in the root's namespace. {@link #hasBody(Document)}, {@link
+   * #extractBody(Document)}, and the WS-Security signer extraction in {@code WssSecurityProcessor}
+   * use it so a nested Body elsewhere (for example inside the Header, or in the other SOAP
+   * namespace) can never be mistaken for the payload. Package-private trust-boundary method: the
+   * listener and the WSS path must agree on one definition.
+   */
+  static Element directBodyElement(Document doc) {
+    if (doc == null) {
+      return null;
+    }
+    Element root = doc.getDocumentElement();
+    if (root == null) {
+      return null;
+    }
+    String rootNamespace = root.getNamespaceURI();
+    if (!SOAP_NS_11.equals(rootNamespace) && !SOAP_NS_12.equals(rootNamespace)) {
+      return null;
+    }
+    if (!"Envelope".equals(elementLocalName(root))) {
+      return null;
+    }
+    NodeList children = root.getChildNodes();
+    for (int i = 0; i < children.getLength(); i++) {
+      if (children.item(i) instanceof Element candidate
+          && "Body".equals(elementLocalName(candidate))
+          && rootNamespace.equals(candidate.getNamespaceURI())) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  /** Namespace-unaware local name of an element (prefix-stripped tag name fallback). */
+  private static String elementLocalName(Element element) {
+    String localName = element.getLocalName();
+    return localName == null ? element.getTagName() : localName;
   }
 
   public static boolean isFault(Document doc) {

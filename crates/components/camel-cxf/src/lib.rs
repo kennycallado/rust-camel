@@ -22,15 +22,16 @@ pub mod health;
 pub(crate) mod metadata;
 pub mod pool;
 pub mod producer;
+pub mod signer;
 
 pub use bundle::CxfBundle;
 pub use component::CxfComponent;
 pub use config::{CxfPoolConfig, CxfProfileConfig};
 pub use error::CxfError;
 pub use health::CxfHealthCheck;
-pub use pool::{BridgeSlot, BridgeState, CxfBridgePool};
+pub use pool::{BridgeListenerInfo, BridgeSlot, BridgeState, CxfBridgePool};
 
-pub const BRIDGE_VERSION: &str = "0.7.0";
+pub const BRIDGE_VERSION: &str = "0.8.0";
 
 #[cfg(test)]
 mod bridge_client_test;

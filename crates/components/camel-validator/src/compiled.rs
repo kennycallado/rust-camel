@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ use serde_yml::Value as YamlValue;
 use crate::config::{SchemaType, ValidatorConfig};
 use crate::error::ValidatorError;
 use crate::resolver::{FilesystemResolver, ResourceResolver};
+use crate::schema_set::{SchemaSet, discover_schema_set};
 use crate::xsd_bridge::XsdBridge;
 
 /// Returns an approximate byte-length for a [`Body`] variant.
@@ -30,10 +32,11 @@ pub(crate) fn approx_body_byte_len(body: &Body) -> Option<usize> {
 
 pub(crate) enum CompiledValidator {
     Xml {
-        /// Raw XSD bytes. `register` is called lazily on first validation so
-        /// bridge startup happens in an async context (avoiding runtime issues
-        /// caused by block_on's temporary runtime).
-        xsd_bytes: Vec<u8>,
+        /// Discovered schema set (root bytes, transitive imports/includes, and
+        /// the supplied alias map). `register` is called lazily on first
+        /// validation so bridge startup happens in an async context (avoiding
+        /// runtime issues caused by block_on's temporary runtime).
+        schema_set: Arc<SchemaSet>,
         backend: Arc<dyn XsdBridge>,
         max_payload_bytes: Option<usize>,
     },
@@ -58,22 +61,39 @@ impl CompiledValidator {
         config: &ValidatorConfig,
         xsd_backend: Arc<dyn XsdBridge>,
     ) -> Result<Self, CamelError> {
+        // Defense-in-depth: `from_uri` caps aliases at parse time, but
+        // `ValidatorConfig` fields are public and a programmatic constructor
+        // can bypass it. Run before any schema-type dispatch or filesystem
+        // read so the bounded cap error wins over a generic missing-schema
+        // error.
+        config.validate_schema_aliases()?;
         let path = &config.schema_path;
 
-        let resolver = FilesystemResolver;
-        let path_str = path.to_str().ok_or_else(|| {
-            CamelError::EndpointCreationFailed("schema path contains non-UTF-8 characters".into())
-        })?;
-        let content = resolver.resolve(path_str)?;
-
         match config.schema_type {
-            SchemaType::Xml => Ok(Self::compile_xsd(
-                &content,
+            SchemaType::Xml => Self::compile_xsd(
+                path,
+                &config.schema_aliases,
                 xsd_backend,
                 config.max_payload_bytes,
-            )),
-            SchemaType::Json => Self::compile_json(&content, path, config.max_payload_bytes),
-            SchemaType::Yaml => Self::compile_yaml_schema(&content, path, config.max_payload_bytes),
+            ),
+            SchemaType::Json | SchemaType::Yaml => {
+                let resolver = FilesystemResolver;
+                let path_str = path.to_str().ok_or_else(|| {
+                    CamelError::EndpointCreationFailed(
+                        "schema path contains non-UTF-8 characters".into(),
+                    )
+                })?;
+                let content = resolver.resolve(path_str)?;
+                match config.schema_type {
+                    SchemaType::Json => {
+                        Self::compile_json(&content, path, config.max_payload_bytes)
+                    }
+                    SchemaType::Yaml => {
+                        Self::compile_yaml_schema(&content, path, config.max_payload_bytes)
+                    }
+                    _ => unreachable!("outer arm restricts this branch to JSON and YAML"),
+                }
+            }
             SchemaType::RelaxNg | SchemaType::Schematron => Err(CamelError::Config(format!(
                 "schema type {:?} is not yet supported; supported: Xml, Json, Yaml",
                 config.schema_type
@@ -81,19 +101,25 @@ impl CompiledValidator {
         }
     }
 
+    /// Discovers the XSD schema set for `path` under `aliases` exactly once.
+    ///
+    /// Bridge startup and schema registration are deferred to the first
+    /// validate() call, which runs in a proper async context. Discovery is
+    /// fail-closed here so an unresolvable root or import surfaces at endpoint
+    /// creation as a domain error rather than a silent empty registration.
     fn compile_xsd(
-        content: &[u8],
+        path: &Path,
+        aliases: &BTreeMap<String, String>,
         backend: Arc<dyn XsdBridge>,
         max_payload_bytes: Option<usize>,
-    ) -> Self {
-        // Bridge startup and schema registration are deferred to the first validate()
-        // call, which runs in a proper async context. This avoids runtime issues
-        // caused by block_on's temporary runtime (channel I/O tasks would die with it).
-        CompiledValidator::Xml {
-            xsd_bytes: content.to_vec(),
+    ) -> Result<Self, CamelError> {
+        let set = discover_schema_set(path, aliases)
+            .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;
+        Ok(CompiledValidator::Xml {
+            schema_set: Arc::new(set),
             backend,
             max_payload_bytes,
-        }
+        })
     }
 
     fn compile_json(
@@ -170,8 +196,10 @@ impl CompiledValidator {
 
         match self {
             CompiledValidator::Xml {
-                xsd_bytes, backend, ..
-            } => Self::validate_xml(xsd_bytes, backend, body).await,
+                schema_set,
+                backend,
+                ..
+            } => Self::validate_xml(schema_set, backend, body).await,
             CompiledValidator::Json { validator, .. } => Self::validate_json(validator, body),
             CompiledValidator::Yaml { validator, .. } => Self::validate_yaml(validator, body),
         }
@@ -192,13 +220,13 @@ impl CompiledValidator {
     }
 
     async fn validate_xml(
-        xsd_bytes: &[u8],
+        schema_set: &SchemaSet,
         backend: &Arc<dyn XsdBridge>,
         body: &Body,
     ) -> Result<(), CamelError> {
         // Register lazily (idempotent: no-op if already registered).
         let schema_id = backend
-            .register(xsd_bytes.to_vec())
+            .register(&schema_set.cache_key(), schema_set)
             .await
             .map_err(|e| CamelError::Config(format!("XSD registration failed: {e}")))?;
 
@@ -295,7 +323,11 @@ mod tests {
 
     #[async_trait]
     impl XsdBridge for MockBridge {
-        async fn register(&self, _xsd_bytes: Vec<u8>) -> Result<String, ValidatorError> {
+        async fn register(
+            &self,
+            _schema_id: &str,
+            _set: &crate::schema_set::SchemaSet,
+        ) -> Result<String, ValidatorError> {
             if let Some(err) = &self.register_err {
                 return Err(err.clone());
             }
@@ -325,6 +357,7 @@ mod tests {
             fail_on_null_body: true,
             header_name: None,
             fail_on_null_header: true,
+            schema_aliases: BTreeMap::new(),
         };
 
         let bridge = Arc::new(MockBridge {

@@ -50,7 +50,7 @@ routes:
     from: "ws://0.0.0.0:9000/chat"
     steps:
       - set_header:
-          name: "CamelWsSendToAll"
+          key: "CamelWsSendToAll"
           value: "true"
       - to: "ws://0.0.0.0:9000/chat"
 ```
@@ -135,12 +135,11 @@ The cxf-example ships a producer that fires every ten seconds and a consumer tha
 ```yaml
 routes:
   - id: cxf-producer-hello
-    from:
-      uri: "timer:hello-tick?period=10000"
+    from: "timer:hello-tick?period=10000"
     steps:
-      - set-body:
-          constant: "<sayHello><name>World</name></sayHello>"
-      - to: "cxf://http://localhost:8080/hello?wsdl=wsdl/hello.wsdl&service={http://example.com/hello}HelloService&port={http://example.com/hello}HelloPort&operation=sayHello"
+      - set_body:
+          value: "<sayHello><name>World</name></sayHello>"
+      - to: "cxf://http://localhost:8080/hello?wsdl=wsdl/hello.wsdl&service={http://example.com/hello}HelloService&port={http://example.com/hello}HelloPort&operation=sayHello&profile=hello"
       - log: "SOAP response: ${body}"
 ```
 
@@ -150,11 +149,10 @@ routes:
 ```yaml
 routes:
   - id: cxf-consumer-hello
-    from:
-      uri: "cxf://http://0.0.0.0:9090/hello?wsdl=wsdl/hello.wsdl&service={http://example.com/hello}HelloService&port={http://example.com/hello}HelloPort"
+    from: "cxf://http://0.0.0.0:9090/cxf/hello?wsdl=wsdl/hello.wsdl&service={http://example.com/hello}HelloService&port={http://example.com/hello}HelloPort&profile=hello"
     steps:
       - log: "Received SOAP request: ${body}"
-      - set-body:
+      - set_body:
           simple: "<sayHelloResponse><message>Hello from rust-camel!</message></sayHelloResponse>"
 ```
 
@@ -166,9 +164,11 @@ The example ships with `Camel.toml` that declares the profile:
 
 ```toml
 [components.cxf]
-version = "0.8.1"
+version = "0.8.0"
+bind_address = "http://0.0.0.0:9090/cxf"
 
 [[components.cxf.profiles]]
+name = "hello"
 wsdl_path = "wsdl/hello.wsdl"
 service_name = "{http://example.com/hello}HelloService"
 port_name = "{http://example.com/hello}HelloPort"
@@ -190,6 +190,10 @@ On shutdown the order matters. Call `pool.begin_shutdown()` before `ctx.stop()` 
 
 The `profile` query parameter is required. The endpoint resolver looks up the profile in `CxfBridgePool::configured_profiles`; an unknown name fails endpoint creation with `unknown profile 'X'`. The `operation` parameter is optional when the WSDL declares a single operation. Use the `CamelCxfOperation` header to override the operation per Exchange.
 
+The producer dispatch runs `Service.Mode.PAYLOAD`. The Exchange body is the bare operation element. Do not wrap it in a SOAP envelope yourself: the bridge emits exactly one `Envelope` with exactly one `Body`, and the operation element is a direct child of that `Body`.
+
+The SOAP version derives from the selected WSDL port binding, never from a request header. A `soap-version` header is ignored: a port bound to SOAP 1.1 emits a SOAP 1.1 envelope and a port bound to SOAP 1.2 emits a SOAP 1.2 envelope. An unrecognized binding ID fails the invocation. A payload whose root element is already a SOAP `Envelope` is rejected before the network call; no request is sent.
+
 ## CXF consumer
 
 `cxf://http://0.0.0.0:9090/...` hosts a SOAP endpoint. The bridge process publishes the endpoint under `<base>/<profile_name>` over Vert.x. Inbound SOAP requests arrive on the gRPC stream as `ConsumerRequest` messages. The Consumer builds an Exchange with the payload bytes as the body and the headers from the table below.
@@ -209,9 +213,162 @@ The inbound Exchange carries these headers from the bridge:
 
 Other HTTP headers from the request land in the Exchange header map.
 
+### Consumer fault status
+
+The listener renders a version-matched SOAP fault for every SOAP-processing
+failure and maps the fault class to an HTTP status. Malformed XML and a missing
+SOAP `Body` are rejected before WS-Security processing, so they never reach a
+security override.
+
+| Failure | Class | SOAP 1.1 | SOAP 1.2 |
+| --- | --- | --- | --- |
+| WS-Security verification | Sender | 500 | 400 |
+| Malformed envelope | Sender | 500 | 400 |
+| Missing SOAP `Body` | Sender | 500 | 400 |
+| Rust `soap:Client` fault code | Sender | 500 | 400 |
+| Signer-descriptor validation | Receiver | 500 | 500 |
+| Route error | Receiver | 500 | 500 |
+| Timeout | Receiver | 500 | 500 |
+| Rust `soap:Server` fault code | Receiver | 500 | 500 |
+| Any other SOAP 1.2 fault code | Receiver | 500 | 500 |
+
+A successful response is HTTP 200. A fault never returns 200.
+
+Transport rejections are not SOAP faults. They never enter the table above:
+
+| Transport rejection | Response | Order |
+| --- | --- | --- |
+| Body over `CXF_MAX_BODY_BYTES` | HTTP 413, plaintext `request body exceeds CXF_MAX_BODY_BYTES`, connection closed | First: during body accumulation — before XML parsing, WS-Security, and the availability gate |
+| No consumer stream (pre-stream, or lost after the gate) | HTTP 503 + `Retry-After`, plaintext `routes unavailable` | Availability gate — before XML parsing and WS-Security |
+
+`security.fault_status` overrides the HTTP status for **security (WSS) faults
+only**, on the profile that sets it, on both SOAP versions. It is an integer in
+400–599, validated at startup. It does not apply to any other fault class, and
+it never applies to the transport rejections above (413, 503). There is no
+global override.
+
+```toml
+[[components.cxf.profiles]]
+name = "esap"
+wsdl_path = "wsdl/hello.wsdl"
+service_name = "{http://example.com/hello}HelloService"
+port_name = "{http://example.com/hello}HelloPort"
+
+[components.cxf.profiles.security]
+keystore_path = "/etc/cxf/esap.jks"
+keystore_password = "changeit"
+truststore_path = "/etc/cxf/esap.jks"
+truststore_password = "changeit"
+fault_status = 403
+```
+
+With this profile, a WSS verification failure returns HTTP 403. A route error still
+returns 500, and a malformed envelope still follows the matrix (400 on SOAP 1.2).
+The override is not an authentication decision: the listener writes no principal
+and no `camel.auth.*` property.
+
+### Consumer signer identity
+
+When inbound WS-Security verification succeeds, the listener exports the signer
+of the request as the `SignerIdentity` field of the `ConsumerRequest`. The
+descriptor has exactly four string fields and never carries certificate bytes:
+
+| Field | Value |
+| --- | --- |
+| `subject` | RFC 2253 distinguished name of the certificate subject |
+| `issuer` | RFC 2253 distinguished name of the certificate issuer |
+| `serial` | Certificate serial number as lowercase hex |
+| `fingerprint_sha256` | 64 lowercase hex characters: SHA-256 of the DER certificate |
+
+The certificate must come from a validated, trusted `SIGN` engine result. The
+bridge never reads identity from message headers, a `UsernameToken`, or an
+unchecked certificate. A certificate whose DER encoding exceeds 64 KiB is
+rejected, never truncated. At most 8 `SIGN` results are inspected; a 9th `SIGN`
+result rejects the request on the budget alone. Certificates that share one
+fingerprint count as one signer; two distinct Body-covering certificates reject
+the request as ambiguous. When no signature is present the field stays absent,
+meaning unknown. The metadata is signer identity, not authentication: no
+principal is written and no `camel.auth.*` property is set.
+
+**Intended breaking change:** a profile whose inbound actions include
+`Signature` now requires a signature that covers the SOAP `Body`. Clients that
+sign only the timestamp or only a header are now rejected. Profiles without a
+`Signature` inbound action are not affected: the bridge runs no signer inspection
+or signer policy on them and dispatches with no signer.
+
 ## CXF security
 
 Credentials flow through per-profile environment variables. `CxfProfileEnvVars` wraps keystore, truststore, and signature passwords in `Redacted` while it builds the child-process configuration. gRPC requests carry only the `security_profile` selector. They do not carry password bytes. `CxfSecurityFields::fmt` prints `<redacted>` for every password field. The redaction policy follows ADR-0051.
+
+### Producer transport TLS
+
+A producer profile can present a client certificate and validate the server over HTTPS. The material is a nested, all-or-nothing table under `[components.cxf.profiles.security.tls]`:
+
+```toml
+[[components.cxf.profiles]]
+name = "baleares"
+wsdl_path = "wsdl/hello.wsdl"
+service_name = "{http://example.com/hello}HelloService"
+port_name = "{http://example.com/hello}HelloPort"
+
+[components.cxf.profiles.security.tls]
+keystore_path = "/etc/cxf/keystore.p12"
+keystore_password = "changeit"
+keystore_type = "PKCS12"
+truststore_path = "/etc/cxf/truststore.p12"
+truststore_password = "changeit"
+truststore_type = "PKCS12"
+```
+
+| Key | Description |
+| --- | --- |
+| `keystore_path` | Path to the client key store. |
+| `keystore_password` | Password for the client key store. Required with `keystore_path`. |
+| `keystore_type` | `PKCS12` (default) or `JKS`. |
+| `truststore_path` | Path to the trust store that validates the server certificate. |
+| `truststore_password` | Password for the trust store. Required with `truststore_path`. |
+| `truststore_type` | `PKCS12` (default) or `JKS`. |
+
+Rules:
+
+- `*_path` and `*_password` are supplied together. A path without a password fails pool validation at startup with an error that names the missing pair member.
+- An explicitly supplied empty or whitespace-only path or password fails validation in both layers. Only an omitted key stays unset. A nonblank password keeps its spaces. Rust rejects the value at config load. The Java bridge rejects it before it announces ready.
+- The store type defaults to `PKCS12`. Any other spelling is rejected at configuration load.
+- A store that a password does not open aborts bridge startup before the `{"status":"ready",...}` line.
+- A trust-store-only profile validates the server certificate and sends no client certificate.
+- Hostname verification stays enabled. No option disables it. A certificate whose SAN does not match the endpoint host fails the handshake.
+- Each profile uses only its own TLS material. Material from one profile never applies to another profile.
+
+Transport TLS is independent of the WS-Security message-layer stores. Transport TLS encrypts the HTTP connection and authenticates the peer at the TLS layer. WS-Security signs and encrypts the SOAP envelope at the message layer. A profile can use either, both, or neither; the two store pairs do not share values.
+
+Transport TLS applies to the producer (`cxf://https://...`) profiles. The consumer listener has its own pool-level transport TLS (Phase 2, operational).
+
+### Consumer listener (pool-level, Phase 2)
+
+The consumer SOAP listener is configured with FLAT keys on the pool (`[components.cxf]`), never per profile:
+
+| Key | Meaning |
+| --- | --- |
+| `bind_address` | `http://<host>:<port>/<base-path>` or `https://<host>:<port>/<base-path>`. Port `0` binds an OS-assigned port. |
+| `soap_tls_cert_path` + `soap_tls_key_path` | Listener server identity (PEM). XOR with the PKCS#12 form. |
+| `soap_tls_pkcs12_path` + `soap_tls_pkcs12_password` | Listener server identity (PKCS#12). XOR with the PEM form. |
+| `soap_tls_client_ca_path` | Client CA. Always required when listener TLS is configured: client auth is mandatory (mutual TLS). |
+
+Rules:
+
+- Exactly one key-material form (PEM XOR PKCS#12). A partial pair or both forms fails pool validation at startup.
+- An explicitly supplied empty or whitespace-only `soap_tls_*` value fails validation in both layers. Only an omitted key stays unset. A nonblank password keeps its spaces. Rust rejects the value at config load. The Java bridge rejects it before the listener binds.
+- An `https` bind requires key material; material requires a bind. An `http` bind without material stays valid: ingress termination is still optional and plaintext is an interim deployment form.
+- Listener TLS is independent of the WS-Security message-layer stores. A pool with listener TLS can use either, both, or neither WSS store set.
+- Required client auth: a client without a certificate, or with a certificate from another CA, is rejected at the TLS handshake — before any SOAP processing.
+
+Startup protocol: the bridge announces `{"status":"ready","port":N}` for gRPC and `{"status":"soap-ready","port":N}` for the SOAP listener, in any order. `N` is the ACTUAL bound port held by the JVM from the first moment it exists (bind port `0` never leaks into the announce). The supervisor (`BridgeProcess`) awaits both lines under one `bridge_start_timeout_ms` budget whenever a SOAP bind is configured; a malformed or out-of-range announced port fails startup. The announced SOAP port is the only port source for clients — no bind-read-drop probe.
+
+Pre-stream availability gate: a request that arrives before a consumer stream is open receives HTTP 503 with a `Retry-After` header and a plaintext body (`routes unavailable`) — never a SOAP fault. The same response serves a stream lost after the gate.
+
+Signer metadata (Body `SIGN` coverage) is an integrity signal, not authentication: the exported `SignerIdentity` fields are exchange properties only and never a principal or authenticated identity (ADR-0032). One-way (no response) operations are not supported by this listener.
+
+CXF and XML bridge release pins are `0.8.0`. Publication of public release assets and tags is owner-only and remains pending.
 
 The XML parser boundary lives in the Java bridge. The Rust component does not run an XML parser. Audit parser hardening in the bridge process. WSDL files also live in the bridge. The Rust side reads them as paths and forwards them to the bridge over the environment.
 

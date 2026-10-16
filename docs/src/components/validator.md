@@ -30,7 +30,7 @@ The Rust example resolves the schema path with `CARGO_MANIFEST_DIR`. Substitute 
 ## URI
 
 ```text
-validator:<schema-path>[?type=xml|json|yaml&failOnNullBody=true|false&headerName=<name>&failOnNullHeader=true|false&maxPayloadBytes=<n>&schemaCacheMaxEntries=<n>]
+validator:<schema-path>[?type=xml|json|yaml&failOnNullBody=true|false&headerName=<name>&failOnNullHeader=true|false&maxPayloadBytes=<n>&schemaCacheMaxEntries=<n>&schemaAliases=<percent-encoded JSON object>]
 ```
 
 | Option | Default | Description |
@@ -41,8 +41,15 @@ validator:<schema-path>[?type=xml|json|yaml&failOnNullBody=true|false&headerName
 | `failOnNullHeader` | `true` | Reject exchanges where the named header is missing |
 | `maxPayloadBytes` | none | Reject bodies larger than this many bytes before validation |
 | `schemaCacheMaxEntries` | `256` | Maximum XSD schema entries the bridge cache holds before eviction |
+| `schemaAliases` | none | Absolute-URI to root-relative virtual path map, as one percent-encoded JSON object. See below. |
 
 The schema type defaults to the file extension (`.xsd`, `.json`, `.yaml`, `.yml`). Pass `type=xml` to override the extension when the path is ambiguous. Paths accept percent-encoded characters.
+
+`schemaAliases` accepts one JSON object that maps absolute schema URIs to root-relative virtual paths. The value is percent-encoded once. For example, `schemaAliases=%7B%22http%3A%2F%2Fexample.com%2Fp.xsd%22%3A%22a%2Fparent.xsd%22%7D` decodes once to `{"http://example.com/p.xsd":"a/parent.xsd"}`. A malformed value, a duplicated `schemaAliases` query parameter, or more than 128 entries fail endpoint creation before the bridge starts. Alias values are root-relative virtual paths.
+
+XSD discovery follows only the reachable `xs:import` and `xs:include` edges within the schema file's parent directory (the confined root). The bounds fail closed during discovery: 256 resource entries, 8 MiB total bytes, 128 aliases, and import depth 32.
+
+Rust reads the confined schema files and transmits the schema set in memory. The Java bridge resolves only from the transmitted in-memory set. Its supplied-key resolver never fetches: no network and no filesystem access occur.
 
 ## Behavior
 

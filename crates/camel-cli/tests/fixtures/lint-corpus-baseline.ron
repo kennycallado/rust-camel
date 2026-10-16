@@ -26,14 +26,6 @@
         [("R-SCHEMA", "error")],
     ),
     (
-        "examples/cxf-example/routes/soap-consumer.yaml",
-        [
-            // rc-m1mx fix: object-form `from` fall-through produced this.
-            // Stays after canonical rewrite (cxf:// still lacks required opts).
-            ("R-URI-known:missing-required-option", "error"),
-        ],
-    ),
-    (
         "examples/file-pollenrich/routes.yaml",
         [("R-URI-known:unknown-option", "error")],
     ),

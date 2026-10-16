@@ -5,20 +5,14 @@ import io.smallrye.common.annotation.Blocking;
 import io.smallrye.mutiny.Uni;
 import jakarta.inject.Inject;
 import java.io.ByteArrayInputStream;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.xml.XMLConstants;
-import javax.xml.parsers.SAXParserFactory;
 import javax.xml.transform.Source;
 import javax.xml.transform.sax.SAXSource;
-import javax.xml.transform.stream.StreamSource;
 import javax.xml.validation.Schema;
-import javax.xml.validation.SchemaFactory;
 import org.xml.sax.ErrorHandler;
 import org.xml.sax.InputSource;
 import org.xml.sax.SAXException;
@@ -35,21 +29,62 @@ import xml_bridge.ValidateWithRequest;
 
 @GrpcService
 public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImplBase {
-  private static final String FEATURE_LOAD_EXTERNAL_DTD =
-      "http://apache.org/xml/features/nonvalidating/load-external-dtd";
-  private static final String FEATURE_EXTERNAL_GENERAL_ENTITIES =
-      "http://xml.org/sax/features/external-general-entities";
-  private static final String FEATURE_EXTERNAL_PARAMETER_ENTITIES =
-      "http://xml.org/sax/features/external-parameter-entities";
-  private static final String PROPERTY_ENTITY_EXPANSION_LIMIT =
-      "http://www.oracle.com/xml/jaxp/properties/entityExpansionLimit";
+  /**
+   * Hard bound on any diagnostic text echoed back over the bridge. Untrusted resource keys or
+   * parser messages can be arbitrarily long; only a bounded category plus an optional truncated
+   * snippet ever leaves the bridge.
+   */
+  private static final int MAX_ERROR_TEXT = 512;
+
+  private static final int MAX_SNIPPET_TEXT = 64;
 
   @Inject SchemaCache schemaCache;
 
   private final Map<String, String> schemaHashById = new ConcurrentHashMap<>();
 
+  /**
+   * Real service monitor for compound registry reads and writes. This is a plain object rather than
+   * the injected {@link SchemaCache}: when {@code SchemaCache} is a CDI client proxy, synchronizing
+   * on it locks the proxy, not the bean, so it cannot guard the {@code schemaHashById} / cache
+   * pair. {@code validateWith} captures both the digest and the compiled schema under this lock,
+   * then validates outside it against an immutable {@link Schema} strong reference.
+   */
+  private final Object registryLock = new Object();
+
   private static BridgeError error(BridgeError.Kind kind, String message) {
-    return BridgeError.newBuilder().setKind(kind).setMessage(message).build();
+    return error(kind, message, message);
+  }
+
+  private static BridgeError error(BridgeError.Kind kind, String message, String detail) {
+    return BridgeError.newBuilder()
+        .setKind(kind)
+        .setMessage(bound(message))
+        .setDetail(bound(detail))
+        .build();
+  }
+
+  /** Collapses control whitespace and truncates to the diagnostic bound. */
+  private static String bound(String text) {
+    if (text == null) {
+      return "";
+    }
+    var collapsed = text.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ').strip();
+    if (collapsed.length() <= MAX_ERROR_TEXT) {
+      return collapsed;
+    }
+    return collapsed.substring(0, MAX_ERROR_TEXT - 3) + "...";
+  }
+
+  /** A bounded, safe stand-in for an untrusted key in a diagnostic. */
+  static String snippet(String text) {
+    if (text == null) {
+      return "";
+    }
+    var collapsed = text.replace('\r', ' ').replace('\n', ' ').replace('\t', ' ').strip();
+    if (collapsed.length() <= MAX_SNIPPET_TEXT) {
+      return collapsed;
+    }
+    return collapsed.substring(0, MAX_SNIPPET_TEXT - 3) + "...";
   }
 
   @Override
@@ -59,30 +94,106 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
         .item(
             () -> {
               var schemaId = req.getSchemaId();
-              var schemaBytes = req.getSchema().toByteArray();
-              var hash = sha256Hex(schemaBytes);
               try {
-                getOrCompileSchema(hash, schemaBytes);
-                schemaHashById.put(schemaId, hash);
+                registerSchemaSet(schemaId, req);
                 return RegisterSchemaResponse.newBuilder().setSchemaId(schemaId).build();
+              } catch (SchemaSetCompiler.SchemaSetException e) {
+                return registerError(schemaId, e.kind(), e.getMessage(), e.detail());
+              } catch (SchemaSetCompiler.ResourceRefusedException e) {
+                return registerError(
+                    schemaId,
+                    BridgeError.Kind.COMPILATION_FAILED,
+                    "SCHEMA_PARSE_ERROR: " + e.getMessage(),
+                    null);
               } catch (SAXException e) {
-                return RegisterSchemaResponse.newBuilder()
-                    .setSchemaId(schemaId)
-                    .setError(
-                        error(
-                            BridgeError.Kind.COMPILATION_FAILED,
-                            "SCHEMA_PARSE_ERROR: " + e.getMessage()))
-                    .build();
+                return registerError(
+                    schemaId,
+                    BridgeError.Kind.COMPILATION_FAILED,
+                    "SCHEMA_PARSE_ERROR: " + refusalMessage(e),
+                    null);
               } catch (Exception e) {
-                return RegisterSchemaResponse.newBuilder()
-                    .setSchemaId(schemaId)
-                    .setError(
-                        error(
-                            BridgeError.Kind.INTERNAL, "registerSchema failed: " + e.getMessage()))
-                    .build();
+                var refusal = refusalCause(e);
+                if (refusal != null) {
+                  return registerError(
+                      schemaId,
+                      BridgeError.Kind.COMPILATION_FAILED,
+                      "SCHEMA_PARSE_ERROR: " + refusal.getMessage(),
+                      null);
+                }
+                return registerError(
+                    schemaId,
+                    BridgeError.Kind.INTERNAL,
+                    "registerSchema failed: " + e.getMessage(),
+                    null);
               }
             });
   }
+
+  private static RegisterSchemaResponse registerError(
+      String schemaId, BridgeError.Kind kind, String message, String detail) {
+    return RegisterSchemaResponse.newBuilder()
+        .setSchemaId(schemaId)
+        .setError(detail == null ? error(kind, message) : error(kind, message, detail))
+        .build();
+  }
+
+  /**
+   * Registers a decoded request. Empty {@code resources} keeps the legacy single-blob contract
+   * keyed by {@code SHA-256(schema)}; a transmitted set is decoded, capped, validated, digest-keyed
+   * by the full schema set, and served by an in-memory resolver only. The mapping swap and cache
+   * mutation happen together under {@link #registryLock}.
+   */
+  private void registerSchemaSet(String schemaId, RegisterSchemaRequest req) throws Exception {
+    // A decoded set is any request carrying transmitted resources or aliases;
+    // only a request that carries neither keeps the legacy single-blob contract
+    // keyed by SHA-256(schema). This way an alias-map cap violation is still
+    // rejected when the (untrusted) request omits resources.
+    if (req.getResourcesCount() == 0 && req.getAliasesCount() == 0) {
+      var schemaBytes = req.getSchema().toByteArray();
+      var digest = SchemaSetCompiler.sha256Hex(schemaBytes);
+      synchronized (registryLock) {
+        schemaCache.getOrCompile(digest, () -> SchemaSetCompiler.compileLegacy(schemaBytes));
+        var previous = schemaHashById.put(schemaId, digest);
+        evictIfUnreferenced(previous, digest);
+      }
+      return;
+    }
+
+    var set = SchemaSetCompiler.decodeSuppliedSet(req);
+    SchemaSetCompiler.preparseForDoctype(set.resources());
+    var digest =
+        SchemaSetCompiler.schemaSetDigest(set.rootSystemId(), set.resources(), set.aliases());
+    synchronized (registryLock) {
+      schemaCache.getOrCompile(digest, () -> SchemaSetCompiler.compileSupplied(set));
+      var previous = schemaHashById.put(schemaId, digest);
+      evictIfUnreferenced(previous, digest);
+    }
+  }
+
+  /**
+   * Atomically captures the public id's digest and its compiled schema. A concurrent replacement
+   * can then evict the old digest without racing this read; the returned {@link Schema} stays valid
+   * because validation only ever holds this immutable strong reference. Returns {@code null} for an
+   * unknown id, and a snapshot with a {@code null} schema when the mapping exists but the compiled
+   * entry is missing.
+   */
+  SchemaSnapshot snapshotFor(String schemaId) {
+    synchronized (registryLock) {
+      var digest = schemaHashById.get(schemaId);
+      if (digest == null) {
+        return null;
+      }
+      return new SchemaSnapshot(digest, schemaCache.get(digest));
+    }
+  }
+
+  /** The real registry monitor, exposed package-private so a test can coordinate a replacement. */
+  Object registryLock() {
+    return registryLock;
+  }
+
+  /** One atomic view of the registry: the mapped digest and its compiled schema. */
+  record SchemaSnapshot(String digest, Schema schema) {}
 
   @Override
   @Blocking
@@ -98,8 +209,8 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
     return Uni.createFrom()
         .item(
             () -> {
-              var hash = schemaHashById.get(req.getSchemaId());
-              if (hash == null) {
+              var snapshot = snapshotFor(req.getSchemaId());
+              if (snapshot == null) {
                 return ValidateResponse.newBuilder()
                     .setValid(false)
                     .setError(
@@ -108,9 +219,7 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
                             "unknown schema_id: " + req.getSchemaId()))
                     .build();
               }
-
-              var schema = schemaCache.get(hash);
-              if (schema == null) {
+              if (snapshot.schema() == null) {
                 return ValidateResponse.newBuilder()
                     .setValid(false)
                     .setError(
@@ -120,24 +229,42 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
                     .build();
               }
 
-              return validateAgainstSchema(schema, req.getDocument().toByteArray());
+              // Released the registry lock above: the immutable Schema is safe to
+              // use even if a concurrent replacement evicts the digest now.
+              return validateAgainstSchema(snapshot.schema(), req.getDocument().toByteArray());
             });
   }
 
   @Override
+  @Blocking
   public Uni<UnregisterSchemaResponse> unregisterSchema(UnregisterSchemaRequest req) {
     return Uni.createFrom()
         .item(
             () -> {
-              var hash = schemaHashById.remove(req.getSchemaId());
-              var released = hash != null && schemaCache.remove(hash);
-              return UnregisterSchemaResponse.newBuilder().setReleased(released).build();
+              synchronized (registryLock) {
+                var digest = schemaHashById.remove(req.getSchemaId());
+                if (digest == null) {
+                  return UnregisterSchemaResponse.newBuilder().setReleased(false).build();
+                }
+                // Only drop the compiled entry once no other public id still
+                // references the same digest.
+                if (!schemaHashById.containsValue(digest)) {
+                  schemaCache.remove(digest);
+                }
+                return UnregisterSchemaResponse.newBuilder().setReleased(true).build();
+              }
             });
+  }
+
+  private void evictIfUnreferenced(String previous, String current) {
+    if (previous != null && !previous.equals(current) && !schemaHashById.containsValue(previous)) {
+      schemaCache.remove(previous);
+    }
   }
 
   private ValidateResponse validateInternal(byte[] schemaBytes, byte[] documentBytes) {
     try {
-      var hash = sha256Hex(schemaBytes);
+      var hash = SchemaSetCompiler.sha256Hex(schemaBytes);
       var schema = getOrCompileSchema(hash, schemaBytes);
       return validateAgainstSchema(schema, documentBytes);
     } catch (SAXException e) {
@@ -201,78 +328,36 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
     if (cached != null) {
       return cached;
     }
-
-    synchronized (schemaCache) {
+    synchronized (registryLock) {
       var existing = schemaCache.get(hash);
       if (existing != null) {
         return existing;
       }
-
-      // Construct the Xerces-J schema factory directly. JAXP discovery is
-      // non-deterministic under native-image: GraalVM 25 falls back to the
-      // JDK-internal Xerces, whose message bundles are absent from the image.
-      // Direct construction always resolves to the classpath Xerces.
-      var factory = new org.apache.xerces.jaxp.validation.XMLSchemaFactory();
-      factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-      // Block external DTD/schema access (JAXP 1.5+)
-      trySetProperty(factory, XMLConstants.ACCESS_EXTERNAL_DTD, "");
-      trySetProperty(factory, XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
-
-      var source = new StreamSource(new ByteArrayInputStream(schemaBytes));
-      var compiled = factory.newSchema(source);
+      var compiled = SchemaSetCompiler.compileLegacy(schemaBytes);
       schemaCache.put(hash, compiled);
       return compiled;
     }
   }
 
-  /** Set a SchemaFactory property, ignoring unsupported-property exceptions. */
-  private static void trySetProperty(SchemaFactory f, String name, String value) {
-    try {
-      f.setProperty(name, value);
-    } catch (org.xml.sax.SAXNotRecognizedException | org.xml.sax.SAXNotSupportedException ignored) {
-      // property not supported by this implementation — skip
-    }
-  }
-
   private static Source secureSaxSource(byte[] xmlBytes) throws Exception {
-    // Construct the Xerces-J SAX parser factory directly. JAXP discovery is
-    // non-deterministic under native-image: GraalVM 25 falls back to the
-    // JDK-internal Xerces, whose message bundles are absent from the image.
-    // Direct construction always resolves to the classpath Xerces.
-    var spf = new org.apache.xerces.jaxp.SAXParserFactoryImpl();
-    spf.setNamespaceAware(true);
-    spf.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-    // Block external entity loading (standard JAXP)
-    trySetFeature(spf, FEATURE_EXTERNAL_GENERAL_ENTITIES, false);
-    trySetFeature(spf, FEATURE_EXTERNAL_PARAMETER_ENTITIES, false);
-    trySetFeature(spf, FEATURE_LOAD_EXTERNAL_DTD, false);
-    // Disallow DOCTYPE entirely (Xerces-specific but effective when available)
-    trySetFeature(spf, "http://apache.org/xml/features/disallow-doctype-decl", true);
-    var reader = spf.newSAXParser().getXMLReader();
-    // Hard entity-expansion limit (Xerces-specific, skip if unsupported)
-    try {
-      reader.setProperty(PROPERTY_ENTITY_EXPANSION_LIMIT, 100);
-    } catch (SAXException ignored) {
-    }
-    reader.setEntityResolver(
-        (publicId, systemId) -> new InputSource(new ByteArrayInputStream(new byte[0])));
-    return new SAXSource(reader, new InputSource(new ByteArrayInputStream(xmlBytes)));
+    return new SAXSource(
+        SchemaSetCompiler.newHardenedReader(), new InputSource(new ByteArrayInputStream(xmlBytes)));
   }
 
-  private static void trySetFeature(SAXParserFactory spf, String name, boolean value) {
-    try {
-      spf.setFeature(name, value);
-    } catch (Exception ignored) {
+  private static SchemaSetCompiler.ResourceRefusedException refusalCause(Throwable t) {
+    for (Throwable cause = t; cause != null; cause = cause.getCause()) {
+      if (cause instanceof SchemaSetCompiler.ResourceRefusedException refusal) {
+        return refusal;
+      }
     }
+    return null;
   }
 
-  private static String sha256Hex(byte[] bytes) {
-    try {
-      var digest = MessageDigest.getInstance("SHA-256");
-      return HexFormat.of().formatHex(digest.digest(bytes));
-    } catch (NoSuchAlgorithmException e) {
-      throw new IllegalStateException("SHA-256 unavailable", e);
-    }
+  private static String refusalMessage(SAXException e) {
+    var refusal = refusalCause(e);
+    return refusal != null && refusal.getMessage() != null
+        ? refusal.getMessage()
+        : String.valueOf(e.getMessage());
   }
 
   private static final class ValidationIssueCollector implements ErrorHandler {

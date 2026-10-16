@@ -45,6 +45,7 @@ async fn test_producer_with_profile_invokes_successfully() {
         bridge_cache_dir: None,
         version: "0.1.0".to_string(),
         bind_address: None,
+        listener_tls: None,
         reconnect: NetworkRetryPolicy::default(),
     };
     let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("pool should build"));
@@ -101,6 +102,7 @@ async fn test_producer_handles_empty_security_profile() {
         bridge_cache_dir: None,
         version: "0.1.0".to_string(),
         bind_address: None,
+        listener_tls: None,
         reconnect: NetworkRetryPolicy::default(),
     };
     let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("pool should build"));

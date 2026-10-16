@@ -31,6 +31,9 @@ pub(super) struct ValidatorMetadataDescriptor {
 
     #[uri_param(name = "failOnNullHeader", default = "true")]
     pub _fail_on_null_header: bool,
+
+    #[uri_param(name = "schemaAliases")]
+    pub _schema_aliases: Option<String>,
 }
 
 #[cfg(test)]
@@ -49,6 +52,7 @@ mod tests {
             "failOnNullHeader",
             "headerName",
             "maxPayloadBytes",
+            "schemaAliases",
             "schemaCacheMaxEntries",
             "type",
         ];

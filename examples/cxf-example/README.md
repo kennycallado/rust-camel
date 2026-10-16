@@ -21,6 +21,6 @@ cd examples/cxf-example
 
 ## Expected output
 
-- Consumer route listens on `http://0.0.0.0:9090/hello`
+- Consumer route listens on `http://0.0.0.0:9090/cxf/hello`
 - Producer route sends SOAP request payloads periodically
 - Logs show received SOAP requests and SOAP responses

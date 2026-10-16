@@ -18,6 +18,35 @@ public class BridgeConfig {
   @ConfigProperty(name = "cxf.address")
   java.util.Optional<String> address;
 
+  /** Listener TLS (pool key {@code soap_tls_cert_path} / env {@code CXF_SOAP_TLS_CERT_PATH}). */
+  @ConfigProperty(name = "cxf.soap.tls.cert.path")
+  java.util.Optional<String> soapTlsCertPath;
+
+  /** Listener TLS (pool key {@code soap_tls_key_path} / env {@code CXF_SOAP_TLS_KEY_PATH}). */
+  @ConfigProperty(name = "cxf.soap.tls.key.path")
+  java.util.Optional<String> soapTlsKeyPath;
+
+  /**
+   * Listener TLS client CA (pool key {@code soap_tls_client_ca_path} / env {@code
+   * CXF_SOAP_TLS_CLIENT_CA_PATH}) — always required when listener TLS material is present (mutual
+   * TLS).
+   */
+  @ConfigProperty(name = "cxf.soap.tls.client.ca.path")
+  java.util.Optional<String> soapTlsClientCaPath;
+
+  /**
+   * Listener TLS (pool key {@code soap_tls_pkcs12_path} / env {@code CXF_SOAP_TLS_PKCS12_PATH}).
+   */
+  @ConfigProperty(name = "cxf.soap.tls.pkcs12.path")
+  java.util.Optional<String> soapTlsPkcs12Path;
+
+  /**
+   * Listener TLS PKCS12 password (pool key {@code soap_tls_pkcs12_password} / env {@code
+   * CXF_SOAP_TLS_PKCS12_PASSWORD}). Redacted from logs (ADR-0051).
+   */
+  @ConfigProperty(name = "cxf.soap.tls.pkcs12.password")
+  java.util.Optional<String> soapTlsPkcs12Password;
+
   @ConfigProperty(name = "cxf.connection.timeout.ms", defaultValue = "30000")
   int connectionTimeoutMs;
 
@@ -29,6 +58,26 @@ public class BridgeConfig {
 
   public String address() {
     return address.orElse(null);
+  }
+
+  public String soapTlsCertPath() {
+    return soapTlsCertPath.orElse(null);
+  }
+
+  public String soapTlsKeyPath() {
+    return soapTlsKeyPath.orElse(null);
+  }
+
+  public String soapTlsClientCaPath() {
+    return soapTlsClientCaPath.orElse(null);
+  }
+
+  public String soapTlsPkcs12Path() {
+    return soapTlsPkcs12Path.orElse(null);
+  }
+
+  public String soapTlsPkcs12Password() {
+    return soapTlsPkcs12Password.orElse(null);
   }
 
   public int connectionTimeoutMs() {

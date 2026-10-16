@@ -185,6 +185,11 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       "org.apache.wss4j.dom.processor.TimestampProcessor",
       "org.apache.wss4j.dom.processor.EncryptedKeyProcessor",
       "org.apache.wss4j.dom.processor.ReferenceListProcessor",
+      // BST_DIRECT_REFERENCE signatures carry a wsse:BinarySecurityToken, which
+      // WSS4J resolves and instantiates reflectively during inbound verification.
+      // Without this entry the native image fails with
+      // "Unable to load class org.apache.wss4j.dom.processor.BinarySecurityTokenProcessor".
+      "org.apache.wss4j.dom.processor.BinarySecurityTokenProcessor",
       "org.apache.wss4j.dom.message.WSSecEncrypt",
       "org.apache.wss4j.dom.message.WSSecBase",
       "org.apache.wss4j.dom.validate.SignatureTrustValidator",

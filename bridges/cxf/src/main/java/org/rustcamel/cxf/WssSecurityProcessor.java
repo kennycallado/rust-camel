@@ -1,13 +1,24 @@
 package org.rustcamel.cxf;
 
+import cxf_bridge.SignerIdentity;
 import java.io.ByteArrayInputStream;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.cert.CertificateEncodingException;
+import java.security.cert.X509Certificate;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Supplier;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
+import javax.security.auth.x500.X500Principal;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.transform.dom.DOMSource;
@@ -35,12 +46,34 @@ import org.w3c.dom.NodeList;
  */
 public class WssSecurityProcessor {
 
+  /** Inbound {@code SIGN} results inspected for Body coverage; a 9th rejects the request. */
+  private static final int MAX_SIGN_RESULTS = 8;
+
+  /** Cap on the DER encoding being hashed; larger certificates are rejected, never truncated. */
+  private static final int MAX_CERT_DER_BYTES = 64 * 1024;
+
+  /**
+   * Result of inbound WS-Security processing: the verified XML and the optional signer descriptor.
+   * The signer is present only when a validated, trusted {@code SIGN} result covers the SOAP Body.
+   */
+  public record VerifiedInboundMessage(String xml, Optional<SignerIdentity> signer) {}
+
   private final SecurityProfile profile;
 
   /** Inbound replay protection for timestamp and nonce caches, shared across inbound calls. */
   private final ReplayCache replayCache = new MemoryReplayCache();
 
+  /**
+   * Produces a fresh engine per inbound call; supplied by the test seam, {@code new} in production.
+   */
+  private final Supplier<WSSecurityEngine> engineFactory;
+
   public WssSecurityProcessor(SecurityProfile profile) {
+    this(profile, WSSecurityEngine::new);
+  }
+
+  /** Package-private constructor: engine factory seam for result-fixture tests. */
+  WssSecurityProcessor(SecurityProfile profile, Supplier<WSSecurityEngine> engineFactory) {
     // Defense-in-depth: the validated Rust path already refuses such profiles at endpoint
     // construction. Consumer coverage is the fixed replay-defense invariant and cannot be
     // narrowed via SIGNATURE_PARTS.
@@ -50,6 +83,7 @@ public class WssSecurityProcessor {
               + " to Body+Timestamp for replay defense");
     }
     this.profile = profile;
+    this.engineFactory = engineFactory;
   }
 
   /** Returns true if outbound signing is possible (keystore configured). */
@@ -126,15 +160,28 @@ public class WssSecurityProcessor {
 
   // --- Inbound processing (enforce required actions) ---
 
-  /** Apply inbound WS-Security (verify signature, decrypt, etc.) to a SOAP XML string. */
-  public String processInbound(String soapXml) throws Exception {
+  /** Apply inbound WS-Security; delegates with an unspecified SOAP version. */
+  public VerifiedInboundMessage processInbound(String soapXml) throws Exception {
+    return processInbound(soapXml, null);
+  }
+
+  /**
+   * Apply inbound WS-Security (verify signature, decrypt, etc.) to a SOAP XML string. {@code
+   * soapVersion} is the version the listener detected before this call; the overload exists so the
+   * listener never re-detects it after. Returns the verified XML together with the optional signer
+   * descriptor: a validated, trusted {@code SIGN} result that covers the SOAP Body. When inbound
+   * verification is impossible, or the input is null or blank, the input XML is returned with no
+   * signer.
+   */
+  public VerifiedInboundMessage processInbound(String soapXml, String soapVersion)
+      throws Exception {
     if (!canVerifyInbound() || soapXml == null || soapXml.isBlank()) {
-      return soapXml;
+      return new VerifiedInboundMessage(soapXml, Optional.empty());
     }
 
     Document doc = parseXml(soapXml);
 
-    WSSecurityEngine engine = new WSSecurityEngine();
+    WSSecurityEngine engine = engineFactory.get();
     RequestData requestData = new RequestData();
     requestData.setSigVerCrypto(profile.getVerificationCrypto());
     requestData.setDecCrypto(profile.getSignatureCrypto());
@@ -148,6 +195,15 @@ public class WssSecurityProcessor {
 
     // Enforce required actions
     String requiredActions = profile.resolveActionsIn();
+
+    // Sign-budget preflight FIRST: SIGN results are counted by action tag alone, before any
+    // coverage or metadata pass reads references or certificates. A 9th SIGN result rejects on
+    // the bound itself. Gated to Signature-required profiles; others stay on the normal WSS
+    // path with no signer policy at all.
+    if (containsAction(requiredActions, "Signature")) {
+      enforceSignResultBudget(results);
+    }
+
     enforceRequiredActions(results, requiredActions);
 
     // WSS4J 4.0 has no required-parts hook on RequestData, so timestamp signature coverage
@@ -157,7 +213,15 @@ public class WssSecurityProcessor {
       verifyTimestampSignatureCoverage(doc, results);
     }
 
-    return domToString(doc);
+    // Signer metadata extraction and every signer policy check run only when the profile's
+    // inbound actions require a Signature. Without it the message stays on the normal WSS
+    // path and no signer is exported, whatever the verified SIGN results contain.
+    Optional<SignerIdentity> signer = Optional.empty();
+    if (containsAction(requiredActions, "Signature")) {
+      signer = extractBodySigner(doc, results);
+    }
+
+    return new VerifiedInboundMessage(domToString(doc), signer);
   }
 
   // --- Helpers ---
@@ -234,6 +298,139 @@ public class WssSecurityProcessor {
     throw new WssRequirementException(
         WSSecurityException.ErrorCode.FAILED_CHECK,
         "wsu:Timestamp is not covered by the message signature");
+  }
+
+  /** Rejects on a 9th {@code SIGN} result by action tag alone; never reads refs or certificates. */
+  private static void enforceSignResultBudget(List<WSSecurityEngineResult> results)
+      throws WSSecurityException {
+    int signSeen = 0;
+    if (results == null) return;
+    for (WSSecurityEngineResult result : results) {
+      Integer action = (Integer) result.get(WSSecurityEngineResult.TAG_ACTION);
+      if (action != null && action == WSConstants.SIGN && ++signSeen > MAX_SIGN_RESULTS) {
+        throw new WssRequirementException(
+            WSSecurityException.ErrorCode.SECURITY_ERROR,
+            "SIGN results exceed the inspection budget: at most 8 are permitted");
+      }
+    }
+  }
+
+  /**
+   * Exports the signer descriptor from the validated {@code SIGN} results that cover the SOAP Body.
+   * Only called when the profile's inbound actions require a Signature, after {@link
+   * #enforceSignResultBudget} has bounded the {@code SIGN} count to at most 8. Certificates sharing
+   * one fingerprint count as one signer; more than one distinct Body-covering fingerprint rejects
+   * the request as ambiguous. A Body-covering result without a verified certificate rejects
+   * fail-closed. No Body-covering result at all is a missing required coverage.
+   */
+  private Optional<SignerIdentity> extractBodySigner(
+      Document doc, List<WSSecurityEngineResult> results) throws WSSecurityException {
+    Element body = SoapEnvelopeHelper.directBodyElement(doc);
+    Map<String, X509Certificate> byFingerprint = new LinkedHashMap<>();
+    if (results != null) {
+      for (WSSecurityEngineResult result : results) {
+        Integer action = (Integer) result.get(WSSecurityEngineResult.TAG_ACTION);
+        if (action == null || action != WSConstants.SIGN) continue;
+        if (!coversBody(result, body)) continue;
+        Object certObj = result.get(WSSecurityEngineResult.TAG_X509_CERTIFICATE);
+        if (!(certObj instanceof X509Certificate cert)) {
+          throw new WssRequirementException(
+              WSSecurityException.ErrorCode.SECURITY_ERROR,
+              "Body-covering signature carries no verified certificate");
+        }
+        byFingerprint.putIfAbsent(fingerprintOf(cert), cert);
+      }
+    }
+
+    if (byFingerprint.isEmpty()) {
+      throw new WssRequirementException(
+          WSSecurityException.ErrorCode.FAILED_CHECK,
+          "Required Signature does not cover the SOAP Body");
+    }
+    if (byFingerprint.size() > 1) {
+      throw new WssRequirementException(
+          WSSecurityException.ErrorCode.SECURITY_ERROR,
+          "multiple distinct Body-covering signers are ambiguous");
+    }
+    return Optional.of(exportSignerIdentity(byFingerprint.values().iterator().next()));
+  }
+
+  /**
+   * True when a {@code SIGN} result covers the authoritative SOAP Body: the envelope's direct
+   * {@code Body} child, never a same-named header element. A data reference with a known protected
+   * element counts only when that element is the Body itself, so a header element masquerading
+   * through a shared wsu:Id never counts; a reference without a protected element falls back to a
+   * direct wsu:Id match against the Body's own wsu:Id.
+   */
+  private static boolean coversBody(WSSecurityEngineResult result, Element body) {
+    if (body == null) return false;
+    Object refsObj = result.get(WSSecurityEngineResult.TAG_DATA_REF_URIS);
+    if (!(refsObj instanceof List<?> refs)) return false;
+    String bodyWsuId = body.getAttributeNS(WSConstants.WSU_NS, "Id");
+    for (Object obj : refs) {
+      if (!(obj instanceof WSDataRef ref)) continue;
+      Element protectedElement = ref.getProtectedElement();
+      if (protectedElement != null) {
+        if (protectedElement.isSameNode(body)) return true;
+        continue;
+      }
+      String signedWsuId = ref.getWsuId();
+      if (hasText(signedWsuId) && hasText(bodyWsuId) && signedWsuId.equals(bodyWsuId)) return true;
+    }
+    return false;
+  }
+
+  /** Builds the bounded wire descriptor from one verified signer certificate. */
+  private static SignerIdentity exportSignerIdentity(X509Certificate cert)
+      throws WSSecurityException {
+    byte[] der = encodedDer(cert);
+    BigInteger serialNumber = cert.getSerialNumber();
+    if (serialNumber.signum() < 0) {
+      throw new WssRequirementException(
+          WSSecurityException.ErrorCode.SECURITY_ERROR,
+          "signer certificate serial number is negative");
+    }
+    return SignerIdentity.newBuilder()
+        .setSubject(cert.getSubjectX500Principal().getName(X500Principal.RFC2253))
+        .setIssuer(cert.getIssuerX500Principal().getName(X500Principal.RFC2253))
+        .setSerial(serialNumber.toString(16).toLowerCase(Locale.ROOT))
+        .setFingerprintSha256(fingerprintOf(cert))
+        .build();
+  }
+
+  /** The certificate DER encoding, rejected when it exceeds 64 KiB — never truncated. */
+  private static byte[] encodedDer(X509Certificate cert) throws WSSecurityException {
+    byte[] der;
+    try {
+      der = cert.getEncoded();
+    } catch (CertificateEncodingException e) {
+      throw new WssRequirementException(
+          WSSecurityException.ErrorCode.SECURITY_ERROR,
+          "signer certificate cannot be DER encoded: " + e.getMessage());
+    }
+    if (der == null || der.length > MAX_CERT_DER_BYTES) {
+      throw new WssRequirementException(
+          WSSecurityException.ErrorCode.SECURITY_ERROR,
+          "signer certificate DER encoding exceeds 64 KiB");
+    }
+    return der;
+  }
+
+  /** SHA-256 of the DER certificate as 64 lowercase hex characters. */
+  private static String fingerprintOf(X509Certificate cert) throws WSSecurityException {
+    byte[] digest;
+    try {
+      digest = MessageDigest.getInstance("SHA-256").digest(encodedDer(cert));
+    } catch (NoSuchAlgorithmException e) {
+      throw new WssRequirementException(
+          WSSecurityException.ErrorCode.SECURITY_ERROR,
+          "SHA-256 is unavailable: " + e.getMessage());
+    }
+    StringBuilder hex = new StringBuilder(digest.length * 2);
+    for (byte b : digest) {
+      hex.append(Character.forDigit((b >> 4) & 0xf, 16)).append(Character.forDigit(b & 0xf, 16));
+    }
+    return hex.toString();
   }
 
   private static boolean containsAction(String actions, String token) {

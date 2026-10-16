@@ -31,6 +31,29 @@ The validator crate does not implement `Lifecycle` for `XsdBridgeBackend`. There
 This requirement applies after an XSD route starts the bridge. JSON and YAML validation do not
 start the bridge.
 
+## Schema-set discovery and resolution
+
+Rust owns confined filesystem discovery. It walks the transitive `xs:import`/`xs:include` closure
+reachable from the root schema file inside that file's parent directory (the canonicalized,
+confined root), then transmits the resulting schema set in memory. Discovery enforces four caps:
+256 resource entries, 8 MiB total bytes, 128 aliases, and import depth 32. An `xs:import` or
+`xs:include` absolute URI must match a supplied `schemaAliases` entry; an absolute filesystem path
+is refused.
+
+The operator URI syntax is:
+
+```text
+validator:<schema-path>[?...&schemaAliases=<percent-encoded JSON object>]
+```
+
+`schemaAliases` accepts one JSON object percent-encoded once. It maps absolute schema URIs to root-relative virtual paths.
+For example, `schemaAliases=%7B%22http%3A%2F%2Fexample.com%2Fp.xsd%22%3A%22a%2Fparent.xsd%22%7D`
+decodes once to `{"http://example.com/p.xsd":"a/parent.xsd"}`.
+Malformed values, duplicated `schemaAliases` query parameters, or more than 128 entries fail endpoint creation before the bridge starts.
+
+The Java bridge resolves only from the transmitted in-memory set. Its supplied-key resolver never
+fetches: no network and no filesystem access occur, and the XXE posture is unchanged.
+
 ## `non_exhaustive` posture
 
 ADR-0049 limits the workspace `#[non_exhaustive]` policy to contract crates. This component is

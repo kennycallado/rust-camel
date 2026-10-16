@@ -6,6 +6,7 @@ import static org.mockito.Mockito.*;
 import jakarta.xml.ws.Dispatch;
 import jakarta.xml.ws.Service;
 import java.net.URL;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -13,6 +14,18 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.xml.namespace.QName;
 import javax.xml.transform.Source;
+import org.apache.cxf.BusFactory;
+import org.apache.cxf.binding.soap.model.SoapOperationInfo;
+import org.apache.cxf.configuration.jsse.TLSClientParameters;
+import org.apache.cxf.endpoint.Client;
+import org.apache.cxf.endpoint.Endpoint;
+import org.apache.cxf.jaxws.DispatchImpl;
+import org.apache.cxf.service.model.BindingInfo;
+import org.apache.cxf.service.model.BindingOperationInfo;
+import org.apache.cxf.service.model.EndpointInfo;
+import org.apache.cxf.transport.http.HTTPConduit;
+import org.apache.cxf.transport.http.URLConnectionHTTPConduit;
+import org.apache.cxf.ws.addressing.EndpointReferenceType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -36,6 +49,7 @@ class CxfClientManagerTest {
   @Mock SecurityProfileStore profileStore;
 
   RecordingManager manager;
+  Service mockService;
   final AtomicInteger creations = new AtomicInteger();
   AutoCloseable openMocks;
   MockedStatic<Service> serviceStatic;
@@ -48,7 +62,7 @@ class CxfClientManagerTest {
     manager = new RecordingManager();
     manager.profileStore = profileStore;
 
-    Service mockService = mock(Service.class);
+    mockService = mock(Service.class);
     when(mockService.createDispatch(any(QName.class), eq(Source.class), eq(Service.Mode.PAYLOAD)))
         .thenAnswer(inv -> newMockDispatch());
     serviceStatic = mockStatic(Service.class);
@@ -69,10 +83,35 @@ class CxfClientManagerTest {
 
   @SuppressWarnings("unchecked")
   private static Dispatch<Source> newMockDispatch() {
-    Dispatch<Source> dispatch = mock(Dispatch.class);
+    DispatchImpl<Source> dispatch = mock(DispatchImpl.class);
     Map<String, Object> context = new HashMap<>();
     when(dispatch.getRequestContext()).thenReturn(context);
+    Client client = mock(Client.class);
+    stubBindingOperations(client);
+    when(dispatch.getClient()).thenReturn(client);
     return dispatch;
+  }
+
+  private static void stubBindingOperations(Client client) {
+    Endpoint endpoint = mock(Endpoint.class);
+    EndpointInfo endpointInfo = mock(EndpointInfo.class);
+    BindingInfo binding = mock(BindingInfo.class);
+    when(client.getEndpoint()).thenReturn(endpoint);
+    when(endpoint.getEndpointInfo()).thenReturn(endpointInfo);
+    when(endpointInfo.getBinding()).thenReturn(binding);
+    List<BindingOperationInfo> operations =
+        List.of("opX", "opT", "opA", "opB", "opC", "k1", "k2", "k3", "opTls", "opPlain").stream()
+            .map(
+                name -> {
+                  BindingOperationInfo operation = mock(BindingOperationInfo.class);
+                  when(operation.getName()).thenReturn(new QName("urn:test", name));
+                  SoapOperationInfo soap = new SoapOperationInfo();
+                  soap.setAction("urn:test:" + name);
+                  when(operation.getExtensor(SoapOperationInfo.class)).thenReturn(soap);
+                  return operation;
+                })
+            .toList();
+    when(binding.getOperations()).thenReturn(operations);
   }
 
   @Test
@@ -133,7 +172,7 @@ class CxfClientManagerTest {
     Dispatch<Source> dispatch =
         manager.getDispatch(WSDL, ADDRESS, SERVICE, PORT, "opA", PROFILE, DEFAULT_TIMEOUT);
     Map<String, Object> context = dispatch.getRequestContext();
-    assertEquals("opA", context.get(SOAPACTION_URI));
+    assertEquals("urn:test:opA", context.get(SOAPACTION_URI));
 
     Map<String, Object> snapshot = new HashMap<>(context);
     manager.getDispatch(WSDL, ADDRESS, SERVICE, PORT, "opA", PROFILE, DEFAULT_TIMEOUT);
@@ -239,6 +278,83 @@ class CxfClientManagerTest {
     assertTrue(ex.getMessage().contains("0"), ex.getMessage());
   }
 
+  @Test
+  @DisplayName("TLSClientParameters are attached to the HTTP conduit when TLS is configured")
+  void tlsParametersAttachedWhenTlsConfigured() throws Exception {
+    Path store = TestKeystoreHelper.createTestKeystore();
+    SecurityProfile profile =
+        SecurityProfile.builder(PROFILE)
+            .tlsKeystore(store.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD, "JKS")
+            .tlsTruststore(store.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD, "JKS")
+            .build();
+    when(profileStore.getProfile(PROFILE)).thenReturn(profile);
+
+    HTTPConduit conduit = realConduit();
+    stubConduitDispatch(conduit);
+
+    manager.getDispatch(WSDL, ADDRESS, SERVICE, PORT, "opTls", PROFILE, DEFAULT_TIMEOUT);
+
+    TLSClientParameters tls = conduit.getTlsClientParameters();
+    assertNotNull(tls, "configured tls must install explicit TLSClientParameters on the conduit");
+    assertNotNull(tls.getKeyManagers(), "the keystore must yield key managers");
+    assertNotNull(tls.getTrustManagers(), "the truststore must yield trust managers");
+    assertFalse(tls.isDisableCNCheck(), "hostname verification must stay enabled");
+  }
+
+  @Test
+  @DisplayName("No TLS block leaves the conduit on JVM defaults")
+  void noTlsBlockLeavesJvmDefaults() throws Exception {
+    SecurityProfile profile = SecurityProfile.builder(PROFILE).build();
+    when(profileStore.getProfile(PROFILE)).thenReturn(profile);
+
+    HTTPConduit conduit = realConduit();
+    stubConduitDispatch(conduit);
+
+    manager.getDispatch(WSDL, ADDRESS, SERVICE, PORT, "opPlain", PROFILE, DEFAULT_TIMEOUT);
+
+    assertNull(
+        conduit.getTlsClientParameters(),
+        "a profile without a tls block must not install explicit TLSClientParameters");
+  }
+
+  @Test
+  @DisplayName("A wrong store password fails initTlsStores before any dispatch")
+  void wrongStorePasswordFailsBeforeReady() throws Exception {
+    Path store = TestKeystoreHelper.createTestKeystore();
+    SecurityProfile profile =
+        SecurityProfile.builder(PROFILE)
+            .tlsKeystore(store.toString(), "not-the-store-password", "JKS")
+            .build();
+    when(profileStore.getProfile(PROFILE)).thenReturn(profile);
+    when(profileStore.profiles()).thenReturn(Map.of(PROFILE, profile));
+
+    assertThrows(IllegalStateException.class, () -> manager.initTlsStores());
+    assertEquals(
+        0, manager.cacheSize(), "no dispatch may be created before the store is validated");
+    assertEquals(0, creations.get(), "initTlsStores must not create a dispatch");
+  }
+
+  /**
+   * Returns a real CXF {@link HTTPConduit} through the mocked dispatch/client so the assertion
+   * exercises the actual TLS-material application rather than verifying a mock method call.
+   */
+  private static HTTPConduit realConduit() throws Exception {
+    return new URLConnectionHTTPConduit(
+        BusFactory.getDefaultBus(), new EndpointInfo(), new EndpointReferenceType());
+  }
+
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  private void stubConduitDispatch(HTTPConduit conduit) {
+    DispatchImpl<Source> dispatch = mock(DispatchImpl.class);
+    when(dispatch.getRequestContext()).thenReturn(new HashMap<>());
+    Client client = mock(Client.class);
+    stubBindingOperations(client);
+    when(client.getConduit()).thenReturn(conduit);
+    when(dispatch.getClient()).thenReturn(client);
+    when(mockService.createDispatch(any(QName.class), eq(Source.class), eq(Service.Mode.PAYLOAD)))
+        .thenReturn((Dispatch) dispatch);
+  }
+
   private Thread lookupWorker(String operation, AtomicInteger crossings, List<String> failures) {
     return new Thread(
         () -> {
@@ -248,7 +364,7 @@ class CxfClientManagerTest {
                   manager.getDispatch(
                       WSDL, ADDRESS, SERVICE, PORT, operation, PROFILE, DEFAULT_TIMEOUT);
               Object uri = dispatch.getRequestContext().get(SOAPACTION_URI);
-              if (!operation.equals(uri)) {
+              if (!("urn:test:" + operation).equals(uri)) {
                 crossings.incrementAndGet();
               }
             }

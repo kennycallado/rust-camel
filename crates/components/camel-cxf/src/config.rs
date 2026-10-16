@@ -1,6 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use camel_bridge::process::{CxfTlsEnvVars, Redacted};
 use camel_component_api::NetworkRetryPolicy;
 
 use crate::BRIDGE_VERSION;
@@ -46,21 +47,168 @@ pub fn validate_profile_name(name: &str) -> Result<(), camel_component_api::Came
     Ok(())
 }
 
+/// Bind-address scheme (lowercased) or `None` when no scheme is present.
+pub(crate) fn bind_address_scheme(address: &str) -> Option<String> {
+    address.split_once(':').map(|(s, _)| s.to_ascii_lowercase())
+}
+
 /// Validates the consumer-side bind address forwarded to the bridge as the
-/// `CXF_ADDRESS` env var. Only plain `http` is accepted: the bridge process
-/// does not expose a TLS listener yet.
+/// `CXF_ADDRESS` env var. Only `http` and `https` are accepted as schemes; the
+/// TLS material interplay (https needs material, material needs https) is
+/// validated by [`CxfPoolConfig::validate`].
 pub(crate) fn validate_consumer_address(
     address: &str,
 ) -> Result<(), camel_component_api::CamelError> {
-    let scheme = address.split_once(':').map(|(s, _)| s);
-    if matches!(scheme, Some(s) if s.eq_ignore_ascii_case("http")) {
-        return Ok(());
+    match bind_address_scheme(address).as_deref() {
+        Some("http") | Some("https") => Ok(()),
+        other => Err(camel_component_api::CamelError::Config(format!(
+            "cxf.bind_address scheme '{}' is not supported: use http:// or https://",
+            other.unwrap_or("<missing scheme>")
+        ))),
     }
-    let shown = scheme.unwrap_or("<missing scheme>");
-    Err(camel_component_api::CamelError::Config(format!(
-        "cxf.bind_address scheme '{shown}' is not supported: \
-         TLS listener support is not yet available; use http://"
-    )))
+}
+
+/// Producer transport key/trust store type. TOML accepts `PKCS12` (default) or
+/// `JKS` only — any other spelling is rejected at parse time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[non_exhaustive]
+pub enum KeyStoreType {
+    /// PKCS#12 store (the default).
+    #[default]
+    #[serde(rename = "PKCS12")]
+    Pkcs12,
+    /// Java KeyStore.
+    #[serde(rename = "JKS")]
+    Jks,
+}
+
+impl KeyStoreType {
+    /// Canonical serialized name emitted to the bridge env vars.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeyStoreType::Pkcs12 => "PKCS12",
+            KeyStoreType::Jks => "JKS",
+        }
+    }
+}
+
+/// Nested `[profiles.security.tls]` producer transport TLS material.
+///
+/// Credentials are redacted from `Debug` (ADR-0051). Pair completeness is
+/// validated by [`CxfTlsConfig::validate`]; the block is serialized as
+/// `CXF_PROFILE_<NAME>_TLS_*` env vars by [`CxfTlsConfig::to_env`].
+#[derive(Clone, Default, serde::Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct CxfTlsConfig {
+    pub keystore_path: Option<String>,
+    pub keystore_password: Option<String>,
+    pub keystore_type: KeyStoreType,
+    pub truststore_path: Option<String>,
+    pub truststore_password: Option<String>,
+    pub truststore_type: KeyStoreType,
+}
+
+impl fmt::Debug for CxfTlsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CxfTlsConfig")
+            .field("keystore_path", &self.keystore_path)
+            .field(
+                "keystore_password",
+                &self.keystore_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("keystore_type", &self.keystore_type)
+            .field("truststore_path", &self.truststore_path)
+            .field(
+                "truststore_password",
+                &self.truststore_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("truststore_type", &self.truststore_type)
+            .finish()
+    }
+}
+
+impl CxfTlsConfig {
+    /// Bidirectional pair validation: `*_path` and `*_password` are supplied
+    /// together for both the keystore and the truststore.
+    fn validate(&self, profile: &str) -> Result<(), camel_component_api::CamelError> {
+        validate_tls_pair(
+            profile,
+            "keystore",
+            self.keystore_path.as_deref(),
+            self.keystore_password.as_deref(),
+        )?;
+        validate_tls_pair(
+            profile,
+            "truststore",
+            self.truststore_path.as_deref(),
+            self.truststore_password.as_deref(),
+        )?;
+        Ok(())
+    }
+
+    /// Map the parsed TLS config onto the bridge env-var carrier.
+    pub fn to_env(&self) -> CxfTlsEnvVars {
+        CxfTlsEnvVars {
+            keystore_path: self.keystore_path.clone(),
+            keystore_password: self.keystore_password.clone().map(Redacted::new),
+            keystore_type: self
+                .keystore_path
+                .as_ref()
+                .map(|_| self.keystore_type.as_str().to_string()),
+            truststore_path: self.truststore_path.clone(),
+            truststore_password: self.truststore_password.clone().map(Redacted::new),
+            truststore_type: self
+                .truststore_path
+                .as_ref()
+                .map(|_| self.truststore_type.as_str().to_string()),
+        }
+    }
+}
+
+/// Fail-closed blank TLS-value check (N4 parity): a supplied value that is
+/// empty or Unicode `White_Space`-only is rejected by BOTH layers instead of
+/// being silently treated as unset. `char::is_whitespace` implements the
+/// Unicode `White_Space` property — the exact set the Java bridge's
+/// `BlankTlsValue` predicate encodes (NBSP U+00A0, NEL U+0085, and U+202F
+/// included, unlike Java's `String.isBlank`). Nonblank values are never
+/// trimmed; only a genuinely omitted (`None`) value counts as unset.
+fn is_blank_tls_value(value: &str) -> bool {
+    value.chars().all(char::is_whitespace)
+}
+
+fn validate_tls_pair(
+    profile: &str,
+    kind: &str,
+    path: Option<&str>,
+    password: Option<&str>,
+) -> Result<(), camel_component_api::CamelError> {
+    // N4 fail-closed: an explicitly supplied empty/whitespace-only value is
+    // invalid — never silently unset (a both-blank pair previously passed and
+    // silently selected JVM store defaults on the Java side).
+    if path.is_some_and(is_blank_tls_value) {
+        return Err(camel_component_api::CamelError::Config(format!(
+            "cxf profile '{profile}': tls.{kind}_path is empty or whitespace-only — supply a \
+             nonblank value or omit the key (blank TLS values are rejected, not treated as \
+             unset)"
+        )));
+    }
+    if password.is_some_and(is_blank_tls_value) {
+        return Err(camel_component_api::CamelError::Config(format!(
+            "cxf profile '{profile}': tls.{kind}_password is empty or whitespace-only — supply \
+             a nonblank value or omit the key (blank TLS values are rejected, not treated as \
+             unset)"
+        )));
+    }
+    match (path, password) {
+        (Some(_), None) => Err(camel_component_api::CamelError::Config(format!(
+            "cxf profile '{profile}': tls.{kind}_path is set but tls.{kind}_password is missing"
+        ))),
+        (None, Some(_)) => Err(camel_component_api::CamelError::Config(format!(
+            "cxf profile '{profile}': tls.{kind}_password is set but tls.{kind}_path is missing"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 #[derive(Clone, Default, serde::Deserialize)]
@@ -78,6 +226,15 @@ pub struct CxfSecurityFields {
     pub signature_digest_algorithm: Option<String>,
     pub signature_c14n_algorithm: Option<String>,
     pub signature_parts: Option<String>,
+    /// Optional per-profile HTTP status override applied to **security (WSS)
+    /// faults only**, on both SOAP versions. Validated to `400..=599` at
+    /// startup; out-of-range values fail the pool config before the bridge
+    /// starts.
+    #[serde(default)]
+    pub fault_status: Option<u16>,
+    /// Nested `[profiles.security.tls]` producer transport TLS material.
+    #[serde(default)]
+    pub tls: Option<CxfTlsConfig>,
 }
 
 impl fmt::Debug for CxfSecurityFields {
@@ -108,6 +265,8 @@ impl fmt::Debug for CxfSecurityFields {
             )
             .field("signature_c14n_algorithm", &self.signature_c14n_algorithm)
             .field("signature_parts", &self.signature_parts)
+            .field("fault_status", &self.fault_status)
+            .field("tls", &self.tls)
             .finish()
     }
 }
@@ -129,6 +288,43 @@ impl CxfProfileConfig {
     }
 }
 
+/// Pool-level listener transport TLS material, configured beside `bind_address`
+/// through the five flat pool keys (`soap_tls_cert_path`, `soap_tls_key_path`,
+/// `soap_tls_client_ca_path`, `soap_tls_pkcs12_path`, `soap_tls_pkcs12_password`)
+/// and assembled by [`TryFrom<CxfPoolConfigRaw>`].
+///
+/// Exactly one key-material form is valid: `cert_path` + `key_path` (PEM) or
+/// `pkcs12_path` + `pkcs12_password` (PKCS#12); `client_ca_path` is always
+/// required (mutual TLS). Shape rules are enforced by
+/// [`CxfPoolConfig::validate`] at config load. The record is forwarded as the
+/// five `CXF_SOAP_TLS_*` env vars on the non-profile path (see
+/// `pool::bridge_config_with_env_trace`) and is independent of the WSS
+/// message-layer stores. Credentials are redacted from `Debug` (ADR-0051).
+#[derive(Clone, Default)]
+#[non_exhaustive]
+pub struct CxfListenerTls {
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
+    pub client_ca_path: Option<String>,
+    pub pkcs12_path: Option<String>,
+    pub pkcs12_password: Option<String>,
+}
+
+impl fmt::Debug for CxfListenerTls {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CxfListenerTls")
+            .field("cert_path", &self.cert_path)
+            .field("key_path", &self.key_path)
+            .field("client_ca_path", &self.client_ca_path)
+            .field("pkcs12_path", &self.pkcs12_path)
+            .field(
+                "pkcs12_password",
+                &self.pkcs12_password.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(try_from = "CxfPoolConfigRaw")]
 pub struct CxfPoolConfig {
@@ -146,10 +342,16 @@ pub struct CxfPoolConfig {
     /// Optional HTTP bind address for the consumer-side SOAP endpoint published by
     /// the bridge process. Forwarded to the bridge as the `CXF_ADDRESS` env var.
     /// When unset the bridge falls back to its built-in default (`http://0.0.0.0:9000/cxf`).
-    /// Format: `http://<host>:<port>/<base-path>` — profiles are routed under
+    /// Format: `http://<host>:<port>/<base-path>` or `https://<host>:<port>/<base-path>`
+    /// (https requires [`CxfListenerTls`] material) — profiles are routed under
     /// `<base-path>/<profile_name>` by the bridge.
     #[serde(default)]
     pub bind_address: Option<String>,
+    /// Pool-level listener TLS material, assembled from the five `soap_tls_*`
+    /// pool keys. Single source of truth carried into the bridge slot and
+    /// re-emitted on restart.
+    #[serde(default)]
+    pub listener_tls: Option<CxfListenerTls>,
     /// Reconnection policy for transient bridge connection failures.
     /// Controls retry behavior when bridge channel connection fails during
     /// startup, health-monitor restarts, or channel refreshes.
@@ -158,7 +360,7 @@ pub struct CxfPoolConfig {
     pub reconnect: NetworkRetryPolicy,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct CxfPoolConfigRaw {
     #[serde(default)]
     profiles: Vec<CxfProfileConfig>,
@@ -173,8 +375,41 @@ struct CxfPoolConfigRaw {
     version: String,
     #[serde(default)]
     bind_address: Option<String>,
+    #[serde(default)]
+    soap_tls_cert_path: Option<String>,
+    #[serde(default)]
+    soap_tls_key_path: Option<String>,
+    #[serde(default)]
+    soap_tls_client_ca_path: Option<String>,
+    #[serde(default)]
+    soap_tls_pkcs12_path: Option<String>,
+    #[serde(default)]
+    soap_tls_pkcs12_password: Option<String>,
     #[serde(default = "cxf_reconnect_default")]
     reconnect: NetworkRetryPolicy,
+}
+
+impl fmt::Debug for CxfPoolConfigRaw {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CxfPoolConfigRaw")
+            .field("profiles", &self.profiles)
+            .field("max_bridges", &self.max_bridges)
+            .field("bridge_start_timeout_ms", &self.bridge_start_timeout_ms)
+            .field("health_check_interval_ms", &self.health_check_interval_ms)
+            .field("bridge_cache_dir", &self.bridge_cache_dir)
+            .field("version", &self.version)
+            .field("bind_address", &self.bind_address)
+            .field("soap_tls_cert_path", &self.soap_tls_cert_path)
+            .field("soap_tls_key_path", &self.soap_tls_key_path)
+            .field("soap_tls_client_ca_path", &self.soap_tls_client_ca_path)
+            .field("soap_tls_pkcs12_path", &self.soap_tls_pkcs12_path)
+            .field(
+                "soap_tls_pkcs12_password",
+                &self.soap_tls_pkcs12_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("reconnect", &self.reconnect)
+            .finish()
+    }
 }
 
 fn default_bridge_version() -> String {
@@ -191,6 +426,7 @@ impl Default for CxfPoolConfig {
             bridge_cache_dir: None,
             version: default_bridge_version(),
             bind_address: None,
+            listener_tls: None,
             reconnect: cxf_reconnect_default(),
         }
     }
@@ -216,6 +452,148 @@ impl CxfPoolConfig {
         if let Some(address) = self.bind_address.as_deref() {
             validate_consumer_address(address)?;
         }
+        self.validate_listener_tls()?;
+        for profile in &self.profiles {
+            if let Some(fault_status) = profile.security.fault_status
+                && !(400..=599).contains(&fault_status)
+            {
+                return Err(camel_component_api::CamelError::Config(format!(
+                    "cxf profile '{}': security.fault_status {} is out of range; expected \
+                     400-599 (security.fault_status overrides WSS fault statuses only and \
+                     must be an HTTP error status)",
+                    profile.name, fault_status
+                )));
+            }
+            if let Some(tls) = &profile.security.tls {
+                tls.validate(&profile.name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fail-closed listener TLS shape (cxf-listener-tls): explicitly supplied
+    /// empty/whitespace-only values are rejected (N4, same policy as the Java
+    /// bridge), exactly one key-material
+    /// form (`cert_path`+`key_path` PEM XOR `pkcs12_path`+`pkcs12_password`), no
+    /// partial pairs, `client_ca_path` always required, TLS material only with an
+    /// `https` bind, `https` only with material, and material without a bind is
+    /// not applicable. Producer transport TLS (`[profiles.security.tls]`) is a
+    /// distinct, per-profile concern and is never consulted here.
+    fn validate_listener_tls(&self) -> Result<(), camel_component_api::CamelError> {
+        let Some(tls) = self.listener_tls.as_ref() else {
+            // No `soap_tls_*` key: an https bind without material fails closed.
+            if let Some(address) = self.bind_address.as_deref()
+                && bind_address_scheme(address).as_deref() == Some("https")
+            {
+                return Err(camel_component_api::CamelError::Config(
+                    "cxf listener TLS: https bind_address requires key material — set \
+                     soap_tls_cert_path+soap_tls_key_path (PEM) or \
+                     soap_tls_pkcs12_path+soap_tls_pkcs12_password (PKCS#12)"
+                        .to_string(),
+                ));
+            }
+            return Ok(());
+        };
+
+        // N4 fail-closed: an explicitly supplied empty/whitespace-only value
+        // is rejected at Rust config load — never silently unset, never
+        // deferred to bridge startup.
+        for (key, value) in [
+            ("soap_tls_cert_path", &tls.cert_path),
+            ("soap_tls_key_path", &tls.key_path),
+            ("soap_tls_client_ca_path", &tls.client_ca_path),
+            ("soap_tls_pkcs12_path", &tls.pkcs12_path),
+            ("soap_tls_pkcs12_password", &tls.pkcs12_password),
+        ] {
+            if value.as_deref().is_some_and(is_blank_tls_value) {
+                return Err(camel_component_api::CamelError::Config(format!(
+                    "cxf listener TLS: {key} is empty or whitespace-only — supply a nonblank \
+                     value or omit the key (blank TLS values are rejected, not treated as unset)"
+                )));
+            }
+        }
+
+        // Partial key-material pairs fail in both directions.
+        match (tls.cert_path.as_deref(), tls.key_path.as_deref()) {
+            (Some(_), None) => {
+                return Err(camel_component_api::CamelError::Config(
+                    "cxf listener TLS: soap_tls_cert_path is set but soap_tls_key_path \
+                     is missing"
+                        .to_string(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(camel_component_api::CamelError::Config(
+                    "cxf listener TLS: soap_tls_key_path is set but soap_tls_cert_path \
+                     is missing"
+                        .to_string(),
+                ));
+            }
+            _ => {}
+        }
+        match (tls.pkcs12_path.as_deref(), tls.pkcs12_password.as_deref()) {
+            (Some(_), None) => {
+                return Err(camel_component_api::CamelError::Config(
+                    "cxf listener TLS: soap_tls_pkcs12_path is set but \
+                     soap_tls_pkcs12_password is missing"
+                        .to_string(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(camel_component_api::CamelError::Config(
+                    "cxf listener TLS: soap_tls_pkcs12_password is set but \
+                     soap_tls_pkcs12_path is missing"
+                        .to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        let pem_form = tls.cert_path.is_some() && tls.key_path.is_some();
+        let pkcs12_form = tls.pkcs12_path.is_some() && tls.pkcs12_password.is_some();
+        if pem_form && pkcs12_form {
+            return Err(camel_component_api::CamelError::Config(
+                "cxf listener TLS: supply exactly one key-material form — \
+                 soap_tls_cert_path+soap_tls_key_path (PEM) or \
+                 soap_tls_pkcs12_path+soap_tls_pkcs12_password (PKCS#12) — never both"
+                    .to_string(),
+            ));
+        }
+        if !pem_form && !pkcs12_form {
+            return Err(camel_component_api::CamelError::Config(
+                "cxf listener TLS: supply exactly one key-material form — \
+                 soap_tls_cert_path+soap_tls_key_path (PEM) or \
+                 soap_tls_pkcs12_path+soap_tls_pkcs12_password (PKCS#12) — none is \
+                 configured"
+                    .to_string(),
+            ));
+        }
+        if tls.client_ca_path.is_none() {
+            return Err(camel_component_api::CamelError::Config(
+                "cxf listener TLS: soap_tls_client_ca_path is always required \
+                 (mutual TLS client authentication)"
+                    .to_string(),
+            ));
+        }
+        match self.bind_address.as_deref() {
+            None => {
+                return Err(camel_component_api::CamelError::Config(
+                    "cxf listener TLS: soap_tls_* material is configured but \
+                     bind_address is absent; the listener TLS configuration is not \
+                     applicable without a bind"
+                        .to_string(),
+                ));
+            }
+            Some(address) => {
+                if bind_address_scheme(address).as_deref() != Some("https") {
+                    return Err(camel_component_api::CamelError::Config(
+                        "cxf listener TLS: bind_address must use https when \
+                         soap_tls_* material is configured"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -224,6 +602,23 @@ impl TryFrom<CxfPoolConfigRaw> for CxfPoolConfig {
     type Error = camel_component_api::CamelError;
 
     fn try_from(raw: CxfPoolConfigRaw) -> Result<Self, Self::Error> {
+        // The five flat `soap_tls_*` keys are the only TOML surface; any of them
+        // present assembles the record so validation sees partial shapes too.
+        let listener_tls = {
+            let tls = CxfListenerTls {
+                cert_path: raw.soap_tls_cert_path,
+                key_path: raw.soap_tls_key_path,
+                client_ca_path: raw.soap_tls_client_ca_path,
+                pkcs12_path: raw.soap_tls_pkcs12_path,
+                pkcs12_password: raw.soap_tls_pkcs12_password,
+            };
+            let any_key = tls.cert_path.is_some()
+                || tls.key_path.is_some()
+                || tls.client_ca_path.is_some()
+                || tls.pkcs12_path.is_some()
+                || tls.pkcs12_password.is_some();
+            any_key.then_some(tls)
+        };
         let cfg = CxfPoolConfig {
             profiles: raw.profiles,
             max_bridges: raw.max_bridges,
@@ -232,6 +627,7 @@ impl TryFrom<CxfPoolConfigRaw> for CxfPoolConfig {
             bridge_cache_dir: raw.bridge_cache_dir,
             version: raw.version,
             bind_address: raw.bind_address,
+            listener_tls,
             reconnect: raw.reconnect,
         };
         cfg.validate()?;
@@ -734,12 +1130,14 @@ mod tests {
     fn consumer_address_https_rejected() {
         let cfg = CxfPoolConfig {
             bind_address: Some("https://0.0.0.0:9000/soap".to_string()),
+            listener_tls: None,
             ..Default::default()
         };
         let err = cfg.validate().unwrap_err();
         assert!(
             err.to_string()
-                .contains("TLS listener support is not yet available")
+                .contains("https bind_address requires key material"),
+            "got: {err}"
         );
     }
 
@@ -747,6 +1145,7 @@ mod tests {
     fn consumer_address_http_accepted() {
         let cfg = CxfPoolConfig {
             bind_address: Some("http://localhost:9000/soap".to_string()),
+            listener_tls: None,
             ..Default::default()
         };
         assert!(cfg.validate().is_ok());
@@ -768,7 +1167,8 @@ mod tests {
         let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
         assert!(
             err.to_string()
-                .contains("TLS listener support is not yet available")
+                .contains("https bind_address requires key material"),
+            "got: {err}"
         );
     }
 
@@ -838,11 +1238,553 @@ mod tests {
             keystore_password: Some("SENTINEL-KEYSTORE-PASS".into()),
             truststore_password: Some("SENTINEL-TRUSTSTORE-PASS".into()),
             sig_password: Some("SENTINEL-SIG-PASS".into()),
+            tls: Some(CxfTlsConfig {
+                keystore_password: Some("SENTINEL-TLS-KS-PASS".into()),
+                truststore_password: Some("SENTINEL-TLS-TS-PASS".into()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let debug = format!("{:?}", fields);
         assert!(!debug.contains("SENTINEL-KEYSTORE-PASS"));
         assert!(!debug.contains("SENTINEL-TRUSTSTORE-PASS"));
         assert!(!debug.contains("SENTINEL-SIG-PASS"));
+        assert!(!debug.contains("SENTINEL-TLS-KS-PASS"));
+        assert!(!debug.contains("SENTINEL-TLS-TS-PASS"));
+    }
+
+    // ── Producer TLS config plumbing (Task 1.5) ─────────────────────────────
+
+    fn profile_with_tls(name: &str, tls: CxfTlsConfig) -> CxfProfileConfig {
+        CxfProfileConfig {
+            name: name.to_string(),
+            address: None,
+            wsdl_path: "/wsdl/test.wsdl".to_string(),
+            service_name: "Svc".to_string(),
+            port_name: "Port".to_string(),
+            security: CxfSecurityFields {
+                tls: Some(tls),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn tls_path_without_password_fails_validation() {
+        let cfg = CxfPoolConfig {
+            profiles: vec![profile_with_tls(
+                "baleares",
+                CxfTlsConfig {
+                    keystore_path: Some("/etc/cxf/ks.p12".to_string()),
+                    ..Default::default()
+                },
+            )],
+            listener_tls: None,
+            ..Default::default()
+        };
+        match cfg.validate().unwrap_err() {
+            camel_component_api::CamelError::Config(msg) => {
+                assert!(msg.contains("keystore_password"), "got: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tls_password_without_path_fails_validation() {
+        let cfg = CxfPoolConfig {
+            profiles: vec![profile_with_tls(
+                "baleares",
+                CxfTlsConfig {
+                    truststore_password: Some("pw".to_string()),
+                    ..Default::default()
+                },
+            )],
+            listener_tls: None,
+            ..Default::default()
+        };
+        match cfg.validate().unwrap_err() {
+            camel_component_api::CamelError::Config(msg) => {
+                assert!(msg.contains("truststore_path"), "got: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keystore_type_defaults_to_pkcs12() {
+        let env = CxfTlsConfig {
+            keystore_path: Some("/etc/cxf/ks.p12".to_string()),
+            keystore_password: Some("pw".to_string()),
+            ..Default::default()
+        }
+        .to_env()
+        .to_env_vars("CXF_PROFILE_TEST_");
+        let entry = env
+            .iter()
+            .find(|(k, _)| k.as_str() == "CXF_PROFILE_TEST_TLS_KEYSTORE_TYPE")
+            .expect("TLS_KEYSTORE_TYPE emitted");
+        assert_eq!(entry.1, "PKCS12");
+    }
+
+    #[test]
+    fn keystore_type_rejects_unknown_spelling() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "baleares"
+            wsdl_path = "/wsdl/test.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security.tls]
+            keystore_path = "/etc/cxf/ks.jks"
+            keystore_password = "pw"
+            keystore_type = "jks"
+        "#;
+        assert!(toml::from_str::<CxfPoolConfig>(toml_str).is_err());
+    }
+
+    // ── Blank TLS-value rejection (N4 fail-closed parity) ──────────────────
+
+    /// Explicitly supplied values both layers must reject: empty, ASCII
+    /// whitespace, and Unicode `White_Space` members where Java's
+    /// `String.isBlank` (`Character.isWhitespace`) disagrees with Rust's
+    /// `char::is_whitespace` (NBSP U+00A0, NEL U+0085, mixed ASCII + U+202F).
+    const BLANK_TLS_VALUES: [&str; 7] =
+        ["", " ", "\t", " \t\r\n", "\u{00A0}", "\u{85}", " \u{202F}"];
+
+    /// Blanks whose echo would leak distinctive bytes; plain ASCII whitespace
+    /// occurs in any message text, so the non-echo check targets these only.
+    const ECHO_SENSITIVE_BLANKS: [&str; 3] = ["\u{00A0}", "\u{85}", " \u{202F}"];
+
+    #[test]
+    fn producer_tls_rejects_blank_store_values() {
+        // Blank keystore path beside an otherwise valid paired password.
+        for blank in BLANK_TLS_VALUES {
+            let cfg = CxfPoolConfig {
+                profiles: vec![profile_with_tls(
+                    "baleares",
+                    CxfTlsConfig {
+                        keystore_path: Some(blank.to_string()),
+                        keystore_password: Some("pw".to_string()),
+                        ..Default::default()
+                    },
+                )],
+                listener_tls: None,
+                ..Default::default()
+            };
+            match cfg.validate().unwrap_err() {
+                camel_component_api::CamelError::Config(msg) => {
+                    assert!(msg.contains("keystore_path"), "got: {msg}");
+                    assert!(msg.contains("baleares"), "got: {msg}");
+                    if ECHO_SENSITIVE_BLANKS.contains(&blank) {
+                        assert!(!msg.contains(blank), "error echoed the value: {msg}");
+                    }
+                }
+                other => panic!("expected CamelError::Config, got {other:?}"),
+            }
+        }
+
+        // Blank truststore password beside an otherwise valid paired path.
+        for blank in BLANK_TLS_VALUES {
+            let cfg = CxfPoolConfig {
+                profiles: vec![profile_with_tls(
+                    "baleares",
+                    CxfTlsConfig {
+                        truststore_path: Some("/etc/cxf/ts.p12".to_string()),
+                        truststore_password: Some(blank.to_string()),
+                        ..Default::default()
+                    },
+                )],
+                listener_tls: None,
+                ..Default::default()
+            };
+            match cfg.validate().unwrap_err() {
+                camel_component_api::CamelError::Config(msg) => {
+                    assert!(msg.contains("truststore_password"), "got: {msg}");
+                    assert!(msg.contains("baleares"), "got: {msg}");
+                    if ECHO_SENSITIVE_BLANKS.contains(&blank) {
+                        assert!(!msg.contains(blank), "error echoed the value: {msg}");
+                    }
+                }
+                other => panic!("expected CamelError::Config, got {other:?}"),
+            }
+        }
+
+        // A both-blank pair previously slipped through as a "complete" pair
+        // and silently selected JVM store defaults on the Java side.
+        for blank in BLANK_TLS_VALUES {
+            let cfg = CxfPoolConfig {
+                profiles: vec![profile_with_tls(
+                    "baleares",
+                    CxfTlsConfig {
+                        keystore_path: Some(blank.to_string()),
+                        keystore_password: Some(blank.to_string()),
+                        ..Default::default()
+                    },
+                )],
+                listener_tls: None,
+                ..Default::default()
+            };
+            match cfg.validate().unwrap_err() {
+                camel_component_api::CamelError::Config(msg) => {
+                    assert!(msg.contains("keystore_path"), "got: {msg}");
+                }
+                other => panic!("expected CamelError::Config, got {other:?}"),
+            }
+        }
+
+        // Genuinely omitted pairs stay valid; nonblank passwords are never
+        // trimmed (meaningful surrounding spaces survive to the env var).
+        let cfg = CxfPoolConfig {
+            profiles: vec![profile_with_tls("baleares", CxfTlsConfig::default())],
+            listener_tls: None,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_ok(), "omitted TLS pairs must stay valid");
+        let tls = CxfTlsConfig {
+            keystore_path: Some("/etc/cxf/ks.p12".to_string()),
+            keystore_password: Some(" pass word ".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            CxfPoolConfig {
+                profiles: vec![profile_with_tls("baleares", tls.clone())],
+                listener_tls: None,
+                ..Default::default()
+            }
+            .validate()
+            .is_ok(),
+            "nonblank password with meaningful spaces must stay valid"
+        );
+        assert_eq!(
+            tls.to_env().keystore_password.map(Redacted::into_inner),
+            Some(" pass word ".to_string()),
+            "nonblank password bytes must be forwarded untouched"
+        );
+    }
+
+    // ── Fault-status override (Task 2.2) ────────────────────────────────────
+
+    fn profile_with_fault_status(name: &str, fault_status: u16) -> CxfProfileConfig {
+        CxfProfileConfig {
+            name: name.to_string(),
+            address: None,
+            wsdl_path: "/wsdl/test.wsdl".to_string(),
+            service_name: "Svc".to_string(),
+            port_name: "Port".to_string(),
+            security: CxfSecurityFields {
+                fault_status: Some(fault_status),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn fault_status_out_of_range_rejected() {
+        for out_of_range in [101u16, 204, 399, 600] {
+            let cfg = CxfPoolConfig {
+                profiles: vec![profile_with_fault_status("esap", out_of_range)],
+                listener_tls: None,
+                ..Default::default()
+            };
+            let err = cfg.validate().unwrap_err();
+            match err {
+                camel_component_api::CamelError::Config(msg) => {
+                    assert!(
+                        msg.contains("fault_status"),
+                        "error must name fault_status, got: {msg}"
+                    );
+                }
+                other => panic!("expected CamelError::Config, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn fault_status_in_range_accepted() {
+        for in_range in [400u16, 403, 500, 599] {
+            let cfg = CxfPoolConfig {
+                profiles: vec![profile_with_fault_status("esap", in_range)],
+                listener_tls: None,
+                ..Default::default()
+            };
+            assert!(
+                cfg.validate().is_ok(),
+                "fault_status {in_range} must be accepted"
+            );
+        }
+    }
+
+    // ── Listener TLS pool shape (Task 2.6) ─────────────────────────────────
+
+    /// Assert a config-validation rejection is a `CamelError::Config` whose
+    /// message names the failing key material.
+    fn assert_config_err(cfg: &CxfPoolConfig, needle: &str) {
+        match cfg.validate().unwrap_err() {
+            camel_component_api::CamelError::Config(msg) => {
+                assert!(msg.contains(needle), "expected {needle:?} in: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+    }
+
+    fn listener_tls(
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        client_ca_path: Option<&str>,
+        pkcs12_path: Option<&str>,
+        pkcs12_password: Option<&str>,
+    ) -> CxfListenerTls {
+        CxfListenerTls {
+            cert_path: cert_path.map(str::to_string),
+            key_path: key_path.map(str::to_string),
+            client_ca_path: client_ca_path.map(str::to_string),
+            pkcs12_path: pkcs12_path.map(str::to_string),
+            pkcs12_password: pkcs12_password.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn listener_tls_both_forms_rejected() {
+        let cfg = CxfPoolConfig {
+            bind_address: Some("https://0.0.0.0:9443/soap".to_string()),
+            listener_tls: Some(listener_tls(
+                Some("/etc/cxf/server.pem"),
+                Some("/etc/cxf/server.key"),
+                Some("/etc/cxf/ca.pem"),
+                Some("/etc/cxf/server.p12"),
+                Some("s3cret"),
+            )),
+            ..Default::default()
+        };
+        assert_config_err(&cfg, "one key-material form");
+    }
+
+    #[test]
+    fn listener_tls_neither_form_rejected_for_https() {
+        let cfg = CxfPoolConfig {
+            bind_address: Some("https://0.0.0.0:9443/soap".to_string()),
+            listener_tls: None,
+            ..Default::default()
+        };
+        assert_config_err(&cfg, "soap_tls_");
+    }
+
+    #[test]
+    fn listener_tls_missing_client_ca_rejected() {
+        let pem_without_ca = CxfPoolConfig {
+            bind_address: Some("https://0.0.0.0:9443/soap".to_string()),
+            listener_tls: Some(listener_tls(
+                Some("/etc/cxf/server.pem"),
+                Some("/etc/cxf/server.key"),
+                None,
+                None,
+                None,
+            )),
+            ..Default::default()
+        };
+        assert_config_err(&pem_without_ca, "soap_tls_client_ca_path");
+
+        let pkcs12_without_ca = CxfPoolConfig {
+            bind_address: Some("https://0.0.0.0:9443/soap".to_string()),
+            listener_tls: Some(listener_tls(
+                None,
+                None,
+                None,
+                Some("/etc/cxf/server.p12"),
+                Some("s3cret"),
+            )),
+            ..Default::default()
+        };
+        assert_config_err(&pkcs12_without_ca, "soap_tls_client_ca_path");
+    }
+
+    #[test]
+    fn listener_tls_http_bind_rejected() {
+        let cfg = CxfPoolConfig {
+            bind_address: Some("http://0.0.0.0:9443/soap".to_string()),
+            listener_tls: Some(listener_tls(
+                Some("/etc/cxf/server.pem"),
+                Some("/etc/cxf/server.key"),
+                Some("/etc/cxf/ca.pem"),
+                None,
+                None,
+            )),
+            ..Default::default()
+        };
+        assert_config_err(&cfg, "https");
+    }
+
+    #[test]
+    fn listener_tls_pkcs12_form_accepted() {
+        // Fresh benign sentinel: the RAW config's own manual Debug must redact the
+        // PKCS12 password (ADR-0051 covers config raw too). The raw assertion is
+        // independent of the final record's formatter — neutralizing only the raw
+        // redaction fails this test; the record formatter cannot mask it.
+        const RAW_DEBUG_SENTINEL: &str = "raw-dbg-SENTINEL-7f3a";
+        let toml_str = format!(
+            r#"
+            bind_address = "https://0.0.0.0:9443/soap"
+            soap_tls_pkcs12_path = "/etc/cxf/server.p12"
+            soap_tls_pkcs12_password = "{RAW_DEBUG_SENTINEL}"
+            soap_tls_client_ca_path = "/etc/cxf/ca.pem"
+        "#
+        );
+
+        // RAW, formatted BEFORE conversion.
+        let raw: CxfPoolConfigRaw =
+            toml::from_str(&toml_str).expect("valid raw listener TLS config");
+        let raw_debug = format!("{raw:?}");
+        assert!(
+            !raw_debug.contains(RAW_DEBUG_SENTINEL),
+            "raw Debug leaked the pkcs12 password: {raw_debug}"
+        );
+        assert!(
+            raw_debug.contains("<redacted>"),
+            "raw Debug must show <redacted>: {raw_debug}"
+        );
+
+        // FINAL record: PKCS12 correct fields accepted; record Debug formatted
+        // separately also redacts (covered again in pool_env_test).
+        let cfg = CxfPoolConfig::try_from(raw).expect("valid listener TLS config");
+        assert!(
+            cfg.validate().is_ok(),
+            "PKCS12 form with client CA must validate"
+        );
+        let record_debug = format!("{:?}", cfg.listener_tls);
+        assert!(
+            !record_debug.contains(RAW_DEBUG_SENTINEL),
+            "record Debug leaked the pkcs12 password: {record_debug}"
+        );
+    }
+
+    #[test]
+    fn listener_tls_cert_key_form_accepted() {
+        let toml_str = r#"
+            bind_address = "https://0.0.0.0:9443/soap"
+            soap_tls_cert_path = "/etc/cxf/server.pem"
+            soap_tls_key_path = "/etc/cxf/server.key"
+            soap_tls_client_ca_path = "/etc/cxf/ca.pem"
+        "#;
+        let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("valid listener TLS config");
+        assert!(
+            cfg.validate().is_ok(),
+            "cert/key form with client CA must validate"
+        );
+    }
+
+    #[test]
+    fn listener_tls_rejects_blank_material_values() {
+        // Reuses the module-level parity table so producer and listener coverage
+        // cannot drift apart.
+        for blank in BLANK_TLS_VALUES {
+            let cfg = CxfPoolConfig {
+                bind_address: Some("https://0.0.0.0:9443/soap".to_string()),
+                listener_tls: Some(listener_tls(
+                    Some(blank),
+                    Some("/etc/cxf/server.key"),
+                    Some("/etc/cxf/ca.pem"),
+                    None,
+                    None,
+                )),
+                ..Default::default()
+            };
+            assert_config_err(&cfg, "soap_tls_cert_path");
+        }
+        for blank in BLANK_TLS_VALUES {
+            let cfg = CxfPoolConfig {
+                bind_address: Some("https://0.0.0.0:9443/soap".to_string()),
+                listener_tls: Some(listener_tls(
+                    Some("/etc/cxf/server.pem"),
+                    Some(blank),
+                    Some("/etc/cxf/ca.pem"),
+                    None,
+                    None,
+                )),
+                ..Default::default()
+            };
+            assert_config_err(&cfg, "soap_tls_key_path");
+        }
+        for blank in BLANK_TLS_VALUES {
+            let cfg = CxfPoolConfig {
+                bind_address: Some("https://0.0.0.0:9443/soap".to_string()),
+                listener_tls: Some(listener_tls(
+                    Some("/etc/cxf/server.pem"),
+                    Some("/etc/cxf/server.key"),
+                    Some(blank),
+                    None,
+                    None,
+                )),
+                ..Default::default()
+            };
+            assert_config_err(&cfg, "soap_tls_client_ca_path");
+        }
+
+        // Each blank material key inside an otherwise-valid PKCS#12 shape.
+        for blank in BLANK_TLS_VALUES {
+            let cfg = CxfPoolConfig {
+                bind_address: Some("https://0.0.0.0:9443/soap".to_string()),
+                listener_tls: Some(listener_tls(
+                    None,
+                    None,
+                    Some("/etc/cxf/ca.pem"),
+                    Some(blank),
+                    Some("s3cret"),
+                )),
+                ..Default::default()
+            };
+            assert_config_err(&cfg, "soap_tls_pkcs12_path");
+        }
+        for blank in BLANK_TLS_VALUES {
+            let cfg = CxfPoolConfig {
+                bind_address: Some("https://0.0.0.0:9443/soap".to_string()),
+                listener_tls: Some(listener_tls(
+                    None,
+                    None,
+                    Some("/etc/cxf/ca.pem"),
+                    Some("/etc/cxf/server.p12"),
+                    Some(blank),
+                )),
+                ..Default::default()
+            };
+            // Rejection must name the key and never echo the blank password.
+            match cfg.validate().unwrap_err() {
+                camel_component_api::CamelError::Config(msg) => {
+                    assert!(msg.contains("soap_tls_pkcs12_password"), "got: {msg}");
+                    if ECHO_SENSITIVE_BLANKS.contains(&blank) {
+                        assert!(!msg.contains(blank), "error echoed the value: {msg}");
+                    }
+                }
+                other => panic!("expected CamelError::Config, got {other:?}"),
+            }
+        }
+
+        // Explicitly blank-only TLS material with no bind is rejected as a
+        // blank value, not as a confusing "none is configured" shape error.
+        for blank in BLANK_TLS_VALUES {
+            let cfg = CxfPoolConfig {
+                bind_address: None,
+                listener_tls: Some(listener_tls(None, None, Some(blank), None, None)),
+                ..Default::default()
+            };
+            assert_config_err(&cfg, "soap_tls_client_ca_path");
+        }
+
+        // A blank-complete PEM form over an https bind previously passed Rust
+        // config load and only failed later at bridge startup.
+        let cfg = CxfPoolConfig {
+            bind_address: Some("https://0.0.0.0:9443/soap".to_string()),
+            listener_tls: Some(listener_tls(Some(""), Some(""), Some(""), None, None)),
+            ..Default::default()
+        };
+        assert_config_err(&cfg, "soap_tls_cert_path");
+
+        // Omitted no-TLS/no-bind (producer-only pool) stays valid.
+        let cfg = CxfPoolConfig::default();
+        assert!(
+            cfg.validate().is_ok(),
+            "omitted no-TLS no-bind must be valid"
+        );
     }
 }

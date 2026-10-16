@@ -47,6 +47,15 @@ message ConsumerRequest {
   map<string, string> headers = 4;
   string soap_action = 5;
   string security_profile = 6;
+  optional SignerIdentity signer = 7; // verified signer identity; absent = unknown
+}
+
+// Verified inbound signer descriptor: bounded strings only, no DER bytes.
+message SignerIdentity {
+  string subject = 1; // RFC 2253 distinguished name
+  string issuer = 2; // RFC 2253 distinguished name
+  string serial = 3; // certificate serial, unsigned lowercase hex
+  string fingerprint_sha256 = 4; // 64 lowercase hex chars of SHA-256(DER)
 }
 
 // Rust → Bridge: route processing result (consumer mode)

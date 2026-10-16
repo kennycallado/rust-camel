@@ -75,6 +75,7 @@ async fn test_pool_detects_unhealthy_bridge() -> Result<(), Box<dyn std::error::
 async fn test_pool_shutdown_cleans_up() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let pool = camel_component_cxf::CxfBridgePool::from_config(CxfPoolConfig {
         profiles: vec![],
+        listener_tls: None,
         ..CxfPoolConfig::default()
     })?;
     pool.shutdown().await?;
@@ -100,6 +101,7 @@ async fn test_insert_slot_and_get_channel() -> Result<(), Box<dyn std::error::Er
 
     let pool = CxfBridgePool::from_config(CxfPoolConfig {
         profiles: vec![],
+        listener_tls: None,
         ..CxfPoolConfig::default()
     })?;
     pool.insert_slot_for_test(key.clone(), slot);
@@ -118,6 +120,7 @@ async fn test_insert_slot_and_get_channel() -> Result<(), Box<dyn std::error::Er
 async fn test_shutdown_with_no_slots() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let pool = CxfBridgePool::from_config(CxfPoolConfig {
         profiles: vec![],
+        listener_tls: None,
         ..CxfPoolConfig::default()
     })?;
     pool.shutdown().await?;

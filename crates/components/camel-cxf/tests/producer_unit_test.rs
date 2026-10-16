@@ -9,6 +9,11 @@ use support::mock_bridge::{MockState, spawn_mock_bridge};
 use tonic::transport::{Channel, Endpoint};
 use tower::Service;
 
+/// Bound for reading mock-bridge observed state. The dispatch has already
+/// completed, so the uncontended lock resolves at once; the bound turns a
+/// stalled dispatch into a fast failure instead of a hung suite.
+const STATE_LOCK_BUDGET: Duration = Duration::from_secs(5);
+
 /// Helper: poll_ready + call in one step (required by Tower contract).
 async fn ready_call(
     producer: &mut CxfProducer,
@@ -26,6 +31,12 @@ async fn ready_call(
 }
 
 async fn make_producer() -> (CxfProducer, MockState) {
+    make_producer_with_default_timeout(None).await
+}
+
+async fn make_producer_with_default_timeout(
+    default_timeout_ms: Option<u64>,
+) -> (CxfProducer, MockState) {
     let (port, state) = spawn_mock_bridge().await.expect("mock bridge");
     let channel = tokio::time::timeout(
         Duration::from_secs(5),
@@ -47,7 +58,7 @@ async fn make_producer() -> (CxfProducer, MockState) {
         "TestPort".to_string(),
         Some("http://localhost:8080/ws".to_string()),
         "defaultOperation".to_string(),
-        None,
+        default_timeout_ms,
         rt,
     );
     (producer, state)
@@ -240,4 +251,86 @@ async fn test_invoke_sends_security_profile() {
     let _ = ready_call(&mut producer, exchange).await;
     let req = state.last_invoke.lock().await.clone().expect("last invoke");
     assert_eq!(req.security_profile, "test");
+}
+
+#[tokio::test]
+async fn timeout_ms_zero_uses_default() {
+    // 0 is a live wire value: the bridge substitutes its own default. The
+    // producer must forward 0 rather than resolving the configured default
+    // locally.
+    let (mut producer, state) = make_producer_with_default_timeout(Some(5000)).await;
+    let mut msg = Message::new(Body::Text("req".to_string()));
+    msg.set_header("CamelCxfTimeoutMs", Value::String("0".to_string()));
+    let exchange = Exchange::new(msg);
+
+    let _ = ready_call(&mut producer, exchange).await.expect("success");
+    let req = tokio::time::timeout(STATE_LOCK_BUDGET, state.last_invoke.lock())
+        .await
+        .expect("last_invoke lock must not hang")
+        .clone()
+        .expect("last invoke");
+    assert_eq!(req.timeout_ms, 0, "0 must reach the wire unchanged");
+}
+
+#[tokio::test]
+async fn timeout_ms_over_i32_max_is_rejected() {
+    let (mut producer, state) = make_producer().await;
+    let mut msg = Message::new(Body::Text("req".to_string()));
+    msg.set_header("CamelCxfTimeoutMs", Value::String("2147483648".to_string()));
+    let exchange = Exchange::new(msg);
+
+    let err = ready_call(&mut producer, exchange)
+        .await
+        .expect_err("timeout above i32 max must be rejected");
+    let text = err.to_string();
+    assert!(
+        text.contains("cxf timeout_ms exceeds 2147483647"),
+        "got: {text}"
+    );
+    assert!(
+        text.contains("2147483647"),
+        "error must name the bound: {text}"
+    );
+    assert!(
+        state.last_invoke.lock().await.is_none(),
+        "no dispatch may occur for an out-of-range timeout"
+    );
+}
+
+#[tokio::test]
+async fn legacy_negative_timeout_is_rejected() {
+    // A legacy `-1` on the wire decodes to u64::MAX.
+    let (mut producer, state) = make_producer().await;
+    let mut msg = Message::new(Body::Text("req".to_string()));
+    msg.set_header("CamelCxfTimeoutMs", Value::String(u64::MAX.to_string()));
+    let exchange = Exchange::new(msg);
+
+    let err = ready_call(&mut producer, exchange)
+        .await
+        .expect_err("legacy negative timeout must be rejected");
+    assert!(
+        err.to_string()
+            .contains("cxf timeout_ms exceeds 2147483647"),
+        "got: {err}"
+    );
+    assert!(
+        state.last_invoke.lock().await.is_none(),
+        "no dispatch may occur for a legacy negative timeout"
+    );
+}
+
+#[tokio::test]
+async fn timeout_ms_in_range_is_applied() {
+    let (mut producer, state) = make_producer().await;
+    let mut msg = Message::new(Body::Text("req".to_string()));
+    msg.set_header("CamelCxfTimeoutMs", Value::String("5000".to_string()));
+    let exchange = Exchange::new(msg);
+
+    let _ = ready_call(&mut producer, exchange).await.expect("success");
+    let req = tokio::time::timeout(STATE_LOCK_BUDGET, state.last_invoke.lock())
+        .await
+        .expect("last_invoke lock must not hang")
+        .clone()
+        .expect("last invoke");
+    assert_eq!(req.timeout_ms, 5000);
 }

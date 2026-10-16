@@ -31,7 +31,7 @@ route!{
 
 ## URI format
 
-`validator:path/to/schema[?type=xml|json|yaml&failOnNullBody=true|false&headerName=X-Header&failOnNullHeader=true|false]`
+`validator:path/to/schema[?type=xml|json|yaml&failOnNullBody=true|false&headerName=X-Header&failOnNullHeader=true|false&schemaAliases=<percent-encoded JSON object>]`
 
 If `type` is omitted, schema type is inferred from file extension.
 
@@ -45,6 +45,21 @@ If `type` is omitted, schema type is inferred from file extension.
 | `failOnNullBody` | `true` | Reject empty bodies when `true` |
 | `headerName` | *(none)* | Validate a header value instead of the body |
 | `failOnNullHeader` | `true` | Reject when the named header is missing |
+| `schemaAliases` | *(none)* | Absolute-URI to root-relative virtual path map, as one percent-encoded JSON object. See below. |
+
+`schemaAliases` maps absolute schema URIs to root-relative virtual paths. The value is one JSON
+object percent-encoded once. For example,
+`schemaAliases=%7B%22http%3A%2F%2Fexample.com%2Fp.xsd%22%3A%22a%2Fparent.xsd%22%7D` decodes once to
+`{"http://example.com/p.xsd":"a/parent.xsd"}`. A malformed value, a duplicated `schemaAliases`
+query parameter, or more than 128 entries fail endpoint creation before the bridge starts. Alias
+values are root-relative virtual paths. XSD discovery follows only the reachable
+`xs:import`/`xs:include` edges inside the schema file's parent directory (the confined root). The
+bounds fail closed during discovery: 256 resource entries, 8 MiB total bytes, 128 aliases, and
+import depth 32.
+
+Rust reads the confined schema files and transmits the schema set in memory.
+The Java bridge resolves only from the transmitted in-memory set.
+Its supplied-key resolver never fetches: no network and no filesystem access occur.
 
 ## Startup behavior
 

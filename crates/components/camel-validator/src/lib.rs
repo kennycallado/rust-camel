@@ -11,6 +11,7 @@ pub mod config;
 pub mod error;
 pub(crate) mod metadata;
 pub mod resolver;
+pub mod schema_set;
 pub mod xsd_bridge;
 
 pub use component::ValidatorComponent;
@@ -18,7 +19,7 @@ pub use config::{SchemaType, ValidatorConfig};
 pub use resolver::{FilesystemResolver, ResourceResolver};
 
 /// Version of the Java XML bridge binary this crate is compatible with.
-pub const BRIDGE_VERSION: &str = "0.7.0";
+pub const BRIDGE_VERSION: &str = "0.8.0";
 
 #[cfg(test)]
 mod bridge_client_test;

@@ -1,3 +1,17 @@
+## Producer envelope and SOAP version
+
+The producer dispatch runs `Service.Mode.PAYLOAD` and passes the Exchange body as
+the bare operation element. The bridge emits exactly one SOAP `Envelope` with one
+`Body`; the operation element is a direct child of `Body`. A body that is already
+a SOAP `Envelope` is rejected before dispatch, so no nested envelope reaches the
+wire.
+
+The SOAP version derives from the selected WSDL port binding
+(`dispatch.getBinding().getBindingID()`), not from a `soap-version` request
+header; that header is ignored. An unrecognized binding ID fails the invocation
+instead of defaulting to SOAP 1.1. Envelope parsing stays in the bridge, which
+owns the XML boundary (ADR-0032).
+
 ## Security posture
 
 ### XML parsing delegation
@@ -15,6 +29,85 @@ through per-profile environment variables. `CxfProfileEnvVars` wraps these
 values in `Redacted` while it builds the child-process configuration. gRPC
 requests carry only the configured `security_profile` selector. They do not
 carry password bytes. See ADR-0051 for credential redaction requirements.
+
+### Transport TLS and message-layer separation
+
+Producer transport TLS comes from the nested `[profiles.security.tls]` table.
+`CxfTlsConfig::to_env` serializes it as `CXF_PROFILE_<NAME>_TLS_*` environment
+variables. The bridge builds `TLSClientParameters` from the `TLS_KEYSTORE_*`
+(key managers) and `TLS_TRUSTSTORE_*` (trust managers) pairs and attaches them
+to the CXF `HTTPConduit` of each dispatch. `CxfClientManager.initTlsStores()`
+loads and validates every profile's stores during Quarkus startup, before the
+`ready` line; a store that a password does not open aborts startup.
+
+This is the HTTP transport layer, not the message layer. It is separate from
+the WS-Security `keystore`/`truststore` fields, which sign and encrypt SOAP
+envelopes. The two pairs are independent: transport TLS encrypts and
+authenticates the connection, WS-Security protects the envelope. Hostname
+verification is always on, and one profile's TLS material never applies to
+another profile.
+
+Producer transport TLS covers the producer. The consumer listener (Phase 2,
+operational) has its own FLAT pool keys beside `bind_address`
+(`soap_tls_cert_path`/`soap_tls_key_path` XOR `soap_tls_pkcs12_path`/
+`soap_tls_pkcs12_password`, plus the always-required `soap_tls_client_ca_path`).
+They are pool-level, never per-profile, and independent of the WSS stores.
+Client auth is required (mutual TLS): a missing or foreign client certificate
+is rejected at the handshake. The bridge binds the configured address (port `0`
+= OS-assigned, JVM-held) and announces the ACTUAL bound port in the
+`soap-ready` line; `BridgeProcess` awaits `ready` + `soap-ready` (any order)
+under one startup budget and exposes the announced SOAP port read-only
+(`CxfBridgePool::listener_info`). Before a consumer stream is open, requests
+take the pre-stream gate: HTTP 503 + `Retry-After` + plaintext, never a SOAP
+fault. Plaintext `http` ingress remains an allowed interim form.
+
+## Consumer fault matrix
+
+The listener classifies every SOAP-processing failure as `Sender` or `Receiver`
+and maps the class to an HTTP status. Malformed XML and a missing SOAP `Body`
+are detected before WS-Security, so a profile's security override can never
+rewrite them. SOAP 1.1 returns 500 for every fault; SOAP 1.2 returns 400 for
+`Sender` and 500 for `Receiver`. A fault never returns 200.
+
+Transport rejections are not SOAP faults and stay outside this matrix: the body
+cap (`CXF_MAX_BODY_BYTES`, HTTP 413 plaintext, enforced during body accumulation
+before XML, WS-Security, and the availability gate) and the availability gate
+(HTTP 503 + `Retry-After` plaintext, pre-stream or lost stream). A
+`fault_status` override never applies to either.
+
+`[profiles.security] fault_status` is an optional integer in 400–599, validated at
+startup. It overrides the status for that profile's security (WSS) faults only, on
+both SOAP versions. It does not apply to the signer descriptor, route errors,
+timeouts, malformed input, a missing `Body`, or Rust `soap:Client`/`soap:Server`
+faults, and there is no global override. The override is a response-shaping value,
+not an authentication decision: it writes no principal and no `camel.auth.*`
+property.
+
+## Consumer signer identity
+
+The listener exports the request signer as the `SignerIdentity` field of the
+`ConsumerRequest`: `subject` and `issuer` are RFC 2253 distinguished names,
+`serial` is the lowercase-hex certificate serial number, and
+`fingerprint_sha256` is 64 lowercase hex characters of the SHA-256 digest of the
+DER certificate. No DER bytes cross the wire. The certificate must come from a
+validated, trusted `SIGN` engine result that covers the SOAP `Body`; the bridge
+never reads identity from headers, a `UsernameToken`, or an unchecked
+certificate. A certificate whose DER encoding exceeds 64 KiB is rejected, never
+truncated. At most 8 `SIGN` results are inspected and a 9th `SIGN` result rejects
+the request on the budget alone; one certificate in several results counts as one
+signer; more than one distinct Body-covering fingerprint rejects the request as
+ambiguous; a signature that does not cover the `Body` never yields a signer. When no signature is present the field stays absent,
+meaning unknown.
+
+The descriptor is signer identity information, not authentication. It is never a
+principal and never writes `camel.auth.*`; the Rust side stores it only under the
+dedicated `camel.cxf.signer.*` exchange properties.
+
+**Intended breaking change:** a profile whose inbound actions include
+`Signature` now requires a Body-covering signature. Timestamp-only and
+header-only signers that previously passed such profiles are now rejected.
+Profiles without a `Signature` inbound action are not affected: no signer
+inspection or signer policy runs on them.
 
 ## Log-level policy
 

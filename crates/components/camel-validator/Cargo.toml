@@ -27,6 +27,7 @@ jsonschema = { workspace = true }
 noyalib = { workspace = true }
 serde_json.workspace = true
 percent-encoding.workspace = true
+quick-xml = { workspace = true }
 tower.workspace = true
 tracing.workspace = true
 thiserror.workspace = true

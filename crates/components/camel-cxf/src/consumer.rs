@@ -47,7 +47,14 @@ impl CxfConsumer {
     }
 }
 
-fn build_exchange(req: &ConsumerRequest) -> Exchange {
+fn build_exchange(req: &ConsumerRequest) -> Result<Exchange, CamelError> {
+    // Validate the optional signer FIRST: the whole descriptor passes or
+    // nothing is written (atomic metadata, no partial exchange on failure).
+    let signer = match &req.signer {
+        Some(raw) => Some(crate::signer::validate_signer(raw)?),
+        None => None,
+    };
+
     let body = if req.payload.is_empty() {
         Body::Empty
     } else {
@@ -84,7 +91,30 @@ fn build_exchange(req: &ConsumerRequest) -> Exchange {
         exchange.input.set_header(k, Value::String(v.clone()));
     }
 
-    exchange
+    // Signer metadata lands as the four dedicated exchange properties ONLY.
+    // Never the principal-property helper, never an authenticated identity,
+    // never any auth-scoped property key (ADR-0032 / design D). Request
+    // headers stay message headers and cannot smuggle these properties in.
+    if let Some(validated) = signer {
+        exchange.set_property(
+            crate::signer::SIGNER_SUBJECT,
+            Value::String(validated.subject),
+        );
+        exchange.set_property(
+            crate::signer::SIGNER_ISSUER,
+            Value::String(validated.issuer),
+        );
+        exchange.set_property(
+            crate::signer::SIGNER_SERIAL,
+            Value::String(validated.serial),
+        );
+        exchange.set_property(
+            crate::signer::SIGNER_FINGERPRINT,
+            Value::String(validated.fingerprint_sha256),
+        );
+    }
+
+    Ok(exchange)
 }
 
 fn build_response_body(exchange: &Exchange) -> Result<Vec<u8>, CamelError> {
@@ -290,27 +320,48 @@ impl Consumer for CxfConsumer {
                         msg = stream.message() => {
                             match msg {
                                 Ok(Some(req)) => {
-                                    let exchange = build_exchange(&req);
                                     let request_id = req.request_id.clone();
                                     let security_profile = req.security_profile.clone();
 
-                                    let result = ctx.send_and_wait(exchange).await;
+                                    // Assembly can reject the request (invalid signer
+                                    // descriptor). The route is then never dispatched and
+                                    // the caller gets a correlated non-WSS Receiver fault
+                                    // (`soap:Server` → HTTP 500 on the publisher); the
+                                    // profile's WSS-only `fault_status` override cannot
+                                    // rewrite it.
+                                    let response = match build_exchange(&req) {
+                                        Ok(exchange) => {
+                                            let result = ctx.send_and_wait(exchange).await;
 
-                                    let response = match result {
-                                        Ok(resp_exchange) => {
-                                            match build_response_body(&resp_exchange) {
-                                                Ok(payload) => ConsumerResponse {
-                                                    request_id,
-                                                    payload,
-                                                    fault: false,
-                                                    fault_code: String::new(),
-                                                    fault_string: String::new(),
-                                                    security_profile,
-                                                },
+                                            match result {
+                                                Ok(resp_exchange) => {
+                                                    match build_response_body(&resp_exchange) {
+                                                        Ok(payload) => ConsumerResponse {
+                                                            request_id,
+                                                            payload,
+                                                            fault: false,
+                                                            fault_code: String::new(),
+                                                            fault_string: String::new(),
+                                                            security_profile,
+                                                        },
+                                                        Err(e) => {
+                                                            runtime.metrics().increment_errors(ctx.route_id(), "b-prime:cxf:response-marshalling");
+                                                            // log-policy: outside-contract
+                                                            error!("CXF consumer response body error: {e}");
+                                                            ConsumerResponse {
+                                                                request_id,
+                                                                payload: vec![],
+                                                                fault: true,
+                                                                fault_code: "soap:Server".to_string(),
+                                                                fault_string: e.to_string(),
+                                                                security_profile,
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                                 Err(e) => {
-                                                    runtime.metrics().increment_errors(ctx.route_id(), "b-prime:cxf:response-marshalling");
-                                                    // log-policy: outside-contract
-                                                    error!("CXF consumer response body error: {e}");
+                                                    // log-policy: handler-owned
+                                                    warn!("CXF consumer route error: {e}");
                                                     ConsumerResponse {
                                                         request_id,
                                                         payload: vec![],
@@ -324,7 +375,7 @@ impl Consumer for CxfConsumer {
                                         }
                                         Err(e) => {
                                             // log-policy: handler-owned
-                                            warn!("CXF consumer route error: {e}");
+                                            warn!("CXF consumer rejected request before dispatch: {e}");
                                             ConsumerResponse {
                                                 request_id,
                                                 payload: vec![],
@@ -463,6 +514,7 @@ mod tests {
             bridge_cache_dir: None,
             version: "0.1.0".to_string(),
             bind_address: None,
+            listener_tls: None,
             reconnect: NetworkRetryPolicy::default(),
         };
         Arc::new(CxfBridgePool::from_config(pool_config).unwrap())
@@ -488,9 +540,10 @@ mod tests {
                 .collect(),
             soap_action: "urn:sayHello".to_string(),
             security_profile: "baleares".to_string(),
+            signer: None,
         };
 
-        let exchange = build_exchange(&req);
+        let exchange = build_exchange(&req).expect("request must assemble");
 
         assert!(matches!(exchange.input.body, Body::Text(_)));
         if let Body::Text(s) = &exchange.input.body {
@@ -542,9 +595,10 @@ mod tests {
             headers: Default::default(),
             soap_action: String::new(),
             security_profile: String::new(),
+            signer: None,
         };
 
-        let exchange = build_exchange(&req);
+        let exchange = build_exchange(&req).expect("request must assemble");
 
         assert!(matches!(exchange.input.body, Body::Empty));
         assert_eq!(
@@ -689,8 +743,9 @@ mod tests {
             headers: Default::default(),
             soap_action: String::new(),
             security_profile: String::new(),
+            signer: None,
         };
-        let exchange = build_exchange(&req);
+        let exchange = build_exchange(&req).expect("request must assemble");
         assert_eq!(
             exchange
                 .input
@@ -729,5 +784,138 @@ mod tests {
         assert_eq!(p.delay_for(1), Duration::from_secs(1));
         assert_eq!(p.delay_for(2), Duration::from_secs(2));
         assert_eq!(p.delay_for(10), Duration::from_secs(30));
+    }
+
+    fn test_signer() -> crate::proto::SignerIdentity {
+        crate::proto::SignerIdentity {
+            subject: "CN=test-alice,O=RustCamel Test".to_string(),
+            issuer: "CN=test-alice,O=RustCamel Test".to_string(),
+            serial: "0a1b2c".to_string(),
+            fingerprint_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+        }
+    }
+
+    #[test]
+    fn signer_is_stored_as_dedicated_properties_only() {
+        use crate::signer::{SIGNER_FINGERPRINT, SIGNER_ISSUER, SIGNER_SERIAL, SIGNER_SUBJECT};
+
+        let req = ConsumerRequest {
+            request_id: "req-signer".to_string(),
+            operation: "sayHello".to_string(),
+            payload: b"<hello/>".to_vec(),
+            headers: Default::default(),
+            soap_action: String::new(),
+            security_profile: "esap".to_string(),
+            signer: Some(test_signer()),
+        };
+
+        let exchange = build_exchange(&req).expect("valid signer must assemble");
+
+        assert_eq!(
+            exchange.property(SIGNER_SUBJECT).and_then(|v| v.as_str()),
+            Some("CN=test-alice,O=RustCamel Test")
+        );
+        assert_eq!(
+            exchange.property(SIGNER_ISSUER).and_then(|v| v.as_str()),
+            Some("CN=test-alice,O=RustCamel Test")
+        );
+        assert_eq!(
+            exchange.property(SIGNER_SERIAL).and_then(|v| v.as_str()),
+            Some("0a1b2c")
+        );
+        assert_eq!(
+            exchange
+                .property(SIGNER_FINGERPRINT)
+                .and_then(|v| v.as_str()),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+
+        // The four dedicated keys are the whole property surface: no
+        // `camel.auth.*` key (so `principal_from_exchange` reports no
+        // authenticated principal) and no claims/roles/scopes.
+        assert!(
+            camel_api::security_policy::principal_from_exchange(&exchange).is_none(),
+            "signer metadata must never be promoted into a Principal"
+        );
+        for key in exchange.properties.keys() {
+            assert!(
+                !key.starts_with("camel.auth."),
+                "no camel.auth.* key may be written, got: {key}"
+            );
+            assert!(
+                !matches!(
+                    key.as_str(),
+                    "claims"
+                        | "roles"
+                        | "scopes"
+                        | "camel.auth.claims"
+                        | "camel.auth.roles"
+                        | "camel.auth.scopes"
+                ),
+                "no claims/roles/scopes may be written, got: {key}"
+            );
+        }
+        assert_eq!(
+            exchange.properties.len(),
+            4,
+            "only the four camel.cxf.signer.* properties may be written, got: {:?}",
+            exchange.properties.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn spoofed_signer_header_stays_header() {
+        use crate::signer::{SIGNER_FINGERPRINT, SIGNER_SUBJECT};
+
+        let req = ConsumerRequest {
+            request_id: "req-spoof".to_string(),
+            operation: "sayHello".to_string(),
+            payload: b"<hello/>".to_vec(),
+            headers: [
+                (SIGNER_SUBJECT.to_string(), "CN=attacker".to_string()),
+                (
+                    SIGNER_FINGERPRINT.to_string(),
+                    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            soap_action: String::new(),
+            security_profile: String::new(),
+            signer: None,
+        };
+
+        let exchange = build_exchange(&req).expect("request must assemble");
+
+        // A client-supplied camel.cxf.signer.* name is an ordinary message
+        // header: preserved as a header, never written as a property.
+        assert_eq!(
+            exchange
+                .input
+                .header(SIGNER_SUBJECT)
+                .and_then(|v| v.as_str()),
+            Some("CN=attacker")
+        );
+        assert_eq!(
+            exchange
+                .input
+                .header(SIGNER_FINGERPRINT)
+                .and_then(|v| v.as_str()),
+            Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+        );
+        assert!(
+            exchange.property(SIGNER_SUBJECT).is_none(),
+            "spoofed header must not become a property"
+        );
+        assert!(
+            exchange.property(SIGNER_FINGERPRINT).is_none(),
+            "spoofed header must not become a property"
+        );
+        assert!(
+            exchange.properties.is_empty(),
+            "no signer property may be set from headers, got: {:?}",
+            exchange.properties.keys().collect::<Vec<_>>()
+        );
     }
 }
