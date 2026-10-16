@@ -63,7 +63,10 @@ delegate — the drain completing, or the drain timing out and the
 delegate being aborted;
 `event` = `create_error` with `reason` = `transient` or `permanent`
 when delegate endpoint or consumer construction fails, matching the
-existing retry classification, once per failed attempt. Stopping an
+existing retry classification, once per failed attempt;
+`event` = `start_error` with `reason` = `transient` or `permanent`
+once per delegate task that ends with an error while the consumer is not
+stopping, matching the same classification. Stopping an
 already `Inactive` delegate SHALL NOT emit.
 
 #### Scenario: delegate started
@@ -303,4 +306,32 @@ required.
 - **GIVEN** a master consumer configured with lock name `my-lock`
 - **WHEN** any leadership-state edge is emitted
 - **THEN** the gauge series carries exactly the label `lock="my-lock"`, the same label schema the `master_leadership_transitions_total` counter uses
+
+### Requirement: Delegate task failures are classified
+
+When a delegate task ends with an error and neither the stop token nor the parent consumer context is cancelled, the Master component SHALL classify the error with the same classification it applies to delegate construction errors. A transient error SHALL leave the delegate `Inactive` and be retried by the acquisition branch under the configured reconnect policy and the acquisition budget. When the acquisition budget refuses that retry, the leadership task SHALL end through the graceful tail and return the last delegate error. A permanent error SHALL end the leadership task through the graceful tail, and the task SHALL return that error. The graceful tail SHALL run the delegate teardown and the lease `step_down` before the task returns, even when the teardown returns an error. For each such failed delegate task the collector SHALL record `master_delegate_lifecycle_total` with `event` = `start_error`. Errors that `reconcile_event` propagates from its own teardown of a stale or dead delegate are outside this requirement.
+
+#### Scenario: transient delegate failure is retried
+
+- **GIVEN** a delegate whose `start()` fails with a transient error once and then succeeds
+- **WHEN** the leadership task observes the finished delegate task
+- **THEN** the Master consumer keeps running, the delegate is created a second time, and the collector records `start_error` with reason `transient` once and `started` twice
+
+#### Scenario: permanent delegate failure ends the task with the error
+
+- **GIVEN** a delegate whose `start()` fails with a permanent error
+- **WHEN** the leadership task observes the finished delegate task
+- **THEN** the lease `step_down` completes, the task returns the delegate error, and the collector records `start_error` with reason `permanent` once
+
+#### Scenario: exhausted budget returns the last transient error
+
+- **GIVEN** `max_attempts = 1` and a delegate whose `start()` fails with a transient error
+- **WHEN** the leadership task observes the finished delegate task
+- **THEN** no second create attempt happens, the leadership task ends, `stop()` returns that transient error, and the collector records `start_error` with reason `transient` once
+
+#### Scenario: a delegate failing during shutdown is not classified
+
+- **GIVEN** a stop request and a delegate whose task ends with a transient error because of that stop
+- **WHEN** the graceful tail runs
+- **THEN** no `start_error` observation is recorded and no new delegate is created
 

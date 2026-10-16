@@ -22,7 +22,7 @@ Tests (all in delegate_errors.rs; setup copied from `create_error_consumer_trans
 
 Acceptance: the first three tests fail before step 3 and pass after it; the fourth passes before and after and pins that the tail does not classify; no existing camel-master test regresses; no new sleeps in test bodies.
 
-- [ ] T1
+- [x] T1
 
 ### T2: Validate and prepare local commit
 
@@ -30,4 +30,4 @@ Files: OpenSpec artifacts and files from T1.
 
 Steps: run the quality gates from AGENTS.md that apply, sync the spec delta, and commit locally with `Bd: rc-77wln`. Do not push. Open a follow-up bd for the three `return Err` paths after `reconcile_event` that still skip `step_down` and for the unclassified stale-stamp and dead-delegate teardown path.
 
-- [ ] T2
+- [x] T2
