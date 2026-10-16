@@ -868,6 +868,11 @@ impl Consumer for JmsConsumer {
             let slot = self.pool.get_or_create_slot(&self.broker_name).await?;
             match &*slot.state_rx.borrow() {
                 BridgeState::Ready { .. } => {} // bridge is up — proceed
+                // A concurrent caller observes Starting while the slot
+                // creator boots the bridge (it holds bridge_create_lock).
+                // Proceed: consumer_loop's await_ready_channel waits for
+                // Ready (cancel-raced) and fails terminally on Parked/Stopped.
+                BridgeState::Starting => {}
                 BridgeState::Degraded(reason) => {
                     return Err(CamelError::ProcessorError(format!(
                         "JMS bridge not available: {}",
@@ -941,8 +946,9 @@ impl Consumer for JmsConsumer {
 
         // NOTE: The actual JMS connection (consumer_loop with SubscribeRequest)
         // happens inside each spawned task. mark_ready is best-effort — the
-        // bridge slot was already probed above, so the bridge process is
-        // running, but individual subscriptions are not confirmed.
+        // pre-flight above accepted a ready or starting slot, so bridge
+        // readiness is not guaranteed yet (the background loop waits for it),
+        // and individual subscriptions are not confirmed.
         ctx.mark_ready();
 
         Ok(())
@@ -1278,6 +1284,92 @@ mod tests {
         assert!(
             err.contains("repair") && err.contains("restart the context"),
             "error must name the operator repair: {err}"
+        );
+    }
+
+    /// camel-112: a concurrent caller of `get_or_create_slot` can observe the
+    /// slot in `Starting` while the creator boots the bridge. The pre-flight
+    /// must accept it — `consumer_loop`'s `await_ready_channel` already waits
+    /// for `Ready` (cancel-raced) and fails terminally on a parked slot
+    /// (mirrors the camel-cxf consumer pre-flight).
+    #[tokio::test]
+    async fn consumer_preflight_starting_spawns_and_waits() {
+        // Identical pool + hand-built BridgeSlot shape as
+        // consumer_preflight_parked_fails, but the watch starts at Starting.
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::Generic,
+            ))
+            .unwrap(),
+        );
+        let (state_tx, state_rx) = tokio::sync::watch::channel(BridgeState::Starting);
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::Generic,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        // Retain the Arc so the test can reach state_tx/state_rx after the pool
+        // is moved into the consumer (matches the component.rs slot fixtures).
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let endpoint_cfg = crate::config::JmsEndpointConfig::from_uri("jms:queue:test").unwrap();
+        let mut consumer = JmsConsumer::new(
+            pool,
+            "default".to_string(),
+            endpoint_cfg,
+            jms_reconnect_default(),
+            rt(),
+        );
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "jms-test-starting-preflight".to_string(),
+        );
+
+        // Pre-flight accepts Starting: start() must return Ok (before the fix it
+        // returns Err "JMS bridge not available: Starting"). Bounded timeout, no
+        // sleeps.
+        let result = tokio::time::timeout(Duration::from_secs(2), consumer.start(ctx))
+            .await
+            .expect("start must not hang in the pre-flight");
+        result.expect("a Starting bridge must be accepted by the pre-flight");
+
+        // The spawned workers await readiness via await_ready_channel, raced
+        // against cancellation — but start() does not wait for them, so they
+        // may not have polled yet. Grab the supervised group handle.
+        let handle = consumer
+            .background_task_handle()
+            .expect("supervised group handle");
+
+        // Park the slot: the terminal state must fail the workers with the
+        // operator-repair error — whether a worker first observes Starting or
+        // goes straight to Parked — with no time-based sync and no spurious
+        // reconnect/restart.
+        slot.state_tx
+            .send(BridgeState::Parked("corrupt journal".to_string()))
+            .expect("publish Parked");
+
+        let inner = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("a terminal parked slot must terminate the background loop")
+            .expect("supervisor task must not panic");
+        let err = inner
+            .expect_err("a parked slot must surface Err from the background loop")
+            .to_string();
+        assert!(
+            err.contains("repair") && err.contains("restart the context"),
+            "the loop error must carry the operator repair guidance, not a retry error: {err}"
+        );
+        assert!(
+            matches!(*slot.state_rx.borrow(), BridgeState::Parked(_)),
+            "the slot must stay Parked (no spurious restart)"
         );
     }
 
