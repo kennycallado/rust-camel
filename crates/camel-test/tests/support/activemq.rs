@@ -113,6 +113,11 @@ impl ActiveMqBroker {
         broker
     }
 
+    /// Docker container id, for freezing the broker with `docker pause`.
+    pub fn container_id(&self) -> &str {
+        self._container.id()
+    }
+
     /// Blocks until the web console's Jolokia agent answers.
     async fn wait_ready(&self) {
         let client = self.client.clone();

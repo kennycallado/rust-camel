@@ -189,6 +189,11 @@ public class JmsClientFactory {
     // native-image reflection requirements.
     cf.setConnectionIDPrefix(withProcessToken(explicitUriOption(url, "jms.connectionIDPrefix")));
     cf.setClientIDPrefix(withProcessToken(cf.getClientIDPrefix()));
+    // Settlement contract (rc-47gr5): acknowledge() must return only after the broker applied the
+    // ack. The Classic client defaults to sendAcksAsync=true, where acknowledge() returns once the
+    // packet is queued, so a crash right after the journal COMMIT could redeliver a message whose
+    // reservation was already cleared.
+    cf.setSendAcksAsync(false);
     if (user != null) cf.setUserName(user);
     if (pass != null) cf.setPassword(pass);
     return cf;
@@ -411,8 +416,8 @@ public class JmsClientFactory {
    * <p>Key native-image considerations: - useEpoll/useKQueue forced to false (Epoll not supported
    * in SubstrateVM) - reconnectAttempts set to allow retries on transient failures
    */
-  private static org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory
-      buildArtemisFactory(String url, String user, String pass) {
+  static org.apache.activemq.artemis.jms.client.ActiveMQConnectionFactory buildArtemisFactory(
+      String url, String user, String pass) {
     URI uri = URI.create(url);
 
     Map<String, Object> params = transportConfig(uri);
@@ -440,6 +445,9 @@ public class JmsClientFactory {
     // indefinitely after a few messages. Setting -1 disables the credit
     // mechanism entirely — the producer never waits for credits.
     cf.setProducerWindowSize(-1);
+    // Settlement contract (rc-47gr5): block acknowledge() until the broker confirms the ack
+    // (default false), so the journal COMMIT implies the broker applied it.
+    cf.setBlockOnAcknowledge(true);
     if (user != null) cf.setUser(user);
     if (pass != null) cf.setPassword(pass);
     return cf;

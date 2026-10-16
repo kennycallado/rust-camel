@@ -773,6 +773,208 @@ async fn jms_bridge_crash_before_completion_redelivers_artemis() {
     run_crash_before_completion_proof(broker, "queue.test-crash-before-completion-artemis").await;
 }
 
+/// Freezes a broker container with `docker pause` and unfreezes it on drop, so
+/// a failed assertion can never leave the container paused.
+struct PausedBroker {
+    container_id: String,
+    paused: bool,
+}
+
+impl PausedBroker {
+    fn pause(container_id: &str) -> Self {
+        docker(&["pause", container_id]);
+        Self {
+            container_id: container_id.to_string(),
+            paused: true,
+        }
+    }
+
+    fn unpause(&mut self) {
+        if self.paused {
+            docker(&["unpause", &self.container_id]);
+            self.paused = false;
+        }
+    }
+}
+
+impl Drop for PausedBroker {
+    fn drop(&mut self) {
+        if self.paused {
+            let _ = std::process::Command::new("docker")
+                .args(["unpause", &self.container_id])
+                .status();
+        }
+    }
+}
+
+fn docker(args: &[&str]) {
+    let status = std::process::Command::new("docker")
+        .args(args)
+        .status()
+        .unwrap_or_else(|e| panic!("cannot run docker {args:?}: {e}"));
+    assert!(status.success(), "docker {args:?} failed: {status}");
+}
+
+/// rc-47gr5: a journal COMMIT implies the broker applied the ack.
+///
+/// The broker is frozen (`docker pause`) after the exchange is accepted and
+/// before the route completes. The bridge's `acknowledge()` cannot be answered
+/// while the broker is frozen, so no COMMIT frame may reach the journal. With
+/// asynchronous acks `acknowledge()` returns as soon as the packet is queued and
+/// the COMMIT lands immediately; a crash right then would redeliver a message
+/// whose reservation was already cleared, with a fresh attempt budget. After the
+/// unfreeze the COMMIT must appear, proving it was pending behind the ack.
+async fn run_commit_implies_broker_ack_proof(broker: CrashBroker, container_id: &str, queue: &str) {
+    init_tracing();
+    install_crypto_provider();
+
+    let binary = require_jms_bridge_binary();
+    let (username, password) = broker.credentials();
+    let probe_broker = ProbeBroker {
+        url: broker.broker_url(),
+        broker_type_env: broker.broker_type_env(),
+        username,
+        password,
+    };
+    let xdg_root = tempfile::TempDir::new().expect("XDG_STATE_HOME root");
+    let artifact_dir = tempfile::TempDir::new().expect("probe artifact dir");
+    let marker = artifact_dir.path().join("handoff.marker");
+    let release = artifact_dir.path().join("handoff.marker.release");
+
+    let mut probe = spawn_probe_configured(
+        &binary,
+        &probe_broker,
+        xdg_root.path(),
+        queue,
+        &marker,
+        "gated",
+    );
+    broker.wait_consumer_registered(queue).await;
+
+    let (producer_proc, producer_channel) = spawn_jms_bridge_configured(
+        &binary,
+        broker.broker_url(),
+        broker.broker_type(),
+        username,
+        password,
+    )
+    .await;
+    let mut producer = BridgeServiceClient::new(producer_channel);
+    await_broker_connected(&mut producer).await;
+    let known_id = send_one_with_header(
+        &mut producer,
+        queue,
+        CRASH_BODY,
+        broker.crash_header(),
+        CRASH_HEADER_VALUE,
+    )
+    .await;
+    assert!(!known_id.is_empty(), "the send must return a JMSMessageID");
+    // The producer is not needed past the send; stop it so the frozen broker
+    // cannot stall it.
+    drop(producer);
+    drop(producer_proc);
+
+    let marker_watch = marker.clone();
+    wait_until(
+        "gated probe handoff marker",
+        Duration::from_secs(60),
+        Duration::from_millis(200),
+        move || {
+            let watch = marker_watch.clone();
+            async move { Ok(watch.is_file()) }
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
+
+    let broker_dir = journal_broker_dir(
+        xdg_root.path(),
+        "default",
+        &broker.broker_type(),
+        broker.broker_url(),
+    );
+    let journal = wait_for_journal(&broker_dir).await;
+
+    // Freeze the broker, then let the route complete: the bridge now tries to
+    // acknowledge against a broker that cannot answer.
+    let mut frozen = PausedBroker::pause(container_id);
+    std::fs::write(&release, b"go\n").expect("write release file");
+
+    let observed = {
+        let journal = journal.clone();
+        let known_id = known_id.clone();
+        wait_until(
+            "journal COMMIT while the broker is frozen",
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+            move || {
+                let journal = journal.clone();
+                let known_id = known_id.clone();
+                async move {
+                    let frames = read_frames(&journal)?;
+                    Ok(commit_observed(&frames, &known_id))
+                }
+            },
+        )
+        .await
+    };
+    assert!(
+        observed.is_err(),
+        "{}: the journal recorded COMMIT while the broker could not have applied the ack",
+        broker.label()
+    );
+
+    frozen.unpause();
+    let committed = journal.clone();
+    let committed_id = known_id.clone();
+    wait_until(
+        "journal COMMIT after the broker resumed",
+        Duration::from_secs(60),
+        Duration::from_millis(200),
+        move || {
+            let journal = committed.clone();
+            let known_id = committed_id.clone();
+            async move {
+                let frames = read_frames(&journal)?;
+                Ok(commit_observed(&frames, &known_id))
+            }
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
+
+    probe.kill_and_reap().await;
+}
+
+/// rc-47gr5: ActiveMQ Classic (`sendAcksAsync=false`).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn jms_bridge_commit_implies_broker_ack_activemq() {
+    let broker = std::sync::Arc::new(ActiveMqBroker::start().await);
+    let container_id = broker.container_id().to_string();
+    run_commit_implies_broker_ack_proof(
+        CrashBroker::Classic(broker),
+        &container_id,
+        "queue.test-commit-implies-ack-activemq",
+    )
+    .await;
+}
+
+/// rc-47gr5: Artemis (`blockOnAcknowledge=true`).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn jms_bridge_commit_implies_broker_ack_artemis() {
+    let broker = std::sync::Arc::new(ArtemisBroker::start().await);
+    let container_id = broker.container_id().to_string();
+    run_commit_implies_broker_ack_proof(
+        CrashBroker::Artemis(broker),
+        &container_id,
+        "queue.test-commit-implies-ack-artemis",
+    )
+    .await;
+}
+
 /// Sends one text message carrying a single user header and returns the
 /// provider message id. Mirrors `send_one`, but the crash proof needs a header
 /// that must be forwarded unchanged on redelivery.

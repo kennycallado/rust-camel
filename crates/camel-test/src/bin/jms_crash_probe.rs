@@ -23,7 +23,9 @@
 //!   `message_id`, `body`, `reservation_count`, and the full header map, then
 //!   blocks; `threshold` appends one accepted-exchange line to the artifact and
 //!   returns a route error on every delivery, so the bridge redelivers until
-//!   the terminal reject-then-log policy fires (task 5.4).
+//!   the terminal reject-then-log policy fires (task 5.4); `gated` writes the
+//!   handoff marker, waits for `<artifact>.release`, then completes the
+//!   exchange so the bridge settles with COMMIT (rc-47gr5).
 //! - `CAMEL_JMS_USERNAME` / `CAMEL_JMS_PASSWORD` (optional): credentials;
 //!   default `admin`/`admin` for the Classic test container.
 //! - `CAMEL_JMS_CRASH_QUEUE` (optional): queue to consume, default
@@ -132,6 +134,16 @@ async fn run() -> Result<(), String> {
                             THRESHOLD_ROUTE_ERROR.to_string(),
                         ));
                     }
+                    ProbeRole::Gated => {
+                        write_probe_marker(&artifact)?;
+                        let mut release = artifact.as_os_str().to_owned();
+                        release.push(".release");
+                        let release = PathBuf::from(release);
+                        while !release.is_file() {
+                            tokio::time::sleep(STATUS_POLL_INTERVAL).await;
+                        }
+                        return Ok(exchange);
+                    }
                 }
                 // Hold the accepted exchange uncommitted until the test kills
                 // this process. Deliberately unbounded: the kill is the test's
@@ -212,6 +224,9 @@ enum ProbeRole {
     /// Append one accepted-exchange line and fail the route on every delivery,
     /// so the bridge redelivers until its terminal reject-then-log policy fires.
     Threshold,
+    /// Write the handoff marker, wait for `<artifact>.release`, then complete the
+    /// exchange normally so the bridge settles with COMMIT (rc-47gr5).
+    Gated,
 }
 
 /// The route error for the `threshold` role. Deliberately payload-free: the
@@ -224,8 +239,9 @@ fn parse_role(raw: Option<&str>) -> Result<ProbeRole, String> {
         None | Some("probe") => Ok(ProbeRole::Probe),
         Some("survivor") => Ok(ProbeRole::Survivor),
         Some("threshold") => Ok(ProbeRole::Threshold),
+        Some("gated") => Ok(ProbeRole::Gated),
         Some(other) => Err(format!(
-            "unknown CAMEL_JMS_CRASH_ROLE '{other}': expected probe, survivor, or threshold"
+            "unknown CAMEL_JMS_CRASH_ROLE '{other}': expected probe, survivor, threshold, or gated"
         )),
     }
 }

@@ -149,6 +149,11 @@ pub struct ArtemisBroker {
 }
 
 impl ArtemisBroker {
+    /// Docker container id, for freezing the broker with `docker pause`.
+    pub fn container_id(&self) -> &str {
+        self._container.id()
+    }
+
     /// Starts an isolated Artemis container and blocks until the broker port
     /// accepts connections.
     pub async fn start() -> Self {
