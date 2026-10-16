@@ -2877,6 +2877,14 @@ mod tests {
     }
 
     #[test]
+    fn loop_yield_now_beside_timeout_recv_not_reported() {
+        // `yield_now` is outside the wait class: the per-iteration check
+        // evaluates only wait-class awaits, and the recv is timeout-bound.
+        let src = "#[tokio::test]\nasync fn t() {\n    loop {\n        match tokio::time::timeout(d, rx.recv()).await {\n            Ok(Some(v)) => { tokio::task::yield_now().await; }\n            _ => break,\n        }\n    }\n}\n";
+        assert!(findings(src).is_empty());
+    }
+
+    #[test]
     fn loop_send_beside_timeout_recv_not_reported() {
         // `send` on a bounded channel is outside the wait class (same as
         // the standalone rule).
