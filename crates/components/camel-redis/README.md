@@ -80,13 +80,13 @@ ctx.register_component("redis", Box::new(RedisComponent::new()));
 
 // SET: Store a value
 let set_route = RouteBuilder::from("direct:set")
-    .set_header("CamelRedisKey", Value::String("mykey".into()))
+    .set_header("CamelRedis.Key", Value::String("mykey".into()))
     .to("redis://localhost:6379?command=SET")
     .build()?;
 
 // GET: Retrieve a value
 let get_route = RouteBuilder::from("direct:get")
-    .set_header("CamelRedisKey", Value::String("mykey".into()))
+    .set_header("CamelRedis.Key", Value::String("mykey".into()))
     .to("redis://localhost:6379?command=GET")
     .build()?;
 ```
@@ -96,15 +96,15 @@ let get_route = RouteBuilder::from("direct:get")
 ```rust
 // HSET: Set hash field
 let route = RouteBuilder::from("direct:hset")
-    .set_header("CamelRedisKey", Value::String("user:123".into()))
-    .set_header("CamelRedisField", Value::String("name".into()))
+    .set_header("CamelRedis.Key", Value::String("user:123".into()))
+    .set_header("CamelRedis.Field", Value::String("name".into()))
     .set_body(Body::Text("Alice".into()))
     .to("redis://localhost:6379?command=HSET")
     .build()?;
 
 // HGETALL: Get all hash fields
 let route = RouteBuilder::from("direct:hgetall")
-    .set_header("CamelRedisKey", Value::String("user:123".into()))
+    .set_header("CamelRedis.Key", Value::String("user:123".into()))
     .to("redis://localhost:6379?command=HGETALL")
     .build()?;
 ```
@@ -114,14 +114,14 @@ let route = RouteBuilder::from("direct:hgetall")
 ```rust
 // LPUSH: Add to list
 let route = RouteBuilder::from("direct:push")
-    .set_header("CamelRedisKey", Value::String("mylist".into()))
+    .set_header("CamelRedis.Key", Value::String("mylist".into()))
     .set_body(Body::Text("item1".into()))
     .to("redis://localhost:6379?command=LPUSH")
     .build()?;
 
 // LRANGE: Get list range
 let route = RouteBuilder::from("direct:range")
-    .set_header("CamelRedisKey", Value::String("mylist".into()))
+    .set_header("CamelRedis.Key", Value::String("mylist".into()))
     .to("redis://localhost:6379?command=LRANGE")
     .build()?;
 ```
@@ -212,19 +212,19 @@ let route = RouteBuilder::from("direct:auth")
 
 | Header | Description |
 |--------|-------------|
-| `CamelRedisKey` | Redis key |
-| `CamelRedisField` | Hash field (for H* commands) |
-| `CamelRedisChannel` | Pub/Sub channel |
-| `CamelRedisScore` | Sorted set score |
-| `CamelRedisStart` | Range start |
-| `CamelRedisEnd` | Range end |
-| `CamelRedisTimeout` | Blocking timeout |
+| `CamelRedis.Key` | Redis key |
+| `CamelRedis.Field` | Hash field (for H* commands) |
+| `CamelRedis.Channel` | Pub/Sub channel |
+| `CamelRedis.Score` | Sorted set score |
+| `CamelRedis.Start` | Range start |
+| `CamelRedis.End` | Range end |
+| `CamelRedis.Timeout` | Blocking timeout |
 
-### Output Headers (from responses)
+### Command Results (from responses)
 
-| Header | Description |
-|--------|-------------|
-| `CamelRedisResult` | Command result |
+Command results are written to the message body as JSON (`Body::Json`), not to an
+exchange header. Input payloads for value-oriented commands (`SET`, `APPEND`) are
+read from the `CamelRedis.Value` header.
 
 ## Example: Caching Layer
 
@@ -241,7 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cache-aside pattern
     let route = RouteBuilder::from("direct:get-user")
         // Try cache first
-        .set_header("CamelRedisKey", Value::String("user:123".into()))
+        .set_header("CamelRedis.Key", Value::String("user:123".into()))
         .to("redis://localhost:6379?command=GET")
         .filter(|ex| ex.input.body.as_text().is_none())
             // Cache miss - fetch from DB
@@ -253,7 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(ex)
             })
             // Store in cache
-            .set_header("CamelRedisKey", Value::String("user:123".into()))
+            .set_header("CamelRedis.Key", Value::String("user:123".into()))
             .to("redis://localhost:6379?command=SET")
         .end_filter()
         .build()?;
@@ -270,7 +270,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```rust
 // Producer: Push jobs
 let producer = RouteBuilder::from("direct:submit-job")
-    .set_header("CamelRedisKey", Value::String("jobs".into()))
+    .set_header("CamelRedis.Key", Value::String("jobs".into()))
     .to("redis://localhost:6379?command=RPUSH")
     .build()?;
 
