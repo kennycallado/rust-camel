@@ -11,7 +11,7 @@ use tracing::{debug, error, warn};
 
 use crate::consumer::{DelegateState, MasterConsumer};
 use crate::leadership::{
-    ReconcileContext, emit_leadership_transition, reconcile_event, stop_delegate,
+    ReconcileContext, emit_leadership_transition, emit_lifecycle, reconcile_event, stop_delegate,
 };
 
 const DELEGATE_RETRY_INTERVAL: Duration = Duration::from_millis(200);
@@ -92,6 +92,10 @@ impl Consumer for MasterConsumer {
             let mut state = DelegateState::Inactive;
             let mut is_leading = false;
             let mut retry_tick = interval(DELEGATE_RETRY_INTERVAL);
+            // Error that ends the task after the graceful tail: a permanent
+            // delegate task failure, or the transient one the acquisition
+            // budget refused to retry (rc-77wln).
+            let mut fatal: Option<CamelError> = None;
 
             let rctx = ReconcileContext {
                 lock_name: &lock_name,
@@ -169,6 +173,11 @@ impl Consumer for MasterConsumer {
                         }
                     }
                     _ = retry_tick.tick() => {
+                        // Transient delegate task error seen in THIS tick.
+                        // Per-tick so it cannot go stale across ticks or
+                        // leadership epochs: the acquisition branch below
+                        // consumes it if the budget refuses the retry.
+                        let mut tick_err: Option<CamelError> = None;
                         // Set when the stale-stamp branch dispatches below:
                         // that dispatch already drained and attempted a
                         // create this tick, so the acquisition branch must
@@ -219,8 +228,14 @@ impl Consumer for MasterConsumer {
                             }
                         }
 
-                        if matches!(&state, DelegateState::Active { handle, .. } if handle.is_finished())
-                            && let Err(err) = stop_delegate(
+                        if matches!(&state, DelegateState::Active { handle, .. } if handle.is_finished()) {
+                            // A failure caused by shutdown is never
+                            // classified or retried; the graceful tail
+                            // tears the delegate down.
+                            if stop_token_loop.is_cancelled() || parent_cancel.is_cancelled() {
+                                break;
+                            }
+                            if let Err(err) = stop_delegate(
                                 &mut state,
                                 drain_timeout,
                                 rctx.lock_name,
@@ -228,10 +243,37 @@ impl Consumer for MasterConsumer {
                                 rctx.metrics,
                             )
                             .await
-                        {
-                            // log-policy: system-broken
-                            error!(lock = %lock_name, "master delegate task failed: {err}");
-                            return Err(err);
+                            {
+                                if is_retryable_camel_error(&err) {
+                                    emit_lifecycle(
+                                        rctx.metrics,
+                                        rctx.lock_name,
+                                        rctx.route_id.as_str(),
+                                        "start_error",
+                                        "transient",
+                                    );
+                                    warn!(
+                                        lock = %lock_name,
+                                        error = %err,
+                                        "master delegate task failed transiently, will retry"
+                                    );
+                                    // The state is Inactive: the acquisition
+                                    // branch below retries under the budget.
+                                    tick_err = Some(err);
+                                } else {
+                                    emit_lifecycle(
+                                        rctx.metrics,
+                                        rctx.lock_name,
+                                        rctx.route_id.as_str(),
+                                        "start_error",
+                                        "permanent",
+                                    );
+                                    // log-policy: system-broken
+                                    error!(lock = %lock_name, "master delegate task failed: {err}");
+                                    fatal = Some(err);
+                                    break;
+                                }
+                            }
                         }
 
                         // `dispatched` is set when the stale-stamp branch
@@ -263,6 +305,10 @@ impl Consumer for MasterConsumer {
                                     attempts,
                                     "delegate start exceeded max attempts or reconnect disabled, stopping consumer"
                                 );
+                                // A refused retry after a delegate task
+                                // failure surfaces that error; a refusal
+                                // after construction errors keeps its Ok.
+                                fatal = tick_err.take();
                                 break;
                             }
                             // Apply backoff delay for retries (skip first
@@ -293,16 +339,21 @@ impl Consumer for MasterConsumer {
                 }
             }
 
-            stop_delegate(
+            // Capture the teardown result (no `?`) so the lease step-down
+            // always runs and is awaited, then surface the first error.
+            let tail = stop_delegate(
                 &mut state,
                 drain_timeout,
                 rctx.lock_name,
                 rctx.route_id.as_str(),
                 rctx.metrics,
             )
-            .await?;
+            .await;
             let _ = timeout(drain_timeout, leadership_handle.step_down()).await;
-            Ok::<(), CamelError>(())
+            match (fatal, tail) {
+                (Some(err), _) | (None, Err(err)) => Err(err),
+                (None, Ok(())) => Ok::<(), CamelError>(()),
+            }
             }
             .await;
             let _ = result_tx.send(result.as_ref().map(|_| ()).map_err(ToString::to_string));

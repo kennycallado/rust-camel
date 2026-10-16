@@ -104,3 +104,131 @@ async fn delegate_transient_error_retries_and_eventually_succeeds() {
     cancel.cancel();
     master.stop().await.unwrap();
 }
+
+// ── rc-77wln: delegate task failures are classified ─────────────────
+
+/// Start a master over `build_start_error_master` with a fresh leader fake.
+fn start_error_fixture(
+    fault: ConsumerFault,
+    max_attempts: u32,
+) -> (
+    MasterConsumer,
+    Arc<FakeLeadershipService>,
+    Arc<RecordingMetricsCollector>,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+) {
+    let leadership = Arc::new(FakeLeadershipService::new(Some(
+        LeadershipEvent::StartedLeading,
+    )));
+    let leadership_dyn: Arc<dyn LeadershipService> = leadership.clone();
+    let platform_service = Arc::new(FakePlatformService::new(leadership_dyn));
+    let create_endpoint_calls = Arc::new(AtomicUsize::new(0));
+    let create_consumer_calls = Arc::new(AtomicUsize::new(0));
+    let metrics = Arc::new(RecordingMetricsCollector {
+        events: Mutex::new(Vec::new()),
+    });
+    let master = build_start_error_master(
+        platform_service,
+        Arc::clone(&create_endpoint_calls),
+        Arc::clone(&create_consumer_calls),
+        Some(fault),
+        max_attempts,
+        Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
+    );
+    (
+        master,
+        leadership,
+        metrics,
+        create_endpoint_calls,
+        create_consumer_calls,
+    )
+}
+
+#[tokio::test]
+async fn transient_delegate_start_error_is_retried() {
+    let (mut master, _leadership, metrics, endpoint_calls, consumer_calls) =
+        start_error_fixture(ConsumerFault::StartError(transient_io_error()), 0);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    // The second delegate is the first one that sends.
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+    assert_eq!(endpoint_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(consumer_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(start_error_events(&metrics, "transient"), 1);
+    assert_eq!(lifecycle_events(&metrics, "started"), 2);
+    assert_eq!(lifecycle_events(&metrics, "stopped"), 1);
+    assert!(!master.leadership_task.as_ref().unwrap().is_finished());
+
+    master.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn permanent_delegate_start_error_ends_task_with_error() {
+    let (mut master, leadership, metrics, _endpoint_calls, _consumer_calls) = start_error_fixture(
+        ConsumerFault::StartError(CamelError::Config("boom".into())),
+        0,
+    );
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    assert!(await_leadership_task_exit(&master).await);
+    // `step_down` awaits the fake's termination signal, which is sent after
+    // the flag is set, so the flag is deterministic once the task finished.
+    assert!(leadership.stepped_down());
+    assert_eq!(start_error_events(&metrics, "permanent"), 1);
+    assert_eq!(start_error_events(&metrics, "transient"), 0);
+    let err = master.stop().await.unwrap_err();
+    assert!(err.to_string().contains("boom"), "unexpected error: {err}");
+}
+
+#[tokio::test]
+async fn exhausted_budget_returns_last_transient_error() {
+    let (mut master, _leadership, metrics, endpoint_calls, _consumer_calls) =
+        start_error_fixture(ConsumerFault::StartError(transient_io_error()), 1);
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+
+    assert!(await_leadership_task_exit(&master).await);
+    assert_eq!(endpoint_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(start_error_events(&metrics, "transient"), 1);
+    assert_eq!(lifecycle_events(&metrics, "started"), 1);
+    let err = master.stop().await.unwrap_err();
+    assert!(err.to_string().contains("boom"), "unexpected error: {err}");
+}
+
+#[tokio::test]
+async fn delegate_error_during_shutdown_is_not_classified() {
+    let (mut master, _leadership, metrics, endpoint_calls, _consumer_calls) =
+        start_error_fixture(ConsumerFault::ErrorOnCancel(transient_io_error()), 0);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), METRICS_TEST_ROUTE.to_string());
+
+    master.start(ctx).await.unwrap();
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.exchange.input.body.as_text(), Some("ok"));
+
+    master.stop().await.unwrap();
+
+    assert_eq!(start_error_events(&metrics, "transient"), 0);
+    assert_eq!(start_error_events(&metrics, "permanent"), 0);
+    assert_eq!(endpoint_calls.load(Ordering::SeqCst), 1);
+}

@@ -47,6 +47,10 @@ The master component has no URI query parameters of its own. Any query parameter
 | `[components.master]` | `drain_timeout_ms` | `5000` | Max time to wait for delegate consumer shutdown on leadership loss |
 | `[components.master]` | `delegate_retry_max_attempts` | `0` | Max attempts to start the delegate consumer while leading. `0` = unlimited |
 
+### Delegate failures
+
+When the delegate task ends with an error while the route is not stopping, the error is classified like a construction error. A transient error (`Io` or a `[TRANSIENT]` message) leaves the delegate inactive, and the next retry tick creates it again under `delegate_retry_max_attempts`. A permanent error stops the leadership task after the delegate teardown and the lease `step_down`, and the route ends with that error. If the retry budget refuses another attempt after such a failure, the route ends with the last delegate error. The counter `master_delegate_lifecycle_total` records each failure with `event=start_error` and `reason=transient` or `permanent`. This covers failures of `start()` and failures of the delegate background task while it runs.
+
 ## Usage
 
 ### Basic Leader-Only Timer

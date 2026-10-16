@@ -237,6 +237,7 @@ async fn disabled_policy_creates_nothing() {
             consumer_error_after: 0,
             consumer_error: None,
             first_exit_signal: Arc::new(Mutex::new(None)),
+            first_consumer_fault: None,
         }),
         Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
         platform_service,

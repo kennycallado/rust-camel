@@ -185,6 +185,15 @@ struct FakeDelegateConsumer {
 /// Delegate component that returns errors from create_endpoint or create_consumer.
 /// Configurable: which error to return, and after how many successful calls
 /// to stop failing.
+/// Fault injected into the consumer created at ordinal 1 only (rc-77wln).
+#[derive(Clone)]
+enum ConsumerFault {
+    /// `start()` fails with this error before sending anything.
+    StartError(CamelError),
+    /// `start()` sends one exchange, waits for cancellation, then fails.
+    ErrorOnCancel(CamelError),
+}
+
 struct ErrorDelegateComponent {
     create_endpoint_calls: Arc<AtomicUsize>,
     create_consumer_calls: Arc<AtomicUsize>,
@@ -196,6 +205,8 @@ struct ErrorDelegateComponent {
     /// fires, so the supervision tick observes a finished handle without
     /// any teardown. `None` in every test that does not need the knob.
     first_exit_signal: Arc<Mutex<Option<watch::Receiver<()>>>>,
+    /// Fault handed to the FIRST created consumer (create ordinal 1) only.
+    first_consumer_fault: Option<ConsumerFault>,
 }
 
 impl Component for ErrorDelegateComponent {
@@ -217,6 +228,7 @@ impl Component for ErrorDelegateComponent {
             consumer_error_after: self.consumer_error_after,
             consumer_error: self.consumer_error.clone(),
             first_exit_signal: Arc::clone(&self.first_exit_signal),
+            first_consumer_fault: self.first_consumer_fault.clone(),
         }))
     }
 }
@@ -226,6 +238,7 @@ struct ErrorDelegateEndpoint {
     consumer_error_after: usize,
     consumer_error: Option<CamelError>,
     first_exit_signal: Arc<Mutex<Option<watch::Receiver<()>>>>,
+    first_consumer_fault: Option<ConsumerFault>,
 }
 
 impl Endpoint for ErrorDelegateEndpoint {
@@ -255,7 +268,12 @@ impl Endpoint for ErrorDelegateEndpoint {
         } else {
             None
         };
-        Ok(Box::new(SuccessDelegateConsumer { exit_signal }))
+        let fault = if call_idx == 1 {
+            self.first_consumer_fault.clone()
+        } else {
+            None
+        };
+        Ok(Box::new(SuccessDelegateConsumer { exit_signal, fault }))
     }
 
     fn create_producer(
@@ -273,12 +291,20 @@ impl Endpoint for ErrorDelegateEndpoint {
 /// any teardown, so the supervision tick observes a dead Active delegate.
 struct SuccessDelegateConsumer {
     exit_signal: Option<watch::Receiver<()>>,
+    fault: Option<ConsumerFault>,
 }
 
 #[async_trait]
 impl Consumer for SuccessDelegateConsumer {
     async fn start(&mut self, context: ConsumerContext) -> Result<(), CamelError> {
+        if let Some(ConsumerFault::StartError(err)) = self.fault.take() {
+            return Err(err);
+        }
         context.send(Exchange::new(Message::new("ok"))).await?;
+        if let Some(ConsumerFault::ErrorOnCancel(err)) = self.fault.take() {
+            context.cancelled().await;
+            return Err(err);
+        }
         match self.exit_signal.as_mut() {
             Some(exit) => {
                 let _ = exit.changed().await;
@@ -439,6 +465,53 @@ fn lifecycle_events(metrics: &RecordingMetricsCollector, event: &str) -> usize {
         .count()
 }
 
+/// Count of `start_error` lifecycle observations with `reason` for the
+/// lock/route pair used by the metrics tests.
+fn start_error_events(metrics: &RecordingMetricsCollector, reason: &str) -> usize {
+    metrics
+        .counters_named("master_delegate_lifecycle_total")
+        .iter()
+        .filter(|(_, labels)| *labels == expected_lifecycle_labels("start_error", reason))
+        .count()
+}
+
+/// Like [`build_error_delegate_master_with_metrics`], but injects a fault
+/// into the consumer created at ordinal 1 (rc-77wln).
+fn build_start_error_master(
+    platform_service: Arc<dyn PlatformService>,
+    create_endpoint_calls: Arc<AtomicUsize>,
+    create_consumer_calls: Arc<AtomicUsize>,
+    first_consumer_fault: Option<ConsumerFault>,
+    max_attempts: u32,
+    metrics: Arc<dyn MetricsCollector>,
+) -> MasterConsumer {
+    let reconnect = NetworkRetryPolicy {
+        max_attempts,
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(5),
+        multiplier: 1.0,
+        ..NetworkRetryPolicy::default()
+    };
+    MasterConsumer::new(
+        METRICS_TEST_LOCK.to_string(),
+        "errdelegate:delegate".to_string(),
+        Arc::new(ErrorDelegateComponent {
+            create_endpoint_calls,
+            create_consumer_calls,
+            endpoint_error: None,
+            consumer_error_after: 0,
+            consumer_error: None,
+            first_exit_signal: Arc::new(Mutex::new(None)),
+            first_consumer_fault,
+        }),
+        metrics,
+        platform_service,
+        Duration::from_millis(500),
+        reconnect,
+        Arc::new(PanicRuntimeObservability) as Arc<dyn camel_component_api::RuntimeObservability>,
+    )
+}
+
 /// Expected complete label set of a `master_leadership_transitions_total`
 /// observation for the lock/route pair used by the metrics tests.
 fn expected_transition_labels(event: &str) -> Vec<(String, String)> {
@@ -480,6 +553,7 @@ fn build_error_delegate_master_with_metrics(
             consumer_error_after,
             consumer_error,
             first_exit_signal: Arc::new(Mutex::new(None)),
+            first_consumer_fault: None,
         }),
         metrics,
         platform_service,

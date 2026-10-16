@@ -1,0 +1,22 @@
+# Design: master-start-error-classification
+
+## Context
+
+`MasterConsumer` runs a leadership task (`supervision.rs`). A delegate is a spawned task whose handle lives in `DelegateState::Active`. A failure of `consumer.start()` and a failure of the delegate background task (`supervise_background`, leadership.rs) both end that task with `Err`. The retry tick sees `handle.is_finished()` and calls `stop_delegate`, which returns the task error. Today the tick then runs `return Err(err)` unconditionally, which also skips the graceful tail, so the awaited lease `step_down` never runs. (The handle's drop still cancels the elector, but nothing waits for termination.)
+
+## Decisions
+
+1. **One classification point.** The error from `stop_delegate` on a finished handle is classified with `is_retryable_camel_error`. The code cannot tell a start failure from a run failure here, and the two need the same policy. A task panic becomes `ProcessorError("... panicked")` without a transient marker, so it is permanent by design.
+2. **Transient: reuse the acquisition branch.** `stop_delegate` leaves the state `Inactive` (`std::mem::replace`). The tick records the metric, logs a warning, and goes on. The acquisition branch of the same tick then retries under `rctx.reconnect` and `rctx.attempts`. The first retry is delay-free (`attempts > 1` guard); later retries back off. A delegate that fails at once every time is bounded by the budget or the backoff. No second retry counter is added.
+3. **Budget semantics.** `rctx.attempts` resets only on a leadership edge or term bump. A delegate that ran healthily and then fails transiently has already spent one attempt, so with `max_attempts = 1` that single failure ends the retries. With `max_attempts = 0` (unlimited) a delegate that fails every time is recreated about every 200 ms tick, as for construction errors. When the budget refuses the retry after a delegate task failure, the task does not end with `Ok`: it stores the delegate error observed in that same tick (a per-tick local, so it cannot go stale across ticks or leadership epochs) as `fatal` and returns it after the tail (decision approved by the owner on 2026-10-16). The route then ends `Failed` and route supervision can restart it. The construction-error path keeps its existing `Ok` result; the two differ because a delegate task failure also covers run failures, which returned `Err` before this change.
+4. **Graceful exit.** On a permanent error, or when the budget refuses a retry after a delegate task failure, the tick stores the error in `fatal` and `break`s out of the loop. The tail captures the result of `stop_delegate` (no `?`), always runs `step_down` bounded by `drain_timeout`, and returns `fatal`, else the tail teardown error, else `Ok(())`. The graceful tail never classifies or retries: it only tears down. The retry tick also `break`s when `stop_token_loop` or the parent context is already cancelled, which is defensive code for a race between the tick and the cancel arms. `stop()` keeps treating an error that exists before the stop request as a real error (`ended_before_stop`). The tail change (always run `step_down`) cannot be shown red with the fake service, whose elector cancels on handle drop; it matters on real platforms where `step_down` awaits lease termination.
+5. **Metric vocabulary.** A new `event` value, `start_error`, with the existing `reason` values. The spec delta MODIFIES the lifecycle-metrics requirement, which enumerates the events and the exact label set. `stop_delegate` also emits `stopped`/`none` on this path, as it does today.
+6. **Out of scope.** The three `return Err` paths after `reconcile_event` (initial snapshot, watch event, tick re-dispatch) still skip `step_down`. The stale-stamp and dead-delegate path also stays unclassified: `reconcile_event` propagates the teardown error of the dead delegate and `log_reconcile_failure` classifies it without a `start_error` metric, so `start_error` counts the finished-handle branch only. Both are tracked in a follow-up bd. Tagging the camel-jms `Starting` error as transient is not done: rc-8yc0p removed that error. Preserving the error variant through the result proxy is not done: no caller classifies it.
+
+## Rejected alternative
+
+Classifying inside `reconcile_event` only. The delegate task runs detached from `reconcile_event`, so its error is observable only when the handle finishes.
+
+## ADRs
+
+ADR-0035 (fencing token and leader epoch) is unchanged: the retry re-enters `reconcile_event`, which keeps the epoch checks.

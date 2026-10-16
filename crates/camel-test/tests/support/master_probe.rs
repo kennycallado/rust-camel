@@ -18,7 +18,7 @@ pub struct DelegateLifecycleProbe {
 
 impl DelegateLifecycleProbe {
     /// Number of `master_delegate_lifecycle_total` observations for `event`
-    /// (`started`, `stopped`, `create_error`).
+    /// (`started`, `stopped`, `create_error`, `start_error`).
     pub fn count(&self, event: &str) -> usize {
         self.events
             .lock()

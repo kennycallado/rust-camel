@@ -159,6 +159,7 @@ async fn dead_delegate_stale_stamp_resets_budget() {
             consumer_error_after: 0,
             consumer_error: None,
             first_exit_signal: Arc::new(Mutex::new(Some(exit_rx))),
+            first_consumer_fault: None,
         }),
         Arc::clone(&metrics) as Arc<dyn MetricsCollector>,
         platform_service,
