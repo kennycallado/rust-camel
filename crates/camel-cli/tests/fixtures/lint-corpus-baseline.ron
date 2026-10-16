@@ -34,15 +34,6 @@
         ],
     ),
     (
-        "examples/hot-reload/routes/route.yaml",
-        [("R-SCHEMA", "error")],
-    ),
-    (
-        "examples/wasm-source-webhook/routes/webhook.yaml",
-        [("R-SCHEMA", "error")],
-    ),
-
-    (
         "examples/file-pollenrich/routes.yaml",
         [("R-URI-known:unknown-option", "error")],
     ),
