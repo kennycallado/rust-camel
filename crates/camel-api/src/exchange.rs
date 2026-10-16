@@ -146,7 +146,25 @@ impl Exchange {
     /// - `CamelExceptionMessage` — the error's Display string
     /// - `CamelExceptionKind` — the error variant name (via `CamelError::classify()`)
     /// - `CamelExceptionCaught` — alias for Java Camel parity
+    ///
+    /// For `HttpOperationFailed` it also sets the `CamelHttpResponseCode` and
+    /// `CamelHttpResponseText` headers, because a failing producer loses its
+    /// exchange with the `Err` and error-handling expressions would otherwise
+    /// have no way to read the status.
     pub fn set_error(&mut self, error: CamelError) {
+        if let CamelError::HttpOperationFailed {
+            status_code,
+            status_text,
+            ..
+        } = &error
+        {
+            self.input.set_header(
+                "CamelHttpResponseCode",
+                Value::Number((*status_code).into()),
+            );
+            self.input
+                .set_header("CamelHttpResponseText", Value::String(status_text.clone()));
+        }
         let msg = error.to_string();
         let kind = error.classify().to_string();
         self.properties.insert(
@@ -289,6 +307,36 @@ mod tests {
             ex.properties.get(PROPERTY_EXCEPTION_CAUGHT),
             Some(&Value::String("Processor error: boom".to_string()))
         );
+    }
+
+    #[test]
+    fn test_set_error_http_failure_exposes_status_headers() {
+        let mut ex = Exchange::default();
+        ex.set_error(CamelError::HttpOperationFailed {
+            method: "GET".into(),
+            url: "http://example.test/x".into(),
+            status_code: 404,
+            status_text: "Not Found".into(),
+            response_body: None,
+        });
+
+        assert_eq!(
+            ex.input.header("CamelHttpResponseCode"),
+            Some(&Value::Number(404.into()))
+        );
+        assert_eq!(
+            ex.input.header("CamelHttpResponseText"),
+            Some(&Value::String("Not Found".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_set_error_non_http_leaves_http_headers_untouched() {
+        let mut ex = Exchange::default();
+        ex.set_error(CamelError::ProcessorError("boom".into()));
+
+        assert!(ex.input.header("CamelHttpResponseCode").is_none());
+        assert!(ex.input.header("CamelHttpResponseText").is_none());
     }
 
     #[test]

@@ -111,7 +111,7 @@ Headers live on a Message. They describe that specific message: content type, en
 
 Properties live on the Exchange itself. They survive body and message changes. A processor sets a property with `exchange.set_property("attempt", 1)`. The next step reads it with `exchange.property("attempt")`. Use properties for cross-step state that is not part of the payload.
 
-The error machinery uses properties. When `set_error()` fires, it auto-populates three property keys: `CamelExceptionMessage`, `CamelExceptionKind`, and `CamelExceptionCaught`. All languages read error context through these keys. Call `handle_error()` to set `CamelExceptionHandled` to `true` and clear the error.
+The error machinery uses properties. When `set_error()` fires, it auto-populates three property keys: `CamelExceptionMessage`, `CamelExceptionKind`, and `CamelExceptionCaught`. All languages read error context through these keys. When the error is an HTTP failure (`HttpOperationFailed`), it also sets the `CamelHttpResponseCode` and `CamelHttpResponseText` headers, so a route can branch on the status, for example `${header.CamelHttpResponseCode} == 404`. Call `handle_error()` to set `CamelExceptionHandled` to `true` and clear the error.
 
 ## Exchange through the pipeline
 
