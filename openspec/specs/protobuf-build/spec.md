@@ -18,13 +18,13 @@ The build scripts of camel-component-grpc, camel-component-validator, camel-xslt
 
 ### Requirement: Generated Rust and source tracking remain compatible
 
-The migration SHALL preserve the complete generated Rust file set and bytes per affected package, the existing protobuf include roots, tonic/prost generation options and OUT_DIR behavior. The gRPC build script SHALL obtain CARGO_MANIFEST_DIR at script execution time. Each build script SHALL declare watches for its protobuf inputs and include root so Cargo regenerates output when those files change.
+The migration SHALL preserve the complete generated Rust file set per affected package and the generated item surface the packages consume — module layout, types and fields — together with the existing protobuf include roots, tonic/prost generation options and OUT_DIR behavior. The gRPC build script SHALL obtain CARGO_MANIFEST_DIR at script execution time. Each build script SHALL declare watches for its protobuf inputs and include root so Cargo regenerates output when those files change.
 
-#### Scenario: Generated outputs match the protoc baseline
+#### Scenario: Generated Rust keeps the protoc baseline surface
 
-- **GIVEN** saved generated Rust from the six unmodified build scripts at commit 2ae4f107
-- **WHEN** the migrated scripts generate Rust for the same sources and generator versions
-- **THEN** each package has exactly the same generated filenames and byte contents
+- **GIVEN** the same protobuf sources and generator versions as the six build scripts at commit 2ae4f107
+- **WHEN** the migrated scripts generate Rust
+- **THEN** each package produces the same generated filenames and its generated modules, types and fields resolve identically for every target of the six packages
 
 #### Scenario: Canonical XML schema and gRPC fixture paths stay valid
 
