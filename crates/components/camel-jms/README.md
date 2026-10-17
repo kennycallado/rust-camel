@@ -164,7 +164,7 @@ cargo run -p jms-example
 
 - IBM MQ not supported (planned for a future release)
 - No durable topic subscribers yet
-- Queue messages are acknowledged after the route completes (bridge 0.8.0). An `Ok` result acknowledges; an unhandled `Err` rolls back and the broker redelivers. After 6 delivery attempts (`JMS_MAX_DELIVERY_ATTEMPTS`) the bridge acknowledges and discards the message, logging only its ID — no dead-letter forwarding. A broker-native redelivery limit that fires first takes precedence. Attempt counts persist under `$XDG_STATE_HOME/rust-camel/jms-bridge` (else `$HOME/.local/state/rust-camel/jms-bridge`); see `docs/src/components/jms.md` in the repository.
+- Queue messages are acknowledged after the route completes (bridge 0.8.0). An `Ok` result acknowledges; an unhandled `Err` rolls back and the broker redelivers. After 6 delivery attempts (`JMS_MAX_DELIVERY_ATTEMPTS`) the bridge acknowledges and discards the message, logging only its ID — no dead-letter forwarding. A broker-native redelivery limit that fires first takes precedence. Attempt counts persist under `$XDG_STATE_HOME/rust-camel/jms-bridge` (else `$HOME/.local/state/rust-camel/jms-bridge`); see `docs/src/components/jms.md` in the repository. Since bridge 0.8.2 the broker acknowledgement is issued synchronously (ActiveMQ Classic `sendAcksAsync(false)`, Artemis `blockOnAcknowledge(true)`), so a crash immediately after the broker commits cannot redeliver a message whose attempt budget was already cleared.
 
 ## Installation
 
