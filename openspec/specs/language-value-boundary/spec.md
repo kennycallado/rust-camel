@@ -300,11 +300,35 @@ default optimization level — both without consuming or changing the stream.
 
 ### Requirement: Mutating scripts write back the body only when assigned
 
-A mutating script step SHALL write the body back only if the script assigned
-it. Assignment SHALL be detected inside the language evaluator, before
-boundary conversion. A script that only sets headers or properties SHALL leave
-the body bit-identical, variant included (`Json`, `Xml`, `Bytes`, `Stream`,
-`Empty`).
+A mutating script step SHALL write the body back only if the post-evaluation
+body is **observably changed after normalization** relative to the normalized
+pre-run snapshot. The body is observably changed after normalization when the
+normalized post-run body differs from the normalized pre-run snapshot, with the
+same value conversion applied to both sides BEFORE converting to a `Body`; an
+unchanged value that changes representation (for example JSON `10.0` surviving
+as an integral number through JavaScript) SHALL therefore compare equal and
+SHALL NOT be written back. For JavaScript, the snapshot SHALL be captured
+inside the same worker evaluation job that runs the script, immediately before
+execution, ONLY for mutating evaluation (`sentinel.is_none()`); read-only
+evaluation does not capture it and sets the field to the inbound body. The
+snapshot is carried on the existing `JsEvalResult`; no separate blocking job
+and no new `JsEngine` trait method SHALL be added. Rhai already captures its
+pre-evaluation snapshot inside its mutating evaluation (`eval_mut_sync`); this
+change does not alter that mechanism. The body assign-only detection binds
+every mutating language, including `rhai` and `js`. A script that only sets
+headers or properties SHALL leave the body bit-identical, variant included
+(`Json`, `Xml`, `Bytes`, `Stream`, `Empty`). Changed-entry parity for the
+header/property MAPS under JavaScript (whole-map rewriting, `1` vs `1.0`
+numeric drift in maps) is NOT fixed by this change and is explicitly deferred
+to rc-zwy7e; this change fixes the JavaScript BODY only.
+
+For JavaScript, assigning `null` to the body SHALL make it `Body::Empty`.
+Because JavaScript exposes both `Bytes` and `Empty` as `null`, a `null`
+assignment on a JavaScript `Bytes` or `Empty` body SHALL be a no-op (the
+normalized snapshot is also null). For Rhai, `Bytes` is exposed as a Blob, so
+`body = ()` on a Rhai `Bytes` body is a real assignment and SHALL make it
+`Body::Empty`; a Rhai `Empty` body is already unit, so `body = ()` SHALL leave
+it `Body::Empty`.
 
 #### Scenario: Header-only script preserves a JSON body
 
@@ -321,16 +345,62 @@ the body bit-identical, variant included (`Json`, `Xml`, `Bytes`, `Stream`,
 - **THEN** the body SHALL still be `Body::Xml`; exposing it to the script as
   a string SHALL NOT change its variant
 
+#### Scenario: JS header-only script preserves an XML body
+
+- **GIVEN** an exchange with a `Body::Xml` body and a `js` `script:` step that
+  only sets one header
+- **WHEN** the step succeeds
+- **THEN** the body SHALL still be `Body::Xml`, so a later HTTP reply keeps its
+  `application/xml` content type
+
+#### Scenario: JS header-only script preserves an integral-float JSON body
+
+- **GIVEN** an exchange with a `Body::Json` body containing the number `10.0`
+  and a `js` `script:` step that only sets one header
+- **WHEN** the step succeeds
+- **THEN** the body SHALL still be `Body::Json` with the original `10.0` value
+
 #### Scenario: Same-value assignment writes nothing
 
-- **GIVEN** a property holding the integer `1` and a `script:` step that
-  assigns the same value `1` to it again
+- **GIVEN** a property holding the integer `1` and a **rhai** `script:` step
+  that assigns the same value `1` to it again
 - **WHEN** the step succeeds
 - **THEN** the property SHALL keep its original stored value handle; the
   re-assignment SHALL be detected as a no-op. Assigning a value of a
   DIFFERENT type with the same numeric meaning (for example `1.0` where `1`
   was stored) SHALL be detected as a change and written back with the new
-  type
+  type. (JavaScript header/property map parity is deferred to rc-zwy7e.)
+
+#### Scenario: JS null body assignment yields Empty
+
+- **GIVEN** an exchange with a `Body::Text` body and a `js` `script:` step
+  that assigns `camel.body = null`
+- **WHEN** the step succeeds
+- **THEN** the body SHALL be `Body::Empty`, not `Body::Json(Null)`
+
+#### Scenario: JS null on Bytes or Empty is a no-op
+
+- **GIVEN** an exchange with a `Body::Bytes` body and a `js` `script:` step
+  that assigns `camel.body = null`
+- **WHEN** the step succeeds
+- **THEN** the body SHALL remain `Body::Bytes`; a null assignment on a JS
+  `Body::Empty` body SHALL likewise remain `Body::Empty` (JS exposes both as
+  `null`)
+
+#### Scenario: Rhai unit assignment on Bytes is a change
+
+- **GIVEN** an exchange with a `Body::Bytes` body and a rhai `script:` step
+  that assigns `body = ()`
+- **WHEN** the step succeeds
+- **THEN** the body SHALL become `Body::Empty` (Rhai exposes `Bytes` as a Blob,
+  so the unit assignment is a real change)
+
+#### Scenario: Rhai unit assignment on Empty is unchanged
+
+- **GIVEN** an exchange with a `Body::Empty` body and a rhai `script:` step
+  that assigns `body = ()`
+- **WHEN** the step succeeds
+- **THEN** the body SHALL remain `Body::Empty`
 
 ### Requirement: Mutating scripts write back only changed entries
 
@@ -358,10 +428,30 @@ partial mutation.
 
 ### Requirement: Read-only expressions cannot mutate the Exchange
 
-In read-only evaluation modes, Exchange-mutating script calls (`set_header()`,
-`set_property()`) SHALL be rejected at expression compilation time with an
-error that points the author to the mutating verb (`script:`). The rejection
-is immediate: no deprecation period (owner decision 2026-10-02).
+In Rhai read-only expressions and predicates, Exchange-mutating script calls
+(`set_header()`, `set_property()`) and any assignment or update to a root
+variable named `body`, `headers`, or `properties` (direct, dotted,
+computed/index, or nested) SHALL be rejected at expression compilation time.
+The check is **conservative**: a local variable that shadows one of those names
+SHALL also be rejected. A local JavaScript variable named `body`/`headers`/
+`properties` is NOT rejected; JavaScript's compile-time walk covers only the
+statically-decidable `camel.*` mutation surface
+(`camel-language-js/src/expression.rs::reject_read_only_mutation`: `camel.body =
+...` including compound assignment and update, `delete camel.body`,
+`camel.set_property(...)`, `camel.headers.set/remove`,
+`camel.properties.set/remove`, static computed members, and destructuring
+targets) and is unchanged by this change. JavaScript's UNDECIDABLE dynamic
+forms (`camel[expr]`, an aliased method reference, host-style
+`Object.defineProperty` / `Reflect.set`) stay refused at RUNTIME by the
+read-only snapshot's throwing traps, never silently discarded. This change adds
+the **root-name assignment/update walk to Rhai**; Rhai has no runtime snapshot
+layer, so the walk is its only rejection mechanism for those forms. Rhai
+method-call mutations on those roots (`headers.clear()`, `headers.remove(x)`)
+are a KNOWN REMAINING GAP (rc-qpjps) and are not covered by this change. The
+Rhai error SHALL point the author to a mutating surface that exists: a
+`script:` step assigning `headers["k"] = value`, `properties["k"] = value`, or
+`body = value`. The rejection is immediate: no deprecation period (owner
+decision 2026-10-02).
 
 #### Scenario: set_property in a read-only expression is a compile error
 
@@ -369,13 +459,54 @@ is immediate: no deprecation period (owner decision 2026-10-02).
   `set_property("k", 1)`
 - **WHEN** the route is added
 - **THEN** route addition SHALL fail with a compile error naming the call and
-  pointing to `script:`
+  pointing to the mutating map-assignment surface
+
+#### Scenario: index assignment to headers is a compile error
+
+- **GIVEN** a `set_property` step whose rhai expression contains
+  `headers["x"] = "1"`
+- **WHEN** the route is added
+- **THEN** route addition SHALL fail with a compile error; the write SHALL NOT
+  be silently discarded
+
+#### Scenario: body assignment is a compile error
+
+- **GIVEN** a `set_property` step whose rhai expression contains
+  `body = "changed"`
+- **WHEN** the route is added
+- **THEN** route addition SHALL fail with a compile error
+
+#### Scenario: nested computed assignment is a compile error
+
+- **GIVEN** a `set_property` step whose rhai expression contains
+  `properties["a"]["b"] = "c"`
+- **WHEN** the route is added
+- **THEN** route addition SHALL fail with a compile error
+
+#### Scenario: compound update is a compile error
+
+- **GIVEN** a `set_property` step whose rhai expression contains
+  `headers["x"] += 1`
+- **WHEN** the route is added
+- **THEN** route addition SHALL fail with a compile error
+
+#### Scenario: a shadowing local name is rejected conservatively
+
+- **GIVEN** a rhai expression `let headers = #{}; headers["x"] = 1`
+- **WHEN** the expression is created
+- **THEN** creation SHALL fail with the same compile error (documented
+  conservative false-positive)
 
 ### Requirement: Read surface parity across evaluation modes
 
 Read-only and mutating evaluation SHALL expose the same read surface: `body`,
 `headers`, and `properties` variables, plus `header()`, `property()`,
-`has_header()`, and `has_property()` functions.
+`has_header()`, and `has_property()` functions. The Rhai read-only scope SHALL
+include the `properties` variable, and the Rhai script-step (mutating) engine
+SHALL register `header()` and `property()` backed by the pre-evaluation
+snapshot maps. The `has_header()`/`has_property()` functions named in this
+requirement are explicitly deferred to rc-w1mds; this change does not implement
+them and SHALL NOT be read as making them pass.
 
 #### Scenario: property() works in a filter predicate
 
@@ -383,6 +514,39 @@ Read-only and mutating evaluation SHALL expose the same read surface: `body`,
 - **WHEN** the predicate evaluates
 - **THEN** the read SHALL succeed with the same value a `script:` step would
   see
+
+#### Scenario: property() works in a rhai script step
+
+- **GIVEN** a rhai `script:` step whose source is `property("level")`
+- **WHEN** the step evaluates
+- **THEN** the read SHALL succeed with the same value the read-only predicate
+  would see
+
+#### Scenario: properties map is readable in a rhai read-only expression
+
+- **GIVEN** a rhai expression `properties["level"]` and an exchange with
+  property `level` set
+- **WHEN** the expression evaluates
+- **THEN** the read SHALL succeed with the property value
+
+#### Scenario: rhai script readers see the pre-run snapshot
+
+- **GIVEN** a rhai `script:` step with source
+  `headers["k"] = "new"; header("k")` and an exchange whose header `k` is
+  `"old"`
+- **WHEN** the step evaluates
+- **THEN** `header("k")` SHALL return `"old"` (the pre-evaluation snapshot),
+  while the assigned map write is still propagated; this differs from
+  JavaScript, whose `camel.headers.get("k")` observes the live mutated map
+
+#### Scenario: JS readers see live mutations
+
+- **GIVEN** a js `script:` step with source
+  `camel.headers.set("k", "new"); camel.headers.get("k")` and an exchange whose
+  header `k` is `"old"`
+- **WHEN** the step evaluates
+- **THEN** `camel.headers.get("k")` SHALL return `"new"` (live behavior,
+  unchanged)
 
 ### Requirement: Predicate results are strictly boolean
 
@@ -575,4 +739,739 @@ BREAKING. Tests removing `script_readonly` rows SHALL retain a surviving
 - **GIVEN** the expression-failure suite no longer includes read-only script rows
 - **WHEN** the surviving error cases execute
 - **THEN** at least one SHALL carry the `secret=abc` seed and existing redaction assertions SHALL verify that the secret is absent from the exposed diagnostics
+
+### Requirement: Simple template expressions preserve literal text
+
+`SimpleLanguage::create_expression` SHALL parse its source in TEMPLATE mode.
+In template mode the source is literal text plus `${...}` interpolation slots
+only. Characters and words outside a slot — including `=`, `<`, `>`, `!`,
+`&&`, `||`, `contains`, `null`, `true`, `false`, single and double quotes, and
+whitespace — SHALL be preserved verbatim and SHALL NOT be re-parsed as
+predicate grammar. The whole source SHALL be outer-trimmed first so a YAML
+block scalar's trailing newline is absorbed; whitespace inside the source SHALL
+be preserved. An empty (after trim) source SHALL be a parse error. The
+unclosed-`${` rule takes precedence over the raw-literal rule: a source
+containing an unclosed `${` is governed by the unclosed rule, not classified
+as a raw literal. "Simple
+template mode" is Simple's own literal-plus-`${}` grammar; it is NOT the
+MiniJinja template engine (ADR-0047) and NOT RouteTemplate JSON-tree
+substitution (ADR-0008).
+
+#### Scenario: Operator-looking text stays literal
+
+- **GIVEN** an expression created from `Got -> ${header.h}` with header `h`
+  equal to `B`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be the string `Got -> B`; no numeric comparison
+  SHALL be attempted
+
+#### Scenario: Keyword-looking text stays literal
+
+- **GIVEN** an expression created from `value is null: ${header.h}` with
+  header `h` equal to `B`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be the string `value is null: B`, preserving the
+  word `null`
+
+#### Scenario: Whitespace and quoting in literal text are preserved
+
+- **GIVEN** an expression created from `${header.h} 3 items` with header `h`
+  equal to `B`, and an expression created from `literal 'quoted' text`
+- **WHEN** each expression is evaluated
+- **THEN** the results SHALL be `B 3 items` and `literal 'quoted' text`
+  respectively
+
+#### Scenario: Angle-bracket literals do not fail
+
+- **GIVEN** an expression created from `<order>${header.h}</order>` with header
+  `h` equal to `B`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be `<order>B</order>` and no parse error SHALL be
+  raised
+
+#### Scenario: Outer trim absorbs a block-final newline
+
+- **GIVEN** an expression source `"Got ${header.h}\n"` with header `h` equal to
+  `B`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be `Got B`, with no trailing newline, and the
+  internal space of `Got ` SHALL be preserved
+
+#### Scenario: Empty template is a parse error
+
+- **GIVEN** an expression source `""` or `"   "`
+- **WHEN** the expression is created
+- **THEN** creation SHALL fail with a parse error
+
+#### Scenario: Unclosed slot after a valid slot is a parse error
+
+- **GIVEN** an expression source `"${header.h} ${"` with header `h` equal to
+  `B`
+- **WHEN** the expression is created
+- **THEN** creation SHALL fail with a parse error; an unclosed `${` in a
+  source with no completed slot and preceding literal text (`Got ${body`)
+  SHALL remain literal text. A source that begins with an unclosed `${`
+  (`${body` or `${`) SHALL fail with a parse error.
+
+### Requirement: Simple expressions treat whole literals as raw text
+
+An expression source with no `${...}` slot SHALL evaluate to the raw source
+text. Quoting, boolean words, numbers, and `null` SHALL NOT be interpreted as
+literals of another type. This is a deliberate value-expression semantic; the
+predicate grammar is unchanged. `$$` is NOT a Simple-template escape:
+At the Simple source level, after substitution, `$${header.h}` is a literal
+`$` followed by the live `${header.h}` slot, not a literal `${header.h}`.
+In a route file, the env pass first turns `$$` into `$`: `$${header.h}`
+reaches Simple as the whole slot `${header.h}` and retains its native value.
+To render `$` plus a slot from a route file, write `$$$${header.h}`.
+A literal `${...}` is produced only through a path that
+does not run the template gate — a nested literal (not gated) or an explicit
+script string.
+
+#### Scenario: Quoted text keeps its quotes
+
+- **GIVEN** an expression created from `'abc'`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be the string `'abc'`, quotes included
+
+#### Scenario: Boolean, number, and null words are raw text
+
+- **GIVEN** expressions created from `true`, `42`, and `null`
+- **WHEN** each is evaluated
+- **THEN** the results SHALL be the strings `true`, `42`, and `null`
+  respectively — not `Value::Bool`, `Value::Number`, or `Value::Null`
+
+#### Scenario: Escapes are raw text
+
+- **GIVEN** an expression created from `"a\n"`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be the five-character source text `"a\n"`, not a
+  string containing a newline
+
+### Requirement: Whole-slot expressions return the slot value
+
+When the outer-trimmed source is exactly one `${...}` slot and nothing else,
+the expression SHALL evaluate to the slot's value using the EXISTING Simple
+evaluator semantics for that atom, with no added stringification. In
+particular, `${body}` on a `Body::Json` body SHALL return the serialized JSON
+string (existing `evaluator.rs` behavior for `Expr::Body`), while a body-field
+slot `${body.items}` SHALL return the native JSON array (existing
+`Expr::BodyField` behavior). A missing/absent slot value SHALL render as
+`Value::Null`. In a mixed template (literal text and/or multiple slots), a
+missing slot SHALL render as the empty string instead.
+
+#### Scenario: Whole header slot returns its native value
+
+- **GIVEN** an expression `${header.n}` and header `n` holding the JSON number
+  `7`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be `Value::Number` `7`, not the string `7`
+
+#### Scenario: Whole body slot keeps existing stringification
+
+- **GIVEN** an expression `${body}` and a `Body::Json` body `{"a":1}`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be the serialized JSON string `{"a":1}` (existing
+  `Expr::Body` semantics), not a native object
+
+#### Scenario: Whole body-field slot keeps an array
+
+- **GIVEN** an expression `${body.items}` and a JSON body `{"items":[1,2]}`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be the JSON array `[1,2]`, not a string
+
+#### Scenario: Whole missing slot returns Null
+
+- **GIVEN** an expression `${header.missing}` with no such header
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be `Value::Null`
+
+#### Scenario: Mixed missing slot renders empty
+
+- **GIVEN** an expression `prefix-${header.missing}-suffix`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be the string `prefix--suffix`
+
+### Requirement: Template slots parse atoms and unknown languages fail at evaluation
+
+A `${...}` slot SHALL parse with the existing atom grammar (`body`, `header.`,
+`body.<path>`, `exchangeProperty.`, `exception.message`, `lang:expr`). A slot
+that names nothing SHALL be a compile-time parse error. A slot with a valid
+lowercase `lang:` prefix whose language is not registered SHALL fail at
+evaluation time with an evaluation error, not at compile time.
+
+#### Scenario: Unrecognized slot is a compile error
+
+- **GIVEN** an expression `${unknown}`
+- **WHEN** the expression is created
+- **THEN** creation SHALL fail with a parse error
+
+#### Scenario: Unknown language is an evaluation failure
+
+- **GIVEN** an expression `${nosuchlang:x}` with no resolver entry for
+  `nosuchlang`
+- **WHEN** the expression is evaluated
+- **THEN** evaluation SHALL fail with an evaluation error; creation SHALL
+  succeed
+
+### Requirement: Bare top-level string value sources interpolate consistently
+
+In a declarative route, a bare **top-level** string value source that contains a
+`${...}` slot SHALL be compiled as a Simple template expression, whichever verb
+carries it (`log:`, `set_body:`, `set_header.value`,
+`set_header_if_absent.value`, `set_property.value`, `transform:`). A `${...}`
+in such a bare string SHALL NOT reach the Exchange as
+literal text. `set_header_if_absent` shares `SetHeaderStep` and
+`parse_value_source` but is produced by REST lowering, not authored directly
+(`#[serde(skip_deserializing)]`); its `value` is gated through the same helper. This covers both the bare scalar form
+(`set_body: "Got ${header.h}"`) and the object `value:` form
+(`set_body: {value: "Got ${header.h}"}`); both SHALL compile through one shared
+helper, used by the bare body and transform arms and by `parse_value_source`
+for the header/property/log value forms. A top-level bare string without a
+`${...}` slot SHALL remain a literal value. A string **nested inside an object
+or array literal** SHALL remain literal, gate or no gate. The same helper SHALL
+serve both the YAML and JSON route compilers, and `log:` SHALL keep compiling
+its bare string to a Simple expression.
+
+#### Scenario: bare log interpolates
+
+- **GIVEN** a step `log: "Got ${header.h}"` with header `h` equal to `B`
+- **WHEN** the route is compiled and the step runs
+- **THEN** the message SHALL be `Got B`
+
+#### Scenario: bare set_body interpolates
+
+- **GIVEN** a step `set_body: "Got ${header.h}"` with header `h` equal to `B`
+- **WHEN** the route is compiled and the step runs
+- **THEN** the body SHALL be the text `Got B`
+
+#### Scenario: object value form interpolates
+
+- **GIVEN** a step `set_body: {value: "Got ${header.h}"}` with header `h`
+  equal to `B`
+- **WHEN** the route is compiled and the step runs
+- **THEN** the body SHALL be the text `Got B`, compiled through the same
+  shared helper as the bare scalar form
+
+#### Scenario: bare set_header value interpolates
+
+- **GIVEN** `set_header: {key: x, value: "Got ${header.h}"}` with header `h`
+  equal to `B` and no explicit `simple:`
+- **WHEN** the route is compiled and the step runs
+- **THEN** header `x` SHALL be the string `Got B`
+
+#### Scenario: plain literal is unchanged
+
+- **GIVEN** a step `set_body: "order"` with no `${...}`
+- **WHEN** the route is compiled
+- **THEN** the value source SHALL remain a literal string `order`
+
+#### Scenario: a formerly-literal template-looking string now fails to compile
+
+- **GIVEN** a step `set_body: "echo ${HOME}"` (or a JS template payload such as
+  `` set_body: "`${name}`" ``) intended as a literal string
+- **WHEN** the route is compiled
+- **THEN** compilation SHALL fail with an `unrecognized token` parse error
+  (the top-level string is now gated and `${HOME}` is not a valid Simple atom).
+  This is a BREAKING change; the commit carries `!:` or `BREAKING CHANGE:`
+
+#### Scenario: nested literal is not gated
+
+- **GIVEN** a step `set_body: {value: {nested: "${header.h}"}}` (or an
+  equivalent JSON object literal)
+- **WHEN** the route is compiled
+- **THEN** the nested string SHALL remain the literal `"${header.h}"`; only a
+  top-level string SHALL be gated
+
+#### Scenario: JSON and YAML agree
+
+- **GIVEN** the same route authored once in YAML and once in JSON, each with a
+  bare top-level `set_body: "Got ${header.h}"`
+- **WHEN** both are compiled to declarative routes
+- **THEN** both SHALL produce a Simple template expression with the same source
+
+### Requirement: Environment and job-argument substitutions are trusted
+
+Route-source substitution SHALL handle `${env:NAME}` ONLY and SHALL fail
+closed for an unescaped `${arg:NAME}`. `${arg:NAME}` is NOT substituted on the
+route path: the tree walk passes an empty argument lookup and fails closed
+(`camel-dsl/src/env_interpolation.rs`,
+`interpolate_env_tree_with_provenance` calls `interpolate_value(..., &|_| None,
+...)`), so an unescaped `${arg:NAME}` in a route source SHALL fail to load. Job
+arguments SHALL be substituted only on the `camel-cli` job execution/send path
+(`crates/camel-cli/src/commands/job/document.rs`, `interpolate_with_args`).
+Substituted text is trusted operator configuration (ADR-0032); a `${...}` token
+it introduces MAY be interpreted as a template slot. The `$${...}` escape form
+(`$${env:X}` / `$${arg:X}`) emits the literal text `${...}`, which the template
+gate then treats as a `lang:` slot; preserving a substituted literal `${...}`
+is deferred to rc-luew6.
+
+#### Scenario: env value equal to a slot becomes a slot
+
+- **GIVEN** an environment variable `NAME` whose value is `${header.h}`, and a
+  step `set_body: "Hello ${env:NAME}"` with header `h` equal to `B`
+- **WHEN** the route is compiled and the step runs
+- **THEN** the compiled value source SHALL be a Simple template
+  `Hello ${header.h}` and the body SHALL be `Hello B`
+
+#### Scenario: plain env value stays literal
+
+- **GIVEN** an environment variable `NAME` whose value is `B`, and a step
+  `set_body: "Hello ${env:NAME}"`
+- **WHEN** the route is compiled
+- **THEN** the compiled value source SHALL be the literal string `Hello B`
+  (no `${` remains, so no template)
+
+#### Scenario: unescaped route arg fails to load
+
+- **GIVEN** a route source containing `set_body: "Hello ${arg:NAME}"`
+- **WHEN** the route is loaded
+- **THEN** loading SHALL fail with an unresolved `NAME` error; `${arg:NAME}` is
+  substituted only on the `camel-cli` job path
+
+#### Scenario: escaped env literal becomes a slot and fails at runtime
+
+- **GIVEN** a route source containing `set_body: "$${env:NAME}"` with `NAME`
+  set to `B`
+- **WHEN** the route is compiled and the step runs
+- **THEN** the escape SHALL yield the literal text `${env:NAME}`, the template
+  gate SHALL treat it as a `lang:expr` slot, the route SHALL compile, and at
+  runtime the step SHALL fail with `Language 'env' not found` (no literal
+  `${...}` path until rc-luew6)
+
+### Requirement: Boolean language conditions use predicate evaluation
+
+A language completion condition in the aggregator SHALL compile through the
+language `Predicate` contract and evaluate with `Predicate::matches`, so a
+non-boolean script result SHALL be a type error and every evaluation error
+SHALL propagate. An `Expression` result SHALL NOT be coerced with `as_bool`.
+
+#### Scenario: completion predicate is strict
+
+- **GIVEN** an aggregator `PredicateExpr` whose Simple source is
+  `${body} == 'DONE'`
+- **WHEN** the predicate evaluates against an exchange
+- **THEN** it SHALL compile as a predicate and match only when the comparison
+  is true
+
+#### Scenario: non-boolean predicate result errors
+
+- **GIVEN** an aggregator `PredicateExpr` whose source evaluates to a string
+- **WHEN** the predicate evaluates
+- **THEN** the step SHALL return `Err(CamelError::ProcessorError)` carrying the
+  language's type-mismatch text, NOT `Ok(false)`. The aggregator has no
+  `EvalMeta`, so the error is a `ProcessorError`, not an
+  `ExpressionFailed`/`ExpressionErrorClass` variant (pre-existing variant gap,
+  filed as a follow-up)
+
+### Requirement: Rhai string methods have explicit purity semantics
+
+The Rhai sandbox SHALL register a pure `trim()` that returns a string,
+shadowing the `StandardPackage` in-place method that mutates its subject and
+returns unit. No `_inplace` alias SHALL be added. The remaining
+`StandardPackage` string methods that mutate in place and return unit SHALL be
+documented with their pure alternatives. The shadow SHALL apply to the
+read-only and mutating engines alike.
+
+#### Scenario: trim returns a string
+
+- **GIVEN** a rhai expression `let x = "  a  "; x.trim() == "a"`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be `true`
+
+#### Scenario: blank check is correct
+
+- **GIVEN** a rhai expression `let x = "   "; x.trim() == ""`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be `true`, and `let x = "   "; x.trim() != ""`
+  SHALL be `false`
+
+#### Scenario: shadow applies in a script step
+
+- **GIVEN** a rhai `script:` step whose source is
+  `let x = "  a  "; x.trim() == "a"`
+- **WHEN** the step evaluates
+- **THEN** the result SHALL be boolean `true`
+
+### Requirement: Rhai JSON helpers shadow the stock built-ins from a shared module
+
+The Rhai sandbox SHALL build one process-wide host module containing the JSON
+wrapper type, functions, and indexers, and SHALL register it globally on every
+engine it builds after the standard package, so its functions take precedence
+over the engine's stock `parse_json` and `to_json`. The host functions SHALL
+read `max-string-size`, `max-array-size`, and `max-map-size` from the calling
+engine, not from captured state.
+
+#### Scenario: Host helpers win on every engine
+
+- **GIVEN** an engine built by the rhai sandbox
+- **WHEN** a script calls `parse_json` or `to_json`
+- **THEN** the host implementation SHALL run, not the stock built-in, on the
+  read-only, mutating, and expression engines alike
+
+### Requirement: Rhai JSON parsing is strict RFC 8259
+
+`parse_json` SHALL accept the full RFC 8259 grammar for any JSON value (object,
+array, or scalar), including the `\/` escape, EXCEPT that an unpaired surrogate
+escape SHALL be refused. Malformed input, including unpaired surrogates, SHALL
+fail with a typed `parse` error that contains no parsed input text and no
+parser line or column; the error SHALL carry the script call position instead.
+
+#### Scenario: Escaped solidus is accepted
+
+- **GIVEN** the JSON text `{"path":"a\/b"}`
+- **WHEN** a script evaluates `parse_json` on it
+- **THEN** parsing SHALL succeed and the `path` value SHALL be `a/b`
+
+#### Scenario: Unpaired surrogate is refused
+
+- **GIVEN** JSON text containing the escape `"\uD800"` with no low surrogate
+- **WHEN** a script calls `parse_json`
+- **THEN** the step SHALL fail with a `parse` error naming the script call
+  position, with no input text and no parser line or column
+
+### Requirement: Rhai JSON number projection is integer-form only
+
+`parse_json` SHALL store each number as its exact source token and SHALL NOT
+convert any number to `f64`. A token SHALL project to a native Rhai `INT` only
+when it is an integer form with no fraction and no exponent and its
+`parse::<i64>()` fits; `-0` MAY normalize. Every other token, including any
+decimal or exponent form and any integer outside the `i64` range, SHALL be a
+`JsonNumber` holding the raw token. The only conversion SHALL be an explicit
+`JsonNumber.to_float()`, which returns a finite `f64` or an `arithmetic` error.
+
+#### Scenario: Integer forms project, decimals and exponents wrap
+
+- **GIVEN** the JSON numbers `9223372036854775807`, `-0`, `1.0`, `1e2`, and
+  `18446744073709551615`
+- **WHEN** a script reads them after `parse_json`
+- **THEN** `9223372036854775807` (and the normalized `-0`) SHALL be native
+  integers, while `1.0`, `1e2`, and `18446744073709551615` SHALL each be a
+  `JsonNumber`
+
+#### Scenario: Large magnitude round-trips exactly
+
+- **GIVEN** the JSON numbers `18446744073709551615`,
+  `123456789012345678901234567890`, and `1e400`
+- **WHEN** a script converts `parse_json` output back with `to_json`
+- **THEN** each number SHALL re-emit with its exact source token and no `f64`
+  rounding
+
+#### Scenario: to_float is explicit and checked
+
+- **GIVEN** the `JsonNumber` for `1e400`
+- **WHEN** a script calls `to_float()` on it
+- **THEN** the step SHALL fail with an `arithmetic` error because the result is
+  not finite
+
+### Requirement: Rhai JSON objects preserve insertion order and duplicate semantics
+
+`parse_json` SHALL retain object keys in authored insertion order in an
+`IndexMap`. A JSON duplicate key SHALL take the last value while keeping the
+position of its first occurrence. Replacing the value at an existing key SHALL
+retain that key's position. `remove` SHALL use shift semantics (remaining keys
+keep their relative order) and re-inserting a removed key SHALL place it at the
+end. `to_json` SHALL emit keys in stored order.
+
+#### Scenario: Authored order is retained
+
+- **GIVEN** the JSON text `{"z":1,"a":2,"m":3}`
+- **WHEN** a script re-emits it with `to_json`
+- **THEN** the keys SHALL appear in the order `z`, `a`, `m`
+
+#### Scenario: Duplicate key keeps first position, last value
+
+- **GIVEN** the JSON text `{"b":1,"a":2,"b":3}`
+- **WHEN** a script re-emits it with `to_json`
+- **THEN** the output SHALL be `{"b":3,"a":2}` in that key order
+
+#### Scenario: Removing a keeps the order of the rest
+
+- **GIVEN** a parsed object `{"a":1,"b":2,"c":3}`
+- **WHEN** a script removes `a` and re-emits the object
+- **THEN** the output SHALL contain `b` then `c` in that order
+
+### Requirement: Rhai parsed JSON uses an Arc copy-on-write wrapper with a minimal surface
+
+`parse_json` SHALL use the same projection at the root and on indexed reads:
+objects/arrays become `JsonValue`, strings/bools/integer-form i64 become native,
+other numbers become `JsonNumber`, and null becomes unit. Containers are backed
+by an `Arc` tree. Reading a wrapper SHALL clone the `Arc`
+(O(1)); mutating a value reached by a bare read SHALL NOT affect its source.
+The wrapper SHALL expose only: string-key and integer-index get and set
+(including chained assignment), dot-property fallback, `len`, `contains`,
+`keys`, `remove`, and `push`. Public `type_of` names SHALL be exactly
+`json value` and `json number`; outbound errors SHALL use these stable labels,
+never Rust type paths.
+
+#### Scenario: Bare read is isolated
+
+- **GIVEN** a parsed object `{"a":{"b":1}}`
+- **WHEN** a script evaluates `let x = j["a"]; x["b"] = 9;` and then
+  `to_json(j)`
+- **THEN** the output SHALL still contain `"b":1`
+
+#### Scenario: type_of uses stable labels
+
+- **GIVEN** a parsed object and a parsed `JsonNumber`
+- **WHEN** a script evaluates `type_of` on each
+- **THEN** the results SHALL be `json value` and `json number` respectively
+
+### Requirement: Rhai JSON wrapper indexing, assignment, and mutation semantics
+
+The wrapper SHALL use one projection everywhere: object or array SHALL read as a
+`JsonValue`; string, bool, and unit SHALL read natively; an `i64` number SHALL
+read as native `INT`; any other number SHALL read as `JsonNumber`. A missing key
+and a JSON `null` SHALL both read as unit; `contains` and the `in` operator
+SHALL distinguish a present key from an absent one. `contains` SHALL accept a
+string key on an object; calling it on an array SHALL fail with `type-mismatch`.
+Dot access on an object SHALL fall back to string-key indexing. A negative array
+index SHALL count from the end; an out-of-range index SHALL raise
+`ErrorArrayBounds`. `push` SHALL only append and SHALL recheck the array cap.
+`remove` SHALL return the removed value, or unit when the key or index is
+absent. Assigning unit SHALL store JSON `null`.
+
+Accepting setters SHALL be: unit, bool, `i64`, finite `f64`, `String`,
+`JsonNumber`, `JsonValue`, native `Map`, and native `Array`. Index and helper
+setters SHALL be registered as single `Dynamic`-accepting functions that
+validate the value type internally, so Rhai never fails to resolve an overload
+and raises a discarded `ErrorIndexingType`. A setter with a wrong-container
+target SHALL fail with a `type-mismatch` error.
+
+#### Scenario: Chained, dot, and negative-index access
+
+- **GIVEN** a parsed object `{"a":[{"b":1}]}`
+- **WHEN** a script evaluates `j["a"][0]["b"] = 2`, then `j.a[-1].b = 3`
+- **THEN** `to_json(j)` SHALL contain the updated nested value, and an
+  out-of-range index SHALL fail with `ErrorArrayBounds`
+
+#### Scenario: Missing key versus null
+
+- **GIVEN** a parsed object `{"n":null}` with no key `m`
+- **WHEN** a script evaluates `j["n"]`, `j["m"]`, `contains("n")`,
+  `contains("m")`, and `"m" in j`
+- **THEN** both reads SHALL return unit, `contains("n")` SHALL be `true`,
+  `contains("m")` SHALL be `false`, and `"m" in j` SHALL be `false`
+
+#### Scenario: Contains on an array fails typed
+
+- **GIVEN** a parsed array
+- **WHEN** a script calls `contains("k")` on it
+- **THEN** the step SHALL fail with a `type-mismatch` error
+
+#### Scenario: Push grows and remove returns
+
+- **GIVEN** a parsed array `[1,2]`
+- **WHEN** a script calls `push(3)`, then `remove(0)`
+- **THEN** the array SHALL grow to `[1,2,3]`, and `remove(0)` SHALL return `1`
+
+#### Scenario: Unit assignment stores null
+
+- **GIVEN** a parsed object
+- **WHEN** a script assigns `j["k"] = ()` and re-emits it
+- **THEN** the output SHALL contain `"k":null`
+
+#### Scenario: Nested setter failure rolls back
+
+- **GIVEN** a parsed object
+- **WHEN** a chained assignment fails on a nested wrong-typed setter
+- **THEN** no part of the wrapper SHALL be mutated
+
+### Requirement: Rhai JSON wrapper comparisons refuse implicit coercion
+
+`==`, `!=`, `<`, `>`, `<=`, and `>=` SHALL be registered between
+`JsonNumber`/`JsonValue` and native `i64`, `f64`, `String`, and `bool`, and
+between wrappers, in both operand orders. All these comparisons SHALL fail with
+`type-mismatch`; no exact-number comparison engine SHALL be added. Scripts MAY
+explicitly call `to_float()` for lossy comparisons. Pairs outside the registered
+set retain Rhai builtin behavior, including comparisons with unit. JSON null
+projects to unit, so its equality with unit is true.
+
+#### Scenario: Mixed numeric comparison refuses implicit coercion
+
+- **GIVEN** a `JsonNumber` holding `18446744073709551615`
+- **WHEN** a script evaluates `j == 2` or `j < 3`
+- **THEN** each SHALL fail with `type-mismatch`
+
+#### Scenario: Null compares with unit
+
+- **GIVEN** a parsed JSON `null`
+- **WHEN** a script evaluates the parsed value `== ()`
+- **THEN** the comparison SHALL be `true`
+
+### Requirement: Rhai JSON serialization is faithful and compatible
+
+`to_json` SHALL be registered for `Map`, `Array`, `JsonValue`, `JsonNumber`,
+and the scalar types `String`, `bool`, `i64`, `f64`, and unit, in both function
+and method form. `to_string` and `to_debug` on a wrapper SHALL return the same
+compact JSON (for `JsonNumber`, the number token). Native `Map` keys SHALL be
+emitted sorted; a wrapper nested inside a native `Map` or `Array` SHALL be
+inlined. Output SHALL be raw UTF-8 (non-ASCII emitted directly), SHALL NOT
+escape `/`, and SHALL escape control characters. Unsupported values (function
+pointers, closures, timestamps, custom types) and non-finite floats SHALL fail
+with a `type-mismatch` error and SHALL NOT use a `Debug`/`Display` fallback or
+include the value in the error. Serializing a native container SHALL apply the
+same depth invariant as parsing.
+
+#### Scenario: Native containers serialize sorted with nested wrappers
+
+- **GIVEN** a native Rhai `Map` `#{"b":1,"a":<parsed value>}`
+- **WHEN** a script calls `to_json` on it
+- **THEN** the output SHALL order keys `a` then `b` and inline the parsed value
+
+#### Scenario: Function and method forms
+
+- **GIVEN** a parsed value
+- **WHEN** a script evaluates `to_json(j)` and `j.to_json()`
+- **THEN** both SHALL return the same compact JSON
+
+#### Scenario: Raw UTF-8 and no slash escaping
+
+- **GIVEN** a parsed value containing `café` and `a/b`
+- **WHEN** a script calls `to_json`
+- **THEN** the output SHALL contain the literal UTF-8 text and the literal `/`
+
+#### Scenario: Non-finite float is refused
+
+- **GIVEN** a Rhai `Map` whose value is `0.0/0.0`
+- **WHEN** a script calls `to_json` on it
+- **THEN** the step SHALL fail with a `type-mismatch` error and SHALL NOT emit
+  `NaN` or a debug string
+
+### Requirement: Rhai JSON wrappers are bounded by the sandbox limits
+
+Parsing SHALL descend the input level at a time using
+`serde_json::value::RawValue` and validate iteratively with an owned depth
+counter. A top-level scalar SHALL have depth 0 and a top-level container depth
+1; depth 128 SHALL be accepted and depth 129 SHALL fail with `limit`. Input
+`max-string-size` SHALL be enforced before descent, and total parse cost SHALL
+be bounded by 128 × the input byte length. The implementation SHALL NOT enable
+`arbitrary_precision` or `unbounded_depth`. Parsing SHALL enforce
+`max-array-size` and `max-map-size` per container and fail with `limit` when
+either cap is exceeded.
+
+The depth cap SHALL be invariant across parsing and mutation. Every set, push,
+and conversion, and every `to_json` of a native container, SHALL check the
+depth of the target path plus the depth of the inserted value and SHALL fail
+with `limit` before applying when the total would exceed 128; a self-assignment
+such as `j["a"] = j` that would exceed the cap SHALL be refused to avoid a stack
+crash. Array and map caps and a total serialized-size estimate SHALL be
+rechecked on every mutation, and a mutation that would exceed `max-string-size`
+SHALL fail with `limit` before being applied. The serializer SHALL be bounded
+and SHALL stop at the limit with a `limit` error rather than truncating. These
+limits SHALL be read from the calling engine. A size limit configured as `0`
+SHALL keep Rhai's unlimited meaning for that cap; the owned depth cap of 128
+and the 128 × input-byte parse cost bound SHALL still apply. Exceeding any bound SHALL NOT
+commit any Exchange change.
+
+#### Scenario: Depth boundary
+
+- **GIVEN** JSON text whose top-level container has depth 128
+- **WHEN** a script calls `parse_json`
+- **THEN** parsing SHALL succeed; one more level SHALL fail with a `limit` error
+
+#### Scenario: Mutation depth and cap are rechecked
+
+- **GIVEN** a wrapper at depth 128
+- **WHEN** a script assigns a nested value that would deepen it, or pushes
+  beyond `max-array-size`
+- **THEN** the step SHALL fail with a `limit` error and the wrapper SHALL be
+  unchanged
+
+#### Scenario: Self-assignment at the cap is refused
+
+- **GIVEN** a wrapper at depth 128
+- **WHEN** a script evaluates `j["a"] = j`
+- **THEN** the step SHALL fail with a `limit` error before a stack crash
+
+### Requirement: Rhai JSON errors follow the existing classifier
+
+An unavailable operation SHALL be classified by the engine's existing
+classifier and SHALL NOT be given a new failing overload. `JsonNumber`
+arithmetic (`+`, `+=`) SHALL fail as `function-not-found`; `values` and `merge`
+SHALL fail as `function-not-found`; an unsupported `for` iteration SHALL fail
+as `runtime` (ErrorFor). Every registered wrapper comparison SHALL fail as
+`type-mismatch`; these guards are the only failing overloads added.
+A size or depth violation SHALL be `limit`. A malformed parse
+SHALL be `parse` with no input text and no parser line or column. A setter type
+failure SHALL be `type-mismatch` and SHALL NEVER be `ErrorIndexingType`, because
+Rhai silently discards indexing errors during index-chain write-back. No error
+SHALL contain exchange data.
+
+#### Scenario: Arithmetic and container helpers are function-not-found
+
+- **GIVEN** a `JsonNumber` and a parsed object
+- **WHEN** a script evaluates `j + 1`, `j += 1`, `obj.values()`, or
+  `obj.merge(x)`
+- **THEN** each SHALL fail with a `function-not-found` error
+
+#### Scenario: Iteration is a runtime error
+
+- **GIVEN** a parsed object
+- **WHEN** a script iterates it with `for`
+- **THEN** the step SHALL fail with a `runtime` error (ErrorFor)
+
+#### Scenario: Setter failure propagates
+
+- **GIVEN** a parsed object
+- **WHEN** a script assigns a function pointer to a key
+- **THEN** the step SHALL fail with a `type-mismatch` error; the failure SHALL
+  NOT be an `ErrorIndexingType` and SHALL NOT be discarded
+
+#### Scenario: Parse error is redacted
+
+- **GIVEN** a script that calls `parse_json` on malformed text holding secret
+  data
+- **WHEN** the script runs
+- **THEN** the error SHALL NOT contain the input text or a parser line/column;
+  it SHALL carry only the class and the script call position
+
+### Requirement: Rhai host JSON helpers leave the exchange converter unchanged
+
+`parse_json` and `to_json` SHALL be script-local host helpers. They SHALL NOT
+change the exchange inbound conversion (`body`, `headers`, and `properties`
+binding) or scope preparation, and a JSON integer greater than `i64::MAX` on
+that path SHALL still be refused. The outbound `dynamic_to_value` converter
+SHALL gain explicit refusal arms for `JsonValue` and `JsonNumber` that use only
+the stable labels `json value` and `json number`; no other converter behavior
+SHALL change. Direct outbound conversion of a wrapper SHALL remain deferred, so
+persisting parsed JSON SHALL require `to_json` or a native leaf. Assigning
+`body = to_json(j)` SHALL yield a text body holding valid JSON. Assigning a
+wrapper directly to a body SHALL fail as an explicit compatibility break. The
+`rc-141om` inbound behavior SHALL remain untouched.
+
+#### Scenario: Exchange inbound behavior is unchanged
+
+- **GIVEN** an exchange property holding a JSON integer greater than `i64::MAX`
+- **WHEN** a Rhai script reads that property
+- **THEN** the evaluation SHALL still fail with the existing typed conversion
+  error
+
+#### Scenario: Outbound refusal uses stable labels
+
+- **GIVEN** a Rhai script whose expression result is a `JsonValue`
+- **WHEN** the outbound conversion runs
+- **THEN** it SHALL refuse with a conversion error whose source label is
+  `json value` (or `json number`) and no Rust type path
+
+#### Scenario: Explicit serialization yields a text body
+
+- **GIVEN** a script that parses JSON and assigns `body = to_json(j)`
+- **WHEN** the script runs
+- **THEN** the body SHALL be a text body holding valid JSON
+
+### Requirement: Rhai JSON round-trip is semantic, not textual
+
+`to_json(parse_json(s))` SHALL re-emit JSON with the same value, numeric
+magnitude, and key order as `s`. Wrapped number tokens SHALL remain exact;
+native i64 spelling MAY normalize, including `-0` to `0`.
+Whitespace, indentation, and escape spelling
+SHALL NOT be preserved and no byte-for-byte guarantee SHALL be made.
+
+#### Scenario: Equivalent, not byte-identical
+
+- **GIVEN** the JSON text `{ "a" : 1 , "b" : "x\/y" }`
+- **WHEN** a script re-emits it with `to_json`
+- **THEN** the output SHALL be valid JSON with the same value and key order,
+  with different whitespace permitted
 
