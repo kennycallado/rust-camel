@@ -53,7 +53,7 @@ pub use error::CxfError;
 pub use health::CxfHealthCheck;
 pub use pool::{BridgeListenerInfo, BridgeSlot, BridgeState, CxfBridgePool};
 
-pub const BRIDGE_VERSION: &str = "0.8.0";
+pub const BRIDGE_VERSION: &str = "0.8.1";
 
 #[cfg(test)]
 mod bridge_client_test;

@@ -264,7 +264,7 @@ the rebuilt binary:
 export CAMEL_CXF_BRIDGE_BINARY_PATH=/path/to/cxf-bridge
 ```
 
-The override skips the download. The release pin stays `0.8.0`.
+The override skips the download. The release pin is `0.8.1`.
 
 ## Environment Variables
 
