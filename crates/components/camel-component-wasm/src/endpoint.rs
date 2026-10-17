@@ -11,6 +11,7 @@ pub struct WasmEndpoint {
     module_path: PathBuf,
     registry: Arc<dyn ComponentContext>,
     config: WasmConfig,
+    load_state: crate::health::WasmLoadState,
 }
 
 impl WasmEndpoint {
@@ -25,7 +26,13 @@ impl WasmEndpoint {
             module_path,
             registry,
             config,
+            load_state: Default::default(),
         }
+    }
+
+    pub(crate) fn with_load_state(mut self, load_state: crate::health::WasmLoadState) -> Self {
+        self.load_state = load_state;
+        self
     }
 
     pub fn config(&self) -> &WasmConfig {
@@ -49,7 +56,8 @@ impl Endpoint for WasmEndpoint {
             self.config.clone(),
             guest_config,
             self.registry.clone(),
-        );
+        )
+        .with_load_state(self.load_state.clone());
         Ok(Box::new(consumer))
     }
 
@@ -63,7 +71,8 @@ impl Endpoint for WasmEndpoint {
             self.registry.clone(),
             self.config.clone(),
             rt,
-        );
+        )
+        .with_load_state(self.load_state.clone());
         Ok(BoxProcessor::new(producer))
     }
 }

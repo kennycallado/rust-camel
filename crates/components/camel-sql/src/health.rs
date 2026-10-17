@@ -13,6 +13,12 @@ type ProbeFuture = Pin<Box<dyn Future<Output = Result<(), CamelError>> + Send>>;
 
 trait SqlHealthProbe: Send + Sync {
     fn probe(&self) -> ProbeFuture;
+
+    /// True while the producer's own lazily created pool has not been built
+    /// yet. Readiness reports this as Degraded (200).
+    fn not_started(&self) -> bool {
+        false
+    }
 }
 
 struct SqlPoolProbe {
@@ -36,6 +42,10 @@ impl SqlPoolProbe {
 }
 
 impl SqlHealthProbe for SqlPoolProbe {
+    fn not_started(&self) -> bool {
+        !(self.catalog.is_some() && self.datasource_name.is_some()) && self.pool.get().is_none()
+    }
+
     fn probe(&self) -> ProbeFuture {
         let pool = Arc::clone(&self.pool);
         let catalog = self.catalog.clone();
@@ -102,6 +112,9 @@ impl AsyncHealthCheck for SqlHealthCheck {
     }
 
     async fn check(&self) -> CheckResult {
+        if self.probe.not_started() {
+            return CheckResult::degraded(self.name(), "pool not created (created on first use)");
+        }
         match tokio::time::timeout(self.timeout, self.probe.probe()).await {
             Ok(Ok(())) => CheckResult::healthy(self.name()),
             Ok(Err(err)) => CheckResult::unhealthy(self.name(), &err.to_string()),
@@ -272,5 +285,40 @@ mod tests {
             HealthStatus::Healthy,
             "health check must resolve pool from catalog when datasource_name is set"
         );
+    }
+
+    #[tokio::test]
+    async fn sql_health_check_degraded_when_pool_not_created() {
+        let empty_cell: Arc<OnceCell<Arc<AnyPool>>> = Arc::new(OnceCell::new());
+        let check = SqlHealthCheck::new(empty_cell, None, None);
+
+        let result = check.check().await;
+
+        assert_eq!(result.status, HealthStatus::Degraded);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("created on first use"))
+        );
+    }
+
+    #[tokio::test]
+    async fn sql_health_check_unhealthy_when_datasource_unknown() {
+        let empty_cell: Arc<OnceCell<Arc<AnyPool>>> = Arc::new(OnceCell::new());
+        let catalog: Arc<dyn DatasourceCatalog> = Arc::new(CatalogWithPool {
+            name: "other".to_string(),
+            pool: Arc::new({
+                sqlx::any::install_default_drivers();
+                sqlx::any::AnyPoolOptions::new()
+                    .connect_lazy("sqlite::memory:")
+                    .expect("lazy pool")
+            }),
+        });
+        let check = SqlHealthCheck::new(empty_cell, Some(catalog), Some("missing".to_string()));
+
+        let result = check.check().await;
+
+        assert_eq!(result.status, HealthStatus::Unhealthy);
     }
 }

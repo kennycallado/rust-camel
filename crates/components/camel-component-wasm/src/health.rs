@@ -2,38 +2,83 @@ use async_trait::async_trait;
 use camel_api::{AsyncHealthCheck, CamelError, CheckResult};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 type ProbeFuture = Pin<Box<dyn Future<Output = Result<(), CamelError>> + Send>>;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum LoadPhase {
+    #[default]
+    NotLoaded,
+    Loaded,
+    Failed(String),
+}
+
+/// Load state of one `wasm:` endpoint's module, shared between the
+/// endpoint's health check and its producer / source consumer. Modules load
+/// lazily (producer: first exchange) or at route start (source consumer), so
+/// the state starts `NotLoaded`.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WasmLoadState(Arc<Mutex<LoadPhase>>);
+
+impl WasmLoadState {
+    fn set(&self, phase: LoadPhase) {
+        *self.0.lock().unwrap_or_else(|p| p.into_inner()) = phase;
+    }
+
+    fn get(&self) -> LoadPhase {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    pub(crate) fn set_loaded(&self) {
+        self.set(LoadPhase::Loaded);
+    }
+
+    pub(crate) fn set_failed(&self, reason: impl Into<String>) {
+        self.set(LoadPhase::Failed(reason.into()));
+    }
+}
+
 /// Trait for probing the WASM engine state.
 trait WasmEngineProbe: Send + Sync {
     fn probe(&self) -> ProbeFuture;
+
+    /// True while the module has not been loaded yet. Readiness reports this
+    /// as Degraded (200) so an unused route does not hold the pod out of
+    /// rotation.
+    fn not_started(&self) -> bool {
+        false
+    }
 }
 
-/// Real probe that checks an `AtomicBool` flag indicating whether the WASM module is loaded.
+/// Real probe that reads the endpoint's module load state.
 struct WasmEngineStateProbe {
-    loaded: Arc<AtomicBool>,
+    state: WasmLoadState,
 }
 
 impl WasmEngineStateProbe {
-    fn new(loaded: Arc<AtomicBool>) -> Self {
-        Self { loaded }
+    fn new(state: WasmLoadState) -> Self {
+        Self { state }
     }
 }
 
 impl WasmEngineProbe for WasmEngineStateProbe {
+    fn not_started(&self) -> bool {
+        self.state.get() == LoadPhase::NotLoaded
+    }
+
     fn probe(&self) -> ProbeFuture {
-        let loaded = Arc::clone(&self.loaded);
+        let phase = self.state.get();
         Box::pin(async move {
-            if loaded.load(Ordering::SeqCst) {
-                Ok(())
-            } else {
-                Err(CamelError::ComponentNotFound(
-                    "WASM engine module not loaded".to_string(),
-                ))
+            match phase {
+                LoadPhase::Loaded => Ok(()),
+                LoadPhase::NotLoaded => Err(CamelError::ComponentNotFound(
+                    "WASM module not loaded".to_string(),
+                )),
+                LoadPhase::Failed(reason) => Err(CamelError::ProcessorError(format!(
+                    "WASM module failed to load: {reason}"
+                ))),
             }
         })
     }
@@ -46,10 +91,10 @@ pub struct WasmHealthCheck {
 }
 
 impl WasmHealthCheck {
-    pub fn new(loaded: Arc<AtomicBool>) -> Self {
+    pub(crate) fn new(state: WasmLoadState) -> Self {
         let timeout = Duration::from_secs(5);
         Self {
-            probe: Arc::new(WasmEngineStateProbe::new(loaded)),
+            probe: Arc::new(WasmEngineStateProbe::new(state)),
             timeout,
         }
     }
@@ -67,6 +112,9 @@ impl AsyncHealthCheck for WasmHealthCheck {
     }
 
     async fn check(&self) -> CheckResult {
+        if self.probe.not_started() {
+            return CheckResult::degraded(self.name(), "module not loaded (loads on first use)");
+        }
         match tokio::time::timeout(self.timeout, self.probe.probe()).await {
             Ok(Ok(())) => CheckResult::healthy(self.name()),
             Ok(Err(err)) => CheckResult::unhealthy(self.name(), &err.to_string()),
@@ -99,6 +147,43 @@ mod tests {
         fn probe(&self) -> ProbeFuture {
             (self.responder)()
         }
+    }
+
+    #[tokio::test]
+    async fn wasm_health_check_follows_load_state() {
+        let state = WasmLoadState::default();
+        let check = WasmHealthCheck::new(state.clone());
+
+        let result = check.check().await;
+        assert_eq!(result.status, HealthStatus::Degraded);
+
+        state.set_loaded();
+        assert_eq!(check.check().await.status, HealthStatus::Healthy);
+
+        state.set_failed("bad magic");
+        let result = check.check().await;
+        assert_eq!(result.status, HealthStatus::Unhealthy);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("bad magic"))
+        );
+    }
+
+    #[tokio::test]
+    async fn wasm_load_state_is_per_endpoint() {
+        let a = WasmLoadState::default();
+        let b = WasmLoadState::default();
+        a.set_loaded();
+        assert_eq!(
+            WasmHealthCheck::new(a).check().await.status,
+            HealthStatus::Healthy
+        );
+        assert_eq!(
+            WasmHealthCheck::new(b).check().await.status,
+            HealthStatus::Degraded
+        );
     }
 
     #[tokio::test]

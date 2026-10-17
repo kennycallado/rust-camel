@@ -78,6 +78,7 @@ pub struct WasmProducer {
     config: crate::config::WasmConfig,
     state_store: crate::state_store::StateStore,
     init_failed: Arc<AtomicBool>,
+    load_state: crate::health::WasmLoadState,
     sem: Arc<Semaphore>,
     /// Observability handle powering the uniform `wasm:invoke`
     /// emission via `component_metrics()` (dashboard-observability 4.2).
@@ -100,6 +101,7 @@ impl Clone for WasmProducer {
             config: self.config.clone(),
             state_store: self.state_store.clone(),
             init_failed: Arc::clone(&self.init_failed),
+            load_state: self.load_state.clone(),
             sem: Arc::clone(&self.sem),
             observability: Arc::clone(&self.observability),
             max_bytes: self.max_bytes,
@@ -129,11 +131,17 @@ impl WasmProducer {
             config,
             state_store,
             init_failed: Arc::new(AtomicBool::new(false)),
+            load_state: Default::default(),
             sem: Arc::new(Semaphore::new(max_concurrent_calls)),
             observability,
             max_bytes: max_stream_bytes,
             no_progress_timeout: DEFAULT_NO_PROGRESS_TIMEOUT,
         }
+    }
+
+    pub(crate) fn with_load_state(mut self, load_state: crate::health::WasmLoadState) -> Self {
+        self.load_state = load_state;
+        self
     }
 
     pub fn config(&self) -> &crate::config::WasmConfig {
@@ -181,6 +189,7 @@ impl Service<Exchange> for WasmProducer {
         let state_store = self.state_store.clone();
         let state_store2 = self.state_store.clone();
         let init_failed = Arc::clone(&self.init_failed);
+        let load_state = self.load_state.clone();
         let sem = Arc::clone(&self.sem);
         // Streaming knobs: resolve the cancellation root PER CALL (the
         // context's shutdown token is replaced on every start) and derive
@@ -218,10 +227,12 @@ impl Service<Exchange> for WasmProducer {
                 {
                     Ok(rt) => {
                         init_failed.store(false, Ordering::Relaxed);
+                        load_state.set_loaded();
                         rt
                     }
                     Err(e) => {
                         init_failed.store(true, Ordering::Relaxed);
+                        load_state.set_failed(e.to_string());
                         warn!(
                             module = %module_path.display(),
                             error = %e,

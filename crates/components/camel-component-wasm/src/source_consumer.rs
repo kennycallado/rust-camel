@@ -49,6 +49,7 @@ pub struct WasmSourceConsumer {
     registry: Arc<dyn ComponentContext>,
     cancel_token: CancellationToken,
     engine: Option<Arc<Engine>>,
+    load_state: crate::health::WasmLoadState,
     run_task: Option<JoinHandle<Result<(), CamelError>>>,
     listener_task: Option<JoinHandle<()>>,
     bridge_task: Option<JoinHandle<()>>,
@@ -78,12 +79,18 @@ impl WasmSourceConsumer {
             registry,
             cancel_token: CancellationToken::new(),
             engine: None,
+            load_state: Default::default(),
             run_task: None,
             listener_task: None,
             bridge_task: None,
             kernel: None,
             plan: None,
         }
+    }
+
+    pub(crate) fn with_load_state(mut self, load_state: crate::health::WasmLoadState) -> Self {
+        self.load_state = load_state;
+        self
     }
 
     /// Test accessor for the captured classification mode.
@@ -96,9 +103,8 @@ impl WasmSourceConsumer {
     }
 }
 
-#[async_trait::async_trait]
-impl Consumer for WasmSourceConsumer {
-    async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+impl WasmSourceConsumer {
+    async fn start_inner(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
         // Adopt the Runtime's context token: stop() must observe it, and the
         // clone into SourceHostState below must carry it into every host
         // import's cancel select!. The new() token is only a placeholder.
@@ -395,6 +401,18 @@ impl Consumer for WasmSourceConsumer {
         self.bridge_task = Some(bt);
 
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Consumer for WasmSourceConsumer {
+    async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        let result = self.start_inner(ctx).await;
+        match &result {
+            Ok(()) => self.load_state.set_loaded(),
+            Err(e) => self.load_state.set_failed(e.to_string()),
+        }
+        result
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {

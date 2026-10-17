@@ -59,6 +59,7 @@ readiness (200 on `/readyz`). A route with an Unhealthy probe fails readiness
 The health subsystem distinguishes two states below Healthy:
 
 - **Degraded**: the component can still process Exchanges. The route passes readiness (200, pod Ready).
+  Lazily started resources (the xslt and jms bridges, the sql producer pool) report Degraded until first use, so a route without traffic still passes readiness.
 - **Unhealthy**: the component cannot process Exchanges. The route fails readiness (503, pod NotReady).
 
 See the [glossary](../concepts/glossary.md) for the canonical definition of

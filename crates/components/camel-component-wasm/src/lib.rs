@@ -61,7 +61,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicBool;
 
 use camel_api::CamelError;
 use camel_component_api::{Component, ComponentContext, ComponentMetadata, Endpoint};
@@ -70,17 +69,11 @@ use metadata::WasmMetadataDescriptor;
 pub struct WasmComponent {
     registry: Arc<dyn ComponentContext>,
     base_dir: PathBuf,
-    engine_loaded: Arc<AtomicBool>,
 }
 
 impl WasmComponent {
     pub fn new(registry: Arc<dyn ComponentContext>, base_dir: PathBuf) -> Self {
-        Self {
-            registry,
-            base_dir,
-            // TODO: set to true when WASM module is successfully loaded/instantiated
-            engine_loaded: Arc::new(AtomicBool::new(false)),
-        }
+        Self { registry, base_dir }
     }
 
     fn validate_and_resolve_path(&self, uri_path: &str) -> Result<PathBuf, CamelError> {
@@ -152,15 +145,19 @@ impl Component for WasmComponent {
 
         let module_path = self.validate_and_resolve_path(&path_part)?;
 
-        let health_check = WasmHealthCheck::new(Arc::clone(&self.engine_loaded));
+        let load_state = health::WasmLoadState::default();
+        let health_check = WasmHealthCheck::new(load_state.clone());
         ctx.register_current_route_health_check(Arc::new(health_check));
 
-        Ok(Box::new(WasmEndpoint::new(
-            uri.to_string(),
-            module_path,
-            self.registry.clone(),
-            wasm_config,
-        )))
+        Ok(Box::new(
+            WasmEndpoint::new(
+                uri.to_string(),
+                module_path,
+                self.registry.clone(),
+                wasm_config,
+            )
+            .with_load_state(load_state),
+        ))
     }
 }
 

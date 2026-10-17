@@ -13,6 +13,12 @@ use crate::proto::HealthRequest;
 #[async_trait]
 pub trait CxfBridgeHealthProbe: Send + Sync {
     fn probe(&self) -> HealthFuture;
+
+    /// True while no bridge slot exists yet (producer-only routes create it
+    /// on the first call). Readiness reports this as Degraded (200).
+    fn not_started(&self) -> bool {
+        false
+    }
 }
 
 pub type HealthFuture =
@@ -34,6 +40,10 @@ impl CxfBridgeProbe {
 
 #[async_trait]
 impl CxfBridgeHealthProbe for CxfBridgeProbe {
+    fn not_started(&self) -> bool {
+        !self.pool.slots.contains_key(&CxfBridgePool::slot_key())
+    }
+
     fn probe(&self) -> HealthFuture {
         let pool = Arc::clone(&self.pool);
         Box::pin(async move {
@@ -107,6 +117,9 @@ impl AsyncHealthCheck for CxfHealthCheck {
     }
 
     async fn check(&self) -> CheckResult {
+        if self.probe.not_started() {
+            return CheckResult::degraded("cxf", "bridge not started (starts on first use)");
+        }
         match self.probe.probe().await {
             Ok(true) => CheckResult::healthy("cxf"),
             Ok(false) => CheckResult::unhealthy("cxf", "bridge reported unhealthy"),
@@ -135,6 +148,27 @@ mod tests {
             let result = self.result.clone();
             Box::pin(async move { result })
         }
+    }
+
+    struct NotStartedProbe;
+
+    #[async_trait]
+    impl CxfBridgeHealthProbe for NotStartedProbe {
+        fn probe(&self) -> HealthFuture {
+            Box::pin(async { Err(CamelError::ProcessorError("must not probe".to_string())) })
+        }
+
+        fn not_started(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn not_started_bridge_returns_degraded() {
+        let check = CxfHealthCheck::with_probe(Box::new(NotStartedProbe));
+        let result = check.check().await;
+        assert_eq!(result.status, HealthStatus::Degraded);
+        assert!(result.message.as_deref().unwrap().contains("not started"));
     }
 
     #[tokio::test]

@@ -13,6 +13,12 @@ type HealthFuture = Pin<Box<dyn Future<Output = Result<bool, CamelError>> + Send
 /// Trait abstracting a single gRPC health probe call (mockable for tests).
 trait BridgeHealthProbe: Send + Sync {
     fn probe(&self) -> HealthFuture;
+
+    /// True while no bridge slot exists for the broker yet (producer-only
+    /// routes create it lazily). Readiness reports this as Degraded (200).
+    fn not_started(&self) -> bool {
+        false
+    }
 }
 
 /// Real probe that reaches into the bridge pool, extracts the channel from a
@@ -29,6 +35,10 @@ impl JmsBridgeHealthProbe {
 }
 
 impl BridgeHealthProbe for JmsBridgeHealthProbe {
+    fn not_started(&self) -> bool {
+        !self.pool.slots.contains_key(&self.broker_name)
+    }
+
     fn probe(&self) -> HealthFuture {
         let pool = Arc::clone(&self.pool);
         let broker_name = self.broker_name.clone();
@@ -92,6 +102,9 @@ impl AsyncHealthCheck for JmsHealthCheck {
     }
 
     async fn check(&self) -> CheckResult {
+        if self.probe.not_started() {
+            return CheckResult::degraded(self.name(), "bridge not started (starts on first use)");
+        }
         match tokio::time::timeout(self.timeout, self.probe.probe()).await {
             Ok(Ok(true)) => CheckResult::healthy(self.name()),
             Ok(Ok(false)) => CheckResult::unhealthy(self.name(), "bridge reported unhealthy"),
@@ -125,6 +138,36 @@ mod tests {
         fn probe(&self) -> HealthFuture {
             (self.responder)()
         }
+    }
+
+    struct NotStartedProbe;
+
+    impl BridgeHealthProbe for NotStartedProbe {
+        fn probe(&self) -> HealthFuture {
+            Box::pin(async { Err(CamelError::ProcessorError("must not probe".to_string())) })
+        }
+
+        fn not_started(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn jms_health_check_degraded_when_bridge_not_started() {
+        let check = JmsHealthCheck::with_probe_for_tests(
+            Arc::new(NotStartedProbe),
+            Duration::from_millis(50),
+        );
+
+        let result = check.check().await;
+
+        assert_eq!(result.status, HealthStatus::Degraded);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("not started"))
+        );
     }
 
     #[tokio::test]

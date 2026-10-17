@@ -14,6 +14,13 @@ type HealthFuture = Pin<Box<dyn Future<Output = Result<bool, CamelError>> + Send
 /// Trait abstracting a single gRPC health probe call (mockable for tests).
 trait XsltBridgeHealthProbe: Send + Sync {
     fn probe(&self) -> HealthFuture;
+
+    /// True while the lazily started bridge has not been launched yet.
+    /// Readiness reports this as Degraded (200) so a route that has not
+    /// received traffic does not hold the pod out of rotation.
+    fn not_started(&self) -> bool {
+        false
+    }
 }
 
 /// Real probe that peeks at the bridge state and, if Ready, issues a gRPC
@@ -29,6 +36,10 @@ impl XsltBridgeProbe {
 }
 
 impl XsltBridgeHealthProbe for XsltBridgeProbe {
+    fn not_started(&self) -> bool {
+        matches!(&*self.state_rx.borrow(), BridgeState::Starting)
+    }
+
     fn probe(&self) -> HealthFuture {
         let state_rx = Arc::clone(&self.state_rx);
 
@@ -81,6 +92,9 @@ impl AsyncHealthCheck for XsltHealthCheck {
     }
 
     async fn check(&self) -> CheckResult {
+        if self.probe.not_started() {
+            return CheckResult::degraded(self.name(), "bridge not started (starts on first use)");
+        }
         match tokio::time::timeout(self.timeout, self.probe.probe()).await {
             Ok(Ok(true)) => CheckResult::healthy(self.name()),
             Ok(Ok(false)) => CheckResult::unhealthy(self.name(), "bridge reported unhealthy"),
@@ -114,6 +128,48 @@ mod tests {
         fn probe(&self) -> HealthFuture {
             (self.responder)()
         }
+    }
+
+    struct NotStartedProbe;
+
+    impl XsltBridgeHealthProbe for NotStartedProbe {
+        fn probe(&self) -> HealthFuture {
+            Box::pin(async { Err(CamelError::ProcessorError("must not probe".to_string())) })
+        }
+
+        fn not_started(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn xslt_health_check_degraded_when_bridge_not_started() {
+        let check = XsltHealthCheck::with_probe_for_tests(
+            Arc::new(NotStartedProbe),
+            Duration::from_millis(50),
+        );
+
+        let result = check.check().await;
+
+        assert_eq!(result.status, HealthStatus::Degraded);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|m| m.contains("not started"))
+        );
+    }
+
+    #[tokio::test]
+    async fn xslt_real_probe_reports_not_started_only_in_starting_state() {
+        let (tx, rx) = watch::channel(BridgeState::Starting);
+        let probe = XsltBridgeProbe::new(Arc::new(rx));
+        assert!(probe.not_started());
+
+        tx.send(BridgeState::Degraded("boom".into())).unwrap();
+        assert!(!probe.not_started());
+        tx.send(BridgeState::Stopped).unwrap();
+        assert!(!probe.not_started());
     }
 
     #[tokio::test]
