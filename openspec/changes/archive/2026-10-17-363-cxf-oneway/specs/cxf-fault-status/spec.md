@@ -2,6 +2,10 @@
 
 ### Requirement: Fault class and HTTP status follow a fixed matrix
 
+<!-- openspec-scenario-ops
+renamed: SOAP 1.1 always returns 500 -> SOAP 1.1 always returns 500 for faults
+-->
+
 The listener SHALL classify every failure as `Sender` or `Receiver` and map it
 to HTTP status as follows:
 
