@@ -156,7 +156,6 @@ protox = "=0.9.1"
 tonic-build = { version = "0.14" }
 tonic-prost-build = { version = "0.14" }
 tonic-prost = { version = "0.14" }
-protoc-bin-vendored = "3"
 tower = { version = "0.5", features = ["util"] }
 tower-lsp = "0.20"
 tower-http = { version = "0.7", features = ["fs", "timeout"] }

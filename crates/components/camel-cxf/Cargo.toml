@@ -46,7 +46,7 @@ tracing-subscriber = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }
-protoc-bin-vendored = { workspace = true }
+protox.workspace = true
 
 [lints]
 workspace = true

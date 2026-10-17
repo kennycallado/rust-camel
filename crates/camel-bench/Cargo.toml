@@ -32,7 +32,7 @@ sha2.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
-protoc-bin-vendored.workspace = true
+protox.workspace = true
 
 [[bench]]
 name = "direct"

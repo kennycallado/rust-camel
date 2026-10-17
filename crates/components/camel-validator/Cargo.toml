@@ -34,7 +34,7 @@ thiserror.workspace = true
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }
-protoc-bin-vendored = { workspace = true }
+protox.workspace = true
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }

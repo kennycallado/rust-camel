@@ -57,10 +57,14 @@ Protobuf editions are unsupported, in sources and in descriptor sets,
 until prost-reflect supports them. Bd `rc-sed5l` tracks the upstream work.
 Error texts follow protox.
 
-The build-time `build.rs` migration is bd `rc-x2rlm`. Bd `rc-joask` is
-resolved by mission 350: sealed artifacts resolve `protoFile` in memory
-through the embedded-source registry. One gap stays open: `rc-me2ii`
-(cache invalidation on an imported file change).
+The build-time migration (bd `rc-x2rlm`) is complete: all six workspace
+`build.rs` scripts compile with `protox` and generate Rust through
+`tonic-prost-build`'s `compile_fds`. Workspace manifests and `Cargo.lock`
+no longer depend on `protoc-bin-vendored` or its platform packages.
+
+Bd `rc-joask` is resolved by mission 350: sealed artifacts resolve
+`protoFile` in memory through the embedded-source registry.
+One gap stays open: `rc-me2ii` (cache invalidation on an imported file change).
 `camel-bridge` downloads (bd `rc-grvqh`) need their own decision.
 
 ## References

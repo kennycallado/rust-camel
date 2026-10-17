@@ -52,7 +52,7 @@ rcgen = "0.14"
 
 [build-dependencies]
 tonic-prost-build.workspace = true
-protoc-bin-vendored.workspace = true
+protox.workspace = true
 
 [lints]
 workspace = true
