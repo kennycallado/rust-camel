@@ -49,11 +49,16 @@ quarkus:
         - tls/placeholder-server.pem
         - tls/placeholder-server.key
         - META-INF/services/jakarta.xml.ws.spi.Provider
+        - META-INF/services/jakarta.xml.soap.SAAJMetaFactory
+        - META-INF/services/jakarta.xml.soap.MessageFactory
+        - META-INF/services/jakarta.xml.soap.SOAPFactory
+        - META-INF/services/jakarta.xml.soap.SOAPConnectionFactory
         - META-INF/services/jakarta.activation.spi.MailcapRegistryProvider
         - META-INF/services/jakarta.activation.spi.MimeTypeRegistryProvider
         - META-INF/services/javax.wsdl.factory.WSDLFactory
         - META-INF/cxf/bus-extensions.txt
         - META-INF/cxf/**
+        - org/apache/xml/security/resource/config.xml
         - META-INF/wsdl/**
     # NOTE: quarkus.native.additional-build-args is intentionally NOT set here.
     # It is provided solely via the QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS env var

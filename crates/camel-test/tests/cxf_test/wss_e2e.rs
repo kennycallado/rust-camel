@@ -1,0 +1,352 @@
+//! Native end-to-end WS-Security signed-call regression.
+//!
+//! A nested module of the `cxf_test` integration target (declared with
+//! `#[path]`), so the `--test cxf_test` filter keeps working.
+//!
+//! **Guards the native SAAJ registration regression.** Without the native-image
+//! registration that makes the SAAJ message factory resolvable, the native
+//! cxf-bridge fails every outbound WS-Security signing before it sends with
+//! `jakarta.xml.soap.SOAPException: Unable to create message factory for SOAP:
+//! ... Provider com.sun.xml.messaging.saaj.soap.SAAJMetaFactoryImpl not found`.
+//! LEG A (producer signing) therefore fails on the native binary before any
+//! request reaches the capture service, and passes once SAAJ is registered for
+//! the native image. LEG B (consumer verification) pins that a real signed
+//! request verifies and exports the known `alice` signer descriptor, so the
+//! profile shape exercised by LEG A is also proven on the inbound path.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use camel_api::{Body, Exchange, Message};
+use camel_component_cxf::config::CxfSecurityFields;
+use camel_component_cxf::{CxfBridgePool, CxfComponent, CxfPoolConfig, CxfProfileConfig};
+use camel_dsl::parse_yaml;
+use camel_test::CamelTestContext;
+use quick_xml::NsReader;
+use quick_xml::events::{BytesStart, Event};
+use reqwest::StatusCode;
+
+use crate::signer::assert_alice_signer_properties;
+use crate::support::cxf::{
+    SoapVersion, require_cxf_bridge_binary, start_capturing_mock_soap_service,
+};
+use crate::support::wait::wait_until;
+use crate::support::{bridge_bg_rt, install_crypto_provider, send_to_direct};
+use crate::wire::{is_soap_envelope_ns, resolved_name};
+use crate::{
+    cxf_wsdl_path, cxf_wss_keystore_fixture, http_client, init_tracing, post_soap,
+    reserve_local_port, wss_single_profile_component,
+};
+
+/// WS-Security (SOAP message security) header namespace.
+const WSSE_NS: &str =
+    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd";
+/// XML digital signature namespace.
+const DS_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
+
+/// Bound for the eagerly-spawned producer bridge slot init. The pool's own
+/// `bridge_start_timeout_ms` is 30 s, so the join must outlast that startup.
+const BRIDGE_INIT_BUDGET: Duration = Duration::from_secs(60);
+
+/// Bare `sayHello` operation payload the bridge wraps and signs.
+const SAY_HELLO_PAYLOAD: &str =
+    r#"<hel:sayHello xmlns:hel="http://example.com/hello"><name>signed</name></hel:sayHello>"#;
+
+/// Namespace-resolved structure of a captured signed request.
+#[derive(Debug, Default)]
+struct SignedRequestStructure {
+    /// Number of `wsse:Security` headers.
+    security_headers: usize,
+    /// Number of `ds:Signature` elements.
+    signatures: usize,
+    /// `URI` attribute values of every `ds:Reference`.
+    reference_uris: Vec<String>,
+    /// `Id` attribute values found on SOAP `Body` elements.
+    body_ids: Vec<String>,
+}
+
+/// Parses `xml` with a namespace-aware reader and records only resolved
+/// `{namespace}local` element names plus the `URI`/`Id` attributes needed to
+/// prove the signature reference covers the SOAP Body.
+fn parse_signed_request(xml: &str) -> SignedRequestStructure {
+    let mut reader = NsReader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut structure = SignedRequestStructure::default();
+
+    loop {
+        match reader.read_resolved_event_into(&mut buf) {
+            Ok((resolve, Event::Start(start))) | Ok((resolve, Event::Empty(start))) => {
+                let (ns, local) = resolved_name(&resolve, &start);
+                if ns == WSSE_NS && local == "Security" {
+                    structure.security_headers += 1;
+                }
+                if ns == DS_NS && local == "Signature" {
+                    structure.signatures += 1;
+                }
+                if ns == DS_NS
+                    && local == "Reference"
+                    && let Some(uri) = attribute_by_local(&start, "URI")
+                {
+                    structure.reference_uris.push(uri);
+                }
+                if is_soap_envelope_ns(&ns)
+                    && local == "Body"
+                    && let Some(id) = attribute_by_local(&start, "Id")
+                {
+                    structure.body_ids.push(id);
+                }
+            }
+            Ok((_, Event::Eof)) => break,
+            Ok(_) => {}
+            Err(err) => panic!("captured signed request is not well-formed XML: {err}"),
+        }
+        buf.clear();
+    }
+    structure
+}
+
+/// Returns the value of the first attribute whose local name (prefix stripped)
+/// matches `local`.
+fn attribute_by_local(start: &BytesStart<'_>, local: &str) -> Option<String> {
+    start.attributes().flatten().find_map(|attr| {
+        let key = attr.key.as_ref();
+        let key_local = key.rsplit(':').next().unwrap_or(key);
+        (key_local == local).then(|| attr.value.to_string())
+    })
+}
+
+/// A producer profile that signs every outbound request with the checked-in
+/// `alice` JKS. Fields mirror the JVM signing configuration
+/// (`SignedRequestFixtureGeneratorTest` / `WssSecurityProcessorTest`): keystore
+/// and password `changeit`, signer alias `alice`, and SHA-256 signature/digest
+/// algorithms because WSS4J secure validation (default-on) forbids RSA-SHA1.
+/// `security_actions_out` is set explicitly to `Signature` (the same value
+/// `SecurityProfile.resolveActionsOrDefault` returns when unset).
+async fn signing_producer_component(addr: SocketAddr) -> CxfComponent {
+    let pool = Arc::new(
+        CxfBridgePool::from_config(CxfPoolConfig {
+            profiles: vec![CxfProfileConfig {
+                name: "wss_sign".to_string(),
+                address: Some(format!("http://{addr}/service")),
+                wsdl_path: cxf_wsdl_path(),
+                service_name: "{http://example.com/hello}HelloService".to_string(),
+                port_name: "{http://example.com/hello}HelloPort".to_string(),
+                security: CxfSecurityFields {
+                    keystore_path: Some(cxf_wss_keystore_fixture()),
+                    keystore_password: Some("changeit".to_string()),
+                    sig_username: Some("alice".to_string()),
+                    sig_password: Some("changeit".to_string()),
+                    security_actions_out: Some("Signature".to_string()),
+                    signature_algorithm: Some(
+                        "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256".to_string(),
+                    ),
+                    signature_digest_algorithm: Some(
+                        "http://www.w3.org/2001/04/xmlenc#sha256".to_string(),
+                    ),
+                    ..Default::default()
+                },
+            }],
+            max_bridges: 4,
+            bridge_start_timeout_ms: 30_000,
+            health_check_interval_ms: 5_000,
+            bridge_cache_dir: None,
+            version: camel_component_cxf::BRIDGE_VERSION.to_string(),
+            bind_address: None,
+            listener_tls: None,
+            reconnect: Default::default(),
+        })
+        .expect("valid cxf producer signing pool config"),
+    );
+
+    // Eagerly create the bridge slot on the permanent background runtime so the
+    // first producer invoke does not race native-bridge startup (and the
+    // `send_to_direct` retry budget) and the tonic dispatch task outlives this
+    // test's runtime.
+    let pool_init = Arc::clone(&pool);
+    let mut pool_init_task = bridge_bg_rt().spawn(async move {
+        pool_init
+            .get_or_create_slot(&CxfBridgePool::slot_key())
+            .await
+    });
+    if tokio::time::timeout(BRIDGE_INIT_BUDGET, &mut pool_init_task)
+        .await
+        .is_err()
+    {
+        pool_init_task.abort();
+        panic!("producer signing bridge slot init must complete within {BRIDGE_INIT_BUDGET:?}");
+    }
+
+    CxfComponent::new(pool)
+}
+
+/// End-to-end native WS-Security closed loop: LEG A signs an outbound producer
+/// call and asserts the captured wire carries a `wsse:Security` header with a
+/// `ds:Signature` whose `ds:Reference` URI covers the SOAP `Body`; LEG B posts
+/// those captured (native-signed) bytes to a WSS consumer and asserts they
+/// verify and export the `alice` signer descriptor.
+///
+/// LEG A is the regression leg: on the native binary without the SAAJ native
+/// registration it fails before the request is sent. LEG B closes the loop so
+/// a structurally valid but cryptographically broken signature cannot pass.
+#[tokio::test(flavor = "multi_thread")]
+async fn cxf_native_wss_signed_call_and_verified_signer() {
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_cxf_bridge_binary();
+    let wsdl_path = cxf_wsdl_path();
+
+    // --- LEG A: outbound signature on the native producer path ---
+    let (addr, captured) = start_capturing_mock_soap_service(SoapVersion::Soap11).await;
+    let h_producer = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(signing_producer_component(addr).await)
+        .build()
+        .await;
+
+    let producer_yaml = format!(
+        "routes:\n  - id: cxf-wss-signed-call\n    from: direct:start\n    steps:\n      - to: \"cxf://http://{addr}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&operation=sayHello&profile=wss_sign\"\n      - to: \"mock:done\"\n"
+    );
+    for route in parse_yaml(&producer_yaml).unwrap() {
+        h_producer.add_route(route).await.unwrap();
+    }
+    h_producer.start().await;
+
+    let exchange = Exchange::new(Message::new(Body::Text(SAY_HELLO_PAYLOAD.to_string())));
+    let response = send_to_direct(&h_producer, "direct:start", exchange)
+        .await
+        .expect(
+            "outbound WS-Security signing must not fail before the request is sent \
+             (regression: native SAAJMetaFactory/MessageFactory registration)",
+        );
+    let response_body = response.body_as::<String>().unwrap_or_default();
+    assert!(
+        response_body.contains("Hello World"),
+        "the signed call must complete against the capturing service, got: {response_body}"
+    );
+
+    let endpoint = h_producer.mock().get_endpoint("done").unwrap();
+    wait_until(
+        "signed producer delivery to mock",
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+        || {
+            let endpoint = endpoint.clone();
+            async move { Ok(!endpoint.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .unwrap();
+
+    let captured_body = captured
+        .lock()
+        .expect("captured request lock")
+        .first()
+        .cloned()
+        .expect("capturing service should have recorded one signed request")
+        .body;
+
+    let structure = parse_signed_request(&captured_body);
+    assert_eq!(
+        structure.security_headers, 1,
+        "the signed request must carry exactly one wsse:Security header, got {:?}\nbody:\n{}",
+        structure, captured_body
+    );
+    assert_eq!(
+        structure.signatures, 1,
+        "the signed request must carry exactly one ds:Signature, got {:?}\nbody:\n{}",
+        structure, captured_body
+    );
+    assert!(
+        !structure.body_ids.is_empty(),
+        "the SOAP Body must carry an Id the signature can reference, got {:?}\nbody:\n{}",
+        structure,
+        captured_body
+    );
+    let covers_body = structure.reference_uris.iter().any(|uri| {
+        uri.strip_prefix('#')
+            .is_some_and(|id| structure.body_ids.iter().any(|body_id| body_id == id))
+    });
+    assert!(
+        covers_body,
+        "a ds:Reference URI must point at the SOAP Body Id (URI=\"#...\"), got references \
+         {:?} and body ids {:?}\nbody:\n{}",
+        structure.reference_uris, structure.body_ids, captured_body
+    );
+
+    h_producer.stop().await;
+
+    // --- LEG B: inbound verification exports the verified signer ---
+    let port = reserve_local_port();
+    let h_consumer = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(wss_single_profile_component(
+            "wss_e2e_consumer",
+            None,
+            port,
+            &wsdl_path,
+        ))
+        .build()
+        .await;
+
+    let consumer_yaml = format!(
+        "routes:\n  - id: wss-e2e-consumer\n    from: \"cxf://http://127.0.0.1:{port}/cxf/wss_e2e_consumer?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile=wss_e2e_consumer\"\n    steps:\n      - set_body:\n          value:\n            constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n      - to: \"mock:consumed\"\n"
+    );
+    for route in parse_yaml(&consumer_yaml).unwrap() {
+        h_consumer.add_route(route).await.unwrap();
+    }
+    h_consumer.start().await;
+
+    let base = format!("http://127.0.0.1:{port}/cxf/wss_e2e_consumer");
+    wait_until(
+        "wss_e2e_consumer endpoint ready",
+        Duration::from_secs(15),
+        Duration::from_millis(200),
+        || {
+            let url = base.clone();
+            async move {
+                match http_client().get(&url).send().await {
+                    Ok(_) => Ok(true),
+                    Err(_) => Ok(false),
+                }
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    // Closed loop: verify the EXACT bytes the native bridge just signed (LEG A
+    // captured request), not a static fixture. The consumer's WSS verification
+    // must accept the native-produced signature and export the alice signer
+    // descriptor — this is what distinguishes "signature-shaped XML" from "a
+    // cryptographically valid signature". The signature carries no wsu:Timestamp,
+    // so it never expires during the test.
+    let res = post_soap(&base, "text/xml", "sayHello", captured_body.clone()).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the native-signed request must pass WS-Security verification and reach the route, \
+         body:\n{captured_body}"
+    );
+
+    let consumed = h_consumer.mock().get_endpoint("consumed").unwrap();
+    wait_until(
+        "wss_e2e_consumer received the signed request",
+        Duration::from_secs(10),
+        Duration::from_millis(200),
+        || {
+            let consumed = consumed.clone();
+            async move { Ok(!consumed.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .unwrap();
+
+    let hits = consumed.get_received_exchanges().await;
+    assert_alice_signer_properties(&hits[0]);
+
+    h_consumer.stop().await;
+}

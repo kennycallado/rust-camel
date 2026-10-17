@@ -158,6 +158,13 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
             Level.FINE,
             "SOAP invoke returned fault: {0}/{1}, code={2}",
             new Object[] {service, port, code});
+        // The cause chain (e.g. a WSSecurityException errorCode behind the
+        // generic "Security processing failed." fault string) is otherwise
+        // lost when the fault is flattened onto the wire — log it so native
+        // WS-Security failures stay diagnosable. Never log secrets.
+        if (sfe.getCause() != null) {
+          LOG.log(Level.WARNING, "SOAP invoke fault cause", sfe.getCause());
+        }
         responseObserver.onNext(faultResp);
         responseObserver.onCompleted();
         return;

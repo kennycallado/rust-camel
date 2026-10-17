@@ -46,6 +46,16 @@ dependencies {
     implementation("jakarta.servlet:jakarta.servlet-api:6.1.0")
     implementation("com.ibm.icu:icu4j:75.1")
     implementation("com.sun.xml.fastinfoset:FastInfoset:2.1.1")
+    // Previously transitive via cxf-rt-ws-security; pinned explicit so the
+    // native SAAJ registration (resources + reflection entries) tracks a
+    // known version instead of whichever the tree resolves.
+    implementation("com.sun.xml.messaging.saaj:saaj-impl:3.0.6")
+    // Optional dependency of saaj-impl (attachments). Once the SAAJ impl
+    // classes are registered for reflection, native-image must analyze
+    // MessageImpl, which references org.jvnet.mimepull.MIMEPart; without this
+    // pin the native build fails with NoClassDefFoundError. Version is the
+    // one saaj-impl 3.0.6 is built against (metro-saaj 3.0.6 BOM).
+    implementation("org.jvnet.mimepull:mimepull:1.11.0")
 
     testImplementation("io.quarkus:quarkus-junit5")
     testImplementation("io.grpc:grpc-testing")

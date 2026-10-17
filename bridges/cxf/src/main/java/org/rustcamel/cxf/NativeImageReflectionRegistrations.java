@@ -193,6 +193,82 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       "org.apache.wss4j.dom.message.WSSecEncrypt",
       "org.apache.wss4j.dom.message.WSSecBase",
       "org.apache.wss4j.dom.validate.SignatureTrustValidator",
+      // --- SAAJ impl (jakarta.xml.soap factories for the WSS4J DOM path) ---
+      "com.sun.xml.messaging.saaj.soap.SAAJMetaFactoryImpl",
+      "com.sun.xml.messaging.saaj.soap.MessageFactoryImpl",
+      "com.sun.xml.messaging.saaj.soap.SOAPFactoryImpl",
+      "com.sun.xml.messaging.saaj.soap.ver1_1.SOAPMessageFactory1_1Impl",
+      "com.sun.xml.messaging.saaj.soap.ver1_2.SOAPMessageFactory1_2Impl",
+      // Exact impls named by the saaj-impl 3.0.6 META-INF/services files
+      // (jakarta.xml.soap.SOAPFactory / SOAPConnectionFactory) — the service
+      // resources above are read reflectively at runtime in the native image.
+      "com.sun.xml.messaging.saaj.soap.ver1_1.SOAPFactory1_1Impl",
+      "com.sun.xml.messaging.saaj.soap.ver1_2.SOAPFactory1_2Impl",
+      "com.sun.xml.messaging.saaj.client.p2p.HttpSOAPConnectionFactory",
+      // --- xmlsec 4.0.4 sign/verify implementations + wss4j token classes ---
+      // Belt-and-braces for the WSS4J DOM signing path (WSSecSignature.build
+      // + XMLSignature.sign). The Santuario registries hold class literals, so
+      // these should be reachable by static analysis; registering the
+      // constructors removes any residual reflective-construction risk and is
+      // a silent no-op for names the image already covers.
+      "org.apache.xml.security.algorithms.implementations.SignatureBaseRSA$SignatureRSASHA256",
+      "org.apache.xml.security.algorithms.implementations.SignatureBaseRSA$SignatureRSASHA1",
+      "org.apache.xml.security.algorithms.implementations.SignatureBaseRSA$SignatureRSASHA384",
+      "org.apache.xml.security.algorithms.implementations.SignatureBaseRSA$SignatureRSASHA512",
+      "org.apache.xml.security.transforms.implementations.TransformC14N",
+      "org.apache.xml.security.transforms.implementations.TransformC14NWithComments",
+      "org.apache.xml.security.transforms.implementations.TransformC14NExclusive",
+      "org.apache.xml.security.transforms.implementations.TransformC14NExclusiveWithComments",
+      "org.apache.xml.security.transforms.implementations.TransformC14N11",
+      "org.apache.xml.security.transforms.implementations.TransformC14N11_WithComments",
+      "org.apache.xml.security.transforms.implementations.TransformEnvelopedSignature",
+      "org.apache.xml.security.transforms.implementations.TransformBase64Decode",
+      "org.apache.xml.security.transforms.implementations.TransformXPath",
+      "org.apache.xml.security.c14n.implementations.Canonicalizer20010315",
+      "org.apache.xml.security.c14n.implementations.Canonicalizer20010315OmitComments",
+      "org.apache.xml.security.c14n.implementations.Canonicalizer20010315WithComments",
+      "org.apache.xml.security.c14n.implementations.Canonicalizer20010315Excl",
+      "org.apache.xml.security.c14n.implementations.Canonicalizer20010315ExclOmitComments",
+      "org.apache.xml.security.c14n.implementations.Canonicalizer20010315ExclWithComments",
+      "org.apache.xml.security.c14n.implementations.Canonicalizer11_OmitComments",
+      "org.apache.xml.security.c14n.implementations.Canonicalizer11_WithComments",
+      // WSS4J 4.x signs with the "physical" canonicalizer internally
+      // (http://santuario.apache.org/c14n/physical). xmlsec resolves
+      // canonicalizers reflectively (Canonicalizer.register(String, String) +
+      // no-arg constructor) — without this entry the native image fails with
+      // "Unknown canonicalizer ... CanonicalizerPhysical.<init>()" and the
+      // outbound signature collapses to the generic "Security processing
+      // failed." SOAP fault.
+      "org.apache.xml.security.c14n.implementations.CanonicalizerPhysical",
+      "org.apache.wss4j.dom.transform.STRTransform",
+      "org.apache.wss4j.common.token.BinarySecurity",
+      "org.apache.wss4j.common.token.SecurityTokenReference",
+      "org.apache.wss4j.common.token.Reference",
+      // --- wss4j action/processor/validator objects ---
+      // WSSConfig.getAction/getProcessor/getValidator instantiate these with
+      // getDeclaredConstructor().newInstance() from name-keyed maps; without
+      // constructor reflection the native image fails inside doSenderAction
+      // right after the SAAJ header creation works. SAML classes are
+      // deliberately excluded (OpenSAML types would break the native build
+      // when OpenSAML is absent).
+      "org.apache.wss4j.dom.action.SignatureAction",
+      "org.apache.wss4j.dom.action.TimestampAction",
+      "org.apache.wss4j.dom.action.EncryptionAction",
+      "org.apache.wss4j.dom.action.UsernameTokenAction",
+      "org.apache.wss4j.dom.action.UsernameTokenSignedAction",
+      "org.apache.wss4j.dom.action.SignatureConfirmationAction",
+      "org.apache.wss4j.dom.action.SignatureDerivedAction",
+      "org.apache.wss4j.dom.action.EncryptionDerivedAction",
+      "org.apache.wss4j.dom.action.CustomTokenAction",
+      "org.apache.wss4j.dom.processor.EncryptedDataProcessor",
+      "org.apache.wss4j.dom.processor.DerivedKeyTokenProcessor",
+      "org.apache.wss4j.dom.processor.SecurityContextTokenProcessor",
+      "org.apache.wss4j.dom.processor.SignatureConfirmationProcessor",
+      "org.apache.wss4j.dom.processor.UsernameTokenProcessor",
+      "org.apache.wss4j.dom.validate.TimestampValidator",
+      "org.apache.wss4j.dom.validate.UsernameTokenValidator",
+      "org.apache.wss4j.dom.transform.AttachmentCiphertextTransform",
+      "org.apache.wss4j.dom.resolvers.ResolverAttachment",
       "org.rustcamel.cxf.WssSecurityProcessor"
     })
 public class NativeImageReflectionRegistrations {}

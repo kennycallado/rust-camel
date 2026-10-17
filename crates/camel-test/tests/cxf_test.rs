@@ -24,6 +24,11 @@ mod signer;
 #[path = "cxf_test/listener.rs"]
 mod listener;
 
+// Nested module: native end-to-end WS-Security signed call (SAAJ native
+// registration regression). Declared by `#[path]` for the same reason as `wire`.
+#[path = "cxf_test/wss_e2e.rs"]
+mod wss_e2e;
+
 use camel_api::{Body, Exchange, Message};
 use camel_bridge::process::{
     BridgeError, BridgeProcess, BridgeProcessConfig, CxfProfileEnvVars, CxfTlsEnvVars, Redacted,

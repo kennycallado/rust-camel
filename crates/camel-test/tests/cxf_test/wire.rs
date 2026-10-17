@@ -68,7 +68,10 @@ fn parse_soap_structure(xml: &str) -> CapturedSoapStructure {
 }
 
 /// Resolves an element to its `(namespace, local name)` pair.
-fn resolved_name(resolve: &ResolveResult<'_>, start: &BytesStart<'_>) -> (String, String) {
+pub(crate) fn resolved_name(
+    resolve: &ResolveResult<'_>,
+    start: &BytesStart<'_>,
+) -> (String, String) {
     let local = start.local_name().as_ref().to_string();
     let ns = match resolve {
         ResolveResult::Bound(ns) => ns.0.to_string(),
@@ -102,7 +105,7 @@ fn record_element(
 }
 
 /// True when `ns` is a SOAP 1.1 or SOAP 1.2 envelope namespace.
-fn is_soap_envelope_ns(ns: &str) -> bool {
+pub(crate) fn is_soap_envelope_ns(ns: &str) -> bool {
     ns == SOAP11_ENVELOPE_NS || ns == SOAP12_ENVELOPE_NS
 }
 
