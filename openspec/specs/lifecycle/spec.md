@@ -1,7 +1,10 @@
 # lifecycle Specification
 
 ## Purpose
-TBD - created by archiving change runtime-endpoint-registry. Update Purpose after archive.
+Lifecycle and health queries over the runtime. The runtime maintains a
+source-endpoint-to-route index and exposes `routes_for_endpoint`, endpoint
+health, and per-route health checks.
+
 ## Requirements
 ### Requirement: Endpoint index population
 

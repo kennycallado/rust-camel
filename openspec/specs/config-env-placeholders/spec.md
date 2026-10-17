@@ -1,7 +1,11 @@
 # config-env-placeholders Specification
 
 ## Purpose
-TBD - created by archiving change env-int-placeholder-typing. Update Purpose after archive.
+`${env:...}` placeholder resolution in TOML configuration. Numeric and other
+typed leaves coerce after resolution, using the existing strict-versus-plain
+leaf rules, and a missing placeholder without a default fails with the
+variable name.
+
 ## Requirements
 ### Requirement: Placeholder-bearing numeric TOML leaves coerce after resolution
 

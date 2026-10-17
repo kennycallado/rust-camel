@@ -1,7 +1,11 @@
 # xsd-schema-set Specification
 
 ## Purpose
-TBD - created by archiving change 361-cxfsoap. Update Purpose after archive.
+Schema-set transmission for XML validation. Registration carries root-relative
+virtual paths, aliases, and a root systemId; numeric limits are enforced in
+Rust and Java; discovery confines reads and follows only reachable imports;
+and the resolver serves supplied keys only.
+
 ## Requirements
 ### Requirement: Schema set is transmitted as virtual paths plus a root systemId
 

@@ -1,7 +1,10 @@
 # mock-component-correctness Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-mock-correctness. Update Purpose after archive.
+Correctness and assertion surface of the mock component. It adds fail-fast
+triggering, count expectations, `try_assert_satisfied`, matcher-aware
+diagnostics, stream-preserving body clones, and a five-parameter URI surface.
+
 ## Requirements
 ### Requirement: fail-fast error trigger
 

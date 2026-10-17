@@ -1,7 +1,10 @@
 # availability-dos-hardening Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-availability-dos. Update Purpose after archive.
+Denial-of-service hardening for long-running servers and producers. The gRPC
+accept loop backs off on persistent accept errors, and the LLM producer
+rejects oversized JSON header payloads before deserializing them.
+
 ## Requirements
 ### Requirement: gRPC accept-loop backoff on persistent accept errors
 

@@ -1,7 +1,11 @@
 # distribution-flavors Specification
 
 ## Purpose
-TBD - created by archiving change three-flavor-matrix. Update Purpose after archive.
+The distribution flavors of the camel CLI. Three flavors (`flavor-slim`,
+`flavor-regular`, `flavor-full`) select the shipped feature closure, and
+flavor-prefixed artifacts, Docker variants, binstall metadata, and release
+tags follow the flavor contracts.
+
 ## Requirements
 ### Requirement: Three distribution flavors with principled bodies
 

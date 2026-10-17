@@ -1,7 +1,11 @@
 # ignore-test-policy Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-ignore-test-policy. Update Purpose after archive.
+Policy for ignored tests. Every `#[ignore]` carries a reason from a closed
+vocabulary; `requires pre-built` tests must be allowlisted; CI runs the
+wasm-integration and external-service integration jobs; `lint-ignore` joins
+the quality gates.
+
 ## Requirements
 ### Requirement: `#[ignore]` reason vocabulary
 

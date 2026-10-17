@@ -1,7 +1,11 @@
 # stream-component Specification
 
 ## Purpose
-TBD - created by archiving change stream-component. Update Purpose after archive.
+The `stream` component. `stream:out` and `stream:err` write bodies to stdout
+and stderr as raw data, `stream:in` frames input into exchanges with
+sequential backpressure, EOF completes the route, and the component registers
+unconditionally in the slim boot cascade.
+
 ## Requirements
 ### Requirement: stream:out and stream:err write exchange bodies as data
 

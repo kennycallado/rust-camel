@@ -1,7 +1,10 @@
 # credential-lint Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-secret-leak-lint. Update Purpose after archive.
+Credential-derive consistency linting. The `lint-secrets` xtask AST-parses
+struct and enum definitions, enforces a closed classification vocabulary
+(ADR-0051), hard-fails on parse errors, and exits non-zero on any violation.
+
 ## Requirements
 ### Requirement: Credential derive consistency lint
 

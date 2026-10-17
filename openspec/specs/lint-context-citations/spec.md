@@ -1,7 +1,11 @@
 # lint-context-citations Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-docdrift-lint. Update Purpose after archive.
+Citation linting for CONTEXT.md files. Cited file paths and anchors must
+resolve, backtick-quoted Rust symbols must resolve to a definition, line
+numbers alone are flagged, glossary terms have one owner, and the lint runs as
+a CI quality gate.
+
 ## Requirements
 ### Requirement: Cited file paths and anchors in CONTEXT.md resolve
 

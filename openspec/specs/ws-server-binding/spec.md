@@ -1,7 +1,10 @@
 # ws-server-binding Specification
 
 ## Purpose
-TBD - created by archiving change ws-bound-address. Update Purpose after archive.
+Server binding for the WebSocket component. Plain and TLS servers accept a
+pre-bound listener, expose the bound address, key registry entries by the
+actual port, and the library tests obtain addresses from bound listeners.
+
 ## Requirements
 ### Requirement: Listener-injected server lifecycle
 

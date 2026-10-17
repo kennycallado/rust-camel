@@ -1,7 +1,11 @@
 # fuzz-tooling Specification
 
 ## Purpose
-TBD - created by archiving change fuzzing-mutation-tooling. Update Purpose after archive.
+Fuzz tooling and isolation discipline. `cargo xtask fuzz` runs targets only
+inside a linked worktree with artifacts under `target-fuzz/`, guards for the
+nightly toolchain and cargo-fuzz, and keeps the fuzz crate out of the
+production workspace.
+
 ## Requirements
 ### Requirement: Fuzz execution isolation
 

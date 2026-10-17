@@ -1,7 +1,11 @@
 # route-lsp Specification
 
 ## Purpose
-TBD - created by archiving change add-camel-lsp. Update Purpose after archive.
+The camel language server. `camel-lsp` speaks LSP over stdio, keeps documents
+per URI, and delegates lint, completion, and hover to the `camel-lint` engine,
+with debounced diagnostics and no dependency on camel-core, camel-dsl, or
+camel-cli.
+
 ## Requirements
 ### Requirement: LSP server runs over stdio and completes the initialize handshake
 

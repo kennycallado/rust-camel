@@ -1,7 +1,11 @@
 # wasm-sandbox-hardening Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-wasm-hardening. Update Purpose after archive.
+Hardening of the WASM host sandbox. The host state store enforces bounded
+allocations, the linker registers only clock and random WASI interfaces, no
+world inherits host stderr, and the listener bind stays
+operator-authoritative.
+
 ## Requirements
 ### Requirement: Host-side key-value store MUST enforce bounded allocations
 

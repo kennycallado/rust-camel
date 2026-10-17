@@ -1,7 +1,10 @@
 # cli-allocator Specification
 
 ## Purpose
-TBD - created by archiving change clidiet. Update Purpose after archive.
+Allocator selection in the `camel` binary. The default build uses the system
+allocator, and the `jemalloc` cargo feature is the sole opt-in override; the
+mimalloc stack stays unreachable under any feature combination.
+
 ## Requirements
 ### Requirement: Single opt-in allocator override
 

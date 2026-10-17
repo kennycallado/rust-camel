@@ -1,7 +1,10 @@
 # xml-bridge-performance Specification
 
 ## Purpose
-TBD - created by archiving change xmlperf-bridge-overhead. Update Purpose after archive.
+Performance attribution for the XML bridge. A criterion benchmark spawns the
+real native bridge through the production path and measures warm per-call
+latency per phase, with reproducible provenance and arithmetic.
+
 ## Requirements
 ### Requirement: Bridge dispatch decomposition benchmark
 

@@ -1,7 +1,11 @@
 # async-lifecycle-correctness Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-async-lifecycle. Update Purpose after archive.
+Correct shutdown and cancellation at asynchronous lifetime boundaries. The
+capability pins how the health server aborts a detached task, how the function
+service and master bridges drain on every exit path, and how producers and
+consumers derive cancellation from the runtime token.
+
 ## Requirements
 ### Requirement: Health server shutdown aborts detached task
 

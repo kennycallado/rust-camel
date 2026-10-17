@@ -1,7 +1,11 @@
 # conductor-workflow Specification
 
 ## Purpose
-TBD - created by archiving change conductor-delivery-phases. Update Purpose after archive.
+The OpenSpec conductor workflow. It defines delivery phases as an
+implementation-ordering construct, STAGE 0 through STAGE 4 terminology,
+session re-entrancy after compaction, the `openspec-task-authoring` skill,
+review-finding gating, and human approval before merge.
+
 ## Requirements
 ### Requirement: Delivery Phases
 

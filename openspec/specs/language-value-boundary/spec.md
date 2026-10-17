@@ -1,7 +1,11 @@
 # language-value-boundary Specification
 
 ## Purpose
-TBD - created by archiving change language-value-boundary. Update Purpose after archive.
+The boundary between script languages and the engine value model. Evaluation
+failures become typed, matchable route exceptions without exchange data;
+structured values round-trip natively; mutating scripts write back only what
+they changed; and Rhai JSON helpers follow strict RFC 8259 rules.
+
 ## Requirements
 ### Requirement: Language evaluation errors fail the step
 

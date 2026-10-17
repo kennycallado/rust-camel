@@ -1,7 +1,11 @@
 # cache-repo-configuration Specification
 
 ## Purpose
-TBD - created by archiving change deployment-resolvable-cache-repo-topology. Update Purpose after archive.
+Configuration of the cache repository. Empty redis topology values normalize
+to absent, non-credential `cache_repo` fields accept typed
+`CAMEL_CACHE_REPO_*` overrides, and the payload location is selected per
+repository.
+
 ## Requirements
 ### Requirement: Empty topology values resolve to absent
 

@@ -1,7 +1,11 @@
 # test-determinism Specification
 
 ## Purpose
-TBD - created by archiving change controlbus-flake-fix. Update Purpose after archive.
+Determinism of the test suites. Tests use paused time, event-driven settling,
+bounded per-test execution, deadline-bounded await loops, real loopback
+servers, and guarded environment mutation, and confirmed flakes get a
+quarantine registry.
+
 ## Requirements
 ### Requirement: Wall-clock-independent controlbus stop test
 

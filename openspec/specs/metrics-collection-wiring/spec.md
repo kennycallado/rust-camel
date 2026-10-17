@@ -1,7 +1,11 @@
 # metrics-collection-wiring Specification
 
 ## Purpose
-TBD - created by archiving change metrics-handle-late-binding. Update Purpose after archive.
+Late-bound metrics collection. Emissions route through one shared
+`MetricsHandle`, second registrations compose over the first, the tracer
+pipeline is implied by prometheus enablement, and error-path emissions are
+complete.
+
 ## Requirements
 ### Requirement: Metrics collector late binding via shared handle
 

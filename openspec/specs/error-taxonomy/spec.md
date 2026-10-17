@@ -1,7 +1,10 @@
 # error-taxonomy Specification
 
 ## Purpose
-TBD - created by archiving change sedamatch. Update Purpose after archive.
+The error type taxonomy. It provides a source-preserving endpoint-creation
+failure variant, `EndpointCreationFailedWithSource`, that pairs the
+user-facing diagnostic with an opaque handle to the typed cause.
+
 ## Requirements
 ### Requirement: source-preserving endpoint-creation failure variant
 

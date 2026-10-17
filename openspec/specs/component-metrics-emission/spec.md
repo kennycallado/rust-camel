@@ -1,7 +1,11 @@
 # component-metrics-emission Specification
 
 ## Purpose
-TBD - created by archiving change dashboard-observability. Update Purpose after archive.
+Metrics emitted by the runtime and its components. It covers route state,
+build and uptime info, queue depth, the uniform component-operations family,
+endpoint creation, pinned-client cache reuse, and jemalloc memory under the
+`jemalloc` feature.
+
 ## Requirements
 ### Requirement: Route state gauge
 

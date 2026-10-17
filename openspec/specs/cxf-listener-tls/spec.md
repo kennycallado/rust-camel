@@ -1,7 +1,11 @@
 # cxf-listener-tls Specification
 
 ## Purpose
-TBD - created by archiving change 361-cxfsoap. Update Purpose after archive.
+TLS for the CXF pool listener. Listener TLS is a pool-level validated shape,
+requires client authentication and fails closed, and the bridge announces the
+actual bound SOAP port through a `soap-ready` line consumed via an explicit
+opt-in.
+
 ## Requirements
 ### Requirement: Listener TLS is a pool-level, validated shape
 

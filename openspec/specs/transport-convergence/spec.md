@@ -1,7 +1,11 @@
 # transport-convergence Specification
 
 ## Purpose
-TBD - created by archiving change unify-transport-auth. Update Purpose after archive.
+Convergence of transports on the shared security kernel. The gRPC, WebSocket,
+MCP, REST, HTTP, and WASM transports consume the compiled security plan,
+enforce the per-route access mode at dispatch, and own their listener
+configuration.
+
 ## Requirements
 ### Requirement: gRPC interceptor security lifecycle
 

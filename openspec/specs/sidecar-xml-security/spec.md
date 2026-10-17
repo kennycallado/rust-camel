@@ -1,7 +1,11 @@
 # sidecar-xml-security Specification
 
 ## Purpose
-TBD - created by archiving change sidecar-xml-hardening. Update Purpose after archive.
+XML and WS-Security hardening for the sidecars. The XML sidecar installs
+deny-all Saxon resolvers, the CXF sidecar adds replay protection and hardened
+factories, and the XML bridge selects Xerces factories deterministically for
+native images.
+
 ## Requirements
 ### Requirement: Saxon secondary resolvers deny-all
 

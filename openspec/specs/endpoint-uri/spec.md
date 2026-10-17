@@ -1,7 +1,10 @@
 # endpoint-uri Specification
 
 ## Purpose
-TBD - created by archiving change add-endpoint-parameters. Update Purpose after archive.
+The typed endpoint URI seam. `EndpointUri` holds scheme, path, and parameters
+with a fail-closed merge and deterministic canonical rendering, preserves the
+authored raw query, and masks all parameter values in `Debug`.
+
 ## Requirements
 ### Requirement: EndpointUri typed seam with fail-closed merge
 

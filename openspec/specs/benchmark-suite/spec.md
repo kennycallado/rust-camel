@@ -1,7 +1,11 @@
 # benchmark-suite Specification
 
 ## Purpose
-TBD - created by archiving change bench-missing-cells. Update Purpose after archive.
+The benchmark suite and its canonical run. It defines the measured scenarios
+and payload-size classes, the registered contender families, ratio confidence
+intervals, the `bench` facade, the `benchmarks/` zone contract, the CI bench
+subset, and the era-1 evidence freeze.
+
 ## Requirements
 ### Requirement: Payload-size axis
 

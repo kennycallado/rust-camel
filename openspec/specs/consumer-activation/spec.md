@@ -1,7 +1,11 @@
 # consumer-activation Specification
 
 ## Purpose
-TBD - created by archiving change cohort-activation-barrier. Update Purpose after archive.
+Consumer activation at context startup. A cohort barrier parks the first
+dispatch of each consumer until the startup cohort completes, outer
+explicit-consumer task termination is observed and published as a route
+failure, and a bare `DefaultRouteController` can open the barrier explicitly.
+
 ## Requirements
 ### Requirement: Cohort activation barrier for first dispatch
 

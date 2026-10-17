@@ -1,7 +1,11 @@
 # http-url-resolution Specification
 
 ## Purpose
-TBD - created by archiving change http-contract-surface. Update Purpose after archive.
+Outbound URL and query resolution for the HTTP producer. Query sources compose
+and merge at pair level, inbound reflection is the default, `allowedUriHosts`
+fences override hosts, and diagnostics redaction fails closed on unparseable
+URLs.
+
 ## Requirements
 ### Requirement: Outbound query composition
 

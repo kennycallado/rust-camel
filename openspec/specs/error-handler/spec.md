@@ -1,7 +1,11 @@
 # error-handler Specification
 
 ## Purpose
-TBD - created by archiving change handledby. Update Purpose after archive.
+Route error-handler behavior. `on_exceptions` clauses accept clause-level
+`handled_by` delegation, delegate failures propagate the original error in
+every disposition, conflicting layouts fail at load with a typed error, and
+`do_try` catch failures keep the catch error.
+
 ## Requirements
 ### Requirement: clause-level handled_by delegation
 

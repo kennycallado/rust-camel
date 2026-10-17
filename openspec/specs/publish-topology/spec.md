@@ -1,7 +1,11 @@
 # publish-topology Specification
 
 ## Purpose
-TBD - created by archiving change eliminate-devdep-cycles. Update Purpose after archive.
+The workspace publish topology. Cycle detection is SCC-accurate, no
+publishable crate closes a publish-order cycle, `camel-test` is a leaf sink,
+and the xtask exposes cycle diagnostics, a lint gate, and a mutation-free
+publish pipeline under ADR-0055.
+
 ## Requirements
 ### Requirement: Cycle detection is SCC-accurate
 

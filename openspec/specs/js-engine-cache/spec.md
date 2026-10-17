@@ -1,7 +1,11 @@
 # js-engine-cache Specification
 
 ## Purpose
-TBD - created by archiving change js-engine-cache. Update Purpose after archive.
+The JavaScript engine worker model. Boa realms are reused across evaluations
+under a documented isolation contract: fresh bindings and lexical environment
+per evaluation, an install-verify step, integrity-set recycling on drift,
+bounded caches, and self-heal on panic.
+
 ## Requirements
 ### Requirement: JS engine cost amortization
 

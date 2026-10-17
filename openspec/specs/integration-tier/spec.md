@@ -1,7 +1,12 @@
 # integration-tier Specification
 
 ## Purpose
-TBD - created by archiving change integration-tier-contract. Update Purpose after archive.
+The integration and unit test tier. A pure content-derived tier function
+splits unit and integration documents over one `.test.yaml` format, with
+symmetric filters, layered hermetic environment resolution, ordered scenario
+actions, partner-side proof, and a scripted partner and state assertion
+vocabulary.
+
 ## Requirements
 ### Requirement: Pure tier derivation
 

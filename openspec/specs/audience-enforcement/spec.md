@@ -1,7 +1,11 @@
 # audience-enforcement Specification
 
 ## Purpose
-TBD - created by archiving change unify-transport-auth. Update Purpose after archive.
+Binding between named provider registry entries, their accepted issuers, and
+their audiences. Authentication caches stay isolated per provider, audience,
+and transport, so a token valid for one provider cannot be substituted into
+another.
+
 ## Requirements
 ### Requirement: Provider audience binding enforcement
 

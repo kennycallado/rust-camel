@@ -1,7 +1,10 @@
 # benchmark-warmup Specification
 
 ## Purpose
-TBD - created by archiving change benchwarmup. Update Purpose after archive.
+Warmup protocol for Protocol A throughput measurements. Warmup samples are
+collected until a wall-clock bound and judged against a trailing stability
+window; the deadline is enforced before and during an in-flight request.
+
 ## Requirements
 ### Requirement: Protocol A warmup uses a trailing stability window
 

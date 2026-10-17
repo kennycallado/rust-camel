@@ -1,7 +1,11 @@
 # unbounded-wait-bounding Specification
 
 ## Purpose
-TBD - created by archiving change bound-bare-recv-waits. Update Purpose after archive.
+Deadline bounding for test waits. The `lint-unbounded-wait` detector requires
+awaits on channels, locks, and global test mutexes in test bodies to be
+deadline-bounded, and analyzes inline closures and helper functions in test
+trees.
+
 ## Requirements
 ### Requirement: Deadline-bounded channel receives in test bodies
 

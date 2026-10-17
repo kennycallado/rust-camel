@@ -1,7 +1,10 @@
 # llm-component Specification
 
 ## Purpose
-TBD - created by archiving change llm-chat-tool-turn-body. Update Purpose after archive.
+LLM chat producer behavior in materialized mode. The assistant text lands on
+the exchange body even for turns that also produce tool calls, and collected
+tool-call ids are deduplicated first-wins.
+
 ## Requirements
 ### Requirement: Materialized tool-turn body carries accompanying text
 

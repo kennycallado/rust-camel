@@ -1,7 +1,11 @@
 # dsl Specification
 
 ## Purpose
-TBD - created by archiving change remove-header-dsl-verb. Update Purpose after archive.
+The declarative route DSL. It defines step kinds such as `remove_header`,
+endpoint `parameters` maps, route-level circuit-breaker fallbacks,
+error-handler exception clauses, `.test.yaml` discovery exclusion, and
+`${env:}` interpolation for routes and OpenAPI generation.
+
 ## Requirements
 ### Requirement: remove_header declarative step
 

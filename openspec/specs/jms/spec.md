@@ -1,7 +1,11 @@
 # jms Specification
 
 ## Purpose
-TBD - created by archiving change jmsmutants. Update Purpose after archive.
+The camel-jms component and its bridge. It pins reconnect defaults, endpoint
+URI validation, broker URL redaction, client-acknowledge bridge consumption,
+durable reservation accounting and journaling, poison-message policy, producer
+header allowlisting, and native-image `jms.*` options.
+
 ## Requirements
 ### Requirement: JMS reconnect defaults remain explicit
 

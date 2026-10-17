@@ -1,7 +1,10 @@
 # documentation Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-docdrift-t1-baseline. Update Purpose after archive.
+Documentation accuracy for the repository. Rustdoc variant references, `TODO`
+comments, README command and flag listings, DSL step-coverage tables, and
+work-item citations must match the shipped surface and current behavior.
+
 ## Requirements
 ### Requirement: Rustdoc variant references resolve to real types
 

@@ -1,7 +1,11 @@
 # endpoint-metadata-derivation Specification
 
 ## Purpose
-TBD - created by archiving change consolidate-uri-metadata. Update Purpose after archive.
+Macro-derived endpoint URI metadata. `#[derive(UriConfig)]` generates URI
+options and `OptionKind` from annotated fields, rejects unsafe combinations at
+compile time, and gives every component a single source of metadata for
+catalogs, lint, and tooling.
+
 ## Requirements
 ### Requirement: Macro-derived URI options
 

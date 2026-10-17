@@ -1,7 +1,11 @@
 # cxf-soap-envelope Specification
 
 ## Purpose
-TBD - created by archiving change 361-cxfsoap. Update Purpose after archive.
+SOAP envelope handling in the CXF bridge producer. The producer derives the
+SOAP version from the selected WSDL binding, emits exactly one envelope in
+PAYLOAD mode, rejects an already-enveloped payload before the network call,
+and reconciles the producer timeout field.
+
 ## Requirements
 ### Requirement: SOAP version derives from the selected WSDL port binding
 

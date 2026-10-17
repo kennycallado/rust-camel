@@ -1,7 +1,11 @@
 # route-lint Specification
 
 ## Purpose
-TBD - created by archiving change add-camel-lint. Update Purpose after archive.
+The `camel-lint` engine and the `camel lint` CLI. The engine parses YAML and
+JSON with span-exact diagnostics, validates against an embedded schema, checks
+URI options against component metadata, and serves incremental edits,
+completions, and hover text.
+
 ## Requirements
 ### Requirement: Lint engine is runtime-free and produces span-exact diagnostics
 

@@ -1,7 +1,11 @@
 # eip-splitter Specification
 
 ## Purpose
-TBD - created by archiving change splitter-fail-loud. Update Purpose after archive.
+Splitter error and body-typing behavior. The splitter and streaming splitter
+fail loud on wrong body types with payload-free diagnostics, pass empty
+content through, type fragments from their source elements, and restart traces
+above the item threshold.
+
 ## Requirements
 ### Requirement: Split fails loud on wrong body type
 

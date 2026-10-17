@@ -1,7 +1,10 @@
 # tls-registry-seam Specification
 
 ## Purpose
-TBD - created by archiving change tlsseam. Update Purpose after archive.
+The TLS and server registry seam. Registries expose a process global through
+two handles over one shared instance, support isolated construction, and route
+TLS handler registration to the owning registry so tests can run isolated.
+
 ## Requirements
 ### Requirement: Dual-handle process-global access
 

@@ -1,7 +1,10 @@
 # seda-component Specification
 
 ## Purpose
-TBD - created by archiving change seda-restart-fix. Update Purpose after archive.
+SEDA endpoint lifecycle. Single-mode queues restore their receiver on consumer
+stop under an activation handshake, and the no-active-consumers gate and
+terminal-config errors classify by typed markers rather than message text.
+
 ## Requirements
 ### Requirement: SEDA Single-mode consumer restartability
 

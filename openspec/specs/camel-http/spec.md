@@ -1,7 +1,10 @@
 # camel-http Specification
 
 ## Purpose
-TBD - created by archiving change jsonreply. Update Purpose after archive.
+HTTP endpoint behavior. It covers JSON error replies, the
+`maxInflightRequests` upper bound, TLS material under the CA-less webpki
+fallback, and duplicate consumer-registration rejection.
+
 ## Requirements
 ### Requirement: JSON error replies preserve existing behavior
 

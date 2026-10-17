@@ -1,7 +1,10 @@
 # trace-model Specification
 
 ## Purpose
-TBD - created by archiving change trace-model-tree. Update Purpose after archive.
+The distributed trace model. A route execution opens a root span, structural
+segments emit nested step spans, splitter fragments nest under the splitter
+step, the sampler is parent-based, and failed spans record an exception event.
+
 ## Requirements
 ### Requirement: Route execution opens a route root span
 

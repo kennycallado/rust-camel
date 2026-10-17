@@ -1,7 +1,11 @@
 # kubernetes-leadership Specification
 
 ## Purpose
-TBD - created by archiving change k8s-lease-holder-identity. Update Purpose after archive.
+Kubernetes leader election and self-fencing. Node identity resolves from a
+documented source chain, the holder identity uses a `<namespace>/<node_id>`
+format, renewals are bounded by the renewal budget, and lease timing
+validation enforces renewal slack.
+
 ## Requirements
 ### Requirement: Kubernetes leader identity resolution
 

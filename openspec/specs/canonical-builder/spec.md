@@ -1,7 +1,10 @@
 # canonical-builder Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-docdrift-t1-baseline. Update Purpose after archive.
+Canonical route builder error text. Rejected declarative steps and split
+aggregations report the current canonical spec version (v2 per ADR-0016)
+instead of the superseded v1 strings.
+
 ## Requirements
 ### Requirement: Canonical spec version references in error messages
 

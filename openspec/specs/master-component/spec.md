@@ -1,7 +1,11 @@
 # master-component Specification
 
 ## Purpose
-TBD - created by archiving change master-metrics-wiring. Update Purpose after archive.
+The camel-master component. It emits leadership transition and delegate
+lifecycle metrics, exports a leadership state gauge, reconciles delegates
+epoch-idempotently under an exact acquisition budget, and documents
+split-brain fencing.
+
 ## Requirements
 ### Requirement: Master component emits leadership transition metrics for observed state edges
 

@@ -1,7 +1,11 @@
 # runtime-boot Specification
 
 ## Purpose
-TBD - created by archiving change integration-tier-contract. Update Purpose after archive.
+The shared runtime boot path. `camel-bundles` owns the component cascade,
+security and startup wiring, and a `BootHandle` that drains bridges and pools,
+so `camel run` and the embedded harness boot identically; context drop
+terminates controller tasks.
+
 ## Requirements
 ### Requirement: Bundle cascade parity
 

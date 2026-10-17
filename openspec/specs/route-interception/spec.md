@@ -1,7 +1,11 @@
 # route-interception Specification
 
 ## Purpose
-TBD - created by archiving change advice-route-interception. Update Purpose after archive.
+Test-time route interception. An ordered rule set maps an exact send URI to
+skip or divert actions, rules freeze at first route registration or start,
+`seda:` interception stays on the send side, and interception is compile-time
+service composition with no control-plane dependency.
+
 ## Requirements
 ### Requirement: Intercept rule model and matching
 

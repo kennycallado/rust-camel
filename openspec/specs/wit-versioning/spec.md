@@ -1,7 +1,11 @@
 # wit-versioning Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-wit-versioning. Update Purpose after archive.
+WIT package versioning and consistency. Every `camel:plugin` WIT file declares
+version `1.0.0`, no `TODO(WIT-006)` markers remain, `camel-wit` stays
+dependency-free, and a cross-crate test enforces canonical and host copies
+match.
+
 ## Requirements
 ### Requirement: WIT package version
 

@@ -1,7 +1,11 @@
 # mock-testkit Specification
 
 ## Purpose
-TBD - created by archiving change mock-declarative-testkit. Update Purpose after archive.
+The `camel test` declarative test runner. It parses `.test.yaml` documents,
+boots one in-process context per document, delivers inputs, evaluates mock and
+matcher expectations with settling, and reports through exit codes, an
+optional JUnit XML file, filters, and a document env layer.
+
 ## Requirements
 ### Requirement: Declarative test document parsing
 

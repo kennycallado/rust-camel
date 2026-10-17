@@ -1,7 +1,10 @@
 # trust-boundary-validation Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-trust-boundary. Update Purpose after archive.
+Validation at untrusted boundaries. SurrealDB query text is gated behind
+`allow_dynamic_query`, the OpenSearch `CamelOpenSearch.Id` header is
+validated, and SQL query text is gated behind the same opt-in.
+
 ## Requirements
 ### Requirement: SurrealDB query op must gate untrusted query text behind explicit opt-in
 

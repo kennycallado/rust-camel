@@ -1,7 +1,10 @@
 # matcher-core Specification
 
 ## Purpose
-TBD - created by archiving change shared-matcher-core. Update Purpose after archive.
+The matcher algebra in `camel-matchers`. It owns count-bound judgment, request
+matching, value expectations, and per-request shape matching, generic over
+projected observations and free of `camel-*` dependencies.
+
 ## Requirements
 ### Requirement: pure matcher algebra ownership
 

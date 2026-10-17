@@ -1,7 +1,10 @@
 # release-pipeline Specification
 
 ## Purpose
-TBD - created by archiving change release-restructure. Update Purpose after archive.
+The release build pipeline. The build matrix lives in one reusable workflow,
+publish side effects are gated on the publish input, the dev path runs the
+feature-closure tests, and release assets are checksummed tarballs.
+
 ## Requirements
 ### Requirement: Release build matrix has a single reusable source of truth
 

@@ -1,7 +1,10 @@
 # ci-compile-gate Specification
 
 ## Purpose
-TBD - created by archiving change configunify. Update Purpose after archive.
+CI coverage for the integration-test compile gate. The `full-tests-linux` job
+compiles the gated test set behind the `integration-tests` feature, so a
+compile break fails CI instead of surfacing only for a human locally.
+
 ## Requirements
 ### Requirement: CI compiles the gated integration test set
 

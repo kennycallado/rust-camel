@@ -1,7 +1,10 @@
 # eip-idempotency Specification
 
 ## Purpose
-TBD - created by archiving change redb-idempotent-repository. Update Purpose after archive.
+Persistent idempotent repositories. A redb-backed repository persists keys
+across restart and stays opt-in under the name `"redb"`, memory remains the
+default, and a Redis backend is available in the repository service crate.
+
 ## Requirements
 ### Requirement: Persistent redb idempotent repository backend
 

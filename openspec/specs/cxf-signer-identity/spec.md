@@ -1,7 +1,11 @@
 # cxf-signer-identity Specification
 
 ## Purpose
-TBD - created by archiving change 361-cxfsoap. Update Purpose after archive.
+Signer identity carried from the CXF bridge. The consumer request carries an
+optional bounded signer descriptor, Rust validates and exposes it through
+dedicated exchange properties, and signer extraction runs only for
+Signature-required profiles.
+
 ## Requirements
 ### Requirement: Signer identity is exchanged as bounded string fields only
 

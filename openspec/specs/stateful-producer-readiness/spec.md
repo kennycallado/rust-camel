@@ -1,7 +1,10 @@
 # stateful-producer-readiness Specification
 
 ## Purpose
-TBD - created by archiving change fix-otel-direct-deadlock. Update Purpose after archive.
+Producer readiness discipline. The Direct, Kafka, JMS, CXF, WASM, OpenSearch,
+and gRPC producers acquire their concurrency permit inside `call()` rather
+than across the `poll_ready` and `call` boundary.
+
 ## Requirements
 ### Requirement: Producers do not carry semaphore permits across the poll_ready/call boundary
 

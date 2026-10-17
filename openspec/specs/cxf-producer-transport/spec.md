@@ -1,7 +1,10 @@
 # cxf-producer-transport Specification
 
 ## Purpose
-TBD - created by archiving change 361-cxfsoap. Update Purpose after archive.
+Transport TLS for the CXF producer conduit. The producer takes a nested
+`[profiles.security.tls]` keystore/truststore configuration, all-or-nothing,
+and retains hostname verification with no option to disable it.
+
 ## Requirements
 ### Requirement: Producer transport TLS is a nested, all-or-nothing profile config
 

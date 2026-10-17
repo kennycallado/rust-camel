@@ -1,7 +1,11 @@
 # direct-dispatch Specification
 
 ## Purpose
-TBD - created by archiving change direct-inline-dispatch. Update Purpose after archive.
+Inline dispatch for direct endpoints. A producer runs a live Sequential
+consumer's pipeline in its own task under a depth cap and cycle check, with
+FIFO admission, timeout parity, dual-domain cancellation, pipeline snapshot
+isolation, and fairness yields on long chains.
+
 ## Requirements
 ### Requirement: Inline dispatch selection for direct endpoints
 

@@ -1,7 +1,11 @@
 # redis-geo Specification
 
 ## Purpose
-TBD - created by archiving change redisgeo. Update Purpose after archive.
+Redis geospatial commands in the producer. GEOADD, GEOPOS, GEODIST, GEOSEARCH
+(radius and box), and GEOHASH are exposed with argument validation, correct
+resolution and retry classification, and a typed geo surface on the Redis
+cache repository.
+
 ## Requirements
 ### Requirement: GEOADD stores a member with coordinates
 The producer SHALL store one member with its longitude and latitude under a key, validating coordinates before any command is sent.

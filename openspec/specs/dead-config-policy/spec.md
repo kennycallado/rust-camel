@@ -1,7 +1,11 @@
 # dead-config-policy Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-dead-config. Update Purpose after archive.
+Fail-closed handling of configuration fields. The runtime rejects fields it
+does not consume, keeps `proxy_url` only for deserialization and rejects any
+value, enforces the WebSocket client send timeout, and resolves `${env:}`
+placeholders over every string leaf with a shared syntax.
+
 ## Requirements
 ### Requirement: No silently ignored config fields
 

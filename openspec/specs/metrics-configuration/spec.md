@@ -1,7 +1,10 @@
 # metrics-configuration Specification
 
 ## Purpose
-TBD - created by archiving change dashboard-observability. Update Purpose after archive.
+Configuration of metric emission. `[observability.metrics]` gates metrics
+independently of tracing, allows per-family opt-out, defaults component
+telemetry off, and keeps the error family non-disableable.
+
 ## Requirements
 ### Requirement: Metrics enablement independent of tracing
 

@@ -1,7 +1,11 @@
 # eip-aggregator Specification
 
 ## Purpose
-TBD - created by archiving change aggregator-adr0046-divergences. Update Purpose after archive.
+Aggregator semantics in rust-camel. The capability documents forced
+divergences from Apache Camel in the tracked processor CONTEXT.md, pins them
+with native tests, registers the sweep lifecycle, and unifies
+correlation-source lowering across the builder and canonical paths.
+
 ## Requirements
 ### Requirement: Aggregator divergence documentation in tracked CONTEXT.md
 

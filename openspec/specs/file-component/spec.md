@@ -1,7 +1,11 @@
 # file-component Specification
 
 ## Purpose
-TBD - created by archiving change file-ancestor-confinement. Update Purpose after archive.
+Path confinement in the camel-file producer. Every write whose target escapes
+the configured base directory through an intermediate path component is
+rejected, for every `fileExist` strategy, including symlinked escapes that
+exist at validation time.
+
 ## Requirements
 ### Requirement: Producer path confinement across intermediate components
 

@@ -1,7 +1,11 @@
 # log-redaction-lint Specification
 
 ## Purpose
-TBD - created by archiving change redactstrict. Update Purpose after archive.
+The `lint-log-redaction` check. It redeems sensitive identifier arguments only
+in redact call shape, documents its detection blind spots, keeps a fixed
+sensitive-name set and its escape hatches, and detects terminal value-exposing
+call chains.
+
 ## Requirements
 ### Requirement: Call-shape redact redemption for identifier references
 

@@ -1,7 +1,11 @@
 # skills-policy Specification
 
 ## Purpose
-TBD - created by archiving change ste-writing-skill. Update Purpose after archive.
+The project's writing-skill policy. `ste-writing` applies ASD-STE100 to
+durable prose in two modes, skills divide by document function, `ste-writing`
+is permitted before an OpenSpec blessing, and the change touches no Rust
+crate.
+
 ## Requirements
 ### Requirement: ste-writing skill with two modes
 

@@ -1,7 +1,10 @@
 # http-emission-correctness Specification
 
 ## Purpose
-TBD - created by archiving change http-bridge-emission-correctness. Update Purpose after archive.
+HTTP header emission policy. The component classifies policy-relevant headers
+into RFC-derived buckets, strips hop-by-hop and framing headers from outbound
+requests, preserves valid response headers, and pins DNS client reuse.
+
 ## Requirements
 ### Requirement: RFC-categorised header classification
 

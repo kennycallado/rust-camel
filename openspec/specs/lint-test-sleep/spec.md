@@ -1,7 +1,10 @@
 # lint-test-sleep Specification
 
 ## Purpose
-TBD - created by archiving change lint-test-sleep. Update Purpose after archive.
+The advisory `lint-test-sleep` check. It scans test function bodies for
+resolved sleep calls, honors a `// allow-test-sleep` escape hatch, and exits
+zero even with findings.
+
 ## Requirements
 ### Requirement: Advisory detection of sleeps in test function bodies
 

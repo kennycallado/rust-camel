@@ -1,7 +1,11 @@
 # metrics-contract-hardening Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-metrics-contract. Update Purpose after archive.
+Hardening of the Prometheus metrics surface. Non-loopback diagnostic binds
+warn at startup, dynamic metric-name collectors are bounded by a configurable
+cap, a failed server task marks the service `Failed`, and name normalization
+is idempotent.
+
 ## Requirements
 ### Requirement: Prometheus diagnostic endpoint must warn on non-loopback bind
 

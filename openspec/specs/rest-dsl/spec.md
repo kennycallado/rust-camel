@@ -1,7 +1,11 @@
 # rest-dsl Specification
 
 ## Purpose
-TBD - created by archiving change add-rest-raw-binding. Update Purpose after archive.
+REST operation binding in the DSL. Operations declare `json` or `raw` binding,
+JSON binding injects media negotiation, unmarshal, and marshal steps, raw
+binding passes streams through untouched and rejects schemas, and OpenAPI and
+authoring paths stay in parity.
+
 ## Requirements
 ### Requirement: REST operation binding mode declaration
 

@@ -1,7 +1,11 @@
 # route-templates Specification
 
 ## Purpose
-TBD - created by archiving change template-compile-parity. Update Purpose after archive.
+Route templates and their materialization. Templated routes compile with the
+same security context and stream-cache threshold as direct routes, support
+typed parameters and per-instance identity, hash their resolved parameters,
+and fail closed with complete diagnostics.
+
 ## Requirements
 ### Requirement: Security context parity for templated routes
 

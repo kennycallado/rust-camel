@@ -1,7 +1,11 @@
 # data-formats Specification
 
 ## Purpose
-TBD - created by archiving change tarfiles. Update Purpose after archive.
+Built-in data formats and the protobuf compiler. TAR, GZIP, and TAR.GZ marshal
+and unmarshal exchange bodies under bounded configuration, and the protobuf
+compiler runs in-process from `.proto` source or a precompiled descriptor set
+and rejects malformed or editions-based input with typed errors.
+
 ## Requirements
 ### Requirement: TAR data format
 

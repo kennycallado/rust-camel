@@ -1,7 +1,10 @@
 # eip-wire-tap Specification
 
 ## Purpose
-TBD - created by archiving change wiretap-camel-model. Update Purpose after archive.
+The WireTap EIP. Taps run as detached tasks admitted through a bounded
+concurrency gate, release their permit on completion, drain gracefully at
+shutdown, never fail the main route, and keep their documented public API.
+
 ## Requirements
 ### Requirement: Bounded detached-task admission with caller back-pressure
 

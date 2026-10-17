@@ -1,7 +1,12 @@
 # misc-correctness Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-misc-correctness. Update Purpose after archive.
+A set of correctness fixes across components. Log truncation counts
+characters, SEDA runs one forwarder per `concurrentConsumers`, the proto
+compiler names descriptor files uniquely across processes, container cleanup
+honors `docker_host`, WSS readiness waits for the TLS bind, and `BeanError` is
+`#[non_exhaustive]`.
+
 ## Requirements
 ### Requirement: Char-semantics log truncation
 

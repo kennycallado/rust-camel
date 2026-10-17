@@ -1,7 +1,11 @@
 # cxf-fault-status Specification
 
 ## Purpose
-TBD - created by archiving change 361-cxfsoap. Update Purpose after archive.
+SOAP fault classification and HTTP status on the CXF listener. The listener
+detects the SOAP version before WS-Security processing, maps fault class to a
+fixed status matrix, emits version-matched fault envelopes, and applies
+per-profile status overrides to security faults.
+
 ## Requirements
 ### Requirement: SOAP version is detected before WS-Security processing
 

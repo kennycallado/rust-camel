@@ -1,7 +1,10 @@
 # job Specification
 
 ## Purpose
-TBD - created by archiving change jobteardown. Update Purpose after archive.
+`camel job` lifecycle hardening. A failure after boot tears the context down
+through the existing bounded shutdown machinery, while diagnostics, exit
+codes, shutdown budgets, signal handling, and batch behavior stay unchanged.
+
 ## Requirements
 ### Requirement: Post-boot job failures tear down the context
 

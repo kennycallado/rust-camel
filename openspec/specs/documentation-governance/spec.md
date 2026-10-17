@@ -1,7 +1,11 @@
 # documentation-governance Specification
 
 ## Purpose
-TBD - created by archiving change context-map-guide-refresh-clause. Update Purpose after archive.
+Governance of the mdBook guide. A user-visible contract change triggers a
+guide refresh; concept, recipe, and operations pages follow the two-source
+rule, ADR citations stay valid, the EIP catalog and index hubs stay complete,
+and the guide builds with no broken links.
+
 ## Requirements
 ### Requirement: User-visible-contract guide refresh trigger
 

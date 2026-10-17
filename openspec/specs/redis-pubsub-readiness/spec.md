@@ -1,7 +1,10 @@
 # redis-pubsub-readiness Specification
 
 ## Purpose
-TBD - created by archiving change redis-live-tls-and-ready-race. Update Purpose after archive.
+Readiness of the Redis PubSub consumer. Readiness is signalled only after the
+server acknowledges every SUBSCRIBE and PSUBSCRIBE, and the camel-test suite
+proves PUBLISH to SUBSCRIBE delivery without a readiness-barrier mask.
+
 ## Requirements
 ### Requirement: PubSub consumer readiness follows server-side SUBSCRIBE registration
 

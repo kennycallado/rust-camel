@@ -1,7 +1,10 @@
 # staged-listener-binding Specification
 
 ## Purpose
-TBD - created by archiving change itest-bound-ports. Update Purpose after archive.
+Staged listener binding for tests. The HTTP and WS registries, the WASM source
+consumer, and the camel-test suites consume a pre-bound `TcpListener` staged
+under its own `(host, port)` key instead of probing ports.
+
 ## Requirements
 ### Requirement: Staged listener consumption
 

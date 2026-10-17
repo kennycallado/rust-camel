@@ -1,7 +1,11 @@
 # redis-failover Specification
 
 ## Purpose
-TBD - created by archiving change redis-sentinel-failover. Update Purpose after archive.
+Redis failover and topology resolution. A `RedisTopology` seam resolves fresh
+clients, sentinel URIs and config are accepted, producers and consumers
+re-resolve the elected master, subscriptions replay after reconnect, and
+health checks probe the current master.
+
 ## Requirements
 ### Requirement: RedisTopology resolution seam
 

@@ -1,7 +1,10 @@
 # cli-scaffold Specification
 
 ## Purpose
-TBD - created by archiving change test-placement-contract. Update Purpose after archive.
+Scaffolding for new camel projects. `camel new` with the basic template emits
+a sample `direct:` route and a colocated test document that references it, so
+a generated project is testable out of the box.
+
 ## Requirements
 ### Requirement: Basic template scaffolds a testable route with colocated test document
 

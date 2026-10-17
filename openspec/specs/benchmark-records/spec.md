@@ -1,7 +1,10 @@
 # benchmark-records Specification
 
 ## Purpose
-TBD - created by archiving change bench-era-2. Update Purpose after archive.
+The record layer for benchmark runs. It defines the `run.json` schema and the
+`index.json` dated-tables view, generates human-readable summaries from
+records, and publishes a run only when every expected cell is present.
+
 ## Requirements
 ### Requirement: Run-level record schema
 

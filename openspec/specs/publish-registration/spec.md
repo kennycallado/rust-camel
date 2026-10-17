@@ -1,7 +1,11 @@
 # publish-registration Specification
 
 ## Purpose
-TBD - created by archiving change oidcgate. Update Purpose after archive.
+Publish-registration drift detection. `cargo xtask lint-publish-registration`
+compares the workspace publish order against a committed OIDC registration
+manifest offline, validates the manifest states, and the release runbook
+requires the gate before tagging.
+
 ## Requirements
 ### Requirement: Offline publish registration drift gate
 

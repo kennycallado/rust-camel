@@ -1,7 +1,10 @@
 # sql-pool Specification
 
 ## Purpose
-TBD - created by archiving change pooldrain. Update Purpose after archive.
+SQL pool behavior. The test suite verifies that `SqlPoolFactory::close`
+completes only after the pool has no remaining connections, and covers the
+SQLite memory URL classifier with a truth table.
+
 ## Requirements
 ### Requirement: SQL pool close drain is unit-tested
 

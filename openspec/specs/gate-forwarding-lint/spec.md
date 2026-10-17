@@ -1,7 +1,10 @@
 # gate-forwarding-lint Specification
 
 ## Purpose
-TBD - created by archiving change gate-forwarding-assert. Update Purpose after archive.
+Bundle gate forwarding. The `lint-gate-forwarding` command statically verifies
+that every crate depending on `camel-bundles` forwards the bundle gates it
+names, and that boot consumers forward all of them.
+
 ## Requirements
 ### Requirement: Bundle gate forwarding lint
 

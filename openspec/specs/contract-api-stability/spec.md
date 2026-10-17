@@ -1,7 +1,10 @@
 # contract-api-stability Specification
 
 ## Purpose
-TBD - created by archiving change non-exhaustive-contract-enforcement. Update Purpose after archive.
+API stability for contract crates. The `cargo xtask lint-non-exhaustive`
+command fails when a public enum lacks both `#[non_exhaustive]` and an
+`exhaustive-by-contract` note (ADR-0049).
+
 ## Requirements
 ### Requirement: xtask lint-non-exhaustive enforces ADR-0049
 

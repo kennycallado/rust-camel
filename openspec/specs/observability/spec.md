@@ -1,7 +1,11 @@
 # observability Specification
 
 ## Purpose
-TBD - created by archiving change steplatency. Update Purpose after archive.
+Runtime observability. Compiled `To` steps retain their declared URI metadata,
+per-step durations export with `route` and `to_uri` labels, bridge RPCs
+propagate W3C trace context, bridges emit structured JSON logs, and the
+runtime counts accepted-not-completed exchanges.
+
 ## Requirements
 ### Requirement: Compiled To steps retain declared URI metadata
 

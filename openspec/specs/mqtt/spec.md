@@ -1,7 +1,10 @@
 # mqtt Specification
 
 ## Purpose
-TBD - created by archiving change mqttmutants. Update Purpose after archive.
+MQTT configuration behavior. The MQTT configuration unit suite pins the
+behavior behind bd issues rc-ldvm, rc-xv4e, rc-blcy, and rc-e83t without a
+live broker.
+
 ## Requirements
 ### Requirement: MQTT configuration mutation coverage
 

@@ -1,7 +1,10 @@
 # guard-mutation-hardening Specification
 
 ## Purpose
-TBD - created by archiving change mutation-hardening. Update Purpose after archive.
+Mutation hardening for the security guards. Tests pin the IPv4-mapped SSRF
+closure and the exact `redact_broker_url` output shapes; the guard production
+code is unchanged.
+
 ## Requirements
 ### Requirement: SSRF IP-guard closure is mutation-hardened
 

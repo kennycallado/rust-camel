@@ -1,7 +1,11 @@
 # component-error-semantics Specification
 
 ## Purpose
-TBD - created by archiving change dashboard-observability. Update Purpose after archive.
+Error-counter semantics for components. Exhausted retry sequences increment
+`camel_errors_total` once, retry attempts and circuit-breaker rejections get
+their own counters, and registry-resolved components report to the collector
+they were built with.
+
 ## Requirements
 ### Requirement: One error per exhausted retry sequence
 

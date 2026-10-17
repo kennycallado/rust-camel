@@ -1,7 +1,11 @@
 # security-kernel Specification
 
 ## Purpose
-TBD - created by archiving change unify-transport-auth. Update Purpose after archive.
+The security kernel contract. Every server route compiles a security plan
+before binding, authorization fails closed without a principal, principals are
+unforgeable, per-bind exposure is gated, and provider unavailability
+propagates as a typed error.
+
 ## Requirements
 ### Requirement: Route security plan compilation
 

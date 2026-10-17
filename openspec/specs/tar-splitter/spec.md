@@ -1,7 +1,9 @@
 # tar-splitter Specification
 
 ## Purpose
-TBD - created by archiving change tarsplitter. Update Purpose after archive.
+TAR and TAR.GZ stream splitting. The stream-split format contract and compiler
+expose TAR and TAR.GZ alongside the preserved ZIP behavior.
+
 ## Requirements
 ### Requirement: stream split format selection
 

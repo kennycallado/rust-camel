@@ -1,7 +1,11 @@
 # cli-jobs Specification
 
 ## Purpose
-TBD - created by archiving change cli-jobs. Update Purpose after archive.
+The `camel job` operator path for one-shot and batch job documents. It defines
+the `*.job.yaml` `execute:` document shape, the fail-closed consumer-scheme
+allowlist, declared job arguments and their dynamic flags, bounded discovery,
+and the exit-code taxonomy.
+
 ## Requirements
 ### Requirement: execute-section document parsing
 

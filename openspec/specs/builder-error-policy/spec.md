@@ -1,7 +1,10 @@
 # builder-error-policy Specification
 
 ## Purpose
-TBD - created by archiving change unify-builder-error-policy. Update Purpose after archive.
+Error policy for the `camel-builder` fluent API. No public builder method
+panics on misuse; double-calling `do_finally` returns a `RouteError`, and the
+`doCatch` disposition sugar methods set the field directly.
+
 ## Requirements
 ### Requirement: Builder fluent API SHALL NOT panic on user-reachable misuse
 

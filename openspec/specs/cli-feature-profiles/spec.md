@@ -1,7 +1,10 @@
 # cli-feature-profiles Specification
 
 ## Purpose
-TBD - created by archiving change clidiet. Update Purpose after archive.
+Feature profiles for the camel CLI. Three flavor markers (`flavor-slim`,
+`flavor-regular`, `flavor-full`) select the build profile, bridge crates stay
+individually selectable, and release legs choose exactly one flavor marker.
+
 ## Requirements
 ### Requirement: Default feature closure is unchanged
 

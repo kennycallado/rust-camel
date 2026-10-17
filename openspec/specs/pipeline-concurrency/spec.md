@@ -1,7 +1,10 @@
 # pipeline-concurrency Specification
 
 ## Purpose
-TBD - created by archiving change fix-pipeline-syncbox-mutex-convoy. Update Purpose after archive.
+Pipeline acquisition concurrency. Per-exchange pipeline handles are acquired
+without a shared blocking mutex, snapshot isolation holds during hot reload,
+and handle clone cost stays under a regression ceiling.
+
 ## Requirements
 ### Requirement: Lock-free per-exchange pipeline acquisition
 

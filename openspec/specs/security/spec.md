@@ -1,7 +1,11 @@
 # security Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-principal-debug-redact. Update Purpose after archive.
+The security kernel's runtime surface. Principals redact untrusted claims in
+`Debug`, routes declare credential sources with ordered precedence,
+credentials compare in constant time and never appear in diagnostics, named
+providers register authenticators, and URL redaction has one canonical helper.
+
 ## Requirements
 ### Requirement: Principal Debug redaction of untrusted claims
 

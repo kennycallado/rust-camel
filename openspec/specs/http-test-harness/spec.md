@@ -1,7 +1,10 @@
 # http-test-harness Specification
 
 ## Purpose
-TBD - created by archiving change httpflake. Update Purpose after archive.
+Readiness helpers for HTTP consumer tests. Readiness is polled from
+`ServerRegistry::bound_addr` under a bounded budget and retry backoff, and
+setup serializes registry mutations with `REGISTRY_TEST_MUTEX`.
+
 ## Requirements
 ### Requirement: Registry-poll readiness with bounded budget
 

@@ -1,7 +1,10 @@
 # grpc-consumer-concurrency Specification
 
 ## Purpose
-TBD - created by archiving change concpanic. Update Purpose after archive.
+Concurrency bound for the gRPC consumer. `consumerConcurrency` values above
+`tokio::sync::Semaphore::MAX_PERMITS` are rejected with a typed configuration
+error naming the parameter, the value, and the limit.
+
 ## Requirements
 ### Requirement: gRPC consumer concurrency upper bound
 

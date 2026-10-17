@@ -1,7 +1,11 @@
 # xj-runtime-affinity Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-xj-block-in-place. Update Purpose after archive.
+Runtime affinity for the XJ component. Endpoint creation works on any Tokio
+runtime flavor, the component owns a multi-thread offload runtime that
+outlives its channels, and `block_in_place` is avoided on current-thread
+runtimes.
+
 ## Requirements
 ### Requirement: Runtime-agnostic endpoint creation
 

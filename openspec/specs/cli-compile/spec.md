@@ -1,7 +1,11 @@
 # cli-compile Specification
 
 ## Purpose
-TBD - created by archiving change cli-compile. Update Purpose after archive.
+Compilation of self-contained native artifacts. The compiler embeds documents,
+configuration, and assets into a copy of the executable with an EOF trailer,
+verifies the trailer and BLAKE3 checksum at boot, and supports detached
+signing, truststore pinning, and freshness floors.
+
 ## Requirements
 ### Requirement: Compile a native single-document artifact
 

@@ -1,7 +1,10 @@
 # loadgen-throughput Specification
 
 ## Purpose
-TBD - created by archiving change loadgen-connections-multistep-bench. Update Purpose after archive.
+The load-generation throughput measurement. `loadgen measure-throughput` takes
+a `--connections` knob separate from `--workers`, records the concurrency
+profile in result artifacts, and ships a multi-step scenario fixture.
+
 ## Requirements
 ### Requirement: Connection concurrency knob
 

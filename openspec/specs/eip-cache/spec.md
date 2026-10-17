@@ -1,7 +1,11 @@
 # eip-cache Specification
 
 ## Purpose
-TBD - created by archiving change add-cache-repository. Update Purpose after archive.
+The cache EIP and its repository backends. It defines the `CacheRepository`
+port, memory, redb, and Redis backends, disk payload offload with a sweeper,
+the `cache`, `cache_invalidate`, `cache_peek_stale`, `cache_clear`, and
+`cache_stats` steps, and cache hit/miss metrics.
+
 ## Requirements
 ### Requirement: CacheRepository port with in-band expiry
 

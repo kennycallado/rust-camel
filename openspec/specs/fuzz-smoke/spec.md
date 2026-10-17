@@ -1,7 +1,11 @@
 # fuzz-smoke Specification
 
 ## Purpose
-TBD - created by archiving change fuzz-smoke-ci. Update Purpose after archive.
+The non-blocking fuzz smoke workflow. It runs path-filtered on pull requests,
+proves the main-checkout refusal drill, runs a 60-second worktree-isolated
+smoke per selected leg, exercises minimization, audits the fuzz lockfile, and
+writes triage instructions to the step summary.
+
 ## Requirements
 ### Requirement: path-filtered PR smoke trigger
 

@@ -1,7 +1,11 @@
 # template-component Specification
 
 ## Purpose
-TBD - created by archiving change external-template-component. Update Purpose after archive.
+The template component. Templates resolve only from route-declared `file:`
+URIs, compile before activation, render from compiled state without filesystem
+I/O, bound their acquisition fail-closed, and reload atomically under a
+control-plane command.
+
 ## Requirements
 ### Requirement: External template URI resolution
 

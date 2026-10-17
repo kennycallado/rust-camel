@@ -1,7 +1,11 @@
 # config-loader-semantics Specification
 
 ## Purpose
-TBD - created by archiving change configunify. Update Purpose after archive.
+Config-loader semantics shared by the camel-dsl and camel-config paths. It
+pins the deep-merge, section walk, include, and profile-selection rules in one
+place, rejects discarded root-level keys and near-miss misspellings, and
+freezes resolution behavior with parity goldens.
+
 ## Requirements
 ### Requirement: Canonical config-loader semantics live once in camel-dsl
 

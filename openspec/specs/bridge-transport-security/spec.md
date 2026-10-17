@@ -1,7 +1,11 @@
 # bridge-transport-security Specification
 
 ## Purpose
-TBD - created by archiving change bridge-lockstep-hardening. Update Purpose after archive.
+Security boundaries for the JMS, CXF, and other bridge sidecars. The
+capability covers TLS activation from broker URI schemes, request- and
+response-body caps, dependency security floors, and inbound and outbound WSS4J
+action validation.
+
 ## Requirements
 ### Requirement: Secure broker URI schemes activate TLS on the JMS sidecar
 

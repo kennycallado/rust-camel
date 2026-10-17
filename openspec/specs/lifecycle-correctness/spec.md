@@ -1,7 +1,10 @@
 # lifecycle-correctness Specification
 
 ## Purpose
-TBD - created by archiving change immediate-start-errors. Update Purpose after archive.
+Lifecycle correctness for consumer startup. Immediate consumer start failures
+transition the route to `Failed` through a single failure watcher, and routes
+that are registered but not started at context completion emit a warning.
+
 ## Requirements
 ### Requirement: Immediate consumer start failures transition the route to Failed
 

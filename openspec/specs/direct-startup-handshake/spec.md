@@ -1,7 +1,11 @@
 # direct-startup-handshake Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-direct-startup-race. Update Purpose after archive.
+The direct consumer startup handshake. `DirectConsumer` uses Explicit startup
+mode and signals readiness after its registry insert, so `StartRoute`
+completes only when the consumer is ready; producer `poll_ready` readiness
+stays registry-based.
+
 ## Requirements
 ### Requirement: DirectConsumer uses Explicit startup mode
 

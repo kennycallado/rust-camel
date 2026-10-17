@@ -1,7 +1,11 @@
 # otel-lifecycle Specification
 
 ## Purpose
-TBD - created by archiving change audit-fix-otel-lifecycle. Update Purpose after archive.
+Lifecycle behavior of the OpenTelemetry service. Metrics resolution waits for
+the global meter provider, a dropped service shuts down providers safely, the
+tracing processor preserves tower readiness, bounded-stop repros share a
+harness, and unit tests live in a sibling module.
+
 ## Requirements
 ### Requirement: OtelMetrics resolution is gated on service start
 

@@ -1,7 +1,11 @@
 # mcp-component Specification
 
 ## Purpose
-TBD - created by archiving change add-mcp-component. Update Purpose after archive.
+The `mcp:` component and its dual client and server roles. It baselines on
+protocol revision `2026-07-28`, provides tool-call and resource-read
+producers, a shared listener registry with readiness gating, JSON Schema
+validation, fail-closed authentication, and catalog cardinality caps.
+
 ## Requirements
 ### Requirement: MCP component scheme and dual roles
 

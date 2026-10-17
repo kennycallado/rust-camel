@@ -1,7 +1,12 @@
 # assurance-tooling Specification
 
 ## Purpose
-TBD - created by archiving change mutation-testing-tooling. Update Purpose after archive.
+Mutation-testing support for the security-sensitive code paths. The `cargo
+xtask mutants` wrapper refuses the main checkout, keeps instrumented builds
+under the worktree-local `target-mutants/`, and pins the baseline scope to the
+SSRF, mqtt, and jms redaction files. Survivors are reported informationally;
+no gate or threshold consumes a mutation score.
+
 ## Requirements
 ### Requirement: xtask mutants wrapper with main-checkout and disk isolation guards
 

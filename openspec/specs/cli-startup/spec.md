@@ -1,7 +1,11 @@
 # cli-startup Specification
 
 ## Purpose
-TBD - created by archiving change exec-cli-startup-guard. Update Purpose after archive.
+Startup validation in the `camel run` command. Exec validation stays
+fail-closed when a route uses an `exec:` endpoint or an exec profile is
+declared, scheme presence is scanned across all statically declared URIs, and
+repeated stop signals force-exit.
+
 ## Requirements
 ### Requirement: Non-exec, non-declared startup skips exec validation
 

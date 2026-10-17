@@ -1,7 +1,10 @@
 # grpc-consumer-cancellation Specification
 
 ## Purpose
-TBD - created by archiving change permitcancel. Update Purpose after archive.
+Cancellation behavior of the gRPC consumer. Permit waits race against consumer
+cancellation, dispatch-table registrations are removed on every exit path, and
+a child cancellation token terminates the bidi response stream on shutdown.
+
 ## Requirements
 ### Requirement: permit wait observes consumer cancellation
 

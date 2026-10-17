@@ -1,7 +1,11 @@
 # fleet-health Specification
 
 ## Purpose
-TBD - created by archiving change heartbeat. Update Purpose after archive.
+Health monitoring for the agent fleet. An hourly heartbeat battery and a
+zero-cost watchdog evaluate quota, inbox staleness, and shared-disk
+conditions, with a documented quota-starvation surgery playbook and selfwake
+patterns that surface watchdog anomalies.
+
 ## Requirements
 ### Requirement: Hourly heartbeat battery
 

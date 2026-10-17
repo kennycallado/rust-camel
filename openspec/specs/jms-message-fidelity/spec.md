@@ -1,7 +1,11 @@
 # jms-message-fidelity Specification
 
 ## Purpose
-TBD - created by archiving change jms-message-fidelity. Update Purpose after archive.
+JMS message fidelity in the bridge. Consumed text messages preserve their
+`ContentType` property, duplicate subscription IDs are rejected with
+`ALREADY_EXISTS` without eviction, and non-Bytes/Text message types forward
+with an empty body under a documented policy.
+
 ## Requirements
 ### Requirement: Consumed TextMessage preserves the ContentType property
 

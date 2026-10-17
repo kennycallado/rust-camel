@@ -1,7 +1,10 @@
 # ws-component Specification
 
 ## Purpose
-TBD - created by archiving change ws-client-consumer. Update Purpose after archive.
+The `ws:` component. Its optional client-consumer mode connects outbound,
+reconnects, applies backpressure and resource limits, exposes readiness,
+health, and observability, and preserves the default server-mode behavior.
+
 ## Requirements
 ### Requirement: Client-consumer mode
 

@@ -1,7 +1,11 @@
 # redis-tls Specification
 
 ## Purpose
-TBD - created by archiving change redis-live-tls-and-ready-race. Update Purpose after archive.
+TLS for Redis connections. Standalone connections trust a configured CA,
+sentinel CA trust installs per plane and fails closed on mixed schemes, rediss
+and rediss-sentinel have live coverage through the repository connection path,
+and the server-only v1 trust model is documented.
+
 ## Requirements
 ### Requirement: Standalone TLS connections trust the configured CA
 
