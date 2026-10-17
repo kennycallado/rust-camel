@@ -147,7 +147,15 @@ pub fn split_zip_bytes(
                     }
                 };
 
-                let raw_name = entry.name().to_string();
+                let raw_name = match entry.name() {
+                    Ok(n) => n.into_owned(),
+                    Err(e) => {
+                        let _ = tx.blocking_send(Err(CamelError::TypeConversionFailed(
+                            format!("Failed to read ZIP entry {i} name: {e}"),
+                        )));
+                        return;
+                    }
+                };
                 let is_dir = entry.is_dir();
 
                 let mut validated = match validate_entry_path(&raw_name, max_path_len, "ZIP") {

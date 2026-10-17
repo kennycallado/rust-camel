@@ -33,7 +33,7 @@ time = "0.3"
 libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 rustls-pemfile = "2"

@@ -155,7 +155,7 @@ mod tests {
         let reader = Cursor::new(zip_bytes);
         let mut archive = ZipArchive::new(reader).unwrap();
         let mut entry = archive.by_index(0).unwrap();
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         assert_eq!(name, "payload");
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf).unwrap();

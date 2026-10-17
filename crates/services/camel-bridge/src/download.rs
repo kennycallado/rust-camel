@@ -357,7 +357,9 @@ fn unpack_zip(data: &[u8], dest: &Path) -> Result<(), BridgeError> {
         let mut entry = archive
             .by_index(i)
             .map_err(|e| BridgeError::Download(format!("zip entry error: {e}")))?;
-        let path = entry.mangled_name();
+        let path = entry
+            .mangled_name()
+            .map_err(|e| BridgeError::Download(format!("zip name error: {e}")))?;
         if path.is_absolute()
             || path
                 .components()
