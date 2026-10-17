@@ -140,19 +140,24 @@ same non-blocking contract.
 
 ### Requirement: findings summary with triage instructions
 
-A final workflow step SHALL write a step summary that, on any finding,
-lists the artifact directory of each selected leg that produced findings
-(`target-fuzz/artifacts/<target>/` for that leg's target) and includes
+The workflow summary step, running after all drills, SHALL write a step
+summary that, on any finding, lists the artifact directory of each selected
+leg that produced findings (`target-fuzz/artifacts/<target>/` for that leg's
+target) and includes
 the triage command (`bd create -t bug -p 1`) and the promotion rule
 (minimized input becomes a committed `#[test]`, never a raw corpus
-blob). The workflow SHALL NOT create issues or bd entries
+blob). The summary SHALL include panic excerpts when a failing leg's log
+contains panic, parity-divergence, or assertion diagnostics. It SHALL name
+the evidence-bundle workflow artifact that contains the logs and crash inputs.
+The workflow SHALL NOT create issues or bd entries
 automatically.
 
 #### Scenario: summary renders on drill failure
 
 - **WHEN** any drill step fails
-- **THEN** the PR shows a summary with artifact paths and triage
-  instructions, and no issue automation ran
+- **THEN** the PR shows a summary with artifact paths, panic excerpts when
+  available, an evidence-bundle pointer, and triage instructions, and no
+  issue automation ran
 
 #### Scenario: non-YAML crash reports its own leg's artifact directory
 

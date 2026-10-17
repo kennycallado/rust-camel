@@ -210,6 +210,10 @@ let route = RouteBuilder::from("direct:auth")
 
 ### Input Headers (for commands)
 
+The table below lists common headers. See the
+[Redis component guide](../../../docs/src/components/redis.md) for numeric and geospatial header rules.
+The [command handlers](src/commands/) define the inputs for each command.
+
 | Header | Description |
 |--------|-------------|
 | `CamelRedis.Key` | Redis key |

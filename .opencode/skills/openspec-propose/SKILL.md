@@ -12,6 +12,8 @@ metadata:
 
 Propose a new change - create the change and generate all artifacts in one step.
 
+**Scenario edits:** Before renaming or dropping a scenario in a `MODIFIED` delta requirement, see [scenario directives](../openspec-archive-change/SKILL.md) for `openspec-scenario-ops` syntax. Use the `cargo xtask archive <change>` wrapper (`--check` validates without writing).
+
 I'll create a change with artifacts:
 - proposal.md (what & why)
 - design.md (how)

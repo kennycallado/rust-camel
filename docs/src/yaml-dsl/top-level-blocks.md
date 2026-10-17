@@ -107,7 +107,13 @@ mcp:
         uri: crm://customers
 ```
 
-The input schema and resource URI travel percent-encoded on the lowered route's query string. Server runtime config (bind, TLS, caps) is owned by `Camel.toml` under `mcp.servers.<name>`; the block's server `name` must match a TOML key or the consumer start fails. The server `security_policy` propagates to every lowered route. See [MCP component](../components/mcp.md).
+The input schema and resource URI travel percent-encoded on the lowered route's query string.
+The block's server `name` must match a `Camel.toml` key under `mcp.servers.<name>` or consumer start fails.
+The DSL block's `bind`, `tls`, `max_tools`, and `max_resources` values configure the runtime listener.
+If TOML and the DSL declare different values for the same key, startup fails and names both sources.
+Keys declared on only one side use that side's values. The server `security_policy` propagates to every lowered route.
+See [MCP component](../components/mcp.md) and the
+[MCP crate CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-mcp/CONTEXT.md#config-keys).
 
 ## Template declaration
 | Field | Type | Required | Default | Description |
