@@ -386,7 +386,7 @@ Pre-stream availability gate: a request that arrives before a consumer stream is
 
 Signer metadata (Body `SIGN` coverage) is an integrity signal, not authentication: the exported `SignerIdentity` fields are exchange properties only and never a principal or authenticated identity (ADR-0032). One-way input-only operations are supported and return an empty HTTP 202 ACK after correlated completion (see [One-way consumer operations](#one-way-consumer-operations)).
 
-CXF and XML bridge release pins are `0.8.0`. One-way acceptance and the mission-361 regressions run against the same pinned `0.8.0` bridge rebuilt from source: set `CAMEL_CXF_BRIDGE_BINARY_PATH` to the rebuilt `cxf-bridge` binary to use it, and the release pin stays `0.8.0`. Publication of public release assets and tags is owner-only and remains pending.
+CXF and XML bridge release pins are `0.8.1` (CXF) and `0.8.0` (XML). One-way acceptance and the mission-361 regressions run against the pinned `0.8.1` bridge rebuilt from source: set `CAMEL_CXF_BRIDGE_BINARY_PATH` to the rebuilt `cxf-bridge` binary to use it. Publication of bridge tags and public release assets is an owner-only action (the `*-bridge-release` workflows build and publish on tag push).
 
 The XML parser boundary lives in the Java bridge. The Rust component does not run an XML parser. Audit parser hardening in the bridge process. WSDL files also live in the bridge. The Rust side reads them as paths and forwards them to the bridge over the environment.
 

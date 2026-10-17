@@ -255,9 +255,9 @@ configuration, not the data plane.
 
 ## Native acceptance
 
-One-way behavior is accepted against the pinned `0.8.0` bridge rebuilt from
+One-way behavior is accepted against the pinned `0.8.1` bridge rebuilt from
 source, not against a downloaded binary. Build it with
-`cargo xtask build-cxf-bridge --version 0.8.0`, then point the Rust component at
+`cargo xtask build-cxf-bridge --version 0.8.1`, then point the Rust component at
 the rebuilt binary:
 
 ```bash
