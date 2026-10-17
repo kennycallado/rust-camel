@@ -187,7 +187,7 @@ pub struct BridgeSlot {
     pub configured_profiles: Vec<crate::config::CxfProfileConfig>,
     pub bind_address: Option<String>,
     /// Persisted pool-level listener TLS record (cxf-listener-tls): re-emitted
-    /// on health-monitor restart through [`bridge_config_for_slot`].
+    /// on health-monitor restart through `bridge_config_for_slot`.
     pub listener_tls: Option<CxfListenerTls>,
     pub state_rx: watch::Receiver<BridgeState>,
     pub(crate) state_tx: watch::Sender<BridgeState>,

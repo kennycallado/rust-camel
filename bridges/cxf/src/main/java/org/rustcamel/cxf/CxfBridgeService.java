@@ -8,14 +8,18 @@ import io.quarkus.grpc.GrpcService;
 import io.smallrye.common.annotation.Blocking;
 import jakarta.annotation.PostConstruct;
 import jakarta.inject.Inject;
+import jakarta.xml.ws.Dispatch;
 import jakarta.xml.ws.soap.SOAPBinding;
 import jakarta.xml.ws.soap.SOAPFaultException;
 import java.io.StringReader;
 import java.lang.reflect.UndeclaredThrowableException;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import javax.xml.namespace.QName;
 import javax.xml.transform.Source;
 import javax.xml.transform.stream.StreamSource;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
 
 @GrpcService
 @Blocking
@@ -28,6 +32,17 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
 
   private static final String SOAP11_BINDING_ID = SOAPBinding.SOAP11HTTP_BINDING;
   private static final String SOAP12_BINDING_ID = SOAPBinding.SOAP12HTTP_BINDING;
+
+  private static final String SOAP11_NS = "http://schemas.xmlsoap.org/soap/envelope/";
+  private static final String SOAP12_NS = "http://www.w3.org/2003/05/soap-envelope";
+
+  /**
+   * Static protocol-failure description for an operation that declares a WSDL output but whose
+   * request-reply dispatch yielded no serializable SOAP content. Deliberately version-neutral so it
+   * never leaks a fabricated payload or a fallback one-way interpretation.
+   */
+  private static final String EMPTY_SOAP_RESPONSE_DESCRIPTION =
+      "empty SOAP response: the operation declares an output but the server returned no body";
 
   @Inject BridgeConfig bridgeConfig;
 
@@ -110,9 +125,44 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
       }
 
       long normalizedTimeout = rawTimeout > 0 ? rawTimeout : bridgeConfig.connectionTimeoutMs();
-      var dispatch =
-          clientManager.getDispatch(
-              wsdl, address, service, port, request.getOperation(), profileName, normalizedTimeout);
+
+      // Service.Mode.PAYLOAD expects the bare operation element. A payload that is already a SOAP
+      // Envelope would be nested in a second envelope on the wire, so parse it and reject that
+      // before any operation resolution or wire transmission. The parsed root QName is the input
+      // element used to select an operation when the request omits an explicit name.
+      String payload = request.getPayload().toStringUtf8();
+      Document payloadDoc = SoapEnvelopeHelper.parseResponse(payload);
+      if (isSoapEnvelopeRoot(payloadDoc)) {
+        responseObserver.onError(
+            Status.INVALID_ARGUMENT
+                .withDescription("payload is already a SOAP Envelope")
+                .asException());
+        return;
+      }
+      QName inputQName = rootQName(payloadDoc);
+
+      CxfClientManager.ResolvedDispatch resolved;
+      try {
+        resolved =
+            clientManager.getResolvedDispatch(
+                wsdl,
+                address,
+                service,
+                port,
+                request.getOperation(),
+                profileName,
+                normalizedTimeout,
+                inputQName);
+      } catch (WsdlOperationCatalog.InvalidOperationException e) {
+        // No explicit name with an input that matches zero or multiple operations, or an explicit
+        // name that did not resolve. Argument-class error, before any wire transmission.
+        LOG.log(Level.WARNING, "Rejected invoke: {0}", e.getMessage());
+        responseObserver.onError(
+            Status.INVALID_ARGUMENT.withDescription(e.getMessage()).withCause(e).asException());
+        return;
+      }
+
+      Dispatch<Source> dispatch = resolved.dispatch();
 
       // The SOAP version is a property of the selected WSDL port binding, never of a request
       // header. Reject a binding we cannot map to an envelope version instead of silently
@@ -126,14 +176,14 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
         return;
       }
 
-      // Service.Mode.PAYLOAD expects the bare operation element. A payload that is already a SOAP
-      // Envelope would be nested in a second envelope on the wire, so reject it before dispatch.
-      String payload = request.getPayload().toStringUtf8();
-      if (SoapEnvelopeHelper.isSoapEnvelope(payload)) {
-        responseObserver.onError(
-            Status.INVALID_ARGUMENT
-                .withDescription("payload is already a SOAP Envelope")
-                .asException());
+      if (resolved.operation().oneWay()) {
+        // Input-only operation: send the bare payload exactly once. There is no response Source to
+        // serialize or inspect. A local invocation failure propagates through the outer error
+        // handling; it is never converted into a success or retried as request-reply.
+        dispatch.invokeOneWay(new StreamSource(new StringReader(payload)));
+        LOG.log(Level.FINE, "SOAP one-way completed: {0}/{1}", new Object[] {service, port});
+        responseObserver.onNext(SoapResponse.getDefaultInstance());
+        responseObserver.onCompleted();
         return;
       }
 
@@ -169,6 +219,13 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
         responseObserver.onCompleted();
         return;
       }
+      // A request-reply operation that produced no Source is a protocol failure: there is no
+      // response content to forward and nothing may be fabricated. Never fall back to one-way.
+      if (responseSource == null) {
+        responseObserver.onError(
+            Status.INTERNAL.withDescription(EMPTY_SOAP_RESPONSE_DESCRIPTION).asRuntimeException());
+        return;
+      }
       // Service.Mode.PAYLOAD: dispatch returns just the SOAP body content (no envelope wrapper).
       // The serialized source is the response payload directly — no envelope extraction needed.
       String responseBody;
@@ -184,6 +241,13 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
                         + " bytes exceeds CXF_MAX_BODY_BYTES="
                         + e.capBytes)
                 .asRuntimeException());
+        return;
+      }
+      // An output-declaring operation whose response serializes to zero bytes is empty content,
+      // not an implicit one-way acknowledgment.
+      if (responseBody.isEmpty()) {
+        responseObserver.onError(
+            Status.INTERNAL.withDescription(EMPTY_SOAP_RESPONSE_DESCRIPTION).asRuntimeException());
         return;
       }
       boolean fault = false;
@@ -264,6 +328,37 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
     responseObserver.onNext(
         HealthResponse.newBuilder().setHealthy(true).setMessage("SERVING").build());
     responseObserver.onCompleted();
+  }
+
+  /**
+   * True when the parsed document root is a SOAP 1.1/1.2 {@code Envelope}. The producer rejects
+   * such a pre-wrapped payload so it is never nested inside a second envelope on the wire.
+   */
+  private static boolean isSoapEnvelopeRoot(Document doc) {
+    Element root = doc.getDocumentElement();
+    if (root == null) {
+      return false;
+    }
+    if (!"Envelope".equals(elementLocalName(root))) {
+      return false;
+    }
+    String namespace = root.getNamespaceURI();
+    return SOAP11_NS.equals(namespace) || SOAP12_NS.equals(namespace);
+  }
+
+  /** Namespace-qualified root element QName of a parsed bare payload. */
+  private static QName rootQName(Document doc) {
+    Element root = doc.getDocumentElement();
+    if (root == null) {
+      return null;
+    }
+    String namespace = root.getNamespaceURI();
+    return new QName(namespace == null ? "" : namespace, elementLocalName(root));
+  }
+
+  private static String elementLocalName(Element element) {
+    String localName = element.getLocalName();
+    return localName == null ? element.getTagName() : localName;
   }
 
   static String toXmlString(Source source, long cap) throws Exception {

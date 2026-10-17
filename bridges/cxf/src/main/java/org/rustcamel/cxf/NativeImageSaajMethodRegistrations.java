@@ -3,21 +3,20 @@ package org.rustcamel.cxf;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
- * Registers the SAAJ SOAP/DOM classes (including their methods and constructors)
- * for GraalVM native-image reflection.
+ * Registers the SAAJ SOAP/DOM classes (including their methods and constructors) for GraalVM
+ * native-image reflection.
  *
- * <p>The failure this guards: WSS4J's {@code WSSecurityUtil.findWsseSecurityHeaderBlock}
- * creates a missing {@code <Header>} via {@code SOAPDocumentImpl.importNode}, which calls
- * {@code createSoapNode(node.getClass(), imported)}. That helper's element branch does
- * {@code clazz.getConstructor(SOAPDocumentImpl.class, Element.class).newInstance(...)}
- * on the CONCRETE SAAJ wrapper class (e.g. {@code ver1_1.Header1_1Impl}). Without
- * constructor reflection metadata for the {@code ver1_1}/{@code ver1_2} classes the
- * lookup throws {@code NoSuchMethodException}, SAAJ wraps it in {@code IllegalStateException},
- * and WSS4J flattens everything to {@code WSSecurityException(INVALID_SECURITY)}
- * ("An error was discovered processing the &lt;wsse:Security&gt; header") and CXF to the
- * generic "Security processing failed." SOAP fault — breaking all outbound WS-Security
- * signing before the request is sent. The abstract {@code impl.*} superclasses do NOT
- * help: constructors are not inherited by {@code getConstructor}.
+ * <p>The failure this guards: WSS4J's {@code WSSecurityUtil.findWsseSecurityHeaderBlock} creates a
+ * missing {@code <Header>} via {@code SOAPDocumentImpl.importNode}, which calls {@code
+ * createSoapNode(node.getClass(), imported)}. That helper's element branch does {@code
+ * clazz.getConstructor(SOAPDocumentImpl.class, Element.class).newInstance(...)} on the CONCRETE
+ * SAAJ wrapper class (e.g. {@code ver1_1.Header1_1Impl}). Without constructor reflection metadata
+ * for the {@code ver1_1}/{@code ver1_2} classes the lookup throws {@code NoSuchMethodException},
+ * SAAJ wraps it in {@code IllegalStateException}, and WSS4J flattens everything to {@code
+ * WSSecurityException(INVALID_SECURITY)} ("An error was discovered processing the
+ * &lt;wsse:Security&gt; header") and CXF to the generic "Security processing failed." SOAP fault —
+ * breaking all outbound WS-Security signing before the request is sent. The abstract {@code impl.*}
+ * superclasses do NOT help: constructors are not inherited by {@code getConstructor}.
  */
 @RegisterForReflection(
     classNames = {

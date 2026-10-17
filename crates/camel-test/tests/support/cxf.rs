@@ -9,12 +9,12 @@ use std::time::Duration;
 use axum::Router;
 use axum::http::HeaderMap;
 use axum::routing::post;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use rustls::server::WebPkiClientVerifier;
-use rustls::{RootCertStore, ServerConfig};
+use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 pub const ENV_CAMEL: &str = "CAMEL_CXF_BRIDGE_BINARY_PATH";
 pub const ENV_ALIAS: &str = "CXF_BRIDGE_PATH";
@@ -296,29 +296,66 @@ pub enum TestClientAuth {
 
 /// Server-side observability captured by [`spawn_soap_tls_server`]: how many
 /// handshakes completed, the TLS error strings of failed handshakes, the
-/// presented client certificate (if any), and the number of requests served.
+/// presented client certificate (if any), and the number of complete POSTs
+/// served. `request_headers`/`request_bodies` hold one entry per complete POST;
+/// `rejected` explains connections the capture layer closed before recording a
+/// POST (malformed or oversized framing).
 #[derive(Default)]
 pub struct TestTlsServerState {
     pub completed: AtomicUsize,
     pub failures: Mutex<Vec<String>>,
     pub client_cert_der: Mutex<Option<Vec<u8>>>,
     pub requests: AtomicUsize,
+    pub request_headers: Mutex<Vec<Vec<(String, String)>>>,
+    pub request_bodies: Mutex<Vec<Vec<u8>>>,
+    pub rejected: Mutex<Vec<String>>,
 }
 
 const TEST_TLS_CONNECTION_BUDGET: usize = 8;
 const TEST_TLS_ACCEPT_TIMEOUT: Duration = Duration::from_secs(45);
 const TEST_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 const TEST_TLS_IO_TIMEOUT: Duration = Duration::from_secs(10);
-const TEST_TLS_READ_CAP: usize = 64 * 1024;
+/// Hard ceiling for captured request headers.
+const TEST_TLS_MAX_HEADER: usize = 64 * 1024;
+/// Hard ceiling for captured request bodies (1 MiB), above every fixture
+/// payload. Untrusted `Content-Length` values are never used as allocation
+/// sizes before this bound is enforced.
+pub const TEST_TLS_MAX_BODY: usize = 1024 * 1024;
 
 /// Loopback HTTPS server that replies to every request with a SOAP 1.1
-/// `sayHelloResponse`. Every accept/handshake/read/write is bounded, so a
-/// client that cannot complete the handshake releases the connection slot
-/// quickly instead of hanging the test. Cleanup is the caller's `handle.abort()`.
+/// `sayHelloResponse`. Retained for existing callers; it delegates to
+/// [`spawn_soap_tls_server_with_response`].
 pub async fn spawn_soap_tls_server(
     server_cert_der: &[u8],
     server_key_der: &[u8],
     auth: TestClientAuth,
+) -> (SocketAddr, Arc<TestTlsServerState>, JoinHandle<()>) {
+    spawn_soap_tls_server_with_response(
+        server_cert_der,
+        server_key_der,
+        auth,
+        200,
+        SOAP11_SAY_HELLO_RESPONSE.as_bytes().to_vec(),
+    )
+    .await
+}
+
+/// Loopback HTTPS server that reads one complete HTTP/1.1 request per
+/// connection (bounded headers and `Content-Length` body) and replies with
+/// `response_status` and `response_body`.
+///
+/// Every accept/handshake/read/write is bounded, so a client that cannot
+/// complete the handshake or sends malformed framing releases the connection
+/// slot quickly instead of hanging the test. Malformed, negative, duplicated,
+/// missing, or over-cap `Content-Length` values are rejected before any body
+/// allocation, and no POST is recorded for that connection. Each connection is
+/// shut down explicitly. Cleanup is the caller's `handle.abort()`.
+pub async fn spawn_soap_tls_server_with_response(
+    server_cert_der: &[u8],
+    server_key_der: &[u8],
+    auth: TestClientAuth,
+    response_status: u16,
+    response_body: Vec<u8>,
 ) -> (SocketAddr, Arc<TestTlsServerState>, JoinHandle<()>) {
     let chain = vec![CertificateDer::from(server_cert_der.to_vec())];
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(server_key_der.to_vec()));
@@ -346,6 +383,11 @@ pub async fn spawn_soap_tls_server(
         .expect("test TLS listener yields a local addr");
     let state = Arc::new(TestTlsServerState::default());
     let task_state = Arc::clone(&state);
+    let reason = match response_status {
+        200 => "OK",
+        202 => "Accepted",
+        _ => "Status",
+    };
 
     let handle = tokio::spawn(async move {
         for _ in 0..TEST_TLS_CONNECTION_BUDGET {
@@ -388,34 +430,229 @@ pub async fn spawn_soap_tls_server(
                     Some(first.as_ref().to_vec());
             }
 
-            let mut buf = vec![0u8; TEST_TLS_READ_CAP];
-            let mut seen = 0usize;
-            while seen < buf.len() && !has_header_end(&buf[..seen]) {
-                match tokio::time::timeout(TEST_TLS_IO_TIMEOUT, tls.read(&mut buf[seen..])).await {
-                    Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
-                    Ok(Ok(n)) => seen += n,
+            match capture_http_request(&mut tls).await {
+                Ok((parsed, body)) => {
+                    task_state.requests.fetch_add(1, Ordering::SeqCst);
+                    task_state
+                        .request_headers
+                        .lock()
+                        .expect("request header lock")
+                        .push(parsed.headers);
+                    task_state
+                        .request_bodies
+                        .lock()
+                        .expect("request body lock")
+                        .push(body);
+
+                    let head = format!(
+                        "HTTP/1.1 {response_status} {reason}\r\nContent-Type: text/xml; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        response_body.len()
+                    );
+                    let _ =
+                        tokio::time::timeout(TEST_TLS_IO_TIMEOUT, tls.write_all(head.as_bytes()))
+                            .await;
+                    let _ =
+                        tokio::time::timeout(TEST_TLS_IO_TIMEOUT, tls.write_all(&response_body))
+                            .await;
+                    let _ = tokio::time::timeout(TEST_TLS_IO_TIMEOUT, tls.flush()).await;
+                }
+                Err(rejection) => {
+                    task_state
+                        .rejected
+                        .lock()
+                        .expect("rejection lock")
+                        .push(rejection);
                 }
             }
-            task_state.requests.fetch_add(1, Ordering::SeqCst);
-
-            let body = SOAP11_SAY_HELLO_RESPONSE;
-            let reply = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/xml; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ =
-                tokio::time::timeout(TEST_TLS_IO_TIMEOUT, tls.write_all(reply.as_bytes())).await;
             let _ = tokio::time::timeout(TEST_TLS_IO_TIMEOUT, tls.shutdown()).await;
+            drop(tls);
         }
     });
 
     (addr, state, handle)
 }
 
-/// True when `buf` already contains the HTTP header terminator `\r\n\r\n`.
-fn has_header_end(buf: &[u8]) -> bool {
-    buf.windows(4).any(|window| window == b"\r\n\r\n")
+/// Parsed HTTP/1.1 request head plus the declared body length.
+struct ParsedRequestHead {
+    headers: Vec<(String, String)>,
+    content_length: usize,
+}
+
+/// Parses the captured request head and validates its framing. `Content-Length`
+/// is mandatory (the CXF client frames with it); duplicate, missing,
+/// nonnumeric, negative, or over-cap values are rejected before any body
+/// allocation. Non-identity transfer encodings are rejected rather than
+/// silently ignored, because the capture path cannot decode them.
+fn parse_request_head(head: &[u8]) -> Result<ParsedRequestHead, String> {
+    let text =
+        std::str::from_utf8(head).map_err(|_| "request headers are not valid UTF-8".to_string())?;
+    let mut lines = text.split("\r\n");
+    let request_line = lines.next().unwrap_or_default();
+    if !request_line.starts_with("POST ") {
+        return Err(format!("unsupported request line: {request_line:?}"));
+    }
+
+    let mut headers = Vec::new();
+    let mut content_length = None;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(format!("malformed header line: {line:?}"));
+        };
+        let name = name.trim().to_string();
+        let value = value.trim().to_string();
+        if name.eq_ignore_ascii_case("transfer-encoding") && !value.eq_ignore_ascii_case("identity")
+        {
+            return Err(format!("unsupported transfer-encoding: {value}"));
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            if content_length.is_some() {
+                return Err("duplicate content-length header".to_string());
+            }
+            let length = value.parse::<usize>().map_err(|_| {
+                format!("invalid content-length {value:?}: expected a nonnegative integer")
+            })?;
+            if length > TEST_TLS_MAX_BODY {
+                return Err(format!(
+                    "content-length {length} exceeds capture cap {TEST_TLS_MAX_BODY}"
+                ));
+            }
+            content_length = Some(length);
+        }
+        headers.push((name, value));
+    }
+
+    let content_length =
+        content_length.ok_or_else(|| "missing content-length header".to_string())?;
+    Ok(ParsedRequestHead {
+        headers,
+        content_length,
+    })
+}
+
+/// Reads one complete request head and body from `tls`.
+async fn capture_http_request(
+    tls: &mut tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+) -> Result<(ParsedRequestHead, Vec<u8>), String> {
+    let mut buffer = Vec::with_capacity(4096);
+    let head_end = loop {
+        if let Some(end) = header_end(&buffer) {
+            // The terminator itself must end within the cap: a read that
+            // straddles the boundary must not admit an over-cap head.
+            if end > TEST_TLS_MAX_HEADER {
+                return Err(format!(
+                    "request headers exceed {TEST_TLS_MAX_HEADER} bytes"
+                ));
+            }
+            break end;
+        }
+        if buffer.len() >= TEST_TLS_MAX_HEADER {
+            return Err(format!(
+                "request headers exceed {TEST_TLS_MAX_HEADER} bytes"
+            ));
+        }
+        // Never read past the remaining header allowance, so the cap is exact
+        // even when a read would otherwise carry the terminator past it.
+        let allowance = (TEST_TLS_MAX_HEADER - buffer.len()).min(4096);
+        let mut chunk = vec![0u8; allowance];
+        match tokio::time::timeout(TEST_TLS_IO_TIMEOUT, tls.read(&mut chunk)).await {
+            Ok(Ok(0)) => return Err("connection closed before complete headers".to_string()),
+            Ok(Ok(n)) => buffer.extend_from_slice(&chunk[..n]),
+            Ok(Err(err)) => return Err(format!("header read failed: {err}")),
+            Err(_) => return Err("header read timed out".to_string()),
+        }
+    };
+
+    let parsed = parse_request_head(&buffer[..head_end])?;
+    let mut body = buffer[head_end..].to_vec();
+    if body.len() > parsed.content_length {
+        return Err("request carries more bytes than its content-length".to_string());
+    }
+    while body.len() < parsed.content_length {
+        let mut chunk = vec![0u8; (parsed.content_length - body.len()).min(4096)];
+        match tokio::time::timeout(TEST_TLS_IO_TIMEOUT, tls.read(&mut chunk)).await {
+            Ok(Ok(0)) => return Err("connection closed before complete body".to_string()),
+            Ok(Ok(n)) => body.extend_from_slice(&chunk[..n]),
+            Ok(Err(err)) => return Err(format!("body read failed: {err}")),
+            Err(_) => return Err("body read timed out".to_string()),
+        }
+    }
+
+    Ok((parsed, body))
+}
+
+/// Index just past the HTTP header terminator `\r\n\r\n`.
+fn header_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+}
+
+/// Raw rustls client trusting `ca` and presenting `client`, used to exercise
+/// the fake TLS capture layer without a bridge.
+pub async fn raw_tls_client(
+    addr: SocketAddr,
+    ca: &TestTlsCa,
+    client: &TestTlsLeaf,
+) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(ca.der()))
+        .expect("test CA is a valid trust anchor");
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("ring provider supports the default protocol versions")
+        .with_root_certificates(roots)
+        .with_client_auth_cert(
+            vec![CertificateDer::from(client.cert_der.clone())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(client.key_der.clone())),
+        )
+        .expect("raw TLS client config builds");
+    let connector = TlsConnector::from(Arc::new(config));
+    // Bounded connect + handshake: the server is local, so anything past this
+    // budget is a test failure, not a wait.
+    let tcp = tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
+        .await
+        .expect("raw TLS client connect within budget")
+        .expect("raw TLS client connects");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        connector.connect(ServerName::IpAddress(addr.ip().into()), tcp),
+    )
+    .await
+    .expect("raw TLS client handshake within budget")
+    .expect("raw TLS client completes the mTLS handshake")
+}
+
+/// A POST probe whose `Content-Length` is the supplied, deliberately possibly
+/// invalid value.
+pub fn capture_probe_request(content_length: &str) -> Vec<u8> {
+    format!(
+        "POST /service HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/xml; charset=utf-8\r\nSOAPAction: \"urn:receive\"\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// A POST probe whose header terminator ends one byte past the header cap: the
+/// bytes before `\r\n\r\n` fill `TEST_TLS_MAX_HEADER - 1` positions, so the
+/// terminator crosses the boundary. Used to prove the cap is exact.
+pub fn capture_boundary_crossing_probe() -> Vec<u8> {
+    const BODY_LENGTH: usize = 1;
+    let prefix = format!(
+        "POST /service HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/xml; charset=utf-8\r\nSOAPAction: \"urn:receive\"\r\nContent-Length: {BODY_LENGTH}\r\nX-Filler: "
+    );
+    // `prefix` already ends with `X-Filler: `; add `filler_len` bytes and the
+    // closing `\r\n` so everything before the terminator is exactly cap - 1.
+    let filler_len = TEST_TLS_MAX_HEADER
+        .checked_sub(1 + prefix.len() + b"\r\n".len())
+        .expect("probe prefix fits under the header cap");
+    let mut probe = prefix.into_bytes();
+    probe.extend(std::iter::repeat_n(b'x', filler_len));
+    probe.extend_from_slice(b"\r\n\r\n");
+    probe
 }
 
 fn client_verifier(

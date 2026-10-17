@@ -1,8 +1,9 @@
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::{Request, Response, Status};
@@ -12,6 +13,21 @@ use camel_component_cxf::proto::{
     cxf_bridge_server::{CxfBridge, CxfBridgeServer},
 };
 
+/// One scripted outcome for the next `invoke`, consumed in FIFO order.
+///
+/// `Error` models a gRPC/transport status (`Unavailable` or a
+/// transport-class `Internal`). The mock counts the receipt before returning
+/// it, so an `Error` outcome can represent a possibly transmitted SOAP send.
+/// Only the producer unit test scripts outcomes; other integration test
+/// binaries compile this shared support module without using it.
+#[allow(dead_code)]
+pub enum ScriptedInvokeOutcome {
+    /// Respond with a successful `SoapResponse` carrying this payload.
+    Success(Vec<u8>),
+    /// Fail the call with this gRPC status.
+    Error(Status),
+}
+
 #[derive(Clone, Default)]
 #[allow(clippy::type_complexity)]
 pub struct MockState {
@@ -20,8 +36,43 @@ pub struct MockState {
     pub invoke_delay: Arc<Mutex<Option<Duration>>>,
     pub invoke_response_payload: Arc<Mutex<Option<Vec<u8>>>>,
     pub healthy: Arc<Mutex<bool>>,
+    /// Counts every `invoke` receipt, incremented before any response is
+    /// produced so a transport error still reflects a received send.
+    pub invocation_count: Arc<Mutex<u64>>,
+    /// FIFO of scripted outcomes; when empty the existing default successful
+    /// behavior applies.
+    pub scripted_outcomes: Arc<Mutex<VecDeque<ScriptedInvokeOutcome>>>,
     pub consumer_requests_tx: Arc<Mutex<Option<mpsc::Sender<Result<ConsumerRequest, Status>>>>>,
     pub consumer_responses_received: Arc<Mutex<Vec<ConsumerResponse>>>,
+    /// Explicit test-side completion boundary. The recorder resolves the
+    /// `oneshot` registered for a request id once that request's response
+    /// has been written into the gRPC sink. A test can therefore await
+    /// request-processing completion instead of inferring it from poll
+    /// stability (observe() in the consumer precedes the send, so a stale
+    /// count is not a completion proof).
+    #[allow(dead_code)]
+    pub response_completion: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+    /// Fires on every recorded response. `notify_one` stores a permit, so a
+    /// write that races a waiter is never lost; used to drain any late
+    /// duplicate response within a bounded window.
+    #[allow(dead_code)]
+    pub response_recorded: Arc<Notify>,
+}
+
+impl MockState {
+    /// Register an explicit completion boundary for `request_id` and return
+    /// a future that resolves when the recorder writes that request's
+    /// response. Call before dispatch: the registry is otherwise
+    /// uncontended, so a synchronous `try_lock` cannot fail.
+    #[allow(dead_code)]
+    pub fn expect_response_completion(&self, request_id: &str) -> oneshot::Receiver<()> {
+        let (tx, rx) = oneshot::channel();
+        self.response_completion
+            .try_lock()
+            .expect("response-completion registry must be uncontended before dispatch")
+            .insert(request_id.to_string(), tx);
+        rx
+    }
 }
 
 #[derive(Clone)]
@@ -42,9 +93,31 @@ impl CxfBridge for MockCxfBridge {
         request: Request<SoapRequest>,
     ) -> Result<Response<SoapResponse>, Status> {
         let req = request.into_inner();
+        // Count receipt BEFORE responding so a transport error can represent a
+        // possibly transmitted SOAP send.
+        {
+            let mut count = self.state.invocation_count.lock().await;
+            *count += 1;
+        }
         {
             let mut last = self.state.last_invoke.lock().await;
             *last = Some(req.clone());
+        }
+
+        // Scripted outcomes take precedence; each is consumed once in FIFO
+        // order. When the queue is empty the existing default behavior runs.
+        let scripted = self.state.scripted_outcomes.lock().await.pop_front();
+        if let Some(outcome) = scripted {
+            return match outcome {
+                ScriptedInvokeOutcome::Success(payload) => Ok(Response::new(SoapResponse {
+                    payload,
+                    headers: Default::default(),
+                    fault: false,
+                    fault_code: String::new(),
+                    fault_string: String::new(),
+                })),
+                ScriptedInvokeOutcome::Error(status) => Err(status),
+            };
         }
 
         if let Some(delay) = *self.state.invoke_delay.lock().await {
@@ -91,7 +164,15 @@ impl CxfBridge for MockCxfBridge {
             while let Some(next) = inbound.next().await {
                 match next {
                     Ok(resp) => {
+                        let request_id = resp.request_id.clone();
                         state.consumer_responses_received.lock().await.push(resp);
+                        // Explicit completion boundary for this request id,
+                        // then a permit-storing wakeup for the drain.
+                        if let Some(tx) = state.response_completion.lock().await.remove(&request_id)
+                        {
+                            let _ = tx.send(());
+                        }
+                        state.response_recorded.notify_one();
                     }
                     Err(_) => break,
                 }

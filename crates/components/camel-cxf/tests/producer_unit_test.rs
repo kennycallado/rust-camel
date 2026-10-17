@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use camel_component_api::{Body, Exchange, Message, Value};
 use camel_component_cxf::producer::CxfProducer;
-use support::mock_bridge::{MockState, spawn_mock_bridge};
+use support::mock_bridge::{MockState, ScriptedInvokeOutcome, spawn_mock_bridge};
 use tonic::transport::{Channel, Endpoint};
 use tower::Service;
 
@@ -333,4 +333,114 @@ async fn timeout_ms_in_range_is_applied() {
         .clone()
         .expect("last invoke");
     assert_eq!(req.timeout_ms, 5000);
+}
+
+/// Queues a scripted transport error followed by a success that must stay
+/// unconsumed by the failing call.
+async fn script_transport_error_then_success(
+    state: &MockState,
+    status: tonic::Status,
+    payload: &[u8],
+) {
+    let mut queue = state.scripted_outcomes.lock().await; // allow-test-wait: mock state mutex — uncontended in-test
+    queue.push_back(ScriptedInvokeOutcome::Error(status));
+    queue.push_back(ScriptedInvokeOutcome::Success(payload.to_vec()));
+}
+
+#[tokio::test]
+async fn cxf_empty_success_preserves_empty_bytes() {
+    let (mut producer, state) = make_producer().await;
+    // The bridge returns a successful, empty SoapResponse.
+    *state.invoke_response_payload.lock().await = Some(Vec::new()); // allow-test-wait: mock state mutex — uncontended in-test
+    let exchange = Exchange::new(Message::new(Body::Text("nonempty request".to_string())));
+
+    let out = ready_call(&mut producer, exchange)
+        .await
+        .expect("empty success must complete");
+
+    match out.input.body {
+        Body::Bytes(b) => assert!(
+            b.is_empty(),
+            "successful empty reply must map to zero-length bytes, not the input: {b:?}"
+        ),
+        other => panic!("expected Body::Bytes, got {other:?}"),
+    }
+    assert_eq!(
+        *state.invocation_count.lock().await,
+        1,
+        "exactly one invocation"
+    );
+}
+
+#[tokio::test]
+async fn cxf_transport_failure_never_replays_invocation() {
+    for status in [
+        tonic::Status::unavailable("connection dropped"),
+        tonic::Status::internal("transport channel closed"),
+    ] {
+        let code = status.code();
+        let (mut producer, state) = make_producer().await;
+        script_transport_error_then_success(&state, status, b"unused-success").await;
+
+        let exchange = Exchange::new(Message::new(Body::Text("request".to_string())));
+        let err = ready_call(&mut producer, exchange)
+            .await
+            .expect_err("a transport failure must stay an error, never a replay");
+
+        assert!(
+            err.to_string().contains("CXF gRPC invoke"),
+            "{code:?}: unexpected error: {err}"
+        );
+        assert_eq!(
+            *state.invocation_count.lock().await,
+            1,
+            "{code:?}: a failed send must not be replayed"
+        );
+        assert_eq!(
+            state.scripted_outcomes.lock().await.len(),
+            1,
+            "{code:?}: the queued success must stay unconsumed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cxf_later_explicit_send_recovers_after_transport_failure() {
+    let (mut producer, state) = make_producer().await;
+    script_transport_error_then_success(
+        &state,
+        tonic::Status::unavailable("connection dropped"),
+        b"second-response",
+    )
+    .await;
+
+    // First explicit send fails without replaying.
+    let first = Exchange::new(Message::new(Body::Text("first".to_string())));
+    let err = ready_call(&mut producer, first)
+        .await
+        .expect_err("the first send must fail");
+    assert!(
+        err.to_string().contains("CXF gRPC invoke"),
+        "unexpected error: {err}"
+    );
+
+    // A later explicit send acquires a fresh client and succeeds.
+    let second = Exchange::new(Message::new(Body::Text("second".to_string())));
+    let out = ready_call(&mut producer, second)
+        .await
+        .expect("the second explicit send must succeed");
+    assert_eq!(
+        out.input.body,
+        Body::Bytes(bytes::Bytes::from_static(b"second-response"))
+    );
+    assert_eq!(
+        *state.invocation_count.lock().await,
+        2,
+        "exactly two invocations across both explicit sends"
+    );
+    let last = state.last_invoke.lock().await.clone().expect("last invoke"); // allow-test-wait: mock state mutex — uncontended in-test
+    assert_eq!(
+        last.payload, b"second",
+        "the second invocation must carry the second call's payload"
+    );
 }

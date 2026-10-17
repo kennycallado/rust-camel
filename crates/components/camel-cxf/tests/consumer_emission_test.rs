@@ -165,6 +165,56 @@ async fn wait_for_recorded_responses(
     Err("timed out waiting for recorded responses".into())
 }
 
+/// Upper bound for reaching the mock's explicit per-request completion
+/// boundary. The boundary is a positive signal (the recorder wrote the
+/// response), not a count-stability guess, so only a wedged pipeline can
+/// hit this.
+const RESPONSE_BOUNDARY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Quiet window that ends the late-duplicate drain: the drain stops once no
+/// new recorded response arrives for this long.
+const RESPONSE_DRAIN_WINDOW: Duration = Duration::from_millis(100);
+
+/// Overall deadline for the late-duplicate drain. Each quiet window restarts
+/// while responses keep arriving, so without this bound responses spaced
+/// under `RESPONSE_DRAIN_WINDOW` apart would keep the loop alive
+/// indefinitely. Exceeding it is an error, never a hang.
+const RESPONSE_DRAIN_TOTAL: Duration = Duration::from_secs(5);
+
+/// Await the mock's EXPLICIT completion boundary for this request: the
+/// recorder resolves `completion` only once the response whose `request_id`
+/// matches has been written into the gRPC sink. Timeout-bounded; no polling.
+async fn await_response_completion(
+    completion: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tokio::time::timeout(RESPONSE_BOUNDARY_TIMEOUT, completion)
+        .await
+        .map_err(|_| "response completion boundary not reached within timeout")?
+        .map_err(|_| "response completion signal dropped")?;
+    Ok(())
+}
+
+/// After the explicit boundary, keep collecting until a full
+/// `RESPONSE_DRAIN_WINDOW` passes with no new recorded response, then return
+/// the FINAL snapshot. The quiet-window loop is itself bounded by
+/// `RESPONSE_DRAIN_TOTAL`: a stream of responses spaced closer than the
+/// quiet window cannot extend the drain past that deadline, and expiry
+/// returns an error rather than hanging. Every wait is
+/// `tokio::time::timeout`; there is no sleep and no iteration budget.
+async fn drain_recorded_responses(
+    state: &MockState,
+) -> Result<Vec<ConsumerResponse>, Box<dyn std::error::Error + Send + Sync>> {
+    tokio::time::timeout(RESPONSE_DRAIN_TOTAL, async {
+        while let Ok(()) =
+            tokio::time::timeout(RESPONSE_DRAIN_WINDOW, state.response_recorded.notified()).await
+        {
+        }
+    })
+    .await
+    .map_err(|_| "recorded responses did not quiesce within the bounded drain deadline")?;
+    wait_for_recorded_responses(state, 1).await
+}
+
 #[tokio::test]
 async fn cxf_consume_success_emits_operation()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -404,6 +454,101 @@ async fn cxf_marshalling_failure_retains_b_prime_and_double_counts()
         )],
         "exactly one failure op — the D5 double-count lives on the error family only: {:?}",
         rt.ops()
+    );
+
+    let () = tokio::time::timeout(Duration::from_secs(2), handler)
+        .await
+        .map_err(|_| "reply handler did not exit within 2s")??;
+
+    token.cancel();
+    let handle = consumer
+        .background_task_handle()
+        .expect("consumer background handle");
+    let outcome = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    assert!(
+        outcome.is_ok(),
+        "consumer task did not observe the context token cancel and exit within 2s"
+    );
+
+    Ok(())
+}
+
+/// Task 2.3: a SUCCESSFUL route whose output body is an unsupported
+/// stream stays a correlated Receiver fault. The proto carries operation
+/// metadata in `ConsumerRequest.operation`/`soap_action` (there is no
+/// separate input-only flag on the Rust side), so the Java input-only
+/// fixture's `ReceiveMessageOp` name is sent here as that metadata. The
+/// assertion is explicit regression evidence that no successful-ACK
+/// shortcut suppresses the marshalling fault.
+#[tokio::test]
+async fn cxf_stream_output_emits_correlated_receiver_fault()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let rt = RecordingRuntimeObservability::new(true);
+    let (state, token, rx, mut consumer) =
+        start_consumer(rt.clone(), "emission-proof-route").await?;
+
+    // Register the explicit per-request completion boundary BEFORE dispatch:
+    // the recorder resolves it when the response for this request id is
+    // written, which is a positive completion signal rather than a polled
+    // count guess.
+    let completion = state.expect_response_completion("req-oneway-stream");
+
+    let handler = tokio::spawn(reply_handler(rx, Behavior::ReplyStreamBody));
+
+    let requests_tx = wait_for_consumer_request_sender(&state).await?;
+    requests_tx
+        .send(Ok(ConsumerRequest {
+            request_id: "req-oneway-stream".to_string(),
+            operation: "ReceiveMessageOp".to_string(),
+            payload: b"<receive/>".to_vec(),
+            headers: Default::default(),
+            soap_action: "urn:ReceiveMessageOp".to_string(),
+            security_profile: String::new(),
+            signer: None,
+        }))
+        .await?;
+
+    // Existing bounded wait for the first response, then the EXPLICIT
+    // request-processing completion boundary, then a timeout-bounded drain
+    // that absorbs any late duplicate, and only then the final snapshot.
+    let _first = wait_for_recorded_responses(&state, 1).await?;
+    await_response_completion(completion).await?;
+    let recorded = drain_recorded_responses(&state).await?;
+
+    // The route executed SUCCESSFULLY (ReplyStreamBody replies Ok), yet
+    // the stream body is unmarshallable: the emitted response must stay
+    // the fault, correlated to the input request id, and must not carry
+    // any normal success payload.
+    assert_eq!(
+        recorded[0].request_id, "req-oneway-stream",
+        "fault must stay correlated to the input request id: {:?}",
+        recorded[0]
+    );
+    assert!(
+        recorded[0].fault,
+        "unsupported streamed output must stay a fault: {:?}",
+        recorded[0]
+    );
+    assert_eq!(
+        recorded[0].fault_code, "soap:Server",
+        "stream rejection maps to the soap:Server Receiver fault code: {:?}",
+        recorded[0]
+    );
+    assert!(
+        recorded[0].payload.is_empty(),
+        "a fault must not carry a normal success payload: {:?}",
+        recorded[0]
+    );
+    assert_eq!(
+        recorded.len(),
+        1,
+        "exactly one emitted response — no additional non-fault response may appear: {:?}",
+        recorded
+    );
+    assert!(
+        recorded.iter().all(|r| r.fault),
+        "no non-fault response may be emitted for a streamed output: {:?}",
+        recorded
     );
 
     let () = tokio::time::timeout(Duration::from_secs(2), handler)

@@ -25,20 +25,20 @@ use crate::{
 
 /// Namespace-resolved structure of a captured SOAP request body.
 #[derive(Debug, Default)]
-struct CapturedSoapStructure {
+pub(super) struct CapturedSoapStructure {
     /// Resolved `{namespace}local` names of every `Envelope` element.
-    envelopes: Vec<String>,
+    pub(super) envelopes: Vec<String>,
     /// Resolved `{namespace}local` names of every `Body` element.
-    bodies: Vec<String>,
+    pub(super) bodies: Vec<String>,
     /// Resolved `{namespace}local` names of every element whose parent is a
     /// SOAP `Body`.
-    body_children: Vec<String>,
+    pub(super) body_children: Vec<String>,
 }
 
 /// Parses `xml` with a namespace-aware reader and returns the resolved SOAP
 /// structure. Prefixes are never counted; only resolved `{namespace}local`
 /// names are recorded, so a `soapenv:`/`soap:` prefix difference is invisible.
-fn parse_soap_structure(xml: &str) -> CapturedSoapStructure {
+pub(super) fn parse_soap_structure(xml: &str) -> CapturedSoapStructure {
     let mut reader = NsReader::from_str(xml);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();

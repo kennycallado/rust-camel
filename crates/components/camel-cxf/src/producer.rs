@@ -327,9 +327,13 @@ impl Service<Exchange> for CxfProducer {
             };
 
             let mut client = cxf_bridge_client(channel);
-            let response = match client.invoke(request.clone()).await {
+            let response = match client.invoke(request).await {
                 Ok(r) => r.into_inner(),
                 Err(status) if is_transport_error(&status) => {
+                    // A transport error may follow a transmitted request, so this
+                    // send must never be replayed. Invalidate/recover the slot so
+                    // a later explicit send can acquire a fresh client, then
+                    // surface this failure unchanged.
                     let key = CxfBridgePool::slot_key();
                     if let Err(refresh_err) = pool.refresh_slot_channel(&key).await {
                         pool.restart_slot(&key);
@@ -337,18 +341,9 @@ impl Service<Exchange> for CxfProducer {
                             "CXF gRPC invoke transport error: {status}; refresh failed: {refresh_err}"
                         )));
                     }
-
-                    let refreshed = pool.get_channel().await.map_err(|e| {
-                        CamelError::ProcessorError(format!("CXF channel refresh error: {e}"))
-                    })?;
-                    let mut retry_client = cxf_bridge_client(refreshed);
-                    retry_client
-                        .invoke(request)
-                        .await
-                        .map_err(|s| {
-                            CamelError::ProcessorError(format!("CXF gRPC invoke error: {s}"))
-                        })?
-                        .into_inner()
+                    return Err(CamelError::ProcessorError(format!(
+                        "CXF gRPC invoke error: {status}"
+                    )));
                 }
                 Err(status) => {
                     return Err(CamelError::ProcessorError(format!(

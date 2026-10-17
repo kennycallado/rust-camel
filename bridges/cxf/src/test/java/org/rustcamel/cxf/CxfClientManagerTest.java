@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 import javax.xml.namespace.QName;
 import javax.xml.transform.Source;
 import org.apache.cxf.BusFactory;
@@ -26,6 +27,7 @@ import org.apache.cxf.service.model.EndpointInfo;
 import org.apache.cxf.transport.http.HTTPConduit;
 import org.apache.cxf.transport.http.URLConnectionHTTPConduit;
 import org.apache.cxf.ws.addressing.EndpointReferenceType;
+import org.apache.cxf.wsdl11.WSDLServiceFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -45,12 +47,17 @@ class CxfClientManagerTest {
   private static final long DEFAULT_TIMEOUT = 30000L;
   private static final String SOAPACTION_URI = "jakarta.xml.ws.soap.http.soapaction.uri";
   private static final String RECEIVE_TIMEOUT = "jakarta.xml.ws.client.receiveTimeout";
+  private static final String ROBUST = "org.apache.cxf.oneway.robust";
+  private static final String NS = "urn:oneway:363";
+  private static final String FIXTURE_WSDL = "/soap-oneway.wsdl";
 
   @Mock SecurityProfileStore profileStore;
 
   RecordingManager manager;
   Service mockService;
   final AtomicInteger creations = new AtomicInteger();
+  final List<Dispatch<Source>> createdDispatches = new CopyOnWriteArrayList<>();
+  Supplier<Dispatch<Source>> dispatchFactory = CxfClientManagerTest::newMockDispatch;
   AutoCloseable openMocks;
   MockedStatic<Service> serviceStatic;
 
@@ -64,7 +71,12 @@ class CxfClientManagerTest {
 
     mockService = mock(Service.class);
     when(mockService.createDispatch(any(QName.class), eq(Source.class), eq(Service.Mode.PAYLOAD)))
-        .thenAnswer(inv -> newMockDispatch());
+        .thenAnswer(
+            inv -> {
+              Dispatch<Source> created = dispatchFactory.get();
+              createdDispatches.add(created);
+              return created;
+            });
     serviceStatic = mockStatic(Service.class);
     serviceStatic
         .when(() -> Service.create(any(URL.class), any(QName.class)))
@@ -114,6 +126,38 @@ class CxfClientManagerTest {
     when(binding.getOperations()).thenReturn(operations);
   }
 
+  /** Builds a mocked CXF dispatch whose selected binding is the real fixture binding. */
+  @SuppressWarnings("unchecked")
+  private static Dispatch<Source> newFixtureDispatch(BindingInfo binding) {
+    DispatchImpl<Source> dispatch = mock(DispatchImpl.class);
+    when(dispatch.getRequestContext()).thenReturn(new HashMap<>());
+    Client client = mock(Client.class);
+    Endpoint endpoint = mock(Endpoint.class);
+    EndpointInfo endpointInfo = mock(EndpointInfo.class);
+    when(client.getEndpoint()).thenReturn(endpoint);
+    when(endpoint.getEndpointInfo()).thenReturn(endpointInfo);
+    when(endpointInfo.getBinding()).thenReturn(binding);
+    when(dispatch.getClient()).thenReturn(client);
+    return dispatch;
+  }
+
+  private static BindingInfo fixtureBinding(String service, String port) {
+    URL wsdl = CxfClientManagerTest.class.getResource(FIXTURE_WSDL);
+    assertNotNull(wsdl, "fixture WSDL must be on the test classpath");
+    WSDLServiceFactory factory =
+        new WSDLServiceFactory(
+            BusFactory.getDefaultBus(), wsdl.toExternalForm(), new QName(NS, service));
+    return factory.create().getServiceInfos().get(0).getEndpoint(new QName(NS, port)).getBinding();
+  }
+
+  private static BindingInfo mainBinding() {
+    return fixtureBinding("OneWayService", "MainPort");
+  }
+
+  private static BindingInfo aliasBinding() {
+    return fixtureBinding("AliasService", "AliasPort");
+  }
+
   @Test
   @DisplayName("cacheSize returns 0 initially")
   void cacheSizeReturnsZeroInitially() {
@@ -142,11 +186,166 @@ class CxfClientManagerTest {
   @Test
   @DisplayName("operation participates in the cache key")
   void operationParticipatesInCacheKey() throws Exception {
-    manager.getDispatch(WSDL, ADDRESS, SERVICE, PORT, null, PROFILE, DEFAULT_TIMEOUT);
-    manager.getDispatch(WSDL, ADDRESS, SERVICE, PORT, "opX", PROFILE, DEFAULT_TIMEOUT);
-    manager.getDispatch(WSDL, ADDRESS, SERVICE, PORT, "   ", PROFILE, DEFAULT_TIMEOUT);
+    dispatchFactory = () -> newFixtureDispatch(mainBinding());
+    QName receiveQName = new QName(NS, "receiveMessage");
+
+    manager.getResolvedDispatch(
+        WSDL, ADDRESS, SERVICE, PORT, null, PROFILE, DEFAULT_TIMEOUT, receiveQName);
+    manager.getResolvedDispatch(
+        WSDL, ADDRESS, SERVICE, PORT, "EchoOp", PROFILE, DEFAULT_TIMEOUT, null);
+    manager.getResolvedDispatch(
+        WSDL, ADDRESS, SERVICE, PORT, "   ", PROFILE, DEFAULT_TIMEOUT, receiveQName);
 
     assertEquals(2, manager.cacheSize(), "whitespace-only operation must normalize to blank key");
+  }
+
+  @Test
+  @DisplayName("resolved dispatch carries shape and fixed non-robust mode")
+  void resolvedDispatchCarriesShapeAndFixedNonRobustMode() throws Exception {
+    dispatchFactory = () -> newFixtureDispatch(mainBinding());
+
+    CxfClientManager.ResolvedDispatch receive =
+        manager.getResolvedDispatch(
+            WSDL, ADDRESS, SERVICE, PORT, "ReceiveMessageOp", PROFILE, DEFAULT_TIMEOUT, null);
+    assertEquals(new QName(NS, "ReceiveMessageOp"), receive.operation().name());
+    assertEquals("urn:receive", receive.operation().soapAction());
+    assertTrue(receive.operation().oneWay(), "ReceiveMessageOp has input and no output");
+    Map<String, Object> receiveContext = receive.dispatch().getRequestContext();
+    assertEquals("urn:receive", receiveContext.get(SOAPACTION_URI));
+    assertEquals(Boolean.FALSE, receiveContext.get(ROBUST), "one-way dispatch must be non-robust");
+
+    CxfClientManager.ResolvedDispatch echo =
+        manager.getResolvedDispatch(
+            WSDL, ADDRESS, SERVICE, PORT, "EchoOp", PROFILE, DEFAULT_TIMEOUT, null);
+    assertEquals(new QName(NS, "EchoOp"), echo.operation().name());
+    assertEquals("urn:echo", echo.operation().soapAction());
+    assertFalse(echo.operation().oneWay(), "EchoOp declares an output");
+    Map<String, Object> echoContext = echo.dispatch().getRequestContext();
+    assertEquals("urn:echo", echoContext.get(SOAPACTION_URI));
+    assertNotEquals(
+        Boolean.FALSE, echoContext.get(ROBUST), "request-reply must not force non-robust mode");
+  }
+
+  @Test
+  @DisplayName("inferred operations do not cross-contaminate cached context")
+  void inferredOperationsDoNotCrossContaminateCachedContext() throws Exception {
+    manager.pinnedMaxDispatches = 64;
+    QName receiveQName = new QName(NS, "receiveMessage");
+    QName echoQName = new QName(NS, "echoRequest");
+    dispatchFactory = () -> newFixtureDispatch(mainBinding());
+
+    // Pre-seed on the main thread: Mockito static Service mocks are thread-confined.
+    CxfClientManager.ResolvedDispatch receive =
+        manager.getResolvedDispatch(
+            WSDL, ADDRESS, SERVICE, PORT, null, PROFILE, DEFAULT_TIMEOUT, receiveQName);
+    CxfClientManager.ResolvedDispatch echo =
+        manager.getResolvedDispatch(
+            WSDL, ADDRESS, SERVICE, PORT, null, PROFILE, DEFAULT_TIMEOUT, echoQName);
+    assertEquals(2, manager.cacheSize());
+
+    Map<String, Object> receiveSnapshot = new HashMap<>(receive.dispatch().getRequestContext());
+    Map<String, Object> echoSnapshot = new HashMap<>(echo.dispatch().getRequestContext());
+
+    for (int i = 0; i < 50; i++) {
+      CxfClientManager.ResolvedDispatch r =
+          manager.getResolvedDispatch(
+              WSDL, ADDRESS, SERVICE, PORT, null, PROFILE, DEFAULT_TIMEOUT, receiveQName);
+      assertSame(
+          receive.dispatch(), r.dispatch(), "receive QName must resolve to its own dispatch");
+      assertTrue(r.operation().oneWay());
+      assertEquals("urn:receive", r.operation().soapAction());
+      assertEquals("urn:receive", r.dispatch().getRequestContext().get(SOAPACTION_URI));
+
+      CxfClientManager.ResolvedDispatch e =
+          manager.getResolvedDispatch(
+              WSDL, ADDRESS, SERVICE, PORT, null, PROFILE, DEFAULT_TIMEOUT, echoQName);
+      assertSame(echo.dispatch(), e.dispatch(), "echo QName must resolve to its own dispatch");
+      assertFalse(e.operation().oneWay());
+      assertEquals("urn:echo", e.operation().soapAction());
+      assertEquals("urn:echo", e.dispatch().getRequestContext().get(SOAPACTION_URI));
+    }
+
+    AtomicInteger crossings = new AtomicInteger();
+    List<String> failures = new CopyOnWriteArrayList<>();
+    Thread workerReceive =
+        inferredLookupWorker(receiveQName, "urn:receive", true, crossings, failures);
+    Thread workerEcho = inferredLookupWorker(echoQName, "urn:echo", false, crossings, failures);
+    workerReceive.start();
+    workerEcho.start();
+    workerReceive.join();
+    workerEcho.join();
+
+    assertTrue(failures::isEmpty, () -> "worker failures: " + failures);
+    assertEquals(0, crossings.get(), "inferred operations crossed cached context");
+    assertEquals(
+        receiveSnapshot,
+        receive.dispatch().getRequestContext(),
+        "no post-creation write to the receive context");
+    assertEquals(
+        echoSnapshot,
+        echo.dispatch().getRequestContext(),
+        "no post-creation write to the echo context");
+  }
+
+  @Test
+  @DisplayName("invalid resolution closes the created dispatch without caching")
+  void invalidResolutionClosesDispatchWithoutCaching() throws Exception {
+    manager.pinnedMaxDispatches = 64;
+    dispatchFactory =
+        () -> {
+          Dispatch<Source> created = newFixtureDispatch(mainBinding());
+          createdDispatches.add(created);
+          return created;
+        };
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            manager.getResolvedDispatch(
+                WSDL, ADDRESS, SERVICE, PORT, "MissingOp", PROFILE, DEFAULT_TIMEOUT, null),
+        "an explicit name absent from the binding must be rejected");
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            manager.getResolvedDispatch(
+                WSDL,
+                ADDRESS,
+                SERVICE,
+                PORT,
+                null,
+                PROFILE,
+                DEFAULT_TIMEOUT,
+                new QName(NS, "notThere")),
+        "an inferred QName matching no operation must be rejected");
+
+    dispatchFactory =
+        () -> {
+          Dispatch<Source> created = newFixtureDispatch(aliasBinding());
+          createdDispatches.add(created);
+          return created;
+        };
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            manager.getResolvedDispatch(
+                WSDL,
+                ADDRESS,
+                SERVICE,
+                PORT,
+                null,
+                PROFILE,
+                DEFAULT_TIMEOUT,
+                new QName(NS, "receiveMessage")),
+        "an inferred QName matching multiple operations must be rejected");
+
+    assertEquals(
+        3,
+        manager.closedDispatches.size(),
+        "each created dispatch rejected by resolution must be closed exactly once");
+    assertEquals(0, manager.cacheSize(), "a failed selection must never be cached");
+    for (Dispatch<Source> created : createdDispatches) {
+      verify(created, never()).invoke(any(Source.class));
+    }
   }
 
   @Test
@@ -373,6 +572,31 @@ class CxfClientManagerTest {
           }
         },
         "worker-" + operation);
+  }
+
+  private Thread inferredLookupWorker(
+      QName inputQName,
+      String expectedAction,
+      boolean expectedOneWay,
+      AtomicInteger crossings,
+      List<String> failures) {
+    return new Thread(
+        () -> {
+          try {
+            for (int i = 0; i < 200; i++) {
+              CxfClientManager.ResolvedDispatch resolved =
+                  manager.getResolvedDispatch(
+                      WSDL, ADDRESS, SERVICE, PORT, null, PROFILE, DEFAULT_TIMEOUT, inputQName);
+              Object uri = resolved.dispatch().getRequestContext().get(SOAPACTION_URI);
+              if (!expectedAction.equals(uri) || resolved.operation().oneWay() != expectedOneWay) {
+                crossings.incrementAndGet();
+              }
+            }
+          } catch (Exception e) {
+            failures.add(inputQName + ": " + e);
+          }
+        },
+        "worker-" + inputQName.getLocalPart());
   }
 
   /** Records every close routed through the single closeQuietly implementation. */

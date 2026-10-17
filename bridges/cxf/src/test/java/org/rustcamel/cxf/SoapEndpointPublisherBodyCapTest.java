@@ -96,6 +96,11 @@ class SoapEndpointPublisherBodyCapTest {
     SecurityProfile testProfile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
     when(profileStore.getProfile(TEST_PROFILE_NAME)).thenReturn(testProfile);
 
+    // Every listener bind resolves an operation catalog for each served profile (Task 2.1), and
+    // the under-cap path now requires operation resolution (Task 2.2): expose the fixture binding
+    // instead of relying on a catalog-less passthrough.
+    when(profileStore.profiles()).thenReturn(Map.of(TEST_PROFILE_NAME, listenerFixtureProfile()));
+
     when(vertx.createHttpServer(any())).thenReturn(httpServer);
     when(httpServer.requestHandler(any())).thenReturn(httpServer);
     doAnswer(
@@ -231,6 +236,16 @@ class SoapEndpointPublisherBodyCapTest {
     }
   }
 
+  private static SecurityProfile listenerFixtureProfile() throws Exception {
+    java.net.URL wsdl = SoapEndpointPublisherBodyCapTest.class.getResource("/soap-oneway.wsdl");
+    assertNotNull(wsdl, "fixture WSDL must be on the test classpath");
+    return SecurityProfile.builder(TEST_PROFILE_NAME)
+        .wsdlPath(java.nio.file.Path.of(wsdl.toURI()).toString())
+        .serviceName("{urn:oneway:363}OneWayService")
+        .portName("{urn:oneway:363}MainPort")
+        .build();
+  }
+
   @Test
   void declaredOversizedContentLengthRejectedUpfront() throws Exception {
     drivePost("4096", 4096);
@@ -257,7 +272,8 @@ class SoapEndpointPublisherBodyCapTest {
   void underCapBodyPasses() throws Exception {
     String envelope =
         "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
-            + "<soapenv:Body><test/></soapenv:Body></soapenv:Envelope>";
+            + "<soapenv:Body><e:echoRequest xmlns:e=\"urn:oneway:363\">hello"
+            + "</e:echoRequest></soapenv:Body></soapenv:Envelope>";
 
     assertTrue(envelope.length() <= TEST_CAP_BYTES, "fixture must fit under the cap");
 

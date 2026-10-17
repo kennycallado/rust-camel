@@ -49,9 +49,11 @@ const DS_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
 /// `bridge_start_timeout_ms` is 30 s, so the join must outlast that startup.
 const BRIDGE_INIT_BUDGET: Duration = Duration::from_secs(60);
 
-/// Bare `sayHello` operation payload the bridge wraps and signs.
-const SAY_HELLO_PAYLOAD: &str =
-    r#"<hel:sayHello xmlns:hel="http://example.com/hello"><name>signed</name></hel:sayHello>"#;
+/// Bare `sayHello` operation payload the bridge wraps and signs. The Body
+/// root is the WSDL's declared input element `sayHelloRequest` — the listener
+/// resolves the payload QName against the selected binding and rejects the
+/// bare operation local name.
+const SAY_HELLO_PAYLOAD: &str = r#"<hel:sayHelloRequest xmlns:hel="http://example.com/hello"><name>signed</name></hel:sayHelloRequest>"#;
 
 /// Namespace-resolved structure of a captured signed request.
 #[derive(Debug, Default)]

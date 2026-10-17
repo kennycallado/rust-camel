@@ -11,22 +11,27 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import jakarta.xml.ws.Binding;
 import jakarta.xml.ws.Dispatch;
+import jakarta.xml.ws.WebServiceException;
 import jakarta.xml.ws.soap.SOAPBinding;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import javax.xml.namespace.QName;
 import javax.xml.transform.Source;
 import javax.xml.transform.stream.StreamSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
@@ -68,21 +73,33 @@ class CxfBridgeServiceTest {
     Binding soap11 = binding(SOAPBinding.SOAP11HTTP_BINDING);
     when(dispatch.getBinding()).thenReturn(soap11);
     when(dispatch.invoke(any(Source.class))).thenReturn(response);
-    when(clientManager.getDispatch(
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyLong()))
-        .thenReturn(dispatch);
+    resolvedReturns(dispatch, false);
   }
 
   private static Binding binding(String bindingId) {
     Binding binding = mock(Binding.class);
     when(binding.getBindingID()).thenReturn(bindingId);
     return binding;
+  }
+
+  /** Installs the resolved-dispatch lookup used by the service after Task 1.3. */
+  private void resolvedReturns(Dispatch<Source> dispatch, boolean oneWay) throws Exception {
+    WsdlOperationCatalog.Operation operation =
+        new WsdlOperationCatalog.Operation(
+            new QName("urn:test", "Op"),
+            Set.of(new QName("urn:test", "req")),
+            "urn:test:action",
+            oneWay);
+    when(clientManager.getResolvedDispatch(
+            anyString(),
+            anyString(),
+            anyString(),
+            anyString(),
+            anyString(),
+            anyString(),
+            anyLong(),
+            any()))
+        .thenReturn(new CxfClientManager.ResolvedDispatch(dispatch, operation));
   }
 
   /**
@@ -104,15 +121,7 @@ class CxfBridgeServiceTest {
               capturedPayloads.add(SoapEnvelopeHelper.sourceToString(invocation.getArgument(0)));
               return response;
             });
-    when(clientManager.getDispatch(
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyString(),
-            anyLong()))
-        .thenReturn(dispatch);
+    resolvedReturns(dispatch, false);
     return dispatch;
   }
 
@@ -344,14 +353,15 @@ class CxfBridgeServiceTest {
     assertNotNull(error, "a negative decoded timeout must fail with onError");
     assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(error).getCode());
     verify(clientManager, never())
-        .getDispatch(
+        .getResolvedDispatch(
             anyString(),
             anyString(),
             anyString(),
             anyString(),
             anyString(),
             anyString(),
-            anyLong());
+            anyLong(),
+            any());
     assertTrue(observer.responses.isEmpty(), "no payload may be forwarded");
   }
 
@@ -367,14 +377,15 @@ class CxfBridgeServiceTest {
     assertNotNull(error, "an oversized timeout must fail with onError");
     assertEquals(Status.Code.INVALID_ARGUMENT, Status.fromThrowable(error).getCode());
     verify(clientManager, never())
-        .getDispatch(
+        .getResolvedDispatch(
             anyString(),
             anyString(),
             anyString(),
             anyString(),
             anyString(),
             anyString(),
-            anyLong());
+            anyLong(),
+            any());
     assertTrue(observer.responses.isEmpty(), "no payload may be forwarded");
   }
 
@@ -390,14 +401,15 @@ class CxfBridgeServiceTest {
     assertNull(observer.error.get(), "an in-range timeout must be accepted");
     ArgumentCaptor<Long> timeout = ArgumentCaptor.forClass(Long.class);
     verify(clientManager)
-        .getDispatch(
+        .getResolvedDispatch(
             anyString(),
             anyString(),
             anyString(),
             anyString(),
             anyString(),
             anyString(),
-            timeout.capture());
+            timeout.capture(),
+            any());
     assertEquals(5000L, timeout.getValue());
   }
 
@@ -419,5 +431,82 @@ class CxfBridgeServiceTest {
     assertEquals("CN=root-ca", parsed.getIssuer());
     assertEquals("0123abc", parsed.getSerial());
     assertEquals(64, parsed.getFingerprintSha256().length());
+  }
+
+  @Test
+  @DisplayName("one-way operation invokes once and returns an empty non-fault acknowledgment")
+  void oneWayInvokesOnceAndReturnsEmptySuccess() throws Exception {
+    Dispatch<Source> dispatch = mock(Dispatch.class);
+    Binding soap11 = binding(SOAPBinding.SOAP11HTTP_BINDING);
+    when(dispatch.getBinding()).thenReturn(soap11);
+    resolvedReturns(dispatch, true);
+    RecordingObserver observer = new RecordingObserver();
+
+    service.invoke(request(), observer);
+
+    verify(dispatch).invokeOneWay(any(Source.class));
+    verify(dispatch, never()).invoke(any(Source.class));
+    assertNull(observer.error.get(), "a one-way dispatch must not fail the call");
+    assertEquals(1, observer.responses.size(), "exactly one acknowledgment response");
+    SoapResponse ack = observer.responses.get(0);
+    assertFalse(ack.getFault(), "the acknowledgment must not be a fault");
+    assertEquals(0, ack.getPayload().size(), "one-way acknowledgment carries empty bytes");
+    assertTrue(observer.completed.get(), "the observer must complete");
+  }
+
+  @Test
+  @DisplayName("one-way local failure does not fall back to request-reply or fabricate success")
+  void oneWayLocalFailureDoesNotFallbackOrSucceed() throws Exception {
+    Dispatch<Source> dispatch = mock(Dispatch.class);
+    Binding soap11 = binding(SOAPBinding.SOAP11HTTP_BINDING);
+    when(dispatch.getBinding()).thenReturn(soap11);
+    doThrow(new WebServiceException("transport down"))
+        .when(dispatch)
+        .invokeOneWay(any(Source.class));
+    resolvedReturns(dispatch, true);
+    RecordingObserver observer = new RecordingObserver();
+
+    service.invoke(request(), observer);
+
+    assertNotNull(observer.error.get(), "a local one-way failure must surface as onError");
+    assertFalse(observer.completed.get(), "a failed one-way send must not complete successfully");
+    assertTrue(observer.responses.isEmpty(), "no success response may be emitted");
+    verify(dispatch).invokeOneWay(any(Source.class));
+    verify(dispatch, never()).invoke(any(Source.class));
+  }
+
+  /** Distinct request-reply failure shapes: absent Source, empty bytes, and a CXF parse failure. */
+  private enum ReplyContent {
+    NULL_SOURCE,
+    ZERO_LENGTH,
+    PARSER_EXCEPTION
+  }
+
+  @ParameterizedTest
+  @EnumSource(ReplyContent.class)
+  @DisplayName("request-reply with missing content is an error and never falls back")
+  void requestReplyMissingContentIsAnError(ReplyContent content) throws Exception {
+    Dispatch<Source> dispatch = mock(Dispatch.class);
+    Binding soap11 = binding(SOAPBinding.SOAP11HTTP_BINDING);
+    when(dispatch.getBinding()).thenReturn(soap11);
+    switch (content) {
+      case NULL_SOURCE -> when(dispatch.invoke(any(Source.class))).thenReturn(null);
+      case ZERO_LENGTH ->
+          when(dispatch.invoke(any(Source.class)))
+              .thenReturn(new StreamSource(new StringReader("")));
+      case PARSER_EXCEPTION ->
+          when(dispatch.invoke(any(Source.class)))
+              .thenThrow(new WebServiceException("empty SOAP response"));
+    }
+    resolvedReturns(dispatch, false);
+    RecordingObserver observer = new RecordingObserver();
+
+    service.invoke(request(), observer);
+
+    assertNotNull(observer.error.get(), "missing request-reply content must be an error");
+    assertNotEquals(Status.Code.OK, Status.fromThrowable(observer.error.get()).getCode());
+    assertTrue(observer.responses.isEmpty(), "no payload may be fabricated");
+    verify(dispatch).invoke(any(Source.class));
+    verify(dispatch, never()).invokeOneWay(any(Source.class));
   }
 }

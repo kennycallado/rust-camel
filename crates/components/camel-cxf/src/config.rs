@@ -95,7 +95,7 @@ impl KeyStoreType {
 /// Nested `[profiles.security.tls]` producer transport TLS material.
 ///
 /// Credentials are redacted from `Debug` (ADR-0051). Pair completeness is
-/// validated by [`CxfTlsConfig::validate`]; the block is serialized as
+/// validated by `CxfTlsConfig::validate`; the block is serialized as
 /// `CXF_PROFILE_<NAME>_TLS_*` env vars by [`CxfTlsConfig::to_env`].
 #[derive(Clone, Default, serde::Deserialize)]
 #[serde(default)]

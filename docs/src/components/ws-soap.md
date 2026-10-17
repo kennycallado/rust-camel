@@ -194,13 +194,23 @@ The producer dispatch runs `Service.Mode.PAYLOAD`. The Exchange body is the bare
 
 The SOAP version derives from the selected WSDL port binding, never from a request header. A `soap-version` header is ignored: a port bound to SOAP 1.1 emits a SOAP 1.1 envelope and a port bound to SOAP 1.2 emits a SOAP 1.2 envelope. An unrecognized binding ID fails the invocation. A payload whose root element is already a SOAP `Envelope` is rejected before the network call; no request is sent.
 
+### One-way producer operations
+
+A WSDL operation is one-way (input-only) when the operation in the selected service/port binding has an input and no output. The producer resolves the operation against that binding: an explicit `operation` name, or the bare payload root QName when the name is absent. An unknown or ambiguous selection fails before any HTTP request.
+
+For an input-only operation the bridge calls `Dispatch.invokeOneWay` exactly once with the bare payload. An empty HTTP 200 or 202 acknowledgment completes successfully with empty output bytes. The bridge does not deserialize an absent response body. Resolved WSDL dispatches are cached per profile.
+
+One-way producer dispatch is non-robust: `org.apache.cxf.oneway.robust` is fixed to `false`, and there is no `oneway.robust` option. A successful send does not assert remote business success and does not guarantee observation of a remote SOAP fault. A local bridge or transport failure remains an error, never an empty success, and does not replay or resend the invocation. Recovery is a subsequent explicit send, a separate action.
+
+An operation with WSDL output stays request-reply. An empty response to a request-reply operation is an error: the producer never falls back to one-way, fabricates a payload, or resends.
+
 ## CXF consumer
 
 `cxf://http://0.0.0.0:9090/...` hosts a SOAP endpoint. The bridge process publishes the endpoint under `<base>/<profile_name>` over Vert.x. Inbound SOAP requests arrive on the gRPC stream as `ConsumerRequest` messages. The Consumer builds an Exchange with the payload bytes as the body and the headers from the table below.
 
 The response body is what the route writes to `exchange.input.body` (or `exchange.output.body` if the route set it). The bridge wraps the bytes in a SOAP envelope and signs with the profile's certificates.
 
-A failed route handler returns a `soap:Server` fault with the error string. A response-marshalling failure (for example a `Stream` body, which CXF does not support) also returns a `soap:Server` fault, increments `b-prime:cxf:response-marshalling`, and logs at `error!` (ADR-0012 class b').
+A failed route handler returns a `soap:Server` fault with the error string. A response-marshalling failure (for example a `Stream` body, which CXF does not support) also returns a `soap:Server` fault, increments `b-prime:cxf:response-marshalling`, and logs at `error!` (ADR-0012 class b'). This holds for an input-only operation too: a marshalling failure stays a Receiver fault and never becomes a successful ACK.
 
 The inbound Exchange carries these headers from the bridge:
 
@@ -212,6 +222,14 @@ The inbound Exchange carries these headers from the bridge:
 | `CxfSecurityProfile` | Profile name that handled the request |
 
 Other HTTP headers from the request land in the Exchange header map.
+
+### One-way consumer operations
+
+Startup builds a per-profile operation catalog from the selected WSDL binding before the HTTP listener binds. Misconfigured or unloadable WSDL metadata fails listener startup before a ready port is announced. Every request resolves the SOAP `Body` root QName against the profile's startup catalog. A supplied SOAPAction must agree with the resolved operation.
+
+An unknown, conflicting, or ambiguous operation faults Sender (SOAP 1.1 HTTP 500, SOAP 1.2 HTTP 400) with zero route dispatch. The WSS-only `fault_status` override never applies to these faults.
+
+For a resolved input-only operation the listener waits for the correlated, non-fault response, including successful Rust response marshalling. It then returns HTTP 202 with a zero-length body and discards the marshalled payload. It writes no outbound ACK envelope and no ACK signature. Route success alone does not bypass marshalling: a route that returns `Body::Stream` marshals to nothing, and that marshalling failure is a Receiver fault (HTTP 500, never 202). Stream unavailability stays HTTP 503 with `Retry-After` and a plain body.
 
 ### Consumer fault status
 
@@ -232,7 +250,7 @@ security override.
 | Rust `soap:Server` fault code | Receiver | 500 | 500 |
 | Any other SOAP 1.2 fault code | Receiver | 500 | 500 |
 
-A successful response is HTTP 200. A fault never returns 200.
+A successful request-reply response is HTTP 200, wrapped and signed once. A successful input-only operation returns HTTP 202 with a zero-length body only after the correlated, non-fault route completion. A fault never returns 200 or 202.
 
 Transport rejections are not SOAP faults. They never enter the table above:
 
@@ -366,9 +384,9 @@ Startup protocol: the bridge announces `{"status":"ready","port":N}` for gRPC an
 
 Pre-stream availability gate: a request that arrives before a consumer stream is open receives HTTP 503 with a `Retry-After` header and a plaintext body (`routes unavailable`) — never a SOAP fault. The same response serves a stream lost after the gate.
 
-Signer metadata (Body `SIGN` coverage) is an integrity signal, not authentication: the exported `SignerIdentity` fields are exchange properties only and never a principal or authenticated identity (ADR-0032). One-way (no response) operations are not supported by this listener.
+Signer metadata (Body `SIGN` coverage) is an integrity signal, not authentication: the exported `SignerIdentity` fields are exchange properties only and never a principal or authenticated identity (ADR-0032). One-way input-only operations are supported and return an empty HTTP 202 ACK after correlated completion (see [One-way consumer operations](#one-way-consumer-operations)).
 
-CXF and XML bridge release pins are `0.8.0`. Publication of public release assets and tags is owner-only and remains pending.
+CXF and XML bridge release pins are `0.8.0`. One-way acceptance and the mission-361 regressions run against the same pinned `0.8.0` bridge rebuilt from source: set `CAMEL_CXF_BRIDGE_BINARY_PATH` to the rebuilt `cxf-bridge` binary to use it, and the release pin stays `0.8.0`. Publication of public release assets and tags is owner-only and remains pending.
 
 The XML parser boundary lives in the Java bridge. The Rust component does not run an XML parser. Audit parser hardening in the bridge process. WSDL files also live in the bridge. The Rust side reads them as paths and forwards them to the bridge over the environment.
 

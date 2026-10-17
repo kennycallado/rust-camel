@@ -24,11 +24,11 @@ import javax.xml.namespace.QName;
 import javax.xml.transform.Source;
 import org.apache.cxf.Bus;
 import org.apache.cxf.BusFactory;
-import org.apache.cxf.binding.soap.model.SoapOperationInfo;
 import org.apache.cxf.bus.CXFBusFactory;
 import org.apache.cxf.configuration.jsse.TLSClientParameters;
 import org.apache.cxf.endpoint.Client;
 import org.apache.cxf.jaxws.DispatchImpl;
+import org.apache.cxf.service.model.BindingInfo;
 import org.apache.cxf.transport.Conduit;
 import org.apache.cxf.transport.http.HTTPConduit;
 
@@ -43,12 +43,21 @@ public class CxfClientManager {
       String port,
       String profile,
       String operation,
+      QName inputQName,
       long timeoutMs) {}
 
   /**
+   * A cached dispatch together with the immutable operation shape it was configured for. Callers
+   * must not mutate the dispatch request context after it is published; creation is the only
+   * writer.
+   */
+  record ResolvedDispatch(Dispatch<Source> dispatch, WsdlOperationCatalog.Operation operation) {}
+
+  /**
    * An explicitly requested operation does not exist in the selected WSDL port binding. Extends
-   * {@link IllegalArgumentException} so manager-level callers keep catching it. The rejected
-   * dispatch is closed and never cached before this is thrown, so no wire transmission can occur.
+   * {@link IllegalArgumentException} so manager-level callers keep catching argument-class failures
+   * and the legacy explicit-operation contract stays compatible. The rejected dispatch is closed
+   * and never cached before this is thrown, so no wire transmission can occur.
    */
   static final class UnknownOperationException extends IllegalArgumentException {
     UnknownOperationException(String message) {
@@ -58,9 +67,10 @@ public class CxfClientManager {
 
   /**
    * Access-order LRU Dispatch cache, bounded by {@code CXF_MAX_DISPATCHES}. Lookup and cold
-   * creation are serialized under the map monitor; the SOAP invoke stays outside it.
+   * creation are serialized under the map monitor; the SOAP invoke stays outside it. Each value
+   * carries the operation metadata selected at creation, so no parallel metadata cache is needed.
    */
-  private final Map<DispatchKey, Dispatch<Source>> dispatches =
+  private final Map<DispatchKey, ResolvedDispatch> dispatches =
       Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true));
 
   /** Test seam: pins the dispatch-cache bound deterministically. */
@@ -83,6 +93,11 @@ public class CxfClientManager {
     }
   }
 
+  /**
+   * Explicit-operation compatibility delegate. Production unnamed dispatch must call {@link
+   * #getResolvedDispatch} with the input QName instead. The no-name form is rejected by resolution
+   * because it cannot select a unique binding operation.
+   */
   public Dispatch<Source> getDispatch(
       String wsdl,
       String address,
@@ -92,19 +107,50 @@ public class CxfClientManager {
       String profileName,
       long timeoutMs)
       throws Exception {
+    return getResolvedDispatch(
+            wsdl, address, service, port, operation, profileName, timeoutMs, null)
+        .dispatch();
+  }
+
+  /**
+   * Resolves the selected binding operation for this dispatch and returns the dispatch together
+   * with its immutable shape. The cache key includes both the explicit operation name and the
+   * inferred input QName so a dispatch configured for one operation can never serve another. On
+   * cache miss a temporary dispatch is created, its selected binding is snapshotted, the operation
+   * is resolved, and only then is operation-specific request context configured and the entry
+   * published. A rejected selection closes the temporary dispatch and is never cached.
+   */
+  public ResolvedDispatch getResolvedDispatch(
+      String wsdl,
+      String address,
+      String service,
+      String port,
+      String operation,
+      String profileName,
+      long timeoutMs,
+      QName inputQName)
+      throws Exception {
     SecurityProfile profile = profileStore.getProfile(profileName);
     String normalizedOperation = operation == null || operation.isBlank() ? "" : operation;
     DispatchKey key =
-        new DispatchKey(wsdl, address, service, port, profileName, normalizedOperation, timeoutMs);
+        new DispatchKey(
+            wsdl, address, service, port, profileName, normalizedOperation, inputQName, timeoutMs);
     try {
       synchronized (dispatches) {
-        Dispatch<Source> existing = dispatches.get(key);
+        ResolvedDispatch existing = dispatches.get(key);
         if (existing != null) {
           return existing;
         }
-        Dispatch<Source> created =
-            createDispatch(
-                wsdl, address, service, port, profile, normalizedOperation, key.timeoutMs());
+        ResolvedDispatch created =
+            createResolvedDispatch(
+                wsdl,
+                address,
+                service,
+                port,
+                profile,
+                normalizedOperation,
+                key.timeoutMs(),
+                inputQName);
         int maxDispatches = resolveMaxDispatches();
         while (dispatches.size() >= maxDispatches) {
           evictLruDispatch();
@@ -124,8 +170,8 @@ public class CxfClientManager {
   private void evictLruDispatch() {
     Iterator<DispatchKey> iterator = dispatches.keySet().iterator();
     DispatchKey lru = iterator.next();
-    Dispatch<Source> evicted = dispatches.remove(lru);
-    closeQuietly(evicted);
+    ResolvedDispatch evicted = dispatches.remove(lru);
+    closeQuietly(evicted.dispatch());
     LOG.fine(
         "Evicted LRU dispatch: "
             + new File(lru.wsdl()).getName()
@@ -242,7 +288,6 @@ public class CxfClientManager {
       String service,
       String port,
       SecurityProfile profile,
-      String operation,
       long timeoutMs) {
     try {
       QName serviceQName = service.startsWith("{") ? QName.valueOf(service) : new QName(service);
@@ -259,29 +304,6 @@ public class CxfClientManager {
       String timeout = String.valueOf(timeoutMs);
       dispatch.getRequestContext().put("jakarta.xml.ws.client.connectionTimeout", timeout);
       dispatch.getRequestContext().put("jakarta.xml.ws.client.receiveTimeout", timeout);
-
-      if (operation != null && !operation.isBlank()) {
-        if (!(dispatch instanceof DispatchImpl<Source> cxfDispatch)) {
-          throw new IllegalStateException("SOAPAction resolution requires a CXF dispatch");
-        }
-        var binding = cxfDispatch.getClient().getEndpoint().getEndpointInfo().getBinding();
-        var bindingOperation =
-            binding.getOperations().stream()
-                .filter(candidate -> candidate.getName().getLocalPart().equals(operation))
-                .findFirst()
-                .orElse(null);
-        if (bindingOperation == null) {
-          closeQuietly(dispatch);
-          throw new UnknownOperationException(
-              "Unknown operation '" + operation + "' in WSDL binding " + binding.getName());
-        }
-        SoapOperationInfo soapOperation = bindingOperation.getExtensor(SoapOperationInfo.class);
-        String action = soapOperation == null ? null : soapOperation.getAction();
-        dispatch.getRequestContext().put("jakarta.xml.ws.soap.http.soapaction.use", Boolean.TRUE);
-        dispatch
-            .getRequestContext()
-            .put("jakarta.xml.ws.soap.http.soapaction.uri", action == null ? "" : action);
-      }
 
       if (profile.hasSecurity() && dispatch instanceof DispatchImpl<Source> cxfDispatch) {
         var out = profile.createOutInterceptor();
@@ -300,6 +322,67 @@ public class CxfClientManager {
       return dispatch;
     } catch (Exception e) {
       throw new RuntimeException(e);
+    }
+  }
+
+  /**
+   * Creates a dispatch, resolves its selected binding operation, configures the operation-specific
+   * request context, and returns both together. Any failure after creation closes the temporary
+   * dispatch and propagates the original argument exception without caching it.
+   */
+  private ResolvedDispatch createResolvedDispatch(
+      String wsdl,
+      String address,
+      String service,
+      String port,
+      SecurityProfile profile,
+      String operation,
+      long timeoutMs,
+      QName inputQName) {
+    Dispatch<Source> dispatch = null;
+    try {
+      dispatch = createDispatch(wsdl, address, service, port, profile, timeoutMs);
+      BindingInfo binding = selectedBinding(dispatch);
+      WsdlOperationCatalog.Operation resolved;
+      try {
+        resolved = WsdlOperationCatalog.fromBinding(binding).resolveProducer(operation, inputQName);
+      } catch (WsdlOperationCatalog.InvalidOperationException e) {
+        if (operation.isEmpty()) {
+          throw e;
+        }
+        throw new UnknownOperationException(
+            "Unknown operation '" + operation + "' in WSDL binding " + binding.getName());
+      }
+      applyOperationContext(dispatch, resolved);
+      return new ResolvedDispatch(dispatch, resolved);
+    } catch (RuntimeException e) {
+      closeQuietly(dispatch);
+      throw e;
+    } catch (Exception e) {
+      closeQuietly(dispatch);
+      throw new RuntimeException(e);
+    }
+  }
+
+  private static BindingInfo selectedBinding(Dispatch<Source> dispatch) {
+    if (!(dispatch instanceof DispatchImpl<Source> cxfDispatch)) {
+      throw new IllegalStateException("Operation resolution requires a CXF dispatch");
+    }
+    return cxfDispatch.getClient().getEndpoint().getEndpointInfo().getBinding();
+  }
+
+  /**
+   * Writes operation-specific request context exactly once, at creation. The SOAPAction comes from
+   * the resolved operation's metadata. An input-only operation is deliberately non-robust. Nothing
+   * here runs after the dispatch is published, so a cached entry is never mutated.
+   */
+  private static void applyOperationContext(
+      Dispatch<Source> dispatch, WsdlOperationCatalog.Operation operation) {
+    Map<String, Object> context = dispatch.getRequestContext();
+    context.put("jakarta.xml.ws.soap.http.soapaction.use", Boolean.TRUE);
+    context.put("jakarta.xml.ws.soap.http.soapaction.uri", operation.soapAction());
+    if (operation.oneWay()) {
+      context.put("org.apache.cxf.oneway.robust", Boolean.FALSE);
     }
   }
 
@@ -325,8 +408,8 @@ public class CxfClientManager {
   @PreDestroy
   void close() {
     synchronized (dispatches) {
-      for (Dispatch<Source> dispatch : dispatches.values()) {
-        closeQuietly(dispatch);
+      for (ResolvedDispatch resolved : dispatches.values()) {
+        closeQuietly(resolved.dispatch());
       }
       dispatches.clear();
     }

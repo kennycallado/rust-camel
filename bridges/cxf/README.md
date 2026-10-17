@@ -181,10 +181,10 @@ WS-Security: DISABLED (no keystore configured)
 
 ## Listener
 
-Consumer addresses accept plain `http://` only. The bridge does not expose a TLS listener yet, so any other scheme (`https://`, and anything else) fails loud:
+Consumer addresses accept `http://` or `https://`. An `https` bind requires the pool-level listener TLS material (`soap_tls_cert_path` + `soap_tls_key_path` or the PKCS#12 pair, plus the always-required `soap_tls_client_ca_path`); client authentication is mandatory (mutual TLS). Any other scheme fails loud:
 
 - At Rust route-build time: `CxfPoolConfig.bind_address` validation rejects the URI before the bridge process starts.
-- At bridge startup: the endpoint publisher rejects the address again before any socket binds.
+- At bridge startup: the endpoint publisher validates the scheme and the listener TLS material shape again before any socket binds.
 
 The default listener address is `http://0.0.0.0:9000/cxf`.
 
@@ -196,6 +196,43 @@ extraction resolves Body by namespace, not by prefix, so SOAP 1.1 and
 SOAP 1.2 envelopes work with any prefix (or none). A malformed XML
 envelope is rejected with HTTP 400 and nothing is forwarded. An
 envelope without a Body forwards an empty payload.
+
+### One-way operations
+
+The selected WSDL service/port binding is the operation authority. A WSDL
+operation is one-way (input-only) when it has an input and no output. The
+producer resolves an explicit operation name, or the bare payload root QName when
+the name is absent, against that binding; an unknown or ambiguous selection fails
+before any HTTP request. For an input-only operation the bridge calls
+`Dispatch.invokeOneWay` exactly once with the bare payload. Empty HTTP 200 and 202
+acknowledgments complete with empty output bytes; no response body is
+deserialized. Resolved dispatches are cached per profile.
+
+Producer one-way dispatch is non-robust: `org.apache.cxf.oneway.robust` is set to
+`false` at dispatch creation, and no `oneway.robust` option exists. A successful
+send does not assert remote business success and does not guarantee observation
+of a remote SOAP fault. A local invocation failure stays an error and is never
+converted into a success, and a possibly transmitted send is never replayed. An
+operation with WSDL output keeps `Dispatch.invoke`; an empty response is an
+error, never an implicit one-way success.
+
+### One-way listener completion
+
+Before the HTTP listener binds, the bridge builds a per-profile operation catalog
+from the selected WSDL binding. Unloadable or misconfigured WSDL metadata fails
+startup before a ready port is announced. Each request resolves the SOAP Body root
+QName against that startup catalog; a supplied SOAPAction must agree with the
+resolved operation. An unknown, conflicting, or ambiguous operation returns a
+version-matched Sender fault (SOAP 1.1 HTTP 500, SOAP 1.2 HTTP 400) with zero
+route dispatch; the WSS-only `fault_status` override never applies.
+
+For a resolved input-only operation the listener waits for the correlated,
+non-fault route completion (including successful Rust response marshalling), then
+returns HTTP 202 with a zero-length body. It discards the marshalled payload and
+writes no ACK envelope and no signature. A successful route that returns
+`Body::Stream` still fails Rust marshalling, so it returns a Receiver fault with
+HTTP 500, never 202. Request-reply success remains HTTP 200, wrapped and signed
+once; a lost consumer stream remains HTTP 503 with `Retry-After`.
 
 ## Dispatch cache (producer)
 
@@ -215,6 +252,19 @@ that derives either from untrusted request data lets an external caller
 churn cached clients — the cap bounds the blast radius, but hot eviction
 still costs allocations and reconnects; keep these dimensions in route
 configuration, not the data plane.
+
+## Native acceptance
+
+One-way behavior is accepted against the pinned `0.8.0` bridge rebuilt from
+source, not against a downloaded binary. Build it with
+`cargo xtask build-cxf-bridge --version 0.8.0`, then point the Rust component at
+the rebuilt binary:
+
+```bash
+export CAMEL_CXF_BRIDGE_BINARY_PATH=/path/to/cxf-bridge
+```
+
+The override skips the download. The release pin stays `0.8.0`.
 
 ## Environment Variables
 

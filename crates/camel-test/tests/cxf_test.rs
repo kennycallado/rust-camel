@@ -521,9 +521,9 @@ async fn cxf_consumer_receives_request_and_returns_response() {
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:hel="http://example.com/hello">
   <soapenv:Header/>
   <soapenv:Body>
-    <hel:sayHello>
+    <hel:sayHelloRequest>
       <name>hello</name>
-    </hel:sayHello>
+    </hel:sayHelloRequest>
   </soapenv:Body>
 </soapenv:Envelope>"#,
         )
@@ -1121,11 +1121,11 @@ async fn cxf_consumer_override_403_applies_to_wss_only() {
 
     // The signed fixture carries a misleading SOAP 1.1 Body nested in the Header and
     // an unreferenced by the signature. The route must receive the direct SOAP 1.2
-    // Body (sayHello), never the nested Header payload.
+    // Body (sayHelloRequest, the WSDL input element), never the nested Header payload.
     let hits = esap_hit.get_received_exchanges().await;
     let hit_body = hits[0].body_as::<String>().unwrap_or_default();
     assert!(
-        hit_body.contains("sayHello"),
+        hit_body.contains("sayHelloRequest"),
         "the direct SOAP 1.2 Body operation must reach the route, got: {hit_body}"
     );
     assert!(
@@ -1324,11 +1324,11 @@ async fn cxf_consumer_fault_code_and_timeout_matrix() {
 
     let soap12 = soap_envelope(
         SOAP12_ENVELOPE_NS,
-        "<hel:sayHello xmlns:hel=\"http://example.com/hello\"><name>x</name></hel:sayHello>",
+        "<hel:sayHelloRequest xmlns:hel=\"http://example.com/hello\"><name>x</name></hel:sayHelloRequest>",
     );
     let soap11 = soap_envelope(
         SOAP11_ENVELOPE_NS,
-        "<hel:sayHello xmlns:hel=\"http://example.com/hello\"><name>x</name></hel:sayHello>",
+        "<hel:sayHelloRequest xmlns:hel=\"http://example.com/hello\"><name>x</name></hel:sayHelloRequest>",
     );
 
     for (profile, expected_local, expected_status) in [
@@ -1501,9 +1501,9 @@ async fn cxf_consumer_concurrent_requests() {
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:hel="http://example.com/hello">
   <soapenv:Header/>
   <soapenv:Body>
-    <hel:sayHello>
+    <hel:sayHelloRequest>
       <name>concurrent-user</name>
-    </hel:sayHello>
+    </hel:sayHelloRequest>
   </soapenv:Body>
 </soapenv:Envelope>"#;
 

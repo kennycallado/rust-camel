@@ -99,6 +99,12 @@ the decision or crate that defines it.
   rings are enforced by module paths and boundary tests, not by crate
   isolation. A crate split stays a post-1.0 option. [Architecture](../architecture/index.md),
   [ADR-0045](../adr/0045-camel-core-architecture-charter.md).
+- **One-way SOAP operation** — a WSDL operation in the selected service/port
+  binding with an input and no output. The producer sends the bare payload once
+  with `Dispatch.invokeOneWay` and completes on an empty acknowledgment; the
+  listener returns an empty HTTP 202 ACK only after a correlated non-fault route
+  completion that includes successful Rust marshalling. One-way producer
+  dispatch is fixed non-robust. [WebSocket and SOAP](../components/ws-soap.md).
 - **OpenAPI code-first generation** — `rest:` AST compiled into an OpenAPI
   3.0.3 document via `camel openapi generate` or
   `camel_dsl::openapi::generate_openapi()`. [YAML DSL](../yaml-dsl/index.md).

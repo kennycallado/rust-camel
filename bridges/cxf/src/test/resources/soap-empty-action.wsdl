@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Extra fixture for Task 2.2: a one-way operation whose declared SOAP action is the empty string.
+  The main soap-oneway.wsdl cannot express this without giving one of its existing operations a
+  different declared action, so this minimal binding isolates the declared-empty-action case.
+-->
+<wsdl:definitions
+    xmlns:wsdl="http://schemas.xmlsoap.org/wsdl/"
+    xmlns:soap="http://schemas.xmlsoap.org/wsdl/soap/"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+    xmlns:tns="urn:oneway:363:empty"
+    targetNamespace="urn:oneway:363:empty"
+    name="EmptyAction363">
+
+  <wsdl:types>
+    <xsd:schema targetNamespace="urn:oneway:363:empty" elementFormDefault="qualified">
+      <xsd:element name="emptyActionMessage" type="xsd:string"/>
+    </xsd:schema>
+  </wsdl:types>
+
+  <wsdl:message name="emptyActionRequest">
+    <wsdl:part name="parameters" element="tns:emptyActionMessage"/>
+  </wsdl:message>
+
+  <wsdl:portType name="EmptyActionPortType">
+    <wsdl:operation name="EmptyActionOp">
+      <wsdl:input message="tns:emptyActionRequest"/>
+    </wsdl:operation>
+  </wsdl:portType>
+
+  <wsdl:binding name="EmptyActionBinding" type="tns:EmptyActionPortType">
+    <soap:binding style="document" transport="http://schemas.xmlsoap.org/soap/http"/>
+    <wsdl:operation name="EmptyActionOp">
+      <soap:operation soapAction=""/>
+      <wsdl:input>
+        <soap:body use="literal"/>
+      </wsdl:input>
+    </wsdl:operation>
+  </wsdl:binding>
+
+  <wsdl:service name="EmptyActionService">
+    <wsdl:port name="EmptyActionPort" binding="tns:EmptyActionBinding">
+      <soap:address location="http://localhost:8080/oneway/empty"/>
+    </wsdl:port>
+  </wsdl:service>
+
+</wsdl:definitions>

@@ -20,6 +20,7 @@ import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -31,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import javax.security.auth.x500.X500Principal;
 import org.apache.wss4j.common.ext.WSSecurityException;
@@ -63,9 +65,24 @@ class SoapEndpointPublisherTest {
   SoapEndpointPublisher publisher;
 
   private static final String TEST_PROFILE_NAME = "test_profile";
+  private static final String FIXTURE_SERVICE = "{urn:oneway:363}OneWayService";
+  private static final String FIXTURE_PORT = "{urn:oneway:363}MainPort";
   private static final String SOAP11_NS = "http://schemas.xmlsoap.org/soap/envelope/";
   private static final String SOAP12_NS = "http://www.w3.org/2003/05/soap-envelope";
   private static final String XML_NS = "http://www.w3.org/XML/1998/namespace";
+
+  /** The fixture's input-only operation body and declared action ({@code urn:receive}). */
+  private static final String RECEIVE_ELEMENT =
+      "<r:receiveMessage xmlns:r=\"urn:oneway:363\">hello</r:receiveMessage>";
+
+  /** The fixture's request-reply operation body and declared action ({@code urn:echo}). */
+  private static final String ECHO_ELEMENT =
+      "<e:echoRequest xmlns:e=\"urn:oneway:363\">hello</e:echoRequest>";
+
+  private static final String EMPTY_ACTION_SERVICE = "{urn:oneway:363:empty}EmptyActionService";
+  private static final String EMPTY_ACTION_PORT = "{urn:oneway:363:empty}EmptyActionPort";
+  private static final String EMPTY_ACTION_ELEMENT =
+      "<m:emptyActionMessage xmlns:m=\"urn:oneway:363:empty\">x</m:emptyActionMessage>";
 
   private static Path keystorePath;
 
@@ -102,6 +119,11 @@ class SoapEndpointPublisherTest {
     SecurityProfile testProfile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
     when(profileStore.getProfile(TEST_PROFILE_NAME)).thenReturn(testProfile);
 
+    // Every listener bind resolves a catalog for each configured profile (Task 2.1), so the mocked
+    // store exposes one profile with valid fixture WSDL metadata by default. Failure-path tests
+    // override profiles() with incomplete or broken metadata; producer-only tests never publish().
+    when(profileStore.profiles()).thenReturn(Map.of(TEST_PROFILE_NAME, listenerFixtureProfile()));
+
     when(vertx.createHttpServer(any())).thenReturn(httpServer);
     when(httpServer.requestHandler(any())).thenReturn(httpServer);
     when(httpRequest.path()).thenReturn("/cxf/" + TEST_PROFILE_NAME);
@@ -122,8 +144,7 @@ class SoapEndpointPublisherTest {
     when(headers.entries())
         .thenReturn(
             List.of(
-                Map.entry("content-type", "text/xml"),
-                Map.entry("soapaction", "\"urn:test:Operation\"")));
+                Map.entry("content-type", "text/xml"), Map.entry("soapaction", "\"urn:echo\"")));
 
     when(bodyBuffer.toString(StandardCharsets.UTF_8)).thenReturn(requestXml);
 
@@ -188,9 +209,7 @@ class SoapEndpointPublisherTest {
 
   @Test
   void noWssProcessing_whenProfileHasNoSecurity() throws Exception {
-    String requestXml =
-        "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
-            + "<soapenv:Body><test/></soapenv:Body></soapenv:Envelope>";
+    String requestXml = envelope11(ECHO_ELEMENT);
 
     ConsumerResponse response =
         ConsumerResponse.newBuilder()
@@ -206,9 +225,7 @@ class SoapEndpointPublisherTest {
 
   @Test
   void prefixedBodyExtractedByLocalName() throws Exception {
-    String requestXml =
-        "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
-            + "<soapenv:Body><p:order xmlns:p=\"urn:t\">X</p:order></soapenv:Body></soapenv:Envelope>";
+    String requestXml = envelope11("<p:echoRequest xmlns:p=\"urn:oneway:363\">X</p:echoRequest>");
 
     ConsumerResponse response =
         ConsumerResponse.newBuilder()
@@ -222,7 +239,7 @@ class SoapEndpointPublisherTest {
     ArgumentCaptor<ConsumerRequest> requestCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
     verify(cxfServerManager).handleSoapRequest(requestCaptor.capture());
     assertEquals(
-        "<p:order xmlns:p=\"urn:t\">X</p:order>",
+        "<p:echoRequest xmlns:p=\"urn:oneway:363\">X</p:echoRequest>",
         requestCaptor.getValue().getPayload().toStringUtf8());
   }
 
@@ -230,7 +247,7 @@ class SoapEndpointPublisherTest {
   void decoyElementNameNotMisExtracted() throws Exception {
     String requestXml =
         "<Envelope xmlns=\"http://schemas.xmlsoap.org/soap/envelope/\">"
-            + "<Body><xsd:bodyData xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">keep</xsd:bodyData>"
+            + "<Body><xsd:echoRequest xmlns:xsd=\"urn:oneway:363\">keep</xsd:echoRequest>"
             + "</Body></Envelope>";
 
     ConsumerResponse response =
@@ -245,7 +262,7 @@ class SoapEndpointPublisherTest {
     ArgumentCaptor<ConsumerRequest> requestCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
     verify(cxfServerManager).handleSoapRequest(requestCaptor.capture());
     assertEquals(
-        "<xsd:bodyData xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\">keep</xsd:bodyData>",
+        "<xsd:echoRequest xmlns:xsd=\"urn:oneway:363\">keep</xsd:echoRequest>",
         requestCaptor.getValue().getPayload().toStringUtf8());
   }
 
@@ -260,10 +277,7 @@ class SoapEndpointPublisherTest {
             .actionsOut("Signature")
             .actionsIn("Signature")
             .build();
-    String plainEnvelope =
-        "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
-            + "<soapenv:Body><test:Hello xmlns:test=\"http://test.example.com\">World</test:Hello>"
-            + "</soapenv:Body></soapenv:Envelope>";
+    String plainEnvelope = envelope11(ECHO_ELEMENT);
     String signed = new WssSecurityProcessor(signing).processOutbound(plainEnvelope);
 
     driveRequestOutcome(signed, "text/xml", signing, completedOk());
@@ -293,7 +307,7 @@ class SoapEndpointPublisherTest {
     // Unsigned request: the signer field stays absent (unknown).
     resetPublisher();
     SecurityProfile plain = SecurityProfile.builder(TEST_PROFILE_NAME).build();
-    driveRequestOutcome(envelope11("<test/>"), "text/xml", plain, completedOk());
+    driveRequestOutcome(echoEnvelope11(), "text/xml", plain, completedOk());
     ArgumentCaptor<ConsumerRequest> unsignedCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
     verify(cxfServerManager, times(2)).handleSoapRequest(unsignedCaptor.capture());
     assertFalse(
@@ -303,7 +317,7 @@ class SoapEndpointPublisherTest {
     // Spoofed signer headers must never mint a signer.
     resetPublisher();
     driveRequestOutcome(
-        envelope11("<test/>"),
+        echoEnvelope11(),
         "text/xml",
         plain,
         completedOk(),
@@ -378,7 +392,7 @@ class SoapEndpointPublisherTest {
             + "<evil:operation xmlns:evil=\"urn:evil\">header-body</evil:operation>"
             + "</s11:Body></soapenv:Header>"
             + "<soapenv:Body>"
-            + "<wanted:operation xmlns:wanted=\"urn:good\">direct-body</wanted:operation>"
+            + "<wanted:echoRequest xmlns:wanted=\"urn:oneway:363\">direct-body</wanted:echoRequest>"
             + "</soapenv:Body></soapenv:Envelope>";
 
     ConsumerResponse response =
@@ -393,7 +407,7 @@ class SoapEndpointPublisherTest {
     verify(cxfServerManager).handleSoapRequest(requestCaptor.capture());
     String payload = requestCaptor.getValue().getPayload().toStringUtf8();
     assertTrue(
-        payload.contains("wanted:operation"),
+        payload.contains("wanted:echoRequest"),
         "the direct SOAP 1.2 Body operation must be forwarded: " + payload);
     assertFalse(
         payload.contains("evil:operation"),
@@ -582,10 +596,7 @@ class SoapEndpointPublisherTest {
             .build();
     when(profileStore.getProfile(TEST_PROFILE_NAME)).thenReturn(realProfile);
 
-    String plainEnvelope =
-        "<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\">"
-            + "<soapenv:Body><test:Hello xmlns:test=\"http://test.example.com\">World</test:Hello>"
-            + "</soapenv:Body></soapenv:Envelope>";
+    String plainEnvelope = envelope11(ECHO_ELEMENT);
     String signedBody = new WssSecurityProcessor(realProfile).processOutbound(plainEnvelope);
     when(bodyBuffer.toString(StandardCharsets.UTF_8)).thenReturn(signedBody);
 
@@ -601,8 +612,7 @@ class SoapEndpointPublisherTest {
     when(headers.entries())
         .thenReturn(
             List.of(
-                Map.entry("content-type", "text/xml"),
-                Map.entry("soapaction", "\"urn:test:Operation\"")));
+                Map.entry("content-type", "text/xml"), Map.entry("soapaction", "\"urn:echo\"")));
 
     ArgumentCaptor<Callable> callableCaptor = ArgumentCaptor.forClass(Callable.class);
     @SuppressWarnings("unchecked")
@@ -694,6 +704,106 @@ class SoapEndpointPublisherTest {
     assertTrue(ex.getMessage().contains("scheme not supported"), ex.getMessage());
     assertTrue(ex.getMessage().contains("(missing)"), ex.getMessage());
     verify(vertx, never()).createHttpServer(any());
+  }
+
+  /** The fixture WSDL path on the test classpath, as the configured filesystem metadata. */
+  private static String fixtureWsdlPath() throws Exception {
+    URL wsdl = SoapEndpointPublisherTest.class.getResource("/soap-oneway.wsdl");
+    assertNotNull(wsdl, "fixture WSDL must be on the test classpath");
+    return Path.of(wsdl.toURI()).toString();
+  }
+
+  /** A profile carrying the valid fixture WSDL metadata a listener bind requires (Task 2.1). */
+  private static SecurityProfile listenerFixtureProfile() throws Exception {
+    return listenerProfile(fixtureWsdlPath(), FIXTURE_SERVICE, FIXTURE_PORT);
+  }
+
+  /** A listener profile with exactly the supplied WSDL metadata, complete or not. */
+  private static SecurityProfile listenerProfile(
+      String wsdlPath, String serviceName, String portName) {
+    return SecurityProfile.builder(TEST_PROFILE_NAME)
+        .wsdlPath(wsdlPath)
+        .serviceName(serviceName)
+        .portName(portName)
+        .build();
+  }
+
+  /**
+   * Task 2.1: a listener bind serves the whole profile store, so every profile must carry a
+   * non-blank WSDL path, service name, and port name, and the configured WSDL must load. Any
+   * missing/blank metadata (null, empty, whitespace-only), a missing WSDL file, or an absent
+   * service/port must fail listener startup before any HTTP server is created, so no ready SOAP
+   * port is ever announced.
+   */
+  @Test
+  void listenerCatalogFailurePreventsBind() throws Exception {
+    when(bridgeConfig.address()).thenReturn("http://127.0.0.1:0/soap");
+
+    SecurityProfile[] brokenProfiles = {
+      listenerProfile(null, FIXTURE_SERVICE, FIXTURE_PORT),
+      listenerProfile("", FIXTURE_SERVICE, FIXTURE_PORT),
+      listenerProfile("   ", FIXTURE_SERVICE, FIXTURE_PORT),
+      listenerProfile("/nonexistent/cxf-missing.wsdl", FIXTURE_SERVICE, FIXTURE_PORT),
+      listenerProfile(fixtureWsdlPath(), null, FIXTURE_PORT),
+      listenerProfile(fixtureWsdlPath(), "   ", FIXTURE_PORT),
+      listenerProfile(fixtureWsdlPath(), FIXTURE_SERVICE, null),
+      listenerProfile(fixtureWsdlPath(), FIXTURE_SERVICE, "   "),
+    };
+
+    for (SecurityProfile broken : brokenProfiles) {
+      resetPublisher();
+      when(profileStore.profiles()).thenReturn(Map.of(TEST_PROFILE_NAME, broken));
+
+      IllegalStateException ex =
+          assertThrows(IllegalStateException.class, () -> publisher.publish());
+      assertTrue(ex.getMessage().contains(TEST_PROFILE_NAME), ex.getMessage());
+      assertTrue(
+          publisher.soapPort().isEmpty(), "a failed catalog load must announce no listener port");
+    }
+
+    verify(vertx, never()).createHttpServer(any());
+  }
+
+  /**
+   * Task 2.1: the catalog snapshot is built from the startup profile and never reloaded from later
+   * profile metadata; the operation set stays bound to the originally selected port.
+   */
+  @Test
+  void listenerCatalogSnapshotUsesStartupProfile() throws Exception {
+    SecurityProfile mainProfile =
+        SecurityProfile.builder(TEST_PROFILE_NAME)
+            .wsdlPath(fixtureWsdlPath())
+            .serviceName("{urn:oneway:363}OneWayService")
+            .portName("{urn:oneway:363}MainPort")
+            .build();
+    when(profileStore.profiles()).thenReturn(Map.of(TEST_PROFILE_NAME, mainProfile));
+
+    publisher.initializeOperationCatalogs();
+
+    WsdlOperationCatalog snapshot = publisher.operationCatalogs.get(TEST_PROFILE_NAME);
+    assertNotNull(snapshot, "the startup profile must yield a catalog");
+    assertDoesNotThrow(
+        () -> snapshot.resolveProducer("EchoOp", null),
+        "the snapshot must resolve the original main-port binding");
+
+    // Change the backing mocked profile metadata after initialization.
+    SecurityProfile aliasProfile =
+        SecurityProfile.builder(TEST_PROFILE_NAME)
+            .wsdlPath(fixtureWsdlPath())
+            .serviceName("{urn:oneway:363}AliasService")
+            .portName("{urn:oneway:363}AliasPort")
+            .build();
+    when(profileStore.profiles()).thenReturn(Map.of(TEST_PROFILE_NAME, aliasProfile));
+    clearInvocations(profileStore);
+
+    assertDoesNotThrow(
+        () -> snapshot.resolveProducer("EchoOp", null),
+        "the initialized snapshot must ignore later profile metadata changes");
+    assertThrows(
+        WsdlOperationCatalog.InvalidOperationException.class,
+        () -> snapshot.resolveProducer("AliasReceiveMessageOp", null),
+        "the alias-only operation must stay unreachable in the initialized main snapshot");
+    verify(profileStore, never()).profiles();
   }
 
   /**
@@ -1436,9 +1546,8 @@ class SoapEndpointPublisherTest {
     when(headers.entries())
         .thenReturn(
             List.of(
-                Map.entry("content-type", "text/xml"),
-                Map.entry("soapaction", "\"urn:test:Operation\"")));
-    when(bodyBuffer.toString(StandardCharsets.UTF_8)).thenReturn(envelope11("<test/>"));
+                Map.entry("content-type", "text/xml"), Map.entry("soapaction", "\"urn:echo\"")));
+    when(bodyBuffer.toString(StandardCharsets.UTF_8)).thenReturn(echoEnvelope11());
 
     ArgumentCaptor<Callable> callableCaptor = ArgumentCaptor.forClass(Callable.class);
     @SuppressWarnings("unchecked")
@@ -1473,9 +1582,7 @@ class SoapEndpointPublisherTest {
     when(httpRequest.endHandler(endCaptor.capture())).thenReturn(httpRequest);
 
     requestHandlerCaptor.getValue().handle(httpRequest);
-    chunkCaptor
-        .getValue()
-        .handle(Buffer.buffer(envelope11("<test/>").getBytes(StandardCharsets.UTF_8)));
+    chunkCaptor.getValue().handle(Buffer.buffer(echoEnvelope11().getBytes(StandardCharsets.UTF_8)));
     endCaptor.getValue().handle((Void) null);
     // The availability gate above saw a live stream (A) and passed.
 
@@ -1501,10 +1608,758 @@ class SoapEndpointPublisherTest {
     manager.cleanup();
   }
 
+  // ── Task 2.2: operation-aware SOAP action extraction and correlated one-way ACK ──
+
+  /** One header/content-type case for operation-aware SOAP action extraction. */
+  private record ActionCase(
+      String name,
+      String version,
+      String contentType,
+      Map<String, String> headers,
+      boolean permitted) {}
+
+  @Test
+  void soap12ContentTypeActionHonorsQuotedPairEscapes() {
+    // Reviewer example: an escaped quote inside `note` must not expose its embedded `action=` text
+    // as the parameter boundary; the genuine trailing action wins.
+    assertEquals(
+        "urn:echo",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of(
+                "content-type",
+                "application/soap+xml; note=\"x\\\";action=urn:receive;z=x\"; action=\"urn:echo\"")));
+
+    // An escaped backslash (\\") before the closing quote keeps the parameter boundary intact.
+    assertEquals(
+        "urn:echo",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; note=\"a\\\\\"; action=\"urn:echo\"")));
+
+    // A quoted-pair inside the action value itself is part of the value, not a terminator.
+    assertEquals(
+        "urn:a\"b",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action=\"urn:a\\\"b\"")));
+  }
+
+  @Test
+  void soap12ContentTypeSkipsWhitespaceBeforeQuotedValue() {
+    // RFC 9110 permits whitespace after '='; `note= "x;action=urn:receive;z=x"` is a single quoted
+    // value, so the embedded action look-alike must be ignored and the real action returned.
+    assertEquals(
+        "urn:echo",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of(
+                "content-type",
+                "application/soap+xml; note= \"x;action=urn:receive;z=x\"; action=\"urn:echo\"")));
+
+    // Same whitespace shape where the embedded action matches but the genuine quoted action is
+    // empty: present-empty semantics win, not the embedded `urn:receive`.
+    assertEquals(
+        "",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of(
+                "content-type",
+                "application/soap+xml; note= \"x;action=urn:receive;z=x\"; action=\"\"")));
+
+    // Whitespace before an unquoted value stays trimmed, exactly as before.
+    assertEquals(
+        "urn:echo",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action= urn:echo")));
+  }
+
+  @Test
+  void soap12ContentTypeTreatsApostropheAsDataAndRecoversMalformedParameters() {
+    // Reviewer input: an apostrophe is ordinary token data, not a quote delimiter, so the embedded
+    // `action=` inside `note='...` terminates at the genuine top-level `;` and the real action
+    // wins.
+    assertEquals(
+        "urn:echo",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; note='x; action=\"urn:echo\"")));
+
+    // Apostrophe inside an unquoted action value is part of the value verbatim.
+    assertEquals(
+        "urn:'echo'",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action=urn:'echo'")));
+
+    // Unterminated quoted-string: pass 1 ends still inQuote, so the whole trailing segment is
+    // swallowed. Nothing after it is live and no action is injected from malformed data.
+    assertNull(
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; broken=\"oops; action=urn:conflict")));
+
+    // The same malformed tail is swallowed when it follows the genuine action segment.
+    assertEquals(
+        "urn:conflict",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of(
+                "content-type", "application/soap+xml; action=\"urn:conflict\"; broken=\"oops")));
+
+    // A quoted value in a non-action segment spans its semicolons; its embedded action never
+    // surfaces and the genuine trailing action wins.
+    assertEquals(
+        "urn:echo",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of(
+                "content-type",
+                "application/soap+xml; note=\"x\" junk=\"a; action=urn:receive; z=b\";"
+                    + " action=urn:echo")));
+
+    // Parameters without '=' or with an empty name are malformed and must not hide the action.
+    assertEquals(
+        "urn:conflict",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; noeq; action=\"urn:conflict\"")));
+
+    // Characters after a genuine closing quote up to the next ';' are an ignored tail.
+    assertEquals(
+        "urn:a",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action=\"urn:a\" junk")));
+  }
+
+  @Test
+  void soap12ContentTypeEdgeCaseMatrix() {
+    // Quote at end of header (closed): value parsed.
+    assertEquals(
+        "urn:echo",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action=\"urn:echo\"")));
+
+    // Backslash at end of header inside quotes: quoted-pair never closes, so the trailing segment
+    // is unterminated and swallowed → null.
+    assertNull(
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action=\"urn:echo\\")));
+
+    // ';' immediately after the opening quote is quoted data, not a separator.
+    assertEquals(
+        ";urn:echo",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action=\";urn:echo\"")));
+
+    // Empty segments are ignored.
+    assertEquals(
+        "urn:echo",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml;; ; action=urn:echo")));
+
+    // Value exactly "" is present-empty, not absence.
+    assertEquals(
+        "",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action=\"\"")));
+
+    // Tab after '=' is skipped like space.
+    assertEquals(
+        "urn:echo",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action=\turn:echo")));
+
+    // '=' inside a quoted value is data.
+    assertEquals(
+        "urn:a=b",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action=\"urn:a=b\"")));
+
+    // First action wins even when a later action segment is present.
+    assertEquals(
+        "urn:first",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action=urn:first; action=urn:second")));
+
+    // Mixed-case name and notaction look-alike.
+    assertEquals(
+        "urn:echo",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; AcTiOn=\"urn:echo\"")));
+    assertNull(
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; notaction=\"urn:echo\"")));
+  }
+
+  @Test
+  void soap12ContentTypeActionIgnoresQuotedTailText() {
+    // Reviewer inputs: only the interior up to the FIRST unescaped closing quote is the value;
+    // later quotes in the segment are ignored tail, never part of the action.
+    assertEquals(
+        "urn:a",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action=\"urn:a\" junk\" x\"")));
+
+    assertEquals(
+        "urn:a",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of(
+                "content-type", "application/soap+xml; action=\"urn:a\" junk\"; charset=utf-8\"")));
+
+    // An escaped interior quote does not close the value; unescaping yields the real action.
+    assertEquals(
+        "a\"b",
+        SoapEndpointPublisher.extractSoapAction(
+            Map.of("content-type", "application/soap+xml; action=\"a\\\"b\" tail\" x\"")));
+  }
+
+  @Test
+  void oneWayActionPresenceSurvivesHttpExtraction() throws Exception {
+    SecurityProfile profile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
+    List<ActionCase> cases =
+        List.of(
+            new ActionCase("soap11 absent header", "1.1", "text/xml", Map.of(), true),
+            new ActionCase(
+                "soap11 matching quoted header",
+                "1.1",
+                "text/xml",
+                Map.of("soapaction", "\"urn:receive\""),
+                true),
+            new ActionCase(
+                "soap11 present-empty header", "1.1", "text/xml", Map.of("soapaction", ""), false),
+            new ActionCase(
+                "soap11 quoted-empty header",
+                "1.1",
+                "text/xml",
+                Map.of("soapaction", "\"\""),
+                false),
+            new ActionCase("soap12 absent action", "1.2", "application/soap+xml", Map.of(), true),
+            new ActionCase(
+                "soap12 matching quoted action",
+                "1.2",
+                "application/soap+xml; action=\"urn:receive\"",
+                Map.of(),
+                true),
+            new ActionCase(
+                "soap12 matching unquoted action",
+                "1.2",
+                "application/soap+xml; action=urn:receive",
+                Map.of(),
+                true),
+            new ActionCase(
+                "soap12 present-empty action",
+                "1.2",
+                "application/soap+xml; action=",
+                Map.of(),
+                false),
+            new ActionCase(
+                "soap12 quoted-empty action",
+                "1.2",
+                "application/soap+xml; action=\"\"",
+                Map.of(),
+                false),
+            new ActionCase(
+                "soap12 mixed-case parameter",
+                "1.2",
+                "application/soap+xml; AcTiOn=\"urn:receive\"",
+                Map.of(),
+                true),
+            new ActionCase(
+                "soap12 unrelated notaction parameter",
+                "1.2",
+                "application/soap+xml; notaction=\"urn:receive\"",
+                Map.of(),
+                true),
+            new ActionCase(
+                "soap12 empty header overrides matching action",
+                "1.2",
+                "application/soap+xml; action=\"urn:receive\"",
+                Map.of("soapaction", ""),
+                false));
+
+    for (ActionCase c : cases) {
+      resetPublisher();
+      clearInvocations(cxfServerManager);
+      clearInvocations(httpResponse);
+      HttpOutcome outcome =
+          driveRequestOutcome(
+              receiveEnvelope(c.version()), c.contentType(), profile, completedOk(), c.headers());
+
+      if (c.permitted()) {
+        assertEquals(202, outcome.status(), c.name() + ": " + outcome.body());
+        assertEquals("", outcome.body(), c.name() + " must be an empty ACK");
+        ArgumentCaptor<ConsumerRequest> requestCaptor =
+            ArgumentCaptor.forClass(ConsumerRequest.class);
+        verify(cxfServerManager, times(1)).handleSoapRequest(requestCaptor.capture());
+        assertEquals("ReceiveMessageOp", requestCaptor.getValue().getOperation(), c.name());
+      } else {
+        int expected = "1.2".equals(c.version()) ? 400 : 500;
+        assertEquals(expected, outcome.status(), c.name() + ": " + outcome.body());
+        assertTrue(
+            outcome.body().contains("Sender") || outcome.body().contains("soap:Client"),
+            c.name() + ": " + outcome.body());
+        verify(cxfServerManager, never()).handleSoapRequest(any());
+      }
+    }
+
+    // A declared-empty-action catalog: a present-empty header AGREES with the declaration.
+    resetPublisher();
+    clearInvocations(cxfServerManager);
+    clearInvocations(httpResponse);
+    SecurityProfile emptyProfile =
+        SecurityProfile.builder(TEST_PROFILE_NAME)
+            .wsdlPath(emptyActionWsdlPath())
+            .serviceName(EMPTY_ACTION_SERVICE)
+            .portName(EMPTY_ACTION_PORT)
+            .build();
+    when(profileStore.profiles()).thenReturn(Map.of(TEST_PROFILE_NAME, emptyProfile));
+    HttpOutcome empty =
+        driveRequestOutcome(
+            envelope11(EMPTY_ACTION_ELEMENT),
+            "text/xml",
+            emptyProfile,
+            completedOk(),
+            Map.of("soapaction", ""));
+    assertEquals(202, empty.status(), "declared-empty action must accept a present-empty header");
+    ArgumentCaptor<ConsumerRequest> emptyCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
+    verify(cxfServerManager, times(1)).handleSoapRequest(emptyCaptor.capture());
+    assertEquals("EmptyActionOp", emptyCaptor.getValue().getOperation());
+  }
+
+  @Test
+  void oneWayAckWaitsForCorrelatedNonFaultCompletion() throws Exception {
+    SecurityProfile signing =
+        SecurityProfile.builder(TEST_PROFILE_NAME)
+            .keystore(keystorePath.toString(), "changeit")
+            .build();
+    WssSecurityProcessor processor = spy(new WssSecurityProcessor(signing));
+    doReturn(false).when(processor).canVerifyInbound();
+    doReturn(true).when(processor).canSignOutbound();
+    installWssProcessor(processor);
+
+    AsyncDrive drive = beginAsyncDrive(receiveEnvelope11(), "text/xml", signing, Map.of());
+
+    drive.awaitDispatch();
+    verify(httpResponse, never()).end(anyString());
+
+    drive.completion.complete(
+        ConsumerResponse.newBuilder()
+            .setRequestId("test-oneway-ack")
+            .setPayload(ByteString.copyFromUtf8("<serialized>ack</serialized>"))
+            .setSecurityProfile(TEST_PROFILE_NAME)
+            .build());
+    drive.awaitFinished();
+
+    ArgumentCaptor<ConsumerRequest> requestCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
+    verify(cxfServerManager, times(1)).handleSoapRequest(requestCaptor.capture());
+    assertEquals("ReceiveMessageOp", requestCaptor.getValue().getOperation());
+    assertEquals(202, drive.status(), "one-way non-fault completion must be an empty 202");
+    assertEquals("", drive.body(), "the ACK must carry no envelope or payload");
+    verify(processor, never()).processOutbound(anyString());
+    verify(httpResponse, times(1)).end("");
+  }
+
+  @Test
+  void oneWayUnknownAmbiguousAndConflictingInputsNeverDispatch() throws Exception {
+    SecurityProfile mainOverride = listenerProfileWithFault(418);
+    SecurityProfile aliasOverride =
+        SecurityProfile.builder(TEST_PROFILE_NAME)
+            .wsdlPath(fixtureWsdlPath())
+            .serviceName("{urn:oneway:363}AliasService")
+            .portName("{urn:oneway:363}AliasPort")
+            .faultStatus(418)
+            .build();
+
+    record BadCase(
+        String name,
+        String version,
+        String contentType,
+        String requestXml,
+        Map<String, String> headers,
+        SecurityProfile profile,
+        boolean alias) {}
+    List<BadCase> cases =
+        List.of(
+            new BadCase(
+                "unknown QName 1.1",
+                "1.1",
+                "text/xml",
+                envelope11("<x:unknown xmlns:x=\"urn:unknown\"/>"),
+                Map.of(),
+                mainOverride,
+                false),
+            new BadCase(
+                "unknown QName 1.2",
+                "1.2",
+                "application/soap+xml",
+                envelope12("<x:unknown xmlns:x=\"urn:unknown\"/>"),
+                Map.of(),
+                mainOverride,
+                false),
+            new BadCase(
+                "alias-ambiguous input 1.1",
+                "1.1",
+                "text/xml",
+                receiveEnvelope11(),
+                Map.of(),
+                aliasOverride,
+                true),
+            new BadCase(
+                "alias-ambiguous input 1.2",
+                "1.2",
+                "application/soap+xml",
+                receiveEnvelope12(),
+                Map.of(),
+                aliasOverride,
+                true),
+            new BadCase(
+                "conflicting action 1.1",
+                "1.1",
+                "text/xml",
+                receiveEnvelope11(),
+                Map.of("soapaction", "urn:echo"),
+                mainOverride,
+                false),
+            new BadCase(
+                "conflicting action 1.2",
+                "1.2",
+                "application/soap+xml",
+                receiveEnvelope12(),
+                Map.of("soapaction", "urn:echo"),
+                mainOverride,
+                false),
+            new BadCase(
+                "present-empty action 1.2",
+                "1.2",
+                "application/soap+xml",
+                receiveEnvelope12(),
+                Map.of("soapaction", ""),
+                mainOverride,
+                false));
+
+    for (BadCase c : cases) {
+      resetPublisher();
+      clearInvocations(cxfServerManager);
+      clearInvocations(httpResponse);
+      when(profileStore.profiles())
+          .thenReturn(Map.of(TEST_PROFILE_NAME, c.alias() ? aliasOverride : mainOverride));
+      HttpOutcome outcome =
+          driveRequestOutcome(
+              c.requestXml(), c.contentType(), c.profile(), completedOk(), c.headers());
+
+      int expected = "1.2".equals(c.version()) ? 400 : 500;
+      assertEquals(expected, outcome.status(), c.name() + ": " + outcome.body());
+      assertNotEquals(418, outcome.status(), c.name() + " must not take the WSS-only override");
+      assertNotEquals(202, outcome.status(), c.name());
+      assertTrue(
+          outcome.body().contains("Sender") || outcome.body().contains("soap:Client"),
+          c.name() + ": " + outcome.body());
+      verify(cxfServerManager, never()).handleSoapRequest(any());
+    }
+  }
+
+  @Test
+  void oneWayMissingCatalogFailsClosedWithoutDispatch() throws Exception {
+    // Production publish() resolves a catalog for every served profile, so a served profile whose
+    // catalog is absent is a broken startup invariant. It must fail closed exactly like an
+    // unknown/ambiguous/conflicting selection: Sender fault per version, never the WSS override,
+    // never an empty-operation dispatch to Rust.
+    SecurityProfile servedButUncataloged = listenerProfileWithFault(418);
+    for (String version : new String[] {"1.1", "1.2"}) {
+      resetPublisher();
+      clearInvocations(cxfServerManager);
+      clearInvocations(httpResponse);
+      // The profile is still served by getProfile() while the published catalog snapshot is empty.
+      when(profileStore.profiles()).thenReturn(Map.of());
+
+      HttpOutcome outcome =
+          driveRequestOutcome(
+              receiveEnvelope(version),
+              soapContentType(version),
+              servedButUncataloged,
+              completedOk());
+
+      int expected = "1.2".equals(version) ? 400 : 500;
+      assertEquals(expected, outcome.status(), version + ": " + outcome.body());
+      assertNotEquals(418, outcome.status(), version + " must not take the WSS-only override");
+      assertNotEquals(202, outcome.status(), version);
+      assertSenderFault(outcome.body(), version);
+      verify(cxfServerManager, never()).handleSoapRequest(any());
+    }
+  }
+
+  @Test
+  void oneWayEscapedContentTypeActionConflictNeverDispatches() throws Exception {
+    // The escaped quote inside `note` hides an embedded `action=urn:receive`; the real action is
+    // the trailing `urn:echo`, which conflicts with the receive operation's declared action.
+    String contentType =
+        "application/soap+xml; note=\"x\\\";action=urn:receive;z=x\"; action=\"urn:echo\"";
+    SecurityProfile served = listenerProfileWithFault(418);
+    for (String version : new String[] {"1.1", "1.2"}) {
+      resetPublisher();
+      clearInvocations(cxfServerManager);
+      clearInvocations(httpResponse);
+      when(profileStore.profiles()).thenReturn(Map.of(TEST_PROFILE_NAME, served));
+
+      HttpOutcome outcome =
+          driveRequestOutcome(receiveEnvelope(version), contentType, served, completedOk());
+
+      int expected = "1.2".equals(version) ? 400 : 500;
+      assertEquals(expected, outcome.status(), version + ": " + outcome.body());
+      assertNotEquals(418, outcome.status(), version + " must not take the WSS-only override");
+      assertNotEquals(202, outcome.status(), version);
+      assertSenderFault(outcome.body(), version);
+      verify(cxfServerManager, never()).handleSoapRequest(any());
+    }
+  }
+
+  @Test
+  void oneWayWhitespaceBeforeQuotedContentTypeActionNeverDispatches() throws Exception {
+    // Whitespace after '=' keeps `note` quoted, so its embedded `action=` is ignored. The real
+    // action then conflicts (urn:echo) or is present-empty ("" vs declared urn:receive): both are
+    // Sender faults per version and must never dispatch.
+    SecurityProfile served = listenerProfileWithFault(418);
+    String[] contentTypes = {
+      "application/soap+xml; note= \"x;action=urn:receive;z=x\"; action=\"urn:echo\"",
+      "application/soap+xml; note= \"x;action=urn:receive;z=x\"; action=\"\""
+    };
+    for (String contentType : contentTypes) {
+      for (String version : new String[] {"1.1", "1.2"}) {
+        resetPublisher();
+        clearInvocations(cxfServerManager);
+        clearInvocations(httpResponse);
+        when(profileStore.profiles()).thenReturn(Map.of(TEST_PROFILE_NAME, served));
+
+        HttpOutcome outcome =
+            driveRequestOutcome(receiveEnvelope(version), contentType, served, completedOk());
+
+        int expected = "1.2".equals(version) ? 400 : 500;
+        String label = version + " " + contentType + ": " + outcome.body();
+        assertEquals(expected, outcome.status(), label);
+        assertNotEquals(418, outcome.status(), version + " must not take the WSS-only override");
+        assertNotEquals(202, outcome.status(), label);
+        assertSenderFault(outcome.body(), version);
+        verify(cxfServerManager, never()).handleSoapRequest(any());
+      }
+    }
+  }
+
+  @Test
+  void oneWayApostropheAndMalformedContentTypeActionNeverDispatch() throws Exception {
+    // Reviewer shapes: the apostrophe is token data, so the trailing action is genuine; and in the
+    // second, a non-action segment's quoted value spans its semicolons while the genuine action
+    // conflicts. Both are Sender faults per version and must never dispatch.
+    SecurityProfile served = listenerProfileWithFault(418);
+    String[] contentTypes = {
+      "application/soap+xml; note='x; action=\"urn:echo\"",
+      "application/soap+xml; note=\"x\" junk=\"a; action=urn:receive; z=b\"; action=urn:echo",
+      "application/soap+xml; action=\"urn:echo\" junk\" x\""
+    };
+    for (String contentType : contentTypes) {
+      for (String version : new String[] {"1.1", "1.2"}) {
+        resetPublisher();
+        clearInvocations(cxfServerManager);
+        clearInvocations(httpResponse);
+        when(profileStore.profiles()).thenReturn(Map.of(TEST_PROFILE_NAME, served));
+
+        HttpOutcome outcome =
+            driveRequestOutcome(receiveEnvelope(version), contentType, served, completedOk());
+
+        int expected = "1.2".equals(version) ? 400 : 500;
+        String label = version + " " + contentType + ": " + outcome.body();
+        assertEquals(expected, outcome.status(), label);
+        assertNotEquals(418, outcome.status(), version + " must not take the WSS-only override");
+        assertNotEquals(202, outcome.status(), label);
+        assertSenderFault(outcome.body(), version);
+        verify(cxfServerManager, never()).handleSoapRequest(any());
+      }
+    }
+  }
+
+  @Test
+  void oneWayUnterminatedQuotedParameterYieldsAbsentActionAndOneWaySuccess() throws Exception {
+    // Pass 1 swallows the entire trailing segment when the quote never closes, so no action is
+    // injected. An absent action on the receive operation is a valid selection: the one-way
+    // operation dispatches once and completes with the empty 202 ACK — never a fault.
+    SecurityProfile profile = listenerProfileWithFault(418);
+    String contentType = "application/soap+xml; broken=\"oops; action=urn:receive";
+    for (String version : new String[] {"1.1", "1.2"}) {
+      resetPublisher();
+      clearInvocations(cxfServerManager);
+      clearInvocations(httpResponse);
+      when(profileStore.profiles()).thenReturn(Map.of(TEST_PROFILE_NAME, profile));
+
+      HttpOutcome outcome =
+          driveRequestOutcome(receiveEnvelope(version), contentType, profile, completedOk());
+
+      String label = version + ": " + outcome.body();
+      assertEquals(202, outcome.status(), label);
+      assertNotEquals(418, outcome.status(), label);
+      assertEquals("", outcome.body(), label);
+      ArgumentCaptor<ConsumerRequest> requestCaptor =
+          ArgumentCaptor.forClass(ConsumerRequest.class);
+      verify(cxfServerManager, times(1)).handleSoapRequest(requestCaptor.capture());
+      assertEquals("ReceiveMessageOp", requestCaptor.getValue().getOperation(), label);
+    }
+  }
+
+  @Test
+  void oneWayFailuresPreserveAvailabilitySecurityAndFaultMatrix() throws Exception {
+    for (String version : new String[] {"1.1", "1.2"}) {
+      String contentType = soapContentType(version);
+      String request = receiveEnvelope(version);
+      int senderStatus = "1.2".equals(version) ? 400 : 500;
+
+      // WSS security failure: a Sender fault where the WSS-only override DOES apply.
+      resetPublisher();
+      installWssProcessor(faultingWssProcessor());
+      clearInvocations(cxfServerManager);
+      HttpOutcome wss =
+          driveRequestOutcome(request, contentType, listenerProfileWithFault(418), completedOk());
+      assertEquals(418, wss.status(), "WSS override must apply: " + wss.body());
+      assertTrue(wss.body().contains("Fault"), wss.body());
+      verify(cxfServerManager, never()).handleSoapRequest(any());
+
+      // Route soap:Client fault: Sender, and the WSS-only override must NOT apply.
+      resetPublisher();
+      clearInvocations(cxfServerManager);
+      HttpOutcome client =
+          driveRequestOutcome(
+              request, contentType, listenerProfileWithFault(418), completedClientFault());
+      assertEquals(senderStatus, client.status(), "route Client fault: " + client.body());
+      assertNotEquals(418, client.status());
+      assertDispatchedAsReceive();
+      assertSenderFault(client.body(), version);
+
+      // Route soap:Server fault: Receiver 500.
+      resetPublisher();
+      clearInvocations(cxfServerManager);
+      HttpOutcome server =
+          driveRequestOutcome(
+              request, contentType, listenerProfileWithFault(418), completedServerFault());
+      assertEquals(500, server.status(), "route Server fault: " + server.body());
+      assertNotEquals(202, server.status());
+      assertDispatchedAsReceive();
+
+      // Unknown fault code: Receiver 500.
+      resetPublisher();
+      clearInvocations(cxfServerManager);
+      HttpOutcome unknown =
+          driveRequestOutcome(
+              request,
+              contentType,
+              listenerProfileWithFault(418),
+              completedFault("custom:Foo", "unknown code"));
+      assertEquals(500, unknown.status(), "unknown fault code must be Receiver 500");
+
+      // Signer-descriptor Receiver fault: still Receiver 500.
+      resetPublisher();
+      clearInvocations(cxfServerManager);
+      HttpOutcome descriptor =
+          driveRequestOutcome(
+              request,
+              contentType,
+              listenerProfileWithFault(418),
+              completedFault("signer:Descriptor", "signer descriptor rejected"));
+      assertEquals(500, descriptor.status(), "signer descriptor fault must be Receiver 500");
+      assertNotEquals(202, descriptor.status());
+
+      // Timeout: Receiver 500.
+      resetPublisher();
+      clearInvocations(cxfServerManager);
+      when(bridgeConfig.consumerTimeoutMs()).thenReturn(20);
+      try {
+        HttpOutcome timeout =
+            driveRequestOutcome(
+                request, contentType, listenerProfileWithFault(418), new CompletableFuture<>());
+        assertEquals(500, timeout.status(), "timeout must be Receiver 500");
+        assertNotEquals(202, timeout.status());
+        assertDispatchedAsReceive();
+      } finally {
+        when(bridgeConfig.consumerTimeoutMs()).thenReturn(5000);
+      }
+
+      // Early unavailable stream: 503 transport availability.
+      resetPublisher();
+      clearInvocations(cxfServerManager);
+      clearInvocations(httpResponse);
+      when(cxfServerManager.hasConsumerObserver()).thenReturn(false);
+      try {
+        assertTransportUnavailable(
+            driveRequestOutcome(
+                request, contentType, listenerProfileWithFault(418), completedOk()));
+      } finally {
+        when(cxfServerManager.hasConsumerObserver()).thenReturn(true);
+      }
+
+      // Late unavailable stream: the SAME 503.
+      resetPublisher();
+      clearInvocations(cxfServerManager);
+      clearInvocations(httpResponse);
+      assertTransportUnavailable(
+          driveRequestOutcome(
+              request,
+              contentType,
+              listenerProfileWithFault(418),
+              CompletableFuture.failedFuture(
+                  new CxfServerManager.StreamUnavailableException("late"))));
+    }
+  }
+
+  @Test
+  void requestReplySuccessStillWrapsAndSignsOnce() throws Exception {
+    SecurityProfile signing =
+        SecurityProfile.builder(TEST_PROFILE_NAME)
+            .keystore(keystorePath.toString(), "changeit")
+            .truststore(keystorePath.toString(), "changeit")
+            .sigUser(TestKeystoreHelper.KEY_ALIAS, "changeit")
+            .actionsOut("Signature")
+            .build();
+    WssSecurityProcessor processor = spy(new WssSecurityProcessor(signing));
+    doReturn(false).when(processor).canVerifyInbound();
+    doReturn(true).when(processor).canSignOutbound();
+    installWssProcessor(processor);
+
+    HttpOutcome outcome =
+        driveRequestOutcome(
+            echoEnvelope11(), "text/xml", signing, completedPayload("<result>ok</result>"));
+
+    assertEquals(200, outcome.status(), outcome.body());
+    Document doc = SoapEnvelopeHelper.parseResponse(outcome.body());
+    assertEquals(SOAP11_NS, doc.getDocumentElement().getNamespaceURI(), outcome.body());
+    assertTrue(outcome.body().contains("result"), outcome.body());
+    verify(processor, times(1)).processOutbound(anyString());
+  }
+
+  /** A listener profile carrying the main fixture metadata and a WSS fault-status override. */
+  private SecurityProfile listenerProfileWithFault(int faultStatus) throws Exception {
+    return SecurityProfile.builder(TEST_PROFILE_NAME)
+        .wsdlPath(fixtureWsdlPath())
+        .serviceName(FIXTURE_SERVICE)
+        .portName(FIXTURE_PORT)
+        .faultStatus(faultStatus)
+        .build();
+  }
+
+  /** Asserts the last dispatched consumer request carried the resolved one-way operation name. */
+  private void assertDispatchedAsReceive() {
+    ArgumentCaptor<ConsumerRequest> requestCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
+    verify(cxfServerManager, atLeastOnce()).handleSoapRequest(requestCaptor.capture());
+    assertEquals("ReceiveMessageOp", requestCaptor.getValue().getOperation());
+  }
+
+  private static void assertSenderFault(String body, String version) {
+    if ("1.2".equals(version)) {
+      assertTrue(body.contains("Sender"), body);
+    } else {
+      assertTrue(body.contains("Client") || body.contains("Sender"), body);
+    }
+  }
+
+  /** The transport-availability 503: Retry-After, plaintext body, never a fault or 202. */
+  private void assertTransportUnavailable(HttpOutcome outcome) {
+    assertEquals(503, outcome.status(), outcome.body());
+    assertNotEquals(202, outcome.status());
+    assertTrue(outcome.body().contains("routes unavailable"), outcome.body());
+    assertFalse(outcome.body().contains("Envelope"), outcome.body());
+    assertFalse(outcome.body().contains("Fault"), outcome.body());
+    verify(httpResponse, atLeastOnce()).putHeader("Retry-After", "1");
+  }
+
   @Test
   void soap11FaultPrefixIsDeclared() throws Exception {
     SecurityProfile profile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
-    String fault = driveRequest(envelope11("<test/>"), "text/xml", profile, failedConsumer());
+    String fault = driveRequest(echoEnvelope11(), "text/xml", profile, failedConsumer());
 
     Element faultcode = findFirst(SoapEnvelopeHelper.parseResponse(fault), "faultcode");
     assertNotNull(faultcode, "SOAP 1.1 fault must carry a faultcode: " + fault);
@@ -1523,7 +2378,7 @@ class SoapEndpointPublisherTest {
     SecurityProfile profile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
     // Driven default: a consumer failure renders the legacy soap:Server code as Receiver.
     String fault =
-        driveRequest(envelope12("<test/>"), "application/soap+xml", profile, failedConsumer());
+        driveRequest(echoEnvelope12(), "application/soap+xml", profile, failedConsumer());
     Document doc = SoapEnvelopeHelper.parseResponse(fault);
     assertEquals(
         SOAP12_NS,
@@ -1682,7 +2537,7 @@ class SoapEndpointPublisherTest {
     resetPublisher();
     HttpOutcome route =
         driveRequestOutcome(
-            envelope12("<test/>"), "application/soap+xml", overridden, completedServerFault());
+            echoEnvelope12(), "application/soap+xml", overridden, completedServerFault());
     assertEquals(
         500,
         route.status(),
@@ -1702,7 +2557,7 @@ class SoapEndpointPublisherTest {
     // Receiver: a Rust route fault on SOAP 1.1 → 500.
     resetPublisher();
     HttpOutcome receiver =
-        driveRequestOutcome(envelope11("<test/>"), "text/xml", profile, completedServerFault());
+        driveRequestOutcome(echoEnvelope11(), "text/xml", profile, completedServerFault());
     assertEquals(500, receiver.status(), "SOAP 1.1 Receiver fault must be 500: " + receiver.body());
   }
 
@@ -1737,7 +2592,7 @@ class SoapEndpointPublisherTest {
             .actionsOut("Signature")
             .faultStatus(418)
             .build();
-    String requestXml = "1.2".equals(version) ? envelope12("<test/>") : envelope11("<test/>");
+    String requestXml = echoEnvelope(version);
     String signedRequest = new WssSecurityProcessor(signing).processOutbound(requestXml);
     WssSecurityProcessor processor = spy(new WssSecurityProcessor(signing));
     if (failSigning) {
@@ -1825,6 +2680,36 @@ class SoapEndpointPublisherTest {
   /** HTTP outcome captured from one driven request. */
   private record HttpOutcome(int status, String body) {}
 
+  /**
+   * A request whose route completion the test holds: the blocking pipeline runs on a daemon worker
+   * so the test thread can inspect the pre-completion state and then complete the correlated
+   * future, all with bounded latch waits and no sleeps.
+   */
+  private static final class AsyncDrive {
+    final CompletableFuture<ConsumerResponse> completion = new CompletableFuture<>();
+    final CountDownLatch dispatched = new CountDownLatch(1);
+    final CountDownLatch finished = new CountDownLatch(1);
+    private final ArgumentCaptor<Integer> statusCaptor = ArgumentCaptor.forClass(Integer.class);
+    private final ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+
+    void awaitDispatch() throws InterruptedException {
+      assertTrue(
+          dispatched.await(5, TimeUnit.SECONDS), "request was never dispatched to the route");
+    }
+
+    void awaitFinished() throws InterruptedException {
+      assertTrue(finished.await(10, TimeUnit.SECONDS), "request worker did not finish");
+    }
+
+    int status() {
+      return statusCaptor.getValue();
+    }
+
+    String body() {
+      return bodyCaptor.getValue();
+    }
+  }
+
   /** Re-creates the plain publisher wired to the shared mocks (no WSS override). */
   private void resetPublisher() {
     publisher = new SoapEndpointPublisher();
@@ -1876,7 +2761,8 @@ class SoapEndpointPublisherTest {
   /**
    * Drives one request and returns both the captured HTTP status and the ended response body. Uses
    * last-captured-value semantics so a single test can drive the same publisher mock more than
-   * once. {@code extraHeaders} are appended to the default content-type/soapaction entries.
+   * once. {@code extraHeaders} are appended to the default content-type entry; no SOAPAction header
+   * is added by default, so a body-only (absent action) request is the baseline.
    */
   private HttpOutcome driveRequestOutcome(
       String requestXml,
@@ -1889,7 +2775,6 @@ class SoapEndpointPublisherTest {
     when(cxfServerManager.handleSoapRequest(any())).thenReturn(consumerResponse);
     List<Map.Entry<String, String>> entries = new ArrayList<>();
     entries.add(Map.entry("content-type", contentType));
-    entries.add(Map.entry("soapaction", "\"urn:test:Operation\""));
     extraHeaders.forEach((key, value) -> entries.add(Map.entry(key, value)));
     when(headers.entries()).thenReturn(entries);
 
@@ -1963,6 +2848,98 @@ class SoapEndpointPublisherTest {
         responseCaptor.getAllValues().get(lastIndex(responseCaptor)));
   }
 
+  /**
+   * Starts a request whose route completion is held by the returned {@link AsyncDrive}. The
+   * blocking pipeline runs on a daemon worker; the test waits for dispatch with a bounded latch,
+   * inspects the unfinished response, then completes the correlated future. Uses the same capture
+   * wiring as {@link #driveRequestOutcome}, only with the completion future under test control.
+   */
+  private AsyncDrive beginAsyncDrive(
+      String requestXml,
+      String contentType,
+      SecurityProfile profile,
+      Map<String, String> extraHeaders)
+      throws Exception {
+    when(profileStore.getProfile(TEST_PROFILE_NAME)).thenReturn(profile);
+    AsyncDrive drive = new AsyncDrive();
+    when(cxfServerManager.handleSoapRequest(any()))
+        .thenAnswer(
+            invocation -> {
+              drive.dispatched.countDown();
+              return drive.completion;
+            });
+    List<Map.Entry<String, String>> entries = new ArrayList<>();
+    entries.add(Map.entry("content-type", contentType));
+    extraHeaders.forEach((key, value) -> entries.add(Map.entry(key, value)));
+    when(headers.entries()).thenReturn(entries);
+
+    ArgumentCaptor<Callable> callableCaptor = ArgumentCaptor.forClass(Callable.class);
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<AsyncResult<SoapEndpointPublisher.SoapHttpResult>>> resultHandlerCaptor =
+        ArgumentCaptor.forClass(Handler.class);
+    doAnswer(invocation -> null)
+        .when(vertx)
+        .executeBlocking(callableCaptor.capture(), resultHandlerCaptor.capture());
+
+    doAnswer(
+            invocation -> {
+              @SuppressWarnings("unchecked")
+              Handler<AsyncResult<HttpServer>> handler = invocation.getArgument(2);
+              handler.handle(Future.succeededFuture(httpServer));
+              return null;
+            })
+        .when(httpServer)
+        .listen(anyInt(), anyString(), any());
+
+    when(httpResponse.setStatusCode(drive.statusCaptor.capture())).thenReturn(httpResponse);
+    when(httpResponse.end(drive.bodyCaptor.capture())).thenAnswer(i -> Future.succeededFuture());
+
+    publisher.publish();
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<HttpServerRequest>> requestHandlerCaptor =
+        ArgumentCaptor.forClass(Handler.class);
+    verify(httpServer, atLeastOnce()).requestHandler(requestHandlerCaptor.capture());
+
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<Buffer>> chunkCaptor = ArgumentCaptor.forClass(Handler.class);
+    @SuppressWarnings("unchecked")
+    ArgumentCaptor<Handler<Void>> endCaptor = ArgumentCaptor.forClass(Handler.class);
+    when(httpRequest.handler(chunkCaptor.capture())).thenReturn(httpRequest);
+    when(httpRequest.endHandler(endCaptor.capture())).thenReturn(httpRequest);
+
+    requestHandlerCaptor.getAllValues().get(lastIndex(requestHandlerCaptor)).handle(httpRequest);
+    chunkCaptor
+        .getAllValues()
+        .get(lastIndex(chunkCaptor))
+        .handle(Buffer.buffer(requestXml.getBytes(StandardCharsets.UTF_8)));
+    endCaptor.getAllValues().get(lastIndex(endCaptor)).handle((Void) null);
+
+    @SuppressWarnings("unchecked")
+    Callable<SoapEndpointPublisher.SoapHttpResult> callable =
+        callableCaptor.getAllValues().get(lastIndex(callableCaptor));
+    @SuppressWarnings("unchecked")
+    Handler<AsyncResult<SoapEndpointPublisher.SoapHttpResult>> resultHandler =
+        resultHandlerCaptor.getAllValues().get(lastIndex(resultHandlerCaptor));
+
+    Thread worker =
+        new Thread(
+            () -> {
+              try {
+                SoapEndpointPublisher.SoapHttpResult result = callable.call();
+                resultHandler.handle(Future.succeededFuture(result));
+              } catch (Exception e) {
+                resultHandler.handle(Future.failedFuture(e));
+              } finally {
+                drive.finished.countDown();
+              }
+            },
+            "async-drive");
+    worker.setDaemon(true);
+    worker.start();
+    return drive;
+  }
+
   private static <T> int lastIndex(ArgumentCaptor<T> captor) {
     return captor.getAllValues().size() - 1;
   }
@@ -1981,6 +2958,41 @@ class SoapEndpointPublisherTest {
         + "\"><soapenv:Body>"
         + body
         + "</soapenv:Body></soapenv:Envelope>";
+  }
+
+  private static String echoEnvelope11() {
+    return envelope11(ECHO_ELEMENT);
+  }
+
+  private static String echoEnvelope12() {
+    return envelope12(ECHO_ELEMENT);
+  }
+
+  private static String receiveEnvelope11() {
+    return envelope11(RECEIVE_ELEMENT);
+  }
+
+  private static String receiveEnvelope12() {
+    return envelope12(RECEIVE_ELEMENT);
+  }
+
+  private static String echoEnvelope(String version) {
+    return "1.2".equals(version) ? echoEnvelope12() : echoEnvelope11();
+  }
+
+  private static String receiveEnvelope(String version) {
+    return "1.2".equals(version) ? receiveEnvelope12() : receiveEnvelope11();
+  }
+
+  private static String soapContentType(String version) {
+    return "1.2".equals(version) ? "application/soap+xml" : "text/xml";
+  }
+
+  /** The declared-empty-action fixture WSDL path on the test classpath. */
+  private static String emptyActionWsdlPath() throws Exception {
+    URL wsdl = SoapEndpointPublisherTest.class.getResource("/soap-empty-action.wsdl");
+    assertNotNull(wsdl, "empty-action fixture WSDL must be on the test classpath");
+    return Path.of(wsdl.toURI()).toString();
   }
 
   private static CompletableFuture<ConsumerResponse> failedConsumer() {
@@ -2005,6 +3017,34 @@ class SoapEndpointPublisherTest {
             .setFaultCode("soap:Server")
             .setFaultString("route failed")
             .build());
+  }
+
+  /** A non-fault consumer response retaining the supplied serialized payload. */
+  private static CompletableFuture<ConsumerResponse> completedPayload(String payload) {
+    return CompletableFuture.completedFuture(
+        ConsumerResponse.newBuilder()
+            .setRequestId("test-payload")
+            .setPayload(ByteString.copyFromUtf8(payload))
+            .setSecurityProfile(TEST_PROFILE_NAME)
+            .build());
+  }
+
+  /** A Rust consumer response with an arbitrary fault code and string. */
+  private static CompletableFuture<ConsumerResponse> completedFault(
+      String faultCode, String faultString) {
+    return CompletableFuture.completedFuture(
+        ConsumerResponse.newBuilder()
+            .setRequestId("test-fault")
+            .setSecurityProfile(TEST_PROFILE_NAME)
+            .setFault(true)
+            .setFaultCode(faultCode)
+            .setFaultString(faultString)
+            .build());
+  }
+
+  /** A Rust route fault with the legacy {@code soap:Client} Sender code. */
+  private static CompletableFuture<ConsumerResponse> completedClientFault() {
+    return completedFault("soap:Client", "route rejected");
   }
 
   /** The real self-signed certificate stored in the test keystore. */

@@ -19,14 +19,19 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import java.net.URI;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import javax.xml.namespace.QName;
 import javax.xml.parsers.ParserConfigurationException;
 import org.apache.wss4j.common.ext.WSSecurityException;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
 import org.xml.sax.SAXParseException;
 
 @ApplicationScoped
@@ -100,6 +105,14 @@ public class SoapEndpointPublisher {
   long pinnedMaxBodyBytes = -1;
 
   /**
+   * Per-profile listener operation catalogs, keyed by profile name, selected once at startup from
+   * the configured profiles. Immutable after {@link #initializeOperationCatalogs()}: no exchange
+   * data can select a different WSDL/service/port. Package-visible so tests can inject a fixed
+   * catalog; production always builds it from {@link SecurityProfileStore}.
+   */
+  Map<String, WsdlOperationCatalog> operationCatalogs = Map.of();
+
+  /**
    * The actual bound SOAP port (from {@code HttpServer.actualPort()} after a successful listen), or
    * empty when no listener is bound. Never a reserve-bind-drop probe: the port is held by this
    * server from the first moment the number exists.
@@ -145,6 +158,54 @@ public class SoapEndpointPublisher {
         profileName, n -> new WssSecurityProcessor(profile));
   }
 
+  /**
+   * Loads the selected WSDL binding's operation catalog for every configured listener profile
+   * before the HTTP listener binds (Task 2.1). No profile may be skipped: a listener bind announces
+   * one SOAP port for the whole profile store, and operation resolution becomes mandatory for every
+   * listener request (Task 2.2), so each profile must carry a non-blank WSDL path, service name,
+   * and port name. Incomplete metadata fails configuration here, before any socket binds; a
+   * configured WSDL that cannot be loaded fails the same way. The result is an immutable snapshot
+   * keyed by profile name and is never reloaded from exchange data.
+   *
+   * <p>The producer-only pool never reaches this method: {@link #publish()} is not invoked when no
+   * bind is configured, so a profile without WSDL metadata is only an error once a listener binds.
+   */
+  void initializeOperationCatalogs() {
+    Map<String, WsdlOperationCatalog> catalogs = new LinkedHashMap<>();
+    for (Map.Entry<String, SecurityProfile> entry : profileStore.profiles().entrySet()) {
+      String profileName = entry.getKey();
+      SecurityProfile profile = entry.getValue();
+      String wsdlPath = requireListenerWsdlMetadata(profileName, "wsdlPath", profile.wsdlPath());
+      String serviceName =
+          requireListenerWsdlMetadata(profileName, "serviceName", profile.serviceName());
+      String portName = requireListenerWsdlMetadata(profileName, "portName", profile.portName());
+      try {
+        catalogs.put(profileName, WsdlOperationCatalog.load(wsdlPath, serviceName, portName));
+      } catch (Exception e) {
+        throw new IllegalStateException(
+            "Failed to load operation catalog for profile '" + profileName + "'", e);
+      }
+    }
+    operationCatalogs = Map.copyOf(catalogs);
+  }
+
+  /**
+   * Requires one listener WSDL metadata field for a profile that a listener bind will serve. A
+   * missing or blank value is a startup configuration error, not a skippable profile.
+   */
+  private static String requireListenerWsdlMetadata(String profileName, String key, String value) {
+    if (value == null || value.isBlank()) {
+      throw new IllegalStateException(
+          "Profile '"
+              + profileName
+              + "' has no configured listener WSDL metadata '"
+              + key
+              + "'; every profile requires a non-blank wsdlPath, serviceName, and portName before a"
+              + " listener can bind");
+    }
+    return value;
+  }
+
   synchronized void publish() {
     if (server != null) {
       return;
@@ -172,6 +233,11 @@ public class SoapEndpointPublisher {
     // Startup validation (ADR-0033): a malformed CXF_MAX_BODY_BYTES must fail loud before any
     // socket binds; requests resolve the cap again at request time.
     maxBodyBytes();
+
+    // Startup metadata (Task 2.1): resolve each configured profile's selected binding catalog
+    // before any socket binds. A configuration/load failure must fail listener startup, not the
+    // first request, and no ready port is announced.
+    initializeOperationCatalogs();
 
     try {
       String host = uri.getHost();
@@ -560,7 +626,7 @@ public class SoapEndpointPublisher {
 
           // Envelope and Body validation before WSS: both are Sender faults that must not be
           // rewritten by a profile's security fault_status override.
-          org.w3c.dom.Document requestDoc = SoapEnvelopeHelper.parseResponse(requestXml);
+          Document requestDoc = SoapEnvelopeHelper.parseResponse(requestXml);
           if (!SoapEnvelopeHelper.hasBody(requestDoc)) {
             throw new MissingSoapBodyException("request envelope has no SOAP Body");
           }
@@ -574,18 +640,36 @@ public class SoapEndpointPublisher {
             signer = verified.signer();
           }
 
-          String requestBody =
-              SoapEnvelopeHelper.extractBody(SoapEnvelopeHelper.parseResponse(securedXml));
-
-          String soapAction = extractSoapAction(headers);
+          // Operation resolution is mandatory for every listener request. The Body root QName and
+          // the raw nullable SOAPAction select exactly one operation from the profile's startup
+          // catalog; an unknown, ambiguous, or conflicting selection is a Sender fault and is
+          // never dispatched to Rust.
+          Document securedDoc = SoapEnvelopeHelper.parseResponse(securedXml);
+          String requestBody = SoapEnvelopeHelper.extractBody(securedDoc);
+          Element bodyElement = SoapEnvelopeHelper.directBodyElement(securedDoc);
+          String rawAction = extractSoapAction(headers);
+          // Production always loads a catalog for every listener profile before the socket binds
+          // (Task 2.1), so this lookup never misses. A missing catalog is therefore a broken
+          // startup invariant, not a request that may bypass operation resolution: fail closed
+          // with the same Sender-fault exception as an unknown/ambiguous/conflicting selection,
+          // so it renders through the version/status matrix (never the WSS fault_status
+          // override) and is never dispatched to Rust with an empty operation.
+          WsdlOperationCatalog catalog = operationCatalogs.get(profileName);
+          if (catalog == null) {
+            throw new WsdlOperationCatalog.InvalidOperationException(
+                "no operation catalog is configured for profile '" + profileName + "'");
+          }
+          WsdlOperationCatalog.Operation resolvedOperation =
+              catalog.resolveConsumer(bodyElementQName(bodyElement), rawAction);
+          String normalizedAction = WsdlOperationCatalog.normalizeSoapAction(rawAction);
 
           ConsumerRequest.Builder consumerRequestBuilder =
               ConsumerRequest.newBuilder()
                   .setRequestId(UUID.randomUUID().toString())
-                  .setOperation(soapAction)
+                  .setOperation(resolvedOperation.name().getLocalPart())
                   .setPayload(ByteString.copyFromUtf8(requestBody))
                   .putAllHeaders(headers)
-                  .setSoapAction(soapAction)
+                  .setSoapAction(normalizedAction == null ? "" : normalizedAction)
                   .setSecurityProfile(profileName);
           // Only a verified Body-covering signature may populate the field; when no signer is
           // present the field stays absent (unknown).
@@ -608,26 +692,31 @@ public class SoapEndpointPublisher {
           }
 
           try {
-            String responseXml;
-            int statusCode;
             if (response.getFault()) {
               // A Rust fault maps through the same matrix but is never a WSS fault, so the
               // per-profile override does not apply.
               FaultClass faultClass = faultClassForRustCode(response.getFaultCode());
-              statusCode = defaultFaultStatus(faultClass, soapVersion);
-              responseXml =
+              int statusCode = defaultFaultStatus(faultClass, soapVersion);
+              String responseXml =
                   buildSoapFault(response.getFaultCode(), response.getFaultString(), soapVersion);
-            } else {
-              statusCode = 200;
-              responseXml = wrapEnvelope(response.getPayload().toStringUtf8(), soapVersion);
+              // Sign with the resolved profile (defense in depth)
+              if (wssProcessor.canSignOutbound()) {
+                responseXml = wssProcessor.processOutbound(responseXml);
+              }
+              return new SoapHttpResult(statusCode, soapVersion, responseXml);
             }
 
-            // Sign with the resolved profile (defense in depth)
+            if (resolvedOperation.oneWay()) {
+              // An input-only operation's correlated non-fault completion is an empty 202 ACK:
+              // the route produced no response, so no envelope is wrapped and nothing is signed.
+              return new SoapHttpResult(202, soapVersion, "");
+            }
+
+            String responseXml = wrapEnvelope(response.getPayload().toStringUtf8(), soapVersion);
             if (wssProcessor.canSignOutbound()) {
               responseXml = wssProcessor.processOutbound(responseXml);
             }
-
-            return new SoapHttpResult(statusCode, soapVersion, responseXml);
+            return new SoapHttpResult(200, soapVersion, responseXml);
           } catch (Exception e) {
             throw new OutboundResponseException(e);
           }
@@ -655,6 +744,8 @@ public class SoapEndpointPublisher {
             boolean isMalformedEnvelope =
                 hasInChain(cause, SAXParseException.class, ParserConfigurationException.class);
             boolean isMissingBody = hasInChain(cause, MissingSoapBodyException.class);
+            boolean isInvalidOperation =
+                hasInChain(cause, WsdlOperationCatalog.InvalidOperationException.class);
             boolean isSecurityFailure = hasInChain(cause, WSSecurityException.class);
             boolean isTimeout = hasInChain(cause, java.util.concurrent.TimeoutException.class);
 
@@ -675,6 +766,12 @@ public class SoapEndpointPublisher {
               faultClass = FaultClass.SENDER;
               faultCode = "soap:Client";
               faultString = "missing SOAP Body: " + sanitize(cause.getMessage());
+            } else if (isInvalidOperation) {
+              // Catalog selection failure is a Sender fault rendered by the version/status
+              // matrix; it is never a WSS fault, so the per-profile override does not apply.
+              faultClass = FaultClass.SENDER;
+              faultCode = "soap:Client";
+              faultString = "invalid operation selection: " + sanitize(cause.getMessage());
             } else if (isSecurityFailure) {
               faultClass = FaultClass.SENDER;
               isWssFault = true;
@@ -869,20 +966,183 @@ public class SoapEndpointPublisher {
     return colon >= 0 ? raw.substring(colon + 1).trim() : raw;
   }
 
-  private static String extractSoapAction(Map<String, String> headers) {
-    String action = headers.getOrDefault("soapaction", "");
-    if (action != null && !action.isBlank()) {
-      return action.replace("\"", "").trim();
+  /**
+   * The namespace-qualified name of the SOAP Body's first child element, or {@code null} when the
+   * Body has no element child. The catalog resolves operations by this QName; a null name matches
+   * nothing and is rejected as an invalid selection.
+   */
+  private static QName bodyElementQName(Element body) {
+    if (body == null) {
+      return null;
     }
-    String contentType = headers.getOrDefault("content-type", "");
-    int idx = contentType.toLowerCase().indexOf("action=");
-    if (idx >= 0) {
-      String tail = contentType.substring(idx + "action=".length()).trim();
-      int semi = tail.indexOf(';');
-      String raw = semi >= 0 ? tail.substring(0, semi) : tail;
-      return raw.replace("\"", "").trim();
+    NodeList children = body.getChildNodes();
+    for (int i = 0; i < children.getLength(); i++) {
+      if (children.item(i) instanceof Element element) {
+        String local =
+            element.getLocalName() == null ? element.getTagName() : element.getLocalName();
+        String namespace = element.getNamespaceURI() == null ? "" : element.getNamespaceURI();
+        return new QName(namespace, local);
+      }
     }
-    return "";
+    return null;
+  }
+
+  /**
+   * Extracts the raw SOAPAction for operation selection, presence-preserving. A present {@code
+   * soapaction} header is returned verbatim — including an explicitly empty value — so header
+   * presence always takes precedence over the content type. Only when the header is absent is the
+   * exact case-insensitive {@code action} parameter of a SOAP 1.2 {@code application/soap+xml}
+   * content type consulted, respecting quoted values and parameter boundaries (an {@code action}
+   * look-alike such as {@code notaction} is not matched). {@code null} means neither source
+   * supplied an action; the value is normalized later by {@link
+   * WsdlOperationCatalog#normalizeSoapAction(String)}.
+   */
+  static String extractSoapAction(Map<String, String> headers) {
+    if (headers.containsKey("soapaction")) {
+      return headers.get("soapaction");
+    }
+    String contentType = headers.get("content-type");
+    if (contentType == null || !isSoap12ContentType(contentType)) {
+      return null;
+    }
+    return actionParameterFromContentType(contentType);
+  }
+
+  /** True when the content type's media type is {@code application/soap+xml} (case-insensitive). */
+  private static boolean isSoap12ContentType(String contentType) {
+    int semi = contentType.indexOf(';');
+    String media = semi >= 0 ? contentType.substring(0, semi) : contentType;
+    return media.trim().equalsIgnoreCase("application/soap+xml");
+  }
+
+  /**
+   * Extracts the value of the exact {@code action} parameter from a content type. Only the double
+   * quote ({@code "}) delimits a quoted-string; an apostrophe is ordinary token data. Parameter
+   * names are compared case-insensitively and whole (so {@code notaction} never matches). Quoted
+   * values may contain {@code ;} and {@code =} and honor quoted-pair escapes ({@code \"} and {@code
+   * \\}). The first {@code action} occurrence wins; {@code null} means no {@code action} parameter
+   * is present.
+   *
+   * <p>Grammar (two passes, one walk each):
+   *
+   * <ol>
+   *   <li>Pass 1 segments the parameter section at {@code ;} seen while NOT inside a double-quoted
+   *       string. Inside quotes, {@code \X} consumes two characters (so {@code \"} does not toggle
+   *       and {@code \\} is one backslash). If the quote state is still open at end of input, the
+   *       entire trailing segment is malformed and swallowed: nothing after it is live.
+   *   <li>Pass 2 reads each segment: trimmed and empty is ignored; no {@code =} is ignored; the
+   *       name is the part before the first {@code =}, trimmed, and empty is ignored. A segment
+   *       whose name is not {@code action} (whole, case-insensitive) is skipped, its interior never
+   *       reinterpreted. For {@code action}, optional space/tab after {@code =} is skipped; a value
+   *       starting with {@code "} is read to the FIRST unescaped closing quote in the segment
+   *       (pass-1 balance guarantees one exists) and unescaped, with any trailing characters after
+   *       that quote ignored; any other value is the remainder trimmed.
+   * </ol>
+   */
+  private static String actionParameterFromContentType(String contentType) {
+    int semi = contentType.indexOf(';');
+    if (semi < 0) {
+      return null;
+    }
+    String params = contentType.substring(semi + 1);
+    int n = params.length();
+
+    // Pass 1: split into segments at top-level ';' only, with a quote-state machine.
+    java.util.List<String> segments = new java.util.ArrayList<>();
+    int segmentStart = 0;
+    boolean inQuote = false;
+    int i = 0;
+    while (i < n) {
+      char c = params.charAt(i);
+      if (inQuote) {
+        if (c == '\\') {
+          // Quoted-pair: consume the escaped character too (at EOI this leaves the quote open,
+          // so the trailing segment is swallowed below).
+          i += 2;
+          continue;
+        }
+        if (c == '"') {
+          inQuote = false;
+        }
+        i++;
+        continue;
+      }
+      if (c == '"') {
+        inQuote = true;
+      } else if (c == ';') {
+        segments.add(params.substring(segmentStart, i));
+        segmentStart = i + 1;
+      }
+      i++;
+    }
+    if (!inQuote) {
+      segments.add(params.substring(segmentStart));
+    }
+
+    // Pass 2: resolve the first 'action' segment; non-action segments are never reinterpreted.
+    for (String segment : segments) {
+      String trimmed = segment.trim();
+      if (trimmed.isEmpty()) {
+        continue;
+      }
+      int eq = trimmed.indexOf('=');
+      if (eq < 0) {
+        continue;
+      }
+      String name = trimmed.substring(0, eq).trim();
+      if (name.isEmpty() || !name.equalsIgnoreCase("action")) {
+        continue;
+      }
+      String value = trimmed.substring(eq + 1);
+      int v = 0;
+      while (v < value.length() && (value.charAt(v) == ' ' || value.charAt(v) == '\t')) {
+        v++;
+      }
+      value = value.substring(v);
+      if (value.startsWith("\"")) {
+        // First unescaped closing quote: a quoted-pair (\X) consumes two characters, so an
+        // escaped interior quote never closes the value. Everything after that quote in the
+        // segment is the ignored tail (never part of the value).
+        int closing = -1;
+        int k = 1;
+        while (k < value.length()) {
+          char c = value.charAt(k);
+          if (c == '\\' && k + 1 < value.length()) {
+            k += 2;
+            continue;
+          }
+          if (c == '"') {
+            closing = k;
+            break;
+          }
+          k++;
+        }
+        if (closing < 0) {
+          // Pass 1 balance guarantees a closing quote; fail closed if it is ever absent.
+          return null;
+        }
+        return unescapeQuotedPairs(value.substring(1, closing));
+      }
+      return value.trim();
+    }
+    return null;
+  }
+
+  /** Removes quoted-pair escapes from a quoted-string interior ({@code \X} becomes {@code X}). */
+  private static String unescapeQuotedPairs(String value) {
+    StringBuilder out = new StringBuilder(value.length());
+    int i = 0;
+    while (i < value.length()) {
+      char c = value.charAt(i);
+      if (c == '\\' && i + 1 < value.length()) {
+        out.append(value.charAt(i + 1));
+        i += 2;
+        continue;
+      }
+      out.append(c);
+      i++;
+    }
+    return out.toString();
   }
 
   /**
@@ -893,8 +1153,7 @@ public class SoapEndpointPublisher {
   static String detectSoapVersion(String requestXml, Map<String, String> headers) {
     if (requestXml != null && !requestXml.isBlank()) {
       try {
-        org.w3c.dom.Element root =
-            SoapEnvelopeHelper.parseResponse(requestXml).getDocumentElement();
+        Element root = SoapEnvelopeHelper.parseResponse(requestXml).getDocumentElement();
         if (root != null) {
           String namespace = root.getNamespaceURI();
           if (SOAP12_NS.equals(namespace)) {

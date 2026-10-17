@@ -11,21 +11,28 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+use camel_api::{Body, CamelError, Exchange, StreamBody};
 use camel_bridge::process::{BridgeProcess, BridgeProcessConfig};
+use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_cxf::config::CxfListenerTls;
 use camel_component_cxf::{CxfBridgePool, CxfComponent, CxfPoolConfig, CxfProfileConfig};
 use camel_dsl::parse_yaml;
 use camel_test::CamelTestContext;
+use futures::StreamExt as _;
 
 use crate::cxf_wsdl_path;
 use crate::init_tracing;
-use crate::support::cxf::{TestTlsCa, TestTlsLeaf, require_cxf_bridge_binary};
+use crate::support::cxf::{SOAP11_ENVELOPE_NS, TestTlsCa, TestTlsLeaf, require_cxf_bridge_binary};
 use crate::support::wait::wait_until;
 use crate::support::{bridge_bg_rt, install_crypto_provider};
+use crate::wire::parse_soap_structure;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::Notify;
 
 /// How long the raw-spawned bridge may take to emit BOTH announcement lines.
 const ANNOUNCE_BUDGET: Duration = Duration::from_secs(90);
@@ -421,14 +428,16 @@ async fn cxf_consumer_mutual_tls_with_no_client_cert_is_rejected() {
 
 // ── Task 2.8: dual ready-line startup + announced-port access ─────────────────
 
-/// Bare `sayHello` SOAP 1.1 envelope posted to the consumer listener.
+/// Bare `sayHelloRequest` SOAP 1.1 envelope posted to the consumer listener.
+/// The Body child is the WSDL-declared input element (`sayHelloRequest`), not
+/// the operation local name (`sayHello`), so the listener resolves it uniquely.
 const LISTENER_SAY_HELLO_SOAP: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:hel="http://example.com/hello">
   <soapenv:Header/>
   <soapenv:Body>
-    <hel:sayHello>
+    <hel:sayHelloRequest>
       <name>hello</name>
-    </hel:sayHello>
+    </hel:sayHelloRequest>
   </soapenv:Body>
 </soapenv:Envelope>"#;
 
@@ -514,6 +523,184 @@ fn listener_consumer_route(soap_port: u16) -> String {
     format!(
         "routes:\n  - id: cxf-listener-route\n    from: \"cxf://https://127.0.0.1:{soap_port}/cxf/test_profile?wsdl={wsdl}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile=test_profile\"\n    steps:\n      - set_body:\n          value:\n            constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n      - to: \"mock:consumed\"\n"
     )
+}
+
+// ── Mission 363 one-way listener: ACK, stream-output fault, action conflict ──
+
+/// Namespace of the single Java `soap-oneway.wsdl` fixture (Task 2.4 reuse).
+const ONEWAY_NS: &str = "urn:oneway:363";
+/// Profile name the one-way listener pool serves and the route/POST address.
+const ONEWAY_LISTENER_PROFILE: &str = "oneway_listener";
+
+/// Bare SOAP 1.1 request whose Body root is the WSDL-declared `receiveMessage`
+/// input element — it resolves uniquely to the input-only `ReceiveMessageOp`.
+/// `soap-oneway.wsdl` lives in the Java bridge test resources, so the listener
+/// and the (future) rebuilt bridge both load the same fixture.
+fn listener_receive_soap() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ow="{ONEWAY_NS}">
+  <soapenv:Header/>
+  <soapenv:Body>
+    <ow:receiveMessage>hello</ow:receiveMessage>
+  </soapenv:Body>
+</soapenv:Envelope>"#
+    )
+}
+
+/// Nonempty, marshallable route output. An input-only operation discards its
+/// correlated successful payload and answers an empty 202, so this must never
+/// appear in the ACK body.
+const ONEWAY_DISCARDED_PAYLOAD: &str = "<serialized>ack</serialized>";
+
+/// Resolves the Java one-way fixture from the workspace root (walking up from
+/// `CARGO_MANIFEST_DIR`), matching the Task 2.4 producer fixture path.
+fn oneway_wsdl_path() -> String {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root resolves from CARGO_MANIFEST_DIR");
+    root.join("bridges/cxf/src/test/resources/soap-oneway.wsdl")
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Real `CxfBridgePool` with a mutual-TLS SOAP listener on
+/// `https://127.0.0.1:0` serving the input-only `soap-oneway.wsdl` profile.
+/// Pool-level listener TLS only — never per-profile material.
+fn oneway_listener_pool(
+    material: &ListenerTlsMaterial,
+    health_check_interval_ms: u64,
+) -> Arc<CxfBridgePool> {
+    let mut listener_tls = CxfListenerTls::default();
+    listener_tls.cert_path = Some(material.cert_pem.to_string_lossy().to_string());
+    listener_tls.key_path = Some(material.key_pem.to_string_lossy().to_string());
+    listener_tls.client_ca_path = Some(material.client_ca_pem.to_string_lossy().to_string());
+    Arc::new(
+        CxfBridgePool::from_config(CxfPoolConfig {
+            profiles: vec![CxfProfileConfig {
+                name: ONEWAY_LISTENER_PROFILE.to_string(),
+                address: Some("http://localhost:8080/oneway/main".to_string()),
+                wsdl_path: oneway_wsdl_path(),
+                service_name: "{urn:oneway:363}OneWayService".to_string(),
+                port_name: "{urn:oneway:363}MainPort".to_string(),
+                security: Default::default(),
+            }],
+            max_bridges: 1,
+            bridge_start_timeout_ms: 30_000,
+            health_check_interval_ms,
+            bridge_cache_dir: None,
+            version: camel_component_cxf::BRIDGE_VERSION.to_string(),
+            bind_address: Some("https://127.0.0.1:0/cxf".to_string()),
+            listener_tls: Some(listener_tls),
+            reconnect: Default::default(),
+        })
+        .expect("valid one-way listener pool config"),
+    )
+}
+
+/// Eagerly creates the bridge slot on the permanent background runtime (so the
+/// tonic dispatch task outlives the test runtime) and returns the ANNOUNCED
+/// SOAP port from `soap-ready` metadata — never a reserve/bind-drop probe.
+async fn start_oneway_listener_pool(pool: &Arc<CxfBridgePool>) -> u16 {
+    let pool_init = Arc::clone(pool);
+    let mut pool_init_task = bridge_bg_rt().spawn(async move {
+        pool_init
+            .get_or_create_slot(&CxfBridgePool::slot_key())
+            .await
+    });
+    if tokio::time::timeout(BRIDGE_INIT_BUDGET, &mut pool_init_task)
+        .await
+        .is_err()
+    {
+        pool_init_task.abort();
+        panic!("bridge slot init must complete within {BRIDGE_INIT_BUDGET:?}");
+    }
+
+    wait_until(
+        "announced soap port",
+        Duration::from_secs(60),
+        Duration::from_millis(200),
+        || {
+            let pool = Arc::clone(pool);
+            async move {
+                Ok(pool
+                    .listener_info()
+                    .await
+                    .is_some_and(|info| info.soap_port.is_some()))
+            }
+        },
+    )
+    .await
+    .expect("bridge must announce its soap port");
+    let info = pool
+        .listener_info()
+        .await
+        .expect("a bridge process must be running");
+    let soap_port = info.soap_port.expect("soap-ready announced port");
+    assert!(soap_port > 0, "announced soap port must be a real port");
+    soap_port
+}
+
+/// Consumer `from` URI for the one-way listener profile at the announced port.
+fn oneway_listener_uri(soap_port: u16) -> String {
+    let wsdl = oneway_wsdl_path();
+    format!(
+        "cxf://https://127.0.0.1:{soap_port}/cxf/{ONEWAY_LISTENER_PROFILE}?wsdl={wsdl}&service={{urn:oneway:363}}OneWayService&port={{urn:oneway:363}}MainPort&profile={ONEWAY_LISTENER_PROFILE}"
+    )
+}
+
+/// Bounded wait until the mutual-TLS GET readiness probe answers 200 on the
+/// given profile path (the health-check response the listener serves once a
+/// consumer stream is open).
+async fn wait_mutual_get_ready_at(client: &reqwest::Client, soap_port: u16, profile: &str) {
+    wait_until(
+        "cxf one-way consumer endpoint ready",
+        Duration::from_secs(30),
+        Duration::from_millis(200),
+        || {
+            let client = client.clone();
+            let url = format!("https://127.0.0.1:{soap_port}/cxf/{profile}");
+            async move {
+                match client.get(&url).send().await {
+                    Ok(res) => Ok(res.status() == reqwest::StatusCode::OK),
+                    Err(_) => Ok(false),
+                }
+            }
+        },
+    )
+    .await
+    .expect("one-way consumer endpoint ready on the announced port");
+}
+
+/// Asserts a SOAP 1.1 fault envelope with a namespace-correct `faultcode`
+/// QName. The `parse_soap_structure` model (Task 2.4) proves the version and
+/// the `Fault` Body child; the rendered `soap:<local>` text proves the code.
+fn assert_soap11_fault(xml: &str, expected_local: &str) {
+    let structure = parse_soap_structure(xml);
+    assert_eq!(
+        structure.envelopes,
+        vec![format!("{{{SOAP11_ENVELOPE_NS}}}Envelope")],
+        "fault must be a single SOAP 1.1 Envelope, got {:?}: {xml}",
+        structure.envelopes
+    );
+    assert_eq!(
+        structure.bodies,
+        vec![format!("{{{SOAP11_ENVELOPE_NS}}}Body")],
+        "fault must carry a single SOAP 1.1 Body, got {:?}: {xml}",
+        structure.bodies
+    );
+    assert_eq!(
+        structure.body_children,
+        vec![format!("{{{SOAP11_ENVELOPE_NS}}}Fault")],
+        "the fault Body child must be a SOAP 1.1 Fault, got {:?}: {xml}",
+        structure.body_children
+    );
+    let expected = format!("<faultcode>soap:{expected_local}</faultcode>");
+    assert!(
+        xml.contains(&expected),
+        "fault must render {expected}: {xml}"
+    );
 }
 
 /// Bounded wait until the mutual-TLS GET readiness probe answers 200 (the
@@ -936,6 +1123,354 @@ async fn cxf_consumer_mutual_tls_restart_preserves_ca_and_port() {
         };
         assert_client_auth_alert(label, &err, expected_alert);
     }
+
+    h.stop().await;
+    pool.shutdown().await.expect("pool shutdown");
+}
+
+// ── Task 2.6: input-only ACK, stream-output Receiver fault, action conflict ──
+
+/// Bound for the negative observation that NO HTTP response may arrive while the
+/// input-only route completion is parked. Comfortably below the 15 s client and
+/// 60 s listener deadlines, so an ACK-at-dispatch regression fails loudly here
+/// instead of being masked by a later timeout.
+const NEGATIVE_ACK_WINDOW: Duration = Duration::from_secs(2);
+
+/// Exact-name acceptance: an input-only `ReceiveMessageOp` over mTLS must NOT
+/// ACK at receipt or dispatch time. The route parks on an explicit `Notify`
+/// hold, so the dispatched HTTP future stays unfinished; only a correlated,
+/// non-fault completion carrying a successfully marshalled (then discarded)
+/// payload releases an empty 202 with no SOAP Envelope.
+///
+/// Compiled here; runtime green requires the Task 2.8 native bridge rebuild.
+#[tokio::test(flavor = "multi_thread")]
+async fn cxf_consumer_oneway_mtls_ack_waits_for_completion() {
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_cxf_bridge_binary();
+    let material = listener_tls_material();
+    let pool = oneway_listener_pool(&material, 2_000);
+    let soap_port = start_oneway_listener_pool(&pool).await;
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(CxfComponent::new(Arc::clone(&pool)))
+        .build()
+        .await;
+
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let entries = Arc::new(AtomicUsize::new(0));
+    let captured: Arc<Mutex<Option<Exchange>>> = Arc::new(Mutex::new(None));
+
+    let route = RouteBuilder::from(&oneway_listener_uri(soap_port))
+        .route_id("cxf-oneway-ack")
+        .process({
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            let entries = Arc::clone(&entries);
+            let captured = Arc::clone(&captured);
+            move |ex: Exchange| {
+                let entered = Arc::clone(&entered);
+                let release = Arc::clone(&release);
+                let entries = Arc::clone(&entries);
+                let captured = Arc::clone(&captured);
+                async move {
+                    entries.fetch_add(1, Ordering::SeqCst);
+                    *captured.lock().expect("captured exchange lock") = Some(ex.clone());
+                    // Signal route entry, then hold completion until the test
+                    // releases it. No sleep: the ACK is driven by the correlated
+                    // completion, not by elapsed time.
+                    entered.notify_one();
+                    release.notified().await;
+                    let mut ex = ex;
+                    ex.input.body = Body::Text(ONEWAY_DISCARDED_PAYLOAD.to_string());
+                    Ok(ex)
+                }
+            }
+        })
+        .build()
+        .expect("one-way hold route builds");
+    h.add_route(route)
+        .await
+        .expect("one-way hold route registers");
+    h.start().await;
+
+    let client = mutual_tls_client(&material);
+    wait_mutual_get_ready_at(&client, soap_port, ONEWAY_LISTENER_PROFILE).await;
+
+    let mut post = tokio::spawn({
+        let client = client.clone();
+        let url = format!("https://127.0.0.1:{soap_port}/cxf/{ONEWAY_LISTENER_PROFILE}");
+        let body = listener_receive_soap();
+        async move {
+            client
+                .post(url)
+                .header("content-type", "text/xml; charset=utf-8")
+                .header("soapaction", "urn:receive")
+                .body(body)
+                .send()
+                .await
+        }
+    });
+
+    // Await route entry under a bound. On timeout, release BEFORE panicking so
+    // the parked route can unwind; on success the route stays parked for the
+    // negative-observation window below.
+    let entered_result = tokio::time::timeout(Duration::from_secs(30), entered.notified()).await;
+    if entered_result.is_err() {
+        release.notify_one();
+        panic!("the consumer route must be entered within the budget");
+    }
+
+    // Negative observation: a correctly implemented input-only ACK waits for the
+    // correlated completion, so NO HTTP response may arrive while the route is
+    // still parked. An ACK at receipt or dispatch time would complete the POST
+    // inside this window — an instantaneous `is_finished()` snapshot could miss
+    // it because the response may already be emitted server-side but not yet
+    // delivered/scheduled back to the POST task.
+    let no_ack_while_parked = tokio::time::timeout(NEGATIVE_ACK_WINDOW, &mut post)
+        .await
+        .is_err();
+
+    // Observations only; every assertion runs after the release is sent so a
+    // failure can never leave the route parked.
+    let entries_at_entry = entries.load(Ordering::SeqCst);
+    release.notify_one();
+    assert!(
+        no_ack_while_parked,
+        "the input-only ACK must wait for the correlated completion, but the HTTP task \
+         completed while the route was parked"
+    );
+    assert_eq!(
+        entries_at_entry, 1,
+        "exactly one route execution must be in flight"
+    );
+
+    let response = tokio::time::timeout(Duration::from_secs(30), post)
+        .await
+        .expect("one-way POST must complete after the release, never hang")
+        .expect("spawned POST task joins")
+        .expect("mutual-TLS request must complete after release");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::ACCEPTED,
+        "a correlated non-fault completion must be an empty 202 ACK"
+    );
+    let body = response.text().await.expect("202 body");
+    assert!(
+        body.is_empty(),
+        "the 202 ACK must be zero-length, got {body:?}"
+    );
+    let structure = parse_soap_structure(&body);
+    assert!(
+        structure.envelopes.is_empty() && structure.bodies.is_empty(),
+        "the 202 ACK must carry no SOAP Envelope: {structure:?}"
+    );
+
+    let (operation, action) = {
+        let captured = captured.lock().expect("captured exchange lock");
+        let captured = captured.as_ref().expect("the route must have been entered");
+        (
+            captured
+                .input
+                .header("CxfOperation")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            captured
+                .input
+                .header("CxfSoapAction")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        )
+    };
+    assert_eq!(
+        operation.as_deref(),
+        Some("ReceiveMessageOp"),
+        "the dispatched operation metadata must be ReceiveMessageOp"
+    );
+    assert_eq!(
+        action.as_deref(),
+        Some("urn:receive"),
+        "the resolved SOAPAction must reach the route"
+    );
+    assert_eq!(
+        entries.load(Ordering::SeqCst),
+        1,
+        "the input-only request must execute the route exactly once"
+    );
+
+    h.stop().await;
+    pool.shutdown().await.expect("pool shutdown");
+}
+
+/// Exact-name acceptance: a SUCCESSFUL route whose output body is an
+/// unsupported `Body::Stream` still fails response marshalling, so an
+/// input-only operation answers the Receiver fault (SOAP 1.1 500 + `Server`
+/// fault code) and NEVER a 202 ACK. The success-ACK shortcut must not suppress
+/// the marshalling failure.
+///
+/// Compiled here; runtime green requires the Task 2.8 native bridge rebuild.
+#[tokio::test(flavor = "multi_thread")]
+async fn cxf_consumer_oneway_stream_output_is_receiver_fault() {
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_cxf_bridge_binary();
+    let material = listener_tls_material();
+    let pool = oneway_listener_pool(&material, 2_000);
+    let soap_port = start_oneway_listener_pool(&pool).await;
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(CxfComponent::new(Arc::clone(&pool)))
+        .build()
+        .await;
+
+    let route = RouteBuilder::from(&oneway_listener_uri(soap_port))
+        .route_id("cxf-oneway-stream")
+        .process(|mut ex: Exchange| async move {
+            let chunks = vec![Ok::<Bytes, CamelError>(Bytes::from_static(b"streamed"))];
+            ex.input.body = Body::Stream(StreamBody {
+                stream: Arc::new(tokio::sync::Mutex::new(Some(
+                    futures::stream::iter(chunks).boxed(),
+                ))),
+                metadata: Default::default(),
+            });
+            Ok(ex)
+        })
+        .build()
+        .expect("one-way stream route builds");
+    h.add_route(route)
+        .await
+        .expect("one-way stream route registers");
+    h.start().await;
+
+    let client = mutual_tls_client(&material);
+    wait_mutual_get_ready_at(&client, soap_port, ONEWAY_LISTENER_PROFILE).await;
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(30),
+        client
+            .post(format!(
+                "https://127.0.0.1:{soap_port}/cxf/{ONEWAY_LISTENER_PROFILE}"
+            ))
+            .header("content-type", "text/xml; charset=utf-8")
+            .header("soapaction", "urn:receive")
+            .body(listener_receive_soap())
+            .send(),
+    )
+    .await
+    .expect("stream-output request must answer promptly, never hang")
+    .expect("stream-output request must complete the handshake");
+
+    let status = response.status();
+    assert_ne!(
+        status,
+        reqwest::StatusCode::ACCEPTED,
+        "an unmarshallable stream output must never be a 202 ACK"
+    );
+    assert_eq!(
+        status,
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        "an unmarshallable stream output must be a Receiver 500"
+    );
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        content_type.contains("text/xml"),
+        "SOAP 1.1 fault content-type must be text/xml, got {content_type}"
+    );
+    let body = response.text().await.expect("fault body");
+    assert_soap11_fault(&body, "Server");
+
+    h.stop().await;
+    pool.shutdown().await.expect("pool shutdown");
+}
+
+/// Exact-name acceptance: a `receiveMessage` Body QName (declared `urn:receive`)
+/// combined with a conflicting `urn:echo` SOAPAction is a Sender fault. The
+/// listener renders a valid SOAP 1.1 fault (500 + `Client`) and NEVER dispatches
+/// to the route, so the route-entry counter stays zero.
+///
+/// Compiled here; runtime green requires the Task 2.8 native bridge rebuild.
+#[tokio::test(flavor = "multi_thread")]
+async fn cxf_consumer_oneway_conflicting_action_never_dispatches() {
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_cxf_bridge_binary();
+    let material = listener_tls_material();
+    let pool = oneway_listener_pool(&material, 2_000);
+    let soap_port = start_oneway_listener_pool(&pool).await;
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(CxfComponent::new(Arc::clone(&pool)))
+        .build()
+        .await;
+
+    let entries = Arc::new(AtomicUsize::new(0));
+    let route = RouteBuilder::from(&oneway_listener_uri(soap_port))
+        .route_id("cxf-oneway-conflict")
+        .process({
+            let entries = Arc::clone(&entries);
+            move |ex: Exchange| {
+                let entries = Arc::clone(&entries);
+                async move {
+                    entries.fetch_add(1, Ordering::SeqCst);
+                    Ok(ex)
+                }
+            }
+        })
+        .build()
+        .expect("one-way conflict route builds");
+    h.add_route(route)
+        .await
+        .expect("one-way conflict route registers");
+    h.start().await;
+
+    let client = mutual_tls_client(&material);
+    wait_mutual_get_ready_at(&client, soap_port, ONEWAY_LISTENER_PROFILE).await;
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(30),
+        client
+            .post(format!(
+                "https://127.0.0.1:{soap_port}/cxf/{ONEWAY_LISTENER_PROFILE}"
+            ))
+            .header("content-type", "text/xml; charset=utf-8")
+            .header("soapaction", "urn:echo")
+            .body(listener_receive_soap())
+            .send(),
+    )
+    .await
+    .expect("conflicting-action request must answer promptly, never hang")
+    .expect("conflicting-action request must complete the handshake");
+
+    let status = response.status();
+    assert_ne!(
+        status,
+        reqwest::StatusCode::ACCEPTED,
+        "a conflicting action must never be a 202 ACK"
+    );
+    assert_eq!(
+        status,
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        "a conflicting action is a SOAP 1.1 Sender fault → 500"
+    );
+    let body = response.text().await.expect("fault body");
+    assert_soap11_fault(&body, "Client");
+    assert_eq!(
+        entries.load(Ordering::SeqCst),
+        0,
+        "an unresolved operation selection must never reach the route"
+    );
 
     h.stop().await;
     pool.shutdown().await.expect("pool shutdown");

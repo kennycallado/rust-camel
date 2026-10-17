@@ -12,6 +12,58 @@ header; that header is ignored. An unrecognized binding ID fails the invocation
 instead of defaulting to SOAP 1.1. Envelope parsing stays in the bridge, which
 owns the XML boundary (ADR-0032).
 
+## One-way SOAP operations
+
+A **One-way SOAP operation** is a WSDL operation in the selected service/port
+binding with an input and no output. The selected binding is the operation
+authority for both directions. An operation with WSDL output is request-reply.
+
+### Producer
+
+The producer resolves the operation against the selected binding: an explicit
+`operation` name, or, when the name is absent, the bare payload root QName. An
+unknown, ambiguous, or missing selection fails before any wire transmission. The
+resolved dispatch sets the SOAPAction and the exchange shape together.
+
+For an input-only operation the bridge calls `Dispatch.invokeOneWay` exactly once
+with the bare payload. Empty HTTP 200 and 202 acknowledgments complete
+successfully with empty output bytes; the bridge does not deserialize an absent
+response body. Resolved WSDL dispatches are cached per profile in the bounded LRU,
+with the non-robust flag fixed at creation.
+
+One-way producer dispatch is non-robust and there is no public `oneway.robust`
+option: `org.apache.cxf.oneway.robust` is fixed to false. Successful send
+completion does not assert remote business success and does not guarantee
+observation of a remote SOAP fault. A local bridge or transport failure remains an
+error; it is never converted into an empty success. A local transport failure
+after a one-way send does not trigger a replay or resend. Recovery is a subsequent
+explicit send, a separate action.
+
+An operation with WSDL output keeps one `Dispatch.invoke`. An empty response is an
+error: the producer never falls back to one-way, fabricates a payload, or resends.
+
+### Consumer listener
+
+Startup builds a per-profile operation catalog from the selected WSDL binding
+before the HTTP listener binds. Misconfigured or unloadable WSDL metadata fails
+listener startup before a ready port is announced. Every request resolves the SOAP
+`Body` root QName against the profile's startup catalog. A supplied SOAPAction must
+agree with the resolved operation.
+
+An unknown, conflicting, or ambiguous operation faults Sender (SOAP 1.1 HTTP 500,
+SOAP 1.2 HTTP 400) with zero route dispatch. The WSS-only `fault_status` override
+never applies to these faults.
+
+For a resolved input-only operation the listener waits for the correlated,
+non-fault `ConsumerResponse`, including successful Rust response marshalling. It
+then returns HTTP 202 with a zero-length body, discards the marshalled payload, and
+writes no outbound ACK envelope and no ACK signature. Route success alone does not
+bypass marshalling: a route returning `Body::Stream` marshals to nothing, and that
+marshalling failure is a Receiver fault (HTTP 500, never 202). Request-reply
+success remains SOAP HTTP 200, wrapped and signed once. Stream unavailability
+remains HTTP 503 with `Retry-After` and a plain body. The transport availability,
+XML, WSS, signer-identity, capacity, and timeout gates are unchanged.
+
 ## Security posture
 
 ### XML parsing delegation
