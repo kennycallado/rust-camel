@@ -124,7 +124,7 @@ async fn run_pipeline(
     for mut svc in steps {
         match svc.ready().await {
             Ok(ready) => {
-                let snapshot = ex.clone();
+                let snapshot = ex.branch_clone();
                 match ready.call(ex).await {
                     Ok(new_ex) => ex = new_ex,
                     Err(err) => return Err(Box::new((snapshot, err))),
@@ -313,7 +313,7 @@ impl tower::Service<Exchange> for DoTryService {
                             }
                         }
 
-                        let catch_result = run_pipeline(steps, ex.clone()).await;
+                        let catch_result = run_pipeline(steps, ex.branch_clone()).await;
 
                         return match catch_result {
                             Ok(ok_ex) => {

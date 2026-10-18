@@ -18,7 +18,7 @@ async fn execute_on_steps(
     disposition: ExceptionDisposition,
     handler: Option<BoxProcessor>,
 ) -> Result<Exchange, CamelError> {
-    let snapshot = original.clone();
+    let snapshot = original.branch_clone();
     let mut ex = original;
     ex.set_error(original_err.clone());
     let mut pipeline = on_steps.clone_inner();
@@ -214,7 +214,7 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
             let delay = backoff.delay_for(attempt);
             tokio::time::sleep(delay).await;
 
-            let mut ex = original.clone();
+            let mut ex = original.branch_clone();
             ex.input.set_header(HEADER_REDELIVERED, Value::Bool(true));
             ex.input.set_header(
                 HEADER_REDELIVERY_COUNTER,
@@ -292,7 +292,7 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
             && let Some((p, _)) = self.policies.get(idx)
             && let Some(ref steps) = p.on_steps
         {
-            let snapshot = exchange.clone();
+            let snapshot = exchange.branch_clone();
             exchange.set_error(error.clone());
             let mut step_pipeline = steps.clone_inner();
             let step_result = async {
@@ -388,7 +388,7 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
             && let Some((p, _)) = self.policies.get(idx)
             && let Some(ref steps) = p.on_steps
         {
-            let snapshot = exchange.clone();
+            let snapshot = exchange.branch_clone();
             exchange.set_error(error.clone());
             let mut step_pipeline = steps.clone_inner();
             let step_result = async {
@@ -558,7 +558,7 @@ where
             .collect();
 
         Box::pin(async move {
-            let original = exchange.clone();
+            let original = exchange.branch_clone();
             let result = match inner.ready().await {
                 Ok(svc) => svc.call(exchange).await,
                 Err(e) => Err(e), // readiness error — enters retry/DLC/onException path below
@@ -580,7 +580,7 @@ where
                         tokio::time::sleep(delay).await;
 
                         // Set redelivery headers
-                        let mut ex = original.clone();
+                        let mut ex = original.branch_clone();
                         ex.input.set_header(HEADER_REDELIVERED, Value::Bool(true));
                         ex.input.set_header(
                             HEADER_REDELIVERY_COUNTER,
@@ -600,7 +600,7 @@ where
                             Err(retry_err) => {
                                 if attempt + 1 == backoff.max_attempts {
                                     // Retries exhausted — send to handler.
-                                    let mut original = original.clone();
+                                    let mut original = original.branch_clone();
                                     original
                                         .input
                                         .set_header(HEADER_REDELIVERED, Value::Bool(true));
@@ -638,7 +638,7 @@ where
                     return execute_on_steps(original, err, steps, policy.disposition, handler)
                         .await;
                 }
-                let mut ex = original.clone();
+                let mut ex = original.branch_clone();
                 ex.set_error(err.clone());
                 let handler = policy_producer.or(dlc);
                 forward_or_propagate(ex, handler, err).await
@@ -710,7 +710,7 @@ async fn send_to_handler(
                 record_span_error(&e);
                 Err(e)
             }
-            Ok(svc) => match svc.call(exchange.clone()).await {
+            Ok(svc) => match svc.call(exchange.branch_clone()).await {
                 Ok(ex) => Ok(ex),
                 Err(e) => {
                     // BOTH the original exchange error and the delegate

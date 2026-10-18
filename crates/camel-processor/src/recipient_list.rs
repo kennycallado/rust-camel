@@ -71,7 +71,7 @@ impl Service<Exchange> for RecipientListService {
             }
 
             if config.parallel {
-                let original_for_aggregate = exchange.clone();
+                let original_for_aggregate = exchange.branch_clone();
                 let mut endpoints_to_call = Vec::with_capacity(uris.len());
                 for uri in &uris {
                     if let Some(endpoint) = pipeline.resolve(uri)? {
@@ -88,7 +88,7 @@ impl Service<Exchange> for RecipientListService {
 
                 for _ in 0..limit {
                     if let Some((uri, mut endpoint)) = iter.next() {
-                        let mut cloned = original_for_aggregate.clone();
+                        let mut cloned = original_for_aggregate.branch_clone();
                         cloned.set_property(CAMEL_SLIP_ENDPOINT, Value::String(uri));
                         join_set.spawn(async move { endpoint.ready().await?.call(cloned).await });
                     }
@@ -122,7 +122,7 @@ impl Service<Exchange> for RecipientListService {
                     }
 
                     if let Some((uri, mut endpoint)) = iter.next() {
-                        let mut cloned = original_for_aggregate.clone();
+                        let mut cloned = original_for_aggregate.branch_clone();
                         cloned.set_property(CAMEL_SLIP_ENDPOINT, Value::String(uri));
                         join_set.spawn(async move { endpoint.ready().await?.call(cloned).await });
                     }
@@ -144,7 +144,7 @@ impl Service<Exchange> for RecipientListService {
             } else {
                 let mut results: Vec<Exchange> = Vec::new();
                 let mut last_error: Option<CamelError> = None;
-                let original_for_aggregate = exchange.clone();
+                let original_for_aggregate = exchange.branch_clone();
                 for uri in &uris {
                     let endpoint = match pipeline.resolve(uri)? {
                         Some(e) => e,
@@ -152,10 +152,10 @@ impl Service<Exchange> for RecipientListService {
                     };
                     exchange.set_property(CAMEL_SLIP_ENDPOINT, Value::String(uri.to_string()));
                     let mut endpoint = endpoint;
-                    let result = endpoint.ready().await?.call(exchange.clone()).await;
+                    let result = endpoint.ready().await?.call(exchange.branch_clone()).await;
                     match result {
                         Ok(ex) => {
-                            results.push(ex.clone());
+                            results.push(ex.branch_clone());
                             exchange = ex;
                         }
                         Err(e) if config.stop_on_exception => return Err(e),

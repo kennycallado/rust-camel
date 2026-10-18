@@ -86,7 +86,7 @@ impl Service<Exchange> for SplitterService {
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
-        let original = exchange.clone();
+        let original = exchange.branch_clone();
         let expression = self.expression.clone();
         let sub_pipeline = self.sub_pipeline.clone();
         let aggregation = self.aggregation.clone();
@@ -291,7 +291,7 @@ fn aggregate(
         AggregationStrategy::Custom(fold_fn) => {
             // Fold using the custom function, starting from the first result.
             let mut iter = results.into_iter();
-            let first = iter.next().unwrap_or_else(|| Ok(original.clone()))?;
+            let first = iter.next().unwrap_or_else(|| Ok(original.branch_clone()))?;
             iter.try_fold(first, |acc, next_result| {
                 let next = next_result?;
                 Ok(fold_fn(acc, next))

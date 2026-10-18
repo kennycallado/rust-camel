@@ -423,6 +423,10 @@ pub fn fragment_exchange(parent: &Exchange, body: Body) -> Exchange {
     ex.pattern = parent.pattern;
     // Inherit OTel context so fragment spans are children of the parent span
     ex.otel_context = parent.otel_context.clone();
+    // claimfamily: each fragment is a fanout branch exchange of the
+    // parent — split a sibling claim onto it so drain stays covered
+    // while the fragment is in flight.
+    ex.in_flight_claim = parent.in_flight_claim.as_ref().map(|claim| claim.split());
     ex
 }
 
@@ -507,7 +511,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::in_flight::{InFlightClaim, InFlightGauge};
     use crate::value::Value;
+    use std::sync::Arc;
 
     #[test]
     fn test_split_body_lines() {
@@ -536,6 +542,21 @@ mod tests {
         let ex = Exchange::new(Message::default()); // Body::Empty
         let fragments = split_body_lines()(&ex).unwrap();
         assert!(fragments.is_empty());
+    }
+
+    #[test]
+    fn fragment_exchange_splits_parent_claim() {
+        let gauge = Arc::new(InFlightGauge::new());
+        let mut parent = Exchange::new(Message::new(Body::Text("a,b".into())));
+        parent.in_flight_claim = Some(InFlightClaim::attach(&gauge));
+
+        let frag = fragment_exchange(&parent, Body::Text("a".into()));
+        assert_eq!(gauge.total(), 2);
+        assert!(frag.in_flight_claim.is_some());
+        assert!(parent.in_flight_claim.is_some());
+
+        drop(frag);
+        assert_eq!(gauge.total(), 1);
     }
 
     #[test]

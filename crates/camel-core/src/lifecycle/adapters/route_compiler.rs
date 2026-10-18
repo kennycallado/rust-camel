@@ -599,7 +599,7 @@ async fn run_steps(
             }
         };
 
-        let original = handler.as_ref().map(|_| ex.clone());
+        let original = handler.as_ref().map(|_| ex.branch_clone());
         let outcome = if trace {
             invoke_with_span(&mut retryable, ex, i).await
         } else {
@@ -939,7 +939,7 @@ impl Service<Exchange> for RouteChannelService {
 
             // Gate 1: Security
             if let Some(mut sec) = security {
-                let original = ex.clone();
+                let original = ex.branch_clone();
                 match invoke_processor(&mut sec, ex).await {
                     Ok(next) => ex = next,
                     Err(err) => {
@@ -957,7 +957,7 @@ impl Service<Exchange> for RouteChannelService {
                     CircuitBreakerDecision::Fallback(mut fb) => {
                         // Circuit open with fallback — call fallback.
                         // Fallback errors go through handle_boundary, not raw to upstream.
-                        let original = ex.clone();
+                        let original = ex.branch_clone();
                         match invoke_processor(&mut fb, ex).await {
                             Ok(result) => return Ok(result),
                             Err(err) => {
@@ -968,7 +968,7 @@ impl Service<Exchange> for RouteChannelService {
                         }
                     }
                     CircuitBreakerDecision::Reject(err) => {
-                        let original = ex.clone();
+                        let original = ex.branch_clone();
                         return handler
                             .handle_boundary(BoundaryKind::CircuitBreaker, original, err)
                             .await;

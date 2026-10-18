@@ -131,7 +131,7 @@ impl OutcomePipeline for DoTrySegment {
         Box::pin(async move {
             // Pre-clone for the "no catch matched" path; `exchange` itself is
             // consumed by `try_body.run(...)` below.
-            let exchange_for_unmatched = exchange.clone();
+            let exchange_for_unmatched = exchange.branch_clone();
 
             // 1. Run try_body. If Stopped, return immediately (skip catch AND finally).
             let try_outcome = self.try_body.run(exchange).await;

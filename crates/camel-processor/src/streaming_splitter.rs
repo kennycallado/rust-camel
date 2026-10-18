@@ -57,7 +57,7 @@ impl Service<Exchange> for StreamingSplitterService {
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
-        let mut original = exchange.clone();
+        let mut original = exchange.branch_clone();
         if matches!(original.input.body, Body::Stream(_)) {
             original.input.body = Body::Empty;
         }

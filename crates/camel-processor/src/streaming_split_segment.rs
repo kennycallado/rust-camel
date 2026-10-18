@@ -73,7 +73,7 @@ impl OutcomePipeline for StreamingSplitSegment {
         let stop_on_exception = self.stop_on_exception;
 
         Box::pin(async move {
-            let original = exchange.clone();
+            let original = exchange.branch_clone();
             let stream = expression(exchange);
             pin_mut!(stream);
 

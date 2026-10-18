@@ -41,7 +41,7 @@ impl Service<Exchange> for EnrichService {
         let producer = self.producer.clone();
         let strategy = Arc::clone(&self.strategy);
         Box::pin(async move {
-            let enriched = producer.oneshot(original.clone()).await?;
+            let enriched = producer.oneshot(original.branch_clone()).await?;
             Ok(strategy.aggregate(original, enriched))
         })
     }

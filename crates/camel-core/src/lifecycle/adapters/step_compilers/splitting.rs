@@ -61,13 +61,13 @@ fn extract_bytes_from_body(
     match &exchange.input.body {
         Body::Bytes(b) => {
             let bytes = b.clone();
-            let mut parent = exchange.clone();
+            let mut parent = exchange.branch_clone();
             parent.input.body = Body::Empty;
             Ok((bytes, parent))
         }
         Body::Text(s) => {
             let bytes = Bytes::copy_from_slice(s.as_bytes());
-            let mut parent = exchange.clone();
+            let mut parent = exchange.branch_clone();
             parent.input.body = Body::Empty;
             Ok((bytes, parent))
         }
@@ -211,7 +211,7 @@ impl StepCompiler for SplittingCompiler {
                                 match &exchange.input.body {
                                     Body::Stream(sb) => {
                                         let sb = sb.clone();
-                                        let mut parent = exchange.clone();
+                                        let mut parent = exchange.branch_clone();
                                         parent.input.body = Body::Empty;
                                         let stream = match take_stream(&sb) {
                                             Ok(s) => s,
@@ -281,7 +281,7 @@ impl StepCompiler for SplittingCompiler {
                                 match &exchange.input.body {
                                     Body::Stream(sb) => {
                                         let sb = sb.clone();
-                                        let mut parent = exchange.clone();
+                                        let mut parent = exchange.branch_clone();
                                         parent.input.body = Body::Empty;
                                         let stream = match take_stream(&sb) {
                                             Ok(s) => s,
@@ -372,7 +372,7 @@ impl StepCompiler for SplittingCompiler {
                                 // Incremental codec path (ndjson, lines, chunks)
                                 let (stream_body, parent) = match &exchange.input.body {
                                     Body::Stream(sb) => (sb.clone(), {
-                                        let mut p = exchange.clone();
+                                        let mut p = exchange.branch_clone();
                                         p.input.body = Body::Empty;
                                         p
                                     }),

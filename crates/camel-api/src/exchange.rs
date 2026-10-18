@@ -224,6 +224,16 @@ impl Exchange {
     pub fn body_as<T: FromBody>(&self) -> Result<T, CamelError> {
         T::from_body(&self.input.body)
     }
+
+    /// Clone for a fanout branch copy. Unlike [`Exchange::clone`], a
+    /// carried in-flight claim is split onto the copy (claimfamily):
+    /// the sibling counts the copy independently and releases when the
+    /// copy completes; the original claim stays live.
+    pub fn branch_clone(&self) -> Self {
+        let mut copy = self.clone();
+        copy.in_flight_claim = self.in_flight_claim.as_ref().map(|claim| claim.split());
+        copy
+    }
 }
 
 impl Clone for Exchange {
@@ -255,7 +265,9 @@ impl Default for Exchange {
 mod tests {
     use super::*;
     use crate::Body;
+    use crate::in_flight::{InFlightClaim, InFlightGauge};
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn test_exchange_new() {
@@ -467,5 +479,46 @@ mod tests {
         let result = ex.body_as::<String>();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn branch_clone_splits_claim_original_unaffected() {
+        let gauge = Arc::new(InFlightGauge::new());
+        let mut src = Exchange::new(Message::default());
+        src.in_flight_claim = Some(InFlightClaim::attach(&gauge));
+
+        let copy = src.branch_clone();
+
+        assert_eq!(gauge.total(), 2);
+        assert!(copy.in_flight_claim.is_some());
+        assert!(src.in_flight_claim.is_some());
+    }
+
+    #[test]
+    fn branch_clone_sibling_releases_independently() {
+        let gauge = Arc::new(InFlightGauge::new());
+        let mut src = Exchange::new(Message::default());
+        src.in_flight_claim = Some(InFlightClaim::attach(&gauge));
+
+        let copy = src.branch_clone();
+        drop(copy);
+        assert_eq!(gauge.total(), 1);
+
+        drop(src);
+        assert_eq!(gauge.total(), 0);
+    }
+
+    #[test]
+    fn plain_clone_carries_no_claim() {
+        let gauge = Arc::new(InFlightGauge::new());
+        let mut src = Exchange::new(Message::default());
+        src.in_flight_claim = Some(InFlightClaim::attach(&gauge));
+        assert_eq!(gauge.total(), 1);
+
+        let copy = src.clone();
+
+        assert_eq!(gauge.total(), 1);
+        assert!(copy.in_flight_claim.is_none());
+        assert!(src.in_flight_claim.is_some());
     }
 }

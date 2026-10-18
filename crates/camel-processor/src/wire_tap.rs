@@ -276,7 +276,7 @@ impl Service<Exchange> for WireTapService {
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let tap_endpoint = self.tap_endpoint.clone();
-        let tap_exchange = exchange.clone();
+        let tap_exchange = exchange.branch_clone();
 
         // Admission critical section: hold the lock across "check open →
         // admit-or-inline decision → register tracked task" so a racing

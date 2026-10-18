@@ -81,7 +81,7 @@ async fn sequential_multicast(
     let total = seg.branches.len();
     for (i, branch) in seg.branches.iter_mut().enumerate() {
         // Each branch gets a clone (Multicast semantics — no shared mutations).
-        let mut ex = exchange.clone();
+        let mut ex = exchange.branch_clone();
         ex.set_property(CAMEL_MULTICAST_INDEX, Value::from(i as i64));
         ex.set_property(CAMEL_MULTICAST_COMPLETE, Value::Bool(i == total - 1));
         match branch.run(ex).await {
@@ -142,7 +142,7 @@ async fn parallel_multicast(
         let stopped_idx = Arc::clone(&stopped_idx);
         let sem = semaphore.clone();
         // Each branch gets its OWN clone of the exchange (Multicast semantics).
-        let mut ex = exchange.clone();
+        let mut ex = exchange.branch_clone();
         ex.set_property(CAMEL_MULTICAST_INDEX, Value::from(idx as i64));
         ex.set_property(CAMEL_MULTICAST_COMPLETE, Value::Bool(idx == total - 1));
         set.spawn(async move {
@@ -269,7 +269,7 @@ async fn parallel_multicast(
             .iter()
             .find(|(idx, _)| *idx == winning_idx)
             .and_then(|(_, o)| match o {
-                camel_api::PipelineOutcome::Stopped(ex) => Some(ex.clone()),
+                camel_api::PipelineOutcome::Stopped(ex) => Some(ex.branch_clone()),
                 _ => None,
             });
         if let Some(ex) = stopped_ex {

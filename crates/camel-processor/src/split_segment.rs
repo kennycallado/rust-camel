@@ -319,7 +319,7 @@ async fn parallel_split(
             .iter()
             .find(|(idx, _)| *idx == winning_idx)
             .and_then(|(_, o)| match o {
-                PipelineOutcome::Stopped(ex) => Some(ex.clone()),
+                PipelineOutcome::Stopped(ex) => Some(ex.branch_clone()),
                 _ => None,
             });
         if let Some(ex) = stopped_ex {

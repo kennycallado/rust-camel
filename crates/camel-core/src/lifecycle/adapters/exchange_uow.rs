@@ -85,7 +85,7 @@ where
             // when the future completes (RAII) — same lifetime as the
             // former fetch_add/guard pair.
             let _claim = InFlightClaim::attach(&counter);
-            let original = exchange.clone();
+            let original = exchange.branch_clone();
 
             let result = match inner.ready().await {
                 Ok(svc) => svc.call(exchange).await,
@@ -105,10 +105,10 @@ where
                 Ok(ex) if ex.has_error() => {
                     // Exchange-level error: pass the post-processing exchange so the hook
                     // can inspect the error flag and any headers/body set by the pipeline.
-                    fire_hook(on_failure, Some(ex.clone())).await;
+                    fire_hook(on_failure, Some(ex.branch_clone())).await;
                 }
                 Ok(ex) => {
-                    fire_hook(on_complete, Some(ex.clone())).await;
+                    fire_hook(on_complete, Some(ex.branch_clone())).await;
                 }
             }
 

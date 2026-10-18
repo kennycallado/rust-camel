@@ -140,7 +140,7 @@ async fn process_failover(
     for i in 0..len {
         let idx = (start + i) % len;
         let mut endpoint = endpoints[idx].clone();
-        match endpoint.ready().await?.call(exchange.clone()).await {
+        match endpoint.ready().await?.call(exchange.branch_clone()).await {
             Ok(ex) => {
                 start_index.store((idx + 1) % len, Ordering::SeqCst);
                 return Ok(ex);
@@ -208,7 +208,7 @@ impl camel_api::OutcomePipeline for LoadBalanceSegment {
                         )
                     }));
                 }
-                match self.destinations[idx].run(exchange.clone()).await {
+                match self.destinations[idx].run(exchange.branch_clone()).await {
                     camel_api::PipelineOutcome::Completed(ex) => {
                         return camel_api::PipelineOutcome::Completed(ex);
                     }

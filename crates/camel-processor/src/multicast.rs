@@ -78,7 +78,7 @@ impl Service<Exchange> for MulticastService {
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
-        let original = exchange.clone();
+        let original = exchange.branch_clone();
         let endpoints = self.endpoints.clone();
         let config = self.config.clone();
 
@@ -116,7 +116,7 @@ async fn process_sequential(
 
     for (i, endpoint) in endpoints.into_iter().enumerate() {
         // Clone the exchange for each endpoint
-        let mut cloned_exchange = exchange.clone();
+        let mut cloned_exchange = exchange.branch_clone();
 
         // Set multicast metadata properties
         cloned_exchange.set_property(CAMEL_MULTICAST_INDEX, Value::from(i as i64));
@@ -162,7 +162,7 @@ async fn process_parallel(
         .into_iter()
         .enumerate()
         .map(|(i, mut endpoint)| {
-            let mut ex = exchange.clone();
+            let mut ex = exchange.branch_clone();
             ex.set_property(CAMEL_MULTICAST_INDEX, Value::from(i as i64));
             ex.set_property(CAMEL_MULTICAST_COMPLETE, Value::Bool(i == total - 1));
             let sem = semaphore.clone();
@@ -232,7 +232,7 @@ fn aggregate(
         MulticastStrategy::Custom(fold_fn) => {
             // Fold using the custom function, starting from the first result.
             let mut iter = results.into_iter();
-            let first = iter.next().unwrap_or_else(|| Ok(original.clone()))?;
+            let first = iter.next().unwrap_or_else(|| Ok(original.branch_clone()))?;
             iter.try_fold(first, |acc, next_result| {
                 let next = next_result?;
                 Ok(fold_fn(acc, next))
