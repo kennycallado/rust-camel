@@ -1548,24 +1548,6 @@ protobuf feature "default"
 protobuf v3.7.2
 protobuf-support feature "default"
 protobuf-support v3.7.2
-protoc-bin-vendored feature "default"
-protoc-bin-vendored v3.2.0
-protoc-bin-vendored-linux-aarch_64 feature "default"
-protoc-bin-vendored-linux-aarch_64 v3.2.0
-protoc-bin-vendored-linux-ppcle_64 feature "default"
-protoc-bin-vendored-linux-ppcle_64 v3.2.0
-protoc-bin-vendored-linux-s390_64 feature "default"
-protoc-bin-vendored-linux-s390_64 v3.2.0
-protoc-bin-vendored-linux-x86_32 feature "default"
-protoc-bin-vendored-linux-x86_32 v3.2.0
-protoc-bin-vendored-linux-x86_64 feature "default"
-protoc-bin-vendored-linux-x86_64 v3.2.0
-protoc-bin-vendored-macos-aarch_64 feature "default"
-protoc-bin-vendored-macos-aarch_64 v3.2.0
-protoc-bin-vendored-macos-x86_64 feature "default"
-protoc-bin-vendored-macos-x86_64 v3.2.0
-protoc-bin-vendored-win32 feature "default"
-protoc-bin-vendored-win32 v3.2.0
 protox feature "default"
 protox v0.9.1
 protox-parse feature "default"
