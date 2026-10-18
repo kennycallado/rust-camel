@@ -62,6 +62,9 @@ class XsdValidationIntegrationTest {
   /** The actual Quarkus server bean, so the test holds the exact monitor the RPC handlers use. */
   @Inject @GrpcService XsdValidatorService actualRoot;
 
+  /** The same cache bean the service uses, so size/eviction assertions observe real state. */
+  @Inject SchemaCache schemaCache;
+
   // ── Legacy single-blob (validate) cases ────────────────────────────────────
 
   @Test
@@ -845,6 +848,145 @@ class XsdValidationIntegrationTest {
     assertEquals(BridgeError.Kind.RESOURCE_NOT_FOUND, afterUnregister.getError().getKind());
   }
 
+  // ── Bounded cache under inline pressure ────────────────────────────────────
+
+  @Test
+  void inlineValidateBeyondBoundKeepsCacheBounded() {
+    // The cache bean and schemaHashById are class-wide singletons: earlier tests
+    // may have registered (and pinned) digests, so measure delta from a baseline.
+    int sizeBase = schemaCache.size();
+    long evBase = schemaCache.evictions();
+    var tag = uniqueTag();
+
+    for (int i = 0; i < 10; i++) {
+      var resp =
+          xsd.validate(
+                  ValidateRequest.newBuilder()
+                      .setSchema(bytes(inlineSchema(tag, i)))
+                      .setDocument(bytes(inlineDocument(tag, i)))
+                      .build())
+              .await()
+              .atMost(Duration.ofSeconds(10));
+      assertTrue(resp.getValid(), "inline validation " + i + " must stay valid");
+    }
+
+    assertTrue(
+        schemaCache.size() <= sizeBase + 8,
+        "cache size " + schemaCache.size() + " must stay within baseline+8 " + (sizeBase + 8));
+    assertTrue(
+        schemaCache.evictions() >= evBase + 2,
+        "inline pressure must have evicted: evictions=" + schemaCache.evictions());
+  }
+
+  @Test
+  void registeredSchemaSetNotEvictedByInlinePressure() {
+    int sizeBase = schemaCache.size();
+    var tag = uniqueTag();
+    var schemaId = "pinned-set-" + tag;
+
+    var registered =
+        register(
+            schemaId,
+            "root.xsd",
+            res(
+                "root.xsd",
+                importSchema("urn:child", "child.xsd", "noteType"),
+                "child.xsd",
+                schemaType("urn:child", "noteType", "to")),
+            Map.of());
+    assertFalse(
+        registered.hasError(), registered.hasError() ? registered.getError().getMessage() : "ok");
+
+    for (int i = 0; i < 10; i++) {
+      var resp =
+          xsd.validate(
+                  ValidateRequest.newBuilder()
+                      .setSchema(bytes(inlineSchema(tag, i)))
+                      .setDocument(bytes(inlineDocument(tag, i)))
+                      .build())
+              .await()
+              .atMost(Duration.ofSeconds(10));
+      assertTrue(resp.getValid(), "inline validation " + i + " must stay valid");
+    }
+
+    assertTrue(
+        validateWith(schemaId, NOTE_TO).getValid(),
+        "a registered schema set must survive inline eviction pressure");
+    assertTrue(
+        schemaCache.size() <= sizeBase + 1 + 8,
+        "cache size "
+            + schemaCache.size()
+            + " must stay within baseline + pinned set + 8 inline");
+  }
+
+  @Test
+  void unregisterAllowsBoundRecovery() {
+    int sizeBase = schemaCache.size();
+    var tag = uniqueTag();
+    var schemaId = "temp-set-" + tag;
+
+    var registered =
+        register(
+            schemaId,
+            "root.xsd",
+            res(
+                "root.xsd",
+                importSchema("urn:child", "child.xsd", "noteType"),
+                "child.xsd",
+                schemaType("urn:child", "noteType", "to")),
+            Map.of());
+    assertFalse(
+        registered.hasError(), registered.hasError() ? registered.getError().getMessage() : "ok");
+
+    var released =
+        xsd.unregisterSchema(UnregisterSchemaRequest.newBuilder().setSchemaId(schemaId).build())
+            .await()
+            .atMost(Duration.ofSeconds(10));
+    assertTrue(released.getReleased());
+
+    for (int i = 0; i < 10; i++) {
+      var resp =
+          xsd.validate(
+                  ValidateRequest.newBuilder()
+                      .setSchema(bytes(inlineSchema(tag, i)))
+                      .setDocument(bytes(inlineDocument(tag, i)))
+                      .build())
+              .await()
+              .atMost(Duration.ofSeconds(10));
+      assertTrue(resp.getValid(), "inline validation " + i + " must stay valid");
+    }
+
+    assertTrue(
+        schemaCache.size() <= sizeBase + 8,
+        "cache size " + schemaCache.size() + " must stay within baseline+8 " + (sizeBase + 8));
+    assertEquals(
+        BridgeError.Kind.RESOURCE_NOT_FOUND, validateWith(schemaId, NOTE_TO).getError().getKind());
+  }
+
+  private static String uniqueTag() {
+    return java.util.UUID.randomUUID().toString().replace("-", "");
+  }
+
+  /** A minimal inline XSD whose element name is unique per {@code (tag, index)}. */
+  private static String inlineSchema(String tag, int index) {
+    return """
+        <xs:schema xmlns:xs="%s">
+          <xs:element name="e%s%d">
+            <xs:complexType>
+              <xs:sequence>
+                <xs:element name="v" type="xs:string"/>
+              </xs:sequence>
+            </xs:complexType>
+          </xs:element>
+        </xs:schema>
+        """
+        .formatted(XS, tag, index);
+  }
+
+  private static String inlineDocument(String tag, int index) {
+    return "<e" + tag + index + "><v>x</v></e" + tag + index + ">";
+  }
+
   // ── Atomic registry snapshot ────────────────────────────────────────────────
 
   @Test
@@ -852,7 +994,7 @@ class XsdValidationIntegrationTest {
     // A directly constructed service is a real instance, never a CDI client
     // proxy, so registryLock() returns the actual monitor the RPCs use.
     var service = new XsdValidatorService();
-    service.schemaCache = new SchemaCache();
+    service.schemaCache = new SchemaCache(256);
 
     var setA =
         res(

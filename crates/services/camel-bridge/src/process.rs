@@ -72,6 +72,13 @@ pub enum BridgeError {
     /// code 78. Never retried (phase 4 parks the slot).
     #[error("Bridge permanent failure: {0}")]
     PermanentFailure(String),
+    #[error(
+        "bridge cache directory {path} is not writable: {source}; the directory may be owned by another user (e.g. left by a Docker run as root) or on a read-only filesystem — repair its ownership/permissions, or bypass the cache via CAMEL_<BRIDGE>_BINARY_PATH or the component's bridge_cache_dir"
+    )]
+    CacheUnwritable {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]

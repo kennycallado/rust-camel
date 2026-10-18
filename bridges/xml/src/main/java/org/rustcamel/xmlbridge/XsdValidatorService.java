@@ -154,6 +154,7 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
       synchronized (registryLock) {
         schemaCache.getOrCompile(digest, () -> SchemaSetCompiler.compileLegacy(schemaBytes));
         var previous = schemaHashById.put(schemaId, digest);
+        schemaCache.pin(digest);
         evictIfUnreferenced(previous, digest);
       }
       return;
@@ -166,6 +167,7 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
     synchronized (registryLock) {
       schemaCache.getOrCompile(digest, () -> SchemaSetCompiler.compileSupplied(set));
       var previous = schemaHashById.put(schemaId, digest);
+      schemaCache.pin(digest);
       evictIfUnreferenced(previous, digest);
     }
   }
@@ -247,8 +249,11 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
                   return UnregisterSchemaResponse.newBuilder().setReleased(false).build();
                 }
                 // Only drop the compiled entry once no other public id still
-                // references the same digest.
+                // references the same digest. Unpin first to release pinned-set
+                // membership; the guard inside unpin makes the call idempotent
+                // and prevents duplicate eviction-queue entries.
                 if (!schemaHashById.containsValue(digest)) {
+                  schemaCache.unpin(digest);
                   schemaCache.remove(digest);
                 }
                 return UnregisterSchemaResponse.newBuilder().setReleased(true).build();
@@ -258,6 +263,7 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
 
   private void evictIfUnreferenced(String previous, String current) {
     if (previous != null && !previous.equals(current) && !schemaHashById.containsValue(previous)) {
+      schemaCache.unpin(previous);
       schemaCache.remove(previous);
     }
   }

@@ -35,6 +35,32 @@ pub(crate) fn find_workspace_root_from_path(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Verify that the bridge cache can accept downloads before touching the
+/// network. Creates `{cache_dir}/{version}`, writes a short-lived probe file
+/// there, and deletes it.
+///
+/// Any filesystem failure (EACCES, EROFS, ENOSPC, ...) is surfaced as
+/// [`BridgeError::CacheUnwritable`] so callers get an actionable remedy instead
+/// of an opaque IO error.
+pub(crate) fn ensure_cache_writable(cache_dir: &Path, version: &str) -> Result<(), BridgeError> {
+    let version_dir = cache_dir.join(version);
+    std::fs::create_dir_all(&version_dir).map_err(|source| BridgeError::CacheUnwritable {
+        path: cache_dir.to_path_buf(),
+        source,
+    })?;
+
+    let probe = version_dir.join(format!(".write-probe-{}", std::process::id()));
+    let write_result = std::fs::write(&probe, b"x");
+    // Best-effort: an orphaned probe file is harmless, so cleanup errors are
+    // deliberately ignored (including when the write itself failed).
+    let _ = std::fs::remove_file(&probe);
+
+    write_result.map_err(|source| BridgeError::CacheUnwritable {
+        path: cache_dir.to_path_buf(),
+        source,
+    })
+}
+
 /// Locate or download the `jms-bridge` binary.
 ///
 /// Resolution order:
@@ -137,6 +163,10 @@ pub async fn ensure_binary_for_spec(
         }
         tracing::warn!("{} cache checksum mismatch — re-downloading", spec.name);
     }
+
+    // Fail fast with an actionable remedy if the cache directory cannot accept
+    // the download, before touching the network.
+    ensure_cache_writable(cache_dir, version)?;
 
     let base_url = release_base_url(spec, version)?;
 
@@ -403,6 +433,226 @@ fn bridge_dir_name(spec: &BridgeSpec) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spec::XML_BRIDGE;
+
+    /// Remove the explicit binary override so `ensure_binary_for_spec` falls
+    /// through to the cache and download logic under test.
+    ///
+    /// SAFETY: edition 2024 marks `remove_var` unsafe because concurrent env
+    /// access is racy. Every writer in this module removes the same variable
+    /// (and, when needed, sets the same loopback release URL), so no test can
+    /// observe an inconsistent value. The miss-test assertions tolerate any
+    /// non-`CacheUnwritable` error, so ambient mutation cannot flake them.
+    fn neutralize_binary_override() {
+        unsafe { std::env::remove_var(XML_BRIDGE.env_binary_path) };
+    }
+
+    /// True when the developer's workspace has a prebuilt shared binary for
+    /// `spec`, in which case `ensure_binary_for_spec` returns at the workspace
+    /// check before reaching the code under test (mirrors the resolution
+    /// order at the top of the function).
+    fn workspace_binary_present(spec: &BridgeSpec) -> bool {
+        let Some(root) = find_workspace_root() else {
+            return false;
+        };
+        let name = if cfg!(target_os = "windows") {
+            format!("{}.exe", spec.name)
+        } else {
+            spec.name.to_string()
+        };
+        root.join("bridges")
+            .join(bridge_dir_name(spec))
+            .join("build")
+            .join("native")
+            .join(name)
+            .is_file()
+    }
+
+    /// Point the release URL at a loopback port so a cache miss never contacts
+    /// a real endpoint: `resolve_release_base_url` rejects the http override
+    /// with `BridgeError::UrlNotAllowed` before any network I/O.
+    ///
+    /// The override deliberately leaks for the rest of the test process: no
+    /// other test in this binary reads the ambient release URL (they pass
+    /// overrides as parameters), and same-value writes are benign.
+    fn set_loopback_release_url() {
+        // SAFETY: see `neutralize_binary_override` — same-value writes only.
+        unsafe { std::env::set_var(XML_BRIDGE.env_release_url, "http://127.0.0.1:9") };
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn unwritable_cache_dir_yields_cache_unwritable_before_download() {
+        use std::os::unix::fs::PermissionsExt;
+
+        neutralize_binary_override();
+        if workspace_binary_present(&XML_BRIDGE) {
+            return;
+        }
+
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let subdir = dir.path().join("readonly");
+        std::fs::create_dir(&subdir).expect("create subdir");
+        std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o555))
+            .expect("chmod subdir read-only");
+
+        // Guard: root (or a permissive filesystem) can still write to 0o555.
+        // In that case the permission assertion below is meaningless.
+        let guard_probe = subdir.join("guard-probe");
+        if std::fs::write(&guard_probe, b"x").is_ok() {
+            std::fs::remove_file(&guard_probe).ok();
+            std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o755))
+                .expect("restore subdir permissions");
+            return;
+        }
+
+        set_loopback_release_url();
+
+        let result = ensure_binary_for_spec(&XML_BRIDGE, "0.0.0-test", &subdir).await;
+
+        // Restore before asserting so TempDir cleanup succeeds even on failure.
+        std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore subdir permissions");
+
+        let err = result.expect_err("read-only cache dir must fail at the probe");
+        match &err {
+            BridgeError::CacheUnwritable { path, .. } => assert_eq!(path, &subdir),
+            other => panic!("expected CacheUnwritable before any download, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn verified_cache_hit_succeeds_without_write_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        neutralize_binary_override();
+        if workspace_binary_present(&XML_BRIDGE) {
+            return;
+        }
+
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let version = "0.0.0-test";
+        let tarball = tarball_filename(&XML_BRIDGE, version).expect("tarball name");
+        let tarball_dir = tarball.trim_end_matches(".tar.gz").trim_end_matches(".zip");
+        let bin_path = dir
+            .path()
+            .join(version)
+            .join(tarball_dir)
+            .join("bin")
+            .join("xml-bridge");
+        std::fs::create_dir_all(bin_path.parent().expect("bin parent")).expect("create bin dir");
+        let bin_bytes = b"verified-binary-bytes";
+        std::fs::write(&bin_path, bin_bytes).expect("write binary");
+        let hash_path = dir.path().join(version).join(".binary.sha256");
+        std::fs::write(&hash_path, sha256_hex(bin_bytes)).expect("write hash");
+
+        // Make the cache dir itself unwritable: a correct verified hit returns
+        // before the write probe and needs no write access.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))
+            .expect("chmod cache dir read-only");
+
+        let result = ensure_binary_for_spec(&XML_BRIDGE, version, dir.path()).await;
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("restore cache dir permissions");
+
+        assert_eq!(
+            result.expect("verified cache hit must succeed without a write probe"),
+            bin_path
+        );
+    }
+
+    #[tokio::test]
+    async fn writable_cache_miss_does_not_report_cache_unwritable() {
+        neutralize_binary_override();
+        if workspace_binary_present(&XML_BRIDGE) {
+            return;
+        }
+
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        set_loopback_release_url();
+
+        let err = ensure_binary_for_spec(&XML_BRIDGE, "0.0.0-test", dir.path())
+            .await
+            .expect_err("a refused download must not yield Ok");
+
+        assert!(
+            !matches!(err, BridgeError::CacheUnwritable { .. }),
+            "writable cache must not be reported as unwritable, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn ensure_cache_writable_succeeds_on_writable_dir() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        ensure_cache_writable(dir.path(), "0.1.0").expect("writable dir should pass probe");
+
+        let version_dir = dir.path().join("0.1.0");
+        assert!(version_dir.is_dir(), "version directory should exist");
+        let probe_prefix = format!(".write-probe-{}", std::process::id());
+        let leftovers: Vec<_> = std::fs::read_dir(&version_dir)
+            .expect("read version dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&probe_prefix)
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "probe file must be deleted on the success path"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ensure_cache_writable_maps_denied_dir_to_cache_unwritable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let subdir = dir.path().join("readonly");
+        std::fs::create_dir(&subdir).expect("create subdir");
+        std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o555))
+            .expect("chmod subdir read-only");
+
+        // Guard: root (or a permissive filesystem) can still write to 0o555.
+        // In that case the permission assertion below is meaningless.
+        let guard_probe = subdir.join("guard-probe");
+        if std::fs::write(&guard_probe, b"x").is_ok() {
+            std::fs::remove_file(&guard_probe).ok();
+            std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o755))
+                .expect("restore subdir permissions");
+            return;
+        }
+
+        let result = ensure_cache_writable(&subdir, "0.1.0");
+
+        // Restore before asserting so TempDir cleanup succeeds even on failure.
+        std::fs::set_permissions(&subdir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore subdir permissions");
+
+        let err = result.expect_err("read-only cache dir must be rejected");
+        match &err {
+            BridgeError::CacheUnwritable { path, .. } => assert_eq!(path, &subdir),
+            other => panic!("expected CacheUnwritable, got: {other:?}"),
+        }
+        let display = err.to_string();
+        assert!(
+            display.contains(subdir.to_string_lossy().as_ref()),
+            "Display must contain the offending path: {display}"
+        );
+        assert!(
+            display.contains("not writable"),
+            "Display must say the directory is not writable: {display}"
+        );
+        assert!(
+            display.contains("repair"),
+            "Display must carry the ownership/permission remedy: {display}"
+        );
+    }
 
     #[test]
     fn resolve_release_base_url_default_contains_github() {

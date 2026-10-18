@@ -62,6 +62,13 @@ quarkus:
     # DROPS the trailing --static,--libc=musl args and yields a glibc-dynamic
     # binary. Keep all native-image args in the env var only.
 
+# Compiled-schema cache bound. Registered schema-set entries are pinned and never
+# evicted; inline entries evict oldest-inserted-first. A non-positive value fails
+# startup (fail-loud).
+xml-bridge:
+  schema-cache:
+    max-entries: 256
+
 "%test":
   quarkus:
     http:
@@ -83,3 +90,10 @@ quarkus:
         trust-store:
           pem:
             certs: tls/test-ca.pem
+  # Small bound so integration tests exercise eviction with a few inserts.
+  # All %test classes share one Quarkus boot: tests must measure cache size and
+  # eviction deltas from a baseline captured inside the test; registered schema
+  # sets pin their digests for the whole suite boot.
+  xml-bridge:
+    schema-cache:
+      max-entries: 8
