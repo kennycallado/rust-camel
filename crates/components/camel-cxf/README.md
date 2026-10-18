@@ -30,7 +30,7 @@ Bridge-based architecture: the Rust component communicates with a Quarkus/GraalV
 
 ```toml
 [components.cxf]
-version = "0.8.1"
+version = "0.8.2"
 
 [[components.cxf.profiles]]
 name = "baleares"
