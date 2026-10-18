@@ -3,12 +3,16 @@ package org.rustcamel.cxf;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+import cxf_bridge.ConsumerRequest;
+import cxf_bridge.ConsumerResponse;
 import cxf_bridge.SignerIdentity;
 import cxf_bridge.SoapRequest;
 import cxf_bridge.SoapResponse;
+import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
+import io.quarkus.grpc.RegisterInterceptor;
 import jakarta.xml.ws.Binding;
 import jakarta.xml.ws.Dispatch;
 import jakarta.xml.ws.WebServiceException;
@@ -17,6 +21,7 @@ import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -508,5 +513,90 @@ class CxfBridgeServiceTest {
     assertTrue(observer.responses.isEmpty(), "no payload may be fabricated");
     verify(dispatch).invoke(any(Source.class));
     verify(dispatch, never()).invokeOneWay(any(Source.class));
+  }
+
+  private CxfServerManager spiedManager() {
+    when(bridgeConfig.maxConcurrentRequests()).thenReturn(4);
+    when(profileStore.profiles()).thenReturn(Map.of("v11", mock(SecurityProfile.class)));
+    CxfServerManager real = new CxfServerManager();
+    real.bridgeConfig = bridgeConfig;
+    real.endpointPublisher = mock(SoapEndpointPublisher.class);
+    CxfServerManager manager = spy(real);
+    service.serverManager = manager;
+    return manager;
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  void openConsumerStreamRejectsMissingEmptyMiscasedAndUnknownProfile() throws Exception {
+    CxfServerManager manager = spiedManager();
+    try {
+      StreamObserver<ConsumerRequest> v11Observer = mock(StreamObserver.class);
+      manager.setConsumerRequestObserver("v11", v11Observer);
+      clearInvocations(manager);
+
+      String[] cases = {null, "", "V11", "v99"};
+      for (String value : cases) {
+        StreamObserver<ConsumerRequest> rejected = mock(StreamObserver.class);
+        StreamObserver<ConsumerResponse> returned;
+        if (value == null) {
+          returned = service.openConsumerStream(rejected);
+        } else {
+          returned =
+              Context.current()
+                  .withValue(ConsumerProfileInterceptor.PROFILE_CONTEXT_KEY, value)
+                  .call(() -> service.openConsumerStream(rejected));
+        }
+        ArgumentCaptor<Throwable> captor = ArgumentCaptor.forClass(Throwable.class);
+        verify(rejected).onError(captor.capture());
+        assertEquals(
+            Status.Code.INVALID_ARGUMENT, Status.fromThrowable(captor.getValue()).getCode());
+        verify(rejected, never()).onNext(any());
+        assertNotNull(returned);
+        returned.onNext(ConsumerResponse.getDefaultInstance());
+        returned.onCompleted();
+      }
+
+      verify(manager, never()).setConsumerRequestObserver(anyString(), any());
+      verify(manager, never()).onConsumerStreamClosed(anyString(), any());
+      verify(manager, never()).completeFromConsumer(any());
+      assertFalse(manager.hasConsumerObserver("V11"));
+      assertFalse(manager.hasConsumerObserver("v99"));
+      assertFalse(manager.hasConsumerObserver(""));
+      assertTrue(manager.hasConsumerObserver("v11"));
+      manager.handleSoapRequest(
+          ConsumerRequest.newBuilder().setRequestId("k").setSecurityProfile("v11").build());
+      verify(v11Observer).onNext(any());
+    } finally {
+      manager.cleanup();
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  void openConsumerStreamRegistersConfiguredProfile() throws Exception {
+    CxfServerManager manager = spiedManager();
+    try {
+      StreamObserver<ConsumerRequest> responseObserver = mock(StreamObserver.class);
+      StreamObserver<ConsumerResponse> returned =
+          Context.current()
+              .withValue(ConsumerProfileInterceptor.PROFILE_CONTEXT_KEY, "v11")
+              .call(() -> service.openConsumerStream(responseObserver));
+      assertTrue(manager.hasConsumerObserver("v11"));
+      verify(manager).setConsumerRequestObserver(eq("v11"), same(responseObserver));
+      returned.onCompleted();
+      assertFalse(manager.hasConsumerObserver("v11"));
+    } finally {
+      manager.cleanup();
+    }
+  }
+
+  @Test
+  void serviceRegistersConsumerProfileInterceptor() {
+    RegisterInterceptor[] found =
+        CxfBridgeService.class.getAnnotationsByType(RegisterInterceptor.class);
+    assertTrue(
+        java.util.Arrays.stream(found)
+            .anyMatch(a -> a.value() == ConsumerProfileInterceptor.class));
   }
 }

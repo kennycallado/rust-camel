@@ -57,6 +57,17 @@ pub struct MockState {
     /// duplicate response within a bounded window.
     #[allow(dead_code)]
     pub response_recorded: Arc<Notify>,
+    /// `x-cxf-profile` metadata of every `OpenConsumerStream` call, in
+    /// arrival order (`None` when the header is absent or not ASCII).
+    #[allow(dead_code)]
+    pub open_stream_profiles: Arc<Mutex<Vec<Option<String>>>>,
+    /// Fires after each recorded open; `notify_one` stores a permit.
+    #[allow(dead_code)]
+    pub open_stream_recorded: Arc<Notify>,
+    /// FIFO of status codes; each `OpenConsumerStream` pops one (after the
+    /// profile is recorded) and fails with it. Empty means accept.
+    #[allow(dead_code)]
+    pub open_stream_rejections: Arc<Mutex<VecDeque<tonic::Code>>>,
 }
 
 impl MockState {
@@ -157,6 +168,18 @@ impl CxfBridge for MockCxfBridge {
         &self,
         request: Request<tonic::Streaming<ConsumerResponse>>,
     ) -> Result<Response<Self::OpenConsumerStreamStream>, Status> {
+        let profile = request
+            .metadata()
+            .get("x-cxf-profile")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        self.state.open_stream_profiles.lock().await.push(profile);
+        self.state.open_stream_recorded.notify_one();
+
+        if let Some(code) = self.state.open_stream_rejections.lock().await.pop_front() {
+            return Err(Status::new(code, "mock bridge rejected OpenConsumerStream"));
+        }
+
         let mut inbound = request.into_inner();
         let state = self.state.clone();
 
@@ -201,6 +224,32 @@ impl CxfBridge for MockCxfBridge {
                 "unhealthy".to_string()
             },
         }))
+    }
+}
+
+/// Wait until at least `n` opens were recorded or `budget` elapses; every
+/// await is bounded by the remaining budget.
+#[allow(dead_code)]
+pub async fn wait_for_open_count(
+    state: &MockState,
+    n: usize,
+    budget: Duration,
+) -> Result<Vec<Option<String>>, String> {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let seen = tokio::time::timeout(remaining, state.open_stream_profiles.lock())
+            .await
+            .map_err(|_| "timed out locking open_stream_profiles".to_string())?
+            .clone();
+        if seen.len() >= n {
+            return Ok(seen);
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("expected {n} opens, saw {}", seen.len()));
+        }
+        let _ = tokio::time::timeout(remaining, state.open_stream_recorded.notified()).await;
     }
 }
 

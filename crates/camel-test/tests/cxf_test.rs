@@ -267,6 +267,64 @@ fn cxf_component_with_bind(bind_port: Option<u16>) -> CxfComponent {
     CxfComponent::new(pool)
 }
 
+fn two_profile_consumer_component(bind_port: u16) -> CxfComponent {
+    let wsdl_path = cxf_wsdl_path();
+    let profile = |name: &str| CxfProfileConfig {
+        name: name.to_string(),
+        address: Some("http://localhost:8080/service".to_string()),
+        wsdl_path: wsdl_path.clone(),
+        service_name: "{http://example.com/hello}HelloService".to_string(),
+        port_name: "{http://example.com/hello}HelloPort".to_string(),
+        security: Default::default(),
+    };
+    let pool = Arc::new(
+        CxfBridgePool::from_config(CxfPoolConfig {
+            profiles: vec![profile("v11"), profile("v12")],
+            max_bridges: 4,
+            bridge_start_timeout_ms: 30_000,
+            health_check_interval_ms: 5_000,
+            bridge_cache_dir: None,
+            version: camel_component_cxf::BRIDGE_VERSION.to_string(),
+            bind_address: Some(format!("http://127.0.0.1:{bind_port}/cxf")),
+            listener_tls: None,
+            reconnect: Default::default(),
+        })
+        .unwrap(),
+    );
+    CxfComponent::new(pool)
+}
+
+async fn post_say_hello(port: u16, profile: &str) -> Result<reqwest::Response, reqwest::Error> {
+    http_client()
+        .post(format!("http://127.0.0.1:{port}/cxf/{profile}"))
+        .header("content-type", "text/xml; charset=utf-8")
+        .header("soapaction", "sayHello")
+        .body(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:hel="http://example.com/hello">
+  <soapenv:Header/>
+  <soapenv:Body>
+    <hel:sayHelloRequest>
+      <name>hello</name>
+    </hel:sayHelloRequest>
+  </soapenv:Body>
+</soapenv:Envelope>"#,
+        )
+        .send()
+        .await
+}
+
+fn profile_route_yaml(port: u16, profile: &str) -> String {
+    let wsdl_path = cxf_wsdl_path();
+    format!(
+        "routes:\n  - id: cxf-consumer-{profile}\n    from: \"cxf://http://127.0.0.1:{port}/cxf/{profile}?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile={profile}\"\n    steps:\n      - set_body:\n          value:\n            constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><hel:message>from-{profile}</hel:message></hel:sayHelloResponse>\"\n      - to: \"mock:{profile}\"\n"
+    )
+}
+
+async fn profile_answers_200(port: u16, profile: &str) -> bool {
+    matches!(post_say_hello(port, profile).await, Ok(r) if r.status() == StatusCode::OK)
+}
+
 fn cxf_wsdl_path() -> String {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -547,6 +605,118 @@ async fn cxf_consumer_receives_request_and_returns_response() {
     )
     .await
     .unwrap();
+
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cxf_consumer_two_profiles_dispatch_to_own_route() {
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_cxf_bridge_binary();
+    let port = reserve_local_port();
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(two_profile_consumer_component(port))
+        .build()
+        .await;
+
+    for profile in ["v11", "v12"] {
+        for route in parse_yaml(&profile_route_yaml(port, profile)).unwrap() {
+            h.add_route(route).await.unwrap();
+        }
+    }
+    h.start().await;
+
+    wait_until(
+        "v11 and v12 streams connected",
+        Duration::from_secs(30),
+        Duration::from_millis(200),
+        || async move {
+            Ok(profile_answers_200(port, "v11").await && profile_answers_200(port, "v12").await)
+        },
+    )
+    .await
+    .unwrap();
+
+    for (profile, other) in [("v11", "v12"), ("v12", "v11")] {
+        for _ in 0..3 {
+            let res = post_say_hello(port, profile).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let body = res.text().await.unwrap();
+            assert!(body.contains(&format!("from-{profile}")), "body: {body}");
+            assert!(!body.contains(&format!("from-{other}")), "body: {body}");
+        }
+    }
+
+    for profile in ["v11", "v12"] {
+        let endpoint = h.mock().get_endpoint(profile).unwrap();
+        let received = endpoint.get_received_exchanges().await;
+        assert!(
+            received.len() >= 3,
+            "{profile} must receive the 3 posted exchanges, got {}",
+            received.len()
+        );
+        for ex in received {
+            assert_eq!(
+                ex.input
+                    .header("CxfSecurityProfile")
+                    .and_then(|v| v.as_str()),
+                Some(profile)
+            );
+        }
+    }
+
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cxf_consumer_profile_without_stream_returns_503() {
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_cxf_bridge_binary();
+    let port = reserve_local_port();
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(two_profile_consumer_component(port))
+        .build()
+        .await;
+
+    for route in parse_yaml(&profile_route_yaml(port, "v12")).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+
+    wait_until(
+        "v12 stream connected",
+        Duration::from_secs(30),
+        Duration::from_millis(200),
+        || async move { Ok(profile_answers_200(port, "v12").await) },
+    )
+    .await
+    .unwrap();
+
+    let res = post_say_hello(port, "v11").await.unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(res.headers().contains_key("retry-after"));
+    let body = res.text().await.unwrap();
+    assert!(!body.contains("Envelope"), "body: {body}");
+
+    let endpoint = h.mock().get_endpoint("v12").unwrap();
+    let received = endpoint.get_received_exchanges().await;
+    assert!(!received.is_empty(), "v12 must have received exchanges");
+    for ex in received {
+        assert_eq!(
+            ex.input
+                .header("CxfSecurityProfile")
+                .and_then(|v| v.as_str()),
+            Some("v12")
+        );
+    }
 
     h.stop().await;
 }
@@ -1262,47 +1432,57 @@ async fn cxf_consumer_fault_code_and_timeout_matrix() {
 
     let (process, channel) = BridgeProcess::start_and_connect(&config).await.unwrap();
 
-    let (tx, rx) = futures::channel::mpsc::unbounded::<ConsumerResponse>();
     let arrived: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let arrived_task = Arc::clone(&arrived);
-    // `open_consumer_stream` only resolves after the bridge flushes response
-    // headers, which it defers until the first inbound SOAP request is dispatched.
-    // Spawn it so the test can POST and drive that first request.
-    tokio::spawn(async move {
-        let mut client = CxfBridgeClient::new(channel);
-        let response = client
-            .open_consumer_stream(rx)
-            .await
-            .expect("open consumer stream");
-        let mut requests = response.into_inner();
-        while let Ok(Some(req)) = requests.message().await {
-            let profile = req.security_profile.clone();
-            arrived_task
-                .lock()
-                .expect("arrived lock")
-                .push(profile.clone());
-            if profile == "m_timeout" {
-                // Withhold the reply: the publisher's consumer timeout must fire.
-                continue;
+    // The bridge registers one consumer stream per profile and rejects an open
+    // without `x-cxf-profile`. `open_consumer_stream` only resolves after the
+    // bridge flushes response headers, which it defers until the first inbound
+    // SOAP request for that profile is dispatched. Spawn one task per profile so
+    // the test can POST and drive that first request.
+    for profile_name in profiles.iter().map(|p| p.name.clone()) {
+        let channel = channel.clone();
+        let arrived_task = Arc::clone(&arrived);
+        let (tx, rx) = futures::channel::mpsc::unbounded::<ConsumerResponse>();
+        tokio::spawn(async move {
+            let mut client = CxfBridgeClient::new(channel);
+            let mut open_request = tonic::Request::new(rx);
+            open_request.metadata_mut().insert(
+                "x-cxf-profile",
+                profile_name.parse().expect("profile metadata value"),
+            );
+            let response = client
+                .open_consumer_stream(open_request)
+                .await
+                .expect("open consumer stream");
+            let mut requests = response.into_inner();
+            while let Ok(Some(req)) = requests.message().await {
+                let profile = req.security_profile.clone();
+                arrived_task
+                    .lock()
+                    .expect("arrived lock")
+                    .push(profile.clone());
+                if profile == "m_timeout" {
+                    // Withhold the reply: the publisher's consumer timeout must fire.
+                    continue;
+                }
+                let code = match profile.as_str() {
+                    "m_client" => "soap:Client",
+                    "m_server" => "soap:Server",
+                    "m_version" => "soap:VersionMismatch",
+                    "m_must" => "soap:MustUnderstand",
+                    "m_data" => "soap:DataEncodingUnknown",
+                    _ => "soap:Server",
+                };
+                let _ = tx.unbounded_send(ConsumerResponse {
+                    request_id: req.request_id.clone(),
+                    payload: Vec::new(),
+                    fault: true,
+                    fault_code: code.to_string(),
+                    fault_string: "typed fault".to_string(),
+                    security_profile: profile,
+                });
             }
-            let code = match profile.as_str() {
-                "m_client" => "soap:Client",
-                "m_server" => "soap:Server",
-                "m_version" => "soap:VersionMismatch",
-                "m_must" => "soap:MustUnderstand",
-                "m_data" => "soap:DataEncodingUnknown",
-                _ => "soap:Server",
-            };
-            let _ = tx.unbounded_send(ConsumerResponse {
-                request_id: req.request_id.clone(),
-                payload: Vec::new(),
-                fault: true,
-                fault_code: code.to_string(),
-                fault_string: "typed fault".to_string(),
-                security_profile: profile,
-            });
-        }
-    });
+        });
+    }
 
     let base = format!("http://127.0.0.1:{port}/cxf");
     wait_until(
@@ -1338,11 +1518,11 @@ async fn cxf_consumer_fault_code_and_timeout_matrix() {
         ("m_must", "MustUnderstand", 500),
         ("m_data", "DataEncodingUnknown", 500),
     ] {
-        let res = post_soap(
+        let (res, _) = post_soap_when_registered(
             &format!("{base}/{profile}"),
             "application/soap+xml",
             "sayHello",
-            soap12.clone(),
+            &soap12,
         )
         .await;
         assert_eq!(res.status().as_u16(), expected_status, "{profile} status");
@@ -1361,12 +1541,11 @@ async fn cxf_consumer_fault_code_and_timeout_matrix() {
     }
 
     // Timeout: real production timeout, bounded by CXF_CONSUMER_TIMEOUT_MS.
-    let started = Instant::now();
-    let res = post_soap(
+    let (res, started) = post_soap_when_registered(
         &format!("{base}/m_timeout"),
         "application/soap+xml",
         "sayHello",
-        soap12.clone(),
+        &soap12,
     )
     .await;
     assert_eq!(res.status().as_u16(), 500, "timeout must be a Receiver 500");
@@ -1435,6 +1614,44 @@ async fn post_soap(
         .send()
         .await
         .expect("SOAP POST must not panic")
+}
+
+/// POSTs a SOAP body, retrying while the publisher answers 503 (the profile's
+/// consumer stream is not registered yet; a 503 is sent before dispatch, so
+/// retrying has no side effects). Returns the first non-503 response and the
+/// instant that attempt started.
+async fn post_soap_when_registered(
+    url: &str,
+    content_type: &str,
+    soapaction: &str,
+    body: &str,
+) -> (reqwest::Response, Instant) {
+    let slot: Arc<Mutex<Option<(reqwest::Response, Instant)>>> = Arc::new(Mutex::new(None));
+    let slot_poll = Arc::clone(&slot);
+    wait_until(
+        "profile stream registered (non-503 SOAP response)",
+        Duration::from_secs(15),
+        Duration::from_millis(100),
+        || {
+            let slot = Arc::clone(&slot_poll);
+            let body = body.to_string();
+            async move {
+                let started = Instant::now();
+                let Some(res) = try_post_soap(url, content_type, soapaction, body).await else {
+                    return Ok(false);
+                };
+                if res.status() == StatusCode::SERVICE_UNAVAILABLE {
+                    return Ok(false);
+                }
+                *slot.lock().expect("slot lock") = Some((res, started));
+                Ok(true)
+            }
+        },
+    )
+    .await
+    .unwrap();
+    let taken = slot.lock().expect("slot lock").take();
+    taken.expect("response stored on success")
 }
 
 /// POSTs a SOAP body, returning `None` when the endpoint is not accepting

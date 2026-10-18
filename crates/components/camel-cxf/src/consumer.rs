@@ -13,17 +13,29 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
-use crate::pool::{BridgeState, CxfBridgePool, cxf_bridge_client};
+use crate::pool::{BridgeState, ConsumerProfileGuard, CxfBridgePool, cxf_bridge_client};
 use crate::proto::{ConsumerRequest, ConsumerResponse};
+
+/// gRPC metadata key carrying the consumer's profile on `OpenConsumerStream`.
+/// Read by the bridge handler `CxfBridgeService.openConsumerStream`.
+pub const CXF_PROFILE_METADATA_KEY: &str = "x-cxf-profile";
 
 pub struct CxfConsumer {
     pool: Arc<CxfBridgePool>,
-    /// Profile name — used for debugging/logging; the bridge sends security_profile
-    /// via ConsumerRequest so the consumer doesn't need to send it explicitly.
-    #[allow(dead_code)]
+    /// The profile this consumer serves; sent as `x-cxf-profile` metadata on
+    /// every `OpenConsumerStream` so the bridge registers the stream under
+    /// this profile and dispatches to it only requests addressed to this
+    /// profile's path; also the key of the duplicate-consumer registration.
     profile_name: String,
     cancel_token: Option<CancellationToken>,
     task_handle: Option<JoinHandle<Result<(), CamelError>>>,
+    /// Registration of `profile_name` in the pool. Owned by the consumer
+    /// struct, never by the spawned task, so a late exit of an old task
+    /// cannot release a newer registration. Dropping the consumer (the
+    /// runtime abort path in `camel-core` `consumer_management.rs`, which
+    /// aborts the outer task after the stop budget without calling `stop()`)
+    /// releases it through `Drop`.
+    profile_guard: Option<ConsumerProfileGuard>,
     /// Observability handle: `metrics()` powers the retained
     /// `b-prime:cxf:response-marshalling` increment and
     /// `component_metrics()` the uniform `cxf:consume` emission
@@ -42,6 +54,7 @@ impl CxfConsumer {
             profile_name,
             cancel_token: None,
             task_handle: None,
+            profile_guard: None,
             runtime,
         }
     }
@@ -177,6 +190,18 @@ async fn await_ready_channel(pool: Arc<CxfBridgePool>) -> Result<Channel, CamelE
 #[async_trait]
 impl Consumer for CxfConsumer {
     async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+        if let Some(mut stale) = self.profile_guard.take() {
+            stale.release();
+        }
+        // Local until the end: every early return drops it and releases.
+        let guard = self.pool.register_consumer_profile(&self.profile_name)?;
+        let profile_header: tonic::metadata::AsciiMetadataValue =
+            self.profile_name.parse().map_err(|e| {
+                CamelError::Config(format!(
+                    "cxf consumer profile '{}' is not a valid gRPC metadata value: {e}",
+                    self.profile_name
+                ))
+            })?;
         let pool = Arc::clone(&self.pool);
         let cancel = ctx.cancel_token();
         self.cancel_token = Some(cancel.clone());
@@ -208,6 +233,7 @@ impl Consumer for CxfConsumer {
 
         let runtime = Arc::clone(&self.runtime);
         let ctx_task = ctx.clone();
+        let profile_name = self.profile_name.clone();
         let handle: JoinHandle<Result<(), CamelError>> = tokio::spawn(async move {
             let ctx = ctx_task;
             let mut consecutive_transport_failures: u32 = 0;
@@ -256,7 +282,11 @@ impl Consumer for CxfConsumer {
                 let (response_tx, response_rx) = mpsc::channel::<ConsumerResponse>(32);
                 let response_stream = ReceiverStream::new(response_rx);
 
-                let stream_result = client.open_consumer_stream(response_stream).await;
+                let mut open_request = tonic::Request::new(response_stream);
+                open_request
+                    .metadata_mut()
+                    .insert(CXF_PROFILE_METADATA_KEY, profile_header.clone());
+                let stream_result = client.open_consumer_stream(open_request).await;
 
                 let mut stream = match stream_result {
                     Ok(resp) => {
@@ -273,6 +303,11 @@ impl Consumer for CxfConsumer {
                         resp.into_inner()
                     }
                     Err(e) => {
+                        if e.code() == tonic::Code::InvalidArgument {
+                            // log-policy: system-broken
+                            error!(profile = %profile_name, "CXF bridge rejected consumer profile with INVALID_ARGUMENT; consumer stops without reconnecting: {}", e.message());
+                            return Ok(());
+                        }
                         let err = CamelError::ProcessorError(format!("CXF gRPC stream error: {e}"));
                         if is_bridge_transport_error(&err) {
                             consecutive_transport_failures += 1;
@@ -452,6 +487,7 @@ impl Consumer for CxfConsumer {
         });
 
         self.task_handle = Some(handle);
+        self.profile_guard = Some(guard);
 
         // Signal route-startup readiness now. The bridge slot was probed above
         // (fail-fast on Degraded/Stopped), so the bridge process is running.
@@ -465,6 +501,9 @@ impl Consumer for CxfConsumer {
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
+        if let Some(mut guard) = self.profile_guard.take() {
+            guard.release();
+        }
         if let Some(cancel) = self.cancel_token.take() {
             cancel.cancel();
         }
@@ -917,5 +956,28 @@ mod tests {
             "no signer property may be set from headers, got: {:?}",
             exchange.properties.keys().collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn failed_start_releases_profile_registration() {
+        use crate::pool::BridgeSlot;
+        let pool = test_pool();
+        let slot = BridgeSlot::new_ready_for_test(
+            Channel::from_static("http://127.0.0.1:1").connect_lazy(),
+        );
+        slot.state_tx
+            .send_replace(BridgeState::Degraded("test".into()));
+        pool.insert_slot_for_test(CxfBridgePool::slot_key(), slot);
+
+        let mut consumer = CxfConsumer::new(Arc::clone(&pool), "v11".to_string(), test_rt());
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "r".to_string());
+        let res = consumer.start(ctx).await;
+        let err = res.expect_err("degraded bridge must fail start");
+        assert!(
+            err.to_string().contains("CXF bridge not available"),
+            "{err}"
+        );
+        assert!(!pool.consumer_profile_active_for_test("v11"));
     }
 }

@@ -113,7 +113,7 @@ class SoapEndpointPublisherTest {
     when(bridgeConfig.consumerTimeoutMs()).thenReturn(5000);
     // Default: a live consumer stream, so the availability gate (Task 2.7) passes and the
     // payload/fault matrix still runs. The pre-stream 503 tests override this to false.
-    when(cxfServerManager.hasConsumerObserver()).thenReturn(true);
+    when(cxfServerManager.hasConsumerObserver(anyString())).thenReturn(true);
 
     // Default profile — no security
     SecurityProfile testProfile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
@@ -1434,7 +1434,7 @@ class SoapEndpointPublisherTest {
     SoapEndpointPublisher pub = publisherWiredWith(real);
     try {
       when(bridgeConfig.address()).thenReturn("http://127.0.0.1:0/soap");
-      when(cxfServerManager.hasConsumerObserver()).thenReturn(false);
+      when(cxfServerManager.hasConsumerObserver(TEST_PROFILE_NAME)).thenReturn(false);
 
       pub.publish();
       assertTrue(pub.soapPort().isPresent());
@@ -1460,6 +1460,63 @@ class SoapEndpointPublisherTest {
   }
 
   /**
+   * The gate asks about the addressed profile only; another profile's live stream is irrelevant.
+   */
+  @Test
+  void gateUsesAddressedProfileNotAnyProfile() throws Exception {
+    when(cxfServerManager.hasConsumerObserver(TEST_PROFILE_NAME)).thenReturn(false);
+    when(cxfServerManager.hasConsumerObserver("other_profile")).thenReturn(true);
+
+    HttpOutcome outcome =
+        driveRequestOutcome(
+            envelope11("<test/>"),
+            "text/xml",
+            SecurityProfile.builder(TEST_PROFILE_NAME).build(),
+            completedOk());
+
+    assertEquals(503, outcome.status(), outcome.body());
+    verify(httpResponse).putHeader("Retry-After", "1");
+    assertTrue(outcome.body().contains("routes unavailable"), outcome.body());
+    assertFalse(outcome.body().contains("Envelope"), outcome.body());
+    assertFalse(outcome.body().contains("Fault"), outcome.body());
+    verify(cxfServerManager).hasConsumerObserver(TEST_PROFILE_NAME);
+    verify(cxfServerManager, never()).hasConsumerObserver("other_profile");
+    verify(cxfServerManager, never()).handleSoapRequest(any());
+  }
+
+  /** With the real manager, a stream for another profile never serves the addressed profile. */
+  @Test
+  @SuppressWarnings("unchecked")
+  void noCrossProfileFallbackWithRealManager() throws Exception {
+    Vertx real = Vertx.vertx();
+    SoapEndpointPublisher pub = publisherWiredWith(real);
+    CxfServerManager manager = new CxfServerManager();
+    io.grpc.stub.StreamObserver<ConsumerRequest> otherObserver =
+        mock(io.grpc.stub.StreamObserver.class);
+    try {
+      manager.bridgeConfig = bridgeConfig;
+      manager.endpointPublisher = pub;
+      pub.cxfServerManager = manager;
+      when(bridgeConfig.maxConcurrentRequests()).thenReturn(10);
+      when(bridgeConfig.address()).thenReturn("http://127.0.0.1:0/soap");
+      manager.setConsumerRequestObserver("other_profile", otherObserver);
+
+      pub.publish();
+      assertTrue(pub.soapPort().isPresent());
+      java.net.http.HttpResponse<String> response =
+          postPlain(pub.soapPort().getAsInt(), envelope11("<test/>"));
+
+      assertEquals(503, response.statusCode(), response.body());
+      assertNotNull(response.headers().firstValue("retry-after").orElse(null));
+      assertFalse(response.body().contains("Envelope"), response.body());
+      verify(otherObserver, never()).onNext(any());
+    } finally {
+      manager.cleanup();
+      real.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+    }
+  }
+
+  /**
    * Availability is checked BEFORE WS-Security and before any XML/version classification: a
    * Signature-required profile whose signature is missing takes the pre-stream 503 (never a 400/500
    * security fault), the WSS processor is never invoked, and the transport body limits still apply
@@ -1475,7 +1532,7 @@ class SoapEndpointPublisherTest {
             .build();
     WssSecurityProcessor recording = mock(WssSecurityProcessor.class);
     installWssProcessor(recording);
-    when(cxfServerManager.hasConsumerObserver()).thenReturn(false);
+    when(cxfServerManager.hasConsumerObserver(TEST_PROFILE_NAME)).thenReturn(false);
 
     // Missing signature on a Signature-required profile: still the pre-stream 503.
     HttpOutcome outcome =
@@ -1485,6 +1542,7 @@ class SoapEndpointPublisherTest {
     assertTrue(outcome.body().contains("routes unavailable"), outcome.body());
     assertFalse(outcome.body().contains("Envelope"), outcome.body());
     assertFalse(outcome.body().contains("Fault"), outcome.body());
+    verify(cxfServerManager).hasConsumerObserver(TEST_PROFILE_NAME);
     verifyNoInteractions(recording);
 
     // Transport body limits apply before the gate and before parsing: oversize is 413.
@@ -1532,14 +1590,14 @@ class SoapEndpointPublisherTest {
     // just-registered request is still in flight.
     doAnswer(
             invocation -> {
-              manager.setConsumerRequestObserver(observerB);
-              manager.onConsumerStreamClosed(observerA);
+              manager.setConsumerRequestObserver(TEST_PROFILE_NAME, observerB);
+              manager.onConsumerStreamClosed(TEST_PROFILE_NAME, observerA);
               return null;
             })
         .when(observerA)
         .onNext(any());
 
-    manager.setConsumerRequestObserver(observerA);
+    manager.setConsumerRequestObserver(TEST_PROFILE_NAME, observerA);
 
     when(profileStore.getProfile(TEST_PROFILE_NAME))
         .thenReturn(SecurityProfile.builder(TEST_PROFILE_NAME).build());
@@ -1604,7 +1662,8 @@ class SoapEndpointPublisherTest {
     String body = responseCaptor.getValue();
     assertFalse(body.contains("Envelope"), body);
     assertFalse(body.contains("Fault"), body);
-    assertTrue(manager.hasConsumerObserver(), "replacement stream B must stay live");
+    assertTrue(
+        manager.hasConsumerObserver(TEST_PROFILE_NAME), "replacement stream B must stay live");
     manager.cleanup();
   }
 
@@ -2273,13 +2332,13 @@ class SoapEndpointPublisherTest {
       resetPublisher();
       clearInvocations(cxfServerManager);
       clearInvocations(httpResponse);
-      when(cxfServerManager.hasConsumerObserver()).thenReturn(false);
+      when(cxfServerManager.hasConsumerObserver(TEST_PROFILE_NAME)).thenReturn(false);
       try {
         assertTransportUnavailable(
             driveRequestOutcome(
                 request, contentType, listenerProfileWithFault(418), completedOk()));
       } finally {
-        when(cxfServerManager.hasConsumerObserver()).thenReturn(true);
+        when(cxfServerManager.hasConsumerObserver(TEST_PROFILE_NAME)).thenReturn(true);
       }
 
       // Late unavailable stream: the SAME 503.

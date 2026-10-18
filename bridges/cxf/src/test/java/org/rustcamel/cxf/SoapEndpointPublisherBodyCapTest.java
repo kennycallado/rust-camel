@@ -91,7 +91,7 @@ class SoapEndpointPublisherBodyCapTest {
     when(bridgeConfig.consumerTimeoutMs()).thenReturn(5000);
     // The streaming fixtures have no real consumer stream; the mock reports one so the
     // availability gate passes and the body-cap/payload matrix still runs (Task 2.7).
-    when(cxfServerManager.hasConsumerObserver()).thenReturn(true);
+    when(cxfServerManager.hasConsumerObserver(anyString())).thenReturn(true);
 
     SecurityProfile testProfile = SecurityProfile.builder(TEST_PROFILE_NAME).build();
     when(profileStore.getProfile(TEST_PROFILE_NAME)).thenReturn(testProfile);

@@ -11,6 +11,7 @@ import jakarta.inject.Inject;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -82,11 +83,14 @@ public class CxfServerManager {
   private final Object lock = new Object();
 
   /**
-   * The live consumer-request observer of the current {@code OpenConsumerStream} RPC. Replaced by
-   * identity on close ({@link #onConsumerStreamClosed}) so a canceled older stream can never clear
-   * a newer replacement stream's liveness. Guarded by {@link #lock}.
+   * The live consumer-request observers of the open {@code OpenConsumerStream} RPCs, one per
+   * profile. A new stream replaces only its own profile's key; on close ({@link
+   * #onConsumerStreamClosed}) the key is cleared only when it still maps to the closing observer,
+   * so a canceled older stream can never clear a newer replacement stream's liveness. Guarded by
+   * {@link #lock}.
    */
-  private StreamObserver<ConsumerRequest> consumerRequestObserver;
+  private final Map<String, StreamObserver<ConsumerRequest>> consumerRequestObservers =
+      new HashMap<>();
 
   @Inject BridgeConfig bridgeConfig;
 
@@ -120,8 +124,9 @@ public class CxfServerManager {
   }
 
   /**
-   * Forwards an incoming SOAP consumer request (from {@link SoapEndpointPublisher}) to the active
-   * gRPC consumer stream and returns a future completed by {@link #completeFromConsumer}.
+   * Forwards an incoming SOAP consumer request (from {@link SoapEndpointPublisher}) to the consumer
+   * stream of the request's security profile and returns a future completed by {@link
+   * #completeFromConsumer}.
    */
   public CompletableFuture<ConsumerResponse> handleSoapRequest(ConsumerRequest request) {
     String requestId = request.getRequestId();
@@ -149,9 +154,11 @@ public class CxfServerManager {
         observer = null;
         inFlightCount.decrementAndGet();
       } else {
-        observer = consumerRequestObserver;
+        observer = consumerRequestObservers.get(request.getSecurityProfile());
         if (observer == null) {
-          rejected = new StreamUnavailableException("no consumer stream connected");
+          rejected =
+              new StreamUnavailableException(
+                  "no consumer stream for profile " + request.getSecurityProfile());
           registered = null;
           inFlightCount.decrementAndGet();
         } else {
@@ -198,34 +205,35 @@ public class CxfServerManager {
    * Replacement never touches pending registrations: the replaced stream's requests stay owned by
    * it and fail on its close.
    */
-  public void setConsumerRequestObserver(StreamObserver<ConsumerRequest> observer) {
+  public void setConsumerRequestObserver(String profile, StreamObserver<ConsumerRequest> observer) {
+    if (profile == null || profile.isEmpty()) {
+      throw new IllegalArgumentException("consumer profile is required");
+    }
     synchronized (lock) {
-      consumerRequestObserver = observer;
+      consumerRequestObservers.put(profile, observer);
     }
   }
 
-  /** True only while a live consumer-request stream is connected. */
-  public boolean hasConsumerObserver() {
+  /** True only while a live consumer-request stream is connected for the given profile. */
+  public boolean hasConsumerObserver(String profile) {
     synchronized (lock) {
-      return consumerRequestObserver != null;
+      return profile != null && consumerRequestObservers.containsKey(profile);
     }
   }
 
   /**
-   * A consumer stream closed or failed: clear its liveness (only when it is still the current
-   * observer) and fail the requests THIS stream owns with the typed {@link
+   * A consumer stream closed or failed: clear its liveness (only when it is still the observer
+   * registered for {@code profile}) and fail the requests THIS stream owns with the typed {@link
    * StreamUnavailableException} (HTTP 503 transport-availability) — irrespective of whether the
    * liveness swap succeeded. A replaced, older stream's close therefore fails only its own
    * in-flight requests and can never clear or fail the replacement stream's requests. The SOAP
    * listener stays published — new requests take the pre-stream {@code 503} until another {@code
    * OpenConsumerStream} arrives.
    */
-  public void onConsumerStreamClosed(StreamObserver<ConsumerRequest> observer) {
+  public void onConsumerStreamClosed(String profile, StreamObserver<ConsumerRequest> observer) {
     List<PendingRequest> victims = new ArrayList<>();
     synchronized (lock) {
-      if (consumerRequestObserver == observer) {
-        consumerRequestObserver = null;
-      }
+      consumerRequestObservers.remove(profile, observer);
       for (PendingRequest pending : pendingRequests.values()) {
         if (pending.owner == observer) {
           victims.add(pending);
@@ -261,7 +269,7 @@ public class CxfServerManager {
     }
     List<PendingRequest> victims;
     synchronized (lock) {
-      consumerRequestObserver = null;
+      consumerRequestObservers.clear();
       victims = new ArrayList<>(pendingRequests.values());
       for (PendingRequest pending : victims) {
         releasePendingLocked(pending);

@@ -23,6 +23,7 @@ import org.w3c.dom.Element;
 
 @GrpcService
 @Blocking
+@io.quarkus.grpc.RegisterInterceptor(ConsumerProfileInterceptor.class)
 public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
   static {
     System.setProperty("jakarta.xml.ws.spi.Provider", "org.apache.cxf.jaxws.spi.ProviderImpl");
@@ -43,6 +44,19 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
    */
   private static final String EMPTY_SOAP_RESPONSE_DESCRIPTION =
       "empty SOAP response: the operation declares an output but the server returned no body";
+
+  /** Answer for a rejected {@code OpenConsumerStream}: inbound messages are ignored. */
+  private static final StreamObserver<ConsumerResponse> REJECTED_STREAM_OBSERVER =
+      new StreamObserver<>() {
+        @Override
+        public void onNext(ConsumerResponse value) {}
+
+        @Override
+        public void onError(Throwable t) {}
+
+        @Override
+        public void onCompleted() {}
+      };
 
   @Inject BridgeConfig bridgeConfig;
 
@@ -302,7 +316,18 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
   @Override
   public StreamObserver<ConsumerResponse> openConsumerStream(
       StreamObserver<ConsumerRequest> responseObserver) {
-    serverManager.setConsumerRequestObserver(responseObserver);
+    String profile = ConsumerProfileInterceptor.PROFILE_CONTEXT_KEY.get();
+    if (profile == null || profile.isEmpty() || !profileStore.profiles().containsKey(profile)) {
+      String prefix = "x-cxf-profile must name a configured consumer profile; got ";
+      String description =
+          profile == null
+              ? prefix + "no value"
+              : profile.isEmpty() ? prefix + "an empty value" : prefix + "'" + profile + "'";
+      LOG.log(Level.WARNING, "Rejected OpenConsumerStream: {0}", description);
+      responseObserver.onError(Status.INVALID_ARGUMENT.withDescription(description).asException());
+      return REJECTED_STREAM_OBSERVER;
+    }
+    serverManager.setConsumerRequestObserver(profile, responseObserver);
     return new StreamObserver<>() {
       @Override
       public void onNext(ConsumerResponse value) {
@@ -313,12 +338,12 @@ public class CxfBridgeService extends CxfBridgeGrpc.CxfBridgeImplBase {
       public void onError(Throwable t) {
         // Stream lifecycle only: clear this stream's liveness (by identity) and fail its
         // in-flight requests. The startup-published SOAP listener stays up (Task 2.7).
-        serverManager.onConsumerStreamClosed(responseObserver);
+        serverManager.onConsumerStreamClosed(profile, responseObserver);
       }
 
       @Override
       public void onCompleted() {
-        serverManager.onConsumerStreamClosed(responseObserver);
+        serverManager.onConsumerStreamClosed(profile, responseObserver);
       }
     };
   }

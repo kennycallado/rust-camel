@@ -111,10 +111,6 @@ name = "camel-component-cron"
 state = "registered"
 
 [[crates]]
-name = "camel-component-cxf"
-state = "registered"
-
-[[crates]]
 name = "camel-component-direct"
 state = "registered"
 
@@ -192,6 +188,10 @@ state = "registered"
 
 [[crates]]
 name = "camel-builder"
+state = "registered"
+
+[[crates]]
+name = "camel-component-cxf"
 state = "registered"
 
 [[crates]]

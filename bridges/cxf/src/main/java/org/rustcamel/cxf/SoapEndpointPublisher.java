@@ -597,12 +597,13 @@ public class SoapEndpointPublisher {
       SecurityProfile profile,
       Buffer body) {
     // Transport-availability gate FIRST — before any XML parsing, SOAP version classification,
-    // and before any WS-Security processing. Without a live consumer stream the routes are
-    // unavailable: HTTP 503 + Retry-After + plaintext, never a SOAP fault (not the fault matrix's
-    // 400/500) and never a hang. Unconditional and version-independent: a Signature-required
-    // profile whose signature is missing or invalid still takes this 503. Transport body limits
-    // were already enforced during accumulation (before this method runs).
-    if (!cxfServerManager.hasConsumerObserver()) {
+    // and before any WS-Security processing. The gate checks the consumer stream of the addressed
+    // profile; without a live stream for it the route is unavailable: HTTP 503 + Retry-After +
+    // plaintext, never a SOAP fault (not the fault matrix's 400/500) and never a hang.
+    // Unconditional and version-independent: a Signature-required profile whose signature is
+    // missing or invalid still takes this 503. Transport body limits were already enforced during
+    // accumulation (before this method runs).
+    if (!cxfServerManager.hasConsumerObserver(profileName)) {
       respondTransportUnavailable(req);
       return;
     }

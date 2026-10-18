@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use camel_bridge::download::ensure_binary_for_spec;
@@ -9,6 +9,7 @@ use camel_bridge::process::{BridgeProcess, BridgeProcessConfig, CxfProfileEnvVar
 use camel_bridge::spec::CXF_BRIDGE;
 use camel_component_api::CamelError;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tonic::transport::Channel;
@@ -221,6 +222,78 @@ impl std::fmt::Debug for BridgeSlot {
     }
 }
 
+// ── Consumer profile registry ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RegistrationToken(u64);
+
+#[derive(Debug, Default)]
+pub(crate) struct ConsumerProfileRegistry {
+    active: DashMap<String, RegistrationToken>,
+    next_token: AtomicU64,
+}
+
+impl ConsumerProfileRegistry {
+    pub(crate) fn register(
+        self: &Arc<Self>,
+        profile: &str,
+    ) -> Result<ConsumerProfileGuard, CamelError> {
+        let token = RegistrationToken(self.next_token.fetch_add(1, Ordering::Relaxed) + 1);
+        match self.active.entry(profile.to_string()) {
+            Entry::Occupied(_) => Err(CamelError::Config(format!(
+                "cxf consumer profile '{profile}' already has an active consumer route in this pool; one consumer route per profile is supported"
+            ))),
+            Entry::Vacant(entry) => {
+                entry.insert(token);
+                Ok(ConsumerProfileGuard {
+                    registry: Arc::clone(self),
+                    profile: profile.to_string(),
+                    token,
+                    released: false,
+                })
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn is_active(&self, profile: &str) -> bool {
+        self.active.contains_key(profile)
+    }
+
+    fn release(&self, profile: &str, token: RegistrationToken) -> bool {
+        self.active.remove_if(profile, |_, t| *t == token).is_some()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ConsumerProfileGuard {
+    registry: Arc<ConsumerProfileRegistry>,
+    profile: String,
+    token: RegistrationToken,
+    released: bool,
+}
+
+impl ConsumerProfileGuard {
+    #[cfg(test)]
+    pub(crate) fn token(&self) -> RegistrationToken {
+        self.token
+    }
+
+    pub(crate) fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        self.registry.release(&self.profile, self.token);
+    }
+}
+
+impl Drop for ConsumerProfileGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 // ── CxfBridgePool ────────────────────────────────────────────────────────────
 
 const MAX_RESTART_ATTEMPTS: u32 = 10;
@@ -241,6 +314,7 @@ pub struct CxfBridgePool {
     pub(crate) bind_address: Option<String>,
     pub(crate) listener_tls: Option<CxfListenerTls>,
     pub(crate) reconnect: NetworkRetryPolicy,
+    pub(crate) consumer_profiles: Arc<ConsumerProfileRegistry>,
 }
 
 impl CxfBridgePool {
@@ -266,7 +340,20 @@ impl CxfBridgePool {
             bind_address: pool_config.bind_address,
             listener_tls: pool_config.listener_tls,
             reconnect: pool_config.reconnect,
+            consumer_profiles: Arc::new(ConsumerProfileRegistry::default()),
         })
+    }
+
+    pub(crate) fn register_consumer_profile(
+        &self,
+        profile: &str,
+    ) -> Result<ConsumerProfileGuard, CamelError> {
+        self.consumer_profiles.register(profile)
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn consumer_profile_active_for_test(&self, profile: &str) -> bool {
+        self.consumer_profiles.is_active(profile)
     }
 
     pub fn slot_key() -> String {
@@ -776,6 +863,43 @@ mod tests {
             listener_tls: None,
             reconnect: NetworkRetryPolicy::default(),
         }
+    }
+
+    #[test]
+    fn consumer_profile_registry_rejects_duplicate() {
+        let registry = Arc::new(ConsumerProfileRegistry::default());
+        let _g1 = registry.register("v11").expect("first registration");
+        match registry.register("v11") {
+            Err(CamelError::Config(msg)) => assert!(msg.contains("'v11'"), "{msg}"),
+            other => panic!("expected Config error, got {other:?}"),
+        }
+        let _g2 = registry.register("v12").expect("other profile");
+    }
+
+    #[test]
+    fn consumer_profile_guard_drop_releases() {
+        let registry = Arc::new(ConsumerProfileRegistry::default());
+        {
+            let _g = registry.register("v11").expect("register");
+            assert!(registry.is_active("v11"));
+        }
+        assert!(!registry.is_active("v11"));
+        registry.register("v11").expect("re-register after drop");
+    }
+
+    #[test]
+    fn consumer_profile_guard_release_is_idempotent_and_token_scoped() {
+        let registry = Arc::new(ConsumerProfileRegistry::default());
+        let mut g1 = registry.register("v11").expect("g1");
+        g1.release();
+        g1.release();
+        let g2 = registry.register("v11").expect("g2");
+        assert_ne!(g2.token(), g1.token());
+        assert!(!registry.release("v11", g1.token()));
+        drop(g1);
+        assert!(registry.is_active("v11"));
+        drop(g2);
+        assert!(!registry.is_active("v11"));
     }
 
     #[test]

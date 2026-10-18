@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 
@@ -47,12 +48,12 @@ class CxfServerManagerTest {
     manager.cleanup();
   }
 
-  private static ConsumerRequest request(String id) {
-    return ConsumerRequest.newBuilder().setRequestId(id).build();
+  private static ConsumerRequest request(String profile, String id) {
+    return ConsumerRequest.newBuilder().setRequestId(id).setSecurityProfile(profile).build();
   }
 
   private static ConsumerResponse response(String id) {
-    return ConsumerResponse.newBuilder().setRequestId(id).setSecurityProfile("p").build();
+    return ConsumerResponse.newBuilder().setRequestId(id).setSecurityProfile("v11").build();
   }
 
   /**
@@ -84,15 +85,15 @@ class CxfServerManagerTest {
     @SuppressWarnings("unchecked")
     StreamObserver<ConsumerRequest> observerB = mock(StreamObserver.class);
 
-    manager.setConsumerRequestObserver(observerA);
-    CompletableFuture<ConsumerResponse> futureA = manager.handleSoapRequest(request("a"));
+    manager.setConsumerRequestObserver("v11", observerA);
+    CompletableFuture<ConsumerResponse> futureA = manager.handleSoapRequest(request("v11", "a"));
     // B replaces A while A's request is in flight; B's request is registered on B.
-    manager.setConsumerRequestObserver(observerB);
-    CompletableFuture<ConsumerResponse> futureB = manager.handleSoapRequest(request("b"));
+    manager.setConsumerRequestObserver("v11", observerB);
+    CompletableFuture<ConsumerResponse> futureB = manager.handleSoapRequest(request("v11", "b"));
 
     // A closes AFTER being replaced: it no longer owns the liveness flag (CAS fails), but its
     // own pending future must still fail typed.
-    manager.onConsumerStreamClosed(observerA);
+    manager.onConsumerStreamClosed("v11", observerA);
 
     assertTrue(
         futureA.isCompletedExceptionally(),
@@ -104,15 +105,15 @@ class CxfServerManagerTest {
         "A's close must fail A's pending future with typed stream unavailability: " + causeA);
 
     // The newer stream is untouched: still live, its future not failed.
-    assertTrue(manager.hasConsumerObserver(), "A's close must not clear B's liveness");
+    assertTrue(manager.hasConsumerObserver("v11"), "A's close must not clear B's liveness");
     assertFalse(futureB.isDone(), "B's pending future must not be failed by A's close");
 
     // Capacity accounting is exact (max=2): A's slot is released exactly once — C is admitted
     // into it, D is rejected as over capacity (a missed release would reject C; a double
     // release would wrongly admit D).
-    CompletableFuture<ConsumerResponse> futureC = manager.handleSoapRequest(request("c"));
+    CompletableFuture<ConsumerResponse> futureC = manager.handleSoapRequest(request("v11", "c"));
     assertFalse(futureC.isDone(), "C must be admitted into A's released slot");
-    CompletableFuture<ConsumerResponse> futureD = manager.handleSoapRequest(request("d"));
+    CompletableFuture<ConsumerResponse> futureD = manager.handleSoapRequest(request("v11", "d"));
     assertTrue(futureD.isCompletedExceptionally(), "D must exceed the max=2 capacity");
     Throwable causeD = rootCause(futureD);
     assertInstanceOf(IllegalStateException.class, causeD, String.valueOf(causeD));
@@ -129,11 +130,11 @@ class CxfServerManagerTest {
 
     manager.completeFromConsumer(response("c"));
     assertTrue(futureC.isDone());
-    CompletableFuture<ConsumerResponse> futureE = manager.handleSoapRequest(request("e"));
+    CompletableFuture<ConsumerResponse> futureE = manager.handleSoapRequest(request("v11", "e"));
     assertFalse(
         futureE.isCompletedExceptionally(),
         "all slots must be released after completion (counts back to zero)");
-    assertTrue(manager.hasConsumerObserver(), "B must still be live at the end");
+    assertTrue(manager.hasConsumerObserver("v11"), "B must still be live at the end");
   }
 
   /**
@@ -152,8 +153,8 @@ class CxfServerManagerTest {
     @SuppressWarnings("unchecked")
     StreamObserver<ConsumerRequest> observerB = mock(StreamObserver.class);
 
-    manager.setConsumerRequestObserver(observerA);
-    CompletableFuture<ConsumerResponse> futureA = manager.handleSoapRequest(request("a"));
+    manager.setConsumerRequestObserver("v11", observerA);
+    CompletableFuture<ConsumerResponse> futureA = manager.handleSoapRequest(request("v11", "a"));
 
     AtomicReference<CompletableFuture<ConsumerResponse>> reconnected = new AtomicReference<>();
     futureA.whenComplete(
@@ -161,18 +162,19 @@ class CxfServerManagerTest {
           // Runs DURING A's close-completion cleanup (inline on the completing thread,
           // outside the manager lock): the stream reconnects as B and submits a new request
           // before cleanup returns.
-          manager.setConsumerRequestObserver(observerB);
-          reconnected.set(manager.handleSoapRequest(request("d")));
+          manager.setConsumerRequestObserver("v11", observerB);
+          reconnected.set(manager.handleSoapRequest(request("v11", "d")));
         });
 
-    manager.onConsumerStreamClosed(observerA);
+    manager.onConsumerStreamClosed("v11", observerA);
 
     assertTrue(futureA.isCompletedExceptionally(), "A's pending future must be failed");
     assertInstanceOf(
         CxfServerManager.StreamUnavailableException.class,
         rootCause(futureA),
         "A's close must fail typed");
-    assertTrue(manager.hasConsumerObserver(), "B must be live after reconnecting during cleanup");
+    assertTrue(
+        manager.hasConsumerObserver("v11"), "B must be live after reconnecting during cleanup");
 
     CompletableFuture<ConsumerResponse> futureD = reconnected.get();
     assertNotNull(futureD, "the reconnecting stream must have submitted its request");
@@ -184,10 +186,103 @@ class CxfServerManagerTest {
     manager.completeFromConsumer(response("d"));
     assertTrue(futureD.isDone(), "B's request must complete on its correlated response");
     assertEquals("d", futureD.join().getRequestId());
+    verify(observerB).onNext(argThat(r -> "d".equals(r.getRequestId())));
+    verify(observerA, never()).onNext(argThat(r -> "d".equals(r.getRequestId())));
 
     // Counts are zero after completion: with max=1 a new request is admitted only if D's slot
     // was released exactly once.
-    CompletableFuture<ConsumerResponse> futureE = manager.handleSoapRequest(request("e"));
+    CompletableFuture<ConsumerResponse> futureE = manager.handleSoapRequest(request("v11", "e"));
     assertFalse(futureE.isCompletedExceptionally(), "capacity must be zero after completion");
+  }
+
+  @SuppressWarnings("unchecked")
+  private static StreamObserver<ConsumerRequest> observerMock() {
+    return mock(StreamObserver.class);
+  }
+
+  private static java.util.List<String> receivedIds(StreamObserver<ConsumerRequest> observer) {
+    ArgumentCaptor<ConsumerRequest> captor = ArgumentCaptor.forClass(ConsumerRequest.class);
+    verify(observer, atLeast(0)).onNext(captor.capture());
+    return captor.getAllValues().stream().map(ConsumerRequest::getRequestId).toList();
+  }
+
+  @Test
+  void secondProfileStreamDoesNotReplaceFirst() {
+    StreamObserver<ConsumerRequest> a = observerMock();
+    StreamObserver<ConsumerRequest> b = observerMock();
+
+    manager.setConsumerRequestObserver("v11", a);
+    manager.setConsumerRequestObserver("v12", b);
+    manager.handleSoapRequest(request("v11", "x"));
+
+    assertTrue(manager.hasConsumerObserver("v11"));
+    assertTrue(manager.hasConsumerObserver("v12"));
+    verify(a, times(1)).onNext(any());
+    verify(b, never()).onNext(any());
+  }
+
+  @Test
+  void requestDispatchesOnlyToItsProfileStream() {
+    StreamObserver<ConsumerRequest> a = observerMock();
+    StreamObserver<ConsumerRequest> b = observerMock();
+    manager.setConsumerRequestObserver("v11", a);
+    manager.setConsumerRequestObserver("v12", b);
+
+    manager.handleSoapRequest(request("v11", "r1"));
+    manager.handleSoapRequest(request("v12", "r2"));
+
+    assertEquals(java.util.List.of("r1"), receivedIds(a));
+    assertEquals(java.util.List.of("r2"), receivedIds(b));
+  }
+
+  @Test
+  void missingProfileStreamFailsWithoutFallback() {
+    StreamObserver<ConsumerRequest> b = observerMock();
+    manager.setConsumerRequestObserver("v12", b);
+
+    CompletableFuture<ConsumerResponse> missing = manager.handleSoapRequest(request("v11", "r"));
+
+    assertTrue(missing.isCompletedExceptionally());
+    Throwable cause = rootCause(missing);
+    assertInstanceOf(CxfServerManager.StreamUnavailableException.class, cause);
+    assertTrue(cause.getMessage().contains("v11"), String.valueOf(cause.getMessage()));
+    verify(b, never()).onNext(any());
+
+    // The rejected v11 request released its capacity slot: both v12 requests fit at max=2.
+    assertFalse(manager.handleSoapRequest(request("v12", "s1")).isDone());
+    assertFalse(manager.handleSoapRequest(request("v12", "s2")).isDone());
+  }
+
+  @Test
+  void closingOneProfileFailsOnlyItsRequests() {
+    StreamObserver<ConsumerRequest> a = observerMock();
+    StreamObserver<ConsumerRequest> b = observerMock();
+    manager.setConsumerRequestObserver("v11", a);
+    manager.setConsumerRequestObserver("v12", b);
+    CompletableFuture<ConsumerResponse> fa = manager.handleSoapRequest(request("v11", "a"));
+    CompletableFuture<ConsumerResponse> fb = manager.handleSoapRequest(request("v12", "b"));
+
+    manager.onConsumerStreamClosed("v11", a);
+
+    assertTrue(fa.isCompletedExceptionally());
+    assertInstanceOf(CxfServerManager.StreamUnavailableException.class, rootCause(fa));
+    assertFalse(fb.isDone());
+    assertFalse(manager.hasConsumerObserver("v11"));
+    assertTrue(manager.hasConsumerObserver("v12"));
+
+    manager.completeFromConsumer(response("b"));
+    assertTrue(fb.isDone());
+    assertEquals("b", fb.join().getRequestId());
+  }
+
+  @Test
+  void cleanupClearsEveryProfile() {
+    manager.setConsumerRequestObserver("v11", observerMock());
+    manager.setConsumerRequestObserver("v12", observerMock());
+
+    manager.cleanup();
+
+    assertFalse(manager.hasConsumerObserver("v11"));
+    assertFalse(manager.hasConsumerObserver("v12"));
   }
 }

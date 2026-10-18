@@ -43,6 +43,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "ne
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Publish-order-safe only while camel-core does NOT depend back on camel-cxf (ADR-0055).
+camel-core = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }

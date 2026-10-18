@@ -1720,6 +1720,7 @@ dependencies = [
  "camel-bridge",
  "camel-component-api",
  "camel-component-cxf",
+ "camel-core",
  "dashmap 6.2.1",
  "futures",
  "prost",

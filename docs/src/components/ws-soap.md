@@ -208,6 +208,8 @@ An operation with WSDL output stays request-reply. An empty response to a reques
 
 `cxf://http://0.0.0.0:9090/...` hosts a SOAP endpoint. The bridge process publishes the endpoint under `<base>/<profile_name>` over Vert.x. Inbound SOAP requests arrive on the gRPC stream as `ConsumerRequest` messages. The Consumer builds an Exchange with the payload bytes as the body and the headers from the table below.
 
+Each consumer route serves one profile. The consumer opens its own gRPC stream and announces the profile as the `x-cxf-profile` call metadata; the bridge delivers a request only to the stream of the profile in its path and never falls back to another profile's stream. A pool accepts one consumer route per profile: a second route on the same profile fails at start with a configuration error naming the profile. Stopping and restarting a route is allowed.
+
 The response body is what the route writes to `exchange.input.body` (or `exchange.output.body` if the route set it). The bridge wraps the bytes in a SOAP envelope and signs with the profile's certificates.
 
 A failed route handler returns a `soap:Server` fault with the error string. A response-marshalling failure (for example a `Stream` body, which CXF does not support) also returns a `soap:Server` fault, increments `b-prime:cxf:response-marshalling`, and logs at `error!` (ADR-0012 class b'). This holds for an input-only operation too: a marshalling failure stays a Receiver fault and never becomes a successful ACK.
@@ -257,7 +259,7 @@ Transport rejections are not SOAP faults. They never enter the table above:
 | Transport rejection | Response | Order |
 | --- | --- | --- |
 | Body over `CXF_MAX_BODY_BYTES` | HTTP 413, plaintext `request body exceeds CXF_MAX_BODY_BYTES`, connection closed | First: during body accumulation — before XML parsing, WS-Security, and the availability gate |
-| No consumer stream (pre-stream, or lost after the gate) | HTTP 503 + `Retry-After`, plaintext `routes unavailable` | Availability gate — before XML parsing and WS-Security |
+| No consumer stream for the addressed profile (pre-stream, or lost after the gate) | HTTP 503 + `Retry-After`, plaintext `routes unavailable` | Availability gate for the profile in the request path — before XML parsing and WS-Security |
 
 `security.fault_status` overrides the HTTP status for **security (WSS) faults
 only**, on the profile that sets it, on both SOAP versions. It is an integer in
@@ -382,7 +384,9 @@ Rules:
 
 Startup protocol: the bridge announces `{"status":"ready","port":N}` for gRPC and `{"status":"soap-ready","port":N}` for the SOAP listener, in any order. `N` is the ACTUAL bound port held by the JVM from the first moment it exists (bind port `0` never leaks into the announce). The supervisor (`BridgeProcess`) awaits both lines under one `bridge_start_timeout_ms` budget whenever a SOAP bind is configured; a malformed or out-of-range announced port fails startup. The announced SOAP port is the only port source for clients — no bind-read-drop probe.
 
-Pre-stream availability gate: a request that arrives before a consumer stream is open receives HTTP 503 with a `Retry-After` header and a plaintext body (`routes unavailable`) — never a SOAP fault. The same response serves a stream lost after the gate.
+Pre-stream availability gate: the gate is per profile. A request to a profile path whose consumer stream is not open receives HTTP 503 with a `Retry-After` header and a plaintext body (`routes unavailable`) — never a SOAP fault — even when another profile has a connected consumer. The same response serves a stream lost after the gate.
+
+Diagnosis: if a profile keeps answering 503 while its route is started, check the log for `CXF bridge rejected consumer profile with INVALID_ARGUMENT`. The bridge rejected the profile the consumer announced (crate and bridge versions out of step, or a profile missing from the bridge configuration); the consumer logged that one error, stopped and does not reconnect. Fix the version pair or profile configuration, then restart the route.
 
 Signer metadata (Body `SIGN` coverage) is an integrity signal, not authentication: the exported `SignerIdentity` fields are exchange properties only and never a principal or authenticated identity (ADR-0032). One-way input-only operations are supported and return an empty HTTP 202 ACK after correlated completion (see [One-way consumer operations](#one-way-consumer-operations)).
 

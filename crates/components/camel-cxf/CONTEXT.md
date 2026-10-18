@@ -109,9 +109,9 @@ is rejected at the handshake. The bridge binds the configured address (port `0`
 = OS-assigned, JVM-held) and announces the ACTUAL bound port in the
 `soap-ready` line; `BridgeProcess` awaits `ready` + `soap-ready` (any order)
 under one startup budget and exposes the announced SOAP port read-only
-(`CxfBridgePool::listener_info`). Before a consumer stream is open, requests
+(`CxfBridgePool::listener_info`). Before the consumer stream of the addressed profile is open, requests to that profile
 take the pre-stream gate: HTTP 503 + `Retry-After` + plaintext, never a SOAP
-fault. Plaintext `http` ingress remains an allowed interim form.
+fault. Plaintext `http` ingress remains an allowed interim form. Consumer streams are per profile: `CxfConsumer` announces its profile as `x-cxf-profile` metadata, the bridge dispatches by the profile in the request path with no cross-profile fallback and answers an unknown or missing profile with `INVALID_ARGUMENT` (terminal for the consumer, no reconnect), and the pool-level `ConsumerProfileGuard` rejects a second consumer route on one profile at start (rc-gsy1v).
 
 ## Consumer fault matrix
 
