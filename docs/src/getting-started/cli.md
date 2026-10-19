@@ -9,7 +9,7 @@ The `camel` CLI runs, scaffolds, and inspects integration routes from the termin
 | `run` | Start routes from a config file | `camel run` |
 | `new` | Scaffold a new project | `camel new my-integration` |
 | `journal inspect` | Read events from a journal file | `camel journal inspect runtime.db` |
-| `lint` | Lint a route file | `camel lint routes/api.yaml` |
+| `lint` | Lint a route file or a directory tree | `camel lint routes/` |
 | `test` | Run declarative mock tests | `camel test tests/` |
 | `job` | Run or list jobs | `camel job report-nightly` |
 | `compile` | Pack a route or job into an artifact | `camel compile routes.yaml -o app` |

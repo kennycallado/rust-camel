@@ -1,0 +1,4 @@
+id: gerror
+from: direct:start
+steps:
+  - to: timer:gold?bogusOption=1

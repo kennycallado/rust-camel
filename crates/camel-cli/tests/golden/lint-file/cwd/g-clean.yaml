@@ -1,0 +1,4 @@
+id: gclean
+from: timer:gold?period=1000
+steps:
+  - to: log:gold

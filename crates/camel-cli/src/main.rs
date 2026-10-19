@@ -119,7 +119,7 @@ enum Commands {
         action: commands::openapi::OpenapiAction,
     },
 
-    /// Lint a route file against the production component catalog.
+    /// Lint a route file or directory tree against the production component catalog.
     Lint(commands::lint::LintArgs),
 
     /// Run declarative mock tests from *.test.yaml documents.

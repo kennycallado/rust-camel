@@ -11,7 +11,7 @@ Each command has a reference page in this section. `run`, `new`, and `journal in
 | `camel run` | Start a Camel context from route files | [Getting started: CLI usage](../getting-started/cli.md) |
 | `camel new <NAME>` | Scaffold a new project | [Getting started: CLI usage](../getting-started/cli.md) |
 | `camel journal inspect <FILE>` | Read events from a runtime journal file | [Getting started: CLI usage](../getting-started/cli.md) |
-| `camel lint <FILE>` | Lint a route file against the production component catalog | this page |
+| `camel lint <PATH>` | Lint a route file or a directory tree | this page |
 | `camel test <FILE\|DIR>...` | Run declarative mock tests from `*.test.yaml` documents | [Declarative camel test](../testing/camel-test.md) |
 | `camel job [<FILE>]` | Run or list jobs from `*.job.yaml` documents | [camel job](job.md) |
 | `camel compile <DOCUMENT>` | Pack a route or job into a self-contained artifact | [camel compile](compile.md) |
@@ -23,17 +23,22 @@ Flag definitions for the command enum live in `crates/camel-cli/src/main.rs`.
 
 ## camel lint
 
-Lint one route file against the production component catalog. The command prints diagnostics with byte-exact spans.
+Lint a route file or a directory tree against the production component catalog. The command prints diagnostics with byte-exact spans.
 
 ```console
 camel lint routes/my-route.yaml
+camel lint routes/
 ```
+
+Pass a directory to lint every route document below it. The walker collects `.yaml`, `.yml`, and `.json` files (extensions are case-sensitive). It prunes hidden entries and `target/` directories below the root, and never descends into symlinked directories; symlinked files are linted. Reserved documents (`*.test.yaml`, `*.test.yml`, `*.job.yaml`, `*.job.yml`) are skipped with an info line. Files are visited in deterministic depth-first order, sorted by name. The command prints one summary line on stdout: `linted N file(s), M skipped, F failed, K diagnostic(s)`.
+
+Exit codes aggregate across the tree: 2 when the root cannot be read or any file fails to read, else 1 when any file has an Error diagnostic, else 0. Documents that are not route definitions are linted too, so they can raise `R-SCHEMA` errors, exactly as when named individually.
 
 | Exit code | Outcome |
 |-----------|---------|
 | 0 | Clean. No Error diagnostics. |
 | 1 | At least one Error diagnostic. |
-| 2 | CLI misuse: missing or unreadable file. |
+| 2 | CLI misuse, or a directory root or file that cannot be read. |
 
 Warnings do not change the exit code. For example, `camel lint` warns `R-MOCK-IN-PRODUCTION` on inline `to: mock:` sends in route files; see [Declarative camel test](../testing/camel-test.md). Reserved documents are skipped with an informational message: `*.test.yaml` test documents and `*.job.yaml` job documents.
 
