@@ -24,5 +24,15 @@
 # `rhai 1.25.1` (the latest 1.x), pulled via camel-language-rhai. Unmaintained is
 # informational, not a vulnerability; no feature combination avoids it. Remove this
 # entry once a rhai release drops smartstring.
-ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0235", "RUSTSEC-2026-0249"]
+#
+# RUSTSEC-2026-0373 (ammonia, case-sensitive CSS url() matching) — transitive,
+# non-applicable in rust-camel. `ammonia 4.1.7` is pulled by `surrealdb-core`
+# (surrealdb 3.2.4), used only by `camel-component-surrealdb`. The vector fires
+# when sanitizing untrusted HTML that carries CSS: a quoted `url("")` is matched
+# case-sensitively, so relative-URL/scheme limits can be bypassed. rust-camel does
+# not sanitize untrusted HTML-with-CSS from route input; the SurrealDB instance is
+# operator-configured and trusted (same reasoning as RUSTSEC-2026-0235 above).
+# No patched ammonia version exists yet; the fix is upstream. Remove this entry
+# once an ammonia release carries the fix (bd rc-9mq7v).
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0235", "RUSTSEC-2026-0249", "RUSTSEC-2026-0373"]
 informational_warnings = ["unmaintained"]
