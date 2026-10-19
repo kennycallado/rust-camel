@@ -175,6 +175,12 @@ pub struct CxfProfileEnvVars {
     pub signature_digest_algorithm: Option<String>,
     pub signature_c14n_algorithm: Option<String>,
     pub signature_parts: Option<String>,
+    /// Optional comma-separated inbound signature algorithm allow-list,
+    /// emitted as `CXF_PROFILE_<NAME>_ALLOWED_SIGNATURE_ALGORITHMS`.
+    pub allowed_signature_algorithms: Option<String>,
+    /// Optional comma-separated inbound digest algorithm allow-list, emitted
+    /// as `CXF_PROFILE_<NAME>_ALLOWED_DIGEST_ALGORITHMS`.
+    pub allowed_digest_algorithms: Option<String>,
     /// Optional per-profile HTTP status override for security (WSS) faults only,
     /// emitted as `CXF_PROFILE_<NAME>_FAULT_STATUS`.
     pub fault_status: Option<u16>,
@@ -232,6 +238,12 @@ impl CxfProfileEnvVars {
         }
         if let Some(ref v) = self.signature_parts {
             vars.push((format!("{}SIGNATURE_PARTS", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.allowed_signature_algorithms {
+            vars.push((format!("{}ALLOWED_SIGNATURE_ALGORITHMS", prefix), v.clone()));
+        }
+        if let Some(ref v) = self.allowed_digest_algorithms {
+            vars.push((format!("{}ALLOWED_DIGEST_ALGORITHMS", prefix), v.clone()));
         }
         if let Some(v) = self.fault_status {
             vars.push((format!("{}FAULT_STATUS", prefix), v.to_string()));
@@ -1113,6 +1125,8 @@ mod tests {
                 signature_digest_algorithm: None,
                 signature_c14n_algorithm: None,
                 signature_parts: None,
+                allowed_signature_algorithms: None,
+                allowed_digest_algorithms: None,
                 fault_status: None,
                 tls: None,
             },
@@ -1135,6 +1149,8 @@ mod tests {
                 signature_digest_algorithm: None,
                 signature_c14n_algorithm: None,
                 signature_parts: None,
+                allowed_signature_algorithms: None,
+                allowed_digest_algorithms: None,
                 fault_status: None,
                 tls: None,
             },
@@ -1239,6 +1255,8 @@ mod tests {
             signature_digest_algorithm: None,
             signature_c14n_algorithm: None,
             signature_parts: None,
+            allowed_signature_algorithms: None,
+            allowed_digest_algorithms: None,
             fault_status: None,
             tls: None,
         }];
@@ -1280,13 +1298,17 @@ mod tests {
             signature_digest_algorithm: None,
             signature_c14n_algorithm: None,
             signature_parts: None,
+            allowed_signature_algorithms: Some(
+                "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256".to_string(),
+            ),
+            allowed_digest_algorithms: Some("http://www.w3.org/2001/04/xmlenc#sha256".to_string()),
             fault_status: Some(403),
             tls: None,
         };
 
         let env = vars.to_env_vars();
-        // 3 required + 1 address + 8 security + 1 fault_status = 13
-        assert_eq!(env.len(), 13);
+        // 3 required + 1 address + 8 security + 2 allowed_algorithms + 1 fault_status = 15
+        assert_eq!(env.len(), 15);
 
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"CXF_PROFILE_FULL_WSDL_PATH"));
@@ -1301,6 +1323,8 @@ mod tests {
         assert!(keys.contains(&"CXF_PROFILE_FULL_SIG_PASSWORD"));
         assert!(keys.contains(&"CXF_PROFILE_FULL_SECURITY_ACTIONS_OUT"));
         assert!(keys.contains(&"CXF_PROFILE_FULL_SECURITY_ACTIONS_IN"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_ALLOWED_SIGNATURE_ALGORITHMS"));
+        assert!(keys.contains(&"CXF_PROFILE_FULL_ALLOWED_DIGEST_ALGORITHMS"));
         let fault_status = env
             .iter()
             .find(|(k, _)| k == "CXF_PROFILE_FULL_FAULT_STATUS")
@@ -1506,6 +1530,8 @@ mod tests {
             signature_digest_algorithm: None,
             signature_c14n_algorithm: None,
             signature_parts: None,
+            allowed_signature_algorithms: None,
+            allowed_digest_algorithms: None,
             fault_status: None,
             tls: None,
         };

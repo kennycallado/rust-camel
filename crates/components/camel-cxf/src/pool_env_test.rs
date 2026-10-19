@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use camel_bridge::process::{BridgeProcessConfig, CxfProfileEnvVars, CxfTlsEnvVars, Redacted};
 
-use crate::config::{CxfListenerTls, CxfProfileConfig};
+use crate::config::{CxfListenerTls, CxfProfileConfig, CxfSecurityFields};
 use crate::pool::env_var_keys;
 
 /// Realistic profile set as built by `start_bridge_inner`: one profile whose
@@ -39,6 +39,10 @@ fn secret_profiles() -> Vec<CxfProfileEnvVars> {
         signature_digest_algorithm: None,
         signature_c14n_algorithm: None,
         signature_parts: None,
+        allowed_signature_algorithms: Some(
+            "http://www.w3.org/2000/09/xmldsig#rsa-sha1".to_string(),
+        ),
+        allowed_digest_algorithms: Some("http://www.w3.org/2000/09/xmldsig#sha1".to_string()),
         fault_status: None,
         tls: Some(CxfTlsEnvVars {
             keystore_path: Some("/etc/cxf/tls-keystore.p12".to_string()),
@@ -256,6 +260,14 @@ fn bridge_env_trace_site_renders_keys_not_values() {
         captured.contains("CXF_PROFILE_BALEARES_ENC_USERNAME"),
         "missing key in {captured}"
     );
+    assert!(
+        captured.contains("CXF_PROFILE_BALEARES_ALLOWED_SIGNATURE_ALGORITHMS"),
+        "missing key in {captured}"
+    );
+    assert!(
+        captured.contains("CXF_PROFILE_BALEARES_ALLOWED_DIGEST_ALGORITHMS"),
+        "missing key in {captured}"
+    );
 
     // VALUES absent — a revert to `env_vars = ?config.env_vars` dumps all of
     // these (address credentials, usernames, Deref-unwrapped passwords).
@@ -274,6 +286,91 @@ fn bridge_env_trace_site_renders_keys_not_values() {
     assert_eq!(
         last_val,
         "http://admin:s3cret@soap.internal:9443/cxf?tok=abc"
+    );
+}
+
+// --- Inbound algorithm allow-lists are opt-in env vars (Task 2.2) ---
+
+/// Profile with the inbound verification allow-lists set (or not) exactly as
+/// parsed from `[profiles.security]`.
+fn allowed_algorithms_profile(
+    name: &str,
+    allowed_signature_algorithms: Option<&str>,
+    allowed_digest_algorithms: Option<&str>,
+) -> CxfProfileConfig {
+    CxfProfileConfig {
+        name: name.to_string(),
+        address: None,
+        wsdl_path: "/etc/cxf/baleares.wsdl".to_string(),
+        service_name: "Svc".to_string(),
+        port_name: "Port".to_string(),
+        security: CxfSecurityFields {
+            allowed_signature_algorithms: allowed_signature_algorithms.map(str::to_string),
+            allowed_digest_algorithms: allowed_digest_algorithms.map(str::to_string),
+            ..Default::default()
+        },
+    }
+}
+
+fn env_map(config: &BridgeProcessConfig) -> std::collections::HashMap<&str, &str> {
+    config
+        .env_vars
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect()
+}
+
+#[test]
+fn pool_env_emits_allowed_algorithms_only_when_set() {
+    const SIG: &str = "http://www.w3.org/2000/09/xmldsig#rsa-sha1,http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+    const DIGEST: &str = "http://www.w3.org/2000/09/xmldsig#sha1";
+
+    let opted_in = crate::pool::profile_env_vars_for(&[allowed_algorithms_profile(
+        "legacy_opt_in",
+        Some(SIG),
+        Some(DIGEST),
+    )]);
+    let config = crate::pool::bridge_config_with_env_trace(
+        "slot-1",
+        PathBuf::from("/tmp/cxf-bridge"),
+        &opted_in,
+        None,
+        15_000,
+        None,
+    );
+    let env = env_map(&config);
+    assert_eq!(
+        env.get("CXF_PROFILE_LEGACY_OPT_IN_ALLOWED_SIGNATURE_ALGORITHMS")
+            .copied(),
+        Some(SIG)
+    );
+    assert_eq!(
+        env.get("CXF_PROFILE_LEGACY_OPT_IN_ALLOWED_DIGEST_ALGORITHMS")
+            .copied(),
+        Some(DIGEST)
+    );
+
+    let secure_default = crate::pool::profile_env_vars_for(&[allowed_algorithms_profile(
+        "secure_default",
+        None,
+        None,
+    )]);
+    let config = crate::pool::bridge_config_with_env_trace(
+        "slot-1",
+        PathBuf::from("/tmp/cxf-bridge"),
+        &secure_default,
+        None,
+        15_000,
+        None,
+    );
+    let env = env_map(&config);
+    assert!(
+        !env.contains_key("CXF_PROFILE_SECURE_DEFAULT_ALLOWED_SIGNATURE_ALGORITHMS"),
+        "unset allow-list must not be emitted: {env:?}"
+    );
+    assert!(
+        !env.contains_key("CXF_PROFILE_SECURE_DEFAULT_ALLOWED_DIGEST_ALGORITHMS"),
+        "unset allow-list must not be emitted: {env:?}"
     );
 }
 

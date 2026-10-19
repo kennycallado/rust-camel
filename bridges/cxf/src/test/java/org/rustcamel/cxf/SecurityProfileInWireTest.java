@@ -66,6 +66,8 @@ class SecurityProfileInWireTest {
             .keystore(keystorePath.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
             .sigUser(TestKeystoreHelper.KEY_ALIAS, TestKeystoreHelper.KEYSTORE_PASSWORD)
             .actionsOut("Signature")
+            .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+            .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
             .build();
     // The signer's own keystore doubles as the verifier's truststore: no dedicated truststore
     // fixture exists and the signer cert must be a trust anchor for verification anyway.

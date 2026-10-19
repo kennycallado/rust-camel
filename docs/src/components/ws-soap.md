@@ -320,6 +320,25 @@ or signer policy on them and dispatches with no signer.
 
 Credentials flow through per-profile environment variables. `CxfProfileEnvVars` wraps keystore, truststore, and signature passwords in `Redacted` while it builds the child-process configuration. gRPC requests carry only the `security_profile` selector. They do not carry password bytes. `CxfSecurityFields::fmt` prints `<redacted>` for every password field. The redaction policy follows ADR-0051.
 
+### Inbound algorithm allow-list (breaking change)
+
+Inbound WS-Security verification enforces a per-profile allow-list (ADR-0085). Two settings form it:
+
+| Option | Environment variable | Property | Default |
+| --- | --- | --- | --- |
+| `allowed_signature_algorithms` | `CXF_PROFILE_<NAME>_ALLOWED_SIGNATURE_ALGORITHMS` | `cxf.security.allowed.signature.algorithms` | `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256`, `http://www.w3.org/2001/04/xmldsig-more#rsa-sha384`, `http://www.w3.org/2001/04/xmldsig-more#rsa-sha512` |
+| `allowed_digest_algorithms` | `CXF_PROFILE_<NAME>_ALLOWED_DIGEST_ALGORITHMS` | `cxf.security.allowed.digest.algorithms` | `http://www.w3.org/2001/04/xmlenc#sha256`, `http://www.w3.org/2001/04/xmldsig-more#sha384`, `http://www.w3.org/2001/04/xmlenc#sha512` |
+
+Values are comma-separated absolute URIs and have replacement semantics: a set value replaces the default. The default rejects the SHA-1 family and every URI outside these six, on JVM and native. This is a breaking change: JVM previously accepted more algorithms through the runtime-registered Santuario provider. To migrate, set both options to the URIs the profile must accept, including the modern ones the profile still needs.
+
+The options are exempt from the outbound signing preconditions. A verify-only profile (truststore, no keystore, no outbound actions) can set them. Construction fails when a set value is empty, has a blank segment, has a non-absolute URI, or the profile has neither a truststore nor a keystore. An empty list is rejected because WSS4J would skip the suite check and allow every algorithm. The Rust mirror requires `://` in every segment, so a non-`://` scheme URI that Java treats as absolute (for example `mailto:foo`) fails at pool-config load. Java remains the authoritative validator.
+
+On a keystore-only profile (no truststore) the producer in-interceptor has no Signature action: it is null when no other inbound action applies, and decrypt-only when an explicit `Encrypt` in-action applies. The inbound opt-in therefore remains consumer-path-only in all cases, because the Signature action requires a truststore.
+
+The legacy partner signs with exclusive c14n (BSP R5404-conformant). The allow-list scopes algorithms only; the bridge does not constrain canonicalization.
+
+The signature knobs (`signature_algorithm`, `signature_digest_algorithm`, `signature_c14n_algorithm`) control signing only. They do not opt in to inbound SHA-1.
+
 ### Producer transport TLS
 
 A producer profile can present a client certificate and validate the server over HTTPS. The material is a nested, all-or-nothing table under `[components.cxf.profiles.security.tls]`:

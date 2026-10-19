@@ -226,6 +226,14 @@ pub struct CxfSecurityFields {
     pub signature_digest_algorithm: Option<String>,
     pub signature_c14n_algorithm: Option<String>,
     pub signature_parts: Option<String>,
+    /// Comma-separated inbound signature algorithm allow-list (absolute URIs).
+    /// Replaces the bridge's secure default when set; exempt from the signing
+    /// preconditions because it is an inbound verification knob.
+    pub allowed_signature_algorithms: Option<String>,
+    /// Comma-separated inbound digest algorithm allow-list (absolute URIs).
+    /// Replaces the bridge's secure default when set; exempt from the signing
+    /// preconditions because it is an inbound verification knob.
+    pub allowed_digest_algorithms: Option<String>,
     /// Optional per-profile HTTP status override applied to **security (WSS)
     /// faults only**, on both SOAP versions. Validated to `400..=599` at
     /// startup; out-of-range values fail the pool config before the bridge
@@ -265,9 +273,82 @@ impl fmt::Debug for CxfSecurityFields {
             )
             .field("signature_c14n_algorithm", &self.signature_c14n_algorithm)
             .field("signature_parts", &self.signature_parts)
+            .field(
+                "allowed_signature_algorithms",
+                &self.allowed_signature_algorithms,
+            )
+            .field("allowed_digest_algorithms", &self.allowed_digest_algorithms)
             .field("fault_status", &self.fault_status)
             .field("tls", &self.tls)
             .finish()
+    }
+}
+
+impl CxfSecurityFields {
+    /// Lightweight mirror of the Java `ALLOWED_*` construction checks. The
+    /// lists are inbound verification knobs, so they are exempt from the
+    /// signing preconditions (no keystore or outbound action is required), but
+    /// they are inert without verification material. Java remains the
+    /// authoritative validator for URI absoluteness; here only `://` presence
+    /// is checked.
+    fn validate_allowed_algorithms(
+        &self,
+        profile: &str,
+    ) -> Result<(), camel_component_api::CamelError> {
+        let has_verification_material =
+            self.keystore_path.is_some() || self.truststore_path.is_some();
+        for (key, raw) in [
+            (
+                "allowed_signature_algorithms",
+                self.allowed_signature_algorithms.as_deref(),
+            ),
+            (
+                "allowed_digest_algorithms",
+                self.allowed_digest_algorithms.as_deref(),
+            ),
+        ] {
+            let Some(raw) = raw else { continue };
+            let mut parsed = 0usize;
+            let mut blank_segment = false;
+            for segment in raw.split(',') {
+                let segment = segment.trim();
+                if segment.is_empty() {
+                    blank_segment = true;
+                    continue;
+                }
+                if !segment.contains("://") {
+                    return Err(camel_component_api::CamelError::Config(format!(
+                        "cxf profile '{profile}': security.{key} segment '{segment}' is not an \
+                         absolute URI; algorithm URIs must be absolute (for example \
+                         'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256')"
+                    )));
+                }
+                parsed += 1;
+            }
+            if parsed == 0 {
+                return Err(camel_component_api::CamelError::Config(format!(
+                    "cxf profile '{profile}': security.{key} is set but lists no algorithm URIs; \
+                     an empty allow-list would allow every algorithm, including SHA-1 — remove \
+                     the option to use the secure defaults or list at least one absolute \
+                     algorithm URI"
+                )));
+            }
+            if blank_segment {
+                return Err(camel_component_api::CamelError::Config(format!(
+                    "cxf profile '{profile}': security.{key} contains a blank algorithm URI \
+                     segment; remove the empty entry and list only absolute algorithm URIs"
+                )));
+            }
+            if !has_verification_material {
+                return Err(camel_component_api::CamelError::Config(format!(
+                    "cxf profile '{profile}': security.{key} is set but the profile has no \
+                     inbound verification material (neither security.keystore_path nor \
+                     security.truststore_path); the allow-list would be silently inert — \
+                     configure a truststore or keystore, or remove the option"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -464,6 +545,9 @@ impl CxfPoolConfig {
                     profile.name, fault_status
                 )));
             }
+            profile
+                .security
+                .validate_allowed_algorithms(&profile.name)?;
             if let Some(tls) = &profile.security.tls {
                 tls.validate(&profile.name)?;
             }
@@ -1514,6 +1598,206 @@ mod tests {
                 "fault_status {in_range} must be accepted"
             );
         }
+    }
+
+    // ── ALLOWED_* inbound algorithm allow-lists (Task 2.1) ─────────────────
+
+    const LEGACY_SIG_URI: &str = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
+    const MODERN_SIG_URI: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+
+    fn profile_with_security(name: &str, security: CxfSecurityFields) -> CxfProfileConfig {
+        CxfProfileConfig {
+            name: name.to_string(),
+            address: None,
+            wsdl_path: "/wsdl/test.wsdl".to_string(),
+            service_name: "Svc".to_string(),
+            port_name: "Port".to_string(),
+            security,
+        }
+    }
+
+    #[test]
+    fn allowed_signature_algorithms_parses_and_emits() {
+        let toml_str = format!(
+            r#"
+            [[profiles]]
+            name = "legacy"
+            wsdl_path = "/wsdl/test.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            truststore_path = "/etc/cxf/truststore.jks"
+            allowed_signature_algorithms = "{LEGACY_SIG_URI},{MODERN_SIG_URI}"
+        "#
+        );
+        let cfg: CxfPoolConfig = toml::from_str(&toml_str).expect("valid toml");
+        assert_eq!(
+            cfg.profiles[0]
+                .security
+                .allowed_signature_algorithms
+                .as_deref(),
+            Some(format!("{LEGACY_SIG_URI},{MODERN_SIG_URI}").as_str())
+        );
+        let debug = format!("{:?}", cfg.profiles[0].security);
+        assert!(
+            debug.contains(LEGACY_SIG_URI),
+            "Debug must not redact algorithm URIs: {debug}"
+        );
+        assert!(
+            debug.contains(MODERN_SIG_URI),
+            "Debug must not redact algorithm URIs: {debug}"
+        );
+    }
+
+    #[test]
+    fn allowed_algorithms_exempt_from_signing_precondition() {
+        let security = CxfSecurityFields {
+            truststore_path: Some("/etc/cxf/truststore.jks".to_string()),
+            allowed_signature_algorithms: Some(format!("{LEGACY_SIG_URI},{MODERN_SIG_URI}")),
+            allowed_digest_algorithms: Some("http://www.w3.org/2001/04/xmlenc#sha256".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            security.keystore_path.is_none(),
+            "verify-only profile must not need a signing keystore"
+        );
+        assert!(
+            security.security_actions_out.is_none(),
+            "verify-only profile must not need outbound actions"
+        );
+        let cfg = CxfPoolConfig {
+            profiles: vec![profile_with_security("legacy", security)],
+            ..Default::default()
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "ALLOWED_* options are exempt from signing preconditions"
+        );
+    }
+
+    #[test]
+    fn allowed_algorithms_without_verification_material_rejected() {
+        for (key, security) in [
+            (
+                "allowed_signature_algorithms",
+                CxfSecurityFields {
+                    allowed_signature_algorithms: Some(LEGACY_SIG_URI.to_string()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "allowed_digest_algorithms",
+                CxfSecurityFields {
+                    allowed_digest_algorithms: Some(
+                        "http://www.w3.org/2000/09/xmldsig#sha1".to_string(),
+                    ),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let cfg = CxfPoolConfig {
+                profiles: vec![profile_with_security("legacy", security)],
+                ..Default::default()
+            };
+            match cfg.validate().unwrap_err() {
+                camel_component_api::CamelError::Config(msg) => {
+                    assert!(msg.contains(key), "error must name {key}, got: {msg}");
+                    assert!(msg.contains("verification material"), "got: {msg}");
+                }
+                other => panic!("expected CamelError::Config, got {other:?}"),
+            }
+        }
+
+        // Producer transport TLS stores are NOT inbound verification material.
+        let cfg = CxfPoolConfig {
+            profiles: vec![profile_with_security(
+                "legacy",
+                CxfSecurityFields {
+                    allowed_signature_algorithms: Some(LEGACY_SIG_URI.to_string()),
+                    tls: Some(CxfTlsConfig {
+                        keystore_path: Some("/etc/cxf/ks.p12".to_string()),
+                        keystore_password: Some("pw".to_string()),
+                        truststore_path: Some("/etc/cxf/ts.p12".to_string()),
+                        truststore_password: Some("pw".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )],
+            ..Default::default()
+        };
+        match cfg.validate().unwrap_err() {
+            camel_component_api::CamelError::Config(msg) => {
+                assert!(
+                    msg.contains("allowed_signature_algorithms"),
+                    "error must name the option, got: {msg}"
+                );
+            }
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn allowed_algorithms_empty_rejected() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "legacy"
+            wsdl_path = "/wsdl/test.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            truststore_path = "/etc/cxf/truststore.jks"
+            allowed_signature_algorithms = ""
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        assert!(
+            err.to_string().contains("allowed_signature_algorithms"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn allowed_algorithms_blank_segment_rejected() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "legacy"
+            wsdl_path = "/wsdl/test.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            keystore_path = "/etc/cxf/keystore.jks"
+            allowed_signature_algorithms = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256,,http://www.w3.org/2001/04/xmldsig-more#rsa-sha512"
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        assert!(
+            err.to_string().contains("allowed_signature_algorithms"),
+            "got: {err}"
+        );
+        assert!(err.to_string().contains("blank"), "got: {err}");
+    }
+
+    #[test]
+    fn allowed_algorithms_non_uri_rejected() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "legacy"
+            wsdl_path = "/wsdl/test.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            truststore_path = "/etc/cxf/truststore.jks"
+            allowed_signature_algorithms = "rsa-sha1"
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        assert!(
+            err.to_string().contains("allowed_signature_algorithms"),
+            "got: {err}"
+        );
+        assert!(err.to_string().contains("absolute URI"), "got: {err}");
     }
 
     // ── Listener TLS pool shape (Task 2.6) ─────────────────────────────────

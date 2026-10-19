@@ -28,10 +28,12 @@ The CXF bridge supports WS-Security (signing, encryption, verification, and decr
 | `cxf.enc.username`                        | `serverkey`       | Alias used for encryption (recipient's public key).                                                                                                     |
 | `cxf.security.actions.out`                | _(empty)_         | Space-separated WSS4J action tokens for outbound messages (e.g. `Signature`, `Signature Encrypt`, `Signature Timestamp`). Supported tokens: `Signature`, `Encrypt`, `Timestamp` (`Timestamp` requires `Signature`); any other token fails the profile build. See Timestamp behavior for constraints and build-time rejections.                                                      |
 | `cxf.security.actions.in`                 | _(empty)_         | Space-separated WSS4J action tokens for inbound messages. Blank/unset keeps the default (`Signature`), which the in-interceptor materializes only when a truststore is present. Supported tokens: `Signature`, `Encrypt`, `Timestamp` (`Timestamp` requires `Signature`); any other token fails the profile build. Explicit `Signature` requires `cxf.truststore.path`; explicit `Encrypt` requires `cxf.keystore.path`; the build fails otherwise. The keystore fallback applies only to the manual consumer path, and the truststore may point at the same JKS as the keystore. |
-| `CXF_PROFILE_<N>_SIGNATURE_ALGORITHM` (`cxf.security.signature.algorithm`) | _(WSS4J default)_ | Signature algorithm URI (e.g. `http://www.w3.org/2000/09/xmldsig#rsa-sha1` for legacy, `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` for modern). Applied on BOTH producer requests and consumer signed responses. |
-| `CXF_PROFILE_<N>_SIGNATURE_DIGEST_ALGORITHM` (`cxf.security.signature.digest.algorithm`) | _(WSS4J default)_ | Digest algorithm URI (e.g. `http://www.w3.org/2000/09/xmldsig#sha1` or `http://www.w3.org/2001/04/xmlenc#sha256`). Applied on BOTH paths. |
-| `CXF_PROFILE_<N>_SIGNATURE_C14N_ALGORITHM` (`cxf.security.signature.c14n.algorithm`) | _(WSS4J default)_ | Canonicalization algorithm URI (e.g. `http://www.w3.org/2001/10/xml-exc-c14n#`). Applied on BOTH paths. |
+| `CXF_PROFILE_<N>_SIGNATURE_ALGORITHM` (`cxf.security.signature.algorithm`) | _(WSS4J default)_ | Signature algorithm URI (e.g. `http://www.w3.org/2000/09/xmldsig#rsa-sha1` for legacy, `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256` for modern). Controls signing only (producer requests and consumer signed responses). Inbound verification rejects SHA-1 signature and digest algorithms unless the profile sets `CXF_PROFILE_<NAME>_ALLOWED_SIGNATURE_ALGORITHMS`/`ALLOWED_DIGEST_ALGORITHMS`. |
+| `CXF_PROFILE_<N>_SIGNATURE_DIGEST_ALGORITHM` (`cxf.security.signature.digest.algorithm`) | _(WSS4J default)_ | Digest algorithm URI (e.g. `http://www.w3.org/2000/09/xmldsig#sha1` or `http://www.w3.org/2001/04/xmlenc#sha256`). Controls signing only. |
+| `CXF_PROFILE_<N>_SIGNATURE_C14N_ALGORITHM` (`cxf.security.signature.c14n.algorithm`) | _(WSS4J default)_ | Canonicalization algorithm URI (e.g. `http://www.w3.org/2001/10/xml-exc-c14n#`). Controls signing only. |
 | `CXF_PROFILE_<N>_SIGNATURE_PARTS` (`cxf.security.signature.parts`) | _(WSS4J default)_ | Signed-parts definition, applied on the PRODUCER path only — see [Signature knobs](#signature-knobs) for grammar and the consumer restriction. |
+| `CXF_PROFILE_<NAME>_ALLOWED_SIGNATURE_ALGORITHMS` (`cxf.security.allowed.signature.algorithms`) | `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256`, `http://www.w3.org/2001/04/xmldsig-more#rsa-sha384`, `http://www.w3.org/2001/04/xmldsig-more#rsa-sha512` | Comma-separated inbound signature verification allow-list of absolute URIs. Set values replace the default. SHA-1 rejected by default. Exempt from the outbound signing preconditions, so a verify-only profile can set it. |
+| `CXF_PROFILE_<NAME>_ALLOWED_DIGEST_ALGORITHMS` (`cxf.security.allowed.digest.algorithms`) | `http://www.w3.org/2001/04/xmlenc#sha256`, `http://www.w3.org/2001/04/xmldsig-more#sha384`, `http://www.w3.org/2001/04/xmlenc#sha512` | Comma-separated inbound digest verification allow-list of absolute URIs. Set values replace the default. SHA-1 rejected by default. Exempt from the outbound signing preconditions, so a verify-only profile can set it. |
 | `cxf.security.username`                   | _(none)_          | Username for basic authentication.                                                                                                                      |
 | `cxf.security.password`                   | _(none)_          | Password for basic authentication.                                                                                                                      |
 
@@ -69,7 +71,47 @@ cxf.security.actions.out=Signature
 cxf.security.actions.in=Signature
 cxf.security.signature.algorithm=http://www.w3.org/2000/09/xmldsig#rsa-sha1
 cxf.security.signature.digest.algorithm=http://www.w3.org/2000/09/xmldsig#sha1
+cxf.security.allowed.signature.algorithms=http://www.w3.org/2000/09/xmldsig#rsa-sha1
+cxf.security.allowed.digest.algorithms=http://www.w3.org/2000/09/xmldsig#sha1
 ```
+
+The legacy partner signs with exclusive c14n (BSP R5404-conformant). The allow-list scopes algorithms only; the bridge does not constrain canonicalization.
+
+### Inbound algorithm allow-list (breaking change)
+
+Inbound verification enforces a per-profile allow-list. The defaults are six
+modern URIs:
+
+- Signature: `http://www.w3.org/2001/04/xmldsig-more#rsa-sha256`,
+  `http://www.w3.org/2001/04/xmldsig-more#rsa-sha384`,
+  `http://www.w3.org/2001/04/xmldsig-more#rsa-sha512`.
+- Digest: `http://www.w3.org/2001/04/xmlenc#sha256`,
+  `http://www.w3.org/2001/04/xmldsig-more#sha384`,
+  `http://www.w3.org/2001/04/xmlenc#sha512`.
+
+The default rejects the SHA-1 family and every URI outside these six, on
+JVM and native. This is a breaking change: JVM previously accepted more
+algorithms through the runtime-registered Santuario provider. To migrate,
+set both knobs to the URIs the profile must accept. Values are
+comma-separated absolute URIs and have replacement semantics: a set value
+replaces the default, so list every URI still needed, including the modern
+ones.
+
+The knobs are exempt from the outbound signing preconditions. A verify-only
+profile (truststore, no keystore, no outbound actions) can set them.
+Construction fails when a set value is empty, has a blank segment, has a
+non-absolute URI, or the profile has neither a truststore nor a keystore.
+An empty list is rejected because WSS4J would skip the suite check and
+allow every algorithm. The Rust mirror requires `://` in every segment, so
+a non-`://` scheme URI that Java treats as absolute (for example
+`mailto:foo`) fails at pool-config load. Java remains the authoritative
+validator.
+
+On a keystore-only profile (no truststore) the producer in-interceptor has
+no Signature action: it is null when no other inbound action applies, and
+decrypt-only when an explicit `Encrypt` in-action applies. The inbound
+opt-in therefore remains consumer-path-only in all cases, because the
+Signature action requires a truststore.
 
 ### Inbound security
 
@@ -100,9 +142,12 @@ property keys below map to these; in native-image the property form is
 inert — the env form is the operative surface. The knobs take effect at
 startup and fail loud:
 
-- **Both paths**: `algorithm`, `digest.algorithm`, and `c14n.algorithm`
-  apply to producer requests (the outbound `Dispatch` interceptor) AND to
-  consumer signed responses (`WssSecurityProcessor`).
+- **Signing only**: `algorithm`, `digest.algorithm`, and `c14n.algorithm`
+  apply to producer requests (the outbound `Dispatch` interceptor) and to
+  consumer signed responses (`WssSecurityProcessor`). They do not widen
+  inbound verification; the [inbound algorithm
+  allow-list](#inbound-algorithm-allow-list-breaking-change) governs
+  acceptance.
 - **Producer only**: `signature.parts`. Consumer coverage is pinned to
   the SOAP Body plus the `wsu:Timestamp` — that pair is the
   replay-defense invariant, so narrowing it by config is refused: a

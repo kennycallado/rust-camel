@@ -276,6 +276,8 @@ class SoapEndpointPublisherTest {
             .encUser(TestKeystoreHelper.KEY_ALIAS)
             .actionsOut("Signature")
             .actionsIn("Signature")
+            .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+            .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
             .build();
     String plainEnvelope = envelope11(ECHO_ELEMENT);
     String signed = new WssSecurityProcessor(signing).processOutbound(plainEnvelope);
@@ -593,6 +595,8 @@ class SoapEndpointPublisherTest {
             .encUser("alice")
             .actionsOut("Timestamp Signature")
             .actionsIn("Timestamp Signature")
+            .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+            .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
             .build();
     when(profileStore.getProfile(TEST_PROFILE_NAME)).thenReturn(realProfile);
 
@@ -2650,6 +2654,8 @@ class SoapEndpointPublisherTest {
             .actionsIn("Signature")
             .actionsOut("Signature")
             .faultStatus(418)
+            .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+            .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
             .build();
     String requestXml = echoEnvelope(version);
     String signedRequest = new WssSecurityProcessor(signing).processOutbound(requestXml);

@@ -212,6 +212,8 @@ class WssSecurityProcessorTimestampCoverageTest {
             .encUser("alice")
             .actionsOut(actionsOut)
             .actionsIn(actionsIn)
+            .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+            .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
             .build();
     return new WssSecurityProcessor(profile);
   }

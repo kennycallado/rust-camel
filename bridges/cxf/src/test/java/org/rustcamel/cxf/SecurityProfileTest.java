@@ -4,8 +4,10 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.stream.Stream;
 import org.apache.cxf.ws.security.wss4j.WSS4JInInterceptor;
 import org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor;
 import org.apache.wss4j.common.ConfigurationConstants;
@@ -13,6 +15,8 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 @DisplayName("SecurityProfile")
 class SecurityProfileTest {
@@ -857,6 +861,137 @@ class SecurityProfileTest {
     Map<String, Object> props = interceptor.getProperties();
     // Timestamp precedes Signature, mirroring the outbound ordering.
     assertEquals("Timestamp Signature", props.get("action"));
+  }
+
+  @Test
+  @DisplayName("ALLOWED_SIGNATURE_ALGORITHMS replaces the defaults and preserves order")
+  void allowedSignatureAlgorithms_parse_replacesDefault() {
+    SecurityProfile p =
+        SecurityProfile.builder("allowed-sig")
+            .keystore(keystorePath.toString(), "changeit")
+            .allowedSignatureAlgorithms(
+                "http://www.w3.org/2000/09/xmldsig#rsa-sha1,"
+                    + "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+            .build();
+    assertEquals(
+        List.of(
+            "http://www.w3.org/2000/09/xmldsig#rsa-sha1",
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"),
+        p.effectiveAllowedSignatureAlgorithms());
+  }
+
+  @Test
+  @DisplayName("ALLOWED_DIGEST_ALGORITHMS defaults to the modern SHA-2 set")
+  void allowedDigestAlgorithms_default_isModernSha2() {
+    SecurityProfile p =
+        SecurityProfile.builder("default-digest")
+            .keystore(keystorePath.toString(), "changeit")
+            .build();
+    assertEquals(
+        List.of(
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha384",
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512"),
+        p.effectiveAllowedSignatureAlgorithms());
+    assertEquals(
+        List.of(
+            "http://www.w3.org/2001/04/xmlenc#sha256",
+            "http://www.w3.org/2001/04/xmldsig-more#sha384",
+            "http://www.w3.org/2001/04/xmlenc#sha512"),
+        p.effectiveAllowedDigestAlgorithms());
+    assertFalse(
+        p.effectiveAllowedDigestAlgorithms().contains("http://www.w3.org/2000/09/xmldsig#sha1"),
+        "default digest allow-list must not contain SHA-1");
+  }
+
+  @Test
+  @DisplayName("blank ALLOWED_SIGNATURE_ALGORITHMS is rejected at build")
+  void allowedSignatureAlgorithms_blank_failsConstruction() {
+    assertBuildRejectedNaming(
+        SecurityProfile.builder("blank_allowed")
+            .keystore(keystorePath.toString(), "changeit")
+            .allowedSignatureAlgorithms("  ,  "),
+        "CXF_PROFILE_BLANK_ALLOWED_ALLOWED_SIGNATURE_ALGORITHMS");
+  }
+
+  @Test
+  @DisplayName("blank ALLOWED_SIGNATURE_ALGORITHMS segment is rejected at build")
+  void allowedSignatureAlgorithms_blankSegment_failsConstruction() {
+    assertBuildRejectedNaming(
+        SecurityProfile.builder("blank_segment")
+            .keystore(keystorePath.toString(), "changeit")
+            .allowedSignatureAlgorithms(
+                "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256,,"
+                    + "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512"),
+        "CXF_PROFILE_BLANK_SEGMENT_ALLOWED_SIGNATURE_ALGORITHMS");
+  }
+
+  @Test
+  @DisplayName("relative ALLOWED_SIGNATURE_ALGORITHMS URIs are rejected at build")
+  void allowedSignatureAlgorithms_relativeUri_failsConstruction() {
+    assertBuildRejectedNaming(
+        SecurityProfile.builder("relative_allowed")
+            .keystore(keystorePath.toString(), "changeit")
+            .allowedSignatureAlgorithms("rsa-sha1"),
+        "CXF_PROFILE_RELATIVE_ALLOWED_ALLOWED_SIGNATURE_ALGORITHMS");
+  }
+
+  @Test
+  @DisplayName("ALLOWED_SIGNATURE_ALGORITHMS without verification material is rejected")
+  void allowedSignatureAlgorithms_withoutVerificationMaterial_failsConstruction() {
+    assertBuildRejectedNaming(
+        SecurityProfile.builder("inert_allowed")
+            .allowedSignatureAlgorithms("http://www.w3.org/2000/09/xmldsig#rsa-sha1"),
+        "CXF_PROFILE_INERT_ALLOWED_ALLOWED_SIGNATURE_ALGORITHMS");
+  }
+
+  @Test
+  @DisplayName("ALLOWED_* knobs are exempt from outbound signing preconditions")
+  void allowedSignatureAlgorithms_exemptFromSigningPreconditions() {
+    SecurityProfile p =
+        SecurityProfile.builder("verify-only")
+            .truststore(keystorePath.toString(), "changeit")
+            .actionsIn("Signature")
+            .allowedSignatureAlgorithms("http://www.w3.org/2000/09/xmldsig#rsa-sha1")
+            .allowedDigestAlgorithms("http://www.w3.org/2000/09/xmldsig#sha1")
+            .build();
+    assertFalse(p.canSignOutbound(), "verify-only profile has no signing keystore");
+    assertTrue(p.inboundAllowsSha1());
+  }
+
+  @Test
+  @DisplayName("inboundAllowsSha1 is true only when an effective list carries SHA-1")
+  void inboundAllowsSha1_trueWhenListed() {
+    SecurityProfile legacy =
+        SecurityProfile.builder("sha1-listed")
+            .keystore(keystorePath.toString(), "changeit")
+            .allowedDigestAlgorithms("http://www.w3.org/2000/09/xmldsig#sha1")
+            .build();
+    assertTrue(legacy.inboundAllowsSha1());
+
+    SecurityProfile modern =
+        SecurityProfile.builder("sha1-default")
+            .keystore(keystorePath.toString(), "changeit")
+            .build();
+    assertFalse(modern.inboundAllowsSha1());
+  }
+
+  @ParameterizedTest
+  @MethodSource("sha1AlgorithmUris")
+  @DisplayName("inboundAllowsSha1 detects each SHA-1 URI on its axis")
+  void inboundAllowsSha1_detectsAllFiveUris(String uri) {
+    SecurityProfile.Builder builder =
+        SecurityProfile.builder("sha1-axis").keystore(keystorePath.toString(), "changeit");
+    if (uri.equals("http://www.w3.org/2000/09/xmldsig#sha1")) {
+      builder.allowedDigestAlgorithms(uri);
+    } else {
+      builder.allowedSignatureAlgorithms(uri);
+    }
+    assertTrue(builder.build().inboundAllowsSha1(), "expected SHA-1 allow-listed: " + uri);
+  }
+
+  static Stream<String> sha1AlgorithmUris() {
+    return SecurityProfile.SHA1_ALGORITHM_URIS.stream();
   }
 
   private static void assertBuildRejectedNaming(SecurityProfile.Builder builder, String envVar) {

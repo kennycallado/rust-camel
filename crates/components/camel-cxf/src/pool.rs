@@ -58,6 +58,8 @@ pub(crate) fn profile_env_vars_for(profiles: &[CxfProfileConfig]) -> Vec<CxfProf
             signature_digest_algorithm: p.security.signature_digest_algorithm.clone(),
             signature_c14n_algorithm: p.security.signature_c14n_algorithm.clone(),
             signature_parts: p.security.signature_parts.clone(),
+            allowed_signature_algorithms: p.security.allowed_signature_algorithms.clone(),
+            allowed_digest_algorithms: p.security.allowed_digest_algorithms.clone(),
             fault_status: p.security.fault_status,
             tls: p.security.tls.as_ref().map(|t| t.to_env()),
         })

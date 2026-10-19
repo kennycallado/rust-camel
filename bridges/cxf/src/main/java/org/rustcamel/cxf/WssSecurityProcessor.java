@@ -28,6 +28,7 @@ import org.apache.wss4j.common.cache.ReplayCache;
 import org.apache.wss4j.common.ext.WSSecurityException;
 import org.apache.wss4j.dom.WSConstants;
 import org.apache.wss4j.dom.WSDataRef;
+import org.apache.wss4j.dom.engine.WSSConfig;
 import org.apache.wss4j.dom.engine.WSSecurityEngine;
 import org.apache.wss4j.dom.engine.WSSecurityEngineResult;
 import org.apache.wss4j.dom.handler.RequestData;
@@ -64,12 +65,30 @@ public class WssSecurityProcessor {
   private final ReplayCache replayCache = new MemoryReplayCache();
 
   /**
-   * Produces a fresh engine per inbound call; supplied by the test seam, {@code new} in production.
+   * Produces a fresh engine per inbound call; supplied by the test seam, {@code pinnedEngine} in
+   * production.
    */
   private final Supplier<WSSecurityEngine> engineFactory;
 
   public WssSecurityProcessor(SecurityProfile profile) {
-    this(profile, WSSecurityEngine::new);
+    this(profile, () -> pinnedEngine(profile));
+  }
+
+  /**
+   * Builds an engine whose signature processor is pinned to Santuario's provider and scoped to the
+   * profile's inbound algorithm suite. WSS4J enables secure validation unconditionally; without the
+   * pin the JDK's default XML signature provider applies JDK policy and forbids SHA-1. A GraalVM
+   * native image cannot register Santuario's provider at runtime, so the explicit {@link
+   * ProfileSignatureProcessor} keeps the Santuario implementation in play when the provider is
+   * absent from {@code java.security.Security}.
+   */
+  private static WSSecurityEngine pinnedEngine(SecurityProfile profile) {
+    WSSecurityEngine engine = new WSSecurityEngine();
+    WSSConfig config = WSSConfig.getNewInstance();
+    config.setProcessor(
+        WSConstants.SIGNATURE, new ProfileSignatureProcessor(profile.inboundAlgorithmSuite()));
+    engine.setWssConfig(config);
+    return engine;
   }
 
   /** Package-private constructor: engine factory seam for result-fixture tests. */

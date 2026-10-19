@@ -16,6 +16,7 @@ class TestKeystoreHelper {
 
   static final String KEYSTORE_PASSWORD = "changeit";
   static final String KEY_ALIAS = "alice";
+  static final String EC_KEY_ALIAS = "ec";
   static final String DEFAULT_DNAME = "CN=test-alice, O=RustCamel Test";
 
   /**
@@ -61,6 +62,42 @@ class TestKeystoreHelper {
       Files.delete(ksPath);
     }
     return generateKeystore(ksPath, storePassword, keyPassword, dname);
+  }
+
+  /**
+   * Creates a temporary JKS keystore with a self-signed EC P-256 keypair under alias {@link
+   * #EC_KEY_ALIAS}. Used to prove non-default signature families (ecdsa-sha256) are rejected by the
+   * default inbound allow-list and accepted only when explicitly allow-listed. Keystore and key
+   * passwords are both {@link #KEYSTORE_PASSWORD}.
+   *
+   * @return path to the generated keystore file
+   */
+  static Path createTestEcKeystore() throws Exception {
+    Path ksPath = Files.createTempFile("test-ec-keystore-", ".jks");
+    ksPath.toFile().deleteOnExit();
+    Files.delete(ksPath); // keytool refuses to write to an existing (even empty) file
+    keytool(
+        "-genkeypair",
+        "-alias",
+        EC_KEY_ALIAS,
+        "-keyalg",
+        "EC",
+        "-groupname",
+        "secp256r1",
+        "-validity",
+        "365",
+        "-dname",
+        DEFAULT_DNAME,
+        "-keystore",
+        ksPath.toAbsolutePath().toString(),
+        "-storetype",
+        "JKS",
+        "-storepass",
+        KEYSTORE_PASSWORD,
+        "-keypass",
+        KEYSTORE_PASSWORD,
+        "-noprompt");
+    return ksPath;
   }
 
   private static Path generateKeystore(

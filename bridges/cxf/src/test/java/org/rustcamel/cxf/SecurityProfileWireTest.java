@@ -121,6 +121,8 @@ class SecurityProfileWireTest {
             .keystore(splitKeystorePath.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
             .sigUser(TestKeystoreHelper.KEY_ALIAS, SPLIT_KEY_PASSWORD)
             .actionsOut("Signature Timestamp")
+            .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+            .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
             .build();
 
     Document doc = runOutboundChain(profile);

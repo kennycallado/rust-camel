@@ -453,6 +453,8 @@ async fn cxf_producer_wrong_tls_password_never_reaches_ready() {
         signature_digest_algorithm: None,
         signature_c14n_algorithm: None,
         signature_parts: None,
+        allowed_signature_algorithms: None,
+        allowed_digest_algorithms: None,
         fault_status: None,
         tls: Some(CxfTlsEnvVars {
             keystore_path: Some(cxf_tls_keystore_fixture()),
@@ -748,6 +750,8 @@ async fn cxf_native_health_check_responds_within_5s() {
         signature_digest_algorithm: None,
         signature_c14n_algorithm: None,
         signature_parts: None,
+        allowed_signature_algorithms: None,
+        allowed_digest_algorithms: None,
         fault_status: None,
         tls: None,
     }];
@@ -1334,6 +1338,8 @@ fn matrix_profile(name: &str, wsdl_path: &str) -> CxfProfileEnvVars {
         signature_digest_algorithm: None,
         signature_c14n_algorithm: None,
         signature_parts: None,
+        allowed_signature_algorithms: None,
+        allowed_digest_algorithms: None,
         fault_status: None,
         tls: None,
     }

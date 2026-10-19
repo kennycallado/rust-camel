@@ -496,6 +496,10 @@ class WssSecurityProcessorIntegrationTest {
 
   private static final String SOAP11_NS = "http://schemas.xmlsoap.org/soap/envelope/";
   private static final String DS_NS = "http://www.w3.org/2000/09/xmldsig#";
+  // The shared fixtures sign and verify with SHA-2 so the default inbound allow-list accepts
+  // them; rsa-sha1 stays reserved for tests whose subject is the legacy algorithm itself.
+  private static final String RSA_SHA256_URI = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+  private static final String SHA256_DIGEST_URI = "http://www.w3.org/2001/04/xmlenc#sha256";
   // sha-384 lives in the xmldsig-more namespace — the xmlenc namespace has no sha384 digest
   // registration in Santuario, so the xmlenc#sha384 form would fail digest resolution.
   private static final String SHA384_DIGEST_URI = "http://www.w3.org/2001/04/xmldsig-more#sha384";
@@ -714,6 +718,8 @@ class WssSecurityProcessorIntegrationTest {
             .encUser(encUser)
             .actionsOut(actionsOut)
             .actionsIn(actionsIn)
+            .signatureAlgorithm(RSA_SHA256_URI)
+            .signatureDigestAlgorithm(SHA256_DIGEST_URI)
             .build();
     return new WssSecurityProcessor(profile);
   }
@@ -724,6 +730,8 @@ class WssSecurityProcessorIntegrationTest {
             .keystore(keystorePath.toString(), "changeit")
             .sigUser("alice", "changeit")
             .encUser("serverkey")
+            .signatureAlgorithm(RSA_SHA256_URI)
+            .signatureDigestAlgorithm(SHA256_DIGEST_URI)
             .build();
     return new WssSecurityProcessor(profile);
   }

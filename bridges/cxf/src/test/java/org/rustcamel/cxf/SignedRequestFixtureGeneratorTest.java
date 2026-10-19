@@ -10,8 +10,19 @@ import java.nio.file.Path;
 import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.security.cert.X509Certificate;
+import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.List;
+import java.util.Locale;
 import javax.security.auth.x500.X500Principal;
+import javax.xml.transform.dom.DOMSource;
+import org.apache.wss4j.common.WSEncryptionPart;
+import org.apache.wss4j.common.crypto.Crypto;
+import org.apache.wss4j.common.crypto.CryptoFactory;
+import org.apache.wss4j.dom.WSConstants;
+import org.apache.wss4j.dom.message.WSSecHeader;
+import org.apache.wss4j.dom.message.WSSecSignature;
+import org.apache.wss4j.dom.message.WSSecTimestamp;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.w3c.dom.Document;
@@ -56,6 +67,10 @@ class SignedRequestFixtureGeneratorTest {
   private static final String EVIL_NS = "urn:evil";
   private static final String SOAP12_NS = "http://www.w3.org/2003/05/soap-envelope";
   private static final String SOAP11_NS = "http://schemas.xmlsoap.org/soap/envelope/";
+  private static final String RSA_SHA1 = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
+  private static final String SHA1 = "http://www.w3.org/2000/09/xmldsig#sha1";
+  private static final String EXCLUSIVE_C14N = "http://www.w3.org/2001/10/xml-exc-c14n#";
+  private static final String DS_NS = "http://www.w3.org/2000/09/xmldsig#";
 
   @Test
   void generate() throws Exception {
@@ -72,7 +87,9 @@ class SignedRequestFixtureGeneratorTest {
         SecurityProfile.builder("esap")
             .keystore(jks, "changeit")
             .sigUser("alice", "changeit")
-            // WSS4J secure validation (default-on) forbids RSA-SHA1; sign with SHA-256.
+            // JVM-side WSS4J does not forbid RSA-SHA1 (Santuario allows it); these fixtures sign
+            // SHA-256 because the bridge's DEFAULT inbound allow-list rejects SHA-1 unless a
+            // profile opts in (mission 370 / bd rc-cln4q).
             .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
             .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
             .build();
@@ -130,7 +147,9 @@ class SignedRequestFixtureGeneratorTest {
         SecurityProfile.builder("esap")
             .keystore(jks.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
             .sigUser(TestKeystoreHelper.KEY_ALIAS, TestKeystoreHelper.KEYSTORE_PASSWORD)
-            // WSS4J secure validation (default-on) forbids RSA-SHA1; sign with SHA-256.
+            // JVM-side WSS4J does not forbid RSA-SHA1 (Santuario allows it); these fixtures sign
+            // SHA-256 because the bridge's DEFAULT inbound allow-list rejects SHA-1 unless a
+            // profile opts in (mission 370 / bd rc-cln4q).
             .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
             .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
             .build();
@@ -168,7 +187,9 @@ class SignedRequestFixtureGeneratorTest {
         SecurityProfile.builder("esap")
             .keystore(jks.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
             .sigUser(TestKeystoreHelper.KEY_ALIAS, TestKeystoreHelper.KEYSTORE_PASSWORD)
-            // WSS4J secure validation (default-on) forbids RSA-SHA1; sign with SHA-256.
+            // JVM-side WSS4J does not forbid RSA-SHA1 (Santuario allows it); these fixtures sign
+            // SHA-256 because the bridge's DEFAULT inbound allow-list rejects SHA-1 unless a
+            // profile opts in (mission 370 / bd rc-cln4q).
             .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
             .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
             .build();
@@ -182,6 +203,178 @@ class SignedRequestFixtureGeneratorTest {
     byte[] keystoreAfter = Files.readAllBytes(jks);
     assertArrayEquals(
         keystoreBefore, keystoreAfter, "re-signing must not mutate the existing long-DN keystore");
+  }
+
+  /**
+   * Generates the legacy partner shape fresh in memory and round-trips it through the production
+   * inbound path with the SHA-1 opt-in. No fixture file is committed: the shape carries a signed
+   * {@code wsu:Timestamp} that expires after the WSS4J TTL (~300 s), so a static file would be a
+   * time bomb. The generator runs in-test, so the TTL is irrelevant here (mission 370 / bd
+   * rc-cln4q).
+   */
+  @Test
+  void generateLegacySha1Fixture_roundTripsAgainstOptedInProfile() throws Exception {
+    Path keystore = TestKeystoreHelper.createTestKeystore();
+
+    String signed =
+        generateLegacySha1Fixture(
+            keystore, TestKeystoreHelper.KEY_ALIAS, TestKeystoreHelper.KEYSTORE_PASSWORD);
+
+    Document doc = SoapEnvelopeHelper.parseResponse(signed);
+    assertEquals(
+        3,
+        doc.getElementsByTagNameNS(DS_NS, "Reference").getLength(),
+        "the partner shape must carry exactly three references");
+    assertEquals(
+        RSA_SHA1,
+        algorithmOf(doc, "SignatureMethod"),
+        "the generated signature method must be rsa-sha1");
+    assertEquals(SHA1, digestAlgorithmOf(doc, "Timestamp"), "the Timestamp digest must be sha1");
+    assertEquals(SHA1, digestAlgorithmOf(doc, "Body"), "the Body digest must be sha1");
+    assertEquals(
+        SHA1,
+        digestAlgorithmOf(doc, "BinarySecurityToken"),
+        "the BinarySecurityToken digest must be sha1");
+
+    SecurityProfile optedIn =
+        SecurityProfile.builder("legacy-fixture-opted-in")
+            .keystore(keystore.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
+            .truststore(keystore.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
+            .actionsIn("Signature")
+            .allowedSignatureAlgorithms(RSA_SHA1)
+            .allowedDigestAlgorithms(SHA1)
+            .build();
+
+    WssSecurityProcessor.VerifiedInboundMessage verified =
+        new WssSecurityProcessor(optedIn).processInbound(signed);
+
+    assertNotNull(verified, "the freshly generated legacy fixture must verify when opted in");
+    assertTrue(
+        verified.signer().isPresent(),
+        "the opted-in verification must export the Body-covering signer");
+  }
+
+  /**
+   * Guards this file's own prose: no comment may keep the old claim that the JVM-side stack forbids
+   * the legacy signature algorithm. The real reason the fixtures sign SHA-256 is the bridge's
+   * opt-in inbound policy, not JVM-side crypto (mission 370 / bd rc-cln4q).
+   */
+  @Test
+  void commentsAreTruthful() throws Exception {
+    Path source = locateOwnSource();
+    List<String> offenders = new ArrayList<>();
+    boolean truthfulReasonDocumented = false;
+    for (String line : Files.readAllLines(source)) {
+      String text = line.strip();
+      boolean comment = text.startsWith("//") || text.startsWith("*") || text.startsWith("/*");
+      if (!comment) {
+        continue;
+      }
+      String lower = text.toLowerCase(Locale.ROOT);
+      if (lower.contains("forbids rsa-sha1") || lower.contains("forbidden rsa-sha1")) {
+        offenders.add(text);
+      }
+      if (lower.contains("default inbound allow-list")) {
+        truthfulReasonDocumented = true;
+      }
+    }
+    assertTrue(
+        offenders.isEmpty(),
+        "comments must not claim the JVM-side stack forbids the legacy algorithm: " + offenders);
+    assertTrue(
+        truthfulReasonDocumented,
+        "the comments must document the real reason: the bridge default inbound allow-list");
+  }
+
+  /**
+   * Resolves this test's own source file from the Gradle project dir or the repository root. Used
+   * only by {@link #commentsAreTruthful()}.
+   */
+  private static Path locateOwnSource() {
+    String relative = "src/test/java/org/rustcamel/cxf/SignedRequestFixtureGeneratorTest.java";
+    for (Path candidate : List.of(Path.of(relative), Path.of("bridges/cxf", relative))) {
+      if (Files.exists(candidate)) {
+        return candidate;
+      }
+    }
+    throw new IllegalStateException(
+        "cannot locate SignedRequestFixtureGeneratorTest.java from "
+            + Path.of("").toAbsolutePath());
+  }
+
+  /**
+   * Generates the wse-php partner shape fully in memory: rsa-sha1 + sha1 over BinarySecurityToken,
+   * Timestamp, and Body with exclusive c14n. Test/repro generator only — no fixture file is
+   * committed, because a signed Timestamp expires after the WSS4J TTL (~300 s). The JVM allows
+   * SHA-1; only the bridge's default inbound allow-list rejects it unless a profile opts in
+   * (mission 370 / bd rc-cln4q).
+   */
+  static String generateLegacySha1Fixture(Path keystore, String alias, String password)
+      throws Exception {
+    Document doc = SoapEnvelopeHelper.parseResponse(SOAP12_REQUEST);
+    WSSecHeader secHeader = new WSSecHeader(doc);
+    secHeader.insertSecurityHeader();
+    new WSSecTimestamp(secHeader).build();
+
+    Crypto crypto =
+        CryptoFactory.getInstance(
+            SecurityProfile.createCryptoProperties(keystore.toString(), password));
+
+    WSSecSignature sign = new WSSecSignature(secHeader);
+    sign.setUserInfo(alias, password);
+    sign.setKeyIdentifierType(WSConstants.BST_DIRECT_REFERENCE);
+    sign.setSignatureAlgorithm(RSA_SHA1);
+    sign.setDigestAlgo(SHA1);
+    sign.setSigCanonicalization(EXCLUSIVE_C14N);
+    // The envelope root NS is the SOAP NS — never hardcode SOAP 1.1 here, or SOAP 1.2 envelopes
+    // fail part resolution at sign time (the same expression as WssSecurityProcessor's outbound
+    // Body part).
+    sign.getParts()
+        .add(new WSEncryptionPart("Body", doc.getDocumentElement().getNamespaceURI(), "Content"));
+    sign.getParts().add(new WSEncryptionPart("Timestamp", WSConstants.WSU_NS, ""));
+    sign.getParts().add(new WSEncryptionPart("BinarySecurityToken", WSConstants.WSSE_NS, ""));
+
+    // WSSecSignature materializes the BST only after prepare(); a BinarySecurityToken part cannot
+    // be resolved before the element is in the security header.
+    sign.prepare(crypto);
+    sign.prependBSTElementToHeader();
+    sign.computeSignature(sign.addReferencesToSign(sign.getParts()));
+
+    return SoapEnvelopeHelper.sourceToString(new DOMSource(doc));
+  }
+
+  /** Algorithm attribute of the first ds:{@code localName} element. */
+  private static String algorithmOf(Document doc, String localName) {
+    NodeList nodes = doc.getElementsByTagNameNS(DS_NS, localName);
+    assertTrue(nodes.getLength() > 0, "missing ds:" + localName);
+    return ((Element) nodes.item(0)).getAttribute("Algorithm");
+  }
+
+  /**
+   * DigestMethod URI of the single reference whose URI targets the given wsu:Id element. Scans all
+   * elements with the local name because this fixture also carries a decoy Header {@code s11:Body}:
+   * only the signed element has a {@code wsu:Id} and a matching reference.
+   */
+  private static String digestAlgorithmOf(Document doc, String signedElementLocalName) {
+    NodeList signedElements = doc.getElementsByTagNameNS("*", signedElementLocalName);
+    assertTrue(signedElements.getLength() > 0, "missing " + signedElementLocalName);
+    NodeList references = doc.getElementsByTagNameNS(DS_NS, "Reference");
+    for (int e = 0; e < signedElements.getLength(); e++) {
+      Element signedElement = (Element) signedElements.item(e);
+      String wsuId = signedElement.getAttributeNS(WSConstants.WSU_NS, "Id");
+      if (wsuId.isEmpty()) {
+        continue;
+      }
+      for (int i = 0; i < references.getLength(); i++) {
+        Element reference = (Element) references.item(i);
+        if (("#" + wsuId).equals(reference.getAttribute("URI"))) {
+          NodeList digests = reference.getElementsByTagNameNS(DS_NS, "DigestMethod");
+          assertTrue(digests.getLength() > 0, "missing DigestMethod for " + signedElementLocalName);
+          return ((Element) digests.item(0)).getAttribute("Algorithm");
+        }
+      }
+    }
+    throw new AssertionError("no reference targets the " + signedElementLocalName + " element");
   }
 
   /**

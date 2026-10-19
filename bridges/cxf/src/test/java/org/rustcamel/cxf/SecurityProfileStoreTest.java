@@ -1,12 +1,21 @@
 package org.rustcamel.cxf;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -14,6 +23,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 @DisplayName("SecurityProfileStore")
 class SecurityProfileStoreTest {
+
+  private static final String RSA_SHA1 = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
+  private static final String SHA1_DIGEST = "http://www.w3.org/2000/09/xmldsig#sha1";
 
   @TempDir static Path tempDir;
 
@@ -440,5 +452,184 @@ class SecurityProfileStoreTest {
     omitted.put("CXF_PROFILES", "secure");
     omitted.put("CXF_PROFILE_SECURE_KEYSTORE_PATH", ksFile.toString());
     assertTrue(createStore(omitted).profiles().containsKey("secure"));
+  }
+
+  @Test
+  @DisplayName("SHA-1 allow warning names the profile and states inbound acceptance")
+  void sha1AllowedWarning_namesProfileAndStatesAcceptance() {
+    SecurityProfile legacy =
+        SecurityProfile.builder("legacy")
+            .keystore(ksFile.toString(), "kspass")
+            .truststore(tsFile.toString(), "tspass")
+            .actionsIn("Signature")
+            .allowedSignatureAlgorithms(RSA_SHA1)
+            .build();
+
+    assertEquals(
+        Optional.of(
+            "WS-Security profile 'legacy' accepts SHA-1 signature/digest algorithms on inbound"
+                + " verification (opted-in via ALLOWED_*; accepted risk, see ADR-0085)"),
+        SecurityProfileStore.sha1AllowedWarning(legacy));
+  }
+
+  @Test
+  @DisplayName("SHA-1 allow warning is absent for the default SHA-2 lists")
+  void sha1AllowedWarning_absentForDefaultProfile() {
+    SecurityProfile modern =
+        SecurityProfile.builder("modern")
+            .keystore(ksFile.toString(), "kspass")
+            .truststore(tsFile.toString(), "tspass")
+            .actionsIn("Signature")
+            .build();
+
+    assertTrue(SecurityProfileStore.sha1AllowedWarning(modern).isEmpty());
+  }
+
+  @Test
+  @DisplayName("signing-knob mismatch fires for legacy signing without inbound opt-in")
+  void signingKnobMismatchWarning_firesForLegacyKnobWithoutInboundOptIn() {
+    SecurityProfile legacy = legacySigningProfile("legacy").build();
+
+    assertEquals(
+        Optional.of(
+            "WS-Security profile 'legacy' signs with SHA-1 ("
+                + RSA_SHA1
+                + ") but does not accept it on inbound verification; set"
+                + " CXF_PROFILE_LEGACY_ALLOWED_SIGNATURE_ALGORITHMS/ALLOWED_DIGEST_ALGORITHMS if"
+                + " legacy partners must be verified (intentional if this asymmetry is"
+                + " deliberate)"),
+        SecurityProfileStore.signingKnobMismatchWarning(legacy));
+  }
+
+  @Test
+  @DisplayName("signing-knob mismatch joins both excluded SHA-1 URIs, signature first")
+  void signingKnobMismatchWarning_joinsBothUris() {
+    SecurityProfile legacy =
+        legacySigningProfile("legacy").signatureDigestAlgorithm(SHA1_DIGEST).build();
+
+    assertEquals(
+        Optional.of(
+            "WS-Security profile 'legacy' signs with SHA-1 ("
+                + RSA_SHA1
+                + ", "
+                + SHA1_DIGEST
+                + ") but does not accept it on inbound verification; set"
+                + " CXF_PROFILE_LEGACY_ALLOWED_SIGNATURE_ALGORITHMS/ALLOWED_DIGEST_ALGORITHMS if"
+                + " legacy partners must be verified (intentional if this asymmetry is"
+                + " deliberate)"),
+        SecurityProfileStore.signingKnobMismatchWarning(legacy));
+  }
+
+  @Test
+  @DisplayName("signing-knob mismatch reports only the legacy digest URI")
+  void signingKnobMismatchWarning_digestOnlyExclusion() {
+    SecurityProfile profile =
+        SecurityProfile.builder("legacydigest")
+            .keystore(ksFile.toString(), "kspass")
+            .truststore(tsFile.toString(), "tspass")
+            .actionsIn("Signature")
+            .signatureDigestAlgorithm(SHA1_DIGEST)
+            .build();
+
+    assertEquals(
+        Optional.of(
+            "WS-Security profile 'legacydigest' signs with SHA-1 ("
+                + SHA1_DIGEST
+                + ") but does not accept it on inbound verification; set"
+                + " CXF_PROFILE_LEGACYDIGEST_ALLOWED_SIGNATURE_ALGORITHMS/ALLOWED_DIGEST_ALGORITHMS"
+                + " if legacy partners must be verified (intentional if this asymmetry is"
+                + " deliberate)"),
+        SecurityProfileStore.signingKnobMismatchWarning(profile));
+    assertFalse(
+        SecurityProfileStore.signingKnobMismatchWarning(profile).orElseThrow().contains(RSA_SHA1),
+        "a modern signature knob must not add the rsa-sha1 URI to the warning");
+  }
+
+  @Test
+  @DisplayName("signing-knob mismatch is silent when the allow-list covers the legacy URIs")
+  void signingKnobMismatchWarning_silentWhenAllowListCovers() {
+    SecurityProfile legacy =
+        legacySigningProfile("legacy")
+            .signatureDigestAlgorithm(SHA1_DIGEST)
+            .allowedSignatureAlgorithms(RSA_SHA1)
+            .allowedDigestAlgorithms(SHA1_DIGEST)
+            .build();
+
+    assertTrue(SecurityProfileStore.signingKnobMismatchWarning(legacy).isEmpty());
+  }
+
+  @Test
+  @DisplayName("signing-knob mismatch is silent without inbound verification material")
+  void signingKnobMismatchWarning_silentWithoutVerificationMaterial() {
+    // The builder forbids signing knobs without a keystore, so a real profile with legacy knobs
+    // always carries verification material. Mock the profile to exercise the material guard.
+    SecurityProfile signingOnly = mock(SecurityProfile.class);
+    when(signingOnly.name()).thenReturn("signonly");
+    when(signingOnly.canVerifyInbound()).thenReturn(false);
+    when(signingOnly.signatureAlgorithm()).thenReturn(RSA_SHA1);
+    when(signingOnly.signatureDigestAlgorithm()).thenReturn(SHA1_DIGEST);
+
+    assertTrue(SecurityProfileStore.signingKnobMismatchWarning(signingOnly).isEmpty());
+  }
+
+  @Test
+  @DisplayName("store construction logs the SHA-1 allow warning once")
+  void storeConstruction_logsSha1AllowedWarning() {
+    Map<String, String> env = new HashMap<>();
+    env.put("CXF_PROFILES", "legacy");
+    env.put("CXF_PROFILE_LEGACY_KEYSTORE_PATH", ksFile.toString());
+    env.put("CXF_PROFILE_LEGACY_KEYSTORE_PASSWORD", "kspass");
+    env.put("CXF_PROFILE_LEGACY_TRUSTSTORE_PATH", tsFile.toString());
+    env.put("CXF_PROFILE_LEGACY_TRUSTSTORE_PASSWORD", "tspass");
+    env.put("CXF_PROFILE_LEGACY_SECURITY_ACTIONS_IN", "Signature");
+    env.put("CXF_PROFILE_LEGACY_ALLOWED_SIGNATURE_ALGORITHMS", RSA_SHA1);
+
+    List<LogRecord> records = new ArrayList<>();
+    Handler handler =
+        new Handler() {
+          @Override
+          public void publish(LogRecord record) {
+            records.add(record);
+          }
+
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    Logger logger = Logger.getLogger(SecurityProfileStore.class.getName());
+    Level previousLevel = logger.getLevel();
+    logger.addHandler(handler);
+    logger.setLevel(Level.ALL);
+    try {
+      createStore(env);
+    } finally {
+      logger.removeHandler(handler);
+      logger.setLevel(previousLevel);
+    }
+
+    List<String> sha1Warnings = new ArrayList<>();
+    for (LogRecord record : records) {
+      if (record.getLevel() == Level.WARNING
+          && record.getMessage() != null
+          && record.getMessage().contains("accepts SHA-1")) {
+        sha1Warnings.add(record.getMessage());
+      }
+    }
+    assertEquals(
+        List.of(
+            "WS-Security profile 'legacy' accepts SHA-1 signature/digest algorithms on inbound"
+                + " verification (opted-in via ALLOWED_*; accepted risk, see ADR-0085)"),
+        sha1Warnings);
+  }
+
+  private static SecurityProfile.Builder legacySigningProfile(String name) {
+    return SecurityProfile.builder(name)
+        .keystore(ksFile.toString(), "kspass")
+        .truststore(tsFile.toString(), "tspass")
+        .actionsOut("Signature")
+        .actionsIn("Signature")
+        .signatureAlgorithm(RSA_SHA1);
   }
 }

@@ -1,9 +1,13 @@
 package org.rustcamel.cxf;
 
 import jakarta.enterprise.context.ApplicationScoped;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.logging.Logger;
 
 /**
@@ -82,11 +86,15 @@ public class SecurityProfileStore {
               .signatureDigestAlgorithm(getenv(prefix + "SIGNATURE_DIGEST_ALGORITHM"))
               .signatureC14nAlgorithm(getenv(prefix + "SIGNATURE_C14N_ALGORITHM"))
               .signatureParts(getenv(prefix + "SIGNATURE_PARTS"))
+              .allowedSignatureAlgorithms(getenv(prefix + "ALLOWED_SIGNATURE_ALGORITHMS"))
+              .allowedDigestAlgorithms(getenv(prefix + "ALLOWED_DIGEST_ALGORITHMS"))
               .faultStatus(faultStatus)
               .build();
 
       profiles.put(name, profile);
       LOG.info("Loaded security profile: " + name);
+      sha1AllowedWarning(profile).ifPresent(LOG::warning);
+      signingKnobMismatchWarning(profile).ifPresent(LOG::warning);
     }
 
     LOG.info("Security profiles loaded: " + profiles.keySet());
@@ -119,6 +127,65 @@ public class SecurityProfileStore {
   /** Package-private for testing — allows overriding env var source. */
   String getenv(String key) {
     return System.getenv(key);
+  }
+
+  /**
+   * Startup WARN when a profile's effective inbound allow-list opts into SHA-1. The message names
+   * the profile and points at the accepted-risk ADR. Pure decision point so tests can assert the
+   * exact wording without log capture.
+   */
+  static Optional<String> sha1AllowedWarning(SecurityProfile profile) {
+    if (!profile.inboundAllowsSha1()) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        "WS-Security profile '"
+            + profile.name()
+            + "' accepts SHA-1 signature/digest algorithms on inbound verification (opted-in via"
+            + " ALLOWED_*; accepted risk, see ADR-0085)");
+  }
+
+  /**
+   * Startup WARN when a signing knob names a SHA-1 URI that the effective inbound allow-list
+   * excludes, on a profile that has inbound verification material. Signing and verifying are
+   * independent surfaces, so an intentionally asymmetric profile (sign SHA-1, verify SHA-2 only) is
+   * valid; the wording tells the operator both how to opt in and that the asymmetry may be
+   * deliberate. At most one WARN per profile: when both axes are excluded their URIs are joined
+   * with {@code ", "}, signature URI first.
+   */
+  static Optional<String> signingKnobMismatchWarning(SecurityProfile profile) {
+    if (!profile.canVerifyInbound()) {
+      return Optional.empty();
+    }
+
+    List<String> excluded = new ArrayList<>();
+    String signatureAlgorithm = profile.signatureAlgorithm();
+    if (isSha1Uri(signatureAlgorithm)
+        && !profile.effectiveAllowedSignatureAlgorithms().contains(signatureAlgorithm)) {
+      excluded.add(signatureAlgorithm);
+    }
+    String signatureDigestAlgorithm = profile.signatureDigestAlgorithm();
+    if (isSha1Uri(signatureDigestAlgorithm)
+        && !profile.effectiveAllowedDigestAlgorithms().contains(signatureDigestAlgorithm)) {
+      excluded.add(signatureDigestAlgorithm);
+    }
+    if (excluded.isEmpty()) {
+      return Optional.empty();
+    }
+
+    return Optional.of(
+        "WS-Security profile '"
+            + profile.name()
+            + "' signs with SHA-1 ("
+            + String.join(", ", excluded)
+            + ") but does not accept it on inbound verification; set CXF_PROFILE_"
+            + profile.name().toUpperCase(Locale.ROOT)
+            + "_ALLOWED_SIGNATURE_ALGORITHMS/ALLOWED_DIGEST_ALGORITHMS if legacy partners must be"
+            + " verified (intentional if this asymmetry is deliberate)");
+  }
+
+  private static boolean isSha1Uri(String uri) {
+    return uri != null && SecurityProfile.SHA1_ALGORITHM_URIS.contains(uri);
   }
 
   /** Default the TLS store type to PKCS12 when unset. */

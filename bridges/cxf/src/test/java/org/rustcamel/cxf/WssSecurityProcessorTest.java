@@ -160,6 +160,8 @@ class WssSecurityProcessorTest {
             .encUser(TestKeystoreHelper.KEY_ALIAS)
             .actionsOut("Signature")
             .actionsIn("Signature")
+            .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+            .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
             .build();
 
     String signed = new WssSecurityProcessor(profile).processOutbound(plainSoap11());

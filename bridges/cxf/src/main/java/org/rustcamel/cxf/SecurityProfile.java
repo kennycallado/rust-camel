@@ -11,17 +11,20 @@ import java.util.Set;
 import java.util.logging.Logger;
 import javax.security.auth.callback.Callback;
 import javax.security.auth.callback.CallbackHandler;
+import org.apache.cxf.binding.soap.SoapMessage;
 import org.apache.cxf.interceptor.Interceptor;
 import org.apache.cxf.message.Message;
 import org.apache.cxf.ws.security.wss4j.WSS4JInInterceptor;
 import org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor;
 import org.apache.wss4j.common.ConfigurationConstants;
+import org.apache.wss4j.common.crypto.AlgorithmSuite;
 import org.apache.wss4j.common.crypto.Crypto;
 import org.apache.wss4j.common.crypto.CryptoFactory;
 import org.apache.wss4j.common.ext.WSPasswordCallback;
 import org.apache.wss4j.common.ext.WSSecurityException;
 import org.apache.wss4j.dom.WSConstants;
 import org.apache.wss4j.dom.engine.WSSConfig;
+import org.apache.wss4j.dom.handler.RequestData;
 import org.apache.wss4j.dom.handler.WSHandlerConstants;
 
 /**
@@ -41,6 +44,29 @@ public class SecurityProfile {
    */
   private static final String DEFAULT_SIGNATURE_PARTS =
       "Body;{}{" + WSConstants.WSU_NS + "}Timestamp";
+
+  /** Secure default inbound signature algorithm allow-list (SHA-2 only). */
+  static final List<String> DEFAULT_ALLOWED_SIGNATURE_ALGORITHMS =
+      List.of(
+          "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+          "http://www.w3.org/2001/04/xmldsig-more#rsa-sha384",
+          "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512");
+
+  /** Secure default inbound digest algorithm allow-list (SHA-2 only). */
+  static final List<String> DEFAULT_ALLOWED_DIGEST_ALGORITHMS =
+      List.of(
+          "http://www.w3.org/2001/04/xmlenc#sha256",
+          "http://www.w3.org/2001/04/xmldsig-more#sha384",
+          "http://www.w3.org/2001/04/xmlenc#sha512");
+
+  /** SHA-1 algorithm URIs recognized by the inbound allow-list check. */
+  static final List<String> SHA1_ALGORITHM_URIS =
+      List.of(
+          "http://www.w3.org/2000/09/xmldsig#rsa-sha1",
+          "http://www.w3.org/2000/09/xmldsig#dsa-sha1",
+          "http://www.w3.org/2000/09/xmldsig#hmac-sha1",
+          "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha1",
+          "http://www.w3.org/2000/09/xmldsig#sha1");
 
   /**
    * Option keys under which the in-memory crypto {@link Properties} objects live. WSS4J resolves
@@ -95,6 +121,10 @@ public class SecurityProfile {
   private final String signatureC14nAlgorithm;
   private final String signatureParts;
 
+  // --- Inbound algorithm allow-lists (raw csv; null means the secure defaults) ---
+  private final String allowedSignatureAlgorithms;
+  private final String allowedDigestAlgorithms;
+
   /**
    * Optional per-profile HTTP status override for security (WSS) faults only. {@code null} keeps
    * the default matrix (SOAP 1.1: 500; SOAP 1.2 Sender: 400, Receiver: 500). Validated by {@link
@@ -132,6 +162,8 @@ public class SecurityProfile {
     this.signatureDigestAlgorithm = b.signatureDigestAlgorithm;
     this.signatureC14nAlgorithm = b.signatureC14nAlgorithm;
     this.signatureParts = b.signatureParts;
+    this.allowedSignatureAlgorithms = b.allowedSignatureAlgorithms;
+    this.allowedDigestAlgorithms = b.allowedDigestAlgorithms;
     this.faultStatus = b.faultStatus;
   }
 
@@ -231,6 +263,69 @@ public class SecurityProfile {
 
   public String signatureParts() {
     return signatureParts;
+  }
+
+  /** Raw comma-separated inbound signature allow-list, or {@code null} when unset. */
+  public String allowedSignatureAlgorithmsRaw() {
+    return allowedSignatureAlgorithms;
+  }
+
+  /** Raw comma-separated inbound digest allow-list, or {@code null} when unset. */
+  public String allowedDigestAlgorithmsRaw() {
+    return allowedDigestAlgorithms;
+  }
+
+  /**
+   * Effective inbound signature algorithm allow-list: the configured csv parsed into trimmed,
+   * ordered URIs, or {@link #DEFAULT_ALLOWED_SIGNATURE_ALGORITHMS} when unset.
+   */
+  public List<String> effectiveAllowedSignatureAlgorithms() {
+    return allowedSignatureAlgorithms == null
+        ? DEFAULT_ALLOWED_SIGNATURE_ALGORITHMS
+        : parseAlgorithmList(allowedSignatureAlgorithms);
+  }
+
+  /**
+   * Effective inbound digest algorithm allow-list: the configured csv parsed into trimmed, ordered
+   * URIs, or {@link #DEFAULT_ALLOWED_DIGEST_ALGORITHMS} when unset.
+   */
+  public List<String> effectiveAllowedDigestAlgorithms() {
+    return allowedDigestAlgorithms == null
+        ? DEFAULT_ALLOWED_DIGEST_ALGORITHMS
+        : parseAlgorithmList(allowedDigestAlgorithms);
+  }
+
+  /** True when either effective inbound allow-list carries a known SHA-1 algorithm URI. */
+  public boolean inboundAllowsSha1() {
+    return allowsSha1(effectiveAllowedSignatureAlgorithms())
+        || allowsSha1(effectiveAllowedDigestAlgorithms());
+  }
+
+  /**
+   * Builds the WSS4J {@link AlgorithmSuite} that scopes inbound acceptance to this profile's
+   * effective allow-lists. Signature methods come from {@link
+   * #effectiveAllowedSignatureAlgorithms()} and digest algorithms from {@link
+   * #effectiveAllowedDigestAlgorithms()}. The six key-length bounds are set explicitly because
+   * WSS4J's ctor defaults (128/256 symmetric, 1024/4096 asymmetric, 160/512 EC) would reject long
+   * keys; the suite is also shared by the EncryptedKey, ReferenceList, EncryptedData, and Signature
+   * processors, so bounds narrowed to one processor's needs would reject the others. The
+   * derived-key length knobs are the ones that default to unchecked, so they are left unset.
+   */
+  public AlgorithmSuite inboundAlgorithmSuite() {
+    AlgorithmSuite suite = new AlgorithmSuite();
+    for (String algorithm : effectiveAllowedSignatureAlgorithms()) {
+      suite.addSignatureMethod(algorithm);
+    }
+    for (String algorithm : effectiveAllowedDigestAlgorithms()) {
+      suite.addDigestAlgorithm(algorithm);
+    }
+    suite.setMinimumSymmetricKeyLength(0);
+    suite.setMaximumSymmetricKeyLength(Integer.MAX_VALUE);
+    suite.setMinimumAsymmetricKeyLength(0);
+    suite.setMaximumAsymmetricKeyLength(Integer.MAX_VALUE);
+    suite.setMinimumEllipticCurveKeyLength(0);
+    suite.setMaximumEllipticCurveKeyLength(Integer.MAX_VALUE);
+    return suite;
   }
 
   /** Optional WSS-only HTTP status override (400-599), or {@code null} for the default matrix. */
@@ -379,6 +474,13 @@ public class SecurityProfile {
 
     if (actions.isEmpty()) return null;
 
+    // Same enforcement as the consumer path: pin Santuario's XMLDSigRI and scope acceptance to
+    // this profile's inbound algorithm suite. WSS4JInInterceptor accepts Processor instances in
+    // its PROCESSOR_MAP, so the wrapper survives CXF's WSSConfig setup unchanged.
+    AlgorithmSuite inboundSuite = inboundAlgorithmSuite();
+    props.put(
+        WSS4JInInterceptor.PROCESSOR_MAP,
+        Map.of(WSConstants.SIGNATURE, new ProfileSignatureProcessor(inboundSuite)));
     props.put(WSHandlerConstants.ACTION, String.join(" ", actions));
     LOG.info(
         "WS-Security inbound enabled for profile '"
@@ -389,7 +491,30 @@ public class SecurityProfile {
             + (actions.contains(WSHandlerConstants.SIGNATURE) ? SIG_CRYPTO_REF_ID : "none")
             + ", decCryptoRefId="
             + (actions.contains(WSHandlerConstants.ENCRYPT) ? DEC_CRYPTO_REF_ID : "none"));
-    return new WSS4JInInterceptor(props);
+    return new ProfileInInterceptor(props, inboundSuite);
+  }
+
+  /**
+   * Producer-side in-interceptor that installs the profile suite after CXF's own decoding. {@code
+   * WSS4JInInterceptor} runs {@code WSHandler.decodeAlgorithmSuite} before processing and always
+   * seeds a fresh, empty suite when the message context is non-null. The wrapper's null-only
+   * install would therefore never fire, so the suite is set here instead; the PROCESSOR_MAP entry
+   * still supplies the Santuario-pinned signature processor.
+   */
+  private static final class ProfileInInterceptor extends WSS4JInInterceptor {
+    private final AlgorithmSuite inboundSuite;
+
+    ProfileInInterceptor(Map<String, Object> properties, AlgorithmSuite inboundSuite) {
+      super(properties);
+      this.inboundSuite = inboundSuite;
+    }
+
+    @Override
+    protected void setAlgorithmSuites(SoapMessage message, RequestData requestData)
+        throws WSSecurityException {
+      super.setAlgorithmSuites(message, requestData);
+      requestData.setAlgorithmSuite(inboundSuite);
+    }
   }
 
   // --- Crypto lazy initialization (double-checked locking) ---
@@ -483,6 +608,8 @@ public class SecurityProfile {
     private String signatureDigestAlgorithm;
     private String signatureC14nAlgorithm;
     private String signatureParts;
+    private String allowedSignatureAlgorithms;
+    private String allowedDigestAlgorithms;
     private Integer faultStatus;
 
     private Builder(String name) {
@@ -576,6 +703,18 @@ public class SecurityProfile {
       return this;
     }
 
+    /** Replaces the inbound signature allow-list with the comma-separated absolute URIs. */
+    public Builder allowedSignatureAlgorithms(String csv) {
+      this.allowedSignatureAlgorithms = csv;
+      return this;
+    }
+
+    /** Replaces the inbound digest allow-list with the comma-separated absolute URIs. */
+    public Builder allowedDigestAlgorithms(String csv) {
+      this.allowedDigestAlgorithms = csv;
+      return this;
+    }
+
     /** Optional WSS-only HTTP status override (400-599); validated by the profile store. */
     public Builder faultStatus(Integer v) {
       this.faultStatus = v;
@@ -586,7 +725,65 @@ public class SecurityProfile {
       validateInboundActions();
       validateOutboundActions();
       validateSignatureKnobs();
+      validateAllowedAlgorithmLists();
       return new SecurityProfile(this);
+    }
+
+    /**
+     * Fail-loud checks on the ALLOWED_* inbound algorithm allow-lists. The lists are exempt from
+     * the outbound signing preconditions (a verify-only profile may set them), but they are inert
+     * without verification material, so setting one on a profile with no truststore and no keystore
+     * would silently leave inbound SHA-1 acceptance to WSS4J defaults. A blank list is rejected
+     * because an empty allow-list expresses "allow everything", which is never a safe intent.
+     */
+    private void validateAllowedAlgorithmLists() {
+      validateAllowedAlgorithmList("ALLOWED_SIGNATURE_ALGORITHMS", allowedSignatureAlgorithms);
+      validateAllowedAlgorithmList("ALLOWED_DIGEST_ALGORITHMS", allowedDigestAlgorithms);
+    }
+
+    private void validateAllowedAlgorithmList(String knob, String raw) {
+      if (raw == null) return;
+      String envVar = "CXF_PROFILE_" + name.toUpperCase(Locale.ROOT) + "_" + knob;
+      List<String> parsed = new ArrayList<>();
+      boolean blankSegment = false;
+      for (String segment : raw.split(",", -1)) {
+        String trimmed = segment.trim();
+        if (trimmed.isEmpty()) {
+          blankSegment = true;
+          continue;
+        }
+        parsed.add(trimmed);
+      }
+      if (parsed.isEmpty()) {
+        throw new IllegalArgumentException(
+            envVar
+                + " is set but lists no algorithm URIs; an empty allow-list would allow every"
+                + " algorithm, including SHA-1; remove the variable to use the secure defaults"
+                + " or list at least one absolute algorithm URI");
+      }
+      if (blankSegment) {
+        throw new IllegalArgumentException(
+            envVar
+                + " contains a blank algorithm URI segment; remove the empty entry and list"
+                + " only absolute algorithm URIs");
+      }
+      for (String algorithm : parsed) {
+        if (!isAbsoluteUri(algorithm)) {
+          throw new IllegalArgumentException(
+              envVar
+                  + " segment '"
+                  + algorithm
+                  + "' is not an absolute URI; algorithm URIs must be absolute (for example"
+                  + " 'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256')");
+        }
+      }
+      if (!hasText(truststorePath) && !hasText(keystorePath)) {
+        throw new IllegalArgumentException(
+            envVar
+                + " is set but the profile has no truststore or keystore; the inbound algorithm"
+                + " allow-list would be silently inert without verification material"
+                + " (cxf.truststore.path or cxf.keystore.path)");
+      }
     }
 
     /**
@@ -740,6 +937,27 @@ public class SecurityProfile {
   /** Default the store type to PKCS12 when unset (spec: store type defaults). */
   private static String normalizeTlsType(String type) {
     return hasText(type) ? type : "PKCS12";
+  }
+
+  /** Parses a comma-separated algorithm list into trimmed, ordered URIs. */
+  static List<String> parseAlgorithmList(String csv) {
+    List<String> algorithms = new ArrayList<>();
+    for (String segment : csv.split(",", -1)) {
+      String trimmed = segment.trim();
+      if (!trimmed.isEmpty()) {
+        algorithms.add(trimmed);
+      }
+    }
+    return List.copyOf(algorithms);
+  }
+
+  private static boolean allowsSha1(List<String> algorithms) {
+    for (String algorithm : algorithms) {
+      if (SHA1_ALGORITHM_URIS.contains(algorithm)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

@@ -12,7 +12,12 @@
 //! request reaches the capture service, and passes once SAAJ is registered for
 //! the native image. LEG B (consumer verification) pins that a real signed
 //! request verifies and exports the known `alice` signer descriptor, so the
-//! profile shape exercised by LEG A is also proven on the inbound path.
+//! profile shape exercised by LEG A is also proven on the inbound path. LEG C
+//! pins the inbound algorithm allow-list boundary: a producer with no
+//! signature-algorithm knobs emits WSS4J's outbound legacy default
+//! (`rsa-sha1` + `sha1`), the default consumer profile rejects it as a WSS
+//! fault, and a consumer profile that opts in via
+//! `allowed_signature_algorithms`/`allowed_digest_algorithms` accepts it.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -36,7 +41,7 @@ use crate::support::{bridge_bg_rt, install_crypto_provider, send_to_direct};
 use crate::wire::{is_soap_envelope_ns, resolved_name};
 use crate::{
     cxf_wsdl_path, cxf_wss_keystore_fixture, http_client, init_tracing, post_soap,
-    reserve_local_port, wss_single_profile_component,
+    reserve_local_port, wss_security, wss_single_profile_component,
 };
 
 /// WS-Security (SOAP message security) header namespace.
@@ -44,6 +49,13 @@ const WSSE_NS: &str =
     "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd";
 /// XML digital signature namespace.
 const DS_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
+
+/// Legacy RSA-SHA1 signature URI. WSS4J emits this outbound when the profile
+/// sets no `signature_algorithm` (LEG C producer).
+const LEGACY_SIGNATURE_ALGORITHM: &str = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
+/// Legacy SHA-1 digest URI. WSS4J emits this outbound when the profile sets no
+/// `signature_digest_algorithm` (LEG C producer).
+const LEGACY_DIGEST_ALGORITHM: &str = "http://www.w3.org/2000/09/xmldsig#sha1";
 
 /// Bound for the eagerly-spawned producer bridge slot init. The pool's own
 /// `bridge_start_timeout_ms` is 30 s, so the join must outlast that startup.
@@ -66,6 +78,10 @@ struct SignedRequestStructure {
     reference_uris: Vec<String>,
     /// `Id` attribute values found on SOAP `Body` elements.
     body_ids: Vec<String>,
+    /// `Algorithm` attribute values of every `ds:SignatureMethod`.
+    signature_algorithms: Vec<String>,
+    /// `Algorithm` attribute values of every `ds:DigestMethod`.
+    digest_algorithms: Vec<String>,
 }
 
 /// Parses `xml` with a namespace-aware reader and records only resolved
@@ -92,6 +108,18 @@ fn parse_signed_request(xml: &str) -> SignedRequestStructure {
                     && let Some(uri) = attribute_by_local(&start, "URI")
                 {
                     structure.reference_uris.push(uri);
+                }
+                if ns == DS_NS
+                    && local == "SignatureMethod"
+                    && let Some(algorithm) = attribute_by_local(&start, "Algorithm")
+                {
+                    structure.signature_algorithms.push(algorithm);
+                }
+                if ns == DS_NS
+                    && local == "DigestMethod"
+                    && let Some(algorithm) = attribute_by_local(&start, "Algorithm")
+                {
+                    structure.digest_algorithms.push(algorithm);
                 }
                 if is_soap_envelope_ns(&ns)
                     && local == "Body"
@@ -123,10 +151,52 @@ fn attribute_by_local(start: &BytesStart<'_>, local: &str) -> Option<String> {
 /// `alice` JKS. Fields mirror the JVM signing configuration
 /// (`SignedRequestFixtureGeneratorTest` / `WssSecurityProcessorTest`): keystore
 /// and password `changeit`, signer alias `alice`, and SHA-256 signature/digest
-/// algorithms because WSS4J secure validation (default-on) forbids RSA-SHA1.
+/// algorithms. SHA-256 is not forced by WSS4J's outbound signer, which still
+/// defaults to `rsa-sha1` + `sha1` (LEG C exercises that default). It is forced
+/// here because the bridge's DEFAULT inbound allow-list accepts only SHA-2
+/// unless the consumer profile opts in via
+/// `allowed_signature_algorithms`/`allowed_digest_algorithms`.
 /// `security_actions_out` is set explicitly to `Signature` (the same value
 /// `SecurityProfile.resolveActionsOrDefault` returns when unset).
 async fn signing_producer_component(addr: SocketAddr) -> CxfComponent {
+    producer_component(
+        addr,
+        CxfSecurityFields {
+            keystore_path: Some(cxf_wss_keystore_fixture()),
+            keystore_password: Some("changeit".to_string()),
+            sig_username: Some("alice".to_string()),
+            sig_password: Some("changeit".to_string()),
+            security_actions_out: Some("Signature".to_string()),
+            signature_algorithm: Some(
+                "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256".to_string(),
+            ),
+            signature_digest_algorithm: Some("http://www.w3.org/2001/04/xmlenc#sha256".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// A producer profile that leaves the signature algorithm knobs unset, so
+/// WSS4J's outbound defaults (`rsa-sha1` + `sha1`) produce the legacy-signed
+/// request LEG C posts to the consumer profiles.
+async fn legacy_signing_producer_component(addr: SocketAddr) -> CxfComponent {
+    producer_component(
+        addr,
+        CxfSecurityFields {
+            keystore_path: Some(cxf_wss_keystore_fixture()),
+            keystore_password: Some("changeit".to_string()),
+            sig_username: Some("alice".to_string()),
+            sig_password: Some("changeit".to_string()),
+            security_actions_out: Some("Signature".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// Shared producer pool setup for the signing profiles above.
+async fn producer_component(addr: SocketAddr, security: CxfSecurityFields) -> CxfComponent {
     let pool = Arc::new(
         CxfBridgePool::from_config(CxfPoolConfig {
             profiles: vec![CxfProfileConfig {
@@ -135,20 +205,7 @@ async fn signing_producer_component(addr: SocketAddr) -> CxfComponent {
                 wsdl_path: cxf_wsdl_path(),
                 service_name: "{http://example.com/hello}HelloService".to_string(),
                 port_name: "{http://example.com/hello}HelloPort".to_string(),
-                security: CxfSecurityFields {
-                    keystore_path: Some(cxf_wss_keystore_fixture()),
-                    keystore_password: Some("changeit".to_string()),
-                    sig_username: Some("alice".to_string()),
-                    sig_password: Some("changeit".to_string()),
-                    security_actions_out: Some("Signature".to_string()),
-                    signature_algorithm: Some(
-                        "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256".to_string(),
-                    ),
-                    signature_digest_algorithm: Some(
-                        "http://www.w3.org/2001/04/xmlenc#sha256".to_string(),
-                    ),
-                    ..Default::default()
-                },
+                security,
             }],
             max_bridges: 4,
             bridge_start_timeout_ms: 30_000,
@@ -349,6 +406,233 @@ async fn cxf_native_wss_signed_call_and_verified_signer() {
 
     let hits = consumed.get_received_exchanges().await;
     assert_alice_signer_properties(&hits[0]);
+
+    h_consumer.stop().await;
+}
+
+/// One WSS consumer profile in its own pool/bridge, with caller-supplied
+/// security fields. Mirrors `wss_single_profile_component` (which fixes the
+/// security shape to `wss_security`), so LEG C can opt one profile into the
+/// legacy algorithm allow-lists.
+fn wss_consumer_component(
+    name: &str,
+    security: CxfSecurityFields,
+    port: u16,
+    wsdl_path: &str,
+) -> CxfComponent {
+    let pool = Arc::new(
+        CxfBridgePool::from_config(CxfPoolConfig {
+            profiles: vec![CxfProfileConfig {
+                name: name.to_string(),
+                address: None,
+                wsdl_path: wsdl_path.to_string(),
+                service_name: "{http://example.com/hello}HelloService".to_string(),
+                port_name: "{http://example.com/hello}HelloPort".to_string(),
+                security,
+            }],
+            max_bridges: 4,
+            bridge_start_timeout_ms: 30_000,
+            health_check_interval_ms: 5_000,
+            bridge_cache_dir: None,
+            version: camel_component_cxf::BRIDGE_VERSION.to_string(),
+            bind_address: Some(format!("http://127.0.0.1:{port}/cxf")),
+            listener_tls: None,
+            reconnect: Default::default(),
+        })
+        .unwrap(),
+    );
+    CxfComponent::new(pool)
+}
+
+/// Starts a WSS consumer with `security` and waits until the listener accepts
+/// HTTP. Returns the context and the profile's base URL.
+async fn start_wss_consumer(
+    profile: &str,
+    security: CxfSecurityFields,
+    wsdl_path: &str,
+) -> (CamelTestContext, String) {
+    let port = reserve_local_port();
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(wss_consumer_component(profile, security, port, wsdl_path))
+        .build()
+        .await;
+
+    let consumer_yaml = format!(
+        "routes:\n  - id: {profile}\n    from: \"cxf://http://127.0.0.1:{port}/cxf/{profile}?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile={profile}\"\n    steps:\n      - set_body:\n          value:\n            constant: \"<hel:sayHelloResponse xmlns:hel='http://example.com/hello'><return>ok</return></hel:sayHelloResponse>\"\n      - to: \"mock:consumed\"\n"
+    );
+    for route in parse_yaml(&consumer_yaml).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+
+    let base = format!("http://127.0.0.1:{port}/cxf/{profile}");
+    wait_until(
+        "wss consumer endpoint ready",
+        Duration::from_secs(15),
+        Duration::from_millis(200),
+        || {
+            let url = base.clone();
+            async move {
+                match http_client().get(&url).send().await {
+                    Ok(_) => Ok(true),
+                    Err(_) => Ok(false),
+                }
+            }
+        },
+    )
+    .await
+    .unwrap();
+
+    (h, base)
+}
+
+/// Runs the no-knobs producer once against the capturing service and returns
+/// the EXACT bytes the native bridge signed. Asserts the signature really
+/// carries the legacy `rsa-sha1` + `sha1` URIs, so a change to WSS4J's
+/// outbound default cannot silently turn LEG C into a SHA-2 round trip.
+async fn capture_legacy_signed_request(wsdl_path: &str) -> String {
+    let (addr, captured) = start_capturing_mock_soap_service(SoapVersion::Soap11).await;
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(legacy_signing_producer_component(addr).await)
+        .build()
+        .await;
+
+    let producer_yaml = format!(
+        "routes:\n  - id: cxf-wss-legacy-signed-call\n    from: direct:start\n    steps:\n      - to: \"cxf://http://{addr}/service?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&operation=sayHello&profile=wss_sign\"\n"
+    );
+    for route in parse_yaml(&producer_yaml).unwrap() {
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+
+    let exchange = Exchange::new(Message::new(Body::Text(SAY_HELLO_PAYLOAD.to_string())));
+    let response = send_to_direct(&h, "direct:start", exchange)
+        .await
+        .expect("legacy outbound WS-Security signing must not fail before the request is sent");
+    let response_body = response.body_as::<String>().unwrap_or_default();
+    assert!(
+        response_body.contains("Hello World"),
+        "the legacy-signed call must complete against the capturing service, got: {response_body}"
+    );
+
+    let captured_body = captured
+        .lock()
+        .expect("captured request lock")
+        .first()
+        .cloned()
+        .expect("capturing service should have recorded one legacy-signed request")
+        .body;
+    h.stop().await;
+
+    let structure = parse_signed_request(&captured_body);
+    assert!(
+        structure
+            .signature_algorithms
+            .iter()
+            .any(|algorithm| algorithm == LEGACY_SIGNATURE_ALGORITHM),
+        "the no-knobs producer must sign with WSS4J's legacy rsa-sha1 default, got {:?}\nbody:\n{}",
+        structure.signature_algorithms,
+        captured_body
+    );
+    assert!(
+        structure
+            .digest_algorithms
+            .iter()
+            .any(|algorithm| algorithm == LEGACY_DIGEST_ALGORITHM),
+        "the no-knobs producer must digest with WSS4J's legacy sha1 default, got {:?}\nbody:\n{}",
+        structure.digest_algorithms,
+        captured_body
+    );
+
+    captured_body
+}
+
+/// LEG C, opted-in half: the exact legacy-signed bytes are accepted when the
+/// consumer profile adds the SHA-1 URIs to its inbound allow-lists. HTTP 200
+/// and a recorded route hit prove the request passed WS-Security verification.
+///
+/// Locally the native bridge must be available through
+/// `CAMEL_CXF_BRIDGE_BINARY_PATH` (or its `CXF_BRIDGE_PATH` alias); without it
+/// `require_cxf_bridge_binary` fails exactly like the existing legs. CI builds
+/// the bridge natively.
+#[tokio::test(flavor = "multi_thread")]
+async fn wss_e2e_leg_c_opted_in_profile_accepts_legacy_sha1() {
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_cxf_bridge_binary();
+    let wsdl_path = cxf_wsdl_path();
+
+    let captured_body = capture_legacy_signed_request(&wsdl_path).await;
+
+    let mut security = wss_security(None);
+    security.allowed_signature_algorithms = Some(LEGACY_SIGNATURE_ALGORITHM.to_string());
+    security.allowed_digest_algorithms = Some(LEGACY_DIGEST_ALGORITHM.to_string());
+    let (h_consumer, base) =
+        start_wss_consumer("wss_e2e_legacy_opt_in", security, &wsdl_path).await;
+
+    let res = post_soap(&base, "text/xml", "sayHello", captured_body.clone()).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "an opted-in consumer profile must accept the legacy-signed request, body:\n{captured_body}"
+    );
+
+    let consumed = h_consumer.mock().get_endpoint("consumed").unwrap();
+    wait_until(
+        "opted-in consumer received the legacy-signed request",
+        Duration::from_secs(10),
+        Duration::from_millis(200),
+        || {
+            let consumed = consumed.clone();
+            async move { Ok(!consumed.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .unwrap();
+
+    let hits = consumed.get_received_exchanges().await;
+    assert_alice_signer_properties(&hits[0]);
+
+    h_consumer.stop().await;
+}
+
+/// LEG C, default half: the same exact legacy-signed bytes are rejected by a
+/// consumer profile that leaves the inbound allow-lists unset (secure default:
+/// SHA-2 only). The response is a SOAP 1.1 WSS fault (500, the version's default
+/// status) and the route never runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn wss_e2e_leg_c_default_profile_rejects_legacy_sha1() {
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_cxf_bridge_binary();
+    let wsdl_path = cxf_wsdl_path();
+
+    let captured_body = capture_legacy_signed_request(&wsdl_path).await;
+    let (h_consumer, base) =
+        start_wss_consumer("wss_e2e_legacy_default", wss_security(None), &wsdl_path).await;
+
+    let res = post_soap(&base, "text/xml", "sayHello", captured_body.clone()).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the default consumer profile must reject the legacy-signed request with the SOAP 1.1 \
+         WSS fault status, body:\n{captured_body}"
+    );
+    let fault_body = res.text().await.unwrap();
+    assert!(
+        fault_body.contains("Fault"),
+        "expected a SOAP fault body for the rejected legacy signature, got: {fault_body}"
+    );
+
+    let consumed = h_consumer.mock().get_endpoint("consumed").unwrap();
+    assert!(
+        consumed.get_received_exchanges().await.is_empty(),
+        "the rejected legacy-signed request must never reach the route"
+    );
 
     h_consumer.stop().await;
 }
