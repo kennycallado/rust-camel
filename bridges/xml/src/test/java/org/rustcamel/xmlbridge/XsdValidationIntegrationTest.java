@@ -914,9 +914,7 @@ class XsdValidationIntegrationTest {
         "a registered schema set must survive inline eviction pressure");
     assertTrue(
         schemaCache.size() <= sizeBase + 1 + 8,
-        "cache size "
-            + schemaCache.size()
-            + " must stay within baseline + pinned set + 8 inline");
+        "cache size " + schemaCache.size() + " must stay within baseline + pinned set + 8 inline");
   }
 
   @Test
