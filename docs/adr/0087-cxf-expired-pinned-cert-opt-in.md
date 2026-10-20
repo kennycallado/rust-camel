@@ -180,8 +180,8 @@ Profiles that never set the option keep stock `Merlin` / `CryptoFactory`
 behavior on JVM and native.
 
 The option is documented in `docs/src/components/ws-soap.md`. No generated
-schema covers `CxfSecurityFields`, so `cargo xtask schema --check` is unaffected. There is no bridge version bump and no release metadata change in
-this decision.
+schema covers `CxfSecurityFields`, so `cargo xtask schema --check` is unaffected. The bridge is released as 0.8.4; nothing else in the release
+metadata changes.
 
 **Closure gate.** bd rc-x7wys stays open until the published bridge accepts the
 partner's expired pinned certificate with both opt-ins enabled, and rejects it
