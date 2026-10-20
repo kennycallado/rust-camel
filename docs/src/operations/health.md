@@ -62,6 +62,10 @@ The health subsystem distinguishes two states below Healthy:
   Lazily started resources (the xslt and jms bridges, the sql producer pool) report Degraded until first use, so a route without traffic still passes readiness.
 - **Unhealthy**: the component cannot process Exchanges. The route fails readiness (503, pod NotReady).
 
+For the JMS bridge, broker status follows the same split. A live bridge with unknown (not yet checked), skipped, or stale broker status is `Degraded` and passes readiness. A completed health RPC that reports the broker as verified down is `Unhealthy` 503. An RPC failure or timeout is also `Unhealthy` 503. Broker fields never trigger a process restart. They describe process liveness and broker reachability only.
+
+The broker-latency isolation guarantee requires the updated Java health handler. No protobuf change is needed. An older blocking bridge cannot provide the guarantee.
+
 See the [glossary](../concepts/glossary.md) for the canonical definition of
 these terms.
 

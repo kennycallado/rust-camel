@@ -1,6 +1,9 @@
 package org.rustcamel.jms;
 
+import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -22,6 +25,11 @@ import java.util.Map;
  *       4194304}
  *   <li>{@code JMS_MAX_DELIVERY_ATTEMPTS} in {@code [1, 100]}, default {@code 6}
  * </ul>
+ *
+ * <p>Broker health probes honor {@code JMS_HEALTH_BROKER_PROBE_MODE}: {@code reuse} (the default)
+ * retains and reuses a diagnostic connection, while {@code skip} performs no broker I/O and reports
+ * connectivity as unverified. Any other value is a permanent configuration error, validated eagerly
+ * at startup before the first RPC.
  */
 @ApplicationScoped
 public class BridgeConfig {
@@ -29,6 +37,7 @@ public class BridgeConfig {
   static final String JOURNAL_LOCK_WAIT_MS_ENV = "JMS_ATTEMPT_JOURNAL_LOCK_WAIT_MS";
   static final String JOURNAL_MAX_BYTES_ENV = "JMS_ATTEMPT_JOURNAL_MAX_BYTES";
   static final String MAX_DELIVERY_ATTEMPTS_ENV = "JMS_MAX_DELIVERY_ATTEMPTS";
+  static final String HEALTH_BROKER_PROBE_MODE_ENV = "JMS_HEALTH_BROKER_PROBE_MODE";
 
   static final long JOURNAL_RETENTION_MS_MIN = 60_000L;
   static final long JOURNAL_RETENTION_MS_MAX = 31_536_000_000L;
@@ -61,6 +70,72 @@ public class BridgeConfig {
    */
   BridgeConfig(Map<String, String> env) {
     this.env = env;
+  }
+
+  /** How broker health probes obtain connectivity information. */
+  public enum BrokerProbeMode {
+    /** Retain and reuse one diagnostic connection across health refreshes. */
+    REUSE,
+    /** Perform no broker I/O; connectivity remains unverified. */
+    SKIP;
+
+    /**
+     * Parses a configured mode, trimming and lower-casing it with {@link Locale#ROOT}.
+     *
+     * @param raw the raw configured value
+     * @return the matching mode
+     * @throws JournalPermanentException when the value is not {@code reuse} or {@code skip}; the
+     *     message names the variable only and never echoes the raw value
+     */
+    static BrokerProbeMode from(String raw) throws JournalPermanentException {
+      String normalized = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
+      return switch (normalized) {
+        case "reuse" -> REUSE;
+        case "skip" -> SKIP;
+        default ->
+            throw new JournalPermanentException(
+                HEALTH_BROKER_PROBE_MODE_ENV + " must be one of [reuse, skip]");
+      };
+    }
+  }
+
+  /**
+   * Configured broker-probe mode. Unset or blank selects {@link BrokerProbeMode#REUSE}.
+   *
+   * @return the configured mode, default {@code reuse}
+   * @throws JournalPermanentException when the value is not {@code reuse} or {@code skip}
+   */
+  public BrokerProbeMode brokerProbeMode() throws JournalPermanentException {
+    String raw = env.get(HEALTH_BROKER_PROBE_MODE_ENV);
+    if (raw == null || raw.isBlank()) {
+      return BrokerProbeMode.REUSE;
+    }
+    return BrokerProbeMode.from(raw);
+  }
+
+  /**
+   * Validates startup configuration eagerly, before any RPC can reach a lazily initialized bean.
+   *
+   * @throws IllegalStateException when the broker-probe mode is unsupported; the message names the
+   *     variable only
+   */
+  void validateStartup() {
+    try {
+      brokerProbeMode();
+    } catch (JournalPermanentException error) {
+      throw new IllegalStateException(error.getMessage(), error);
+    }
+  }
+
+  /**
+   * Enforces the configuration contract at startup. Advances the permanent configuration failure to
+   * boot time instead of deferring it to the first health RPC.
+   *
+   * @param event the Quarkus startup event
+   * @throws IllegalStateException when the broker-probe mode is unsupported
+   */
+  void onStartup(@Observes StartupEvent event) {
+    validateStartup();
   }
 
   public String brokerUrl() {

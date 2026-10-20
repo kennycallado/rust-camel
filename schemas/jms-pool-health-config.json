@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/kennycallado/rust-camel/main/schemas/jms-pool-health-config.json",
+  "title": "JMS pool health configuration (scoped fragment)",
+  "description": "Scoped fragment for the four JMS pool health fields. This is not a complete JMS pool validator: it defines only health_timeout_ms, health_failure_threshold, health_broker_probe_mode, and health_check_interval_ms. Every other pool property (brokers, max_bridges, start/reconnect timings, cache directory, retry policy) keeps its runtime validation in JmsPoolConfig::validate(), and additional properties are permitted here by design.",
+  "type": "object",
+  "properties": {
+    "health_timeout_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615,
+      "default": 3000,
+      "description": "Liveness deadline for one JMS health RPC, in milliseconds, stored as a u64."
+    },
+    "health_failure_threshold": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295,
+      "default": 3,
+      "description": "Consecutive failed liveness probes required before the bridge restarts, stored as a u32."
+    },
+    "health_broker_probe_mode": {
+      "type": "string",
+      "enum": ["reuse", "skip"],
+      "default": "reuse",
+      "description": "Broker diagnostic strategy for health checks: reuse one provider probe path or skip broker I/O."
+    },
+    "health_check_interval_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 5000,
+      "description": "Delay between health liveness probes, in milliseconds, stored as a u64."
+    }
+  },
+  "additionalProperties": true
+}

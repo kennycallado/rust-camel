@@ -29,6 +29,36 @@ use crate::proto::{
 
 const NEAR_CAP_BODY_SIZE: usize = 15 * 1024 * 1024;
 
+/// Restores an environment variable to its prior value when dropped.
+///
+/// Shared by the `component.rs` and `consumer.rs` test modules so every test
+/// that mutates the process environment while holding [`crate::BRIDGE_ENV_LOCK`]
+/// uses one restore implementation.
+pub(crate) struct EnvGuard {
+    key: &'static str,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        if let Some(v) = &self.prev {
+            // SAFETY: restoring process env in test scope.
+            unsafe { std::env::set_var(self.key, v) };
+        } else {
+            // SAFETY: restoring process env in test scope.
+            unsafe { std::env::remove_var(self.key) };
+        }
+    }
+}
+
+/// Captures an environment variable's prior value and restores it on drop.
+pub(crate) fn env_guard(key: &'static str) -> EnvGuard {
+    EnvGuard {
+        key,
+        prev: std::env::var_os(key),
+    }
+}
+
 /// The two copies of the JMS bridge wire contract. Task 3.1 keeps them
 /// byte-identical except the Java `option` lines in the bridge copy.
 const CRATE_PROTO: &str = include_str!("../proto/jms_bridge.proto");
@@ -609,4 +639,481 @@ async fn wire_payload_omits_credentials_and_keeps_trace_id() {
         !payload.contains("hunter2"),
         "denied value appears in the serialized SendRequest: {payload}"
     );
+}
+
+// ── Task 2.4: scripted health fixtures for the real monitor ──────────────────
+
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::component::{
+    BridgeSlot, BridgeState, JmsBridgePool, ProbeProcessed, RefreshAttempt, ReplacementProcessed,
+};
+
+/// One scripted reply for a single health call. The server pops one entry per
+/// call; an empty queue answers `healthy=true, broker_connected=true,
+/// message="ok"` so a test can enqueue only the exceptional prefix.
+pub(crate) enum ScriptedHealth {
+    /// Reply with the given response.
+    Respond(HealthResponse),
+    /// Enter `gate` before replying: signal `entered`, then wait for
+    /// `release`, then reply. The test holds `release` to force a timeout.
+    Gate {
+        response: HealthResponse,
+        gate: Arc<ProbeGate>,
+    },
+    /// Fail the RPC with the given status.
+    Error(Status),
+}
+
+/// Gate coordinating one delayed health reply between test and server.
+pub(crate) struct ProbeGate {
+    /// Signalled by the server once the request entered the handler.
+    pub entered: Arc<tokio::sync::Notify>,
+    /// Signalled by the test (or teardown) to let the handler reply.
+    pub release: Arc<tokio::sync::Notify>,
+}
+
+/// Builds a fresh gate pair for [`ScriptedHealth::Gate`].
+pub(crate) fn probe_gate() -> Arc<ProbeGate> {
+    Arc::new(ProbeGate {
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    })
+}
+
+/// Server-side events for one health call. These coordinate gates only; they
+/// are NOT proof that the client monitor processed the response — assertions
+/// await monitor acknowledgements instead.
+pub(crate) enum HealthEvent {
+    Started,
+    Completed,
+}
+
+/// Owns the scripted health server task and its shutdown path; no detached
+/// server survives a test.
+pub(crate) struct ScriptedHealthHandle {
+    pub port: u16,
+    pub calls: Arc<AtomicUsize>,
+    pub events: tokio::sync::mpsc::UnboundedReceiver<HealthEvent>,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+    /// Gates entered by in-flight handlers; released on shutdown so no
+    /// handler stays blocked.
+    gates: Arc<std::sync::Mutex<Vec<Arc<ProbeGate>>>>,
+}
+
+impl ScriptedHealthHandle {
+    /// Releases every entered gate, signals shutdown, and joins the server
+    /// under a bounded timeout, aborting if the bound expires.
+    pub async fn shutdown(self) {
+        let Self {
+            shutdown,
+            mut task,
+            gates,
+            ..
+        } = self;
+        {
+            let entered = gates.lock().expect("gates mutex poisoned");
+            for gate in entered.iter() {
+                gate.release.notify_one();
+            }
+        }
+        let _ = shutdown.send(());
+        if tokio::time::timeout(Duration::from_secs(2), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ScriptedHealthService {
+    queue: Arc<std::sync::Mutex<VecDeque<ScriptedHealth>>>,
+    calls: Arc<AtomicUsize>,
+    events: tokio::sync::mpsc::UnboundedSender<HealthEvent>,
+    gates: Arc<std::sync::Mutex<Vec<Arc<ProbeGate>>>>,
+}
+
+#[async_trait::async_trait]
+impl BridgeService for ScriptedHealthService {
+    async fn send(&self, _request: Request<SendRequest>) -> Result<Response<SendResponse>, Status> {
+        Err(Status::unimplemented(
+            "scripted health fixture serves Health only",
+        ))
+    }
+
+    type SubscribeStream = Pin<Box<dyn Stream<Item = Result<JmsMessage, Status>> + Send>>;
+
+    async fn subscribe(
+        &self,
+        _request: Request<SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        Err(Status::unimplemented(
+            "scripted health fixture serves Health only",
+        ))
+    }
+
+    async fn health(
+        &self,
+        _request: Request<HealthRequest>,
+    ) -> Result<Response<HealthResponse>, Status> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let _ = self.events.send(HealthEvent::Started);
+        let entry = self
+            .queue
+            .lock()
+            .expect("script queue mutex poisoned")
+            .pop_front()
+            .unwrap_or_else(|| {
+                ScriptedHealth::Respond(HealthResponse {
+                    healthy: true,
+                    broker_connected: true,
+                    message: "ok".to_string(),
+                })
+            });
+        // The gate is applied before the reply; the queue lock is never held
+        // across the wait.
+        let outcome = match entry {
+            ScriptedHealth::Respond(response) => Ok(response),
+            ScriptedHealth::Error(status) => Err(status),
+            ScriptedHealth::Gate { response, gate } => {
+                self.gates
+                    .lock()
+                    .expect("gates mutex poisoned")
+                    .push(Arc::clone(&gate));
+                gate.entered.notify_one();
+                gate.release.notified().await;
+                Ok(response)
+            }
+        };
+        let _ = self.events.send(HealthEvent::Completed);
+        outcome.map(Response::new)
+    }
+
+    async fn complete(
+        &self,
+        _request: Request<CompletionRequest>,
+    ) -> Result<Response<CompletionResponse>, Status> {
+        Err(Status::unimplemented(
+            "scripted health fixture serves Health only",
+        ))
+    }
+}
+
+/// Spawns the scripted health server. Each call pops one `ScriptedHealth`
+/// entry and increments `calls`.
+pub(crate) async fn spawn_scripted_health(script: Vec<ScriptedHealth>) -> ScriptedHealthHandle {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind scripted health listener");
+    let port = listener.local_addr().expect("local addr").port();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
+    let gates = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let queue = Arc::new(std::sync::Mutex::new(VecDeque::from(script)));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let calls_for_service = Arc::clone(&calls);
+    let gates_for_service = Arc::clone(&gates);
+    let task = tokio::spawn(async move {
+        let _ = tonic::transport::Server::builder()
+            .add_service(BridgeServiceServer::new(ScriptedHealthService {
+                queue,
+                calls: calls_for_service,
+                events: events_tx,
+                gates: gates_for_service,
+            }))
+            .serve_with_incoming_shutdown(incoming, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+    ScriptedHealthHandle {
+        port,
+        calls,
+        events: events_rx,
+        shutdown: shutdown_tx,
+        task,
+        gates,
+    }
+}
+
+/// Connects a real (handshaked) tonic channel to the scripted server.
+pub(crate) async fn connect_scripted(port: u16) -> tonic::transport::Channel {
+    let endpoint = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("valid scripted endpoint");
+    tokio::time::timeout(Duration::from_secs(5), endpoint.connect())
+        .await
+        .expect("scripted server connect within 5s")
+        .expect("connected scripted channel")
+}
+
+/// Test fixture owning the real health monitor, the scripted health server,
+/// and the optional real stub child installed in the slot
+/// ([`camel_bridge::process::BridgeProcess`] wraps a `tokio::process::Child`
+/// with `kill_on_drop(true)`; `shutdown` reclaims and stops it).
+pub(crate) struct TestBridgeFixture {
+    pub pool: Arc<JmsBridgePool>,
+    pub slot: Arc<BridgeSlot>,
+    pub probe_rx: tokio::sync::mpsc::UnboundedReceiver<ProbeProcessed>,
+    pub replacement_rx: tokio::sync::mpsc::UnboundedReceiver<ReplacementProcessed>,
+    monitor: Option<tokio::task::JoinHandle<()>>,
+    server: Option<ScriptedHealthHandle>,
+}
+
+impl TestBridgeFixture {
+    /// Installs the optional initial child as the slot's Ready process (or
+    /// publishes Ready with the scripted channel alone), installs the test
+    /// notification channels, and starts the real health monitor.
+    pub(crate) async fn start(
+        pool: Arc<JmsBridgePool>,
+        slot: Arc<BridgeSlot>,
+        server: ScriptedHealthHandle,
+        initial_child: Option<camel_bridge::process::BridgeProcess>,
+    ) -> TestBridgeFixture {
+        let channel = connect_scripted(server.port).await;
+        match initial_child {
+            Some(child) => {
+                JmsBridgePool::apply_initial_start_result(slot.as_ref(), Ok((child, channel)))
+                    .await;
+            }
+            None => {
+                let _ = slot.state_tx.send_replace(BridgeState::Ready { channel });
+            }
+        }
+
+        let (probe_tx, probe_rx) = tokio::sync::mpsc::unbounded_channel();
+        *pool
+            .probe_processed
+            .lock()
+            .expect("probe_processed mutex poisoned") = Some(probe_tx);
+        let (replacement_tx, replacement_rx) = tokio::sync::mpsc::unbounded_channel();
+        *pool
+            .replacement_processed
+            .lock()
+            .expect("replacement_processed mutex poisoned") = Some(replacement_tx);
+
+        pool.spawn_health_monitor(Arc::clone(&slot)).await;
+        let monitor = slot
+            .health_monitor_handle
+            .lock()
+            .await
+            .take()
+            .expect("health monitor handle stored");
+
+        TestBridgeFixture {
+            pool,
+            slot,
+            probe_rx,
+            replacement_rx,
+            monitor: Some(monitor),
+            server: Some(server),
+        }
+    }
+
+    /// Awaits the next monitor probe acknowledgement under a 5s bound.
+    pub(crate) async fn next_probe(&mut self) -> ProbeProcessed {
+        tokio::time::timeout(Duration::from_secs(5), self.probe_rx.recv())
+            .await
+            .expect("monitor probe acknowledgement within 5s")
+            .expect("probe_processed channel open")
+    }
+
+    /// Awaits the next replacement-processed notification under a 5s bound.
+    pub(crate) async fn next_replacement(&mut self) -> ReplacementProcessed {
+        tokio::time::timeout(Duration::from_secs(5), self.replacement_rx.recv())
+            .await
+            .expect("replacement-processed notification within 5s")
+            .expect("replacement_processed channel open")
+    }
+
+    /// Awaits the next server-side event under a 5s bound.
+    pub(crate) async fn next_server_event(&mut self) -> HealthEvent {
+        let server = self.server.as_mut().expect("server still attached");
+        tokio::time::timeout(Duration::from_secs(5), server.events.recv())
+            .await
+            .expect("server event within 5s")
+            .expect("server events channel open")
+    }
+
+    /// Awaits server-side completion of a health call under a 5s bound.
+    pub(crate) async fn await_server_completed(&mut self) {
+        loop {
+            match self.next_server_event().await {
+                HealthEvent::Completed => return,
+                HealthEvent::Started => {}
+            }
+        }
+    }
+
+    /// Health calls observed by the scripted server so far.
+    pub(crate) fn server_calls(&self) -> usize {
+        self.server
+            .as_ref()
+            .expect("server still attached")
+            .calls
+            .load(Ordering::SeqCst)
+    }
+
+    /// Stops the monitor, the server, the installed child, and any unused
+    /// prepared processes, all under bounded timeouts.
+    pub(crate) async fn shutdown(mut self) {
+        // The monitor only exits on a terminal state; publish it first so the
+        // join is prompt, then abort if the bound expires.
+        let _ = self.slot.state_tx.send_replace(BridgeState::Stopped);
+        if let Some(mut monitor) = self.monitor.take()
+            && tokio::time::timeout(Duration::from_secs(2), &mut monitor)
+                .await
+                .is_err()
+        {
+            monitor.abort();
+            let _ = monitor.await;
+        }
+        if let Some(server) = self.server.take() {
+            server.shutdown().await;
+        }
+        let process = self.slot.process.lock().await.take();
+        if let Some(process) = process {
+            let _ = tokio::time::timeout(Duration::from_secs(2), process.stop()).await;
+        }
+        let mut queue = self.pool.replacement_outcomes.lock().await;
+        while let Some(prepared) = queue.pop_front() {
+            if let Ok((process, _channel)) = prepared {
+                let _ = tokio::time::timeout(Duration::from_secs(2), process.stop()).await;
+            }
+        }
+    }
+}
+
+impl Drop for TestBridgeFixture {
+    fn drop(&mut self) {
+        // Panic path: abort everything so a panicking test leaks no task.
+        // The child is killed by `BridgeProcess`'s kill-on-drop child when the
+        // slot/pool drop during unwind.
+        if let Some(monitor) = self.monitor.take() {
+            monitor.abort();
+        }
+        if let Some(server) = self.server.take() {
+            let _ = server.shutdown.send(());
+            server.task.abort();
+        }
+    }
+}
+
+/// Task 2.4 test helper: reads the slot's installed child PID.
+pub(crate) async fn slot_child_pid(slot: &BridgeSlot) -> Option<u32> {
+    slot.process
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|p| p.child_pid())
+}
+
+/// Task 2.4 test helper: queues one prepared replacement launch result.
+pub(crate) async fn push_replacement(
+    pool: &JmsBridgePool,
+    process: camel_bridge::process::BridgeProcess,
+    channel: tonic::transport::Channel,
+) {
+    pool.replacement_outcomes
+        .lock()
+        .await
+        .push_back(Ok((process, channel)));
+}
+
+/// Task 2.4 test helper: replacement attempts observed so far.
+pub(crate) fn replacement_attempts(pool: &JmsBridgePool) -> usize {
+    pool.replacement_attempts.load(Ordering::SeqCst)
+}
+
+/// Task 2.5 test helper: every refresh attempt recorded so far.
+pub(crate) fn refresh_attempts(pool: &JmsBridgePool) -> Vec<RefreshAttempt> {
+    pool.refresh_attempts
+        .lock()
+        .expect("refresh_attempts mutex poisoned")
+        .clone()
+}
+
+/// Task 2.5 test helper: waits for the `start`-indexed refresh attempt under a
+/// bounded wait, driven by the pool's post-recording notification (no sleep or
+/// polling).
+pub(crate) async fn next_refresh_attempt(pool: &JmsBridgePool, start: usize) -> RefreshAttempt {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(attempt) = refresh_attempts(pool).get(start) {
+            return attempt.clone();
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            panic!("refresh attempt {start} not observed within 3s");
+        }
+        // `notify_one` stores a permit, so a recording between the check and
+        // this wait cannot be lost.
+        let _ = tokio::time::timeout(remaining, pool.refresh_observed.notified()).await;
+    }
+}
+
+/// Task 2.5 test helper: starts a real ready-handshake child that announces
+/// `port` and sleeps, so `refresh_slot_channel` selects a real process endpoint.
+#[cfg(unix)]
+pub(crate) async fn ready_stub_process(
+    dir: &std::path::Path,
+    tag: &str,
+    port: u16,
+) -> camel_bridge::process::BridgeProcess {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let pidfile = dir.join(format!("{tag}.pid"));
+    let script = format!(
+        "#!/bin/sh\necho $$ > '{}'\nprintf '%s\\n' '{{\"status\":\"ready\",\"port\":{port}}}'\nexec sleep 30\n",
+        pidfile.display()
+    );
+    let path = dir.join(format!("{tag}.sh"));
+    std::fs::write(&path, script).expect("write stub bridge");
+    let mut perms = std::fs::metadata(&path)
+        .expect("stat stub bridge")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).expect("chmod stub bridge");
+
+    let config = camel_bridge::process::BridgeProcessConfig::jms(
+        path,
+        "tcp://localhost:61616".to_string(),
+        camel_bridge::process::BrokerType::ActiveMq,
+        None,
+        None,
+        2_000,
+        Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
+        Some("0123456789abcdef0123456789abcdef".to_string()),
+    );
+    camel_bridge::process::BridgeProcess::start(&config)
+        .await
+        .expect("stub must reach the ready line")
+}
+
+/// Task 2.5 test helper: takes and stops the slot's installed child under a
+/// bounded timeout.
+pub(crate) async fn stop_slot_process(slot: &BridgeSlot) {
+    let process = tokio::time::timeout(Duration::from_secs(2), slot.process.lock())
+        .await
+        .expect("process lock within 2s")
+        .take();
+    if let Some(process) = process {
+        let _ = tokio::time::timeout(Duration::from_secs(2), process.stop()).await;
+    }
+}
+
+/// Task 2.4 test helper: broker-status transitions observed so far.
+pub(crate) fn broker_transitions(
+    pool: &JmsBridgePool,
+) -> Vec<crate::component::BrokerStatusTransition> {
+    pool.broker_status_transitions
+        .lock()
+        .expect("broker_status_transitions mutex poisoned")
+        .clone()
 }

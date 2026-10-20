@@ -59,14 +59,14 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
       long lockWaitMs,
       long maxAttempts) {}
 
-  private volatile boolean lastHealthy = false;
-  private volatile long lastHealthCheck = 0L;
-  private volatile String lastHealthMessage = "ok";
-  private static final long HEALTH_TTL_MS = 10_000L;
+  private volatile BridgeHealthCache healthCache;
+  private final Object healthCacheLock = new Object();
+  private volatile boolean shutdownStarted;
 
   @Override
   public void send(SendRequest request, StreamObserver<SendResponse> responseObserver) {
     try {
+      long generation = healthCache().generation();
       String msgId =
           producer.send(
               request.getDestination(),
@@ -76,8 +76,7 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
       responseObserver.onNext(
           SendResponse.newBuilder().setMessageId(msgId == null ? "" : msgId).build());
       responseObserver.onCompleted();
-      lastHealthy = true;
-      lastHealthMessage = "ok";
+      healthCache().recordSendSuccess(generation);
     } catch (Exception e) {
       LOG.error(
           "JMS send failed for destination '" + request.getDestination() + "': " + e.getMessage(),
@@ -252,32 +251,57 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
 
   @Override
   public void health(HealthRequest request, StreamObserver<HealthResponse> responseObserver) {
-    long now = System.currentTimeMillis();
-    if (now - lastHealthCheck > HEALTH_TTL_MS) {
-      synchronized (this) {
-        now = System.currentTimeMillis();
-        if (now - lastHealthCheck > HEALTH_TTL_MS) {
-          try {
-            clientFactory.checkHealth();
-            lastHealthy = true;
-            lastHealthMessage = "ok";
-          } catch (Exception e) {
-            lastHealthy = false;
-            lastHealthMessage = summarizeThrowable(e);
-            LOG.warn("JMS broker health check failed: " + lastHealthMessage);
-          }
-          lastHealthCheck = now;
-        }
-      }
-    }
-
-    responseObserver.onNext(
-        HealthResponse.newBuilder()
-            .setHealthy(lastHealthy)
-            .setBrokerConnected(lastHealthy)
-            .setMessage(lastHealthMessage)
-            .build());
+    responseObserver.onNext(healthCache().current().toResponse());
     responseObserver.onCompleted();
+  }
+
+  /**
+   * Lazily creates the single cached health snapshot. Construction performs no broker I/O and no
+   * eager CDI initialization: the retained probe opens its diagnostic only on the cache's refresh
+   * worker.
+   *
+   * @return the process-wide cache
+   * @throws IllegalStateException when shutdown has started before a cache was created
+   */
+  private BridgeHealthCache healthCache() {
+    BridgeHealthCache cache = healthCache;
+    if (cache != null) {
+      return cache;
+    }
+    synchronized (healthCacheLock) {
+      cache = healthCache;
+      if (cache != null) {
+        return cache;
+      }
+      if (shutdownStarted) {
+        throw new IllegalStateException("JMS bridge service is shutting down");
+      }
+      try {
+        cache =
+            new BridgeHealthCache(
+                clientFactory.healthProbe(),
+                config.brokerProbeMode() == BridgeConfig.BrokerProbeMode.SKIP,
+                System::currentTimeMillis);
+      } catch (JournalPermanentException error) {
+        throw new IllegalStateException(error.getMessage(), error);
+      }
+      clientFactory.setResetHook(cache::invalidate);
+      healthCache = cache;
+      return cache;
+    }
+  }
+
+  /** Package-private test accessor; never creates a cache. */
+  BridgeHealthCache healthCacheForTests() {
+    return healthCache;
+  }
+
+  /** Package-private test seam for injecting a fake-clock cache without CDI. */
+  void installHealthCacheForTests(BridgeHealthCache cache) {
+    synchronized (healthCacheLock) {
+      healthCache = cache;
+      clientFactory.setResetHook(cache::invalidate);
+    }
   }
 
   /**
@@ -301,6 +325,16 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
 
   @PreDestroy
   public void shutdown() {
+    BridgeHealthCache cache;
+    synchronized (healthCacheLock) {
+      shutdownStarted = true;
+      cache = healthCache;
+    }
+    if (cache != null) {
+      // Never call the lazy accessor from shutdown: it would create a cache after the terminal
+      // flag. Invalidation and bounded close run outside the initialization lock.
+      cache.invalidate();
+    }
     synchronized (shutdownLock) {
       shutdown = true;
     }
@@ -314,6 +348,9 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
           consumerFactory.destroy(e.getValue());
         }
       }
+    }
+    if (cache != null) {
+      cache.close();
     }
   }
 
@@ -382,32 +419,5 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
       responseObserver.onCompleted();
     } catch (Exception ignored) {
     }
-  }
-
-  private static String summarizeThrowable(Throwable error) {
-    if (error == null) {
-      return "connection failed";
-    }
-
-    StringBuilder summary = new StringBuilder();
-    Throwable cur = error;
-    int depth = 0;
-    while (cur != null && depth < 6) {
-      if (depth > 0) {
-        summary.append(" <- ");
-      }
-      summary.append(cur.getClass().getName());
-      String msg = cur.getMessage();
-      if (msg != null && !msg.isBlank()) {
-        summary.append(": ").append(msg);
-      }
-      cur = cur.getCause();
-      depth++;
-    }
-
-    if (summary.length() == 0) {
-      return "connection failed";
-    }
-    return summary.toString();
   }
 }

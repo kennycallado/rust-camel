@@ -111,6 +111,49 @@ fn destination(endpoint_config: &JmsEndpointConfig) -> String {
     )
 }
 
+/// Outcome of the shared consumer refresh action (task 2.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryOutcome {
+    /// The refresh was attempted; callers keep their existing retry flow.
+    Continue,
+    /// Cancellation won the refresh select; callers return `Ok(())`.
+    Cancelled,
+}
+
+/// Shared consumer refresh/cancel/wake action for both retry sites.
+///
+/// Cancellation is raced against the real `refresh_slot_channel` call. A
+/// failed refresh (including the fixed two-second expiration) logs the
+/// credential-safe warning and requests one coalesced liveness probe by
+/// waking the monitor; it never restarts or degrades the slot. The caller
+/// keeps every counter increment, threshold check, and reset at its original
+/// site.
+async fn refresh_channel_or_request_probe(
+    pool: &JmsBridgePool,
+    broker_name: &str,
+    destination: &str,
+    idx: usize,
+    cancel: &CancellationToken,
+    ctx: &ConsumerContext,
+) -> RecoveryOutcome {
+    let refresh = tokio::select! {
+        _ = cancel.cancelled() => return RecoveryOutcome::Cancelled,
+        _ = ctx.cancelled() => return RecoveryOutcome::Cancelled,
+        result = pool.refresh_slot_channel(broker_name) => result,
+    };
+    if let Err(refresh_err) = refresh {
+        warn!(
+            broker = %broker_name,
+            destination = %destination,
+            consumer_idx = idx,
+            error = %refresh_err,
+            "JMS channel refresh failed; requesting liveness probe"
+        );
+        pool.restart_slot(broker_name);
+    }
+    RecoveryOutcome::Continue
+}
+
 /// Classifies a gRPC status as a permanent, route-only failure.
 ///
 /// The gRPC code is lost once a `tonic::Status` is converted into a
@@ -522,22 +565,22 @@ async fn consumer_loop(
                             failures = consecutive_transport_failures,
                             "JMS subscribe transport failures exceeded threshold; refreshing channel"
                         );
-                        // Race the channel refresh against cancellation so a
-                        // requested shutdown is never blocked (task 4.5).
-                        let refresh = tokio::select! {
-                            _ = cancel.cancelled() => return Ok(()),
-                            _ = ctx.cancelled() => return Ok(()),
-                            result = pool.refresh_slot_channel(broker_name) => result,
-                        };
-                        if let Err(refresh_err) = refresh {
-                            warn!(
-                                broker = %broker_name,
-                                destination = %destination,
-                                consumer_idx = idx,
-                                error = %refresh_err,
-                                "JMS channel refresh failed; requesting bridge restart"
-                            );
-                            pool.restart_slot(broker_name);
+                        // Shared with the stream-error site: race the channel
+                        // refresh against cancellation so a requested shutdown
+                        // is never blocked (task 4.5), then wake the monitor
+                        // only when the refresh failed (task 2.5).
+                        match refresh_channel_or_request_probe(
+                            pool,
+                            broker_name,
+                            &destination,
+                            idx as usize,
+                            &cancel,
+                            ctx,
+                        )
+                        .await
+                        {
+                            RecoveryOutcome::Cancelled => return Ok(()),
+                            RecoveryOutcome::Continue => {}
                         }
                         consecutive_transport_failures = 0;
                     }
@@ -765,6 +808,15 @@ async fn consumer_loop(
                             ));
                             if is_bridge_transport_error(&subscribe_err) {
                                 consecutive_transport_failures += 1;
+                                // Invariant (rc-5vfz3): a successful subscribe
+                                // resets `consecutive_transport_failures` to
+                                // zero, so the first stream error reaches one
+                                // and `break`s the stream loop before a second
+                                // error can arrive. This threshold-two branch is
+                                // therefore unreachable in the natural stream
+                                // path; its shared recovery action is tested
+                                // directly and its wiring statically, without
+                                // claiming end-to-end coverage of this branch.
                                 if consecutive_transport_failures >= 2 {
                                     warn!(
                                         broker = %broker_name,
@@ -773,22 +825,21 @@ async fn consumer_loop(
                                         failures = consecutive_transport_failures,
                                         "JMS stream transport failures exceeded threshold; refreshing channel"
                                     );
-                                    // Race the refresh against cancellation
-                                    // so shutdown is never blocked (4.5).
-                                    let refresh = tokio::select! {
-                                        _ = cancel.cancelled() => return Ok(()),
-                                        _ = ctx.cancelled() => return Ok(()),
-                                        result = pool.refresh_slot_channel(broker_name) => result,
-                                    };
-                                    if let Err(refresh_err) = refresh {
-                                        warn!(
-                                            broker = %broker_name,
-                                            destination = %destination,
-                                            consumer_idx = idx,
-                                            error = %refresh_err,
-                                            "JMS channel refresh failed; requesting bridge restart"
-                                        );
-                                        pool.restart_slot(broker_name);
+                                    // Shared refresh/cancel/wake action; a
+                                    // requested shutdown is never blocked
+                                    // (4.5).
+                                    match refresh_channel_or_request_probe(
+                                        pool,
+                                        broker_name,
+                                        &destination,
+                                        idx as usize,
+                                        &cancel,
+                                        ctx,
+                                    )
+                                    .await
+                                    {
+                                        RecoveryOutcome::Cancelled => return Ok(()),
+                                        RecoveryOutcome::Continue => {}
                                     }
                                     consecutive_transport_failures = 0;
                                 }
@@ -1016,7 +1067,11 @@ impl Consumer for JmsConsumer {
 mod tests {
     use super::*;
     use crate::BrokerType;
-    use crate::component::BridgeSlot;
+    use crate::bridge_client_test::{
+        TestBridgeFixture, env_guard, next_refresh_attempt, ready_stub_process, refresh_attempts,
+        replacement_attempts, spawn_scripted_health, stop_slot_process,
+    };
+    use crate::component::{BridgeSlot, ProbeOutcome};
     use crate::config::{JmsPoolConfig, jms_reconnect_default};
     use crate::proto::bridge_service_server::{BridgeService, BridgeServiceServer};
     use crate::proto::{
@@ -1210,6 +1265,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -1255,6 +1311,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -1313,6 +1370,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         // Retain the Arc so the test can reach state_tx/state_rx after the pool
         // is moved into the consumer (matches the component.rs slot fixtures).
@@ -1576,25 +1634,8 @@ mod tests {
         // Serialize against other tests mutating CAMEL_JMS_BRIDGE_BINARY_PATH (rc-alwn).
         let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
 
-        struct EnvGuard {
-            key: &'static str,
-            prev: Option<std::ffi::OsString>,
-        }
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                if let Some(v) = &self.prev {
-                    unsafe { std::env::set_var(self.key, v) };
-                } else {
-                    unsafe { std::env::remove_var(self.key) };
-                }
-            }
-        }
-
         let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
-        let _guard = EnvGuard {
-            key: env_key,
-            prev: std::env::var_os(env_key),
-        };
+        let _guard = env_guard(env_key);
         unsafe { std::env::set_var(env_key, "/bin/false") };
 
         let pool = Arc::new(
@@ -1773,6 +1814,245 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         Ok(port)
+    }
+
+    /// Task 2.5 fixture: every subscribe fails with `UNAVAILABLE`; health
+    /// succeeds and signals each call so producer/consumer wakes are observed
+    /// through the real monitor.
+    #[derive(Clone)]
+    struct AlwaysUnavailableSubscribeBridge {
+        subscribes: Arc<std::sync::atomic::AtomicUsize>,
+        health_calls: Arc<std::sync::atomic::AtomicUsize>,
+        subscribe_events: mpsc::UnboundedSender<()>,
+        health_events: mpsc::UnboundedSender<()>,
+    }
+
+    #[async_trait]
+    impl BridgeService for AlwaysUnavailableSubscribeBridge {
+        async fn send(
+            &self,
+            _request: Request<SendRequest>,
+        ) -> Result<Response<SendResponse>, Status> {
+            Err(Status::unimplemented("send not exercised here"))
+        }
+
+        type SubscribeStream = Pin<Box<dyn Stream<Item = Result<JmsMessage, Status>> + Send>>;
+
+        async fn subscribe(
+            &self,
+            _request: Request<SubscribeRequest>,
+        ) -> Result<Response<Self::SubscribeStream>, Status> {
+            self.subscribes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = self.subscribe_events.send(());
+            Err(Status::unavailable("subscribe always unavailable"))
+        }
+
+        async fn health(
+            &self,
+            _request: Request<HealthRequest>,
+        ) -> Result<Response<HealthResponse>, Status> {
+            self.health_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = self.health_events.send(());
+            Ok(Response::new(HealthResponse {
+                healthy: true,
+                broker_connected: true,
+                message: "ok".to_string(),
+            }))
+        }
+
+        async fn complete(
+            &self,
+            _request: Request<CompletionRequest>,
+        ) -> Result<Response<CompletionResponse>, Status> {
+            Ok(Response::new(CompletionResponse { accepted: true }))
+        }
+    }
+
+    struct AlwaysUnavailableBridgeHandle {
+        port: u16,
+        subscribes: Arc<std::sync::atomic::AtomicUsize>,
+        health_calls: Arc<std::sync::atomic::AtomicUsize>,
+        subscribe_events: mpsc::UnboundedReceiver<()>,
+        health_events: mpsc::UnboundedReceiver<()>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl AlwaysUnavailableBridgeHandle {
+        async fn next_subscribe(&mut self) {
+            tokio::time::timeout(Duration::from_secs(5), self.subscribe_events.recv())
+                .await
+                .expect("subscribe attempt within 5s")
+                .expect("subscribe event channel open");
+        }
+
+        async fn next_health(&mut self) {
+            tokio::time::timeout(Duration::from_secs(5), self.health_events.recv())
+                .await
+                .expect("health call within 5s")
+                .expect("health event channel open");
+        }
+
+        async fn shutdown(self) {
+            self.task.abort();
+            let _ = self.task.await;
+        }
+    }
+
+    async fn spawn_always_unavailable_subscribe_bridge() -> AlwaysUnavailableBridgeHandle {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind always-unavailable listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let subscribes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let health_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (subscribe_events_tx, subscribe_events) = mpsc::unbounded_channel();
+        let (health_events_tx, health_events) = mpsc::unbounded_channel();
+        let service = AlwaysUnavailableSubscribeBridge {
+            subscribes: Arc::clone(&subscribes),
+            health_calls: Arc::clone(&health_calls),
+            subscribe_events: subscribe_events_tx,
+            health_events: health_events_tx,
+        };
+        let task = tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(BridgeServiceServer::new(service))
+                .serve_with_incoming(incoming)
+                .await;
+        });
+        AlwaysUnavailableBridgeHandle {
+            port,
+            subscribes,
+            health_calls,
+            subscribe_events,
+            health_events,
+            task,
+        }
+    }
+
+    /// Task 2.5 fixture: subscribe 0 succeeds with a stream that immediately
+    /// errors `UNAVAILABLE`; subscribes 1 and 2 are gated and then fail
+    /// `UNAVAILABLE`, producing two separated threshold-two refresh windows so
+    /// the test can install a second real refresh target between them. Later
+    /// subscribes stay pending, keeping the consumer alive for cancellation.
+    #[derive(Clone)]
+    struct GatedTransportFailuresBridge {
+        subscribes: Arc<std::sync::atomic::AtomicUsize>,
+        health_calls: Arc<std::sync::atomic::AtomicUsize>,
+        subscribe_events: mpsc::UnboundedSender<()>,
+        health_events: mpsc::UnboundedSender<()>,
+        first_gate: Arc<tokio::sync::Notify>,
+        second_gate: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl BridgeService for GatedTransportFailuresBridge {
+        async fn send(
+            &self,
+            _request: Request<SendRequest>,
+        ) -> Result<Response<SendResponse>, Status> {
+            Err(Status::unimplemented("send not exercised here"))
+        }
+
+        type SubscribeStream = Pin<Box<dyn Stream<Item = Result<JmsMessage, Status>> + Send>>;
+
+        async fn subscribe(
+            &self,
+            _request: Request<SubscribeRequest>,
+        ) -> Result<Response<Self::SubscribeStream>, Status> {
+            let n = self
+                .subscribes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = self.subscribe_events.send(());
+            match n {
+                0 => Ok(Response::new(Box::pin(futures::stream::once(async move {
+                    Err::<JmsMessage, Status>(Status::unavailable("stream unavailable"))
+                })))),
+                1 => {
+                    self.first_gate.notified().await;
+                    Err(Status::unavailable(
+                        "subscribe unavailable after first stream error",
+                    ))
+                }
+                2 => {
+                    self.second_gate.notified().await;
+                    Err(Status::unavailable(
+                        "subscribe unavailable after first refresh",
+                    ))
+                }
+                3 => Err(Status::unavailable(
+                    "subscribe unavailable after second retry",
+                )),
+                _ => Ok(Response::new(Box::pin(futures::stream::pending()))),
+            }
+        }
+
+        async fn health(
+            &self,
+            _request: Request<HealthRequest>,
+        ) -> Result<Response<HealthResponse>, Status> {
+            self.health_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = self.health_events.send(());
+            Ok(Response::new(HealthResponse {
+                healthy: true,
+                broker_connected: true,
+                message: "ok".to_string(),
+            }))
+        }
+
+        async fn complete(
+            &self,
+            _request: Request<CompletionRequest>,
+        ) -> Result<Response<CompletionResponse>, Status> {
+            Ok(Response::new(CompletionResponse { accepted: true }))
+        }
+    }
+
+    async fn spawn_gated_transport_failures_bridge() -> (
+        AlwaysUnavailableBridgeHandle,
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind gated transport-failure listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let subscribes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let health_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (subscribe_events_tx, subscribe_events) = mpsc::unbounded_channel();
+        let (health_events_tx, health_events) = mpsc::unbounded_channel();
+        let first_gate = Arc::new(tokio::sync::Notify::new());
+        let second_gate = Arc::new(tokio::sync::Notify::new());
+        let service = GatedTransportFailuresBridge {
+            subscribes: Arc::clone(&subscribes),
+            health_calls: Arc::clone(&health_calls),
+            subscribe_events: subscribe_events_tx,
+            health_events: health_events_tx,
+            first_gate: Arc::clone(&first_gate),
+            second_gate: Arc::clone(&second_gate),
+        };
+        let task = tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(BridgeServiceServer::new(service))
+                .serve_with_incoming(incoming)
+                .await;
+        });
+        (
+            AlwaysUnavailableBridgeHandle {
+                port,
+                subscribes,
+                health_calls,
+                subscribe_events,
+                health_events,
+                task,
+            },
+            first_gate,
+            second_gate,
+        )
     }
 
     /// Two ways a gRPC `FAILED_PRECONDITION` reaches the consumer: immediate
@@ -2151,6 +2431,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -2377,6 +2658,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), slot);
         pool
@@ -2404,9 +2686,75 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), slot);
         pool
+    }
+
+    fn consumer_liveness_pool(interval_ms: u64) -> Arc<JmsBridgePool> {
+        Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig {
+                health_check_interval_ms: interval_ms,
+                health_timeout_ms: 250,
+                health_failure_threshold: 1,
+                ..JmsPoolConfig::default()
+            })
+            .expect("consumer liveness pool config must be valid"),
+        )
+    }
+
+    fn test_slot_consumer(name: &str) -> Arc<BridgeSlot> {
+        let (state_tx, state_rx) = tokio::sync::watch::channel(BridgeState::Starting);
+        Arc::new(BridgeSlot {
+            name: name.to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::Generic,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
+        })
+    }
+
+    async fn insert_ready_process_slot(
+        pool: &Arc<JmsBridgePool>,
+        channel: tonic::transport::Channel,
+        process: camel_bridge::process::BridgeProcess,
+    ) -> Arc<BridgeSlot> {
+        let (state_tx, state_rx) = tokio::sync::watch::channel(BridgeState::Ready { channel });
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::Generic,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(Some(process))),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
+        });
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+        slot
+    }
+
+    async fn stop_test_monitor(slot: &Arc<BridgeSlot>) {
+        let _ = slot.state_tx.send_replace(BridgeState::Stopped);
+        let mut monitor =
+            tokio::time::timeout(Duration::from_secs(2), slot.health_monitor_handle.lock())
+                .await
+                .expect("monitor handle lock within 2s")
+                .take();
+        if let Some(monitor) = monitor.as_mut()
+            && tokio::time::timeout(Duration::from_secs(2), &mut *monitor)
+                .await
+                .is_err()
+        {
+            monitor.abort();
+            let _ = monitor.await;
+        }
     }
 
     fn spawn_jms_loop(
@@ -3922,5 +4270,455 @@ mod tests {
             );
             cancel.cancel();
         }
+    }
+
+    /// Task 2.5: the subscribe-retry refresh itself fails against the real
+    /// installed dead process endpoint, then wakes the real monitor within
+    /// 500 ms of that observation; the slot stays Ready and cancellation
+    /// remains bounded.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn consumer_subscribe_retry_notifies_probe_wake() {
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let dead_endpoint = 2;
+        let process = ready_stub_process(dir.path(), "consumer-dead", dead_endpoint).await;
+
+        let mut bridge = spawn_always_unavailable_subscribe_bridge().await;
+        let channel = crate::bridge_client_test::connect_scripted(bridge.port).await;
+        let pool = consumer_liveness_pool(60_000);
+        let slot = insert_ready_process_slot(&pool, channel, process).await;
+        pool.spawn_health_monitor(Arc::clone(&slot)).await;
+
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let ctx = ConsumerContext::new(route_tx, cancel.clone(), "jms-consumer-wake".to_string());
+        let handle = spawn_jms_loop(&pool, &ctx, cancel.clone(), reconnect_after(10), rt());
+
+        bridge.next_subscribe().await;
+        bridge.next_subscribe().await;
+        assert!(bridge.subscribes.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+
+        // The actual failed refresh is observed before the wake deadline
+        // starts; the refresh observation is bounded separately by three
+        // seconds.
+        let attempt = next_refresh_attempt(&pool, 0).await;
+        assert_eq!(attempt.endpoint, Some(dead_endpoint), "{attempt:?}");
+        assert!(attempt.failed, "{attempt:?}");
+        assert!(!attempt.timed_out, "{attempt:?}");
+
+        tokio::time::timeout(Duration::from_millis(500), bridge.next_health())
+            .await
+            .expect("the failed refresh must wake the monitor within 500 ms");
+        assert!(
+            bridge
+                .health_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= 1
+        );
+        assert!(
+            matches!(*slot.state_rx.borrow(), BridgeState::Ready { .. }),
+            "a liveness wake must preserve Ready"
+        );
+        assert_eq!(replacement_attempts(&pool), 0);
+
+        cancel.cancel();
+        let inner = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("cancellation must complete within 5s")
+            .expect("consumer task must not panic");
+        assert!(inner.is_ok(), "requested cancellation is normal: {inner:?}");
+
+        bridge.shutdown().await;
+        stop_test_monitor(&slot).await;
+        stop_slot_process(&slot).await;
+    }
+
+    /// Task 2.5: gated consumer reconnects produce two separated refresh
+    /// failures. The second observation names the second real installed dead
+    /// process endpoint, waking the monitor within 500 ms while the slot stays
+    /// Ready.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn consumer_channel_refresh_retry_notifies_probe_wake() {
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let first_endpoint = 2;
+        let second_endpoint = 3;
+        let first_process = ready_stub_process(dir.path(), "consumer-first", first_endpoint).await;
+        let second_process =
+            ready_stub_process(dir.path(), "consumer-second", second_endpoint).await;
+
+        let (mut bridge, first_gate, second_gate) = spawn_gated_transport_failures_bridge().await;
+        let channel = crate::bridge_client_test::connect_scripted(bridge.port).await;
+        let pool = consumer_liveness_pool(60_000);
+        let slot = insert_ready_process_slot(&pool, channel, first_process).await;
+        pool.spawn_health_monitor(Arc::clone(&slot)).await;
+
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let ctx = ConsumerContext::new(
+            route_tx,
+            cancel.clone(),
+            "jms-consumer-refresh-wake".to_string(),
+        );
+        let handle = spawn_jms_loop(&pool, &ctx, cancel.clone(), reconnect_after(10), rt());
+
+        // Subscribe 0 is the immediate stream error; subscribe 1 is the first
+        // gated failure that reaches the threshold.
+        bridge.next_subscribe().await;
+        bridge.next_subscribe().await;
+        first_gate.notify_one();
+
+        let first_attempt = next_refresh_attempt(&pool, 0).await;
+        assert_eq!(
+            first_attempt.endpoint,
+            Some(first_endpoint),
+            "{first_attempt:?}"
+        );
+        assert!(first_attempt.failed, "{first_attempt:?}");
+        assert!(!first_attempt.timed_out, "{first_attempt:?}");
+        tokio::time::timeout(Duration::from_millis(500), bridge.next_health())
+            .await
+            .expect("the first failed refresh must wake the monitor");
+
+        // Install the second real dead target before releasing the next retry.
+        let old = tokio::time::timeout(Duration::from_secs(2), slot.process.lock())
+            .await
+            .expect("process lock within 2s")
+            .replace(second_process);
+        if let Some(old) = old {
+            let _ = tokio::time::timeout(Duration::from_secs(2), old.stop()).await;
+        }
+        second_gate.notify_one();
+
+        let second_attempt = next_refresh_attempt(&pool, 1).await;
+        assert_eq!(
+            second_attempt.endpoint,
+            Some(second_endpoint),
+            "the second refresh must name the second installed endpoint: {second_attempt:?}"
+        );
+        assert!(second_attempt.failed, "{second_attempt:?}");
+        assert!(!second_attempt.timed_out, "{second_attempt:?}");
+
+        tokio::time::timeout(Duration::from_millis(500), bridge.next_health())
+            .await
+            .expect("the second failed refresh must wake the monitor within 500 ms");
+        assert!(
+            matches!(*slot.state_rx.borrow(), BridgeState::Ready { .. }),
+            "a liveness wake must preserve Ready"
+        );
+        assert_eq!(replacement_attempts(&pool), 0);
+
+        cancel.cancel();
+        let inner = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("cancellation must complete within 5s")
+            .expect("consumer task must not panic");
+        assert!(inner.is_ok(), "requested cancellation is normal: {inner:?}");
+
+        bridge.shutdown().await;
+        stop_test_monitor(&slot).await;
+        stop_slot_process(&slot).await;
+    }
+
+    /// Task 2.5: the shared stream-site recovery action is exercised directly
+    /// (the natural stream-error threshold branch is unreachable by design).
+    /// Its real refresh fails against the installed dead process endpoint and
+    /// wakes the monitor within 500 ms of the recorded failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stream_site_recovery_helper_notifies_probe_wake() {
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let dead_endpoint = 4;
+        let process = ready_stub_process(dir.path(), "helper-dead", dead_endpoint).await;
+        let server = spawn_scripted_health(Vec::new()).await;
+        let pool = consumer_liveness_pool(60_000);
+        let slot = test_slot_consumer("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, Some(process))
+                .await;
+
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let ctx = ConsumerContext::new(route_tx, cancel.clone(), "jms-stream-helper".to_string());
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            refresh_channel_or_request_probe(&pool, "default", "queue:test", 0, &cancel, &ctx),
+        )
+        .await
+        .expect("the recovery helper must return within three seconds");
+        assert_eq!(outcome, RecoveryOutcome::Continue);
+
+        let attempt = next_refresh_attempt(&pool, 0).await;
+        assert_eq!(attempt.endpoint, Some(dead_endpoint), "{attempt:?}");
+        assert!(attempt.failed, "{attempt:?}");
+        assert!(!attempt.timed_out, "{attempt:?}");
+
+        let ack = tokio::time::timeout(Duration::from_millis(500), fx.next_probe())
+            .await
+            .expect("the helper must wake the monitor within 500 ms of the failure");
+        assert!(matches!(ack.outcome, ProbeOutcome::Success), "{ack:?}");
+        assert!(matches!(ack.state, BridgeState::Ready { .. }), "{ack:?}");
+        assert_eq!(ack.attempts, 0, "{ack:?}");
+        assert_eq!(replacement_attempts(&pool), 0);
+
+        fx.shutdown().await;
+    }
+
+    /// Task 2.5: cancellation wins over an endpoint-selected connector future,
+    /// returns `Cancelled`, records no refresh attempt, requests no probe or
+    /// replacement, and drops the connector future.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stream_site_recovery_helper_returns_cancelled() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct DropSignal(Arc<AtomicBool>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let process = ready_stub_process(dir.path(), "helper-cancel", 5).await;
+        let server = spawn_scripted_health(Vec::new()).await;
+        let pool = consumer_liveness_pool(60_000);
+        let slot = test_slot_consumer("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, Some(process))
+                .await;
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        pool.set_refresh_connector_override({
+            let entered = Arc::clone(&entered);
+            let dropped = Arc::clone(&dropped);
+            move |_endpoint| {
+                let entered = Arc::clone(&entered);
+                let dropped = Arc::clone(&dropped);
+                Box::pin(async move {
+                    let _drop_signal = DropSignal(dropped);
+                    entered.notify_one();
+                    futures::future::pending::<
+                        Result<tonic::transport::Channel, camel_bridge::process::BridgeError>,
+                    >()
+                    .await
+                })
+                    as Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = Result<
+                                        tonic::transport::Channel,
+                                        camel_bridge::process::BridgeError,
+                                    >,
+                                > + Send,
+                        >,
+                    >
+            }
+        });
+
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let ctx = ConsumerContext::new(route_tx, cancel.clone(), "jms-stream-cancel".to_string());
+        let helper = tokio::spawn({
+            let pool = Arc::clone(&pool);
+            let cancel = cancel.clone();
+            let ctx = ctx.clone();
+            async move {
+                refresh_channel_or_request_probe(&pool, "default", "queue:test", 0, &cancel, &ctx)
+                    .await
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the connector future must start after endpoint selection");
+        cancel.cancel();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), helper)
+            .await
+            .expect("cancellation must return within five seconds")
+            .expect("helper task must not panic");
+        assert_eq!(outcome, RecoveryOutcome::Cancelled);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "cancellation must drop the selected connector future"
+        );
+        assert!(
+            refresh_attempts(&pool).is_empty(),
+            "a cancelled refresh records no completion"
+        );
+        assert_eq!(replacement_attempts(&pool), 0);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), fx.next_probe())
+                .await
+                .is_err(),
+            "cancellation must not request a probe"
+        );
+        assert!(
+            matches!(*slot.state_rx.borrow(), BridgeState::Ready { .. }),
+            "cancellation must preserve Ready"
+        );
+
+        fx.shutdown().await;
+    }
+
+    /// Task 2.5: the single absolute production deadline covers process-lock
+    /// acquisition plus the whole selected connector future. Progress every
+    /// 25 ms never renews it; the timeout observation names the real process
+    /// endpoint and the helper wakes the live monitor without any restart.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_progressing_connector_has_fixed_budget_and_never_restarts_live_bridge() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct DropSignal(Arc<AtomicBool>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let selected_endpoint = 6;
+        let process = ready_stub_process(dir.path(), "helper-slow", selected_endpoint).await;
+        let server = spawn_scripted_health(Vec::new()).await;
+        let pool = consumer_liveness_pool(60_000);
+        let slot = test_slot_consumer("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, Some(process))
+                .await;
+
+        let progress = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        pool.set_refresh_connector_override({
+            let progress = Arc::clone(&progress);
+            let completed = Arc::clone(&completed);
+            let dropped = Arc::clone(&dropped);
+            move |_endpoint| {
+                let progress = Arc::clone(&progress);
+                let completed = Arc::clone(&completed);
+                let dropped = Arc::clone(&dropped);
+                Box::pin(async move {
+                    let _drop_signal = DropSignal(dropped);
+                    // The progress loop lives inside the connector future, not
+                    // in the test body. It is finite (5 s) and must be
+                    // cancelled by the production two-second deadline long
+                    // before it can finish.
+                    let mut ticker = tokio::time::interval(Duration::from_millis(25));
+                    for _ in 0..200 {
+                        ticker.tick().await;
+                        progress.fetch_add(1, Ordering::SeqCst);
+                    }
+                    completed.store(true, Ordering::SeqCst);
+                    Err(camel_bridge::process::BridgeError::Transport(
+                        "slow connector finished".to_string(),
+                    ))
+                })
+                    as Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = Result<
+                                        tonic::transport::Channel,
+                                        camel_bridge::process::BridgeError,
+                                    >,
+                                > + Send,
+                        >,
+                    >
+            }
+        });
+
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let cancel = CancellationToken::new();
+        let ctx = ConsumerContext::new(route_tx, cancel.clone(), "jms-stream-slow".to_string());
+
+        let start = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            refresh_channel_or_request_probe(&pool, "default", "queue:test", 0, &cancel, &ctx),
+        )
+        .await
+        .expect("the helper must return within the two-second deadline plus one second margin");
+        let elapsed = start.elapsed();
+        assert_eq!(outcome, RecoveryOutcome::Continue);
+        assert!(
+            elapsed >= Duration::from_secs(2),
+            "the production deadline must not be shortened: {elapsed:?}"
+        );
+        assert!(
+            elapsed <= Duration::from_secs(3),
+            "one recovery operation must stay bounded: {elapsed:?}"
+        );
+        assert!(
+            progress.load(Ordering::SeqCst) >= 10,
+            "the connector must have signalled repeated progress"
+        );
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "the five-second connector loop must be cancelled, not completed"
+        );
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "timeout must drop the connector future"
+        );
+
+        let attempt = next_refresh_attempt(&pool, 0).await;
+        assert_eq!(attempt.endpoint, Some(selected_endpoint), "{attempt:?}");
+        assert!(attempt.failed, "{attempt:?}");
+        assert!(attempt.timed_out, "{attempt:?}");
+
+        let ack = tokio::time::timeout(Duration::from_millis(500), fx.next_probe())
+            .await
+            .expect("the timeout must wake the live monitor within 500 ms");
+        assert!(matches!(ack.outcome, ProbeOutcome::Success), "{ack:?}");
+        assert!(matches!(ack.state, BridgeState::Ready { .. }), "{ack:?}");
+        assert_eq!(ack.attempts, 0, "{ack:?}");
+
+        // Control: a connector that completes within the budget succeeds.
+        let ready_channel = match &*slot.state_rx.borrow() {
+            BridgeState::Ready { channel } => channel.clone(),
+            other => panic!("slot must stay Ready: {other:?}"),
+        };
+        pool.set_refresh_connector_override(move |_endpoint| {
+            let channel = ready_channel.clone();
+            Box::pin(async move { Ok(channel) })
+                as Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<
+                                    tonic::transport::Channel,
+                                    camel_bridge::process::BridgeError,
+                                >,
+                            > + Send,
+                    >,
+                >
+        });
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            refresh_channel_or_request_probe(&pool, "default", "queue:test", 1, &cancel, &ctx),
+        )
+        .await
+        .expect("a promptly completing connector must finish within the budget");
+        assert_eq!(outcome, RecoveryOutcome::Continue);
+
+        let control = next_refresh_attempt(&pool, 1).await;
+        assert_eq!(control.endpoint, Some(selected_endpoint), "{control:?}");
+        assert!(
+            !control.failed,
+            "the control refresh must succeed: {control:?}"
+        );
+        assert!(!control.timed_out, "{control:?}");
+        assert!(
+            matches!(*slot.state_rx.borrow(), BridgeState::Ready { .. }),
+            "the control refresh must keep Ready"
+        );
+        assert_eq!(replacement_attempts(&pool), 0);
+
+        fx.shutdown().await;
     }
 }

@@ -51,6 +51,23 @@ password    = "admin"        # optional
 
 Multiple brokers are supported — add as many `[default.components.jms.brokers.<name>]` entries as needed.
 
+### Pool health settings
+
+These settings apply to the whole pool. They live in `[default.components.jms]`.
+
+| Setting | Default | Values | Description |
+|---------|---------|--------|-------------|
+| `health_check_interval_ms` | `5000` | positive integer | Delay between liveness probes. The default and meaning are unchanged. |
+| `health_timeout_ms` | `3000` | positive integer | Deadline for one liveness probe. An expired probe counts as a failure. |
+| `health_failure_threshold` | `3` | positive integer | Number of consecutive failed probes that restarts a bridge. |
+| `health_broker_probe_mode` | `reuse` | `reuse` or `skip` | Broker probe strategy. `reuse` keeps one provider diagnostic connection. `skip` performs no broker I/O. |
+
+Only consecutive failed liveness probes restart a bridge. A failed probe is an RPC error or an expired `health_timeout_ms`. A successful RPC resets the failure count, even when the response reports a broker problem. Broker status fields never cause a restart. With the default settings, the worst-case dead-process detection is about 24 s: `3 x (5 s + 3 s)`.
+
+One channel refresh has a fixed 2 s budget. The budget covers process-lock acquisition and the selected connector future. Progress does not renew the budget. After a failed or expired refresh, the caller requests a liveness probe within 500 ms. It never restarts the process. Slow broker work alone cannot restart a live bridge.
+
+The broker-latency isolation guarantee requires the updated Java health handler. No protobuf change is needed. An older blocking bridge cannot provide the guarantee.
+
 ## Quick Start
 
 ```rust
@@ -107,8 +124,9 @@ No Java runtime is required on the host — the bridge is a native binary.
 ### Bridge Health Monitor
 
 Each bridge runs a background health monitor that:
-- Checks bridge health periodically (default: every 5s)
-- Auto-restarts the bridge process on failure with exponential backoff (5s → 10s → 20s → ... up to 120s)
+- Probes bridge health every `health_check_interval_ms` (default: 5 s) with a `health_timeout_ms` deadline (default: 3 s)
+- Restarts the bridge process only after `health_failure_threshold` consecutive failed probes (default: 3), with exponential backoff (5 s → 10 s → 20 s → ... up to 120 s)
+- Resets the failure count on any completed health RPC, even when the response reports a broker problem
 - Caps restart attempts at **10** before transitioning to a permanent `Degraded` state
 
 ### Graceful Shutdown

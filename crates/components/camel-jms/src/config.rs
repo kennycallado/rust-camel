@@ -149,6 +149,14 @@ fn default_health_check_interval_ms() -> u64 {
     5_000
 }
 
+fn default_health_timeout_ms() -> u64 {
+    3_000
+}
+
+fn default_health_failure_threshold() -> u32 {
+    3
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum DestinationType {
     Queue,
@@ -568,6 +576,32 @@ impl std::fmt::Debug for BrokerConfig {
     }
 }
 
+/// Broker probe strategy for JMS health checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthBrokerProbeMode {
+    Reuse,
+    Skip,
+}
+
+// Kept explicit per the config contract; the derived form would hide the
+// operator-visible default choice.
+#[allow(clippy::derivable_impls)]
+impl Default for HealthBrokerProbeMode {
+    fn default() -> Self {
+        Self::Reuse
+    }
+}
+
+impl HealthBrokerProbeMode {
+    pub(crate) fn as_env_str(self) -> &'static str {
+        match self {
+            Self::Reuse => "reuse",
+            Self::Skip => "skip",
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct JmsPoolConfig {
     #[serde(default)]
@@ -580,6 +614,12 @@ pub struct JmsPoolConfig {
     pub broker_reconnect_interval_ms: u64,
     #[serde(default = "default_health_check_interval_ms")]
     pub health_check_interval_ms: u64,
+    #[serde(default = "default_health_timeout_ms")]
+    pub health_timeout_ms: u64,
+    #[serde(default = "default_health_failure_threshold")]
+    pub health_failure_threshold: u32,
+    #[serde(default)]
+    pub health_broker_probe_mode: HealthBrokerProbeMode,
     #[serde(default = "default_bridge_cache_dir")]
     pub bridge_cache_dir: PathBuf,
     #[serde(default = "jms_reconnect_default")]
@@ -594,6 +634,9 @@ impl Default for JmsPoolConfig {
             bridge_start_timeout_ms: default_bridge_start_timeout_ms(),
             broker_reconnect_interval_ms: default_broker_reconnect_interval_ms(),
             health_check_interval_ms: default_health_check_interval_ms(),
+            health_timeout_ms: default_health_timeout_ms(),
+            health_failure_threshold: default_health_failure_threshold(),
+            health_broker_probe_mode: HealthBrokerProbeMode::default(),
             bridge_cache_dir: default_bridge_cache_dir(),
             reconnect: jms_reconnect_default(),
         }
@@ -672,6 +715,16 @@ impl JmsPoolConfig {
         if self.health_check_interval_ms == 0 {
             return Err(CamelError::Config(
                 "health_check_interval_ms must be > 0".to_string(),
+            ));
+        }
+        if self.health_timeout_ms == 0 {
+            return Err(CamelError::Config(
+                "health_timeout_ms must be > 0".to_string(),
+            ));
+        }
+        if self.health_failure_threshold == 0 {
+            return Err(CamelError::Config(
+                "health_failure_threshold must be > 0".to_string(),
             ));
         }
         if self.broker_reconnect_interval_ms == 0 {
@@ -1116,6 +1169,69 @@ mod tests {
         let err = cfg.validate().unwrap_err();
         assert!(
             err.to_string().contains("broker_reconnect_interval_ms"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn health_settings_default_to_3000_3_and_reuse() {
+        let cfg = JmsPoolConfig::default();
+        assert_eq!(cfg.health_timeout_ms, 3_000);
+        assert_eq!(cfg.health_failure_threshold, 3);
+        assert_eq!(cfg.health_broker_probe_mode, HealthBrokerProbeMode::Reuse);
+        assert_eq!(cfg.health_check_interval_ms, 5_000);
+    }
+
+    #[test]
+    fn partial_toml_receives_health_defaults() {
+        let toml = r#"
+[brokers.default]
+broker_url = "tcp://localhost:61616"
+broker_type = "activemq"
+"#;
+        let cfg: JmsPoolConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.health_timeout_ms, 3_000);
+        assert_eq!(cfg.health_failure_threshold, 3);
+        assert_eq!(cfg.health_broker_probe_mode, HealthBrokerProbeMode::Reuse);
+    }
+
+    #[test]
+    fn toml_parses_skip_probe_mode() {
+        let cfg: JmsPoolConfig = toml::from_str(r#"health_broker_probe_mode = "skip""#).unwrap();
+        assert_eq!(cfg.health_broker_probe_mode, HealthBrokerProbeMode::Skip);
+    }
+
+    #[test]
+    fn toml_rejects_unknown_probe_mode() {
+        let err =
+            toml::from_str::<JmsPoolConfig>(r#"health_broker_probe_mode = "probe""#).unwrap_err();
+        assert!(
+            err.to_string().contains("health_broker_probe_mode"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_health_timeout() {
+        let mut cfg = JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::ActiveMq);
+        cfg.health_timeout_ms = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("health_timeout_ms"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_health_failure_threshold() {
+        let mut cfg = JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::ActiveMq);
+        cfg.health_failure_threshold = 0;
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("health_failure_threshold"),
             "got: {}",
             err
         );

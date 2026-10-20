@@ -44,6 +44,9 @@ public class JmsClientFactory {
   // MessageListeners without any error. Consumers use this directly.
   private volatile ConnectionFactory rawFactory;
 
+  private volatile JmsBrokerProbe brokerProbe;
+  private volatile Runnable resetHook;
+
   public ConnectionFactory get() {
     if (factory == null) {
       synchronized (this) {
@@ -56,47 +59,23 @@ public class JmsClientFactory {
   }
 
   /**
-   * Health check using a bare (non-pooled) connection factory. This avoids commons-pool2 reflection
-   * issues in GraalVM native images.
+   * Lazily creates the single retained broker probe. Constructing it performs no broker I/O; the
+   * first {@code probe(...)} call opens the provider diagnostic.
+   *
+   * @return the process-wide retained probe
    */
-  public void checkHealth() throws Exception {
-    initNativeImageWorkarounds();
-
-    String type = config.brokerType();
-    String url = config.brokerUrl();
-    String user = config.username();
-    String pass = config.password();
-
-    switch (type) {
-      case "activemq":
-        {
-          ActiveMQConnectionFactory cf = buildActiveMqFactory(url, user, pass);
-          try (Connection c = cf.createConnection()) {
-            c.start();
-          }
-          break;
+  JmsBrokerProbe healthProbe() {
+    JmsBrokerProbe probe = brokerProbe;
+    if (probe == null) {
+      synchronized (this) {
+        probe = brokerProbe;
+        if (probe == null) {
+          probe = new JmsBrokerProbe(config);
+          brokerProbe = probe;
         }
-      case "artemis":
-        {
-          // Use the ServerLocator directly with createSessionFactory(tc)
-          // to bypass waitForTopology(). The no-arg createSessionFactory()
-          // always waits for a CLUSTER_TOPOLOGY packet from the broker,
-          // which never arrives in GraalVM native image (Netty callback
-          // not processed), causing an infinite hang / timeout.
-          var cf = buildArtemisFactory(url, user, pass);
-          var locator = cf.getServerLocator();
-          var tc = locator.getStaticTransportConfigurations()[0];
-          try (var csf = locator.createSessionFactory(tc)) {
-            // Successfully created a session factory → broker is reachable
-          } finally {
-            cf.close();
-          }
-          break;
-        }
-      default:
-        throw new IllegalArgumentException(
-            "Unsupported broker_type: '" + type + "'. Valid values: activemq, artemis");
+      }
     }
+    return probe;
   }
 
   /**
@@ -126,19 +105,35 @@ public class JmsClientFactory {
     return rawFactory.createConnection();
   }
 
-  public synchronized void reset() {
-    if (factory instanceof PooledConnectionFactory pool) {
+  /** Registers the non-blocking hook that invalidates cached broker status before a pool reset. */
+  void setResetHook(Runnable hook) {
+    resetHook = hook;
+  }
+
+  public void reset() {
+    Runnable hook = resetHook;
+    if (hook != null) {
       try {
-        pool.stop();
-      } catch (Exception ignored) {
-      }
-    } else if (factory instanceof JmsPoolConnectionFactory pool) {
-      try {
-        pool.stop();
-      } catch (Exception ignored) {
+        // Run outside the factory lock: the hook only invalidates the cache generation and never
+        // performs provider I/O or calls reset() again.
+        hook.run();
+      } catch (RuntimeException ignored) {
       }
     }
-    factory = null;
+    synchronized (this) {
+      if (factory instanceof PooledConnectionFactory pool) {
+        try {
+          pool.stop();
+        } catch (Exception ignored) {
+        }
+      } else if (factory instanceof JmsPoolConnectionFactory pool) {
+        try {
+          pool.stop();
+        } catch (Exception ignored) {
+        }
+      }
+      factory = null;
+    }
   }
 
   private ConnectionFactory createFactory() {
@@ -177,7 +172,7 @@ public class JmsClientFactory {
 
   // Package-private (not private) so JmsClientFactoryPrefixTest can exercise the effective prefix;
   // mirrors the existing transportConfig testability seam.
-  ActiveMQConnectionFactory buildActiveMqFactory(String url, String user, String pass) {
+  static ActiveMQConnectionFactory buildActiveMqFactory(String url, String user, String pass) {
     initNativeImageWorkarounds();
     ActiveMQConnectionFactory cf = new ActiveMQConnectionFactory(url);
     // Keep connection and client IDs unique across processes even if the native-image IdGenerator
@@ -465,7 +460,7 @@ public class JmsClientFactory {
    * FactoryFinder.ObjectFactory with one that knows about all ActiveMQ service classes and
    * instantiates them directly — zero reflection, zero resource loading.
    */
-  private static void initNativeImageWorkarounds() {
+  static void initNativeImageWorkarounds() {
     if (!NATIVE_INIT_DONE.compareAndSet(false, true)) return;
 
     // Register TCP transport factory eagerly (bypass TRANSPORT_FACTORY_FINDER)
@@ -502,6 +497,10 @@ public class JmsClientFactory {
 
   @PreDestroy
   public void close() {
+    JmsBrokerProbe probe = brokerProbe;
+    if (probe != null) {
+      probe.close();
+    }
     reset();
   }
 }

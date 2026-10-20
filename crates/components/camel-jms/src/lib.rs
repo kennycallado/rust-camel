@@ -32,8 +32,8 @@ pub use component::{
 };
 pub use config::default_bridge_cache_dir;
 pub use config::{
-    AcknowledgementMode, BrokerConfig, DestinationType, ExchangePattern, JmsEndpointConfig,
-    JmsPoolConfig, JmsTransactionMode,
+    AcknowledgementMode, BrokerConfig, DestinationType, ExchangePattern, HealthBrokerProbeMode,
+    JmsEndpointConfig, JmsPoolConfig, JmsTransactionMode,
 };
 pub use health::JmsHealthCheck;
 

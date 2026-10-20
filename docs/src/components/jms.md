@@ -174,9 +174,35 @@ Do not edit a live journal file while a route or bridge holds the lock. An unkey
 
 The component does not speak JMS. A native Java bridge process handles the JMS protocol and the TCP connection. The component talks to the bridge over gRPC. The bridge binary is a GraalVM native executable. The host does not need a Java runtime.
 
-The bridge pool assigns one bridge per broker. The first send or consume starts the bridge. The bridge's ephemeral gRPC port comes from its stdout. A health monitor pings the bridge every `healthCheckIntervalMs` (default 5s). A failed health check moves the slot to `Degraded`, then `Restarting`. Restarts use exponential backoff capped at 120 seconds. After 10 failed restart attempts the slot stays `Degraded`.
+The bridge pool assigns one bridge per broker. The first send or consume starts the bridge. The bridge's ephemeral gRPC port comes from its stdout. A health monitor probes the bridge every `health_check_interval_ms` (default 5 s) with a `health_timeout_ms` deadline (default 3 s). Only consecutive failed probes restart a bridge. The slot moves to `Restarting` only after `health_failure_threshold` consecutive failures. Restarts use exponential backoff capped at 120 seconds. After 10 failed restart attempts the slot stays `Degraded`.
 
 The Consumer observes bridge state through a watch channel. A pending bridge returns `Pending` from `poll_ready`. A degraded bridge returns `Err` with the reason. The producer waits for the bridge to become `Ready` before sending.
+
+## Health and broker status
+
+A completed health RPC proves that the bridge process is alive. This rule holds when the response reports a broker problem. A failed probe is an RPC error or an expired `health_timeout_ms`. Only `health_failure_threshold` consecutive failed probes restart a bridge. A successful RPC resets the failure count.
+
+The health RPC returns a cached broker status snapshot and does not wait for broker connectivity. The snapshot has a 10 s TTL and a background refresh starts after 5 s. The readiness adapter maps the response as follows.
+
+| Broker status | `healthy` | `brokerConnected` | Readiness |
+| --- | --- | --- | --- |
+| Verified up | true | true | Healthy (200) |
+| Verified down | false | false | Unhealthy (503) |
+| Not yet checked | true | false | Degraded (200) |
+| Skipped | true | false | Degraded (200) |
+| Stale | true | false | Degraded (200) |
+
+A response that reports the broker verified down maps to `Unhealthy` 503. It is not merely a message attached to a healthy response. A healthy RPC that reports `healthy=false` maps to `Unhealthy` 503, and the adapter does not wait for an RPC failure. An RPC error or timeout also maps to `Unhealthy` 503.
+
+A not yet checked broker reports unknown status. Unknown, skipped, and stale status map to `Degraded` 200, so readiness passes. The process is live and ready, and broker connectivity is not verified. Broker status fields never trigger a process restart.
+
+`health_broker_probe_mode` selects the broker probe strategy. `reuse` (the default) keeps one provider diagnostic connection across refreshes. `skip` performs no broker I/O and opens no connection. Unsupported values are rejected at startup.
+
+`health_check_interval_ms` sets the delay between probes. `health_timeout_ms` sets the deadline for one probe. A probe that exceeds its deadline counts as a failed probe, whatever the interval.
+
+One channel refresh has a fixed 2 s budget. The budget covers process-lock acquisition and the selected connector future. Progress does not renew the budget. After a failed or expired refresh, the caller requests a liveness probe within 500 ms. It never restarts the process. Slow broker work alone cannot restart a live bridge.
+
+The broker-latency isolation guarantee requires the updated Java health handler. The update needs no protobuf change. An older blocking bridge cannot provide the guarantee.
 
 ## Trust boundary
 

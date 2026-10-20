@@ -23,8 +23,8 @@ use tower::Service;
 use tracing::{info, warn};
 
 use crate::config::{
-    BrokerConfig, JmsEndpointConfig, JmsPoolConfig, attempt_journal_broker_key,
-    default_attempt_journal_dir, ensure_attempt_journal_dir,
+    BrokerConfig, HealthBrokerProbeMode, JmsEndpointConfig, JmsPoolConfig,
+    attempt_journal_broker_key, default_attempt_journal_dir, ensure_attempt_journal_dir,
 };
 use crate::consumer::JmsConsumer;
 use crate::health::JmsHealthCheck;
@@ -40,6 +40,13 @@ use crate::proto::{HealthRequest, bridge_service_client::BridgeServiceClient};
 /// format-string drift cannot silently break retry logic.
 pub const BRIDGE_TRANSPORT_ERROR_PREFIX: &str = "JMS gRPC ";
 const MAX_RESTART_ATTEMPTS: u32 = 10;
+
+/// Fixed absolute budget for one channel refresh (task 2.5).
+///
+/// Established once on entry to [`JmsBridgePool::refresh_slot_channel`], it
+/// covers process-lock acquisition and the whole selected connector future.
+/// Connection progress, retries, and progress callbacks never renew it.
+const CHANNEL_REFRESH_TIMEOUT_MS: u64 = 2_000;
 
 // ── Bridge gRPC decode limit ─────────────────────────────────────────────────
 
@@ -133,6 +140,151 @@ pub enum BridgeState {
     Stopped,
 }
 
+// ── Health-monitor liveness policy (task 2.4) ────────────────────────────────
+
+/// Outcome of one health probe attempt.
+///
+/// A completed RPC is liveness proof regardless of broker fields; only RPC
+/// errors and deadlines are liveness failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeOutcome {
+    /// The health RPC completed with a response (any broker fields).
+    Success,
+    /// The health RPC exceeded `health_timeout_ms`.
+    Timeout,
+    /// The health RPC failed at the transport/status layer.
+    RpcError,
+}
+
+/// Test-only broker-status transition recorded by
+/// [`BrokerStatusReporter::report_broker_status`].
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BrokerStatusTransition {
+    /// `healthy=true, broker_connected=true`.
+    VerifiedUp,
+    /// `healthy=false, broker_connected=false`.
+    BrokerDown,
+    /// Any other pair (live but not verified connected).
+    Unverified,
+}
+
+/// Test-only replacement launch result prepared for the monitor's
+/// replacement branch (task 2.4).
+#[cfg(test)]
+type PreparedLaunchResult = Result<(BridgeProcess, Channel), StartBridgeError>;
+
+/// Test-only connector future substituted after the real process endpoint is
+/// selected, inside the unchanged production deadline (task 2.5).
+#[cfg(test)]
+type RefreshConnectorFuture = Pin<Box<dyn Future<Output = Result<Channel, BridgeError>> + Send>>;
+#[cfg(test)]
+type RefreshConnectorOverride = Arc<dyn Fn(u16) -> RefreshConnectorFuture + Send + Sync>;
+
+/// Test-only monitor acknowledgement: one per completed probe, sent only
+/// after the real counter/reporting/publication path has been applied.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct ProbeProcessed {
+    /// Zero-based probe index.
+    pub index: usize,
+    /// Slot state observed at acknowledgement time.
+    pub state: BridgeState,
+    /// Probe outcome (successful response, timeout, or RPC error).
+    pub outcome: ProbeOutcome,
+    /// Consecutive-failure count after applying this probe.
+    pub consecutive_failures: u32,
+    /// Replacement attempts observed at acknowledgement time.
+    pub attempts: usize,
+}
+
+/// Test-only observation of one completed `refresh_slot_channel` attempt
+/// (task 2.5), recorded inside the real method after selecting the process.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RefreshAttempt {
+    /// Broker slot the refresh belonged to.
+    pub broker_name: String,
+    /// gRPC endpoint (port) of the process actually passed to `connect()`;
+    /// `None` when no process was selected (missing process, lock timeout, or
+    /// unknown broker).
+    pub endpoint: Option<u16>,
+    /// `true` when the refresh failed (connect error, timeout, publication
+    /// refusal, or no selected process).
+    pub failed: bool,
+    /// `true` only when the fixed two-second deadline expired.
+    pub timed_out: bool,
+}
+
+/// Test-only notification sent after a replacement attempt completed its
+/// actual installation or error handling.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct ReplacementProcessed {
+    /// Replacement attempts observed after this attempt.
+    pub attempts: usize,
+    /// `true` when a process was installed Ready.
+    pub installed: bool,
+    /// PID of the installed replacement child, when installed.
+    pub installed_pid: Option<u32>,
+    /// Slot state observed after installation/error handling.
+    pub state: BridgeState,
+}
+
+/// Reports `(healthy, broker_connected)` transitions for the health monitor.
+///
+/// One bounded, credential-safe `tracing::warn!` is emitted only when the
+/// pair changes: the message is fixed and never carries the broker URL,
+/// username, password, or provider message. Under `cfg(test)` the matching
+/// [`BrokerStatusTransition`] is recorded so tests observe transitions
+/// without exposing raw credentials. Broker status reporting never restarts
+/// the bridge.
+pub(crate) struct BrokerStatusReporter {
+    #[cfg(test)]
+    transitions: Arc<std::sync::Mutex<Vec<BrokerStatusTransition>>>,
+}
+
+impl BrokerStatusReporter {
+    /// Builds the reporter from the pool's status seam.
+    fn from_pool(_pool: &JmsBridgePool) -> Self {
+        Self {
+            #[cfg(test)]
+            transitions: Arc::clone(&_pool.broker_status_transitions),
+        }
+    }
+
+    /// Emits one bounded warning when the `(healthy, broker_connected)` pair
+    /// differs from `last`, then records the transition under `cfg(test)`.
+    fn report_broker_status(
+        &self,
+        last: &mut Option<(bool, bool)>,
+        healthy: bool,
+        broker_connected: bool,
+    ) {
+        let pair = (healthy, broker_connected);
+        if *last == Some(pair) {
+            return;
+        }
+        *last = Some(pair);
+        #[cfg(test)]
+        {
+            let transition = match pair {
+                (true, true) => BrokerStatusTransition::VerifiedUp,
+                (false, false) => BrokerStatusTransition::BrokerDown,
+                _ => BrokerStatusTransition::Unverified,
+            };
+            self.transitions
+                .lock()
+                .expect("broker_status_transitions mutex poisoned")
+                .push(transition);
+        }
+        warn!(
+            healthy,
+            broker_connected, "JMS bridge broker status changed"
+        );
+    }
+}
+
 // ── BridgeSlot ───────────────────────────────────────────────────────────────
 
 pub struct BridgeSlot {
@@ -147,6 +299,8 @@ pub struct BridgeSlot {
     /// JoinHandle of the health monitor task for this slot.
     /// Stored so that shutdown can await the monitor and observe panics.
     pub(crate) health_monitor_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Coalesced liveness wake-up for the health monitor (task 2.5).
+    pub(crate) probe_wake: Arc<tokio::sync::Notify>,
 }
 
 impl std::fmt::Debug for BridgeSlot {
@@ -224,6 +378,12 @@ pub struct JmsBridgePool {
     pub(crate) bridge_start_timeout_ms: u64,
     pub(crate) reconnect: NetworkRetryPolicy,
     pub(crate) health_check_interval_ms: u64,
+    /// Configured liveness deadline for one health RPC (`health_timeout_ms`).
+    pub(crate) health_timeout_ms: u64,
+    /// Consecutive liveness failures tolerated before recovery
+    /// (`health_failure_threshold`); the monitor clamps it to at least 1.
+    pub(crate) health_failure_threshold: u32,
+    pub(crate) health_broker_probe_mode: HealthBrokerProbeMode,
     pub(crate) bridge_version: String,
     pub(crate) bridge_cache_dir: PathBuf,
     /// Maximum number of concurrently active (Starting/Ready) bridges.
@@ -231,6 +391,41 @@ pub struct JmsBridgePool {
     /// Serializes bridge admission (check + insert) to prevent race on max_bridges.
     bridge_create_lock: Mutex<()>,
     pub(crate) shutting_down: Arc<AtomicBool>,
+    /// Test seam: recorded broker-status transitions (task 2.4).
+    #[cfg(test)]
+    pub(crate) broker_status_transitions: Arc<std::sync::Mutex<Vec<BrokerStatusTransition>>>,
+    /// Test seam: counted replacement attempts (task 2.4).
+    #[cfg(test)]
+    pub(crate) replacement_attempts: Arc<std::sync::atomic::AtomicUsize>,
+    /// Test seam: prepared launch results substituted for real launches in
+    /// the monitor's replacement branch; an empty queue launches normally
+    /// (task 2.4).
+    #[cfg(test)]
+    pub(crate) replacement_outcomes:
+        Arc<tokio::sync::Mutex<std::collections::VecDeque<PreparedLaunchResult>>>,
+    /// Test seam: monitor probe acknowledgements, sent only after the real
+    /// counter/reporting/publication path ran (task 2.4).
+    #[cfg(test)]
+    pub(crate) probe_processed:
+        Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ProbeProcessed>>>>,
+    /// Test seam: replacement-processed notifications, sent after actual
+    /// installation or error handling (task 2.4).
+    #[cfg(test)]
+    pub(crate) replacement_processed:
+        Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ReplacementProcessed>>>>,
+    /// Test seam: completed channel-refresh attempts, recorded inside the real
+    /// `refresh_slot_channel` path (task 2.5).
+    #[cfg(test)]
+    pub(crate) refresh_attempts: Arc<std::sync::Mutex<Vec<RefreshAttempt>>>,
+    /// Test seam: post-recording notification for bounded refresh-attempt
+    /// waits (task 2.5).
+    #[cfg(test)]
+    pub(crate) refresh_observed: Arc<tokio::sync::Notify>,
+    /// Test seam: substitutes only the selected connector future, after real
+    /// endpoint selection and inside the unchanged production deadline
+    /// (task 2.5).
+    #[cfg(test)]
+    pub(crate) refresh_connector_override: Arc<std::sync::Mutex<Option<RefreshConnectorOverride>>>,
 }
 
 impl JmsBridgePool {
@@ -251,11 +446,32 @@ impl JmsBridgePool {
             bridge_start_timeout_ms: pool_config.bridge_start_timeout_ms,
             reconnect,
             health_check_interval_ms: pool_config.health_check_interval_ms,
+            health_timeout_ms: pool_config.health_timeout_ms,
+            health_failure_threshold: pool_config.health_failure_threshold,
+            health_broker_probe_mode: pool_config.health_broker_probe_mode,
             bridge_version: crate::BRIDGE_VERSION.to_string(),
             bridge_cache_dir: pool_config.bridge_cache_dir,
             max_bridges: pool_config.max_bridges,
             bridge_create_lock: Mutex::new(()),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            broker_status_transitions: Arc::new(std::sync::Mutex::new(Vec::new())),
+            #[cfg(test)]
+            replacement_attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            replacement_outcomes: Arc::new(tokio::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
+            #[cfg(test)]
+            probe_processed: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            replacement_processed: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            refresh_attempts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            #[cfg(test)]
+            refresh_observed: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            refresh_connector_override: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -380,6 +596,7 @@ impl JmsBridgePool {
                     state_tx,
                     process: Arc::new(tokio::sync::Mutex::new(None)),
                     health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+                    probe_wake: Arc::new(tokio::sync::Notify::new()),
                 });
                 entry.insert(Arc::clone(&slot));
                 slot
@@ -394,6 +611,7 @@ impl JmsBridgePool {
             &broker_url,
             &broker_type,
             &credentials,
+            self.health_broker_probe_mode,
         )
         .await;
 
@@ -412,7 +630,7 @@ impl JmsBridgePool {
     /// concurrently (shutdown `Stopped`) always wins. Extracted from
     /// `get_or_create_slot` so tests can inject a trusted [`StartBridgeError`]
     /// and observe the published watch state without spawning a process.
-    async fn apply_initial_start_result(
+    pub(crate) async fn apply_initial_start_result(
         slot: &BridgeSlot,
         result: Result<(BridgeProcess, Channel), StartBridgeError>,
     ) {
@@ -434,31 +652,27 @@ impl JmsBridgePool {
         }
     }
 
-    /// Signal a slot to restart (called by producers on transport errors).
+    /// Request an immediate liveness verification for a non-terminal slot.
     ///
-    /// The eligibility check and the `Restarting` publication are one atomic
-    /// watch mutation: a terminal slot (`Parked`/`Stopped`) is never
-    /// resurrected, and a terminal publication racing this call cannot be
-    /// overwritten. Operator repair plus a context restart (tasks 4.3/4.7) is
-    /// the only clearing path.
+    /// This is a coalesced wake-up, not a lifecycle transition: it never
+    /// writes `Restarting`, starts/stops a bridge, degrades a slot, or fakes a
+    /// watch change. Repeated requests collapse into one stored permit while
+    /// the monitor is between waits. Terminal slots (`Parked`/`Stopped`) keep
+    /// the existing warning path and are never resurrected.
     pub fn restart_slot(&self, broker_name: &str) {
         if let Some(slot) = self.slots.get(broker_name) {
-            let published = slot.state_tx.send_if_modified(|cur| match cur {
-                BridgeState::Parked(_) | BridgeState::Stopped => false,
-                _ => {
-                    *cur = BridgeState::Restarting {
-                        attempt: 0,
-                        next_at: Instant::now(),
-                    };
-                    true
-                }
-            });
-            if !published {
+            let terminal = matches!(
+                &*slot.state_rx.borrow(),
+                BridgeState::Parked(_) | BridgeState::Stopped
+            );
+            if terminal {
                 warn!(
                     "JMS broker '{}' is terminal (parked/stopped); ignoring restart request",
                     broker_name
                 );
+                return;
             }
+            slot.probe_wake.notify_one();
         }
     }
 
@@ -466,45 +680,159 @@ impl JmsBridgePool {
     ///
     /// Useful when a channel becomes stale after transport-level failures while
     /// the underlying bridge process is still alive.
+    ///
+    /// One absolute deadline is established on method entry and covers both
+    /// process-lock acquisition and the whole selected connector future.
+    /// Connection progress never renews it. Expiration returns a fixed,
+    /// credential-safe error and never publishes a restart or counts a
+    /// liveness failure.
     pub async fn refresh_slot_channel(&self, broker_name: &str) -> Result<(), CamelError> {
-        let slot = self
-            .slots
-            .get(broker_name)
-            .map(|s| Arc::clone(&*s))
-            .ok_or_else(|| {
-                CamelError::ProcessorError(format!("Unknown JMS broker '{}'", broker_name))
-            })?;
+        #[cfg(test)]
+        let selected_endpoint = Arc::new(std::sync::Mutex::new(None::<u16>));
+        #[cfg(test)]
+        let selected_for_connect = Arc::clone(&selected_endpoint);
 
-        // Lock is held during connect() (TLS handshake + retries) — widened from
-        // the old grpc_port() read. Bounded: localhost TLS (~10ms typical), per-slot
-        // lock (only blocks same-broker operations). Acceptable trade-off vs exposing
-        // pub(crate) TLS material to component crates.
-        let channel = {
-            let guard = slot.process.lock().await;
-            let process = guard.as_ref().ok_or_else(|| {
-                CamelError::ProcessorError(format!(
-                    "JMS broker '{}' has no running bridge process",
-                    broker_name
-                ))
-            })?;
-            process.connect().await.map_err(|e| {
-                CamelError::ProcessorError(format!(
-                    "JMS broker '{}' channel refresh failed: {}",
-                    broker_name, e
-                ))
-            })?
-        };
+        let result =
+            tokio::time::timeout(Duration::from_millis(CHANNEL_REFRESH_TIMEOUT_MS), async {
+                let slot = self
+                    .slots
+                    .get(broker_name)
+                    .map(|s| Arc::clone(&*s))
+                    .ok_or_else(|| {
+                        CamelError::ProcessorError(format!("Unknown JMS broker '{}'", broker_name))
+                    })?;
 
-        // The check and the `Ready` publication are one atomic watch mutation:
-        // a terminal state published while `connect()` awaited (shutdown) is
-        // never overwritten by this delayed refresh.
-        if !slot.publish_unless_terminal(BridgeState::Ready { channel }) {
-            return Err(CamelError::ProcessorError(format!(
-                "JMS broker '{}' became terminal during channel refresh",
-                broker_name
-            )));
+                // Lock is held during connect() (TLS handshake + retries) —
+                // widened from the old grpc_port() read. The enclosing
+                // deadline bounds both the lock wait and the whole connect.
+                let guard = slot.process.lock().await;
+                let process = guard.as_ref().ok_or_else(|| {
+                    CamelError::ProcessorError(format!(
+                        "JMS broker '{}' has no running bridge process",
+                        broker_name
+                    ))
+                })?;
+                #[cfg(test)]
+                let endpoint = {
+                    let endpoint = process.grpc_port();
+                    *selected_for_connect
+                        .lock()
+                        .expect("selected_endpoint mutex poisoned") = Some(endpoint);
+                    endpoint
+                };
+
+                // Test seam: substitute only the connector future, after the
+                // real endpoint was selected and inside the production
+                // deadline. The closure receives that selected endpoint.
+                #[cfg(test)]
+                let channel = {
+                    let override_fn = self
+                        .refresh_connector_override
+                        .lock()
+                        .expect("refresh_connector_override mutex poisoned")
+                        .clone();
+                    match override_fn {
+                        Some(connect) => connect(endpoint).await,
+                        None => process.connect().await,
+                    }
+                };
+                #[cfg(not(test))]
+                let channel = process.connect().await;
+
+                let channel = channel.map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "JMS broker '{}' channel refresh failed: {}",
+                        broker_name, e
+                    ))
+                })?;
+                // Release ownership before returning the slot for publication.
+                drop(guard);
+                Ok::<_, CamelError>((slot, channel))
+            })
+            .await;
+
+        #[cfg(test)]
+        let endpoint = *selected_endpoint
+            .lock()
+            .expect("selected_endpoint mutex poisoned");
+
+        match result {
+            Ok(Ok((slot, channel))) => {
+                // The check and the `Ready` publication are one atomic watch
+                // mutation: a terminal state published while `connect()`
+                // awaited (shutdown) is never overwritten by this delayed
+                // refresh.
+                let published = slot.publish_unless_terminal(BridgeState::Ready { channel });
+                #[cfg(test)]
+                self.record_refresh_attempt(RefreshAttempt {
+                    broker_name: broker_name.to_string(),
+                    endpoint,
+                    failed: !published,
+                    timed_out: false,
+                });
+                if !published {
+                    return Err(CamelError::ProcessorError(format!(
+                        "JMS broker '{}' became terminal during channel refresh",
+                        broker_name
+                    )));
+                }
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                #[cfg(test)]
+                self.record_refresh_attempt(RefreshAttempt {
+                    broker_name: broker_name.to_string(),
+                    endpoint,
+                    failed: true,
+                    timed_out: false,
+                });
+                Err(e)
+            }
+            Err(_elapsed) => {
+                #[cfg(test)]
+                self.record_refresh_attempt(RefreshAttempt {
+                    broker_name: broker_name.to_string(),
+                    endpoint,
+                    failed: true,
+                    timed_out: true,
+                });
+                // Fixed and credential-safe: no broker URL, user, password, or
+                // provider message. Never publishes `Restarting` or a failure
+                // count.
+                Err(CamelError::ProcessorError(
+                    "JMS bridge channel refresh timed out".to_string(),
+                ))
+            }
         }
-        Ok(())
+    }
+
+    /// Test seam: records one completed refresh attempt and publishes the
+    /// post-recording notification (task 2.5).
+    #[cfg(test)]
+    fn record_refresh_attempt(&self, attempt: RefreshAttempt) {
+        self.refresh_attempts
+            .lock()
+            .expect("refresh_attempts mutex poisoned")
+            .push(attempt);
+        self.refresh_observed.notify_one();
+    }
+
+    /// Test seam: installs or replaces the selected-connector override.
+    ///
+    /// The override receives the real selected process endpoint and runs
+    /// inside the unchanged production deadline; endpoint selection, timeout,
+    /// observation, publication, and lifecycle policy stay real (task 2.5).
+    #[cfg(test)]
+    pub(crate) fn set_refresh_connector_override<F, Fut>(&self, connect: F)
+    where
+        F: Fn(u16) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Channel, BridgeError>> + Send + 'static,
+    {
+        *self
+            .refresh_connector_override
+            .lock()
+            .expect("refresh_connector_override mutex poisoned") =
+            Some(Arc::new(move |endpoint| Box::pin(connect(endpoint))));
     }
 
     pub fn begin_shutdown(&self) {
@@ -565,16 +893,32 @@ impl JmsBridgePool {
         }
     }
 
-    async fn spawn_health_monitor(&self, slot: Arc<BridgeSlot>) {
+    pub(crate) async fn spawn_health_monitor(&self, slot: Arc<BridgeSlot>) {
         let health_interval = self.health_check_interval_ms;
+        let health_timeout = Duration::from_millis(self.health_timeout_ms);
+        let threshold = self.health_failure_threshold.max(1);
         let bridge_version = self.bridge_version.clone();
         let bridge_cache_dir = self.bridge_cache_dir.clone();
         let start_timeout_ms = self.bridge_start_timeout_ms;
+        let health_broker_probe_mode = self.health_broker_probe_mode;
         let handle_ref = Arc::clone(&slot.health_monitor_handle);
         let shutting_down = Arc::clone(&self.shutting_down);
         let broker_name = slot.name.clone();
+        let reporter = BrokerStatusReporter::from_pool(self);
+        #[cfg(test)]
+        let replacement_attempts = Arc::clone(&self.replacement_attempts);
+        #[cfg(test)]
+        let replacement_outcomes = Arc::clone(&self.replacement_outcomes);
+        #[cfg(test)]
+        let probe_processed = Arc::clone(&self.probe_processed);
+        #[cfg(test)]
+        let replacement_processed = Arc::clone(&self.replacement_processed);
 
         let handle = tokio::spawn(async move {
+            let mut consecutive_failures: u32 = 0;
+            let mut last_broker_status: Option<(bool, bool)> = None;
+            #[cfg(test)]
+            let mut probe_index: usize = 0;
             loop {
                 let state = slot.state_rx.borrow().clone();
                 match state {
@@ -582,32 +926,92 @@ impl JmsBridgePool {
                         info!("Health monitor for '{}' exiting (Stopped)", slot.name);
                         break;
                     }
-                    BridgeState::Ready { ref channel } => {
-                        tokio::time::sleep(Duration::from_millis(health_interval)).await;
-                        let mut client = bridge_service_client(channel.clone());
-                        let health_timeout = Duration::from_secs(3);
+                    BridgeState::Ready { .. } => {
+                        // Fresh sleep, not `interval.tick()`: no immediate
+                        // initial tick and no catch-up burst. A stored permit
+                        // wins immediately and coalesces repeated requests.
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_millis(health_interval)) => {}
+                            _ = slot.probe_wake.notified() => {}
+                        }
+                        // Re-read after either wait: a terminal publication or
+                        // a channel replacement during the wait must be
+                        // observed before this probe starts.
+                        let state = slot.state_rx.borrow().clone();
+                        let BridgeState::Ready { channel } = state else {
+                            continue;
+                        };
+                        let mut client = bridge_service_client(channel);
+                        let mut failure_msg: Option<String> = None;
+                        let mut outcome = ProbeOutcome::Success;
                         match tokio::time::timeout(health_timeout, client.health(HealthRequest {}))
                             .await
                         {
-                            Ok(Ok(_)) => {}
-                            Ok(Err(e)) => {
-                                warn!(
-                                    "Health check failed for broker '{}': {e}. Marking Degraded.",
-                                    slot.name
+                            Ok(Ok(resp)) => {
+                                let resp = resp.into_inner();
+                                // A completed RPC is liveness proof regardless
+                                // of the broker fields (spec T1/T2): report the
+                                // broker conditions, reset the counter, stay
+                                // Ready. Broker conditions never restart the
+                                // bridge.
+                                consecutive_failures = 0;
+                                reporter.report_broker_status(
+                                    &mut last_broker_status,
+                                    resp.healthy,
+                                    resp.broker_connected,
                                 );
-                                let _ = slot
-                                    .publish_unless_terminal(BridgeState::Degraded(e.to_string()));
+                            }
+                            Ok(Err(e)) => {
+                                consecutive_failures = consecutive_failures.saturating_add(1);
+                                outcome = ProbeOutcome::RpcError;
+                                failure_msg = Some(e.to_string());
                             }
                             Err(_) => {
-                                let msg = format!(
+                                consecutive_failures = consecutive_failures.saturating_add(1);
+                                outcome = ProbeOutcome::Timeout;
+                                failure_msg = Some(format!(
                                     "health RPC timed out after {}ms",
                                     health_timeout.as_millis()
-                                );
+                                ));
+                            }
+                        }
+                        // Below the threshold the slot stays Ready and no
+                        // Degraded is published; at the threshold the existing
+                        // Degraded text drives the bounded restart flow.
+                        if let Some(msg) = failure_msg
+                            && consecutive_failures >= threshold
+                        {
+                            if matches!(outcome, ProbeOutcome::Timeout) {
                                 warn!(
                                     "Health check timed out for broker '{}': {}. Marking Degraded.",
                                     slot.name, msg
                                 );
-                                let _ = slot.publish_unless_terminal(BridgeState::Degraded(msg));
+                            } else {
+                                warn!(
+                                    "Health check failed for broker '{}': {}. Marking Degraded.",
+                                    slot.name, msg
+                                );
+                            }
+                            let _ = slot.publish_unless_terminal(BridgeState::Degraded(msg));
+                        }
+                        // Test seam: acknowledge only after the real
+                        // counter/reporting/publication path ran (task 2.4).
+                        #[cfg(test)]
+                        {
+                            let ack = ProbeProcessed {
+                                index: probe_index,
+                                state: slot.state_rx.borrow().clone(),
+                                outcome,
+                                consecutive_failures,
+                                attempts: replacement_attempts.load(Ordering::SeqCst),
+                            };
+                            probe_index += 1;
+                            if let Some(tx) = probe_processed
+                                .lock()
+                                .expect("probe_processed mutex poisoned")
+                                .as_ref()
+                            {
+                                let _ = tx.send(ack);
                             }
                         }
                     }
@@ -672,6 +1076,11 @@ impl JmsBridgePool {
                             break;
                         }
 
+                        // Counted after the terminal/restart-budget guards and
+                        // before stopping the prior process (task 2.4).
+                        #[cfg(test)]
+                        replacement_attempts.fetch_add(1, Ordering::SeqCst);
+
                         let old_process = {
                             let mut guard = slot.process.lock().await;
                             guard.take()
@@ -680,6 +1089,30 @@ impl JmsBridgePool {
                             let _ = p.stop().await;
                         }
 
+                        // With a populated test queue only the launch result is
+                        // substituted; installation and success/error handling
+                        // below are unchanged. An empty queue launches normally.
+                        #[cfg(test)]
+                        let start_result = {
+                            let mut queue = replacement_outcomes.lock().await;
+                            match queue.pop_front() {
+                                Some(prepared) => prepared,
+                                None => {
+                                    Self::start_bridge_process(
+                                        &bridge_version,
+                                        &bridge_cache_dir,
+                                        start_timeout_ms,
+                                        &slot.name,
+                                        &slot.broker_url,
+                                        &slot.broker_type,
+                                        &slot.credentials,
+                                        health_broker_probe_mode,
+                                    )
+                                    .await
+                                }
+                            }
+                        };
+                        #[cfg(not(test))]
                         let start_result = Self::start_bridge_process(
                             &bridge_version,
                             &bridge_cache_dir,
@@ -688,11 +1121,17 @@ impl JmsBridgePool {
                             &slot.broker_url,
                             &slot.broker_type,
                             &slot.credentials,
+                            health_broker_probe_mode,
                         )
                         .await;
 
+                        let mut monitor_exit = false;
+                        #[cfg(test)]
+                        let mut installed_pid: Option<u32> = None;
                         match start_result {
                             Ok((process, channel)) => {
+                                #[cfg(test)]
+                                let pid = process.child_pid();
                                 // Atomic install + publication: if shutdown
                                 // published `Stopped` while this start was
                                 // in-flight, the child is returned, not stored.
@@ -700,9 +1139,17 @@ impl JmsBridgePool {
                                     slot.install_ready_process(process, channel).await
                                 {
                                     let _ = process.stop().await;
-                                    break;
+                                    monitor_exit = true;
+                                } else {
+                                    info!("Broker '{}' bridge restarted successfully", slot.name);
+                                    // A successful install resets the liveness
+                                    // counter for the replacement bridge.
+                                    consecutive_failures = 0;
+                                    #[cfg(test)]
+                                    {
+                                        installed_pid = pid;
+                                    }
                                 }
-                                info!("Broker '{}' bridge restarted successfully", slot.name);
                             }
                             Err(StartBridgeError::Permanent(reason)) => {
                                 warn!(
@@ -711,7 +1158,7 @@ impl JmsBridgePool {
                                 );
                                 // Atomic: a shutdown `Stopped` is preserved.
                                 let _ = slot.publish_unless_terminal(BridgeState::Parked(reason));
-                                break;
+                                monitor_exit = true;
                             }
                             Err(StartBridgeError::Other(err)) => {
                                 let reason = err.to_string();
@@ -728,9 +1175,32 @@ impl JmsBridgePool {
                                     attempt: attempt + 1,
                                     next_at: next,
                                 }) {
-                                    break;
+                                    monitor_exit = true;
                                 }
                             }
+                        }
+
+                        // Test seam: notify only after actual installation or
+                        // error handling (task 2.4).
+                        #[cfg(test)]
+                        {
+                            let event = ReplacementProcessed {
+                                attempts: replacement_attempts.load(Ordering::SeqCst),
+                                installed: installed_pid.is_some(),
+                                installed_pid,
+                                state: slot.state_rx.borrow().clone(),
+                            };
+                            if let Some(tx) = replacement_processed
+                                .lock()
+                                .expect("replacement_processed mutex poisoned")
+                                .as_ref()
+                            {
+                                let _ = tx.send(event);
+                            }
+                        }
+
+                        if monitor_exit {
+                            break;
                         }
                     }
                 }
@@ -742,6 +1212,7 @@ impl JmsBridgePool {
         *guard = Some(handle);
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_bridge_process(
         bridge_version: &str,
         bridge_cache_dir: &std::path::Path,
@@ -750,6 +1221,7 @@ impl JmsBridgePool {
         broker_url: &str,
         broker_type: &BrokerType,
         credentials: &Option<(String, String)>,
+        health_broker_probe_mode: HealthBrokerProbeMode,
     ) -> Result<(BridgeProcess, Channel), StartBridgeError> {
         info!(
             "Starting JMS bridge process for {}...",
@@ -780,7 +1252,7 @@ impl JmsBridgePool {
         })?;
         let broker_key = attempt_journal_broker_key(broker_name, broker_type, broker_url);
 
-        let process_config = BridgeProcessConfig::jms(
+        let mut process_config = BridgeProcessConfig::jms(
             binary_path,
             broker_url.to_string(),
             broker_type.clone(),
@@ -792,6 +1264,9 @@ impl JmsBridgePool {
             Some(journal_dir.to_string_lossy().into_owned()),
             Some(broker_key),
         );
+        process_config
+            .env_vars
+            .push(health_probe_env(health_broker_probe_mode));
 
         Self::start_bridge_process_with_config(&process_config, start_timeout_ms).await
     }
@@ -1126,7 +1601,7 @@ impl Service<Exchange> for LazyJmsProducer {
                                     warn!(
                                         broker = %broker_name,
                                         error = %refresh_err,
-                                        "JMS channel refresh failed; requesting bridge restart"
+                                        "JMS channel refresh failed; requesting liveness probe"
                                     );
                                     pool.restart_slot(&broker_name);
                                 }
@@ -1171,6 +1646,15 @@ impl Service<Exchange> for LazyJmsProducer {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Environment entry that carries the configured broker-probe mode into every
+/// bridge launch (initial start and every health-monitor restart).
+pub(crate) fn health_probe_env(mode: HealthBrokerProbeMode) -> (String, String) {
+    (
+        "JMS_HEALTH_BROKER_PROBE_MODE".to_string(),
+        mode.as_env_str().to_string(),
+    )
+}
 
 /// Operator repair guidance appended to every permanent JMS error.
 ///
@@ -1225,7 +1709,7 @@ mod tests {
     }
 
     use super::*;
-    use crate::config::{BrokerConfig, JmsPoolConfig, redact_broker_url};
+    use crate::config::{BrokerConfig, HealthBrokerProbeMode, JmsPoolConfig, redact_broker_url};
     use std::collections::HashMap;
 
     #[test]
@@ -1410,27 +1894,8 @@ mod tests {
         // Serialize against other tests mutating CAMEL_JMS_BRIDGE_BINARY_PATH (rc-alwn).
         let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
 
-        struct EnvGuard {
-            key: &'static str,
-            prev: Option<std::ffi::OsString>,
-        }
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                if let Some(v) = &self.prev {
-                    // SAFETY: restoring process env in test scope.
-                    unsafe { std::env::set_var(self.key, v) };
-                } else {
-                    // SAFETY: restoring process env in test scope.
-                    unsafe { std::env::remove_var(self.key) };
-                }
-            }
-        }
-
         let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
-        let _guard = EnvGuard {
-            key: env_key,
-            prev: std::env::var_os(env_key),
-        };
+        let _guard = env_guard(env_key);
         // SAFETY: test-scoped env mutation.
         unsafe { std::env::set_var(env_key, "/bin/false") };
 
@@ -1478,27 +1943,8 @@ mod tests {
         // Serialize against other tests mutating CAMEL_JMS_BRIDGE_BINARY_PATH (rc-alwn).
         let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
 
-        struct EnvGuard {
-            key: &'static str,
-            prev: Option<std::ffi::OsString>,
-        }
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                if let Some(v) = &self.prev {
-                    // SAFETY: restoring process env in test scope.
-                    unsafe { std::env::set_var(self.key, v) };
-                } else {
-                    // SAFETY: restoring process env in test scope.
-                    unsafe { std::env::remove_var(self.key) };
-                }
-            }
-        }
-
         let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
-        let _guard = EnvGuard {
-            key: env_key,
-            prev: std::env::var_os(env_key),
-        };
+        let _guard = env_guard(env_key);
         // SAFETY: test-scoped env mutation.
         unsafe { std::env::set_var(env_key, "/bin/false") };
 
@@ -1537,21 +1983,21 @@ mod tests {
         assert!(err.to_string().contains("is degraded"), "got: {}", err);
     }
 
-    /// A send transport error should trigger a channel refresh attempt first.
-    /// If refresh cannot be performed (e.g. no running bridge process metadata),
-    /// the producer requests a bridge restart as fallback.
+    /// A send transport error first refreshes the channel. If the refresh
+    /// targets the installed second dead endpoint and fails, the producer asks
+    /// for a liveness probe and leaves the slot Ready (never Restarting).
+    #[cfg(unix)]
     #[tokio::test]
-    async fn lazy_producer_requests_restart_when_refresh_unavailable() {
+    async fn lazy_producer_requests_liveness_probe_when_refresh_unavailable() {
         use tokio::sync::watch;
-        use tonic::transport::Endpoint as TonicEndpoint;
+        use tonic::transport::Channel;
         use tower::Service;
 
-        // Build a lazy channel to a port where nothing is listening.
-        // connect_lazy() succeeds immediately; the error manifests on the actual RPC call.
-        let dead_channel = TonicEndpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let first_dead_channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
 
         let (state_tx, state_rx) = watch::channel(BridgeState::Ready {
-            channel: dead_channel.clone(),
+            channel: first_dead_channel,
         });
 
         let pool = Arc::new(
@@ -1562,7 +2008,10 @@ mod tests {
             .unwrap(),
         );
 
-        // Manually insert a slot with the dead-channel in Ready state.
+        // The first dead channel drives the send failure. The installed real
+        // process advertises a second, distinct dead endpoint (port 2); the
+        // producer's own refresh must select and fail against it.
+        let second_dead_process = ready_stub_process(dir.path(), "second-dead", 2).await;
         let slot = Arc::new(BridgeSlot {
             name: "default".to_string(),
             broker_url: "tcp://localhost:61616".to_string(),
@@ -1570,8 +2019,9 @@ mod tests {
             credentials: None,
             state_rx: state_rx.clone(),
             state_tx: state_tx.clone(),
-            process: Arc::new(tokio::sync::Mutex::new(None)),
+            process: Arc::new(tokio::sync::Mutex::new(Some(second_dead_process))),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -1588,18 +2038,41 @@ mod tests {
         let mut exchange = Exchange::default();
         exchange.input.body = camel_component_api::Body::Text("hello".to_string());
 
-        // The send will fail because the channel points to a dead port.
-        let result = producer.call(exchange).await;
-        assert!(result.is_err(), "expected send to fail");
-
-        // Refresh cannot run in this setup (slot has no BridgeProcess), so the
-        // fallback path requests a restart.
-        let state_after = state_rx.borrow().clone();
+        let err = producer
+            .call(exchange)
+            .await
+            .expect_err("the first dead channel must fail the send");
         assert!(
-            matches!(state_after, BridgeState::Restarting { .. }),
-            "slot must enter Restarting when refresh is unavailable; got: {:?}",
-            state_after
+            err.to_string().contains(BRIDGE_TRANSPORT_ERROR_PREFIX),
+            "the producer must surface the original transport error, got: {err}"
         );
+
+        // The observation must come from the producer call itself, not from a
+        // manual follow-up refresh.
+        let attempt = next_refresh_attempt(&pool, 0).await;
+        assert_eq!(attempt.broker_name, "default");
+        assert_eq!(
+            attempt.endpoint,
+            Some(2),
+            "the refresh must name the installed second endpoint: {attempt:?}"
+        );
+        assert!(
+            attempt.failed,
+            "the second dead endpoint must fail: {attempt:?}"
+        );
+        assert!(!attempt.timed_out, "{attempt:?}");
+        assert_eq!(
+            refresh_attempts(&pool).len(),
+            1,
+            "the producer call generated exactly one refresh observation"
+        );
+        assert!(
+            matches!(&*state_rx.borrow(), BridgeState::Ready { .. }),
+            "a liveness wake must preserve Ready"
+        );
+        assert_eq!(replacement_attempts(&pool), 0);
+
+        stop_slot_process(&slot).await;
     }
 
     // ── JMS-007: Transport error classification ──────────────────────────────
@@ -1712,6 +2185,7 @@ mod tests {
                 state_tx,
                 process: Arc::new(tokio::sync::Mutex::new(None)),
                 health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+                probe_wake: Arc::new(tokio::sync::Notify::new()),
             });
             pool.slots.insert(name.to_string(), slot);
         }
@@ -1758,6 +2232,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("b1".to_string(), slot);
 
@@ -1792,6 +2267,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -1835,6 +2311,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -1886,6 +2363,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -1931,6 +2409,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -2005,6 +2484,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -2108,6 +2588,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: monitor_handle_ref,
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -2149,6 +2630,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -2357,6 +2839,7 @@ mod tests {
                 state_tx: state_tx.clone(),
                 process: Arc::new(tokio::sync::Mutex::new(None)),
                 health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+                probe_wake: Arc::new(tokio::sync::Notify::new()),
             });
             pool.slots.insert(name.to_string(), slot);
         }
@@ -2386,17 +2869,17 @@ mod tests {
 
     // ── JMS-010: Transport error does NOT auto-resend ────────────────────────
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn transport_error_refreshes_channel_but_does_not_resend() {
+    async fn transport_error_requests_liveness_probe_and_does_not_resend() {
         use tokio::sync::watch;
-        use tonic::transport::Endpoint as TonicEndpoint;
         use tower::Service;
 
-        let dead_channel = TonicEndpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let (port, sends, _health_calls, server_task) = spawn_counting_send_failure_bridge().await;
+        let channel = connect_scripted(port).await;
 
-        let (state_tx, state_rx) = watch::channel(BridgeState::Ready {
-            channel: dead_channel.clone(),
-        });
+        let (state_tx, state_rx) = watch::channel(BridgeState::Ready { channel });
 
         let pool = Arc::new(
             JmsBridgePool::from_config(JmsPoolConfig::single_broker(
@@ -2406,6 +2889,10 @@ mod tests {
             .unwrap(),
         );
 
+        // The installed real process advertises a second, distinct dead
+        // endpoint; the producer's own refresh attempts it and fails without
+        // resending the exchange.
+        let second_dead_process = ready_stub_process(dir.path(), "second-dead", 2).await;
         let slot = Arc::new(BridgeSlot {
             name: "default".to_string(),
             broker_url: "tcp://localhost:61616".to_string(),
@@ -2413,8 +2900,9 @@ mod tests {
             credentials: None,
             state_rx: state_rx.clone(),
             state_tx: state_tx.clone(),
-            process: Arc::new(tokio::sync::Mutex::new(None)),
+            process: Arc::new(tokio::sync::Mutex::new(Some(second_dead_process))),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -2431,22 +2919,48 @@ mod tests {
         let mut exchange = Exchange::default();
         exchange.input.body = camel_component_api::Body::Text("hello".to_string());
 
-        let result = producer.call(exchange).await;
-        assert!(result.is_err(), "expected send to fail");
-
-        let state_after = state_rx.borrow().clone();
+        let err = producer
+            .call(exchange)
+            .await
+            .expect_err("the transport-dead send must fail");
         assert!(
-            matches!(state_after, BridgeState::Restarting { .. }),
-            "slot must enter Restarting; got: {:?}",
-            state_after
+            err.to_string().contains(BRIDGE_TRANSPORT_ERROR_PREFIX),
+            "error must be original transport error, got: {err}"
+        );
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            1,
+            "the original request must be sent exactly once (no resend)"
         );
 
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains(BRIDGE_TRANSPORT_ERROR_PREFIX),
-            "error must be original transport error, got: {}",
-            err_msg
+        // The observation must come from the producer call itself, not from a
+        // manual follow-up refresh.
+        let attempt = next_refresh_attempt(&pool, 0).await;
+        assert_eq!(attempt.broker_name, "default");
+        assert_eq!(
+            attempt.endpoint,
+            Some(2),
+            "the refresh must name the installed second endpoint: {attempt:?}"
         );
+        assert!(
+            attempt.failed,
+            "the second dead endpoint must fail: {attempt:?}"
+        );
+        assert!(!attempt.timed_out, "{attempt:?}");
+        assert_eq!(
+            refresh_attempts(&pool).len(),
+            1,
+            "the producer call generated exactly one refresh observation"
+        );
+        assert!(
+            matches!(&*state_rx.borrow(), BridgeState::Ready { .. }),
+            "the slot must remain Ready"
+        );
+        assert_eq!(replacement_attempts(&pool), 0);
+
+        server_task.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(2), server_task).await;
+        stop_slot_process(&slot).await;
     }
 
     // ── D-L12: Drop impl cleans up slots without explicit shutdown ───────────
@@ -2508,6 +3022,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: monitor_handle_ref,
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -2570,6 +3085,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         };
 
         JmsBridgePool::apply_initial_start_result(
@@ -2599,6 +3115,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         };
         JmsBridgePool::apply_initial_start_result(
             &transient,
@@ -2638,6 +3155,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         JmsBridgePool::apply_initial_start_result(
             slot.as_ref(),
@@ -2700,6 +3218,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         };
 
         slot.publish_shutdown();
@@ -2730,6 +3249,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         };
 
         slot.publish_shutdown();
@@ -2765,6 +3285,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         };
 
         JmsBridgePool::apply_initial_start_result(
@@ -2816,6 +3337,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         });
         slot.publish_shutdown();
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
@@ -2872,6 +3394,7 @@ mod tests {
             state_tx,
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
         };
         // Shutdown wins before the restart result is installed.
         slot.publish_shutdown();
@@ -2992,5 +3515,1094 @@ mod tests {
             .unwrap_or(0);
         assert!(pid > 0, "stub must have written its pid");
         assert!(wait_pid_gone(pid).await, "child {pid} must be terminated");
+    }
+
+    #[test]
+    fn health_probe_env_uses_lowercase_names() {
+        for (mode, expected) in [
+            (HealthBrokerProbeMode::Reuse, "reuse"),
+            (HealthBrokerProbeMode::Skip, "skip"),
+        ] {
+            let (key, value) = health_probe_env(mode);
+            assert_eq!(key, "JMS_HEALTH_BROKER_PROBE_MODE");
+            assert_eq!(value, expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn start_bridge_process_exports_health_probe_mode() {
+        // rustls 0.23 requires a process-level CryptoProvider before the
+        // post-ready mTLS connect runs in `start_bridge_process`.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
+
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let mode_file = dir.path().join("probe-mode.txt");
+        let pidfile = dir.path().join("child.pid");
+        let stub = write_stub(
+            dir.path(),
+            "stub-bridge.sh",
+            &format!(
+                "#!/bin/sh\necho $$ > '{}'\nprintf '%s' \"$JMS_HEALTH_BROKER_PROBE_MODE\" > '{}'\nprintf '%s\\n' '{{\"status\":\"ready\",\"port\":1}}'\nexec sleep 30\n",
+                pidfile.display(),
+                mode_file.display()
+            ),
+        );
+
+        let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
+        let _guard = env_guard(env_key);
+        // SAFETY: test-scoped env mutation.
+        unsafe { std::env::set_var(env_key, &stub) };
+
+        let result = JmsBridgePool::start_bridge_process(
+            crate::BRIDGE_VERSION,
+            dir.path(),
+            200,
+            "default",
+            "tcp://localhost:61616",
+            &BrokerType::ActiveMq,
+            &None,
+            HealthBrokerProbeMode::Skip,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "the stub's unreachable port must fail connect/health after the env write"
+        );
+        let mode = std::fs::read_to_string(&mode_file).expect("stub must write the probe mode");
+        assert_eq!(mode.trim(), "skip");
+
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        assert!(pid > 0, "stub must have written its pid");
+        assert!(wait_pid_gone(pid).await, "child {pid} must be terminated");
+    }
+
+    #[test]
+    fn pool_carries_skip_mode_from_config() {
+        let pool = JmsBridgePool::from_config(JmsPoolConfig {
+            health_broker_probe_mode: HealthBrokerProbeMode::Skip,
+            ..JmsPoolConfig::default()
+        })
+        .expect("pool config must be valid");
+
+        assert_eq!(pool.health_broker_probe_mode, HealthBrokerProbeMode::Skip);
+    }
+
+    // ── Task 2.4: configured liveness timeout/threshold in the real monitor ──
+
+    use crate::bridge_client_test::{
+        ScriptedHealth, TestBridgeFixture, broker_transitions, connect_scripted, env_guard,
+        next_refresh_attempt, probe_gate, push_replacement, ready_stub_process, refresh_attempts,
+        replacement_attempts, slot_child_pid, spawn_scripted_health, stop_slot_process,
+    };
+    use crate::proto::HealthResponse;
+
+    /// Builds a fresh non-terminal slot for monitor tests (task 2.4).
+    fn test_slot(name: &str) -> Arc<BridgeSlot> {
+        let (state_tx, state_rx) = tokio::sync::watch::channel(BridgeState::Starting);
+        Arc::new(BridgeSlot {
+            name: name.to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
+        })
+    }
+
+    /// Pool with explicit liveness cadence, timeout, and threshold (task 2.4).
+    fn liveness_pool(interval_ms: u64, timeout_ms: u64, threshold: u32) -> Arc<JmsBridgePool> {
+        Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig {
+                health_check_interval_ms: interval_ms,
+                health_timeout_ms: timeout_ms,
+                health_failure_threshold: threshold,
+                ..JmsPoolConfig::default()
+            })
+            .expect("pool config must be valid"),
+        )
+    }
+
+    fn scripted_response(healthy: bool, broker_connected: bool) -> HealthResponse {
+        HealthResponse {
+            healthy,
+            broker_connected,
+            message: "scripted".to_string(),
+        }
+    }
+
+    /// Ready-handshake stub child: writes its pid, announces `ready`, sleeps.
+    #[cfg(unix)]
+    async fn stub_bridge_process(dir: &std::path::Path, tag: &str) -> BridgeProcess {
+        stub_bridge_process_on_port(dir, tag, 1).await
+    }
+
+    /// Ready-handshake stub child announcing a caller-selected (dead) port.
+    #[cfg(unix)]
+    async fn stub_bridge_process_on_port(
+        dir: &std::path::Path,
+        tag: &str,
+        port: u16,
+    ) -> BridgeProcess {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let pidfile = dir.join(format!("{tag}.pid"));
+        let stub = write_stub(
+            dir,
+            &format!("{tag}.sh"),
+            &format!(
+                "#!/bin/sh\necho $$ > '{}'\nprintf '%s\\n' '{{\"status\":\"ready\",\"port\":{port}}}'\nexec sleep 30\n",
+                pidfile.display()
+            ),
+        );
+        let config = BridgeProcessConfig::jms(
+            stub,
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            2_000,
+            Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
+            Some("0123456789abcdef0123456789abcdef".to_string()),
+        );
+        BridgeProcess::start(&config)
+            .await
+            .expect("stub must reach the ready line")
+    }
+
+    /// Task 2.5 fixture: bridge whose `Send` always fails at the transport
+    /// layer and whose `Health` succeeds, so producer-triggered wakes can be
+    /// observed without a live broker.
+    #[derive(Clone)]
+    struct CountingSendFailureBridge {
+        sends: Arc<std::sync::atomic::AtomicUsize>,
+        health_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::proto::bridge_service_server::BridgeService for CountingSendFailureBridge {
+        async fn send(
+            &self,
+            _request: tonic::Request<crate::proto::SendRequest>,
+        ) -> Result<tonic::Response<crate::proto::SendResponse>, tonic::Status> {
+            self.sends.fetch_add(1, Ordering::SeqCst);
+            Err(tonic::Status::unavailable("send channel is dead"))
+        }
+
+        type SubscribeStream = Pin<
+            Box<dyn futures::Stream<Item = Result<crate::proto::JmsMessage, tonic::Status>> + Send>,
+        >;
+
+        async fn subscribe(
+            &self,
+            _request: tonic::Request<crate::proto::SubscribeRequest>,
+        ) -> Result<tonic::Response<Self::SubscribeStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented(
+                "counting send-failure fixture serves Send and Health only",
+            ))
+        }
+
+        async fn health(
+            &self,
+            _request: tonic::Request<crate::proto::HealthRequest>,
+        ) -> Result<tonic::Response<HealthResponse>, tonic::Status> {
+            self.health_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(tonic::Response::new(scripted_response(true, true)))
+        }
+
+        async fn complete(
+            &self,
+            _request: tonic::Request<crate::proto::CompletionRequest>,
+        ) -> Result<tonic::Response<crate::proto::CompletionResponse>, tonic::Status> {
+            Ok(tonic::Response::new(crate::proto::CompletionResponse {
+                accepted: true,
+            }))
+        }
+    }
+
+    async fn spawn_counting_send_failure_bridge() -> (
+        u16,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind counting send-failure listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let health_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = CountingSendFailureBridge {
+            sends: Arc::clone(&sends),
+            health_calls: Arc::clone(&health_calls),
+        };
+        let task = tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(crate::proto::bridge_service_server::BridgeServiceServer::new(service))
+                .serve_with_incoming(incoming)
+                .await;
+        });
+        (port, sends, health_calls, task)
+    }
+
+    /// T1: a completed `false/false` (verified-down) response is liveness
+    /// proof — the monitor reports `BrokerDown`, keeps the Ready channel and
+    /// child, and never replaces the bridge.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn t1_monitor_reports_verified_down_and_keeps_ready_consumer() {
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let child = stub_bridge_process(dir.path(), "initial").await;
+        let child_pid = child.child_pid().expect("stub child pid");
+        let pool = liveness_pool(20, 250, 5);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let server = spawn_scripted_health(vec![ScriptedHealth::Respond(scripted_response(
+            false, false,
+        ))])
+        .await;
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, Some(child))
+                .await;
+
+        let ack = fx.next_probe().await;
+        assert!(
+            matches!(ack.outcome, ProbeOutcome::Success),
+            "a completed RPC is liveness proof: {ack:?}"
+        );
+        assert!(
+            matches!(ack.state, BridgeState::Ready { .. }),
+            "broker conditions must not publish Degraded: {ack:?}"
+        );
+        assert_eq!(ack.attempts, 0, "no attempt on broker status: {ack:?}");
+        let transitions = broker_transitions(&pool);
+        assert_eq!(
+            transitions.first(),
+            Some(&BrokerStatusTransition::BrokerDown),
+            "BrokerDown must be reported for healthy=false, broker_connected=false: {transitions:?}"
+        );
+        assert!(
+            matches!(&*slot.state_rx.borrow(), BridgeState::Ready { .. }),
+            "the Ready channel must be unchanged"
+        );
+        assert_eq!(
+            slot_child_pid(&slot).await,
+            Some(child_pid),
+            "the child PID must be unchanged"
+        );
+        assert_eq!(replacement_attempts(&pool), 0);
+        fx.shutdown().await;
+    }
+
+    /// T2: recovery begins exactly at the Nth consecutive failure — never
+    /// earlier — and installs the prepared replacement through the real
+    /// install path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn t2_monitor_restarts_exactly_at_nth_failure() {
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let pool = liveness_pool(20, 250, 3);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let server = spawn_scripted_health(vec![
+            ScriptedHealth::Error(tonic::Status::unavailable("rpc 1")),
+            ScriptedHealth::Error(tonic::Status::unavailable("rpc 2")),
+            ScriptedHealth::Error(tonic::Status::unavailable("rpc 3")),
+        ])
+        .await;
+
+        let rep_child = stub_bridge_process(dir.path(), "rep1").await;
+        let rep_pid = rep_child.child_pid().expect("replacement pid");
+        let rep_channel = connect_scripted(server.port).await;
+        push_replacement(&pool, rep_child, rep_channel).await;
+
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, None).await;
+
+        let ack1 = fx.next_probe().await;
+        assert!(matches!(ack1.outcome, ProbeOutcome::RpcError), "{ack1:?}");
+        assert_eq!(ack1.consecutive_failures, 1, "{ack1:?}");
+        assert_eq!(
+            ack1.attempts, 0,
+            "zero attempts after failure one: {ack1:?}"
+        );
+
+        let ack2 = fx.next_probe().await;
+        assert!(matches!(ack2.outcome, ProbeOutcome::RpcError), "{ack2:?}");
+        assert_eq!(ack2.consecutive_failures, 2, "{ack2:?}");
+        assert_eq!(
+            ack2.attempts, 0,
+            "zero attempts after failures one and two: {ack2:?}"
+        );
+
+        let ack3 = fx.next_probe().await;
+        assert!(matches!(ack3.outcome, ProbeOutcome::RpcError), "{ack3:?}");
+        assert_eq!(ack3.consecutive_failures, 3, "{ack3:?}");
+        assert_eq!(
+            ack3.attempts, 0,
+            "the attempt is counted after the ack: {ack3:?}"
+        );
+
+        let rep = fx.next_replacement().await;
+        assert_eq!(
+            rep.attempts, 1,
+            "exactly one attempt at the nth failure: {rep:?}"
+        );
+        assert!(
+            rep.installed,
+            "the prepared child must be installed: {rep:?}"
+        );
+        assert_eq!(rep.installed_pid, Some(rep_pid), "{rep:?}");
+        assert!(
+            matches!(rep.state, BridgeState::Ready { .. }),
+            "Ready state after install: {rep:?}"
+        );
+        assert_eq!(
+            slot_child_pid(&slot).await,
+            Some(rep_pid),
+            "the actual replacement child must be installed"
+        );
+        fx.shutdown().await;
+    }
+
+    /// T2: a successful response resets the counter even with broker fields
+    /// `false/false`, so it never contributes to the threshold.
+    #[tokio::test]
+    async fn t2_monitor_resets_failure_count_on_successful_false_response() {
+        let pool = liveness_pool(20, 250, 2);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let server = spawn_scripted_health(vec![
+            ScriptedHealth::Error(tonic::Status::unavailable("rpc 1")),
+            ScriptedHealth::Respond(scripted_response(false, false)),
+            ScriptedHealth::Error(tonic::Status::unavailable("rpc 2")),
+        ])
+        .await;
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, None).await;
+
+        let ack1 = fx.next_probe().await;
+        assert!(matches!(ack1.outcome, ProbeOutcome::RpcError), "{ack1:?}");
+        assert_eq!(ack1.consecutive_failures, 1, "{ack1:?}");
+
+        let ack2 = fx.next_probe().await;
+        assert!(matches!(ack2.outcome, ProbeOutcome::Success), "{ack2:?}");
+        assert_eq!(
+            ack2.consecutive_failures, 0,
+            "a successful response resets the count: {ack2:?}"
+        );
+
+        let ack3 = fx.next_probe().await;
+        assert!(matches!(ack3.outcome, ProbeOutcome::RpcError), "{ack3:?}");
+        assert_eq!(ack3.consecutive_failures, 1, "{ack3:?}");
+
+        for ack in [&ack1, &ack2, &ack3] {
+            assert!(
+                matches!(ack.state, BridgeState::Ready { .. }),
+                "Ready throughout: {ack:?}"
+            );
+            assert_eq!(ack.attempts, 0, "zero attempts throughout: {ack:?}");
+        }
+        assert_eq!(replacement_attempts(&pool), 0);
+        fx.shutdown().await;
+    }
+
+    /// T2: a successful replacement resets the counter for the new bridge, so
+    /// the next recovery needs a fresh threshold run (zero/one/one/two
+    /// attempts after four errors with threshold two).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn t2_monitor_resets_failure_count_after_successful_replacement() {
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let pool = liveness_pool(20, 250, 2);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let server = spawn_scripted_health(vec![
+            ScriptedHealth::Error(tonic::Status::unavailable("rpc 1")),
+            ScriptedHealth::Error(tonic::Status::unavailable("rpc 2")),
+            ScriptedHealth::Error(tonic::Status::unavailable("rpc 3")),
+            ScriptedHealth::Error(tonic::Status::unavailable("rpc 4")),
+        ])
+        .await;
+
+        let rep1_child = stub_bridge_process(dir.path(), "rep1").await;
+        let rep1_pid = rep1_child.child_pid().expect("rep1 pid");
+        push_replacement(&pool, rep1_child, connect_scripted(server.port).await).await;
+        let rep2_child = stub_bridge_process(dir.path(), "rep2").await;
+        let rep2_pid = rep2_child.child_pid().expect("rep2 pid");
+        push_replacement(&pool, rep2_child, connect_scripted(server.port).await).await;
+
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, None).await;
+
+        let ack1 = fx.next_probe().await;
+        assert_eq!(ack1.attempts, 0, "zero after error one: {ack1:?}");
+
+        let ack2 = fx.next_probe().await;
+        assert_eq!(ack2.attempts, 0, "{ack2:?}");
+        let rep1 = fx.next_replacement().await;
+        assert_eq!(rep1.attempts, 1, "one after error two: {rep1:?}");
+        assert!(rep1.installed, "{rep1:?}");
+        assert_eq!(rep1.installed_pid, Some(rep1_pid), "{rep1:?}");
+
+        let ack3 = fx.next_probe().await;
+        assert_eq!(ack3.attempts, 1, "one after error three: {ack3:?}");
+        assert_eq!(
+            ack3.consecutive_failures, 1,
+            "the install reset the counter: {ack3:?}"
+        );
+
+        let ack4 = fx.next_probe().await;
+        assert_eq!(ack4.attempts, 1, "{ack4:?}");
+        let rep2 = fx.next_replacement().await;
+        assert_eq!(rep2.attempts, 2, "two after error four: {rep2:?}");
+        assert!(rep2.installed, "{rep2:?}");
+        assert_eq!(rep2.installed_pid, Some(rep2_pid), "{rep2:?}");
+        assert!(
+            matches!(rep2.state, BridgeState::Ready { .. }),
+            "actual Ready installation after each pair: {rep2:?}"
+        );
+        assert_eq!(
+            slot_child_pid(&slot).await,
+            Some(rep2_pid),
+            "the second pair must be the installed child"
+        );
+        fx.shutdown().await;
+    }
+
+    /// T2/T3: timeouts respect the threshold and a successful response resets
+    /// it; only the final consecutive timeout triggers exactly one
+    /// replacement.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn t2_monitor_timeouts_respect_threshold_and_success_reset() {
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let pool = liveness_pool(20, 50, 3);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        // Gated replies are held past their deadlines; only bounded fixture
+        // teardown releases them.
+        let gate1 = probe_gate();
+        let gate2 = probe_gate();
+        let gate3 = probe_gate();
+        let gate4 = probe_gate();
+        let server = spawn_scripted_health(vec![
+            ScriptedHealth::Gate {
+                response: scripted_response(true, true),
+                gate: gate1,
+            },
+            ScriptedHealth::Respond(scripted_response(false, false)),
+            ScriptedHealth::Gate {
+                response: scripted_response(true, true),
+                gate: gate2,
+            },
+            ScriptedHealth::Gate {
+                response: scripted_response(true, true),
+                gate: gate3,
+            },
+            ScriptedHealth::Gate {
+                response: scripted_response(true, true),
+                gate: gate4,
+            },
+        ])
+        .await;
+
+        let rep_child = stub_bridge_process(dir.path(), "rep1").await;
+        let rep_pid = rep_child.child_pid().expect("replacement pid");
+        push_replacement(&pool, rep_child, connect_scripted(server.port).await).await;
+
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, None).await;
+
+        let ack1 = fx.next_probe().await;
+        assert!(matches!(ack1.outcome, ProbeOutcome::Timeout), "{ack1:?}");
+        assert_eq!(ack1.consecutive_failures, 1, "{ack1:?}");
+        assert_eq!(ack1.attempts, 0, "{ack1:?}");
+
+        let ack2 = fx.next_probe().await;
+        assert!(matches!(ack2.outcome, ProbeOutcome::Success), "{ack2:?}");
+        assert_eq!(
+            ack2.consecutive_failures, 0,
+            "the successful response resets the count: {ack2:?}"
+        );
+        assert_eq!(ack2.attempts, 0, "{ack2:?}");
+
+        let ack3 = fx.next_probe().await;
+        assert!(matches!(ack3.outcome, ProbeOutcome::Timeout), "{ack3:?}");
+        assert_eq!(ack3.consecutive_failures, 1, "{ack3:?}");
+        assert_eq!(ack3.attempts, 0, "{ack3:?}");
+
+        let ack4 = fx.next_probe().await;
+        assert!(matches!(ack4.outcome, ProbeOutcome::Timeout), "{ack4:?}");
+        assert_eq!(ack4.consecutive_failures, 2, "{ack4:?}");
+        assert_eq!(
+            ack4.attempts, 0,
+            "attempts stay zero through the penultimate outcome: {ack4:?}"
+        );
+
+        let ack5 = fx.next_probe().await;
+        assert!(matches!(ack5.outcome, ProbeOutcome::Timeout), "{ack5:?}");
+        assert_eq!(ack5.consecutive_failures, 3, "{ack5:?}");
+
+        let rep = fx.next_replacement().await;
+        assert_eq!(
+            rep.attempts, 1,
+            "exactly one replacement after the final timeout: {rep:?}"
+        );
+        assert!(rep.installed, "{rep:?}");
+        assert_eq!(rep.installed_pid, Some(rep_pid), "{rep:?}");
+        assert!(
+            matches!(rep.state, BridgeState::Ready { .. }),
+            "actual prepared child/channel installed Ready: {rep:?}"
+        );
+        // Releases all held gates in bounded fixture teardown.
+        fx.shutdown().await;
+    }
+
+    /// T3: a response that completes within the configured deadline is
+    /// accepted — Ready, zero attempts.
+    #[tokio::test]
+    async fn t3_monitor_accepts_response_before_configured_timeout() {
+        let pool = liveness_pool(20, 500, 1);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let gate = probe_gate();
+        let server = spawn_scripted_health(vec![ScriptedHealth::Gate {
+            response: scripted_response(true, true),
+            gate: Arc::clone(&gate),
+        }])
+        .await;
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, None).await;
+
+        // Await server entry, then promptly release the reply.
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+            .await
+            .expect("the gated request must enter the server");
+        let entered = Instant::now();
+        gate.release.notify_one();
+
+        let ack = fx.next_probe().await;
+        assert!(
+            matches!(ack.outcome, ProbeOutcome::Success),
+            "the response must complete within the configured deadline: {ack:?}"
+        );
+        assert!(
+            entered.elapsed() < Duration::from_secs(1),
+            "the response must complete promptly: {:?}",
+            entered.elapsed()
+        );
+        assert!(matches!(ack.state, BridgeState::Ready { .. }), "{ack:?}");
+        assert_eq!(ack.attempts, 0, "{ack:?}");
+        assert_eq!(replacement_attempts(&pool), 0);
+        fx.shutdown().await;
+    }
+
+    /// T3: a held response times out at the configured deadline (not a
+    /// hardcoded three seconds), and the late reply cannot overwrite the
+    /// replacement state.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn t3_monitor_times_out_after_configured_timeout() {
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let pool = liveness_pool(20, 50, 1);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let gate = probe_gate();
+        let server = spawn_scripted_health(vec![ScriptedHealth::Gate {
+            response: scripted_response(true, true),
+            gate: Arc::clone(&gate),
+        }])
+        .await;
+
+        let rep_child = stub_bridge_process(dir.path(), "rep1").await;
+        let rep_pid = rep_child.child_pid().expect("replacement pid");
+        push_replacement(&pool, rep_child, connect_scripted(server.port).await).await;
+
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, None).await;
+
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+            .await
+            .expect("the gated request must enter the server");
+        let entered = Instant::now();
+
+        // The gate is held past its deadline: timeout plus replacement must
+        // complete under a one-second bound.
+        let (ack, rep) = tokio::time::timeout(Duration::from_secs(1), async {
+            let ack = fx.next_probe().await;
+            let rep = fx.next_replacement().await;
+            (ack, rep)
+        })
+        .await
+        .expect("timeout and replacement within one second");
+
+        assert!(matches!(ack.outcome, ProbeOutcome::Timeout), "{ack:?}");
+        let elapsed = entered.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "the probe must wait the configured deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "no hardcoded three-second deadline: {elapsed:?}"
+        );
+        assert_eq!(rep.attempts, 1, "exactly one replacement: {rep:?}");
+        assert!(rep.installed, "{rep:?}");
+        assert_eq!(rep.installed_pid, Some(rep_pid), "{rep:?}");
+        assert!(
+            matches!(rep.state, BridgeState::Ready { .. }),
+            "actual Ready installation: {rep:?}"
+        );
+
+        // Release the old response: it must not overwrite the replacement.
+        gate.release.notify_one();
+        fx.await_server_completed().await;
+        assert!(
+            matches!(&*slot.state_rx.borrow(), BridgeState::Ready { .. }),
+            "the late response must not overwrite the replacement state"
+        );
+        assert_eq!(
+            slot_child_pid(&slot).await,
+            Some(rep_pid),
+            "the late response must not replace the installed child"
+        );
+        assert_eq!(replacement_attempts(&pool), 1);
+        fx.shutdown().await;
+    }
+
+    /// T6: three stale (healthy=true, broker_connected=false) probe periods
+    /// produce zero restarts and a stable child — broker false is never
+    /// process failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn t6_real_monitor_three_stale_periods_zero_restarts_and_stable_child() {
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let child = stub_bridge_process(dir.path(), "initial").await;
+        let child_pid = child.child_pid().expect("stub child pid");
+        let pool = liveness_pool(20, 250, 5);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let server = spawn_scripted_health(
+            (0..5)
+                .map(|_| ScriptedHealth::Respond(scripted_response(true, false)))
+                .collect(),
+        )
+        .await;
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, Some(child))
+                .await;
+
+        let first = fx.next_probe().await;
+        let start = Instant::now();
+        let second = fx.next_probe().await;
+        let third = fx.next_probe().await;
+        let fourth = fx.next_probe().await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(20) * 3,
+            "at least three real periods must elapse: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "three more acknowledgements under five seconds: {elapsed:?}"
+        );
+
+        for ack in [&first, &second, &third, &fourth] {
+            assert!(
+                matches!(ack.outcome, ProbeOutcome::Success),
+                "prompt responses: {ack:?}"
+            );
+            assert!(
+                matches!(ack.state, BridgeState::Ready { .. }),
+                "Ready at every acknowledgement: {ack:?}"
+            );
+            assert_eq!(ack.attempts, 0, "zero attempts throughout: {ack:?}");
+        }
+        assert!(
+            fourth.index >= 3,
+            "at least four completed probes total: {:?}",
+            fourth.index
+        );
+        assert!(
+            fx.server_calls() >= 4,
+            "the server observed at least four probes"
+        );
+        assert_eq!(replacement_attempts(&pool), 0);
+        assert_eq!(
+            slot_child_pid(&slot).await,
+            Some(child_pid),
+            "the slot's actual process PID must be unchanged"
+        );
+        fx.shutdown().await;
+    }
+
+    /// T6: verified-down (`false/false`) replies over three periods produce
+    /// zero restarts, report `BrokerDown`, and keep the child.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn t6_real_monitor_verified_down_false_false_zero_restarts() {
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let child = stub_bridge_process(dir.path(), "initial").await;
+        let child_pid = child.child_pid().expect("stub child pid");
+        let pool = liveness_pool(20, 250, 5);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let server = spawn_scripted_health(
+            (0..5)
+                .map(|_| ScriptedHealth::Respond(scripted_response(false, false)))
+                .collect(),
+        )
+        .await;
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, Some(child))
+                .await;
+
+        let first = fx.next_probe().await;
+        let start = Instant::now();
+        let second = fx.next_probe().await;
+        let third = fx.next_probe().await;
+        let fourth = fx.next_probe().await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(20) * 3,
+            "at least three real periods must elapse: {elapsed:?}"
+        );
+
+        for ack in [&first, &second, &third, &fourth] {
+            assert!(
+                matches!(ack.outcome, ProbeOutcome::Success),
+                "prompt responses: {ack:?}"
+            );
+            assert!(
+                matches!(ack.state, BridgeState::Ready { .. }),
+                "Ready throughout: {ack:?}"
+            );
+            assert_eq!(ack.attempts, 0, "zero attempts: {ack:?}");
+        }
+        let transitions = broker_transitions(&pool);
+        assert_eq!(
+            transitions.first(),
+            Some(&BrokerStatusTransition::BrokerDown),
+            "BrokerDown must be reported: {transitions:?}"
+        );
+        assert_eq!(replacement_attempts(&pool), 0);
+        assert_eq!(
+            slot_child_pid(&slot).await,
+            Some(child_pid),
+            "the slot's actual process PID must be unchanged"
+        );
+        fx.shutdown().await;
+    }
+
+    /// Task 2.5: a coalesced wake runs one immediate probe without changing
+    /// the configured cadence, the Ready state, or the attempt count.
+    #[tokio::test]
+    async fn restart_slot_wakes_monitor_and_preserves_ready() {
+        let pool = liveness_pool(60_000, 250, 1);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+        let server = spawn_scripted_health(Vec::new()).await;
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, None).await;
+
+        pool.restart_slot("default");
+
+        let ack = tokio::time::timeout(Duration::from_millis(500), fx.next_probe())
+            .await
+            .expect("a wake must probe without waiting for the 60s cadence");
+        assert!(
+            matches!(ack.outcome, ProbeOutcome::Success),
+            "scripted healthy bridge: {ack:?}"
+        );
+        assert!(
+            matches!(ack.state, BridgeState::Ready { .. }),
+            "a wake must preserve Ready: {ack:?}"
+        );
+        assert_eq!(ack.consecutive_failures, 0, "{ack:?}");
+        assert_eq!(ack.attempts, 0, "{ack:?}");
+        assert_eq!(fx.server_calls(), 1);
+        assert_eq!(replacement_attempts(&pool), 0);
+        fx.shutdown().await;
+    }
+
+    /// Task 2.5: ten requests before the monitor waits coalesce into exactly
+    /// one permit/probe.
+    #[tokio::test]
+    async fn repeated_restart_requests_coalesce_to_one_probe() {
+        let pool = liveness_pool(60_000, 250, 1);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+        for _ in 0..10 {
+            pool.restart_slot("default");
+        }
+
+        let server = spawn_scripted_health(Vec::new()).await;
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, None).await;
+
+        let ack = tokio::time::timeout(Duration::from_millis(500), fx.next_probe())
+            .await
+            .expect("coalesced wake must run one probe");
+        assert!(
+            matches!(ack.outcome, ProbeOutcome::Success),
+            "no failure may be counted for a wake: {ack:?}"
+        );
+        assert_eq!(ack.consecutive_failures, 0, "{ack:?}");
+        assert_eq!(ack.attempts, 0, "{ack:?}");
+        assert_eq!(fx.server_calls(), 1, "ten notify_one calls coalesce to one");
+
+        // The next cadence is the full configured interval: no second probe
+        // starts immediately from leftover permits.
+        let no_second = tokio::time::timeout(Duration::from_millis(200), fx.next_probe()).await;
+        assert!(
+            no_second.is_err(),
+            "a coalesced wake must not leave a second permit: {no_second:?}"
+        );
+        assert_eq!(fx.server_calls(), 1);
+        assert_eq!(replacement_attempts(&pool), 0);
+        fx.shutdown().await;
+    }
+
+    /// Task 2.5: the producer's transport-error path refreshes against the real
+    /// installed dead process endpoint, records that failure, then wakes the
+    /// real monitor within 500 ms of the observation instead of writing
+    /// `Restarting`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn producer_transport_failure_notifies_probe_wake() {
+        use tower::Service;
+
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let dead_endpoint = 7;
+        let process = ready_stub_process(dir.path(), "producer-wake", dead_endpoint).await;
+        let pool = liveness_pool(60_000, 250, 1);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+        let server = spawn_scripted_health(Vec::new()).await;
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, Some(process))
+                .await;
+
+        let endpoint_config =
+            crate::config::JmsEndpointConfig::from_uri("jms:queue:producer-wake").unwrap();
+        let mut producer = LazyJmsProducer {
+            pool: Arc::clone(&pool),
+            broker_name: "default".to_string(),
+            endpoint_config,
+            resolved_broker_type: BrokerType::ActiveMq,
+        };
+        let mut exchange = Exchange::default();
+        exchange.input.body = camel_component_api::Body::Text("hello".to_string());
+
+        let err = producer
+            .call(exchange)
+            .await
+            .expect_err("the scripted fixture's Send is a transport failure");
+        assert!(
+            err.to_string().contains(BRIDGE_TRANSPORT_ERROR_PREFIX),
+            "got: {err}"
+        );
+
+        let attempt = next_refresh_attempt(&pool, 0).await;
+        assert_eq!(attempt.endpoint, Some(dead_endpoint), "{attempt:?}");
+        assert!(attempt.failed, "{attempt:?}");
+        assert!(!attempt.timed_out, "{attempt:?}");
+
+        let ack = tokio::time::timeout(Duration::from_millis(500), fx.next_probe())
+            .await
+            .expect("the producer must wake the monitor within 500 ms of the failure");
+        assert!(matches!(ack.outcome, ProbeOutcome::Success), "{ack:?}");
+        assert!(matches!(ack.state, BridgeState::Ready { .. }), "{ack:?}");
+        assert_eq!(ack.attempts, 0, "{ack:?}");
+        assert!(fx.server_calls() >= 1);
+        assert_eq!(replacement_attempts(&pool), 0);
+        fx.shutdown().await;
+    }
+
+    /// Task 2.5: terminal slots reject both direct restart requests and wakes
+    /// that arrive during an in-flight probe; no further probe runs.
+    #[tokio::test]
+    async fn terminal_wake_skips_probe_and_stays_terminal() {
+        for terminal in [
+            BridgeState::Parked("terminal wake".to_string()),
+            BridgeState::Stopped,
+        ] {
+            let pool = liveness_pool(60_000, 250, 1);
+            let slot = test_slot("default");
+            let _ = slot.state_tx.send_replace(terminal.clone());
+            pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+            pool.restart_slot("default");
+            match &terminal {
+                BridgeState::Parked(_) => assert!(
+                    matches!(&*slot.state_rx.borrow(), BridgeState::Parked(_)),
+                    "restart_slot must leave Parked unchanged"
+                ),
+                BridgeState::Stopped => assert!(
+                    matches!(&*slot.state_rx.borrow(), BridgeState::Stopped),
+                    "restart_slot must leave Stopped unchanged"
+                ),
+                _ => unreachable!("loop only contains terminal states"),
+            }
+            assert_eq!(replacement_attempts(&pool), 0);
+        }
+
+        for terminal in [
+            BridgeState::Parked("terminal inflight".to_string()),
+            BridgeState::Stopped,
+        ] {
+            let gate = probe_gate();
+            let server = spawn_scripted_health(vec![ScriptedHealth::Gate {
+                response: scripted_response(true, true),
+                gate: Arc::clone(&gate),
+            }])
+            .await;
+            let pool = liveness_pool(60_000, 250, 1);
+            let slot = test_slot("default");
+            pool.slots.insert("default".to_string(), Arc::clone(&slot));
+            let mut fx =
+                TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, None).await;
+
+            pool.restart_slot("default");
+            tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+                .await
+                .expect("the prompt probe must enter the server");
+
+            // Terminal publication during the probe wins; the wake queued for
+            // the next iteration must be discarded by the state re-read.
+            let _ = slot.state_tx.send_replace(terminal.clone());
+            pool.restart_slot("default");
+            gate.release.notify_one();
+
+            let ack = fx.next_probe().await;
+            match &terminal {
+                BridgeState::Parked(_) => assert!(
+                    matches!(ack.state, BridgeState::Parked(_)),
+                    "the in-flight ack must observe Parked: {ack:?}"
+                ),
+                BridgeState::Stopped => assert!(
+                    matches!(ack.state, BridgeState::Stopped),
+                    "the in-flight ack must observe Stopped: {ack:?}"
+                ),
+                _ => unreachable!("loop only contains terminal states"),
+            }
+            assert_eq!(fx.server_calls(), 1);
+            let no_second = tokio::time::timeout(Duration::from_millis(200), fx.next_probe()).await;
+            assert!(
+                no_second.is_err(),
+                "a wake cannot resurrect a terminal slot: {no_second:?}"
+            );
+            assert_eq!(fx.server_calls(), 1);
+            assert_eq!(replacement_attempts(&pool), 0);
+            fx.shutdown().await;
+        }
+    }
+
+    /// Task 2.5: a wake during an in-flight probe only stores one permit for
+    /// the next loop iteration; probes never overlap.
+    #[tokio::test]
+    async fn wake_during_inflight_probe_does_not_start_overlapping_probe() {
+        let first_gate = probe_gate();
+        let second_gate = probe_gate();
+        let server = spawn_scripted_health(vec![
+            ScriptedHealth::Gate {
+                response: scripted_response(true, true),
+                gate: Arc::clone(&first_gate),
+            },
+            ScriptedHealth::Gate {
+                response: scripted_response(true, true),
+                gate: Arc::clone(&second_gate),
+            },
+        ])
+        .await;
+        let pool = liveness_pool(60_000, 250, 1);
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+        let mut fx =
+            TestBridgeFixture::start(Arc::clone(&pool), Arc::clone(&slot), server, None).await;
+
+        pool.restart_slot("default");
+        tokio::time::timeout(Duration::from_secs(5), first_gate.entered.notified())
+            .await
+            .expect("first probe must enter the gated server");
+        assert_eq!(fx.server_calls(), 1);
+
+        pool.restart_slot("default");
+        assert_eq!(
+            fx.server_calls(),
+            1,
+            "a wake while the first probe is in flight must not start an overlap"
+        );
+
+        first_gate.release.notify_one();
+        let first_ack = fx.next_probe().await;
+        assert!(
+            matches!(first_ack.outcome, ProbeOutcome::Success),
+            "{first_ack:?}"
+        );
+        assert_eq!(
+            first_ack.consecutive_failures, 0,
+            "a wake is not a failure: {first_ack:?}"
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), second_gate.entered.notified())
+            .await
+            .expect("the stored permit must start exactly one follow-up probe");
+        assert_eq!(fx.server_calls(), 2);
+
+        second_gate.release.notify_one();
+        let second_ack = fx.next_probe().await;
+        assert!(
+            matches!(second_ack.outcome, ProbeOutcome::Success),
+            "{second_ack:?}"
+        );
+        assert_eq!(second_ack.consecutive_failures, 0, "{second_ack:?}");
+        assert_eq!(fx.server_calls(), 2, "exactly one follow-up probe");
+        assert_eq!(replacement_attempts(&pool), 0);
+        fx.shutdown().await;
+    }
+
+    /// Step 9: the initial-launch failure path is unchanged — transient
+    /// failures still degrade and never count as replacement attempts.
+    #[tokio::test]
+    async fn initial_launch_failure_path_is_unchanged() {
+        let pool = liveness_pool(20, 250, 5);
+        let slot = test_slot("default");
+
+        JmsBridgePool::apply_initial_start_result(
+            slot.as_ref(),
+            Err(StartBridgeError::Other(CamelError::ProcessorError(
+                "initial launch failed".to_string(),
+            ))),
+        )
+        .await;
+
+        match &*slot.state_rx.borrow() {
+            BridgeState::Degraded(reason) => assert_eq!(
+                reason, "Initial start failed: Processor error: initial launch failed",
+                "the initial failure path must preserve the exact historical message"
+            ),
+            other => panic!("expected the initial failure to stay Degraded, got: {other:?}"),
+        }
+        assert_eq!(replacement_attempts(&pool), 0);
     }
 }

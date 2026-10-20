@@ -41,6 +41,12 @@ camel-component-api = { workspace = true, features = ["test-support"] }
 tokio-stream     = { workspace = true }
 tempfile         = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Test-only: install the process-level CryptoProvider required by rustls 0.23
+# when the private start_bridge_process test reaches its mTLS connect phase.
+rustls           = { workspace = true }
+# Test-only: compile/execute schemas/jms-pool-health-config.json against the
+# runtime health contract. Never a production dependency.
+jsonschema       = { workspace = true }
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }

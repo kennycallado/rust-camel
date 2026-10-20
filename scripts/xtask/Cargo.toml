@@ -20,6 +20,9 @@ walkdir = "2"
 zip = { workspace = true }
 serde_json = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+# Production `xtask schema --check` path compiles and executes the
+# hand-authored health schema; not test-only.
+jsonschema = { workspace = true }
 ureq = "3"
 schemars = { workspace = true }
 tempfile = { workspace = true }

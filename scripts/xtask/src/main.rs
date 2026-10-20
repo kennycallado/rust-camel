@@ -1427,6 +1427,178 @@ fn workspace_root_or_exit() -> PathBuf {
     })
 }
 
+/// Hand-authored schemas are not generated from Rust types, so `--check`
+/// cannot diff them against a generator. Compile them and execute validation
+/// against known-invalid instances; a parse-only check would pass a schema
+/// that rejects nothing.
+fn validate_handwritten_schemas(workspace_root: &Path) -> Result<(), String> {
+    validate_jms_pool_health_schema(&workspace_root.join("schemas/jms-pool-health-config.json"))
+}
+
+fn validate_jms_pool_health_schema(path: &Path) -> Result<(), String> {
+    const PROPERTIES: [&str; 4] = [
+        "health_timeout_ms",
+        "health_failure_threshold",
+        "health_broker_probe_mode",
+        "health_check_interval_ms",
+    ];
+
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let schema: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))?;
+
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("{}: missing object `properties`", path.display()))?;
+    for name in PROPERTIES {
+        if !properties.contains_key(name) {
+            return Err(format!(
+                "{}: missing required property `{name}`",
+                path.display()
+            ));
+        }
+    }
+    if properties.len() != PROPERTIES.len() {
+        return Err(format!(
+            "{}: expected exactly {} scoped properties, found {}",
+            path.display(),
+            PROPERTIES.len(),
+            properties.len()
+        ));
+    }
+    if schema.get("additionalProperties") != Some(&serde_json::Value::Bool(true)) {
+        return Err(format!(
+            "{}: `additionalProperties` must be true",
+            path.display()
+        ));
+    }
+
+    let validator = jsonschema::validator_for(&schema)
+        .map_err(|e| format!("{}: schema does not compile: {e}", path.display()))?;
+
+    let invalid_instances = [
+        (
+            "health_timeout_ms",
+            serde_json::json!({ "health_timeout_ms": 0 }),
+        ),
+        (
+            "health_failure_threshold",
+            serde_json::json!({ "health_failure_threshold": 0 }),
+        ),
+        (
+            "health_broker_probe_mode",
+            serde_json::json!({ "health_broker_probe_mode": "probe" }),
+        ),
+        (
+            "health_check_interval_ms",
+            serde_json::json!({ "health_check_interval_ms": 0 }),
+        ),
+    ];
+    for (property, instance) in invalid_instances {
+        let paths: Vec<String> = validator
+            .iter_errors(&instance)
+            .map(|e| e.instance_path().as_str().to_string())
+            .collect();
+        if paths.is_empty() {
+            return Err(format!(
+                "{}: schema accepted known-invalid instance for `{property}`",
+                path.display()
+            ));
+        }
+        if !paths
+            .iter()
+            .any(|path| path.split('/').any(|segment| segment == property))
+        {
+            return Err(format!(
+                "{}: rejection of invalid `{property}` did not name the property (paths: {paths:?})",
+                path.display()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod handwritten_schema_tests {
+    use super::*;
+
+    const VALID_SCHEMA: &str = r#"{
+        "type": "object",
+        "properties": {
+            "health_timeout_ms": { "type": "integer", "minimum": 1 },
+            "health_failure_threshold": { "type": "integer", "minimum": 1 },
+            "health_broker_probe_mode": { "type": "string", "enum": ["reuse", "skip"] },
+            "health_check_interval_ms": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": true
+    }"#;
+
+    fn write_schema(root: &Path, contents: &str) {
+        let schemas = root.join("schemas");
+        std::fs::create_dir_all(&schemas).expect("create schemas dir"); // allow-unwrap
+        std::fs::write(schemas.join("jms-pool-health-config.json"), contents)
+            .expect("write schema"); // allow-unwrap
+    }
+
+    #[test]
+    fn rejects_malformed_handwritten_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_schema(dir.path(), "{ this is not JSON");
+
+        let err = validate_handwritten_schemas(dir.path()).expect_err("malformed JSON must fail");
+        assert!(err.contains("parse"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_handwritten_schema_missing_property() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = VALID_SCHEMA.replace(
+            r#",
+            "health_check_interval_ms": { "type": "integer", "minimum": 1 }"#,
+            "",
+        );
+        assert_ne!(missing, VALID_SCHEMA, "fixture must drop a property");
+        write_schema(dir.path(), &missing);
+
+        let err = validate_handwritten_schemas(dir.path()).expect_err("missing property must fail");
+        assert!(err.contains("health_check_interval_ms"), "got: {err}");
+    }
+
+    #[test]
+    fn accepts_valid_handwritten_schema_through_executable_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_schema(dir.path(), VALID_SCHEMA);
+
+        validate_handwritten_schemas(dir.path()).expect("valid schema must pass validation");
+    }
+
+    #[test]
+    fn rejects_permissive_handwritten_schema_that_accepts_invalid_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let permissive = r#"{
+            "type": "object",
+            "properties": {
+                "health_timeout_ms": {},
+                "health_failure_threshold": {},
+                "health_broker_probe_mode": {},
+                "health_check_interval_ms": {}
+            },
+            "additionalProperties": true
+        }"#;
+        write_schema(dir.path(), permissive);
+
+        let err = validate_handwritten_schemas(dir.path())
+            .expect_err("permissive schema must be rejected by executable validation");
+        assert!(
+            err.contains("schema accepted known-invalid instance"),
+            "got: {err}"
+        );
+        assert!(err.contains("health_timeout_ms"), "got: {err}");
+    }
+}
+
 fn run_schema_generation(check: bool) -> Result<(), String> {
     let workspace_root = workspace_root()?;
     let schemas_dir = workspace_root.join("schemas");
@@ -1497,13 +1669,24 @@ fn run_schema_generation(check: bool) -> Result<(), String> {
             ));
         }
 
+        // Hand-authored schemas have no generator to diff against, so
+        // compile and execute them instead of trusting a parse-only check.
+        let handwritten = validate_handwritten_schemas(&workspace_root);
+
         if !drift.is_empty() {
-            return Err(format!(
+            let mut message = format!(
                 "Schema drift detected. Re-run `cargo xtask schema` (regenerates \
                  schemas/dsl/route-schema.json and syncs \
                  crates/camel-lint/schema/route-schema.json)\n  {}",
                 drift.join("\n  ")
-            ));
+            );
+            if let Err(err) = &handwritten {
+                message.push_str(&format!("\nHandwritten schema validation failed: {err}"));
+            }
+            return Err(message);
+        }
+        if let Err(err) = handwritten {
+            return Err(format!("Handwritten schema validation failed: {err}"));
         }
         println!("OK: all schemas and TS types match.");
     } else {

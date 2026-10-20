@@ -7,6 +7,7 @@ A Quarkus-based gRPC bridge that exposes JMS messaging to the Rust runtime. The 
 | Variable                        | Default                 | Description                                                                                                          |
 | ------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | `JMS_MAX_BODY_BYTES`            | `16777216` (16 MiB)     | Message body cap in bytes. Covers both `BytesMessage` and `TextMessage` bodies.                       |
+| `JMS_HEALTH_BROKER_PROBE_MODE`  | `reuse`                 | Broker diagnostic strategy for health calls. Valid values: `reuse`, `skip`. Unsupported values abort startup. |
 | `BRIDGE_BROKER_URL`             | `tcp://localhost:61616` | Broker connection URL.                                                                                                |
 | `BRIDGE_BROKER_TYPE`            | `activemq`              | Broker adapter type. Valid values: `activemq`, `artemis`.                                                             |
 | `BRIDGE_USERNAME`               | _(none)_                | Broker username.                                                                                                      |
@@ -20,6 +21,18 @@ A Quarkus-based gRPC bridge that exposes JMS messaging to the Rust runtime. The 
 ### Body cap
 
 A malformed, non-positive, or above-ceiling `JMS_MAX_BODY_BYTES` value aborts startup. The cap applies to both body types: `BytesMessage` bodies are checked against the pre-read body length, and `TextMessage` bodies are materialized and UTF-8 encoded before enforcement — the cap bounds the forwarded body size, not the peak sidecar allocation (a transient ~2-3x allocation of oversized text precedes rejection). The ceiling is 19 MiB. Operators must respect the ordering constraint: the cap stays at or below 19 MiB, and the Rust IPC decode limit is 20 MiB. The headroom absorbs IPC framing overhead (destination, headers, content type), so a message accepted by the bridge is always decodable on the Rust side.
+
+## Broker status and health probes
+
+The health RPC returns a cached broker status snapshot. It does not wait for broker connect, start, inspection, or close.
+
+- `JMS_HEALTH_BROKER_PROBE_MODE=reuse` retains one provider diagnostic connection across refreshes. The bridge does not open a fresh broker connection for each health check.
+- `JMS_HEALTH_BROKER_PROBE_MODE=skip` performs no broker I/O and opens no broker connection. Connectivity stays unverified.
+- Unsupported values abort startup.
+
+The snapshot has a 10 s TTL (`HEALTH_TTL_MS`). A background refresh starts after 5 s. One owned worker performs at most one refresh at a time, and there is no refresh queue. A snapshot or in-flight refresh older than the TTL reports stale status with its age. A not-yet-checked broker reports unknown status. Skipped status is explicit. Unknown, skipped, and stale status never claim verified broker connectivity.
+
+The broker-latency isolation guarantee requires this updated Java health handler. No protobuf change is needed. An older blocking bridge cannot provide the guarantee.
 
 ## Message-type forwarding policy (ADR-0067)
 

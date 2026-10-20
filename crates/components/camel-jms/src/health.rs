@@ -8,7 +8,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-type HealthFuture = Pin<Box<dyn Future<Output = Result<bool, CamelError>> + Send>>;
+/// One bridge health probe result: bridge liveness plus broker connectivity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BridgeProbeResult {
+    pub healthy: bool,
+    pub broker_connected: bool,
+    pub message: String,
+}
+
+type HealthFuture = Pin<Box<dyn Future<Output = Result<BridgeProbeResult, CamelError>> + Send>>;
 
 /// Trait abstracting a single gRPC health probe call (mockable for tests).
 trait BridgeHealthProbe: Send + Sync {
@@ -69,7 +77,12 @@ impl BridgeHealthProbe for JmsBridgeHealthProbe {
                 ))
             })?;
 
-            Ok(resp.into_inner().healthy)
+            let resp = resp.into_inner();
+            Ok(BridgeProbeResult {
+                healthy: resp.healthy,
+                broker_connected: resp.broker_connected,
+                message: resp.message,
+            })
         })
     }
 }
@@ -106,8 +119,23 @@ impl AsyncHealthCheck for JmsHealthCheck {
             return CheckResult::degraded(self.name(), "bridge not started (starts on first use)");
         }
         match tokio::time::timeout(self.timeout, self.probe.probe()).await {
-            Ok(Ok(true)) => CheckResult::healthy(self.name()),
-            Ok(Ok(false)) => CheckResult::unhealthy(self.name(), "bridge reported unhealthy"),
+            Ok(Ok(result)) if !result.healthy => {
+                let message = if result.message.is_empty() {
+                    "bridge reported unhealthy"
+                } else {
+                    &result.message
+                };
+                CheckResult::unhealthy(self.name(), message)
+            }
+            Ok(Ok(result)) if !result.broker_connected => {
+                let message = if result.message.is_empty() {
+                    "broker status unverified"
+                } else {
+                    &result.message
+                };
+                CheckResult::degraded(self.name(), message)
+            }
+            Ok(Ok(_)) => CheckResult::healthy(self.name()),
             Ok(Err(err)) => CheckResult::unhealthy(self.name(), &err.to_string()),
             Err(_) => CheckResult::unhealthy(self.name(), "health probe timed out"),
         }
@@ -170,9 +198,20 @@ mod tests {
         );
     }
 
+    fn probe_result(healthy: bool, broker_connected: bool, message: &str) -> HealthFuture {
+        let message = message.to_string();
+        Box::pin(async move {
+            Ok(BridgeProbeResult {
+                healthy,
+                broker_connected,
+                message,
+            })
+        })
+    }
+
     #[tokio::test]
-    async fn jms_health_check_healthy_on_true() {
-        let probe = Arc::new(MockHealthProbe::new(|| Box::pin(async { Ok(true) })));
+    async fn jms_health_check_healthy_when_verified_up() {
+        let probe = Arc::new(MockHealthProbe::new(|| probe_result(true, true, "ok")));
         let check = JmsHealthCheck::with_probe_for_tests(probe, Duration::from_millis(50));
 
         let result = check.check().await;
@@ -183,17 +222,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jms_health_check_unhealthy_on_error() {
+    async fn jms_health_check_unhealthy_when_verified_down() {
         let probe = Arc::new(MockHealthProbe::new(|| {
+            probe_result(false, false, "broker unreachable")
+        }));
+        let check = JmsHealthCheck::with_probe_for_tests(probe, Duration::from_millis(50));
+
+        let result = check.check().await;
+
+        assert_eq!(result.name, "jms");
+        assert_eq!(result.status, HealthStatus::Unhealthy);
+        assert_eq!(result.message.as_deref(), Some("broker unreachable"));
+    }
+
+    #[tokio::test]
+    async fn jms_health_check_degraded_for_unknown_or_skipped() {
+        let probe = Arc::new(MockHealthProbe::new(|| {
+            probe_result(true, false, "broker probe skipped; connectivity unverified")
+        }));
+        let check = JmsHealthCheck::with_probe_for_tests(probe, Duration::from_millis(50));
+
+        for _ in 0..2 {
+            let result = check.check().await;
+
+            assert_eq!(result.name, "jms");
+            assert_eq!(result.status, HealthStatus::Degraded);
+            assert_eq!(
+                result.message.as_deref(),
+                Some("broker probe skipped; connectivity unverified")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn jms_health_check_degraded_for_stale() {
+        let probe = Arc::new(MockHealthProbe::new(|| {
+            probe_result(true, false, "broker status stale; age 10001 ms")
+        }));
+        let check = JmsHealthCheck::with_probe_for_tests(probe, Duration::from_millis(50));
+
+        let result = check.check().await;
+
+        assert_eq!(result.name, "jms");
+        assert_eq!(result.status, HealthStatus::Degraded);
+        assert_eq!(
+            result.message.as_deref(),
+            Some("broker status stale; age 10001 ms")
+        );
+    }
+
+    #[tokio::test]
+    async fn jms_health_check_unhealthy_on_error_and_timeout() {
+        let error_probe = Arc::new(MockHealthProbe::new(|| {
             Box::pin(async {
                 Err(CamelError::ProcessorError(
                     "simulated bridge error".to_string(),
                 ))
             })
         }));
-        let check = JmsHealthCheck::with_probe_for_tests(probe, Duration::from_millis(50));
+        let error_check =
+            JmsHealthCheck::with_probe_for_tests(error_probe, Duration::from_millis(50));
 
-        let result = check.check().await;
+        let result = error_check.check().await;
 
         assert_eq!(result.name, "jms");
         assert_eq!(result.status, HealthStatus::Unhealthy);
@@ -203,19 +293,21 @@ mod tests {
                 .as_deref()
                 .is_some_and(|m| m.contains("simulated bridge error"))
         );
-    }
 
-    #[tokio::test]
-    async fn jms_health_check_unhealthy_on_timeout() {
-        let probe = Arc::new(MockHealthProbe::new(|| {
+        let sleeping_probe = Arc::new(MockHealthProbe::new(|| {
             Box::pin(async {
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                Ok(true)
+                Ok(BridgeProbeResult {
+                    healthy: true,
+                    broker_connected: true,
+                    message: String::new(),
+                })
             })
         }));
-        let check = JmsHealthCheck::with_probe_for_tests(probe, Duration::from_millis(5));
+        let timeout_check =
+            JmsHealthCheck::with_probe_for_tests(sleeping_probe, Duration::from_millis(5));
 
-        let result = check.check().await;
+        let result = timeout_check.check().await;
 
         assert_eq!(result.name, "jms");
         assert_eq!(result.status, HealthStatus::Unhealthy);
