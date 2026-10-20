@@ -16,6 +16,12 @@ The LLM component SHALL confine production genai SDK imports to `provider/genai_
 - **THEN** the boundary test fails, and passes again after the violation is
   reverted
 
+#### Scenario: untouched surfaces pass unchanged
+
+- **GIVEN** the change added generic providers through configuration, factory dispatch, feature gates and docs
+- **WHEN** the full crate test suite runs (`cargo test -p camel-component-llm --all-features`)
+- **THEN** every pre-existing test outside the adapter/boundary files passes without modification, including all `producer_*_tests.rs` and `tests/*` except `boundary.rs`
+
 #### Scenario: boundary scanner covers generic providers
 
 - **GIVEN** generic providers implemented behind the adapter
@@ -39,8 +45,14 @@ The adapter SHALL construct explicit ServiceTargets from the configured service,
 - **WHEN** chat or embed builds a request
 - **THEN** the request targets OpenAI, never an inferred Ollama adapter
 
-## ADDED Requirements
+#### Scenario: Ollama model name does not leak into OpenAI targeting
 
+- **GIVEN** an OpenAI-feature adapter configured with model `qwen3.5:4b`
+- **WHEN** a chat or embed request is built
+- **THEN** the genai target is `AdapterKind::OpenAI` at the configured endpoint,
+  never an inferred adapter kind
+
+## ADDED Requirements
 ### Requirement: Generic provider configuration is explicit and backward compatible
 
 The component SHALL accept `type = "generic"` entries with `service = "anthropic"` or `service = "gemini"`, required `api_key` and `default_model`, optional `base_url`, and the existing provider timeout, concurrency, retry, pricing, and cache fields. Missing required strings SHALL fail deserialization; blank credentials or models SHALL fail validation/construction. Unknown service names SHALL fail deserialization with a diagnostic naming the rejected service and supported choices. Existing `openai`, `ollama`, and `mock` configurations SHALL retain their syntax, defaults, and behavior. Generic credentials SHALL be explicit, SHALL NOT trigger ambient SDK credential discovery, and SHALL NOT appear in Debug output or component-generated configuration diagnostics. Component-generated URL diagnostics SHALL use ADR-0051 redaction; provider response-body handling retains the existing error-mapping behavior.
