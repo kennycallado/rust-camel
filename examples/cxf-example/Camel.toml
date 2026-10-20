@@ -2,7 +2,7 @@
 dir = "routes"
 
 [components.cxf]
-version = "0.8.2"
+version = "0.8.3"
 bind_address = "http://0.0.0.0:9090/cxf"
 
 [[components.cxf.profiles]]
