@@ -89,7 +89,7 @@ the decision or crate that defines it.
   `DivertCopyTo` action. [Route interception](../testing/route-interception.md),
   [ADR-0064](../adr/0064-two-tier-testing-contract.md).
 - **LlmProvider** — trait abstraction over LLM backends (OpenAI, Ollama,
-  Mock). Camel-shaped, not siumai-shaped. All siumai imports stay in the
+  Mock). Camel-shaped, not genai-shaped. All genai imports stay in the
   adapter. [Components](../components/index.md),
   [ADR-0020](../adr/0020-llm-component-provider-adapter-boundary.md).
 - **Message** — body and headers container inside an Exchange.

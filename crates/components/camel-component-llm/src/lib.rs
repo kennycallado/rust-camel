@@ -7,7 +7,7 @@
 //! override (ADR-0021), and concurrency control via producer semaphore.
 //!
 //! Uses a project-owned `LlmProvider` trait with strict adapter boundary
-//! isolating the siumai SDK behind `provider/siumai_adapter.rs` (ADR-0020).
+//! isolating the genai SDK behind `provider/genai_adapter.rs` (ADR-0020).
 
 pub mod bundle;
 pub mod config;
@@ -48,9 +48,10 @@ use provider_factory::ProviderMap;
 ///   non-redirecting; a redirect response is a signal of misconfiguration
 ///   or attack.
 /// - **Connect timeout 10s** — bound TCP handshake.
-/// - **Request timeout 30s** — bound total request lifetime. (Per-request
-///   deadlines set via siumai's `timeout` builder take precedence for
-///   streaming activity; this is the hard ceiling.)
+/// - **Request timeout 30s** — bound total request lifetime. This is the
+///   sole deadline: no per-request deadline is configurable through the
+///   `LlmProvider` surface; when it fires, `LlmError::Timeout` carries the
+///   configured duration.
 /// - **Optional DNS pinning** — when `pinned` is `Some((host, addrs))`,
 ///   applies `resolve_to_addrs` to close the TOCTOU window between SSRF
 ///   validation and the first outbound request (D-M10).

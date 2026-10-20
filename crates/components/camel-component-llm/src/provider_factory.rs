@@ -178,7 +178,7 @@ fn build_single(
             }
             let configured_timeout =
                 Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or(30));
-            crate::provider::siumai_adapter::build_openai(name, c, configured_timeout, policy)
+            crate::provider::genai_adapter::build_openai(name, c, configured_timeout, policy)
                 .map(|p| p as Arc<dyn LlmProvider>)
         }
         #[cfg(not(any(feature = "openai", feature = "all-providers")))]
@@ -190,7 +190,7 @@ fn build_single(
             validate_llm_url(&c.base_url, policy)?;
             let configured_timeout =
                 Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or(30));
-            crate::provider::siumai_adapter::build_ollama(name, c, configured_timeout, policy)
+            crate::provider::genai_adapter::build_ollama(name, c, configured_timeout, policy)
                 .map(|p| p as Arc<dyn LlmProvider>)
         }
         #[cfg(not(any(feature = "ollama", feature = "all-providers")))]

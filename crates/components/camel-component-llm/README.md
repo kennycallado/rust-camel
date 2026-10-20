@@ -94,17 +94,17 @@ See [`src/headers.rs`](src/headers.rs) for the full list. Key headers:
 
 ## Provider Feature Flags
 
-| Provider | Cargo feature | Requires siumai |
-|----------|---------------|-----------------|
+| Provider | Cargo feature | Requires genai |
+|----------|---------------|----------------|
 | Mock     | `mock` (default) | No |
-| OpenAI   | `openai`     | Yes |
-| Ollama   | `ollama`     | Yes |
+| OpenAI   | `openai`     | Yes (genai-backed) |
+| Ollama   | `ollama`     | Yes (genai-backed) |
 
 Enable multiple: `--features "openai,ollama"` or use `all-providers`.
 
 ## Architecture Decisions
 
-- [ADR-0020](https://github.com/kenny/rust-camel/blob/main/docs/adr/0020-llm-component-provider-adapter-boundary.md) — Project-owned `LlmProvider` trait isolates siumai SDK behind `provider/siumai_adapter.rs`
+- [ADR-0020](https://github.com/kenny/rust-camel/blob/main/docs/adr/0020-llm-component-provider-adapter-boundary.md) — Project-owned `LlmProvider` trait isolates genai SDK behind `provider/genai_adapter.rs`
 - [ADR-0021](https://github.com/kenny/rust-camel/blob/main/docs/adr/0021-llm-retry-retry-after-manual-loop.md) — Manual retry loop honors `retry_after` over exponential backoff
 
 ## Example

@@ -5,7 +5,7 @@ name: Integration Ollama Smoke
 # weekly on the developer host via the camel-ollama-live.timer systemd unit.
 #
 # This job pulls ONLY the 621 MB embeddinggemma model and runs ONLY the
-# ollama_embed test. It proves the siumai adapter still constructs, opens a
+# ollama_embed test. It proves the genai adapter still constructs, opens a
 # socket to Ollama, and round-trips one request in a clean CI environment. It
 # deliberately avoids the 3.4 GB qwen3.5:4b chat model and all generative
 # tests: CPU-only 4B inference on a 2-4 vCPU runner is slow, the chat cache

@@ -1,15 +1,17 @@
 use std::path::PathBuf;
 
-/// Enforces that no file outside the allowed boundary imports siumai.
-/// Production boundary: provider/siumai_adapter.rs, provider_factory.rs.
-/// Test-only exception: provider/siumai_adapter_tests.rs (StubChat, StubEmbed implement siumai traits).
+/// Enforces that no file outside the allowed boundary imports genai.
+///
+/// ADR-0020 (amended for the genai swap): the production boundary is
+/// `provider/genai_adapter.rs`; the only other exception is its unit-test
+/// module `provider/genai_adapter_tests.rs`, which exercises genai types
+/// directly. `provider_factory.rs` is deliberately outside the allowlist.
 #[test]
-fn no_siumai_imports_outside_adapter() {
+fn no_genai_imports_outside_adapter() {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let allowed_files = [
-        "provider/siumai_adapter.rs",
-        "provider/siumai_adapter_tests.rs",
-        "provider_factory.rs",
+        "provider/genai_adapter.rs",
+        "provider/genai_adapter_tests.rs",
     ];
 
     let mut violations = Vec::new();
@@ -44,13 +46,7 @@ fn no_siumai_imports_outside_adapter() {
                 if trimmed.starts_with("//") {
                     continue;
                 }
-                if trimmed.contains("use siumai")
-                    || trimmed.contains("siumai::")
-                    || trimmed.contains("siumai_core::")
-                    || trimmed.contains("siumai_provider_")
-                    || trimmed.contains("siumai_registry::")
-                    || trimmed.contains("siumai_bridge::")
-                {
+                if imports_genai(trimmed) {
                     violations.push(format!("{}:{}: {}", rel, lineno + 1, trimmed));
                 }
             }
@@ -59,7 +55,30 @@ fn no_siumai_imports_outside_adapter() {
 
     assert!(
         violations.is_empty(),
-        "siumai imports found outside adapter boundary:\n{}",
+        "genai imports found outside adapter boundary:\n{}",
         violations.join("\n")
     );
+}
+
+/// Match `genai::` or `use genai` with a word boundary, so identifiers and
+/// module paths such as `genai_adapter` do not match.
+fn imports_genai(line: &str) -> bool {
+    if line.contains("genai::") {
+        return true;
+    }
+
+    let needle = "use genai";
+    let mut rest = line;
+    while let Some(pos) = rest.find(needle) {
+        let after = &rest[pos + needle.len()..];
+        if !matches!(
+            after.chars().next(),
+            Some(c) if c.is_alphanumeric() || c == '_'
+        ) {
+            return true;
+        }
+        rest = after;
+    }
+
+    false
 }

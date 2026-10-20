@@ -22,9 +22,9 @@ _Avoid_: mode, action, verb
 `HashMap<String, Arc<dyn LlmProvider>>` owned by `LlmComponent`. Resolved by name from config. Not a global registry — safe for tests, hot-reload, multi-context.
 _Avoid_: registry, pool, factory (use provider_factory for the builder function)
 
-**SiumaiProvider**:
-The adapter that bridges `LlmProvider` to the siumai SDK. Lives in `provider/siumai_adapter.rs`. If siumai breaks, only this file changes.
-_Avoid_: OpenAiClient, OllamaClient (those are siumai types, never exposed)
+**GenaiProvider**:
+The adapter that bridges `LlmProvider` to the genai SDK. Lives in `provider/genai_adapter.rs`. If genai breaks, only this file changes.
+_Avoid_: OpenAiClient, OllamaClient (those are genai types, never exposed)
 
 **Materialized mode**:
 When `stream=false`, the producer collects all `ChatEvent`s into a single result with complete usage headers (`CamelLlmTokensIn`, `CamelLlmTokensOut`). Text-only turns use `Body::Text`. Tool-call turns with accompanying text use `Body::Text` plus `CamelLlmText` (the route owns dispatch through `CamelLlmToolCalls`). Tool-call turns without text use `Body::Empty`. Duplicate tool-call ids within one materialized turn keep the first occurrence (identical repeats log at `debug`, conflicting payloads at `warn`).
@@ -74,7 +74,7 @@ _Avoid_: billing, accounting
 - `ChatMessage`: new field `tool_calls: Option<Vec<EmittedToolCall>>`
 - `build_chat_request`: return type changed from `ChatRequest` to `Result<ChatRequest, LlmError>`
 - `MetricsCollector` trait: new default method `record_histogram` (non-breaking; default no-op)
-- `LlmError::Timeout`: now carries the configured `Duration` (siumai `TimeoutError` maps here, not to `Network`)
+- `LlmError::Timeout`: now carries the configured `Duration` (genai transport timeout maps here, not to `Network`)
 
 ## Error mapping
 

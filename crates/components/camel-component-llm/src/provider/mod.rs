@@ -1,11 +1,11 @@
 //! LlmProvider trait and request/response types.
 //!
-//! These types are Camel-shaped (not siumai-shaped).
-//! The siumai adapter translates between these and siumai's types.
+//! These types are Camel-shaped (not genai-shaped).
+//! The genai adapter translates between these and genai's types.
 
-pub mod mock;
 #[cfg(any(feature = "openai", feature = "ollama", feature = "all-providers"))]
-pub mod siumai_adapter;
+pub mod genai_adapter;
+pub mod mock;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -14,8 +14,8 @@ use crate::error::LlmError;
 
 /// Provider abstraction for LLM chat and embedding operations.
 ///
-/// Camel-shaped trait (not siumai-shaped). The siumai adapter
-/// translates between these types and siumai's types.
+/// Camel-shaped trait (not genai-shaped). The genai adapter
+/// translates between these types and genai's types.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Unique provider identifier (e.g., "openai", "ollama").

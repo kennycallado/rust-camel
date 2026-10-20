@@ -68,7 +68,7 @@ The response cache deduplicates materialized requests. It sits at the producer l
 
 ## Providers
 
-The Mock provider ships in the default build. OpenAI and Ollama require cargo features (`--features openai` and `--features ollama`). The `SiumaiProvider` adapter isolates the siumai SDK. If siumai breaks, only `provider/siumai_adapter.rs` changes (ADR-0020).
+The Mock provider ships in the default build. OpenAI and Ollama require cargo features (`--features openai` and `--features ollama`). The `GenaiProvider` adapter isolates the genai SDK. If genai breaks, only `provider/genai_adapter.rs` changes (ADR-0020).
 
 ## Retry and timeout
 
