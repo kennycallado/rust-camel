@@ -23,8 +23,8 @@ pub mod provider_factory;
 
 pub use bundle::LlmBundle;
 pub use config::{
-    LlmEndpointConfig, LlmGlobalConfig, LlmOperation, LlmProviderConfig, MockProviderConfig,
-    OllamaProviderConfig, OpenaiProviderConfig,
+    GenericProviderConfig, LlmEndpointConfig, LlmGlobalConfig, LlmOperation, LlmProviderConfig,
+    LlmServiceKind, MockProviderConfig, OllamaProviderConfig, OpenaiProviderConfig,
 };
 pub use cost::PricingTable;
 pub use error::LlmError;

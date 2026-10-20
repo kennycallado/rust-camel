@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Generic LLM Provider Entry",
+  "description": "One generic provider entry (not a complete global LLM configuration). Describes the serde shape of LlmProviderConfig::Generic and the policy fields shared with the existing provider variants. Hand-maintained in this repository; it is not generated and is not loaded by library code.",
+  "type": "object",
+  "required": [
+    "type",
+    "service",
+    "api_key",
+    "default_model"
+  ],
+  "properties": {
+    "type": {
+      "description": "Provider variant discriminator.",
+      "const": "generic"
+    },
+    "service": {
+      "description": "Native LLM service protocol to target.",
+      "type": "string",
+      "enum": [
+        "anthropic",
+        "gemini"
+      ]
+    },
+    "api_key": {
+      "description": "Explicit API key for the selected service. Values are never discovered from the environment.",
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "default_model": {
+      "description": "Explicit default model for the selected service.",
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "base_url": {
+      "description": "Optional base URL override. Defaults to the service's standard endpoint.",
+      "type": "string"
+    },
+    "timeout_secs": {
+      "description": "Optional per-provider timeout in seconds. Positive when set.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_concurrency": {
+      "description": "Optional per-provider concurrency limit.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "network_retry": {
+      "description": "Optional shared network retry and backoff policy.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "max_attempts": {
+          "description": "Maximum attempts before giving up. 0 means unlimited.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_attempts_absolute": {
+          "description": "Optional hard cap on total attempts. Null or absent preserves max_attempts semantics.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "initial_delay_ms": {
+          "description": "Base delay for the first retry, in milliseconds.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_delay_ms": {
+          "description": "Maximum backoff delay, in milliseconds.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "multiplier": {
+          "description": "Exponential backoff multiplier.",
+          "type": "number"
+        },
+        "jitter_factor": {
+          "description": "Jitter factor applied to the computed delay.",
+          "type": "number"
+        }
+      }
+    },
+    "pricing": {
+      "description": "Optional shared pricing table for cost estimation.",
+      "type": "object",
+      "required": [
+        "input_per_1k_tokens",
+        "output_per_1k_tokens"
+      ],
+      "properties": {
+        "input_per_1k_tokens": {
+          "description": "USD cost per 1,000 input tokens.",
+          "type": "number",
+          "minimum": 0
+        },
+        "output_per_1k_tokens": {
+          "description": "USD cost per 1,000 output tokens.",
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "cache_ttl_secs": {
+      "description": "Optional response cache TTL in seconds. Positive when set.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "cache_max_entries": {
+      "description": "Optional maximum cache entries.",
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": true
+}

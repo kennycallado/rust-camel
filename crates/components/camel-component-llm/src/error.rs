@@ -114,6 +114,8 @@ impl LlmError {
 /// Returns `true` if the error is transient and the operation may succeed
 /// on retry.
 ///
+/// [`LlmError::QuotaExceeded`] is not retryable, while [`LlmError::RateLimit`] is retryable.
+///
 /// Retryable errors:
 /// - [`LlmError::RateLimit`] — provider asks us to back off
 /// - [`LlmError::Network`] — transient connection issues
@@ -157,6 +159,27 @@ mod tests {
         assert!(is_retryable(&LlmError::ModelUnavailable(
             "overloaded".into()
         )));
+    }
+
+    #[test]
+    fn quota_exhausted_not_retryable_while_rate_limit_is() {
+        let quota = LlmError::QuotaExceeded {
+            detail: "billing limit".into(),
+        };
+        let throttled_without_retry_after = LlmError::RateLimit { retry_after: None };
+        let throttled_with_retry_after = LlmError::RateLimit {
+            retry_after: Some(Duration::from_secs(7)),
+        };
+
+        assert!(!is_retryable(&quota), "quota exhaustion must fail fast");
+        assert!(
+            is_retryable(&throttled_without_retry_after),
+            "rate limiting is retryable without retry-after"
+        );
+        assert!(
+            is_retryable(&throttled_with_retry_after),
+            "rate limiting is retryable with retry-after"
+        );
     }
 
     #[test]

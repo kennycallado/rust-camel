@@ -18,6 +18,8 @@ use camel_api::SsrfPolicy;
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, StreamExt};
 
+#[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+use crate::config::LlmServiceKind;
 use crate::error::LlmError;
 use crate::provider::{
     ChatEvent, ChatMessage, ChatRequest, ChatRole, EmbedRequest, EmbedResponse, FinishReason,
@@ -218,6 +220,19 @@ pub(super) fn openai_endpoint_for(base_url: Option<&str>) -> String {
     }
 }
 
+/// Native generic-service endpoint, defaulting to the documented public API.
+#[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+fn generic_endpoint_for(service: LlmServiceKind, base_url: Option<&str>) -> String {
+    match base_url {
+        Some(url) => ensure_trailing_slash(url),
+        None => match service {
+            LlmServiceKind::Anthropic => "https://api.anthropic.com/v1/",
+            LlmServiceKind::Gemini => "https://generativelanguage.googleapis.com/v1beta/",
+        }
+        .to_string(),
+    }
+}
+
 /// Per-request embedding model, falling back to the provider default.
 pub(super) fn embed_model_for(req: &EmbedRequest, default: &str) -> String {
     if req.model.is_empty() {
@@ -405,6 +420,13 @@ enum GenaiConfig {
     /// Ollama (local) provider configuration.
     #[cfg(any(feature = "ollama", feature = "all-providers"))]
     Ollama { base_url: String },
+    /// Native service selected by the generic provider configuration.
+    #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+    Generic {
+        service: LlmServiceKind,
+        api_key: String,
+        base_url: Option<String>,
+    },
 }
 
 impl GenaiConfig {
@@ -414,6 +436,11 @@ impl GenaiConfig {
             GenaiConfig::OpenAi { .. } => AdapterKind::OpenAI,
             #[cfg(any(feature = "ollama", feature = "all-providers"))]
             GenaiConfig::Ollama { .. } => AdapterKind::Ollama,
+            #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+            GenaiConfig::Generic { service, .. } => match service {
+                LlmServiceKind::Anthropic => AdapterKind::Anthropic,
+                LlmServiceKind::Gemini => AdapterKind::Gemini,
+            },
         }
     }
 
@@ -425,6 +452,10 @@ impl GenaiConfig {
             GenaiConfig::OpenAi { base_url, .. } => openai_endpoint_for(base_url.as_deref()),
             #[cfg(any(feature = "ollama", feature = "all-providers"))]
             GenaiConfig::Ollama { base_url, .. } => base_url.clone(),
+            #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+            GenaiConfig::Generic {
+                service, base_url, ..
+            } => generic_endpoint_for(*service, base_url.as_deref()),
         }
     }
 
@@ -434,6 +465,8 @@ impl GenaiConfig {
             GenaiConfig::OpenAi { api_key, .. } => Some(api_key),
             #[cfg(any(feature = "ollama", feature = "all-providers"))]
             GenaiConfig::Ollama { .. } => None,
+            #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+            GenaiConfig::Generic { api_key, .. } => Some(api_key),
         }
     }
 }
@@ -511,6 +544,10 @@ impl LlmProvider for GenaiProvider {
     }
 
     fn supports_embed(&self) -> bool {
+        #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+        if matches!(&self.config, GenaiConfig::Generic { .. }) {
+            return false;
+        }
         true
     }
 
@@ -617,6 +654,15 @@ impl LlmProvider for GenaiProvider {
     }
 
     async fn embed(&self, req: EmbedRequest) -> Result<EmbedResponse, LlmError> {
+        // Generic native services are chat-only. Reject before touching the
+        // OnceCell so no client is constructed and no network call is possible.
+        #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+        if matches!(&self.config, GenaiConfig::Generic { .. }) {
+            return Err(LlmError::UnsupportedCapability(
+                "generic providers do not support embeddings".into(),
+            ));
+        }
+
         let config = self.config.clone();
         let configured_timeout = self.configured_timeout;
         let policy = self.policy;
@@ -765,6 +811,20 @@ async fn collect_pinning_from_config(
                 Ok(None)
             }
         }
+        #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+        GenaiConfig::Generic {
+            base_url: Some(url),
+            ..
+        } => {
+            let (host, addrs) = validate_base_url_ssrf(url, policy).await?;
+            if is_hostname_domain(url) {
+                Ok(Some((host, addrs)))
+            } else {
+                Ok(None)
+            }
+        }
+        #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+        GenaiConfig::Generic { base_url: None, .. } => Ok(None),
     }
 }
 
@@ -841,6 +901,39 @@ pub fn build_ollama(
     )))
 }
 
-#[cfg(all(test, any(feature = "openai", feature = "ollama")))]
+/// Build a native generic-service provider selected by explicit configuration.
+///
+/// The target adapter kind comes from `service`; the model is never inspected
+/// and no environment variable is consulted. The genai client stays lazy.
+#[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+pub fn build_generic(
+    name: &str,
+    config: &crate::config::GenericProviderConfig,
+    configured_timeout: Duration,
+    policy: SsrfPolicy,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let cfg = GenaiConfig::Generic {
+        service: config.service,
+        api_key: config.api_key.clone(),
+        base_url: config.base_url.clone(),
+    };
+    Ok(Arc::new(GenaiProvider::new(
+        name,
+        &config.default_model,
+        cfg,
+        configured_timeout,
+        policy,
+    )))
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "openai",
+        feature = "ollama",
+        feature = "generic-providers",
+        feature = "all-providers"
+    )
+))]
 #[path = "genai_adapter_tests.rs"]
 mod tests;

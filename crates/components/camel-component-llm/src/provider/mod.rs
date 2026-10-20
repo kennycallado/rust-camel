@@ -3,7 +3,12 @@
 //! These types are Camel-shaped (not genai-shaped).
 //! The genai adapter translates between these and genai's types.
 
-#[cfg(any(feature = "openai", feature = "ollama", feature = "all-providers"))]
+#[cfg(any(
+    feature = "openai",
+    feature = "ollama",
+    feature = "generic-providers",
+    feature = "all-providers"
+))]
 pub mod genai_adapter;
 pub mod mock;
 

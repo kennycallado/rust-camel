@@ -69,3 +69,62 @@ hardened DNS-pinned reqwest client via `with_reqwest`. The boundary allowlist
 narrows to `provider/genai_adapter.rs` plus the adapter tests
 (`provider_factory.rs` removed — it imports no SDK); the boundary test now
 scans for `genai::` / `use genai`.
+
+## Amendment 2026-10-20 (llm-provider-extensibility)
+
+The boundary decision stands. Generic Anthropic and Gemini providers extend the
+configuration, factory, and adapter. They add no public trait and no SDK type to
+the configuration surface. Production genai imports stay in
+`provider/genai_adapter.rs`, and the adapter test file keeps its test-only
+allowlist entry.
+
+### Decision
+
+Add `LlmProviderConfig::Generic(GenericProviderConfig)`. The entry uses the
+`type = "generic"` tag. A crate-owned `LlmServiceKind` selector accepts
+`anthropic` and `gemini`. Configuration requires explicit `api_key` and
+`default_model` values and accepts `base_url` plus the existing timeout,
+concurrency, retry, pricing, and cache fields. The `service` selector is
+configuration data. It is not the Tower `Service` trait and not a member of the
+Services architecture tier.
+
+The adapter maps the selector to an explicit SDK `ServiceTarget`:
+
+| Service | Adapter kind | Default endpoint | Authentication |
+| --- | --- | --- | --- |
+| anthropic | `Anthropic` | `https://api.anthropic.com/v1/` | Explicit single key, sent as `x-api-key` |
+| gemini | `Gemini` | `https://generativelanguage.googleapis.com/v1beta/` | Explicit single key, sent as `x-goog-api-key` |
+
+A `base_url` override replaces the default endpoint. The existing trailing-slash
+normalization applies. The factory keeps the existing URL validation and DNS
+pinning under the SSRF policy. The model passes to the selected protocol
+unchanged. A request model override keeps the selected service. The adapter
+never infers a service from a model name.
+
+The `generic-providers` feature enables the existing optional genai dependency
+and the two native constructors. The `all-providers` feature includes it.
+Configuration remains parseable in every build. Without the feature, provider
+construction returns `UnsupportedCapability` with the feature name. This is an
+actionable construction error, not a compile error and not a fallback provider.
+
+### Limitations
+
+Generic providers are chat-only. `supports_embed` returns `false`, and `embed`
+returns `UnsupportedCapability` before client initialization or network I/O.
+Generic embeddings do not exist. OpenAI and Ollama embedding behavior is
+unchanged.
+
+Credentials and models are explicit. The adapter does not read environment
+variables and does not use SDK credential discovery. An application may
+substitute environment values before it builds the configuration, but direct
+deserialization does not expand those strings. If an Anthropic request omits
+`max_tokens`, genai selects the default. Camel does not reimplement that
+default.
+
+Gemini reports request throttling and daily or project quota exhaustion as HTTP
+429 `RESOURCE_EXHAUSTED`. The inherited status mapping turns both cases into
+retryable `RateLimit` with no retry-after value. Retry count follows the
+configured `network_retry` policy. `max_attempts = 0` is unlimited unless
+`max_attempts_absolute` sets a cap. `QuotaExceeded` remains the separate
+OpenAI-style `insufficient_quota` mapping and fails fast. The component does not
+claim that every vendor quota response becomes `QuotaExceeded`.

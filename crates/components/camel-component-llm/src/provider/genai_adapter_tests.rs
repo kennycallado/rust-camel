@@ -4,10 +4,13 @@ use std::time::Duration;
 
 use super::*;
 use crate::error::LlmError;
+#[cfg(any(feature = "openai", feature = "ollama", feature = "all-providers"))]
+use crate::provider::LlmProvider;
 use crate::provider::{
-    ChatMessage, ChatRole, EmbedRequest, EmittedToolCall, FinishReason, LlmProvider, LlmUsage,
-    ToolChoice, ToolDefinition,
+    ChatMessage, ChatRole, EmbedRequest, EmittedToolCall, FinishReason, LlmUsage, ToolChoice,
+    ToolDefinition,
 };
+#[cfg(any(feature = "openai", feature = "ollama", feature = "all-providers"))]
 use camel_api::SsrfPolicy;
 #[cfg(any(feature = "ollama", feature = "all-providers"))]
 use futures::future::join_all;
@@ -1941,6 +1944,648 @@ mod wiremock_error {
         assert!(
             matches!(err, LlmError::Timeout(after) if after == Duration::from_secs(1)),
             "expected Timeout with the configured 1s duration, got: {err:?}"
+        );
+    }
+}
+
+/// Native generic-service targets, factory construction, embedding rejection,
+/// and URL-policy/pinning behavior (llm-provider-extensibility 1.2).
+#[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+mod generic_native {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use camel_api::SsrfPolicy;
+    use genai::ModelSpec;
+    use genai::adapter::AdapterKind;
+    use genai::resolver::AuthData;
+
+    use super::super::{
+        BuildOverride, GenaiConfig, GenaiProvider, collect_pinning_from_config, resolve_target,
+    };
+    use crate::config::{
+        GenericProviderConfig, LlmGlobalConfig, LlmProviderConfig, LlmServiceKind,
+    };
+    use crate::error::LlmError;
+    use crate::provider::{ChatMessage, ChatRequest, EmbedRequest, LlmProvider};
+    use crate::provider_factory::build_provider_map;
+
+    fn generic_config(
+        service: LlmServiceKind,
+        api_key: &str,
+        default_model: &str,
+        base_url: Option<&str>,
+        timeout_secs: Option<u64>,
+    ) -> GenericProviderConfig {
+        GenericProviderConfig {
+            service,
+            api_key: api_key.into(),
+            default_model: default_model.into(),
+            base_url: base_url.map(str::to_string),
+            timeout_secs,
+            max_concurrency: None,
+            network_retry: None,
+            pricing: None,
+            cache_ttl_secs: None,
+            cache_max_entries: None,
+        }
+    }
+
+    fn global_with(
+        name: &str,
+        config: GenericProviderConfig,
+        allow_internal: bool,
+    ) -> LlmGlobalConfig {
+        let mut providers = HashMap::new();
+        providers.insert(name.into(), LlmProviderConfig::Generic(config));
+        LlmGlobalConfig {
+            providers,
+            allow_internal,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn generic_targets_are_explicit_and_normalized() {
+        for (service, kind, default_url) in [
+            (
+                LlmServiceKind::Anthropic,
+                AdapterKind::Anthropic,
+                "https://api.anthropic.com/v1/",
+            ),
+            (
+                LlmServiceKind::Gemini,
+                AdapterKind::Gemini,
+                "https://generativelanguage.googleapis.com/v1beta/",
+            ),
+        ] {
+            let default_config = GenaiConfig::Generic {
+                service,
+                api_key: "explicit-key".into(),
+                base_url: None,
+            };
+            assert_eq!(default_config.adapter_kind(), kind);
+            assert_eq!(default_config.endpoint(), default_url);
+
+            let override_config = GenaiConfig::Generic {
+                service,
+                api_key: "explicit-key".into(),
+                base_url: Some("https://example.com/native".into()),
+            };
+            assert_eq!(override_config.adapter_kind(), kind);
+            assert_eq!(override_config.endpoint(), "https://example.com/native/");
+
+            let spec = resolve_target(
+                override_config.adapter_kind(),
+                &override_config.endpoint(),
+                override_config.api_key(),
+                "qwen3.5:4b",
+            );
+
+            match spec {
+                ModelSpec::Target(target) => {
+                    assert_eq!(target.model.adapter_kind, kind);
+                    assert_eq!(target.model.model_name.as_str(), "qwen3.5:4b");
+                    assert_eq!(target.endpoint.base_url(), "https://example.com/native/");
+                    assert!(
+                        matches!(&target.auth, AuthData::Key(key) if !key.is_empty()),
+                        "generic targeting must carry explicit nonempty auth"
+                    );
+                }
+                other => panic!("expected ModelSpec::Target, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn generic_factory_builds_chat_only_providers() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "anthropic-native".into(),
+            LlmProviderConfig::Generic(generic_config(
+                LlmServiceKind::Anthropic,
+                "anthropic-key",
+                "claude-test",
+                None,
+                Some(7),
+            )),
+        );
+        providers.insert(
+            "gemini-native".into(),
+            LlmProviderConfig::Generic(generic_config(
+                LlmServiceKind::Gemini,
+                "gemini-key",
+                "gemini-test",
+                None,
+                Some(7),
+            )),
+        );
+        let config = LlmGlobalConfig {
+            providers,
+            ..Default::default()
+        };
+
+        let map = build_provider_map(&config).expect("lazy generic construction must succeed");
+        assert_eq!(map.len(), 2);
+
+        let anthropic = map.get("anthropic-native").expect("anthropic provider");
+        assert_eq!(anthropic.id(), "anthropic-native");
+        assert_eq!(anthropic.default_model(), "claude-test");
+        assert!(!anthropic.supports_embed());
+
+        let gemini = map.get("gemini-native").expect("gemini provider");
+        assert_eq!(gemini.id(), "gemini-native");
+        assert_eq!(gemini.default_model(), "gemini-test");
+        assert!(!gemini.supports_embed());
+
+        // Chat is the supported operation; constructing the lazy stream must
+        // not require network I/O.
+        let _chat = gemini.chat_stream(ChatRequest::new("", vec![ChatMessage::user("hello")]));
+    }
+
+    #[tokio::test]
+    async fn generic_embed_rejects_before_client_initialization() {
+        for service in [LlmServiceKind::Anthropic, LlmServiceKind::Gemini] {
+            let builds = Arc::new(AtomicUsize::new(0));
+            let builds_in_override = Arc::clone(&builds);
+            let override_: BuildOverride = Arc::new(move || {
+                builds_in_override.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Err(LlmError::Network(
+                        "embed must not initialize a generic client".into(),
+                    ))
+                })
+            });
+            let provider = GenaiProvider::new_with_build_override(
+                "generic-native",
+                "explicit-model",
+                GenaiConfig::Generic {
+                    service,
+                    api_key: "explicit-key".into(),
+                    base_url: None,
+                },
+                Duration::from_secs(7),
+                override_,
+                SsrfPolicy::AllowInternal,
+            );
+
+            assert!(
+                !provider.supports_embed(),
+                "generic services are chat-only for {service:?}"
+            );
+
+            let err = provider
+                .embed(EmbedRequest::new("", vec!["hello".into()]))
+                .await
+                .expect_err("generic embed must be rejected");
+            assert!(
+                matches!(&err, LlmError::UnsupportedCapability(_)),
+                "expected UnsupportedCapability, got: {err}"
+            );
+            assert_eq!(
+                builds.load(Ordering::SeqCst),
+                0,
+                "embed must reject before client initialization for {service:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_url_policy_and_pinning() {
+        for service in [LlmServiceKind::Anthropic, LlmServiceKind::Gemini] {
+            for url in [
+                "https://127.0.0.1/v1",
+                "https://169.254.169.254/v1",
+                "file:///tmp/llm",
+            ] {
+                let config = global_with(
+                    "generic-native",
+                    generic_config(service, "explicit-key", "explicit-model", Some(url), None),
+                    false,
+                );
+                let result = build_provider_map(&config);
+                let err = match result {
+                    Ok(_) => panic!("public-HTTPS policy must reject the override"),
+                    Err(err) => err,
+                };
+                assert!(
+                    matches!(&err, LlmError::InvalidRequest(_)),
+                    "expected InvalidRequest for {service:?} {url}, got: {err}"
+                );
+            }
+
+            let ip_config = GenaiConfig::Generic {
+                service,
+                api_key: "explicit-key".into(),
+                base_url: Some("http://127.0.0.1:12345/native".into()),
+            };
+            assert!(
+                collect_pinning_from_config(&ip_config, SsrfPolicy::AllowInternal)
+                    .await
+                    .expect("IP literal validation")
+                    .is_none(),
+                "IP literals need no DNS pinning"
+            );
+            let ip_global = global_with(
+                "generic-native",
+                generic_config(
+                    service,
+                    "explicit-key",
+                    "explicit-model",
+                    Some("http://127.0.0.1:12345/native"),
+                    None,
+                ),
+                true,
+            );
+            assert_eq!(
+                build_provider_map(&ip_global)
+                    .expect("lazy internal factory construction must succeed")
+                    .len(),
+                1
+            );
+
+            let hostname_config = GenaiConfig::Generic {
+                service,
+                api_key: "explicit-key".into(),
+                base_url: Some("http://localhost:12345/native".into()),
+            };
+            let (host, addrs) =
+                collect_pinning_from_config(&hostname_config, SsrfPolicy::AllowInternal)
+                    .await
+                    .expect("hostname validation")
+                    .expect("hostname must be pinned");
+            assert_eq!(host, "localhost");
+            assert!(!addrs.is_empty(), "loopback resolution must be nonempty");
+            assert!(
+                addrs.iter().all(|addr| addr.ip().is_loopback()),
+                "expected loopback addresses, got: {addrs:?}"
+            );
+            assert!(
+                addrs.iter().all(|addr| addr.port() == 0),
+                "resolver sockets must preserve the existing port-0 semantics: {addrs:?}"
+            );
+        }
+    }
+}
+
+/// Native wire-protocol fixtures for generic providers (llm-provider-extensibility
+/// 1.3). Providers are constructed through the production factory with
+/// `allow_internal=true`; the mock server is the only network peer.
+#[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+mod wiremock_generic {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use futures::StreamExt;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::config::{
+        GenericProviderConfig, LlmGlobalConfig, LlmProviderConfig, LlmServiceKind,
+    };
+    use crate::error::{LlmError, is_retryable};
+    use crate::provider::{
+        ChatEvent, ChatMessage, ChatRequest, FinishReason, LlmProvider, LlmUsage,
+    };
+    use crate::provider_factory::build_provider_map;
+
+    const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+    type Events = Vec<Result<ChatEvent, LlmError>>;
+
+    /// Build a generic provider through the production factory. `allow_internal`
+    /// is required because wiremock listens on a loopback HTTP address.
+    fn factory_provider(
+        name: &str,
+        service: LlmServiceKind,
+        api_key: &str,
+        default_model: &str,
+        base_url: String,
+    ) -> Arc<dyn LlmProvider> {
+        let config = LlmGlobalConfig {
+            providers: HashMap::from([(
+                name.to_string(),
+                LlmProviderConfig::Generic(GenericProviderConfig {
+                    service,
+                    api_key: api_key.into(),
+                    default_model: default_model.into(),
+                    base_url: Some(base_url),
+                    timeout_secs: None,
+                    max_concurrency: None,
+                    network_retry: None,
+                    pricing: None,
+                    cache_ttl_secs: None,
+                    cache_max_entries: None,
+                }),
+            )]),
+            allow_internal: true,
+            ..Default::default()
+        };
+        let mut map =
+            build_provider_map(&config).expect("lazy generic provider construction must succeed");
+        map.remove(name)
+            .expect("provider must be present in the map")
+    }
+
+    /// Drain a chat stream under a bounded timeout. Never sleeps.
+    async fn collect_events(provider: &dyn LlmProvider, request: ChatRequest) -> Events {
+        tokio::time::timeout(TEST_TIMEOUT, provider.chat_stream(request).collect())
+            .await
+            .expect("chat stream must complete within the bounded test timeout")
+    }
+
+    fn request() -> ChatRequest {
+        ChatRequest::new("", vec![ChatMessage::user("hello")])
+    }
+
+    fn delta_texts(events: &[Result<ChatEvent, LlmError>]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(ChatEvent::Delta { text }) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn error_count(events: &[Result<ChatEvent, LlmError>]) -> usize {
+        events.iter().filter(|event| event.is_err()).count()
+    }
+
+    /// Return the single `Finished` event's fields, asserting exactly one exists.
+    fn finished_event(
+        events: &[Result<ChatEvent, LlmError>],
+    ) -> (&Option<LlmUsage>, &Option<String>, &Option<FinishReason>) {
+        let mut found = events.iter().filter_map(|event| match event {
+            Ok(ChatEvent::Finished {
+                usage,
+                model,
+                finish_reason,
+                ..
+            }) => Some((usage, model, finish_reason)),
+            _ => None,
+        });
+        let finished = found.next().expect("expected exactly one Finished event");
+        assert!(
+            found.next().is_none(),
+            "expected exactly one Finished event"
+        );
+        finished
+    }
+
+    fn assert_single_finished_last(events: &[Result<ChatEvent, LlmError>]) {
+        assert!(
+            matches!(events.last(), Some(Ok(ChatEvent::Finished { .. }))),
+            "Finished must be the last event, got: {events:?}"
+        );
+        finished_event(events);
+    }
+
+    /// Anthropic SSE frames in the native protocol shape: one `message_start`
+    /// with input 3 / output 0, a content block, one `hello` delta, a
+    /// `message_delta` carrying `end_turn` and output 2, then `message_stop`.
+    fn anthropic_sse() -> String {
+        [
+            (
+                "message_start",
+                r#"{"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","model":"claude-test","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":0}}}"#,
+            ),
+            (
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}"#,
+            ),
+            (
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            (
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}"#,
+            ),
+            ("message_stop", r#"{"type":"message_stop"}"#),
+        ]
+        .iter()
+        .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+        .collect()
+    }
+
+    /// One native Gemini candidates frame carrying `hello`, `STOP`, and usage.
+    fn gemini_sse() -> String {
+        format!(
+            "data: {}\n\n",
+            r#"{"candidates":[{"content":{"parts":[{"text":"hello"}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5},"modelVersion":"gemini-test"}"#
+        )
+    }
+
+    async fn anthropic_server() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(anthropic_sse(), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn received(server: &MockServer) -> Vec<wiremock::Request> {
+        server
+            .received_requests()
+            .await
+            .expect("request recording is enabled by default")
+    }
+
+    fn header<'a>(request: &'a wiremock::Request, name: &str) -> Option<&'a str> {
+        request
+            .headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+    }
+
+    fn body_json(request: &wiremock::Request) -> serde_json::Value {
+        serde_json::from_slice(&request.body).expect("json request body")
+    }
+
+    #[tokio::test]
+    async fn anthropic_factory_stream_captures_usage() {
+        let server = anthropic_server().await;
+        let provider = factory_provider(
+            "anthropic-native",
+            LlmServiceKind::Anthropic,
+            "anthropic-test-key",
+            "claude-test",
+            format!("{}/v1", server.uri()),
+        );
+
+        let events = collect_events(provider.as_ref(), request()).await;
+
+        assert_eq!(delta_texts(&events), vec!["hello"]);
+        assert_eq!(error_count(&events), 0, "unexpected error: {events:?}");
+        assert_single_finished_last(&events);
+
+        let (usage, model, finish_reason) = finished_event(&events);
+        assert_eq!(
+            *usage,
+            Some(LlmUsage {
+                prompt_tokens: 3,
+                completion_tokens: 2,
+                total_tokens: 5,
+            })
+        );
+        assert_eq!(model.as_deref(), Some("claude-test"));
+        assert!(matches!(finish_reason, Some(FinishReason::Stop)));
+
+        let requests = received(&server).await;
+        assert_eq!(requests.len(), 1, "expected exactly one request");
+        assert_eq!(requests[0].url.path(), "/v1/messages");
+        assert_eq!(
+            header(&requests[0], "x-api-key"),
+            Some("anthropic-test-key")
+        );
+        assert!(
+            header(&requests[0], "anthropic-version").is_some(),
+            "anthropic-version header must be sent"
+        );
+        let json = body_json(&requests[0]);
+        assert_eq!(json["model"], "claude-test");
+        assert_eq!(json["stream"], true);
+    }
+
+    #[tokio::test]
+    async fn anthropic_request_model_override_keeps_service() {
+        let server = anthropic_server().await;
+        let provider = factory_provider(
+            "anthropic-native",
+            LlmServiceKind::Anthropic,
+            "anthropic-test-key",
+            "claude-test",
+            format!("{}/v1", server.uri()),
+        );
+
+        let events = collect_events(
+            provider.as_ref(),
+            ChatRequest::new("qwen3.5:4b", vec![ChatMessage::user("hello")]),
+        )
+        .await;
+
+        assert_eq!(delta_texts(&events), vec!["hello"]);
+        assert_eq!(error_count(&events), 0, "unexpected error: {events:?}");
+        assert_single_finished_last(&events);
+        let (_, model, _) = finished_event(&events);
+        assert_eq!(model.as_deref(), Some("qwen3.5:4b"));
+
+        let requests = received(&server).await;
+        assert_eq!(requests.len(), 1, "expected exactly one request");
+        assert_eq!(requests[0].url.path(), "/v1/messages");
+        assert_eq!(
+            header(&requests[0], "x-api-key"),
+            Some("anthropic-test-key")
+        );
+        assert_eq!(body_json(&requests[0])["model"], "qwen3.5:4b");
+    }
+
+    #[tokio::test]
+    async fn gemini_factory_stream_captures_usage() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1beta/models/gemini-test:streamGenerateContent"))
+            .and(query_param("alt", "sse"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(gemini_sse(), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let provider = factory_provider(
+            "gemini-native",
+            LlmServiceKind::Gemini,
+            "gemini-test-key",
+            "gemini-test",
+            format!("{}/v1beta", server.uri()),
+        );
+
+        let events = collect_events(provider.as_ref(), request()).await;
+
+        assert_eq!(delta_texts(&events), vec!["hello"]);
+        assert_eq!(error_count(&events), 0, "unexpected error: {events:?}");
+        assert_single_finished_last(&events);
+
+        let (usage, model, finish_reason) = finished_event(&events);
+        assert_eq!(
+            *usage,
+            Some(LlmUsage {
+                prompt_tokens: 3,
+                completion_tokens: 2,
+                total_tokens: 5,
+            })
+        );
+        assert_eq!(model.as_deref(), Some("gemini-test"));
+        assert!(matches!(finish_reason, Some(FinishReason::Stop)));
+
+        let requests = received(&server).await;
+        assert_eq!(requests.len(), 1, "expected exactly one request");
+        assert_eq!(
+            requests[0].url.path(),
+            "/v1beta/models/gemini-test:streamGenerateContent"
+        );
+        assert_eq!(requests[0].url.query(), Some("alt=sse"));
+        assert_eq!(
+            header(&requests[0], "x-goog-api-key"),
+            Some("gemini-test-key")
+        );
+    }
+
+    #[tokio::test]
+    async fn gemini_resource_exhausted_is_retryable_rate_limit() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1beta/models/gemini-test:streamGenerateContent"))
+            .and(query_param("alt", "sse"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+                "error": {
+                    "code": 429,
+                    "status": "RESOURCE_EXHAUSTED",
+                    "message": "quota or throttling"
+                }
+            })))
+            .mount(&server)
+            .await;
+        let provider = factory_provider(
+            "gemini-native",
+            LlmServiceKind::Gemini,
+            "gemini-test-key",
+            "gemini-test",
+            format!("{}/v1beta", server.uri()),
+        );
+
+        let events = collect_events(provider.as_ref(), request()).await;
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Ok(ChatEvent::Finished { .. }))),
+            "an error response must not emit Finished: {events:?}"
+        );
+        let errors: Vec<&LlmError> = events
+            .iter()
+            .filter_map(|event| event.as_ref().err())
+            .collect();
+        assert_eq!(errors.len(), 1, "expected exactly one error: {events:?}");
+        assert!(
+            matches!(errors[0], LlmError::RateLimit { retry_after: None }),
+            "expected RateLimit without retry_after, got: {:?}",
+            errors[0]
+        );
+        assert!(
+            is_retryable(errors[0]),
+            "RESOURCE_EXHAUSTED must stay retryable"
         );
     }
 }

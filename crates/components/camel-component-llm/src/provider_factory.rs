@@ -1,7 +1,12 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-#[cfg(any(feature = "openai", feature = "ollama", feature = "all-providers"))]
+#[cfg(any(
+    feature = "openai",
+    feature = "ollama",
+    feature = "generic-providers",
+    feature = "all-providers"
+))]
 use std::time::Duration;
 
 use crate::config::{LlmGlobalConfig, LlmProviderConfig};
@@ -197,6 +202,28 @@ fn build_single(
         LlmProviderConfig::Ollama(_) => Err(LlmError::UnsupportedCapability(
             "Ollama provider requires the 'ollama' feature flag".into(),
         )),
+        #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
+        LlmProviderConfig::Generic(c) => {
+            c.validate_required_fields().map_err(|detail| {
+                LlmError::InvalidRequest(format!("provider '{name}' {detail}"))
+            })?;
+            if let Some(ref base_url) = c.base_url {
+                validate_llm_url(base_url, policy)?;
+            }
+            let configured_timeout =
+                Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or(30));
+            crate::provider::genai_adapter::build_generic(name, c, configured_timeout, policy)
+                .map(|p| p as Arc<dyn LlmProvider>)
+        }
+        #[cfg(not(any(feature = "generic-providers", feature = "all-providers")))]
+        LlmProviderConfig::Generic(c) => {
+            c.validate_required_fields().map_err(|detail| {
+                LlmError::InvalidRequest(format!("provider '{name}' {detail}"))
+            })?;
+            Err(LlmError::UnsupportedCapability(
+                "generic providers require the 'generic-providers' feature flag".into(),
+            ))
+        }
     }
 }
 
@@ -241,6 +268,70 @@ mod tests {
         let global = LlmGlobalConfig::default();
         let map = build_provider_map(&global).expect("build ok");
         assert!(map.is_empty());
+    }
+
+    #[cfg(all(feature = "openai", feature = "ollama"))]
+    #[tokio::test]
+    async fn legacy_factory_variants_build_unchanged() {
+        use crate::provider::{ChatEvent, ChatMessage, ChatRequest};
+        use futures::StreamExt;
+
+        let toml_str = r#"
+allow_internal = true
+
+[providers.legacy-openai]
+type = "openai"
+api_key = "sk-legacy"
+default_model = "gpt-4o-legacy"
+
+[providers.legacy-ollama]
+type = "ollama"
+base_url = "http://127.0.0.1:11434"
+default_model = "llama3-legacy"
+
+[providers.legacy-mock]
+type = "mock"
+response = "echo"
+default_model = "mock-model-legacy"
+"#;
+        let global: LlmGlobalConfig = toml::from_str(toml_str).expect("legacy config parses");
+        global.validate().expect("legacy config validates");
+        let map = build_provider_map(&global).expect("legacy providers build lazily");
+
+        assert_eq!(map.len(), 3);
+        for (name, model) in [
+            ("legacy-openai", "gpt-4o-legacy"),
+            ("legacy-ollama", "llama3-legacy"),
+            ("legacy-mock", "mock-model-legacy"),
+        ] {
+            let provider = map.get(name).expect("provider present");
+            assert_eq!(provider.id(), name);
+            assert_eq!(provider.default_model(), model);
+            // There is no `supports_chat` accessor: the mandatory
+            // `chat_stream` trait method is the chat API. Constructing the
+            // lazy stream proves every legacy variant retains chat without
+            // performing I/O.
+            let _chat =
+                provider.chat_stream(ChatRequest::new("", vec![ChatMessage::user("hello")]));
+        }
+
+        assert!(map["legacy-openai"].supports_embed());
+        assert!(map["legacy-ollama"].supports_embed());
+
+        // Mock matches the existing echo tests: streams the user prompt back.
+        let mut stream = map["legacy-mock"].chat_stream(ChatRequest::new(
+            "mock-model-legacy",
+            vec![ChatMessage::user("hello legacy")],
+        ));
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            match event.expect("mock stream ok") {
+                ChatEvent::Delta { text: delta } => text.push_str(&delta),
+                ChatEvent::ToolCall { .. } | ChatEvent::Finished { .. } => {}
+            }
+        }
+        assert_eq!(text, "hello legacy");
+        assert!(map["legacy-mock"].supports_embed());
     }
 
     #[test]
@@ -431,5 +522,83 @@ mod tests {
     fn validate_llm_url_pinned_allow_internal_rejects_public_http() {
         let err = validate_llm_url_pinned("http://1.1.1.1", SsrfPolicy::AllowInternal).unwrap_err();
         assert!(err.to_string().contains("HTTP not permitted"), "got: {err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Generic provider factory (llm-provider-extensibility 1.1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn generic_factory_rejects_blank_required_fields() {
+        use crate::config::{GenericProviderConfig, LlmServiceKind};
+
+        for service in [LlmServiceKind::Anthropic, LlmServiceKind::Gemini] {
+            for (api_key, default_model, field, secret) in [
+                ("  ", "explicit-model", "api_key", "explicit-model"),
+                (
+                    "factory-secret-marker",
+                    "  ",
+                    "default_model",
+                    "factory-secret-marker",
+                ),
+            ] {
+                let config = LlmProviderConfig::Generic(GenericProviderConfig {
+                    service,
+                    api_key: api_key.into(),
+                    base_url: Some("https://example.com/v1".into()),
+                    default_model: default_model.into(),
+                    timeout_secs: None,
+                    max_concurrency: None,
+                    network_retry: None,
+                    pricing: None,
+                    cache_ttl_secs: None,
+                    cache_max_entries: None,
+                });
+                let err = match build_single(
+                    "generic-test",
+                    &config,
+                    None,
+                    SsrfPolicy::PublicHttpsOnly,
+                ) {
+                    Ok(_) => panic!("blank required field must be rejected"),
+                    Err(e) => e,
+                };
+                assert!(
+                    matches!(&err, LlmError::InvalidRequest(_)),
+                    "expected InvalidRequest, got: {err}"
+                );
+                let msg = err.to_string();
+                assert!(msg.contains(field), "must name {field}: {msg}");
+                assert!(!msg.contains(secret), "must not expose {secret}: {msg}");
+            }
+        }
+    }
+
+    #[cfg(not(feature = "generic-providers"))]
+    #[test]
+    fn generic_feature_disabled_is_actionable() {
+        let toml_str = r#"
+[providers.a-generic]
+type = "generic"
+service = "anthropic"
+api_key = "test-key"
+default_model = "explicit-model"
+"#;
+        let cfg: LlmGlobalConfig =
+            toml::from_str(toml_str).expect("generic config must parse without the feature");
+        cfg.validate().expect("generic config must validate");
+
+        let err = match build_provider_map(&cfg) {
+            Ok(_) => panic!("generic construction must fail without the feature"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(&err, LlmError::UnsupportedCapability(_)),
+            "expected UnsupportedCapability, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("generic-providers"),
+            "must name the feature: {err}"
+        );
     }
 }

@@ -66,14 +66,115 @@ impl Default for LlmGlobalConfig {
     }
 }
 
+/// Native LLM service targeted by a generic provider entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmServiceKind {
+    /// Anthropic Messages API.
+    Anthropic,
+    /// Gemini generative language API.
+    Gemini,
+}
+
+/// Configuration for a generic provider selected by service.
+///
+/// Credentials are explicit: deserialization and the adapter never discover
+/// them from the environment.
+#[derive(Clone, serde::Deserialize)]
+pub struct GenericProviderConfig {
+    /// Native service protocol to target.
+    pub service: LlmServiceKind,
+
+    /// API key for the selected service.
+    pub api_key: String,
+
+    /// Default model to use (e.g., "claude-sonnet-4-0").
+    pub default_model: String,
+
+    /// Base URL override (defaults to the service's standard endpoint).
+    #[serde(default)]
+    pub base_url: Option<String>,
+
+    /// Optional per-provider timeout override (seconds).
+    /// Overrides global `timeout_secs` when set.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+
+    /// Optional max concurrency for this provider.
+    #[serde(default)]
+    pub max_concurrency: Option<usize>,
+
+    /// Optional network retry policy for transient failures.
+    #[serde(default)]
+    pub network_retry: Option<NetworkRetryPolicy>,
+
+    /// Optional pricing table for cost estimation.
+    #[serde(default)]
+    pub pricing: Option<PricingTable>,
+
+    /// Optional response cache TTL in seconds (materialized-only).
+    /// Absent = cache disabled for this provider.
+    #[serde(default)]
+    pub cache_ttl_secs: Option<u64>,
+
+    /// Optional maximum cache entries (LRU eviction boundary).
+    /// When set, oldest entries are evicted when the cache exceeds this
+    /// size. When absent, the cache is unbounded.
+    #[serde(default)]
+    pub cache_max_entries: Option<usize>,
+}
+
+impl GenericProviderConfig {
+    /// Reject credentials or default models that contain only whitespace.
+    ///
+    /// Nonblank values are stored and returned verbatim; they are never
+    /// trimmed.
+    pub fn validate_required_fields(&self) -> Result<(), &'static str> {
+        if self.api_key.trim().is_empty() {
+            return Err("api_key must not be blank");
+        }
+        if self.default_model.trim().is_empty() {
+            return Err("default_model must not be blank");
+        }
+        Ok(())
+    }
+}
+
+fn redacted_optional_url(url: &Option<String>) -> Option<String> {
+    url.as_deref().map(camel_api::redact::redact_url)
+}
+
+impl fmt::Debug for GenericProviderConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GenericProviderConfig")
+            .field("service", &self.service)
+            .field("api_key", &"[REDACTED]")
+            .field("default_model", &self.default_model)
+            .field("base_url", &redacted_optional_url(&self.base_url))
+            .field("timeout_secs", &self.timeout_secs)
+            .field("max_concurrency", &self.max_concurrency)
+            .field("network_retry", &self.network_retry)
+            .field("pricing", &self.pricing)
+            .field("cache_ttl_secs", &self.cache_ttl_secs)
+            .field("cache_max_entries", &self.cache_max_entries)
+            .finish()
+    }
+}
+
 /// Configuration for a single LLM provider, discriminated by `type` field.
+///
+/// `#[non_exhaustive]`: new provider variants are additive, so downstream
+/// matches must carry a wildcard arm.
 #[derive(Clone, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum LlmProviderConfig {
     /// OpenAI-compatible provider (also Azure OpenAI).
     Openai(OpenaiProviderConfig),
     /// Ollama (local) provider.
     Ollama(OllamaProviderConfig),
+    /// Generic provider selected by native service.
+    Generic(GenericProviderConfig),
     /// Mock provider for testing.
     Mock(MockProviderConfig),
 }
@@ -85,6 +186,7 @@ impl LlmProviderConfig {
         match self {
             LlmProviderConfig::Openai(c) => c.max_concurrency,
             LlmProviderConfig::Ollama(c) => c.max_concurrency,
+            LlmProviderConfig::Generic(c) => c.max_concurrency,
             LlmProviderConfig::Mock(_) => None,
         }
     }
@@ -95,6 +197,7 @@ impl LlmProviderConfig {
         match self {
             LlmProviderConfig::Openai(c) => c.timeout_secs,
             LlmProviderConfig::Ollama(c) => c.timeout_secs,
+            LlmProviderConfig::Generic(c) => c.timeout_secs,
             LlmProviderConfig::Mock(_) => None,
         }
     }
@@ -105,6 +208,7 @@ impl LlmProviderConfig {
         match self {
             LlmProviderConfig::Openai(c) => c.network_retry.clone(),
             LlmProviderConfig::Ollama(c) => c.network_retry.clone(),
+            LlmProviderConfig::Generic(c) => c.network_retry.clone(),
             LlmProviderConfig::Mock(_) => None,
         }
     }
@@ -115,6 +219,7 @@ impl LlmProviderConfig {
         match self {
             LlmProviderConfig::Openai(c) => c.pricing.clone(),
             LlmProviderConfig::Ollama(c) => c.pricing.clone(),
+            LlmProviderConfig::Generic(c) => c.pricing.clone(),
             LlmProviderConfig::Mock(_) => None,
         }
     }
@@ -125,6 +230,7 @@ impl LlmProviderConfig {
         match self {
             LlmProviderConfig::Openai(c) => c.cache_ttl_secs,
             LlmProviderConfig::Ollama(c) => c.cache_ttl_secs,
+            LlmProviderConfig::Generic(c) => c.cache_ttl_secs,
             LlmProviderConfig::Mock(_) => None,
         }
     }
@@ -135,6 +241,7 @@ impl LlmProviderConfig {
         match self {
             LlmProviderConfig::Openai(c) => c.cache_max_entries,
             LlmProviderConfig::Ollama(c) => c.cache_max_entries,
+            LlmProviderConfig::Generic(c) => c.cache_max_entries,
             LlmProviderConfig::Mock(_) => None,
         }
     }
@@ -159,6 +266,19 @@ impl fmt::Debug for LlmProviderConfig {
                 .debug_struct("Ollama")
                 .field("base_url", &c.base_url)
                 .field("default_model", &c.default_model)
+                .field("timeout_secs", &c.timeout_secs)
+                .field("max_concurrency", &c.max_concurrency)
+                .field("network_retry", &c.network_retry)
+                .field("pricing", &c.pricing)
+                .field("cache_ttl_secs", &c.cache_ttl_secs)
+                .field("cache_max_entries", &c.cache_max_entries)
+                .finish(),
+            LlmProviderConfig::Generic(c) => f
+                .debug_struct("Generic")
+                .field("service", &c.service)
+                .field("api_key", &"[REDACTED]")
+                .field("default_model", &c.default_model)
+                .field("base_url", &redacted_optional_url(&c.base_url))
                 .field("timeout_secs", &c.timeout_secs)
                 .field("max_concurrency", &c.max_concurrency)
                 .field("network_retry", &c.network_retry)
@@ -295,6 +415,14 @@ impl LlmGlobalConfig {
         }
 
         for (name, provider) in &self.providers {
+            // Generic entries require nonblank credentials and default models;
+            // reject them before any limit/pricing checks so the diagnostic
+            // names the missing content rather than an unrelated field.
+            if let LlmProviderConfig::Generic(c) = provider {
+                c.validate_required_fields()
+                    .map_err(|detail| CamelError::Config(format!("provider '{name}' {detail}")))?;
+            }
+
             // Provider-level timeout_secs: Some(0) is invalid
             if provider.timeout_secs() == Some(0) {
                 return Err(CamelError::Config(format!(
@@ -840,5 +968,293 @@ error_message = "boom"
         // Default (no param)
         let ec = LlmEndpointConfig::from_uri("llm:chat").unwrap();
         assert!(ec.stream);
+    }
+
+    // -----------------------------------------------------------------------
+    // Generic provider configuration (llm-provider-extensibility 1.1)
+    // -----------------------------------------------------------------------
+
+    fn generic_config(service: LlmServiceKind) -> GenericProviderConfig {
+        GenericProviderConfig {
+            service,
+            api_key: "test-key".into(),
+            base_url: None,
+            default_model: "explicit-model".into(),
+            timeout_secs: None,
+            max_concurrency: None,
+            network_retry: None,
+            pricing: None,
+            cache_ttl_secs: None,
+            cache_max_entries: None,
+        }
+    }
+
+    fn generic_global_config(generic: GenericProviderConfig) -> LlmGlobalConfig {
+        let mut providers = HashMap::new();
+        providers.insert("generic-test".into(), LlmProviderConfig::Generic(generic));
+        LlmGlobalConfig {
+            providers,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn generic_services_parse_and_preserve_values() {
+        let toml_str = r#"
+[providers.anthropic-generic]
+type = "generic"
+service = "anthropic"
+api_key = " test-key "
+default_model = "explicit-model"
+
+[providers.gemini-generic]
+type = "generic"
+service = "gemini"
+api_key = " test-key "
+default_model = "explicit-model"
+"#;
+        let cfg: LlmGlobalConfig = toml::from_str(toml_str).expect("parse");
+        cfg.validate().expect("validate");
+
+        assert_eq!(
+            cfg.providers.len(),
+            2,
+            "both generic entries must be present"
+        );
+
+        for (name, expected) in [
+            ("anthropic-generic", LlmServiceKind::Anthropic),
+            ("gemini-generic", LlmServiceKind::Gemini),
+        ] {
+            let generic = match &cfg.providers[name] {
+                LlmProviderConfig::Generic(c) => c,
+                other => panic!("expected Generic for {name}, got {other:?}"),
+            };
+            assert_eq!(generic.service, expected);
+            assert_eq!(generic.api_key, " test-key ", "key must stay untrimmed");
+            assert_eq!(generic.default_model, "explicit-model");
+            assert_eq!(generic.base_url, None);
+            assert_eq!(generic.timeout_secs, None);
+            assert_eq!(generic.max_concurrency, None);
+            assert_eq!(generic.network_retry, None);
+            assert!(generic.pricing.is_none());
+            assert_eq!(generic.cache_ttl_secs, None);
+            assert_eq!(generic.cache_max_entries, None);
+        }
+    }
+
+    #[test]
+    fn generic_unknown_service_is_actionable() {
+        let toml_str = r#"
+[providers.typo]
+type = "generic"
+service = "anthropci"
+api_key = "test-key"
+default_model = "explicit-model"
+"#;
+        let err =
+            toml::from_str::<LlmGlobalConfig>(toml_str).expect_err("unknown service must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("anthropci"),
+            "must name the rejected service: {msg}"
+        );
+        assert!(
+            msg.contains("anthropic"),
+            "must list supported anthropic: {msg}"
+        );
+        assert!(msg.contains("gemini"), "must list supported gemini: {msg}");
+    }
+
+    #[test]
+    fn generic_required_fields_are_enforced() {
+        let missing_service = r#"
+[providers.missing-service]
+type = "generic"
+api_key = "test-key"
+default_model = "explicit-model"
+"#;
+        let err = toml::from_str::<LlmGlobalConfig>(missing_service)
+            .expect_err("missing service must fail");
+        assert!(err.to_string().contains("service"), "error: {err}");
+
+        let missing_key = r#"
+[providers.missing-key]
+type = "generic"
+service = "anthropic"
+default_model = "explicit-model"
+"#;
+        let err =
+            toml::from_str::<LlmGlobalConfig>(missing_key).expect_err("missing api_key must fail");
+        assert!(err.to_string().contains("api_key"), "error: {err}");
+
+        let missing_model = r#"
+[providers.missing-model]
+type = "generic"
+service = "gemini"
+api_key = "test-key"
+"#;
+        let err = toml::from_str::<LlmGlobalConfig>(missing_model)
+            .expect_err("missing default_model must fail");
+        assert!(err.to_string().contains("default_model"), "error: {err}");
+
+        for (api_key, default_model, expected_field, forbidden) in [
+            ("", "explicit-model", "api_key", "explicit-model"),
+            ("  ", "explicit-model", "api_key", "explicit-model"),
+            ("super-secret-key", "", "default_model", "super-secret-key"),
+            (
+                "super-secret-key",
+                "  ",
+                "default_model",
+                "super-secret-key",
+            ),
+        ] {
+            let cfg = generic_global_config(GenericProviderConfig {
+                api_key: api_key.into(),
+                default_model: default_model.into(),
+                ..generic_config(LlmServiceKind::Anthropic)
+            });
+            let err = cfg.validate().expect_err("blank content must be rejected");
+            assert!(
+                matches!(&err, CamelError::Config(_)),
+                "expected Config error, got: {err}"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains(expected_field),
+                "must name {expected_field}: {msg}"
+            );
+            assert!(
+                !msg.contains(forbidden),
+                "must not expose {forbidden}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_debug_redacts_credentials_and_url() {
+        let generic = GenericProviderConfig {
+            service: LlmServiceKind::Gemini,
+            api_key: "generic-secret-marker".into(),
+            base_url: Some(
+                "https://user:password-marker@example.com/v1?api_key=query-secret-marker".into(),
+            ),
+            ..generic_config(LlmServiceKind::Gemini)
+        };
+        let nested_debug = format!("{generic:?}");
+        let enum_debug = format!("{:?}", LlmProviderConfig::Generic(generic.clone()));
+        let global_debug = format!("{:?}", generic_global_config(generic));
+
+        for rendered in [&nested_debug, &enum_debug, &global_debug] {
+            for secret in [
+                "generic-secret-marker",
+                "password-marker",
+                "query-secret-marker",
+                "user:password-marker",
+            ] {
+                assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+            }
+            assert!(
+                rendered.contains("[REDACTED]"),
+                "key redaction missing: {rendered}"
+            );
+            assert!(
+                rendered.contains("***@") || rendered.contains("[redacted]"),
+                "URL redaction missing: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_policy_fields_round_trip_and_validate() {
+        let toml_str = r#"
+[providers.generic-anthropic]
+type = "generic"
+service = "anthropic"
+api_key = "test-key"
+default_model = "explicit-model"
+timeout_secs = 7
+max_concurrency = 2
+cache_ttl_secs = 9
+cache_max_entries = 4
+network_retry = { enabled = true, max_attempts = 3, initial_delay_ms = 1, max_delay_ms = 5, multiplier = 2.0, jitter_factor = 0.0 }
+pricing = { input_per_1k_tokens = 0.01, output_per_1k_tokens = 0.02 }
+
+[providers.generic-gemini]
+type = "generic"
+service = "gemini"
+api_key = "test-key"
+default_model = "explicit-model"
+timeout_secs = 7
+max_concurrency = 2
+cache_ttl_secs = 9
+cache_max_entries = 4
+network_retry = { enabled = true, max_attempts = 3, initial_delay_ms = 1, max_delay_ms = 5, multiplier = 2.0, jitter_factor = 0.0 }
+pricing = { input_per_1k_tokens = 0.01, output_per_1k_tokens = 0.02 }
+"#;
+        let cfg: LlmGlobalConfig = toml::from_str(toml_str).expect("parse");
+        cfg.validate().expect("valid policy fields");
+
+        for name in ["generic-anthropic", "generic-gemini"] {
+            let provider = &cfg.providers[name];
+            assert_eq!(provider.timeout_secs(), Some(7));
+            assert_eq!(provider.max_concurrency(), Some(2));
+            let retry = provider.network_retry().expect("retry policy");
+            assert!(retry.enabled);
+            assert_eq!(retry.max_attempts, 3);
+            assert_eq!(retry.initial_delay, std::time::Duration::from_millis(1));
+            assert_eq!(retry.max_delay, std::time::Duration::from_millis(5));
+            assert_eq!(retry.multiplier, 2.0);
+            assert_eq!(retry.jitter_factor, 0.0);
+            assert_eq!(retry.max_attempts_absolute, None);
+            let pricing = provider.pricing().expect("pricing");
+            assert_eq!(pricing.input_per_1k_tokens, 0.01);
+            assert_eq!(pricing.output_per_1k_tokens, 0.02);
+            assert_eq!(provider.cache_ttl_secs(), Some(9));
+            assert_eq!(provider.cache_max_entries(), Some(4));
+        }
+
+        for service in [LlmServiceKind::Anthropic, LlmServiceKind::Gemini] {
+            let assert_rejected = |generic: GenericProviderConfig, field: &str| {
+                let err = generic_global_config(generic)
+                    .validate()
+                    .expect_err("invalid generic policy must be rejected");
+                assert!(
+                    matches!(&err, CamelError::Config(_)),
+                    "expected Config error, got: {err}"
+                );
+                assert!(err.to_string().contains(field), "must name {field}: {err}");
+            };
+
+            let mut config = generic_config(service);
+            config.timeout_secs = Some(0);
+            assert_rejected(config, "timeout_secs");
+
+            let mut config = generic_config(service);
+            config.max_concurrency = Some(0);
+            assert_rejected(config, "max_concurrency");
+
+            let mut config = generic_config(service);
+            config.cache_ttl_secs = Some(0);
+            assert_rejected(config, "cache_ttl_secs");
+
+            let mut config = generic_config(service);
+            config.cache_max_entries = Some(0);
+            assert_rejected(config, "cache_max_entries");
+
+            let mut config = generic_config(service);
+            config.pricing = Some(PricingTable {
+                input_per_1k_tokens: -1.0,
+                output_per_1k_tokens: 0.02,
+            });
+            assert_rejected(config, "pricing");
+
+            let mut config = generic_config(service);
+            config.pricing = Some(PricingTable {
+                input_per_1k_tokens: 0.01,
+                output_per_1k_tokens: -1.0,
+            });
+            assert_rejected(config, "pricing");
+        }
     }
 }

@@ -3,8 +3,16 @@
 ## Language
 
 **LlmProvider**:
-Trait abstraction over LLM backends (OpenAI, Ollama, Mock). Each provider implements `chat_stream()` and `embed()`. Owned by `LlmComponent` as `Arc<dyn LlmProvider>` in a `ProviderMap`.
+Trait abstraction over LLM backends (OpenAI, Ollama, Anthropic, Gemini, Mock). Each provider implements `chat_stream()` and `embed()`. Owned by `LlmComponent` as `Arc<dyn LlmProvider>` in a `ProviderMap`.
 _Avoid_: client, connection, SDK wrapper
+
+**LlmServiceKind**:
+Crate-owned generic provider selector with `anthropic` and `gemini` values. It chooses the native chat protocol and adapter kind for `type = "generic"` entries. It is configuration data, not the Tower `Service` trait and not the Services architecture tier.
+_Avoid_: adapter (adapter is the internal SDK bridge), provider type
+
+**Generic native provider**:
+`LlmProviderConfig::Generic` entry with explicit `service`, `api_key`, and `default_model`, plus optional `base_url` and shared policy fields. It never discovers credentials or models from the environment and never infers a service from a model name. It is chat-only. The `generic-providers` feature gates construction, and `all-providers` includes that feature. Configuration types stay available in every build.
+_Avoid_: universal provider, auto provider, SDK provider
 
 **LlmComponent**:
 The `Component` impl (scheme `"llm"`) that owns the `ProviderMap` and creates `LlmEndpoint`s from URIs.
@@ -23,7 +31,7 @@ _Avoid_: mode, action, verb
 _Avoid_: registry, pool, factory (use provider_factory for the builder function)
 
 **GenaiProvider**:
-The adapter that bridges `LlmProvider` to the genai SDK. Lives in `provider/genai_adapter.rs`. If genai breaks, only this file changes.
+The adapter that bridges `LlmProvider` to the genai SDK for OpenAI, Ollama, and generic Anthropic and Gemini. Lives in `provider/genai_adapter.rs`. If genai breaks, only this file changes. Generic services map to explicit SDK `ServiceTarget`s and never change with the model name.
 _Avoid_: OpenAiClient, OllamaClient (those are genai types, never exposed)
 
 **Materialized mode**:
@@ -47,8 +55,12 @@ Wraps provider work to enforce `max_concurrency`. For streaming, the permit is h
 _Avoid_: connection pool, rate limiter
 
 **Retry-after honoring**:
-The manual retry loop (ADR-0021) uses `RateLimit.retry_after` over exponential backoff when present. Materialized-only; no retry after content-start.
+The manual retry loop (ADR-0021) uses `RateLimit.retry_after` over exponential backoff when present. Materialized-only; no retry after content-start. Retry count follows the configured `NetworkRetryPolicy`. `max_attempts = 0` is unlimited unless `max_attempts_absolute` sets a cap.
 _Avoid_: backoff override, provider delay
+
+**Gemini resource exhaustion**:
+Gemini uses HTTP 429 `RESOURCE_EXHAUSTED` for request throttling and daily or project quota exhaustion. Both map to retryable `RateLimit` with no retry-after value through the inherited status mapping. `QuotaExceeded` is a separate OpenAI-style `insufficient_quota` mapping and is not retryable. Not every vendor quota response becomes `QuotaExceeded`.
+_Avoid_: Gemini quota error (use the mapped `RateLimit` or `QuotaExceeded` names)
 
 **ToolDefinition / ToolChoice / ToolCall**:
 Tools the model may call, passed via `CamelLlmTools` header (JSON array). Component emits tool-call intent via `ChatEvent::ToolCall` — it NEVER executes tools (the route owns dispatch). Multi-turn: `ChatRole::Tool { tool_call_id }` carries prior tool results; assistant messages carry `tool_calls` for conversation history.

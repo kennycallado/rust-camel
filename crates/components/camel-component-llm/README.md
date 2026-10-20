@@ -5,7 +5,8 @@ LLM integration component for [rust-camel](https://crates.io/crates/camel-api).
 ## Features
 
 - **Chat (streaming + materialized)** — Stream tokens per-event or collect into a single response body
-- **Embeddings** — Generate vector embeddings from text
+- **Embeddings** — Generate vector embeddings with the genai-backed OpenAI and Ollama providers. Mock also embeds for tests; generic Anthropic and Gemini entries are chat-only
+- **Generic native chat** — Anthropic and Gemini through one `type = "generic"` shape with an explicit service selector
 - **Tool calling** — Pass tool definitions via header; component emits tool-call intents (route owns dispatch)
 - **Multi-turn conversations** — Full conversation history with system, user, assistant, and tool roles
 - **Response cache** — Materialized-only, single-flight via dashmap + `tokio::sync::watch`
@@ -15,29 +16,64 @@ LLM integration component for [rust-camel](https://crates.io/crates/camel-api).
 
 ## Quick Start
 
-Add to `Camel.toml`:
+Add to `Camel.toml` under the `[components.llm]` table that the bundle loader reads:
 
 ```toml
-[llm]
-[[llm.providers]]
-name = "my-openai"
-adapter = "openai"
-model = "gpt-4o"
-api_key = "${OPENAI_API_KEY}"
+[components.llm]
+default_provider = "my-openai"
 
-[[llm.providers]]
-name = "local"
-adapter = "ollama"
-model = "llama3"
-base_url = "http://localhost:11434/v1"
+[components.llm.providers.my-openai]
+type = "openai"
+api_key = "${env:OPENAI_API_KEY}"
+default_model = "gpt-4o"
+
+[components.llm.providers.local]
+type = "ollama"
+base_url = "http://localhost:11434"
+default_model = "llama3"
 ```
+
+`Camel.toml` resolves `${env:OPENAI_API_KEY}` in string leaves before the `[components.llm]` table is deserialized. Direct deserialization through `LlmBundle::from_toml` does not expand placeholders. This is application-level configuration interpolation, not SDK credential discovery.
 
 For local Ollama, set `allow_internal = true` to permit HTTP + loopback addresses:
 
 ```toml
-[llm]
+[components.llm]
 allow_internal = true
 ```
+
+### Generic native providers
+
+The `generic-providers` feature enables native Anthropic and Gemini chat. The `all-providers` feature includes it. The default build contains Mock only.
+
+```toml
+[components.llm]
+default_provider = "anthropic-native"
+
+[components.llm.providers.anthropic-native]
+type = "generic"
+service = "anthropic"
+api_key = "replace-with-anthropic-api-key"
+default_model = "claude-sonnet-4-0"
+
+[components.llm.providers.gemini-native]
+type = "generic"
+service = "gemini"
+api_key = "replace-with-gemini-api-key"
+default_model = "gemini-2.0-flash"
+```
+
+A generic entry requires `type = "generic"`, `service`, `api_key`, and `default_model`. It accepts the shared policy fields `base_url`, `timeout_secs`, `max_concurrency`, `network_retry`, `pricing`, `cache_ttl_secs`, and `cache_max_entries`. The `service` selector is configuration data. It is not the Tower `Service` trait and not the Services architecture tier.
+
+Credentials and models are explicit. The component does not read environment variables and does not infer a service from a model name. An application can resolve `${...}` before it builds the TOML value. Direct deserialization does not expand those strings. A request `model` parameter overrides `default_model` without changing the service.
+
+Default endpoints are `https://api.anthropic.com/v1/` for Anthropic and `https://generativelanguage.googleapis.com/v1beta/` for Gemini. A `base_url` override replaces the default, and Camel adds a trailing slash when it is absent. Anthropic authentication uses the `x-api-key` header. Gemini authentication uses the `x-goog-api-key` header. If an Anthropic request omits `max_tokens`, genai chooses the default, not Camel.
+
+Generic providers are chat-only. `supports_embed` returns `false` and `llm:embed` returns `UnsupportedCapability` before a request exists. Without the feature, configuration still parses but construction returns `UnsupportedCapability` naming `generic-providers`.
+
+Gemini reports request throttling and daily or project quota exhaustion as HTTP 429 `RESOURCE_EXHAUSTED`. Both cases map to retryable `RateLimit` with no retry-after value. Retries follow the configured `network_retry` policy. `max_attempts = 0` is unlimited unless `max_attempts_absolute` sets a cap. `QuotaExceeded` is a separate OpenAI-style `insufficient_quota` mapping. It is not retryable. Not every vendor quota response becomes `QuotaExceeded`.
+
+The LLM guide has full examples and operational notes: [`docs/src/components/llm.md`](../../../docs/src/components/llm.md).
 
 Or use `LlmBundle` programmatically:
 
@@ -99,8 +135,10 @@ See [`src/headers.rs`](src/headers.rs) for the full list. Key headers:
 | Mock     | `mock` (default) | No |
 | OpenAI   | `openai`     | Yes (genai-backed) |
 | Ollama   | `ollama`     | Yes (genai-backed) |
+| Anthropic | `generic-providers` | Yes (genai-backed) |
+| Gemini    | `generic-providers` | Yes (genai-backed) |
 
-Enable multiple: `--features "openai,ollama"` or use `all-providers`.
+Enable multiple: `--features "openai,ollama,generic-providers"` or use `all-providers`.
 
 ## Architecture Decisions
 
