@@ -624,6 +624,46 @@ class SecurityProfileStoreTest {
         sha1Warnings);
   }
 
+  @Test
+  @DisplayName("store parses the allow-expired-pinned-certificate opt-in")
+  void store_parses_allow_expired_pinned_certificate_env() {
+    Map<String, String> env = new HashMap<>();
+    env.put("CXF_PROFILES", "opted");
+    env.put("CXF_PROFILE_OPTED_KEYSTORE_PATH", ksFile.toString());
+    env.put("CXF_PROFILE_OPTED_KEYSTORE_PASSWORD", "kspass");
+    env.put("CXF_PROFILE_OPTED_ALLOW_EXPIRED_PINNED_CERTIFICATE", "true");
+
+    SecurityProfileStore store = createStore(env);
+    assertTrue(store.getProfile("opted").allowExpiredPinnedCertificate());
+  }
+
+  @Test
+  @DisplayName("store defaults the allow-expired-pinned-certificate opt-in to false")
+  void store_defaults_allow_expired_pinned_certificate_false() {
+    Map<String, String> env = new HashMap<>();
+    env.put("CXF_PROFILES", "opted");
+    env.put("CXF_PROFILE_OPTED_KEYSTORE_PATH", ksFile.toString());
+    env.put("CXF_PROFILE_OPTED_KEYSTORE_PASSWORD", "kspass");
+
+    SecurityProfileStore store = createStore(env);
+    assertFalse(store.getProfile("opted").allowExpiredPinnedCertificate());
+  }
+
+  @Test
+  @DisplayName("store rejects a non-boolean allow-expired-pinned-certificate value")
+  void store_rejects_non_boolean_allow_expired_pinned_certificate() {
+    Map<String, String> env = new HashMap<>();
+    env.put("CXF_PROFILES", "opted");
+    env.put("CXF_PROFILE_OPTED_KEYSTORE_PATH", ksFile.toString());
+    env.put("CXF_PROFILE_OPTED_KEYSTORE_PASSWORD", "kspass");
+    env.put("CXF_PROFILE_OPTED_ALLOW_EXPIRED_PINNED_CERTIFICATE", "yes");
+
+    IllegalStateException ex = assertThrows(IllegalStateException.class, () -> createStore(env));
+    assertTrue(
+        ex.getMessage().contains("CXF_PROFILE_OPTED_ALLOW_EXPIRED_PINNED_CERTIFICATE"),
+        "expected message naming the variable but was: " + ex.getMessage());
+  }
+
   private static SecurityProfile.Builder legacySigningProfile(String name) {
     return SecurityProfile.builder(name)
         .keystore(ksFile.toString(), "kspass")

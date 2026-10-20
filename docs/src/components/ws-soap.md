@@ -339,6 +339,59 @@ The legacy partner signs with exclusive c14n (BSP R5404-conformant). The allow-l
 
 The signature knobs (`signature_algorithm`, `signature_digest_algorithm`, `signature_c14n_algorithm`) control signing only. They do not opt in to inbound SHA-1.
 
+### Expired pinned certificate (consumer opt-in)
+
+A consumer profile can accept an expired inbound certificate only when the certificate is pinned exactly and the operator opts in (ADR-0087).
+
+| Option | Environment variable | Property | Default |
+| --- | --- | --- | --- |
+| `allow_expired_pinned_certificate` | `CXF_PROFILE_<NAME>_ALLOW_EXPIRED_PINNED_CERTIFICATE` | `cxf.security.allow.expired.pinned.certificate` | `false` |
+
+The option is `false` by default. When it is `true`, verification accepts an expired certificate only when all of these conditions hold:
+
+- Exactly one certificate is presented.
+- Revocation is disabled.
+- The full DER encoding of the presented certificate byte-equals an entry in the profile's keystore or truststore.
+
+Every other failure is rejected unchanged. The following cases still fail with the opt-in on:
+
+- A not-yet-valid certificate.
+- A chain of more than one certificate, including an expired leaf inside a chain.
+- An issuer certificate pinned in place of the presented leaf.
+- Any verification with revocation enabled. No profile-level revocation setting exists.
+
+The opt-in applies to the consumer inbound verification path only. The producer `ProfileInInterceptor` path always uses stock `CryptoFactory`, so a producer response signed with the pinned expired certificate still fails with `invalidCert`.
+
+Startup validation is fail-closed when the option is `true`:
+
+- The resolved inbound actions must include `Signature`. Blank actions resolve to `Signature` through the existing default; explicit actions without `Signature` fail startup.
+- The profile must configure a truststore or a keystore. Without verification material there is nothing to pin.
+- The bridge logs a WARN that names the profile and the loss of expiry as a key-lifetime bound and of any expiry-tied rotation.
+
+The option accepts only `true` or `false`. Any other value fails startup with an error that names the environment variable.
+
+The expiry opt-in and the inbound algorithm allow-list (ADR-0085) are independent and may both be enabled. The partner case needs both: its pinned certificate is expired and its signature is RSA-SHA1. A rejection is attributable to one gate by its error:
+
+- Expiry opt-in off: `FAILED_CHECK` with the rendered message `The provided certificate is invalid` (the `invalidCert` Wire key) and a `CertificateExpiredException` cause.
+- SHA-1 allow-list off: the generic `INVALID_SECURITY` error. The rejected algorithm URI appears only in the WSS4J WARN log and is never required in the thrown message. Do not parse the response for the URI.
+
+In the profile's `[profiles.security]` table:
+
+```toml
+[[components.cxf.profiles]]
+name = "partner-112"
+wsdl_path = "wsdl/partner.wsdl"
+service_name = "{http://example.com/partner}PartnerService"
+port_name = "{http://example.com/partner}PartnerPort"
+
+[components.cxf.profiles.security]
+keystore_path = "/etc/cxf/partner-112.jks"
+keystore_password = "changeit"
+truststore_path = "/etc/cxf/partner-112.jks"
+truststore_password = "changeit"
+allow_expired_pinned_certificate = true
+```
+
 ### Producer transport TLS
 
 A producer profile can present a client certificate and validate the server over HTTPS. The material is a nested, all-or-nothing table under `[components.cxf.profiles.security.tls]`:

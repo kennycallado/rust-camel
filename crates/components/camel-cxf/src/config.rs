@@ -234,6 +234,12 @@ pub struct CxfSecurityFields {
     /// Replaces the bridge's secure default when set; exempt from the signing
     /// preconditions because it is an inbound verification knob.
     pub allowed_digest_algorithms: Option<String>,
+    /// Per-profile opt-in accepting an expired inbound certificate only when
+    /// its full DER is pinned in the profile's keystore or truststore.
+    /// Defaults to `false`; the Java bridge remains the authoritative
+    /// fail-closed validator.
+    #[serde(default)]
+    pub allow_expired_pinned_certificate: bool,
     /// Optional per-profile HTTP status override applied to **security (WSS)
     /// faults only**, on both SOAP versions. Validated to `400..=599` at
     /// startup; out-of-range values fail the pool config before the bridge
@@ -278,6 +284,10 @@ impl fmt::Debug for CxfSecurityFields {
                 &self.allowed_signature_algorithms,
             )
             .field("allowed_digest_algorithms", &self.allowed_digest_algorithms)
+            .field(
+                "allow_expired_pinned_certificate",
+                &self.allow_expired_pinned_certificate,
+            )
             .field("fault_status", &self.fault_status)
             .field("tls", &self.tls)
             .finish()
@@ -1798,6 +1808,52 @@ mod tests {
             "got: {err}"
         );
         assert!(err.to_string().contains("absolute URI"), "got: {err}");
+    }
+
+    // ── Expired pinned-certificate opt-in (Task 4) ─────────────────────────
+
+    #[test]
+    fn allow_expired_pinned_certificate_defaults_false() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "partner"
+            wsdl_path = "/wsdl/partner.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            truststore_path = "/etc/cxf/truststore.jks"
+            truststore_password = "changeit"
+        "#;
+        let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("valid toml");
+        assert!(
+            !cfg.profiles[0].security.allow_expired_pinned_certificate,
+            "the opt-in must default to false"
+        );
+    }
+
+    #[test]
+    fn allow_expired_pinned_certificate_parses_true() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "partner"
+            wsdl_path = "/wsdl/partner.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            truststore_path = "/etc/cxf/truststore.jks"
+            truststore_password = "changeit"
+            allow_expired_pinned_certificate = true
+        "#;
+        let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("valid toml");
+        let security = &cfg.profiles[0].security;
+        assert!(security.allow_expired_pinned_certificate);
+        let debug = format!("{security:?}");
+        assert!(
+            debug.contains("allow_expired_pinned_certificate: true"),
+            "boolean opt-in must not be redacted in Debug: {debug}"
+        );
     }
 
     // ── Listener TLS pool shape (Task 2.6) ─────────────────────────────────

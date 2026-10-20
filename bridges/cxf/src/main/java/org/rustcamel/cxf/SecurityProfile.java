@@ -125,6 +125,9 @@ public class SecurityProfile {
   private final String allowedSignatureAlgorithms;
   private final String allowedDigestAlgorithms;
 
+  // --- Inbound trust relaxation (per-profile opt-in; default false) ---
+  private final boolean allowExpiredPinnedCertificate;
+
   /**
    * Optional per-profile HTTP status override for security (WSS) faults only. {@code null} keeps
    * the default matrix (SOAP 1.1: 500; SOAP 1.2 Sender: 400, Receiver: 500). Validated by {@link
@@ -164,6 +167,7 @@ public class SecurityProfile {
     this.signatureParts = b.signatureParts;
     this.allowedSignatureAlgorithms = b.allowedSignatureAlgorithms;
     this.allowedDigestAlgorithms = b.allowedDigestAlgorithms;
+    this.allowExpiredPinnedCertificate = b.allowExpiredPinnedCertificate;
     this.faultStatus = b.faultStatus;
   }
 
@@ -293,6 +297,11 @@ public class SecurityProfile {
     return allowedDigestAlgorithms == null
         ? DEFAULT_ALLOWED_DIGEST_ALGORITHMS
         : parseAlgorithmList(allowedDigestAlgorithms);
+  }
+
+  /** True when this profile opts into accepting an expired exactly-pinned inbound certificate. */
+  public boolean allowExpiredPinnedCertificate() {
+    return allowExpiredPinnedCertificate;
   }
 
   /** True when either effective inbound allow-list carries a known SHA-1 algorithm URI. */
@@ -537,7 +546,10 @@ public class SecurityProfile {
         if (verificationCrypto == null) {
           String path = hasText(truststorePath) ? truststorePath : keystorePath;
           String pass = hasText(truststorePassword) ? truststorePassword : keystorePassword;
-          verificationCrypto = CryptoFactory.getInstance(createCryptoProperties(path, pass));
+          verificationCrypto =
+              allowExpiredPinnedCertificate
+                  ? new PinnedTrustMerlin(createCryptoProperties(path, pass), true)
+                  : CryptoFactory.getInstance(createCryptoProperties(path, pass));
         }
       }
     }
@@ -610,6 +622,7 @@ public class SecurityProfile {
     private String signatureParts;
     private String allowedSignatureAlgorithms;
     private String allowedDigestAlgorithms;
+    private boolean allowExpiredPinnedCertificate;
     private Integer faultStatus;
 
     private Builder(String name) {
@@ -715,6 +728,15 @@ public class SecurityProfile {
       return this;
     }
 
+    /**
+     * Per-profile opt-in for accepting an expired certificate only when it is exactly pinned in the
+     * profile's verification store. Default false.
+     */
+    public Builder allowExpiredPinnedCertificate(boolean v) {
+      this.allowExpiredPinnedCertificate = v;
+      return this;
+    }
+
     /** Optional WSS-only HTTP status override (400-599); validated by the profile store. */
     public Builder faultStatus(Integer v) {
       this.faultStatus = v;
@@ -723,6 +745,7 @@ public class SecurityProfile {
 
     public SecurityProfile build() {
       validateInboundActions();
+      validateExpiredPinnedCertificate();
       validateOutboundActions();
       validateSignatureKnobs();
       validateAllowedAlgorithmLists();
@@ -830,6 +853,35 @@ public class SecurityProfile {
             "in-actions include Encrypt but no keystore is configured: '"
                 + raw
                 + "'. Decryption keys live in the keystore (cxf.keystore.path)");
+      }
+    }
+
+    /**
+     * Fail-loud checks on the expired-pinned-certificate opt-in. The relaxation only applies to
+     * inbound Signature verification against an exactly-pinned certificate, so an opted-in profile
+     * must resolve inbound actions to Signature and carry verification material. Blank inbound
+     * actions resolve to Signature through {@link #resolveActionsOrDefault(String)}; an explicit
+     * action list without Signature is rejected.
+     */
+    private void validateExpiredPinnedCertificate() {
+      if (!allowExpiredPinnedCertificate) return;
+      String envVar =
+          "CXF_PROFILE_" + name.toUpperCase(Locale.ROOT) + "_ALLOW_EXPIRED_PINNED_CERTIFICATE";
+      String inActions = resolveActionsOrDefault(securityActionsIn);
+      if (!containsAction(inActions, "Signature")) {
+        throw new IllegalArgumentException(
+            envVar
+                + " is set but resolved in-actions do not include Signature: '"
+                + inActions
+                + "'; expired pinned certificate acceptance applies to inbound Signature"
+                + " verification only");
+      }
+      if (!hasText(truststorePath) && !hasText(keystorePath)) {
+        throw new IllegalArgumentException(
+            envVar
+                + " is set but the profile has no verification material; a truststore or keystore"
+                + " is required to pin the accepted certificate (cxf.truststore.path or"
+                + " cxf.keystore.path)");
       }
     }
 

@@ -4,6 +4,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 import java.util.Base64;
 import java.util.List;
 
@@ -138,6 +140,299 @@ class TestKeystoreHelper {
     }
 
     return ksPath;
+  }
+
+  // ── Expired-certificate trust fixtures ───────────────────────────────────
+
+  /**
+   * Creates a temporary JKS keystore with an RSA 2048 self-signed keypair under {@link #KEY_ALIAS}
+   * whose validity window ended 370 days ago. Keystore and key passwords are both {@link
+   * #KEYSTORE_PASSWORD}.
+   *
+   * @return path to the generated keystore file
+   */
+  static Path createExpiredTestKeystore() throws Exception {
+    Path ksPath = createTempKeystore("test-expired-keystore-");
+    generateKeystore(ksPath, DEFAULT_DNAME, "-400d", "30", null);
+    return ksPath;
+  }
+
+  /**
+   * Creates a temporary JKS keystore with an RSA 2048 self-signed keypair under {@link #KEY_ALIAS}
+   * whose validity window starts 10 days from now.
+   *
+   * @return path to the generated keystore file
+   */
+  static Path createFutureTestKeystore() throws Exception {
+    Path ksPath = createTempKeystore("test-future-keystore-");
+    generateKeystore(ksPath, DEFAULT_DNAME, "+10d", "365", null);
+    return ksPath;
+  }
+
+  /**
+   * Creates a temporary JKS keystore with a fresh RSA 2048 keypair whose subject is exactly {@link
+   * #DEFAULT_DNAME} and whose certificate is expired. The key material differs from every other
+   * generated store.
+   *
+   * @return path to the generated keystore file
+   */
+  static Path createExpiredSameDnDifferentKeyKeystore() throws Exception {
+    Path ksPath = createTempKeystore("test-expired-same-dn-keystore-");
+    generateKeystore(ksPath, DEFAULT_DNAME, "-400d", "30", null);
+    return ksPath;
+  }
+
+  /**
+   * Creates a temporary JKS keystore with an RSA 2048 self-signed keypair signed with SHA1withRSA
+   * whose validity window ended 370 days ago.
+   *
+   * @return path to the generated keystore file
+   */
+  static Path createExpiredSha1TestKeystore() throws Exception {
+    Path ksPath = createTempKeystore("test-expired-sha1-keystore-");
+    generateKeystore(ksPath, DEFAULT_DNAME, "-400d", "30", "SHA1withRSA");
+    return ksPath;
+  }
+
+  /**
+   * Creates a two-certificate key entry under alias {@code leaf} in a JKS keystore inside {@code
+   * dir}: a CA certificate under alias {@code ca} (basic-constraints CA) and an expired RSA 2048
+   * leaf signed by that CA. The stored chain is leaf then CA.
+   *
+   * @param dir directory that receives the CA store, leaf store, CSR, and certificates
+   * @return path to the leaf keystore
+   */
+  static Path createExpiredChainKeystore(Path dir) throws Exception {
+    Files.createDirectories(dir);
+    Path caStore = dir.resolve("expired-chain-ca.jks");
+    Path leafStore = dir.resolve("expired-chain-leaf.jks");
+    Files.deleteIfExists(caStore);
+    Files.deleteIfExists(leafStore);
+
+    keytool(
+        "-genkeypair",
+        "-alias",
+        "ca",
+        "-keyalg",
+        "RSA",
+        "-keysize",
+        "2048",
+        "-validity",
+        "3650",
+        "-dname",
+        "CN=cxf-expired-chain-ca, O=RustCamel Test",
+        "-ext",
+        "bc:c",
+        "-keystore",
+        caStore.toAbsolutePath().toString(),
+        "-storetype",
+        "JKS",
+        "-storepass",
+        KEYSTORE_PASSWORD,
+        "-keypass",
+        KEYSTORE_PASSWORD,
+        "-noprompt");
+
+    keytool(
+        "-genkeypair",
+        "-alias",
+        "leaf",
+        "-keyalg",
+        "RSA",
+        "-keysize",
+        "2048",
+        "-startdate",
+        "-400d",
+        "-validity",
+        "30",
+        "-dname",
+        DEFAULT_DNAME,
+        "-keystore",
+        leafStore.toAbsolutePath().toString(),
+        "-storetype",
+        "JKS",
+        "-storepass",
+        KEYSTORE_PASSWORD,
+        "-keypass",
+        KEYSTORE_PASSWORD,
+        "-noprompt");
+
+    Path caCert = dir.resolve("expired-chain-ca.cer");
+    keytool(
+        "-exportcert",
+        "-alias",
+        "ca",
+        "-file",
+        caCert.toString(),
+        "-keystore",
+        caStore.toString(),
+        "-storepass",
+        KEYSTORE_PASSWORD,
+        "-noprompt");
+
+    // The CA must be a trusted cert in the leaf store before the CA-signed reply is imported:
+    // keytool builds the key entry chain of that reply against the store's trusted certs.
+    keytool(
+        "-importcert",
+        "-alias",
+        "ca",
+        "-file",
+        caCert.toString(),
+        "-keystore",
+        leafStore.toString(),
+        "-storepass",
+        KEYSTORE_PASSWORD,
+        "-noprompt");
+
+    Path csr = dir.resolve("expired-chain-leaf.csr");
+    keytool(
+        "-certreq",
+        "-alias",
+        "leaf",
+        "-file",
+        csr.toString(),
+        "-keystore",
+        leafStore.toString(),
+        "-storepass",
+        KEYSTORE_PASSWORD,
+        "-keypass",
+        KEYSTORE_PASSWORD);
+
+    Path leafCert = dir.resolve("expired-chain-leaf.cer");
+    keytool(
+        "-gencert",
+        "-alias",
+        "ca",
+        "-keystore",
+        caStore.toString(),
+        "-storepass",
+        KEYSTORE_PASSWORD,
+        "-keypass",
+        KEYSTORE_PASSWORD,
+        "-infile",
+        csr.toString(),
+        "-outfile",
+        leafCert.toString(),
+        "-startdate",
+        "-400d",
+        "-validity",
+        "30");
+
+    keytool(
+        "-importcert",
+        "-alias",
+        "leaf",
+        "-file",
+        leafCert.toString(),
+        "-keystore",
+        leafStore.toString(),
+        "-storepass",
+        KEYSTORE_PASSWORD,
+        "-keypass",
+        KEYSTORE_PASSWORD,
+        "-trustcacerts",
+        "-noprompt");
+
+    return leafStore;
+  }
+
+  /**
+   * Creates a fresh JKS truststore containing the certificate exported from {@code sourceKeystore}
+   * under {@code sourceAlias}, imported as the trusted entry {@code pinned}.
+   *
+   * @param sourceKeystore keystore holding the certificate to pin
+   * @param sourceAlias alias of the certificate in the source keystore
+   * @return path to the generated truststore file
+   */
+  static Path createTruststoreWithCertificate(Path sourceKeystore, String sourceAlias)
+      throws Exception {
+    Path truststore = createTempKeystore("test-pinned-truststore-");
+    Path certFile = Files.createTempFile("test-pinned-cert-", ".cer");
+    certFile.toFile().deleteOnExit();
+    try {
+      keytool(
+          "-exportcert",
+          "-alias",
+          sourceAlias,
+          "-file",
+          certFile.toString(),
+          "-keystore",
+          sourceKeystore.toString(),
+          "-storepass",
+          KEYSTORE_PASSWORD,
+          "-noprompt");
+      keytool(
+          "-importcert",
+          "-alias",
+          "pinned",
+          "-file",
+          certFile.toString(),
+          "-keystore",
+          truststore.toString(),
+          "-storetype",
+          "JKS",
+          "-storepass",
+          KEYSTORE_PASSWORD,
+          "-noprompt");
+    } finally {
+      Files.deleteIfExists(certFile);
+    }
+    return truststore;
+  }
+
+  /** Loads the X.509 certificate under {@code alias} from a JKS store. */
+  static X509Certificate certificateFrom(Path keystore, String alias) throws Exception {
+    return (X509Certificate) loadJks(keystore, KEYSTORE_PASSWORD).getCertificate(alias);
+  }
+
+  /** Loads the X.509 key entry chain under {@code alias} from a JKS store. */
+  static X509Certificate[] certificateChainFrom(Path keystore, String alias) throws Exception {
+    Certificate[] chain = loadJks(keystore, KEYSTORE_PASSWORD).getCertificateChain(alias);
+    X509Certificate[] certificates = new X509Certificate[chain.length];
+    for (int i = 0; i < chain.length; i++) {
+      certificates[i] = (X509Certificate) chain[i];
+    }
+    return certificates;
+  }
+
+  private static Path createTempKeystore(String prefix) throws Exception {
+    Path ksPath = Files.createTempFile(prefix, ".jks");
+    ksPath.toFile().deleteOnExit();
+    Files.delete(ksPath); // keytool refuses to write to an existing (even empty) file
+    return ksPath;
+  }
+
+  private static void generateKeystore(
+      Path ksPath, String dname, String startDate, String validity, String sigAlg)
+      throws Exception {
+    List<String> cmd = new java.util.ArrayList<>();
+    cmd.add("-genkeypair");
+    cmd.add("-alias");
+    cmd.add(KEY_ALIAS);
+    cmd.add("-keyalg");
+    cmd.add("RSA");
+    cmd.add("-keysize");
+    cmd.add("2048");
+    cmd.add("-startdate");
+    cmd.add(startDate);
+    cmd.add("-validity");
+    cmd.add(validity);
+    cmd.add("-dname");
+    cmd.add(dname);
+    if (sigAlg != null) {
+      cmd.add("-sigalg");
+      cmd.add(sigAlg);
+    }
+    cmd.add("-keystore");
+    cmd.add(ksPath.toAbsolutePath().toString());
+    cmd.add("-storetype");
+    cmd.add("JKS");
+    cmd.add("-storepass");
+    cmd.add(KEYSTORE_PASSWORD);
+    cmd.add("-keypass");
+    cmd.add(KEYSTORE_PASSWORD);
+    cmd.add("-noprompt");
+    keytool(cmd.toArray(new String[0]));
   }
 
   // ── Listener TLS material (Task 2.7) ─────────────────────────────────────

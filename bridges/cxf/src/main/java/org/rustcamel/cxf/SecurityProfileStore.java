@@ -66,6 +66,9 @@ public class SecurityProfileStore {
           name, "truststore", tlsTruststorePath, tlsTruststorePassword, tlsTruststoreType);
 
       Integer faultStatus = parseFaultStatus(name, getenv(prefix + "FAULT_STATUS"));
+      String expiredPinnedCertVar = prefix + "ALLOW_EXPIRED_PINNED_CERTIFICATE";
+      boolean allowExpiredPinnedCertificate =
+          parseAllowExpiredPinnedCertificate(expiredPinnedCertVar, getenv(expiredPinnedCertVar));
 
       SecurityProfile profile =
           SecurityProfile.builder(name)
@@ -88,12 +91,14 @@ public class SecurityProfileStore {
               .signatureParts(getenv(prefix + "SIGNATURE_PARTS"))
               .allowedSignatureAlgorithms(getenv(prefix + "ALLOWED_SIGNATURE_ALGORITHMS"))
               .allowedDigestAlgorithms(getenv(prefix + "ALLOWED_DIGEST_ALGORITHMS"))
+              .allowExpiredPinnedCertificate(allowExpiredPinnedCertificate)
               .faultStatus(faultStatus)
               .build();
 
       profiles.put(name, profile);
       LOG.info("Loaded security profile: " + name);
       sha1AllowedWarning(profile).ifPresent(LOG::warning);
+      expiredPinnedCertWarning(profile).ifPresent(LOG::warning);
       signingKnobMismatchWarning(profile).ifPresent(LOG::warning);
     }
 
@@ -143,6 +148,44 @@ public class SecurityProfileStore {
             + profile.name()
             + "' accepts SHA-1 signature/digest algorithms on inbound verification (opted-in via"
             + " ALLOWED_*; accepted risk, see ADR-0085)");
+  }
+
+  /**
+   * Startup WARN when a profile opts into accepting an expired exactly-pinned inbound certificate.
+   * The message names the profile, the knob, and the accepted risk recorded in ADR-0087. Pure
+   * decision point so tests can assert the wording without log capture.
+   */
+  static Optional<String> expiredPinnedCertWarning(SecurityProfile profile) {
+    if (!profile.allowExpiredPinnedCertificate()) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        "WS-Security profile '"
+            + profile.name()
+            + "' accepts an expired exactly-pinned inbound certificate"
+            + " (ALLOW_EXPIRED_PINNED_CERTIFICATE; expiry as a key-lifetime bound and any"
+            + " expiry-tied rotation are lost for this pin; accepted risk, see ADR-0087)");
+  }
+
+  /**
+   * Parses the optional {@code CXF_PROFILE_<NAME>_ALLOW_EXPIRED_PINNED_CERTIFICATE} opt-in. Only an
+   * absent/blank value (false), {@code true}, and {@code false} are valid; anything else fails loud
+   * before the profile is built.
+   *
+   * @throws IllegalStateException naming the variable on any other value
+   */
+  static boolean parseAllowExpiredPinnedCertificate(String envVar, String raw) {
+    if (raw == null || raw.isBlank()) {
+      return false;
+    }
+    if ("true".equals(raw)) {
+      return true;
+    }
+    if ("false".equals(raw)) {
+      return false;
+    }
+    throw new IllegalStateException(
+        envVar + " must be 'true' or 'false' when set, but was '" + raw + "'");
   }
 
   /**

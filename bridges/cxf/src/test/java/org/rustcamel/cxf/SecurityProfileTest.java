@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.cert.X509Certificate;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -11,6 +13,7 @@ import java.util.stream.Stream;
 import org.apache.cxf.ws.security.wss4j.WSS4JInInterceptor;
 import org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor;
 import org.apache.wss4j.common.ConfigurationConstants;
+import org.apache.wss4j.common.ext.WSSecurityException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -992,6 +995,167 @@ class SecurityProfileTest {
 
   static Stream<String> sha1AlgorithmUris() {
     return SecurityProfile.SHA1_ALGORITHM_URIS.stream();
+  }
+
+  @Test
+  @DisplayName("startup rejects the opt-in without a Signature in-action")
+  void startup_rejects_flag_without_signature_action() throws Exception {
+    Path expired = TestKeystoreHelper.createExpiredTestKeystore();
+    try {
+      IllegalArgumentException ex =
+          assertThrows(
+              IllegalArgumentException.class,
+              () ->
+                  SecurityProfile.builder("expired")
+                      .keystore(expired.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
+                      .actionsIn("Encrypt")
+                      .allowExpiredPinnedCertificate(true)
+                      .build());
+      assertTrue(
+          ex.getMessage().contains("CXF_PROFILE_EXPIRED_ALLOW_EXPIRED_PINNED_CERTIFICATE"),
+          "expected message naming the knob but was: " + ex.getMessage());
+    } finally {
+      Files.deleteIfExists(expired);
+    }
+  }
+
+  @Test
+  @DisplayName("startup rejects the opt-in without verification material")
+  void startup_rejects_flag_without_verification_material() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SecurityProfile.builder("expired").allowExpiredPinnedCertificate(true).build());
+    assertTrue(
+        ex.getMessage().contains("CXF_PROFILE_EXPIRED_ALLOW_EXPIRED_PINNED_CERTIFICATE"),
+        "expected message naming the knob but was: " + ex.getMessage());
+    assertTrue(
+        ex.getMessage().contains("truststore or keystore"),
+        "expected message requiring verification material but was: " + ex.getMessage());
+  }
+
+  @Test
+  @DisplayName("startup warns about the accepted risk for an opted-in profile")
+  void startup_warns_about_accepted_risk() throws Exception {
+    Path expired = TestKeystoreHelper.createExpiredTestKeystore();
+    try {
+      SecurityProfile optedIn =
+          SecurityProfile.builder("opted")
+              .truststore(expired.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
+              .allowExpiredPinnedCertificate(true)
+              .build();
+      String warning = SecurityProfileStore.expiredPinnedCertWarning(optedIn).orElseThrow();
+      assertTrue(warning.contains("opted"), "expected profile name in: " + warning);
+      assertTrue(warning.contains("ADR-0087"), "expected ADR reference in: " + warning);
+
+      SecurityProfile defaultOff =
+          SecurityProfile.builder("default_off")
+              .truststore(expired.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
+              .build();
+      assertTrue(SecurityProfileStore.expiredPinnedCertWarning(defaultOff).isEmpty());
+    } finally {
+      Files.deleteIfExists(expired);
+    }
+  }
+
+  @Test
+  @DisplayName("default inbound Signature action permits the opt-in")
+  void default_inbound_signature_action_permits_the_opt_in() {
+    SecurityProfile truststoreProfile =
+        SecurityProfile.builder("opted_ts")
+            .truststore(keystorePath.toString(), "changeit")
+            .allowExpiredPinnedCertificate(true)
+            .build();
+    assertEquals("Signature", truststoreProfile.resolveActionsIn());
+
+    SecurityProfile keystoreProfile =
+        SecurityProfile.builder("opted_ks")
+            .keystore(keystorePath.toString(), "changeit")
+            .allowExpiredPinnedCertificate(true)
+            .build();
+    assertEquals("Signature", keystoreProfile.resolveActionsIn());
+  }
+
+  @Test
+  @DisplayName("default off keeps stock Merlin behavior")
+  void default_off_keeps_stock_merlin_behavior() throws Exception {
+    SecurityProfile profile =
+        SecurityProfile.builder("stock").keystore(keystorePath.toString(), "changeit").build();
+    assertFalse(
+        profile.getVerificationCrypto() instanceof PinnedTrustMerlin,
+        "default-off profile must keep CryptoFactory/Merlin");
+  }
+
+  @Test
+  @DisplayName("opt-in builds a PinnedTrustMerlin")
+  void opt_in_builds_pinned_trust_merlin() throws Exception {
+    SecurityProfile profile =
+        SecurityProfile.builder("pinned")
+            .keystore(keystorePath.toString(), "changeit")
+            .allowExpiredPinnedCertificate(true)
+            .build();
+    assertTrue(
+        profile.getVerificationCrypto() instanceof PinnedTrustMerlin,
+        "opted-in profile must use PinnedTrustMerlin");
+  }
+
+  @Test
+  @DisplayName("opt-in truststore does not trust the signing-only certificate")
+  void opt_in_truststore_does_not_trust_signing_only_certificate() throws Exception {
+    Path expired = TestKeystoreHelper.createExpiredTestKeystore();
+    try {
+      Path expiredTruststore =
+          TestKeystoreHelper.createTruststoreWithCertificate(expired, TestKeystoreHelper.KEY_ALIAS);
+      try {
+        SecurityProfile stock =
+            SecurityProfile.builder("stock_ts")
+                .keystore(keystorePath.toString(), "changeit")
+                .truststore(expiredTruststore.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
+                .build();
+        assertFalse(stock.getVerificationCrypto() instanceof PinnedTrustMerlin);
+
+        SecurityProfile optedIn =
+            SecurityProfile.builder("pinned_ts")
+                .keystore(keystorePath.toString(), "changeit")
+                .truststore(expiredTruststore.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
+                .allowExpiredPinnedCertificate(true)
+                .build();
+        assertTrue(optedIn.getVerificationCrypto() instanceof PinnedTrustMerlin);
+
+        X509Certificate validSigningCert =
+            TestKeystoreHelper.certificateFrom(keystorePath, TestKeystoreHelper.KEY_ALIAS);
+
+        WSSecurityException stockFailure =
+            assertThrows(
+                WSSecurityException.class,
+                () ->
+                    stock
+                        .getVerificationCrypto()
+                        .verifyTrust(
+                            new X509Certificate[] {validSigningCert},
+                            false,
+                            Collections.emptyList(),
+                            Collections.emptyList()));
+        WSSecurityException optedInFailure =
+            assertThrows(
+                WSSecurityException.class,
+                () ->
+                    optedIn
+                        .getVerificationCrypto()
+                        .verifyTrust(
+                            new X509Certificate[] {validSigningCert},
+                            false,
+                            Collections.emptyList(),
+                            Collections.emptyList()));
+
+        assertEquals(stockFailure.getErrorCode(), optedInFailure.getErrorCode());
+        assertEquals(stockFailure.getMessage(), optedInFailure.getMessage());
+      } finally {
+        Files.deleteIfExists(expiredTruststore);
+      }
+    } finally {
+      Files.deleteIfExists(expired);
+    }
   }
 
   private static void assertBuildRejectedNaming(SecurityProfile.Builder builder, String envVar) {

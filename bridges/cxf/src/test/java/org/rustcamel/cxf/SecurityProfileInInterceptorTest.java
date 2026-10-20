@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Provider;
 import java.security.Security;
+import java.security.cert.CertificateExpiredException;
 import java.util.Map;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.transform.dom.DOMSource;
@@ -48,6 +49,8 @@ class SecurityProfileInInterceptorTest {
   private static final String XMLDSIG_PROVIDER = "ApacheXMLDSig";
   private static final String RSA_SHA1 = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
   private static final String SHA1 = "http://www.w3.org/2000/09/xmldsig#sha1";
+  private static final String RSA_SHA256 = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+  private static final String SHA256 = "http://www.w3.org/2001/04/xmlenc#sha256";
   private static final String EXCLUSIVE_C14N = "http://www.w3.org/2001/10/xml-exc-c14n#";
 
   private static Path keystorePath;
@@ -134,6 +137,49 @@ class SecurityProfileInInterceptorTest {
       if (original != null) {
         Security.insertProviderAt(new XMLDSigRI(), originalPosition + 1);
       }
+    }
+  }
+
+  @Test
+  void producer_profile_in_interceptor_rejects_expired_pinned_response() throws Exception {
+    Path expiredStore = TestKeystoreHelper.createExpiredTestKeystore();
+    Path expiredTruststore =
+        TestKeystoreHelper.createTruststoreWithCertificate(
+            expiredStore, TestKeystoreHelper.KEY_ALIAS);
+    try {
+      SecurityProfile profile =
+          SecurityProfile.builder("producer-expired-pinned")
+              .truststore(expiredTruststore.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
+              .actionsIn("Signature")
+              .allowExpiredPinnedCertificate(true)
+              .build();
+      String signedExpiredResponse =
+          ExpiredSignedEnvelopeFactory.signSoap11(
+              plainSoap11(),
+              expiredStore,
+              TestKeystoreHelper.KEY_ALIAS,
+              RSA_SHA256,
+              SHA256,
+              false,
+              false);
+
+      Fault rejection =
+          assertThrows(
+              Fault.class,
+              () -> invokeInInterceptor(profile, signedExpiredResponse),
+              "the producer path must not honor the consumer-only expiry opt-in");
+
+      WSSecurityException securityException = findCause(rejection, WSSecurityException.class);
+      assertNotNull(
+          securityException, "the fault must wrap a WSSecurityException: " + causeChain(rejection));
+      assertEquals(WSSecurityException.ErrorCode.FAILED_CHECK, securityException.getErrorCode());
+      assertInstanceOf(CertificateExpiredException.class, securityException.getCause());
+      assertTrue(
+          securityException.getMessage().contains("The provided certificate is invalid"),
+          "unexpected rejection message: " + securityException.getMessage());
+    } finally {
+      Files.deleteIfExists(expiredStore);
+      Files.deleteIfExists(expiredTruststore);
     }
   }
 

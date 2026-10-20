@@ -181,6 +181,9 @@ pub struct CxfProfileEnvVars {
     /// Optional comma-separated inbound digest algorithm allow-list, emitted
     /// as `CXF_PROFILE_<NAME>_ALLOWED_DIGEST_ALGORITHMS`.
     pub allowed_digest_algorithms: Option<String>,
+    /// Per-profile expired pinned-certificate opt-in, emitted as
+    /// `CXF_PROFILE_<NAME>_ALLOW_EXPIRED_PINNED_CERTIFICATE` only when true.
+    pub allow_expired_pinned_certificate: bool,
     /// Optional per-profile HTTP status override for security (WSS) faults only,
     /// emitted as `CXF_PROFILE_<NAME>_FAULT_STATUS`.
     pub fault_status: Option<u16>,
@@ -244,6 +247,12 @@ impl CxfProfileEnvVars {
         }
         if let Some(ref v) = self.allowed_digest_algorithms {
             vars.push((format!("{}ALLOWED_DIGEST_ALGORITHMS", prefix), v.clone()));
+        }
+        if self.allow_expired_pinned_certificate {
+            vars.push((
+                format!("{}ALLOW_EXPIRED_PINNED_CERTIFICATE", prefix),
+                "true".to_string(),
+            ));
         }
         if let Some(v) = self.fault_status {
             vars.push((format!("{}FAULT_STATUS", prefix), v.to_string()));
@@ -1127,6 +1136,7 @@ mod tests {
                 signature_parts: None,
                 allowed_signature_algorithms: None,
                 allowed_digest_algorithms: None,
+                allow_expired_pinned_certificate: false,
                 fault_status: None,
                 tls: None,
             },
@@ -1151,6 +1161,7 @@ mod tests {
                 signature_parts: None,
                 allowed_signature_algorithms: None,
                 allowed_digest_algorithms: None,
+                allow_expired_pinned_certificate: false,
                 fault_status: None,
                 tls: None,
             },
@@ -1257,6 +1268,7 @@ mod tests {
             signature_parts: None,
             allowed_signature_algorithms: None,
             allowed_digest_algorithms: None,
+            allow_expired_pinned_certificate: false,
             fault_status: None,
             tls: None,
         }];
@@ -1302,13 +1314,15 @@ mod tests {
                 "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256".to_string(),
             ),
             allowed_digest_algorithms: Some("http://www.w3.org/2001/04/xmlenc#sha256".to_string()),
+            allow_expired_pinned_certificate: true,
             fault_status: Some(403),
             tls: None,
         };
 
         let env = vars.to_env_vars();
-        // 3 required + 1 address + 8 security + 2 allowed_algorithms + 1 fault_status = 15
-        assert_eq!(env.len(), 15);
+        // 3 required + 1 address + 8 security + 2 allowed_algorithms
+        // + 1 expired-pinned-cert opt-in + 1 fault_status = 16
+        assert_eq!(env.len(), 16);
 
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"CXF_PROFILE_FULL_WSDL_PATH"));
@@ -1325,11 +1339,52 @@ mod tests {
         assert!(keys.contains(&"CXF_PROFILE_FULL_SECURITY_ACTIONS_IN"));
         assert!(keys.contains(&"CXF_PROFILE_FULL_ALLOWED_SIGNATURE_ALGORITHMS"));
         assert!(keys.contains(&"CXF_PROFILE_FULL_ALLOWED_DIGEST_ALGORITHMS"));
+        let allow_expired = env
+            .iter()
+            .find(|(k, _)| k == "CXF_PROFILE_FULL_ALLOW_EXPIRED_PINNED_CERTIFICATE")
+            .expect("expired-pinned-cert opt-in env var emitted");
+        assert_eq!(allow_expired.1, "true");
         let fault_status = env
             .iter()
             .find(|(k, _)| k == "CXF_PROFILE_FULL_FAULT_STATUS")
             .expect("fault_status env var emitted");
         assert_eq!(fault_status.1, "403");
+    }
+
+    #[test]
+    fn profile_env_vars_omits_allow_expired_pinned_certificate_when_false() {
+        let vars = CxfProfileEnvVars {
+            name: "default".to_string(),
+            wsdl_path: "/wsdl".to_string(),
+            service_name: "Svc".to_string(),
+            port_name: "Port".to_string(),
+            address: None,
+            keystore_path: None,
+            keystore_password: None,
+            truststore_path: None,
+            truststore_password: None,
+            sig_username: None,
+            sig_password: None,
+            enc_username: None,
+            security_actions_out: None,
+            security_actions_in: None,
+            signature_algorithm: None,
+            signature_digest_algorithm: None,
+            signature_c14n_algorithm: None,
+            signature_parts: None,
+            allowed_signature_algorithms: None,
+            allowed_digest_algorithms: None,
+            allow_expired_pinned_certificate: false,
+            fault_status: None,
+            tls: None,
+        };
+
+        let env = vars.to_env_vars();
+        assert!(
+            !env.iter()
+                .any(|(key, _)| key.ends_with("ALLOW_EXPIRED_PINNED_CERTIFICATE")),
+            "default-off must not emit the opt-in: {env:?}"
+        );
     }
 
     #[test]
@@ -1532,6 +1587,7 @@ mod tests {
             signature_parts: None,
             allowed_signature_algorithms: None,
             allowed_digest_algorithms: None,
+            allow_expired_pinned_certificate: false,
             fault_status: None,
             tls: None,
         };

@@ -85,16 +85,24 @@ class SoapEndpointPublisherTest {
       "<m:emptyActionMessage xmlns:m=\"urn:oneway:363:empty\">x</m:emptyActionMessage>";
 
   private static Path keystorePath;
+  private static Path expiredKeystorePath;
+  private static Path expiredTruststorePath;
 
   @BeforeAll
   static void setUpKeystore() throws Exception {
     keystorePath = TestKeystoreHelper.createTestKeystore();
+    expiredKeystorePath = TestKeystoreHelper.createExpiredTestKeystore();
+    expiredTruststorePath =
+        TestKeystoreHelper.createTruststoreWithCertificate(
+            expiredKeystorePath, TestKeystoreHelper.KEY_ALIAS);
   }
 
   @AfterAll
   static void tearDownKeystore() throws Exception {
-    if (keystorePath != null) {
-      Files.deleteIfExists(keystorePath);
+    for (Path store : new Path[] {keystorePath, expiredKeystorePath, expiredTruststorePath}) {
+      if (store != null) {
+        Files.deleteIfExists(store);
+      }
     }
   }
 
@@ -333,6 +341,65 @@ class SoapEndpointPublisherTest {
     assertFalse(
         spoofedCaptor.getAllValues().get(2).hasSigner(),
         "Client-supplied signer headers must not export a signer");
+  }
+
+  @Test
+  void expired_pinned_cert_rejected_by_default() throws Exception {
+    SecurityProfile profile = expiredPinnedProfile(false);
+
+    HttpOutcome outcome =
+        driveRequestOutcome(signedExpiredEnvelope(), "text/xml", profile, completedOk());
+
+    assertEquals(500, outcome.status(), outcome.body());
+    assertSenderFault(outcome.body(), "1.1");
+    assertTrue(
+        outcome.body().contains("The provided certificate is invalid"),
+        "the rendered fault must carry the invalidCert message: " + outcome.body());
+    verify(cxfServerManager, never()).handleSoapRequest(any());
+  }
+
+  @Test
+  void expired_pinned_cert_e2e_reaches_route_with_signer() throws Exception {
+    SecurityProfile profile = expiredPinnedProfile(true);
+
+    driveRequestOutcome(signedExpiredEnvelope(), "text/xml", profile, completedOk());
+
+    ArgumentCaptor<ConsumerRequest> requestCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
+    verify(cxfServerManager, times(1)).handleSoapRequest(requestCaptor.capture());
+    ConsumerRequest dispatched = requestCaptor.getValue();
+    assertTrue(dispatched.hasSigner(), "the accepted expired pin must export a signer");
+    X509Certificate expired =
+        TestKeystoreHelper.certificateFrom(expiredKeystorePath, TestKeystoreHelper.KEY_ALIAS);
+    assertEquals(
+        sha256Hex(expired.getEncoded()),
+        dispatched.getSigner().getFingerprintSha256(),
+        "the dispatched signer must be the exact pinned expired certificate");
+    assertFalse(
+        dispatched.getSigner().getFingerprintSha256().isEmpty(),
+        "the dispatched signer fingerprint must be non-empty");
+  }
+
+  private static SecurityProfile expiredPinnedProfile(boolean optIn) {
+    SecurityProfile.Builder builder =
+        SecurityProfile.builder(TEST_PROFILE_NAME)
+            .keystore(expiredKeystorePath.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
+            .truststore(expiredTruststorePath.toString(), TestKeystoreHelper.KEYSTORE_PASSWORD)
+            .actionsIn("Signature");
+    if (optIn) {
+      builder.allowExpiredPinnedCertificate(true);
+    }
+    return builder.build();
+  }
+
+  private static String signedExpiredEnvelope() throws Exception {
+    return ExpiredSignedEnvelopeFactory.signSoap11(
+        envelope11(ECHO_ELEMENT),
+        expiredKeystorePath,
+        TestKeystoreHelper.KEY_ALIAS,
+        "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+        "http://www.w3.org/2001/04/xmlenc#sha256",
+        false,
+        false);
   }
 
   @Test

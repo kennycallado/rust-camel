@@ -43,6 +43,7 @@ fn secret_profiles() -> Vec<CxfProfileEnvVars> {
             "http://www.w3.org/2000/09/xmldsig#rsa-sha1".to_string(),
         ),
         allowed_digest_algorithms: Some("http://www.w3.org/2000/09/xmldsig#sha1".to_string()),
+        allow_expired_pinned_certificate: false,
         fault_status: None,
         tls: Some(CxfTlsEnvVars {
             keystore_path: Some("/etc/cxf/tls-keystore.p12".to_string()),
@@ -371,6 +372,62 @@ fn pool_env_emits_allowed_algorithms_only_when_set() {
     assert!(
         !env.contains_key("CXF_PROFILE_SECURE_DEFAULT_ALLOWED_DIGEST_ALGORITHMS"),
         "unset allow-list must not be emitted: {env:?}"
+    );
+}
+
+// --- Expired pinned-certificate opt-in (Task 4) ---
+
+/// Profile carrying the expired pinned-certificate opt-in (or not) as parsed
+/// from `[profiles.security]`.
+fn expired_pinned_profile(name: &str, allow_expired_pinned_certificate: bool) -> CxfProfileConfig {
+    CxfProfileConfig {
+        name: name.to_string(),
+        address: None,
+        wsdl_path: "/etc/cxf/baleares.wsdl".to_string(),
+        service_name: "Svc".to_string(),
+        port_name: "Port".to_string(),
+        security: CxfSecurityFields {
+            truststore_path: Some("/etc/cxf/truststore.jks".to_string()),
+            truststore_password: Some("changeit".to_string()),
+            allow_expired_pinned_certificate,
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn pool_env_emits_allow_expired_pinned_certificate_only_when_true() {
+    let opted_in = crate::pool::profile_env_vars_for(&[expired_pinned_profile("opted", true)]);
+    let config = crate::pool::bridge_config_with_env_trace(
+        "slot-true",
+        PathBuf::from("/tmp/cxf-bridge"),
+        &opted_in,
+        None,
+        15_000,
+        None,
+    );
+    let env = env_map(&config);
+    assert_eq!(
+        env.get("CXF_PROFILE_OPTED_ALLOW_EXPIRED_PINNED_CERTIFICATE")
+            .copied(),
+        Some("true")
+    );
+
+    let default_off =
+        crate::pool::profile_env_vars_for(&[expired_pinned_profile("default", false)]);
+    let config = crate::pool::bridge_config_with_env_trace(
+        "slot-false",
+        PathBuf::from("/tmp/cxf-bridge"),
+        &default_off,
+        None,
+        15_000,
+        None,
+    );
+    let env = env_map(&config);
+    assert!(
+        !env.keys()
+            .any(|key| key.ends_with("ALLOW_EXPIRED_PINNED_CERTIFICATE")),
+        "default-off profile must not emit the opt-in: {env:?}"
     );
 }
 
