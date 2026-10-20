@@ -89,6 +89,8 @@
 - name: doc-build
   run: RUSTDOCFLAGS="-D warnings" cargo doc -p camel-api -p camel-core
     -p camel-builder -p camel-dsl -p camel-endpoint --no-deps
+- name: doc-guide-test   # only when docs/** changed; else "N/A — no docs changed"
+  run: cd docs && mdbook test
 - name: cargo-audit
   run: cargo audit
 ```
