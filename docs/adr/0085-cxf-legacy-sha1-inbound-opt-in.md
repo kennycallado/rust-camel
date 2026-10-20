@@ -13,7 +13,7 @@ emergency buses. The partner runs the PUBLISHED native
 `http://www.w3.org/2000/09/xmldsig#rsa-sha1` (digest `sha1`, exclusive
 c14n). Every inbound message fails with:
 
-```
+```text
 It is forbidden to use algorithm http://www.w3.org/2000/09/xmldsig#rsa-sha1 when secure validation is enabled
 ```
 
