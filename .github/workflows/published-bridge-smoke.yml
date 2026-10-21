@@ -61,6 +61,7 @@ env:
   # Same disk mitigation as ci.yml full-tests-linux.
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_BACKTRACE: "1"
 
 jobs:
   smoke:
@@ -140,21 +141,33 @@ jobs:
       - name: WSS e2e subset (LEG A + LEG C) against the published binary
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          # Stream the test output. A buffered `out="$(...)"` capture makes a hung
+          # test invisible in the log: that hid a 60-minute stall behind an empty
+          # step. tee keeps the live log and the file the assertions read.
+          log="$RUNNER_TEMP/cxf-smoke.log"
+          echo "bridge: $CAMEL_CXF_BRIDGE_BINARY_PATH"
+          ls -l "$CAMEL_CXF_BRIDGE_BINARY_PATH"
+          set +e
+          timeout --signal=TERM --kill-after=30s 2100 \
+            cargo test -p camel-test --features integration-tests-cxf --test cxf_test \
+              -- wss_e2e_leg_c cxf_native_wss_signed_call_and_verified_signer \
+                 --nocapture --test-threads=1 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::group::processes after failure"
+            ps -eo pid,etime,args | grep -i '[c]xf-bridge' || true
+            echo "::endgroup::"
+          fi
           # `cargo test <filter>` exits 0 when the filter matches zero tests, so
           # assert every expected test actually ran. Without this, a future
           # rename would silently neuter the smoke job (vacuous pass).
-          set +e
-          out="$(cargo test -p camel-test --features integration-tests-cxf --test cxf_test \
-            -- wss_e2e_leg_c cxf_native_wss_signed_call_and_verified_signer --nocapture 2>&1)"
-          status=$?
-          set -e
-          printf '%s\n' "$out"
           for name in \
             cxf_native_wss_signed_call_and_verified_signer \
             wss_e2e_leg_c_opted_in_profile_accepts_legacy_sha1 \
             wss_e2e_leg_c_default_profile_rejects_legacy_sha1; do
-            if ! grep -q "$name" <<<"$out"; then
+            if ! grep -q "$name" "$log"; then
               echo "::error::test '$name' did not run — filter matched zero tests or the test was renamed"
               exit 1
             fi
