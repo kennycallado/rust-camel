@@ -300,16 +300,17 @@ configuration, not the data plane.
 
 ## Native acceptance
 
-One-way behavior is accepted against the pinned `0.8.1` bridge rebuilt from
-source, not against a downloaded binary. Build it with
-`cargo xtask build-cxf-bridge --version 0.8.1`, then point the Rust component at
-the rebuilt binary:
+One-way behavior is accepted against a bridge built from source, not a
+downloaded binary. Build it with `cargo xtask build-cxf-bridge` without
+`--version`; the result is labelled `dev` by `build-native.sh`. Then point the
+Rust component at the rebuilt binary:
 
 ```bash
 export CAMEL_CXF_BRIDGE_BINARY_PATH=/path/to/cxf-bridge
 ```
 
-The override skips the download. The release pin is `0.8.1`.
+The override skips the download. For the current released version, use
+`camel_cxf::BRIDGE_VERSION` or the bridge release page.
 
 ## Environment Variables
 

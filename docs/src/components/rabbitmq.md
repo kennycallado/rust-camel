@@ -124,7 +124,7 @@ Credentials never render in a diagnostic. The password wrapper renders as `<reda
 
 The `concurrentConsumers` parameter spawns N parallel channel and consumer engines on the same queue. `prefetch` bounds the unacknowledged deliveries per engine. A consumer start waits up to 60 s for the connection and then runs one topology RPC bounded by 10 s.
 
-The Consumer acknowledges a delivery only after the route completes. The JMS component does the same since bridge 0.8.0.
+The Consumer acknowledges a delivery only after the route completes. The JMS component does the same.
 
 ## Producer
 

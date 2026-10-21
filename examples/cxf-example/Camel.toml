@@ -2,7 +2,7 @@
 dir = "routes"
 
 [components.cxf]
-version = "0.8.4"
+# Uses the component default from camel_cxf::BRIDGE_VERSION.
 bind_address = "http://0.0.0.0:9090/cxf"
 
 [[components.cxf.profiles]]

@@ -6,3 +6,4 @@
 //! `main.rs` consumes the same module through this lib target.
 
 pub mod archive;
+pub mod bridge_versions;

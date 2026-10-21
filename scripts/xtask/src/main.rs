@@ -13,6 +13,7 @@ mod mutants;
 mod scan_state;
 
 use xtask::archive;
+use xtask::bridge_versions;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -161,6 +162,25 @@ enum Commands {
     /// component crate source outside `#[cfg(test)]`. Components must
     /// depend on ports (camel-component-api), not concrete adapters.
     LintComponentDeps,
+    /// Lint bridge versions: parse the flat `bridges/versions.toml` registry,
+    /// compare it with the registered `BRIDGE_VERSION` constants, and reject
+    /// bridge versions in the live documentation set. With `--tag`, verify a
+    /// release tag against the registry before running both checks.
+    LintBridgeVersions {
+        /// Release tag to verify against the registry (for example
+        /// `cxf-bridge-v0.8.4`).
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// Atomically bump one bridge version in `bridges/versions.toml` and its
+    /// registered `BRIDGE_VERSION` constants, then run the bridge-version lint.
+    /// Any failure restores every target byte-for-byte.
+    BumpBridge {
+        /// Bridge to bump: `cxf`, `jms`, or `xml`.
+        bridge: String,
+        /// New semantic version (for example `0.8.5`).
+        version: String,
+    },
     /// Enforce trustpub registration manifest drift against the
     /// workspace publish order. Offline by default; `--online` adds an
     /// explicit crates.io crate-existence observation for
@@ -614,6 +634,56 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-component-deps error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintBridgeVersions { tag } => {
+            let workspace_root = workspace_root_or_exit();
+            let outcome = match bridge_versions::lint(&workspace_root, tag.as_deref()) {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    eprintln!("lint-bridge-versions error: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            if let Some(error) = &outcome.tag_error {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+
+            if outcome.findings.is_empty() {
+                println!("lint-bridge-versions: OK (no findings)");
+            } else {
+                for finding in &outcome.findings {
+                    let lexeme = &finding.token;
+                    println!(
+                        "{}:{}: {} [{}]",
+                        finding.path.display(),
+                        finding.line,
+                        finding.detail,
+                        lexeme
+                    );
+                }
+                eprintln!(
+                    "\nlint-bridge-versions: FAILED ({} findings)",
+                    outcome.findings.len()
+                );
+                std::process::exit(1);
+            }
+        }
+        Commands::BumpBridge { bridge, version } => {
+            let workspace_root = workspace_root_or_exit();
+            match bridge_versions::bump::bump_bridge(&workspace_root, &bridge, &version) {
+                Ok(report) => {
+                    println!("bumped {bridge} to {version}:");
+                    for path in &report.changed {
+                        println!("{}", path.display());
+                    }
+                }
+                Err(error) => {
+                    eprintln!("{error}");
                     std::process::exit(1);
                 }
             }

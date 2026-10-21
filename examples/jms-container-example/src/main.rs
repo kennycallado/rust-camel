@@ -13,7 +13,7 @@
 //!   `username`/`password` so the bridge can authenticate.
 //! - **Custom JMS headers**: producer sets `orderId` and `priority` on every
 //!   message and forwards them with `jmsHeaderAllowlist=orderId,priority`.
-//!   Since bridge 0.8.0 the producer forwards no user header unless the
+//!   The producer forwards no user header unless the
 //!   allowlist names it. Use valid JMS property names (no hyphens).
 //! - **Competing consumers**: two independent consumer routes (`consumer-a` and
 //!   `consumer-b`) both subscribe to the same `orders` queue. Artemis
@@ -24,7 +24,7 @@
 //! - **Topic fan-out**: a timer publishes to `jms:topic:events`; two topic
 //!   consumers each receive every message independently.
 //!
-//! ## Acknowledgement (bridge 0.8.0)
+//! ## Acknowledgement
 //!
 //! The bridge acknowledges a message only after the route completes. An `Ok`
 //! route result (including an error handled by the Dead Letter Channel)
@@ -199,7 +199,7 @@ async fn main() -> Result<(), CamelError> {
     //   priority  — alternates between "high" and "normal"
     //
     // `jmsHeaderAllowlist` forwards these headers through the broker; without
-    // it bridge 0.8.0 drops every user header. They are visible in the
+    // the bridge drops every user header. They are visible in the
     // consumer log output (showHeaders=true).
     // -----------------------------------------------------------------------
 

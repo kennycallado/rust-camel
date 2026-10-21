@@ -123,7 +123,7 @@ use std::path::PathBuf;
 let config = XjComponentConfig {
     bridge_binary_path: Some(PathBuf::from("/opt/xml-bridge/bin/xml-bridge")),
     bridge_start_timeout_ms: 60_000,
-    bridge_version: "1.0.0".to_string(),
+    bridge_version: camel_xslt::BRIDGE_VERSION.to_string(),
     bridge_cache_dir: PathBuf::from("/tmp/camel-bridge-cache"),
 };
 ```

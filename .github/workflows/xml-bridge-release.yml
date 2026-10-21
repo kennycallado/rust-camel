@@ -10,7 +10,16 @@ permissions:
   contents: read
 
 jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Check bridge tag against registry
+        run: cargo xtask lint-bridge-versions --tag "$GITHUB_REF_NAME"
+
   build:
+    needs: guard
     strategy:
       fail-fast: false
       matrix:

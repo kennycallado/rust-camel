@@ -53,55 +53,6 @@ pub(crate) static BRIDGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(
 #[cfg(test)]
 mod bridge_client_test;
 
-/// Repo-shape guard (task 6.3; version-free): the bridge wire
-/// version pinned by this crate must equal the Gradle default fallback in
-/// `bridges/jms/build.gradle.kts`, so a partial bump (Rust or Gradle only)
-/// fails loudly instead of shipping a mismatched pair. Reads the build source
-/// instead of a literal, so a version bump never has to touch a test.
-/// Skips when the workspace checkout is absent (e.g. a packaged crate).
-#[cfg(test)]
-mod bridge_version_test {
-    use std::path::{Path, PathBuf};
-
-    #[test]
-    fn bridge_version_pin_matches_gradle_default() {
-        let Some(build_gradle) = locate_build_gradle() else {
-            eprintln!("skipping: bridges/jms/build.gradle.kts not found from this checkout");
-            return;
-        };
-        let src = std::fs::read_to_string(&build_gradle)
-            .unwrap_or_else(|e| panic!("read {}: {e}", build_gradle.display()));
-        let line = src
-            .lines()
-            .find(|l| l.contains("findProperty(\"version\")"))
-            .unwrap_or_else(|| panic!("no version fallback line in {}", build_gradle.display()));
-        let fallback = line
-            .rsplit("?:")
-            .next()
-            .and_then(|s| s.split('"').nth(1))
-            .unwrap_or_else(|| panic!("version fallback string missing in: {}", line.trim()));
-        assert_eq!(
-            crate::BRIDGE_VERSION,
-            fallback,
-            "BRIDGE_VERSION must match the Gradle default fallback in bridges/jms/build.gradle.kts"
-        );
-    }
-
-    /// Walk up from the crate directory looking for the bridge build source.
-    fn locate_build_gradle() -> Option<PathBuf> {
-        let mut dir: Option<&Path> = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
-        for _ in 0..6 {
-            let d = dir?;
-            let candidate = d.join("bridges/jms/build.gradle.kts");
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-            dir = d.parent();
-        }
-        None
-    }
-}
-
 pub mod proto {
     // Generated from the crate-local `proto/jms_bridge.proto`, which mirrors
     // the Java bridge proto (minus the Java `option` lines) and carries the

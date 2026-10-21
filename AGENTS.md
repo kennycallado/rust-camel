@@ -78,6 +78,8 @@
   run: cargo xtask lint-publish-registration
 - name: lint-component-deps
   run: cargo xtask lint-component-deps
+- name: lint-bridge-versions
+  run: cargo xtask lint-bridge-versions
 - name: lint-gate-forwarding
   run: cargo xtask lint-gate-forwarding
 - name: lint-context-citations

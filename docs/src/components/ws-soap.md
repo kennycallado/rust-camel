@@ -164,7 +164,7 @@ The example ships with `Camel.toml` that declares the profile:
 
 ```toml
 [components.cxf]
-version = "0.8.4"
+# Uses the component default from camel_cxf::BRIDGE_VERSION.
 bind_address = "http://0.0.0.0:9090/cxf"
 
 [[components.cxf.profiles]]
@@ -462,7 +462,7 @@ Diagnosis: if a profile keeps answering 503 while its route is started, check th
 
 Signer metadata (Body `SIGN` coverage) is an integrity signal, not authentication: the exported `SignerIdentity` fields are exchange properties only and never a principal or authenticated identity (ADR-0032). One-way input-only operations are supported and return an empty HTTP 202 ACK after correlated completion (see [One-way consumer operations](#one-way-consumer-operations)).
 
-CXF and XML bridge release pins are `0.8.4` (CXF) and `0.8.1` (XML). Per-profile consumer dispatch needs the CXF bridge `0.8.3` or newer. `allow_expired_pinned_certificate` needs `0.8.4` or newer. One-way acceptance and the mission-361 regressions run against the pinned `0.8.4` bridge rebuilt from source: set `CAMEL_CXF_BRIDGE_BINARY_PATH` to the rebuilt `cxf-bridge` binary to use it. Publication of bridge tags and public release assets is an owner-only action (the `*-bridge-release` workflows build and publish on tag push).
+Per-profile consumer dispatch, `allow_expired_pinned_certificate`, and one-way operations are current capabilities of the CXF bridge. For the current bridge version, use `camel_cxf::BRIDGE_VERSION` or the bridge release page. One-way acceptance and the mission-361 regressions run against a bridge rebuilt from source: set `CAMEL_CXF_BRIDGE_BINARY_PATH` to the rebuilt `cxf-bridge` binary to use it. Publication of bridge tags and public release assets is an owner-only action (the `*-bridge-release` workflows build and publish on tag push).
 
 The XML parser boundary lives in the Java bridge. The Rust component does not run an XML parser. Audit parser hardening in the bridge process. WSDL files also live in the bridge. The Rust side reads them as paths and forwards them to the bridge over the environment.
 

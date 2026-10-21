@@ -4,7 +4,18 @@ plugins {
     id("com.diffplug.spotless") version "6.25.0"
 }
 
-version = project.findProperty("version")?.toString() ?: "0.8.4"
+version = providers.gradleProperty("version").orNull ?: run {
+    val bridgeRegistry = rootDir.resolve("../versions.toml")
+    check(bridgeRegistry.isFile) {
+        "bridge version registry not found: ${bridgeRegistry.absolutePath}"
+    }
+    val bridgeKey = "cxf"
+    Regex("""(?m)^\s*${Regex.escape(bridgeKey)}\s*=\s*"([^"]+)"\s*$""")
+        .find(bridgeRegistry.readText())
+        ?.groupValues
+        ?.get(1)
+        ?: error("bridge version key '$bridgeKey' not found in ${bridgeRegistry.absolutePath}")
+}
 
 repositories {
     mavenCentral()

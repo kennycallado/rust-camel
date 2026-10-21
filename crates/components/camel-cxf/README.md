@@ -30,7 +30,7 @@ Bridge-based architecture: the Rust component communicates with a Quarkus/GraalV
 
 ```toml
 [components.cxf]
-version = "0.8.4"
+# Uses the component default from camel_cxf::BRIDGE_VERSION.
 
 [[components.cxf.profiles]]
 name = "baleares"

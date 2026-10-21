@@ -32,3 +32,6 @@ ts-rs = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+noyalib.workspace = true
