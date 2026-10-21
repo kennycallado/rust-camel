@@ -1,35 +1,43 @@
-use super::{LinkAwareSampler, OtelService};
-use crate::config::OtelSampler;
-use opentelemetry::Context;
+use super::OtelService;
+use crate::config::{OtelConfig, OtelSampler};
 use opentelemetry::trace::{
     Link, Span, SpanContext, SpanId, SpanKind, TraceContextExt, TraceFlags, TraceId, TraceState,
     Tracer, TracerProvider,
 };
+use opentelemetry::{Context, KeyValue};
 use opentelemetry_sdk::trace::{
     InMemorySpanExporter, Sampler, SamplingDecision, SdkTracerProvider, ShouldSample,
 };
 
 #[test]
 fn sampler_always_on_wraps_parent_based() {
-    let result = OtelService::to_sdk_sampler(&OtelSampler::AlwaysOn);
+    let config =
+        OtelConfig::new("http://localhost:4317", "svc").with_sampler(OtelSampler::AlwaysOn);
+    let result = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
     assert!(matches!(result, Sampler::ParentBased(_)));
 }
 
 #[test]
 fn sampler_ratio_based_wraps_parent_based() {
-    let result = OtelService::to_sdk_sampler(&OtelSampler::TraceIdRatioBased(0.5));
+    let config = OtelConfig::new("http://localhost:4317", "svc")
+        .with_sampler(OtelSampler::TraceIdRatioBased(0.5));
+    let result = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
     assert!(matches!(result, Sampler::ParentBased(_)));
 }
 
 #[test]
 fn sampler_always_off_wraps_parent_based() {
-    let result = OtelService::to_sdk_sampler(&OtelSampler::AlwaysOff);
+    let config =
+        OtelConfig::new("http://localhost:4317", "svc").with_sampler(OtelSampler::AlwaysOff);
+    let result = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
     assert!(matches!(result, Sampler::ParentBased(_)));
 }
 
 #[test]
 fn sampler_unsampled_parent_drops_child() {
-    let sampler = OtelService::to_sdk_sampler(&OtelSampler::TraceIdRatioBased(1.0));
+    let config = OtelConfig::new("http://localhost:4317", "svc")
+        .with_sampler(OtelSampler::TraceIdRatioBased(1.0));
+    let sampler = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
     let parent = SpanContext::new(
         TraceId::from_hex("12345678901234567890123456789012").expect("valid trace id"),
         SpanId::from_hex("1234567890123456").expect("valid span id"),
@@ -51,7 +59,9 @@ fn sampler_unsampled_parent_drops_child() {
 
 #[test]
 fn sampler_sampled_parent_records_child_regardless_of_ratio() {
-    let sampler = OtelService::to_sdk_sampler(&OtelSampler::TraceIdRatioBased(0.0));
+    let config = OtelConfig::new("http://localhost:4317", "svc")
+        .with_sampler(OtelSampler::TraceIdRatioBased(0.0));
+    let sampler = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
     let parent = SpanContext::new(
         TraceId::from_hex("12345678901234567890123456789012").expect("valid trace id"),
         SpanId::from_hex("1234567890123456").expect("valid span id"),
@@ -73,7 +83,9 @@ fn sampler_sampled_parent_records_child_regardless_of_ratio() {
 
 #[test]
 fn sampler_root_ratio_delegate_drops_at_zero() {
-    let sampler = OtelService::to_sdk_sampler(&OtelSampler::TraceIdRatioBased(0.0));
+    let config = OtelConfig::new("http://localhost:4317", "svc")
+        .with_sampler(OtelSampler::TraceIdRatioBased(0.0));
+    let sampler = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
     let result = sampler.should_sample(
         None,
         TraceId::from_hex("abcdefabcdefabcdefabcdefabcdefab").expect("valid trace id"),
@@ -116,30 +128,30 @@ fn sample_with_link(sampler: &dyn ShouldSample, link: SpanContext) -> SamplingDe
 
 #[test]
 fn link_aware_root_follows_sampled_link() {
-    let sampler = Sampler::ParentBased(Box::new(LinkAwareSampler {
-        inner: Sampler::AlwaysOff,
-    }));
+    let config =
+        OtelConfig::new("http://localhost:4317", "svc").with_sampler(OtelSampler::AlwaysOff);
+    let sampler = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
     let decision = sample_with_link(&sampler, link_target(true));
     assert!(matches!(decision, SamplingDecision::RecordAndSample));
 }
 
 #[test]
 fn link_aware_root_follows_unsampled_link() {
-    let sampler = Sampler::ParentBased(Box::new(LinkAwareSampler {
-        inner: Sampler::AlwaysOn,
-    }));
+    let config =
+        OtelConfig::new("http://localhost:4317", "svc").with_sampler(OtelSampler::AlwaysOn);
+    let sampler = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
     let decision = sample_with_link(&sampler, link_target(false));
     assert!(matches!(decision, SamplingDecision::Drop));
 }
 
 #[test]
 fn link_aware_root_without_links_delegates_inner() {
-    let off = Sampler::ParentBased(Box::new(LinkAwareSampler {
-        inner: Sampler::AlwaysOff,
-    }));
-    let on = Sampler::ParentBased(Box::new(LinkAwareSampler {
-        inner: Sampler::AlwaysOn,
-    }));
+    let off_config =
+        OtelConfig::new("http://localhost:4317", "svc").with_sampler(OtelSampler::AlwaysOff);
+    let on_config =
+        OtelConfig::new("http://localhost:4317", "svc").with_sampler(OtelSampler::AlwaysOn);
+    let off = OtelService::to_sdk_sampler(&off_config).expect("valid sampler config");
+    let on = OtelService::to_sdk_sampler(&on_config).expect("valid sampler config");
     assert!(matches!(
         off.should_sample(
             None,
@@ -170,10 +182,11 @@ fn link_aware_root_without_links_delegates_inner() {
 fn provider_mints_linked_root_with_parent_flag() {
     for link_sampled in [true, false] {
         let exporter = InMemorySpanExporter::default();
+        let config =
+            OtelConfig::new("http://localhost:4317", "svc").with_sampler(OtelSampler::AlwaysOff);
+        let sampler = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
         let provider = SdkTracerProvider::builder()
-            .with_sampler(Sampler::ParentBased(Box::new(LinkAwareSampler {
-                inner: Sampler::AlwaysOff,
-            })))
+            .with_sampler(sampler)
             .with_simple_exporter(exporter.clone())
             .build();
         let tracer = provider.tracer("splittrace-item");
@@ -212,7 +225,10 @@ fn to_sdk_sampler_wraps_root_link_aware() {
         OtelSampler::AlwaysOff,
         OtelSampler::TraceIdRatioBased(1.0),
     ] {
-        let Sampler::ParentBased(delegate) = OtelService::to_sdk_sampler(&sampler) else {
+        let config = OtelConfig::new("http://localhost:4317", "svc").with_sampler(sampler.clone());
+        let Sampler::ParentBased(delegate) =
+            OtelService::to_sdk_sampler(&config).expect("valid sampler config")
+        else {
             panic!("to_sdk_sampler must wrap {sampler:?} in ParentBased");
         };
         let decision = sample_with_link(delegate.as_ref(), unsampled.clone());
@@ -221,4 +237,113 @@ fn to_sdk_sampler_wraps_root_link_aware() {
             "unsampled link must drop the root span even under {sampler:?}"
         );
     }
+}
+
+#[test]
+fn exclude_routes_drops_matching_root() {
+    let config = OtelConfig::new("http://localhost:4317", "svc")
+        .with_sampler(OtelSampler::AlwaysOn)
+        .with_exclude_routes(vec!["skip-request*".into()]);
+    let sampler = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
+    let result = sampler.should_sample(
+        None,
+        TraceId::from_hex("abcdefabcdefabcdefabcdefabcdefab").expect("valid trace id"),
+        "skip-request",
+        &SpanKind::Internal,
+        &[KeyValue::new("route_id", "skip-request")],
+        &[],
+    );
+    assert!(matches!(result.decision, SamplingDecision::Drop));
+}
+
+#[test]
+fn exclude_routes_keeps_other_roots() {
+    let config = OtelConfig::new("http://localhost:4317", "svc")
+        .with_sampler(OtelSampler::AlwaysOn)
+        .with_exclude_routes(vec!["skip-request*".into()]);
+    let sampler = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
+    let result = sampler.should_sample(
+        None,
+        TraceId::from_hex("abcdefabcdefabcdefabcdefabcdefab").expect("valid trace id"),
+        "orders-in",
+        &SpanKind::Internal,
+        &[KeyValue::new("route_id", "orders-in")],
+        &[],
+    );
+    assert!(matches!(result.decision, SamplingDecision::RecordAndSample));
+}
+
+#[test]
+fn sampled_parent_wins_over_exclusion() {
+    let config = OtelConfig::new("http://localhost:4317", "svc")
+        .with_sampler(OtelSampler::AlwaysOn)
+        .with_exclude_routes(vec!["skip-*".into()]);
+    let sampler = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
+    let parent = SpanContext::new(
+        TraceId::from_hex("12345678901234567890123456789012").expect("valid trace id"),
+        SpanId::from_hex("1234567890123456").expect("valid span id"),
+        TraceFlags::SAMPLED,
+        true,
+        TraceState::default(),
+    );
+    let cx = Context::new().with_remote_span_context(parent);
+    let result = sampler.should_sample(
+        Some(&cx),
+        TraceId::from_hex("abcdefabcdefabcdefabcdefabcdefab").expect("valid trace id"),
+        "child",
+        &SpanKind::Internal,
+        &[KeyValue::new("route_id", "skip-me")],
+        &[],
+    );
+    assert!(matches!(result.decision, SamplingDecision::RecordAndSample));
+}
+
+#[test]
+fn linked_split_item_follows_origin() {
+    let config = OtelConfig::new("http://localhost:4317", "svc")
+        .with_sampler(OtelSampler::AlwaysOn)
+        .with_exclude_routes(vec!["skip-*".into()]);
+    let sampler = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
+    let result = sampler.should_sample(
+        None,
+        TraceId::from_hex("abcdefabcdefabcdefabcdefabcdefab").expect("valid trace id"),
+        "item",
+        &SpanKind::Internal,
+        &[KeyValue::new("route_id", "skip-me")],
+        &[Link::new(link_target(false), Vec::new(), 0)],
+    );
+    assert!(matches!(result.decision, SamplingDecision::Drop));
+}
+
+#[test]
+fn sampled_link_wins_over_exclusion() {
+    let config = OtelConfig::new("http://localhost:4317", "svc")
+        .with_sampler(OtelSampler::AlwaysOn)
+        .with_exclude_routes(vec!["skip-*".into()]);
+    let sampler = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
+    let result = sampler.should_sample(
+        None,
+        TraceId::from_hex("abcdefabcdefabcdefabcdefabcdefab").expect("valid trace id"),
+        "item",
+        &SpanKind::Internal,
+        &[KeyValue::new("route_id", "skip-me")],
+        &[Link::new(link_target(true), Vec::new(), 0)],
+    );
+    assert!(matches!(result.decision, SamplingDecision::RecordAndSample));
+}
+
+#[test]
+fn exclude_routes_empty_list_delegates_to_inner() {
+    let config =
+        OtelConfig::new("http://localhost:4317", "svc").with_sampler(OtelSampler::AlwaysOn);
+    let sampler = OtelService::to_sdk_sampler(&config).expect("valid sampler config");
+    let result = sampler.should_sample(
+        None,
+        TraceId::from_hex("abcdefabcdefabcdefabcdefabcdefab").expect("valid trace id"),
+        "root",
+        &SpanKind::Internal,
+        &[KeyValue::new("route_id", "any-route")],
+        &[],
+    );
+    assert!(matches!(result.decision, SamplingDecision::RecordAndSample));
 }

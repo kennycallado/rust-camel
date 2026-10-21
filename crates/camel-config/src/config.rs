@@ -501,6 +501,9 @@ pub struct OtelCamelConfig {
 
     #[serde(default)]
     pub resource_attrs: HashMap<String, String>,
+
+    #[serde(default)]
+    pub exclude_routes: Vec<String>,
 }
 
 impl Default for OtelCamelConfig {
@@ -515,6 +518,7 @@ impl Default for OtelCamelConfig {
             metrics_interval_ms: default_otel_metrics_interval_ms(),
             logs_enabled: true,
             resource_attrs: HashMap::new(),
+            exclude_routes: Vec::new(),
         }
     }
 }
@@ -2485,12 +2489,20 @@ impl CamelConfig {
                 ));
             }
         }
-        if let Some(ref otel) = self.observability.otel
-            && otel.metrics_interval_ms == 0
-        {
-            return Err(CamelError::Config(
-                "observability.otel.metrics_interval_ms must be > 0".to_string(),
-            ));
+        if let Some(ref otel) = self.observability.otel {
+            if otel.metrics_interval_ms == 0 {
+                return Err(CamelError::Config(
+                    "observability.otel.metrics_interval_ms must be > 0".to_string(),
+                ));
+            }
+            for pattern in &otel.exclude_routes {
+                if let Err(e) = glob::Pattern::new(pattern) {
+                    return Err(CamelError::Config(format!(
+                        "invalid [observability.otel] exclude_routes pattern '{}': {}",
+                        pattern, e
+                    )));
+                }
+            }
         }
         if let PlatformCamelConfig::Kubernetes(ref k8s) = self.platform {
             if k8s.lease_duration_secs == 0 {

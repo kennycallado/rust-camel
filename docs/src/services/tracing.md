@@ -43,6 +43,27 @@ metrics automatically.
 
 See [camel-otel CONTEXT.md](https://github.com/kennycallado/rust-camel/blob/main/crates/services/camel-otel/CONTEXT.md) for the full operational invariants.
 
+## Excluding routes from tracing
+
+Set `exclude_routes` to keep selected routes out of the exported trace. The
+value is a list of glob patterns. The sampler matches each pattern,
+case-sensitively, against the full route id. When a matching route starts a
+new trace, its root and child spans are not exported. Metrics are unaffected.
+An invalid pattern fails config load and the error names the pattern, even
+when `enabled = false`. The default is an empty list, so no route is excluded.
+
+```toml
+[observability.otel]
+enabled = true
+endpoint = "http://localhost:4317"
+exclude_routes = ["*-inbox-worker", "health-*"]
+```
+
+Parent-based sampling is unchanged. A sampled inbound parent wins over route
+exclusion, and so does a sampled link (for example a split item linked to a
+sampled origin). Routes reached from an excluded route through `direct:` or
+`seda:` are children of the dropped root, so they inherit the drop.
+
 ## Propagation helpers
 
 The crate provides helpers that bridge W3C trace context between transport headers and an `Exchange`:

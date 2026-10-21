@@ -25,14 +25,18 @@ async-trait.workspace = true
 thiserror.workspace = true
 url.workspace = true
 dashmap.workspace = true
+glob = { workspace = true }
 
 [dev-dependencies]
 camel-core.workspace = true
 camel-builder.workspace = true
+camel-component-timer = { workspace = true }
+camel-processor = { workspace = true }
 tokio = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tower = { workspace = true }
 serial_test = "4"
+tracing-opentelemetry = { workspace = true }
 opentelemetry-proto = { version = "0.33", default-features = false, features = [
     "gen-tonic",
     "trace",

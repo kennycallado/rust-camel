@@ -34,6 +34,7 @@ pub struct OtelConfig {
     pub resource_attrs: Vec<(String, String)>,
     pub logs_enabled: bool,
     pub metrics_interval_ms: u64,
+    pub exclude_routes: Vec<String>,
 }
 
 impl fmt::Debug for OtelConfig {
@@ -46,6 +47,7 @@ impl fmt::Debug for OtelConfig {
             .field("resource_attrs", &"[REDACTED]")
             .field("logs_enabled", &self.logs_enabled)
             .field("metrics_interval_ms", &self.metrics_interval_ms)
+            .field("exclude_routes", &self.exclude_routes)
             .finish()
     }
 }
@@ -60,6 +62,7 @@ impl OtelConfig {
             resource_attrs: vec![],
             logs_enabled: true,
             metrics_interval_ms: 60000,
+            exclude_routes: Vec::new(),
         }
     }
 
@@ -88,6 +91,11 @@ impl OtelConfig {
         self
     }
 
+    pub fn with_exclude_routes(mut self, patterns: Vec<String>) -> Self {
+        self.exclude_routes = patterns;
+        self
+    }
+
     /// Validate the configuration, returning an error if any field is invalid.
     pub fn validate(&self) -> Result<(), camel_api::CamelError> {
         // service_name must be non-empty
@@ -106,6 +114,15 @@ impl OtelConfig {
         url::Url::parse(self.endpoint.trim()).map_err(|e| {
             camel_api::CamelError::Config(format!("endpoint is not a valid URL: {}", e))
         })?;
+
+        for pattern in &self.exclude_routes {
+            glob::Pattern::new(pattern).map_err(|e| {
+                camel_api::CamelError::Config(format!(
+                    "invalid [observability.otel] exclude_routes pattern '{}': {}",
+                    pattern, e
+                ))
+            })?;
+        }
 
         Ok(())
     }
@@ -174,6 +191,28 @@ mod tests {
             service_name: "myservice".into(),
             ..OtelConfig::new("http://localhost:4317", "myservice")
         };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn otel_config_rejects_invalid_exclude_pattern() {
+        let cfg = OtelConfig::new("http://localhost:4317", "svc")
+            .with_exclude_routes(vec!["[unclosed".into()]);
+        match cfg.validate() {
+            Err(camel_api::CamelError::Config(msg)) => {
+                assert!(
+                    msg.contains("[unclosed"),
+                    "message names the pattern: {msg}"
+                );
+            }
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn otel_config_accepts_valid_exclude_patterns() {
+        let cfg = OtelConfig::new("http://localhost:4317", "svc")
+            .with_exclude_routes(vec!["orders-*".into(), "exact-route".into()]);
         assert!(cfg.validate().is_ok());
     }
 

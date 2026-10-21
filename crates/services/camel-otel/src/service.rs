@@ -50,6 +50,9 @@ use crate::config::{OtelConfig, OtelProtocol, OtelSampler};
 #[path = "exporter_retry_tests.rs"]
 mod exporter_retry_tests;
 #[cfg(test)]
+#[path = "route_exclusion_tests.rs"]
+mod route_exclusion_tests;
+#[cfg(test)]
 #[path = "sampler_tests.rs"]
 mod sampler_tests;
 #[cfg(test)]
@@ -102,7 +105,7 @@ pub struct OtelService {
 /// without links delegate to the inner root sampler unchanged.
 #[derive(Clone, Debug)]
 struct LinkAwareSampler {
-    inner: Sampler,
+    inner: RouteExcludeSampler,
 }
 
 impl ShouldSample for LinkAwareSampler {
@@ -143,6 +146,60 @@ impl ShouldSample for LinkAwareSampler {
             ),
         }
     }
+}
+
+/// Root-sampler wrapper: a parentless span whose creation attributes
+/// carry a `route_id` matching one of the configured glob patterns is
+/// dropped. Non-matching roots (and roots without `route_id`) delegate
+/// to the inner root sampler unchanged.
+#[derive(Clone, Debug)]
+struct RouteExcludeSampler {
+    matchers: Vec<glob::Pattern>,
+    inner: Sampler,
+}
+
+impl ShouldSample for RouteExcludeSampler {
+    fn should_sample(
+        &self,
+        parent_context: Option<&Context>,
+        trace_id: TraceId,
+        name: &str,
+        span_kind: &SpanKind,
+        attributes: &[KeyValue],
+        links: &[Link],
+    ) -> SamplingResult {
+        if let Some(route_id) = attributes.iter().find(|kv| kv.key.as_str() == "route_id")
+            && self
+                .matchers
+                .iter()
+                .any(|matcher| matcher.matches(route_id.value.as_str().as_ref()))
+        {
+            let trace_state = parent_context
+                .map(|cx| cx.span().span_context().trace_state().clone())
+                .unwrap_or_default();
+            return SamplingResult {
+                decision: SamplingDecision::Drop,
+                attributes: Vec::new(),
+                trace_state,
+            };
+        }
+        self.inner
+            .should_sample(parent_context, trace_id, name, span_kind, attributes, links)
+    }
+}
+
+fn compile_exclude_patterns(patterns: &[String]) -> Result<Vec<glob::Pattern>, CamelError> {
+    patterns
+        .iter()
+        .map(|pattern| {
+            glob::Pattern::new(pattern).map_err(|e| {
+                CamelError::Config(format!(
+                    "invalid [observability.otel] exclude_routes pattern '{}': {}",
+                    pattern, e
+                ))
+            })
+        })
+        .collect()
 }
 
 impl OtelService {
@@ -347,8 +404,10 @@ impl OtelService {
 
     /// Build and install the global TracerProvider early.
     ///
-    /// Must be called before `init_tracing_subscriber()` so that
-    /// `tracing_opentelemetry::layer()` picks up the global provider.
+    /// Must be called before route spans are created: the engine mints spans
+    /// through the global OTel tracer. `tracing_opentelemetry::layer()` is
+    /// constructed with a no-op tracer by default and does NOT read the
+    /// global provider.
     pub fn init_tracer_provider(&mut self) -> Result<(), CamelError> {
         self.validate_config()?;
 
@@ -358,7 +417,7 @@ impl OtelService {
 
         let resource = self.build_resource();
         let span_exporter = self.build_span_exporter()?;
-        let sampler = Self::to_sdk_sampler(&self.config.sampler);
+        let sampler = Self::to_sdk_sampler(&self.config)?;
 
         let tracer_provider = SdkTracerProvider::builder()
             .with_sampler(sampler)
@@ -391,26 +450,22 @@ impl OtelService {
         Resource::builder().with_attributes(attrs).build()
     }
 
-    /// Convert `OtelSampler` to a parent-based SDK sampler.
+    /// Convert `OtelConfig` to a parent-based SDK sampler.
     ///
     /// Children inherit the parent sampling decision; an unsampled parent
-    /// records nothing. The root delegate is link-aware: a parentless span
-    /// built with links follows the first link's sampling flag (splittrace
-    /// per-item root spans).
-    fn to_sdk_sampler(sampler: &OtelSampler) -> Sampler {
-        match sampler {
-            OtelSampler::AlwaysOn => Sampler::ParentBased(Box::new(LinkAwareSampler {
-                inner: Sampler::AlwaysOn,
-            })),
-            OtelSampler::AlwaysOff => Sampler::ParentBased(Box::new(LinkAwareSampler {
-                inner: Sampler::AlwaysOff,
-            })),
-            OtelSampler::TraceIdRatioBased(ratio) => {
-                Sampler::ParentBased(Box::new(LinkAwareSampler {
-                    inner: Sampler::TraceIdRatioBased(*ratio),
-                }))
-            }
-        }
+    /// records nothing. The root delegate is link-aware (a parentless span
+    /// built with links follows the first link's sampling flag, splittrace
+    /// per-item root spans), then applies configured route exclusions.
+    fn to_sdk_sampler(config: &OtelConfig) -> Result<Sampler, CamelError> {
+        let matchers = compile_exclude_patterns(&config.exclude_routes)?;
+        let inner = match config.sampler {
+            OtelSampler::AlwaysOn => Sampler::AlwaysOn,
+            OtelSampler::AlwaysOff => Sampler::AlwaysOff,
+            OtelSampler::TraceIdRatioBased(ratio) => Sampler::TraceIdRatioBased(ratio),
+        };
+        Ok(Sampler::ParentBased(Box::new(LinkAwareSampler {
+            inner: RouteExcludeSampler { matchers, inner },
+        })))
     }
 
     /// Validate the configuration before starting.
@@ -467,7 +522,7 @@ impl Lifecycle for OtelService {
 
         // Build and install TracerProvider (if not already initialized early)
         if self.tracer_provider.is_none() {
-            let sampler = Self::to_sdk_sampler(&self.config.sampler);
+            let sampler = Self::to_sdk_sampler(&self.config)?;
 
             let tracer_provider = match self.build_tracer_provider(sampler, resource.clone()) {
                 Ok(tp) => tp,

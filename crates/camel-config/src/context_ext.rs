@@ -669,8 +669,9 @@ impl CamelConfig {
 
         let tracer_config = config.observability.tracer.clone();
 
-        // Create OtelService *before* subscriber so providers are available
-        // for the tracing-opentelemetry layer and the log bridge.
+        // Create OtelService *before* subscriber so the logger provider is
+        // available for the log bridge and the tracer provider is installed
+        // before any route span is created.
         #[cfg(feature = "otel")]
         let otel_service_opt = if otel_enabled {
             let otel_cfg = config.observability.otel.as_ref().unwrap(); // allow-unwrap
@@ -693,7 +694,8 @@ impl CamelConfig {
                 .with_protocol(protocol)
                 .with_sampler(sampler)
                 .with_logs_enabled(otel_cfg.logs_enabled)
-                .with_metrics_interval_ms(otel_cfg.metrics_interval_ms);
+                .with_metrics_interval_ms(otel_cfg.metrics_interval_ms)
+                .with_exclude_routes(otel_cfg.exclude_routes.clone());
 
             for (key, value) in &otel_cfg.resource_attrs {
                 otel_config = otel_config.with_resource_attr(key, value);
@@ -704,8 +706,10 @@ impl CamelConfig {
             // Initialize LoggerProvider early so the log bridge can attach to the subscriber
             let logger_provider = otel_service.init_logger_provider()?;
 
-            // Initialize TracerProvider early so the tracing-opentelemetry layer
-            // picks up the global tracer provider at subscriber install time
+            // Initialize TracerProvider early so the global tracer provider exists
+            // before route spans are created (the engine mints them through the
+            // global tracer). The tracing-opentelemetry layer does not read it:
+            // `layer()` is built with a no-op tracer.
             otel_service.init_tracer_provider()?;
 
             Some((otel_service, logger_provider))

@@ -381,3 +381,55 @@ fn test_config_valid_datasources_pass() {
     };
     assert!(config.validate().is_ok());
 }
+
+#[test]
+fn invalid_glob_fails_config_load() {
+    use std::io::Write;
+
+    let mut file = tempfile::NamedTempFile::new().expect("temp file");
+    write!(
+        file,
+        "[observability.otel]\nenabled = false\nexclude_routes = [\"[unclosed\"]\n"
+    )
+    .expect("write temp config");
+
+    let err = CamelConfig::from_file(file.path().to_str().expect("utf-8 path"))
+        .expect_err("invalid glob must fail load");
+    let ConfigError::Message(msg) = err else {
+        panic!("expected ConfigError::Message, got: {err:?}");
+    };
+    assert!(
+        msg.contains("invalid [observability.otel] exclude_routes pattern '[unclosed'"),
+        "error must name the invalid pattern, got: {msg}"
+    );
+}
+
+#[test]
+fn invalid_glob_fails_config_validation() {
+    let config = CamelConfig {
+        observability: ObservabilityConfig {
+            otel: Some(OtelCamelConfig {
+                exclude_routes: vec!["[unclosed".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..CamelConfig::default()
+    };
+
+    let err = config
+        .validate()
+        .expect_err("invalid glob must fail validation");
+    let CamelError::Config(msg) = err else {
+        panic!("expected CamelError::Config, got: {err:?}");
+    };
+    assert!(
+        msg.contains("[unclosed"),
+        "error must name the invalid pattern, got: {msg}"
+    );
+}
+
+#[test]
+fn exclude_routes_default_empty() {
+    assert!(OtelCamelConfig::default().exclude_routes.is_empty());
+}

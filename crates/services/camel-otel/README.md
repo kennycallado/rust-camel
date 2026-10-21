@@ -92,6 +92,7 @@ region = "us-east-1"
 | `metrics_interval_ms` | `60000` | Metrics export interval in ms |
 | `logs_enabled` | `true` | Export logs via OTLP |
 | `resource_attrs` | `{}` | Custom resource attributes |
+| `exclude_routes` | `[]` | Glob patterns (case-sensitive, full route-id match); matching routes that start a trace export no spans; metrics kept |
 
 ## OtelService
 

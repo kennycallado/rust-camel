@@ -47,7 +47,7 @@ _Avoid_: tracing middleware, header copier
   providers and emits one `warn!`. Stopping explicitly is still preferred
   (graceful, observable), but drop-without-stop no longer leaks batch-exporter
   tasks.
-- **Sampling is root-only.** The configured sampler decides ROOT spans only; children inherit the parent sampling decision. An unsampled parent records nothing, while a sampled inbound parent records children even under AlwaysOff.
+- **Sampling is root-only.** The configured sampler decides ROOT spans only; children inherit the parent sampling decision. An unsampled parent records nothing, while a sampled inbound parent records children even under AlwaysOff. Root decisions are made by `ParentBased(LinkAwareSampler(RouteExcludeSampler(root)))`: parent first, then the first link's sampled flag, then `exclude_routes` globs (matched against the `route_id` creation attribute; an empty list, the default, changes nothing). Exclusion drops spans only; metrics for an excluded route are still recorded.
 
 ## Test layout
 

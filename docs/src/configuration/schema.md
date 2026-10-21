@@ -139,6 +139,7 @@ OTLP export configuration. The protocol and sampler accept the values listed bel
 | `metrics_interval_ms` | integer (ms) | `60000` | Period for the metrics export loop. Must be `> 0`. |
 | `logs_enabled` | bool | `true` | Include log records in the OTLP stream. |
 | `resource_attrs` | table | `{}` | Extra resource attributes attached to every export. |
+| `exclude_routes` | `string[]` | `[]` | Glob patterns (case-sensitive, full match on route id). A matching route that starts a new trace keeps metrics but exports no spans; a sampled inbound parent or sampled link still wins. Invalid patterns fail config load. |
 
 ### [observability.prometheus]
 
