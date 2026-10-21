@@ -164,10 +164,17 @@ jobs:
         run: |
           set -uo pipefail
           log="$RUNNER_TEMP/cxf-smoke.log"
+          # NEVER pipe cargo output here. The spawned cxf-bridge children inherit
+          # stderr and outlive the test process, so a pipe stays open after the
+          # tests finish and the step hangs forever (that is what killed the four
+          # previous runs: "3 passed" in 2s, then silence for 60 minutes).
+          # Redirect to a file and stream it with tail; no pipe, no hang.
           setsid bash -c 'cargo test -p camel-test --features integration-tests-cxf --test cxf_test \
               -- wss_e2e_leg_c cxf_native_wss_signed_call_and_verified_signer \
-                 --nocapture --test-threads=1 2>&1 | tee "$1"' _ "$log" &
+                 --nocapture --test-threads=1 > "$1" 2>&1' _ "$log" &
           pid=$!
+          tail -n +1 --pid="$pid" -f "$log" &
+          tailpid=$!
           deadline=$((SECONDS + 600))
           while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 5; done
           if kill -0 "$pid" 2>/dev/null; then
@@ -177,14 +184,12 @@ jobs:
           else
             wait "$pid"; status=$?
           fi
+          kill "$tailpid" 2>/dev/null || true
           if [ "$status" -ne 0 ]; then
             echo "::group::processes after failure"
             ps -eo pid,etime,args | grep -i '[c]xf-bridge' || true
             echo "::endgroup::"
           fi
-          # `cargo test <filter>` exits 0 when the filter matches zero tests, so
-          # assert every expected test actually ran. Without this, a future
-          # rename would silently neuter the smoke job (vacuous pass).
           for name in \
             cxf_native_wss_signed_call_and_verified_signer \
             wss_e2e_leg_c_opted_in_profile_accepts_legacy_sha1 \
@@ -195,3 +200,8 @@ jobs:
             fi
           done
           exit "$status"
+
+      - name: Kill leftover bridge processes
+        if: always()
+        shell: bash
+        run: pkill -f 'cxf-bridge' || true
