@@ -119,6 +119,7 @@ jsonwebtoken.workspace = true
 tokio-tungstenite.workspace = true
 
 [features]
+integration-tests-cxf = ["dep:camel-component-cxf"]
 integration-tests = [
     "dep:camel-master",
     "dep:testcontainers",

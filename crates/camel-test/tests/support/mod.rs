@@ -52,7 +52,7 @@ pub async fn stage_ws_listener(host: &str) -> u16 {
     addr.port()
 }
 
-#[cfg(feature = "integration-tests")]
+#[cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
 use camel_api::Exchange;
 
 /// Returns a handle to a dedicated background Tokio runtime used for all
@@ -70,7 +70,8 @@ use camel_api::Exchange;
 /// By running `get_or_create_slot` inside `bridge_bg_rt().spawn(...)`, all
 /// tasks that the pool spawns (dispatch tasks, health monitors) end up on this
 /// permanent runtime instead.
-#[cfg(feature = "integration-tests")]
+#[cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
+#[allow(dead_code)] // not every test binary including `support` uses it
 pub fn bridge_bg_rt() -> &'static tokio::runtime::Handle {
     use std::sync::OnceLock;
     static HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
@@ -89,7 +90,7 @@ pub fn bridge_bg_rt() -> &'static tokio::runtime::Handle {
     })
 }
 
-#[cfg(feature = "integration-tests")]
+#[cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
 use camel_component_api::CamelError;
 
 #[allow(dead_code)] // not every test binary including `support` uses it
@@ -97,10 +98,10 @@ pub fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability
     std::sync::Arc::new(camel_component_api::NoOpComponentContext)
 }
 
-#[cfg(feature = "integration-tests")]
+#[cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
 use camel_test::CamelTestContext;
 
-#[cfg(feature = "integration-tests")]
+#[cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
 use tower::ServiceExt;
 
 #[cfg(feature = "integration-tests")]
@@ -124,7 +125,7 @@ pub mod jms_crash_probe;
 #[cfg(feature = "integration-tests")]
 pub mod jms_journal;
 
-#[cfg(feature = "integration-tests")]
+#[cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
 pub mod cxf;
 
 #[cfg(feature = "integration-tests")]
@@ -157,13 +158,13 @@ pub fn init_tracing() {
         .try_init();
 }
 
-#[cfg(feature = "integration-tests")]
+#[cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
 #[allow(dead_code)]
 pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-#[cfg(feature = "integration-tests")]
+#[cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
 fn is_direct_not_registered(err: &CamelError) -> bool {
     matches!(
         err,
@@ -172,7 +173,7 @@ fn is_direct_not_registered(err: &CamelError) -> bool {
     )
 }
 
-#[cfg(feature = "integration-tests")]
+#[cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
 async fn retry_direct_not_registered<F, Fut>(
     timeout: std::time::Duration,
     poll: std::time::Duration,
@@ -200,7 +201,10 @@ where
     }
 }
 
-#[cfg(all(test, feature = "integration-tests"))]
+#[cfg(all(
+    test,
+    any(feature = "integration-tests", feature = "integration-tests-cxf")
+))]
 mod tests {
     use super::*;
 
@@ -256,7 +260,7 @@ mod tests {
     }
 }
 
-#[cfg(feature = "integration-tests")]
+#[cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
 #[allow(dead_code)]
 pub async fn send_to_direct(
     h: &CamelTestContext,

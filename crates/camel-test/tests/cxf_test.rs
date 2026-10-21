@@ -1,4 +1,4 @@
-#![cfg(feature = "integration-tests")]
+#![cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
 
 mod support;
 

@@ -17,8 +17,10 @@
 # Download URL shape (mirrors crates/services/camel-bridge/src/download.rs:253):
 #   https://github.com/kennycallado/rust-camel/releases/download/cxf-bridge-v<VER>/cxf-bridge-<VER>-linux-musl-x86_64.tar.gz
 #
-# Expected runtime: ~10-20 min cold (compiling the camel-test `cxf_test`
-# target) plus the e2e subset (three tests, each spawning the native bridge).
+# Feature scope: this smoke compiles only the `integration-tests-cxf` feature
+# of camel-test, so unrelated integration dependencies stay out of the job.
+# A local cold narrow no-run compile measured 449.262 s in mission 377; the
+# 60-minute timeout leaves headroom for CI setup, download, and the e2e tests.
 #
 # Scope of the smoke: the legacy SHA-1 boundary (LEG C: opted-in accepts,
 # default rejects) AND the mainstream SHA-2 round trip (LEG A producer signing
@@ -66,7 +68,7 @@ jobs:
     # Only smoke successful releases; manual dispatch is always allowed.
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -143,7 +145,7 @@ jobs:
           # assert every expected test actually ran. Without this, a future
           # rename would silently neuter the smoke job (vacuous pass).
           set +e
-          out="$(cargo test -p camel-test --features integration-tests --test cxf_test \
+          out="$(cargo test -p camel-test --features integration-tests-cxf --test cxf_test \
             -- wss_e2e_leg_c cxf_native_wss_signed_call_and_verified_signer --nocapture 2>&1)"
           status=$?
           set -e
