@@ -1,0 +1,13 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "expert": "experts/e_opus",
+  "bless_hash": "sha256:aaf99c4c2995a3d14c92489567ed8341dcbb5a3f1d03d1d61569daa4a85fa091",
+  "notes": "Supersedes spec blessing (hash includes tasks.md). r_glm APPROVE-WITH-FINDINGS: all 4 findings applied (CONTEXT.md stale-paragraph rewrite scoped in Task 3; plain-enum wording; Prerequisites lines; message vocabulary aligned). Plan executable verbatim by w_balanced. Span selection deterministic: options order [query, step-inherited, config-local] verified at all three collection sites. Every delta-spec scenario maps to a named task test; no scope creep. lib.rs re-export is a glob — step 7 is a no-op check.",
+  "spec_bless": {
+    "verdict": "BLESS",
+    "expert": "experts/e_opus",
+    "bless_hash": "sha256:0f2106d8d14ddc926a96c6e9fae030a486362d220ed93a124ab35245188f325e",
+    "notes": "Taxonomy Query/StepParameters/ConfigParameters is a bijection with the two lowering fail-closes. Single-diagnostic-per-key consistent with runtime first-check-wins. Parameters-side span matches both fail-closes. MODIFIED requirement reproduces baseline verbatim + origin paragraph."
+  }
+}
