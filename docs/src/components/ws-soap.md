@@ -445,10 +445,6 @@ Trust limit: `signed=true` only when a verified `SIGN` result references the exp
 ```toml
 [[components.cxf.profiles]]
 name = "partner-112"
-exposed_soap_headers = [
-  "{http://tempuri.org/commonSchema}requestHeaderType",
-  "{http://tempuri.org/resources}RequestHeaderElement",
-]
 wsdl_path = "wsdl/partner.wsdl"
 service_name = "{http://example.com/partner}PartnerService"
 port_name = "{http://example.com/partner}PartnerPort"
@@ -457,6 +453,10 @@ port_name = "{http://example.com/partner}PartnerPort"
 truststore_path = "/etc/cxf/partner-112.jks"
 truststore_password = "changeit"
 timestamp_ttl_seconds = 315360000
+exposed_soap_headers = [
+  "{http://tempuri.org/commonSchema}requestHeaderType",
+  "{http://tempuri.org/resources}RequestHeaderElement",
+]
 ```
 
 ### Producer transport TLS
