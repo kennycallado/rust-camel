@@ -61,6 +61,8 @@ pub(crate) fn profile_env_vars_for(profiles: &[CxfProfileConfig]) -> Vec<CxfProf
             allowed_signature_algorithms: p.security.allowed_signature_algorithms.clone(),
             allowed_digest_algorithms: p.security.allowed_digest_algorithms.clone(),
             allow_expired_pinned_certificate: p.security.allow_expired_pinned_certificate,
+            timestamp_ttl_seconds: p.security.timestamp_ttl_seconds,
+            timestamp_future_tolerance_seconds: p.security.timestamp_future_tolerance_seconds,
             fault_status: p.security.fault_status,
             tls: p.security.tls.as_ref().map(|t| t.to_env()),
         })

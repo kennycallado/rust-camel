@@ -68,6 +68,14 @@ public class SecurityProfile {
           "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha1",
           "http://www.w3.org/2000/09/xmldsig#sha1");
 
+  /** Default inbound WS-Security Timestamp TTL in seconds (same as the WSS4J default). */
+  public static final int DEFAULT_TIMESTAMP_TTL_SECONDS = 300;
+
+  /**
+   * Default inbound WS-Security Timestamp future tolerance in seconds (same as the WSS4J default).
+   */
+  public static final int DEFAULT_TIMESTAMP_FUTURE_TOLERANCE_SECONDS = 60;
+
   /**
    * Option keys under which the in-memory crypto {@link Properties} objects live. WSS4J resolves
    * crypto by ref-id string: SIG_PROP_REF_ID / ENC_PROP_REF_ID / DEC_PROP_REF_ID name a key whose
@@ -128,6 +136,10 @@ public class SecurityProfile {
   // --- Inbound trust relaxation (per-profile opt-in; default false) ---
   private final boolean allowExpiredPinnedCertificate;
 
+  // --- Inbound Timestamp freshness window (null = WSS4J default) ---
+  private final Integer timestampTtlSeconds;
+  private final Integer timestampFutureToleranceSeconds;
+
   /**
    * Optional per-profile HTTP status override for security (WSS) faults only. {@code null} keeps
    * the default matrix (SOAP 1.1: 500; SOAP 1.2 Sender: 400, Receiver: 500). Validated by {@link
@@ -168,6 +180,8 @@ public class SecurityProfile {
     this.allowedSignatureAlgorithms = b.allowedSignatureAlgorithms;
     this.allowedDigestAlgorithms = b.allowedDigestAlgorithms;
     this.allowExpiredPinnedCertificate = b.allowExpiredPinnedCertificate;
+    this.timestampTtlSeconds = b.timestampTtlSeconds;
+    this.timestampFutureToleranceSeconds = b.timestampFutureToleranceSeconds;
     this.faultStatus = b.faultStatus;
   }
 
@@ -302,6 +316,26 @@ public class SecurityProfile {
   /** True when this profile opts into accepting an expired exactly-pinned inbound certificate. */
   public boolean allowExpiredPinnedCertificate() {
     return allowExpiredPinnedCertificate;
+  }
+
+  /**
+   * Effective inbound WS-Security Timestamp TTL in seconds, or {@link
+   * #DEFAULT_TIMESTAMP_TTL_SECONDS} when unset. Consumer inbound path only; the producer
+   * in-interceptor does not apply it.
+   */
+  public int timestampTtlSeconds() {
+    return timestampTtlSeconds != null ? timestampTtlSeconds : DEFAULT_TIMESTAMP_TTL_SECONDS;
+  }
+
+  /**
+   * Effective inbound WS-Security Timestamp future tolerance in seconds, or {@link
+   * #DEFAULT_TIMESTAMP_FUTURE_TOLERANCE_SECONDS} when unset. Consumer inbound path only; the
+   * producer in-interceptor does not apply it.
+   */
+  public int timestampFutureToleranceSeconds() {
+    return timestampFutureToleranceSeconds != null
+        ? timestampFutureToleranceSeconds
+        : DEFAULT_TIMESTAMP_FUTURE_TOLERANCE_SECONDS;
   }
 
   /** True when either effective inbound allow-list carries a known SHA-1 algorithm URI. */
@@ -623,6 +657,8 @@ public class SecurityProfile {
     private String allowedSignatureAlgorithms;
     private String allowedDigestAlgorithms;
     private boolean allowExpiredPinnedCertificate;
+    private Integer timestampTtlSeconds;
+    private Integer timestampFutureToleranceSeconds;
     private Integer faultStatus;
 
     private Builder(String name) {
@@ -737,6 +773,18 @@ public class SecurityProfile {
       return this;
     }
 
+    /** Inbound Timestamp TTL in seconds; {@code null} keeps the WSS4J default (300). */
+    public Builder timestampTtlSeconds(Integer v) {
+      this.timestampTtlSeconds = v;
+      return this;
+    }
+
+    /** Inbound Timestamp future tolerance in seconds; {@code null} keeps the WSS4J default (60). */
+    public Builder timestampFutureToleranceSeconds(Integer v) {
+      this.timestampFutureToleranceSeconds = v;
+      return this;
+    }
+
     /** Optional WSS-only HTTP status override (400-599); validated by the profile store. */
     public Builder faultStatus(Integer v) {
       this.faultStatus = v;
@@ -746,10 +794,37 @@ public class SecurityProfile {
     public SecurityProfile build() {
       validateInboundActions();
       validateExpiredPinnedCertificate();
+      validateTimestampWindow();
       validateOutboundActions();
       validateSignatureKnobs();
       validateAllowedAlgorithmLists();
       return new SecurityProfile(this);
+    }
+
+    /**
+     * Fail-loud checks on the inbound Timestamp freshness window (ADR-0088). A non-positive value
+     * would otherwise surface only on the first secured message, and a value on a profile without
+     * verification material is inert because the consumer path never warns or rejects it.
+     */
+    private void validateTimestampWindow() {
+      validateTimestampKnob("TIMESTAMP_TTL_SECONDS", timestampTtlSeconds);
+      validateTimestampKnob("TIMESTAMP_FUTURE_TOLERANCE_SECONDS", timestampFutureToleranceSeconds);
+    }
+
+    private void validateTimestampKnob(String knob, Integer v) {
+      if (v == null) return;
+      String envVar = "CXF_PROFILE_" + name.toUpperCase(Locale.ROOT) + "_" + knob;
+      if (v <= 0) {
+        throw new IllegalArgumentException(
+            envVar + " must be a positive integer number of seconds, but was " + v);
+      }
+      if (!hasText(truststorePath) && !hasText(keystorePath)) {
+        throw new IllegalArgumentException(
+            envVar
+                + " is set but the profile has no truststore or keystore; the timestamp window"
+                + " would be silently inert without verification material (cxf.truststore.path or"
+                + " cxf.keystore.path)");
+      }
     }
 
     /**

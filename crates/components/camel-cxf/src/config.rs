@@ -240,6 +240,16 @@ pub struct CxfSecurityFields {
     /// fail-closed validator.
     #[serde(default)]
     pub allow_expired_pinned_certificate: bool,
+    /// Consumer inbound Timestamp TTL in seconds (`Created` may be at most this old).
+    /// `None` keeps the bridge default (300). Accepted range 1..=2147483647 (the
+    /// WSS4J `int` limit); larger values are rejected at startup.
+    #[serde(default)]
+    pub timestamp_ttl_seconds: Option<u64>,
+    /// Consumer inbound Timestamp future tolerance in seconds (`Created` may be at
+    /// most this far ahead). `None` keeps the bridge default (60). Accepted range
+    /// 1..=2147483647 (the WSS4J `int` limit); larger values are rejected at startup.
+    #[serde(default)]
+    pub timestamp_future_tolerance_seconds: Option<u64>,
     /// Optional per-profile HTTP status override applied to **security (WSS)
     /// faults only**, on both SOAP versions. Validated to `400..=599` at
     /// startup; out-of-range values fail the pool config before the bridge
@@ -287,6 +297,11 @@ impl fmt::Debug for CxfSecurityFields {
             .field(
                 "allow_expired_pinned_certificate",
                 &self.allow_expired_pinned_certificate,
+            )
+            .field("timestamp_ttl_seconds", &self.timestamp_ttl_seconds)
+            .field(
+                "timestamp_future_tolerance_seconds",
+                &self.timestamp_future_tolerance_seconds,
             )
             .field("fault_status", &self.fault_status)
             .field("tls", &self.tls)
@@ -354,6 +369,53 @@ impl CxfSecurityFields {
                     "cxf profile '{profile}': security.{key} is set but the profile has no \
                      inbound verification material (neither security.keystore_path nor \
                      security.truststore_path); the allow-list would be silently inert — \
+                     configure a truststore or keystore, or remove the option"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Fail-closed consumer inbound Timestamp freshness window. A zero value is
+    /// rejected; a window is inert without verification material, so setting it
+    /// without a keystore or truststore is rejected too.
+    fn validate_timestamp_window(
+        &self,
+        profile: &str,
+    ) -> Result<(), camel_component_api::CamelError> {
+        let has_verification_material = self
+            .keystore_path
+            .as_deref()
+            .is_some_and(|p| !p.trim().is_empty())
+            || self
+                .truststore_path
+                .as_deref()
+                .is_some_and(|p| !p.trim().is_empty());
+        for (key, value) in [
+            ("timestamp_ttl_seconds", self.timestamp_ttl_seconds),
+            (
+                "timestamp_future_tolerance_seconds",
+                self.timestamp_future_tolerance_seconds,
+            ),
+        ] {
+            let Some(v) = value else { continue };
+            if v == 0 {
+                return Err(camel_component_api::CamelError::Config(format!(
+                    "cxf profile '{profile}': security.{key} must be a positive number of \
+                     seconds; 0 is not allowed"
+                )));
+            }
+            if v > i32::MAX as u64 {
+                return Err(camel_component_api::CamelError::Config(format!(
+                    "cxf profile {profile}: security.{key} must be at most 2147483647 seconds \
+                     (WSS4J int limit), got {v}"
+                )));
+            }
+            if !has_verification_material {
+                return Err(camel_component_api::CamelError::Config(format!(
+                    "cxf profile '{profile}': security.{key} is set but the profile has no \
+                     inbound verification material (neither security.keystore_path nor \
+                     security.truststore_path); the timestamp window would be silently inert — \
                      configure a truststore or keystore, or remove the option"
                 )));
             }
@@ -558,6 +620,7 @@ impl CxfPoolConfig {
             profile
                 .security
                 .validate_allowed_algorithms(&profile.name)?;
+            profile.security.validate_timestamp_window(&profile.name)?;
             if let Some(tls) = &profile.security.tls {
                 tls.validate(&profile.name)?;
             }
@@ -1854,6 +1917,263 @@ mod tests {
             debug.contains("allow_expired_pinned_certificate: true"),
             "boolean opt-in must not be redacted in Debug: {debug}"
         );
+    }
+
+    // ── Timestamp freshness window ──
+
+    #[test]
+    fn timestamp_window_defaults_unset() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "partner"
+            wsdl_path = "/wsdl/partner.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            truststore_path = "/etc/cxf/truststore.jks"
+            truststore_password = "changeit"
+        "#;
+        let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("valid toml");
+        let security = &cfg.profiles[0].security;
+        assert_eq!(security.timestamp_ttl_seconds, None);
+        assert_eq!(security.timestamp_future_tolerance_seconds, None);
+        cfg.validate().expect("defaults must validate");
+    }
+
+    #[test]
+    fn timestamp_window_parses_from_toml() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "partner"
+            wsdl_path = "/wsdl/partner.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            truststore_path = "/etc/cxf/truststore.jks"
+            truststore_password = "changeit"
+            timestamp_ttl_seconds = 900
+            timestamp_future_tolerance_seconds = 120
+        "#;
+        let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("valid toml");
+        let security = &cfg.profiles[0].security;
+        assert_eq!(security.timestamp_ttl_seconds, Some(900));
+        assert_eq!(security.timestamp_future_tolerance_seconds, Some(120));
+        cfg.validate().expect("positive windows validate");
+        let debug = format!("{security:?}");
+        assert!(
+            debug.contains("timestamp_ttl_seconds: Some(900)"),
+            "timestamp window must not be redacted in Debug: {debug}"
+        );
+    }
+
+    #[test]
+    fn timestamp_window_zero_rejected() {
+        // Pool deserialization validates, so an invalid TOML value never reaches
+        // `validate()`; build the config directly to assert the check itself.
+        for key in [
+            "timestamp_ttl_seconds",
+            "timestamp_future_tolerance_seconds",
+        ] {
+            let mut security = CxfSecurityFields {
+                truststore_path: Some("/etc/cxf/truststore.jks".to_string()),
+                truststore_password: Some("changeit".to_string()),
+                ..Default::default()
+            };
+            match key {
+                "timestamp_ttl_seconds" => security.timestamp_ttl_seconds = Some(0),
+                _ => security.timestamp_future_tolerance_seconds = Some(0),
+            }
+            let cfg = CxfPoolConfig {
+                profiles: vec![profile_with_security("partner", security)],
+                ..Default::default()
+            };
+            match cfg.validate().unwrap_err() {
+                camel_component_api::CamelError::Config(msg) => {
+                    assert!(msg.contains("'partner'"), "got: {msg}");
+                    assert!(msg.contains(&format!("security.{key}")), "got: {msg}");
+                    assert!(msg.contains("positive"), "got: {msg}");
+                }
+                other => panic!("expected CamelError::Config, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn timestamp_window_zero_rejected_at_toml_load() {
+        for key in [
+            "timestamp_ttl_seconds",
+            "timestamp_future_tolerance_seconds",
+        ] {
+            let toml_str = format!(
+                r#"
+                [[profiles]]
+                name = "partner"
+                wsdl_path = "/wsdl/partner.wsdl"
+                service_name = "Svc"
+                port_name = "Port"
+
+                [profiles.security]
+                truststore_path = "/etc/cxf/truststore.jks"
+                truststore_password = "changeit"
+                {key} = 0
+                "#
+            );
+            let err = toml::from_str::<CxfPoolConfig>(&toml_str).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains(&format!("security.{key}")), "got: {msg}");
+            assert!(msg.contains("positive"), "got: {msg}");
+        }
+    }
+
+    #[test]
+    fn timestamp_window_int_max_accepted() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "partner"
+            wsdl_path = "/wsdl/partner.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            truststore_path = "/etc/cxf/truststore.jks"
+            truststore_password = "changeit"
+            timestamp_ttl_seconds = 2147483647
+            timestamp_future_tolerance_seconds = 2147483647
+        "#;
+        let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("valid toml");
+        let security = &cfg.profiles[0].security;
+        assert_eq!(security.timestamp_ttl_seconds, Some(2147483647));
+        assert_eq!(
+            security.timestamp_future_tolerance_seconds,
+            Some(2147483647)
+        );
+        cfg.validate().expect("int max windows validate");
+    }
+
+    #[test]
+    fn timestamp_window_above_int_max_rejected() {
+        // Values above the WSS4J `int` limit are rejected, never clamped
+        // (owner ruling 2026-10-21).
+        for key in [
+            "timestamp_ttl_seconds",
+            "timestamp_future_tolerance_seconds",
+        ] {
+            for value in [2147483648_u64, u64::MAX] {
+                let mut security = CxfSecurityFields {
+                    truststore_path: Some("/etc/cxf/truststore.jks".to_string()),
+                    truststore_password: Some("changeit".to_string()),
+                    ..Default::default()
+                };
+                match key {
+                    "timestamp_ttl_seconds" => security.timestamp_ttl_seconds = Some(value),
+                    _ => security.timestamp_future_tolerance_seconds = Some(value),
+                }
+                let cfg = CxfPoolConfig {
+                    profiles: vec![profile_with_security("partner", security)],
+                    ..Default::default()
+                };
+                match cfg.validate().unwrap_err() {
+                    camel_component_api::CamelError::Config(msg) => {
+                        assert!(msg.contains(&format!("security.{key}")), "got: {msg}");
+                        assert!(msg.contains("2147483647"), "got: {msg}");
+                    }
+                    other => panic!("expected CamelError::Config, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn timestamp_window_without_material_rejected() {
+        // Pool deserialization validates, so an invalid TOML value never reaches
+        // `validate()`; build the config directly to assert the check itself.
+        for key in [
+            "timestamp_ttl_seconds",
+            "timestamp_future_tolerance_seconds",
+        ] {
+            let mut security = CxfSecurityFields::default();
+            match key {
+                "timestamp_ttl_seconds" => security.timestamp_ttl_seconds = Some(900),
+                _ => security.timestamp_future_tolerance_seconds = Some(900),
+            }
+            let cfg = CxfPoolConfig {
+                profiles: vec![profile_with_security("partner", security)],
+                ..Default::default()
+            };
+            match cfg.validate().unwrap_err() {
+                camel_component_api::CamelError::Config(msg) => {
+                    assert!(
+                        msg.contains("no inbound verification material"),
+                        "got: {msg}"
+                    );
+                }
+                other => panic!("expected CamelError::Config, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn timestamp_window_blank_material_rejected() {
+        // An empty or whitespace-only store path is not verification material:
+        // the Java bridge uses `hasText`, so a blank path must reject the window.
+        for key in [
+            "timestamp_ttl_seconds",
+            "timestamp_future_tolerance_seconds",
+        ] {
+            for blank in ["", "   "] {
+                let mut security = CxfSecurityFields {
+                    truststore_path: Some(blank.to_string()),
+                    truststore_password: Some("changeit".to_string()),
+                    ..Default::default()
+                };
+                match key {
+                    "timestamp_ttl_seconds" => security.timestamp_ttl_seconds = Some(900),
+                    _ => security.timestamp_future_tolerance_seconds = Some(900),
+                }
+                let cfg = CxfPoolConfig {
+                    profiles: vec![profile_with_security("partner", security)],
+                    ..Default::default()
+                };
+                match cfg.validate().unwrap_err() {
+                    camel_component_api::CamelError::Config(msg) => {
+                        assert!(
+                            msg.contains("no inbound verification material"),
+                            "key {key}, blank {blank:?}: got: {msg}"
+                        );
+                    }
+                    other => panic!("expected CamelError::Config, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn timestamp_window_without_material_rejected_at_toml_load() {
+        for key in [
+            "timestamp_ttl_seconds",
+            "timestamp_future_tolerance_seconds",
+        ] {
+            let toml_str = format!(
+                r#"
+                [[profiles]]
+                name = "partner"
+                wsdl_path = "/wsdl/partner.wsdl"
+                service_name = "Svc"
+                port_name = "Port"
+
+                [profiles.security]
+                {key} = 900
+                "#
+            );
+            let err = toml::from_str::<CxfPoolConfig>(&toml_str).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("no inbound verification material"),
+                "got: {msg}"
+            );
+        }
     }
 
     // ── Listener TLS pool shape (Task 2.6) ─────────────────────────────────

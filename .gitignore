@@ -54,9 +54,10 @@ benchmarks/.cache/
 # raw run artifacts + meta snapshots live only on the measurement host)
 benchmarks/harness/out/
 
-# conductor-light workflow scratch (per-change blessing/review verdicts;
-# written at worktree root, must not be tracked)
+# conductor-light workflow scratch (per-change blessing/review verdicts)
 .bless.json
+# Owner-requested final implementation blessing is committed at repo root.
+!/.bless.json
 .review.json
 benchmarks/runner/DIGEST
 

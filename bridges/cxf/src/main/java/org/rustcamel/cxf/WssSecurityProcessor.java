@@ -207,6 +207,9 @@ public class WssSecurityProcessor {
     requestData.setCallbackHandler(profile.createPasswordCallback());
     requestData.setTimestampReplayCache(replayCache);
     requestData.setNonceReplayCache(replayCache);
+    // Per-profile freshness window; defaults equal the WSS4J defaults.
+    requestData.setTimeStampTTL(profile.timestampTtlSeconds());
+    requestData.setTimeStampFutureTTL(profile.timestampFutureToleranceSeconds());
 
     WSHandlerResult handlerResult = engine.processSecurityHeader(doc, requestData);
     List<WSSecurityEngineResult> results =

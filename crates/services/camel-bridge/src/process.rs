@@ -184,6 +184,12 @@ pub struct CxfProfileEnvVars {
     /// Per-profile expired pinned-certificate opt-in, emitted as
     /// `CXF_PROFILE_<NAME>_ALLOW_EXPIRED_PINNED_CERTIFICATE` only when true.
     pub allow_expired_pinned_certificate: bool,
+    /// Optional per-profile Timestamp TTL in seconds, emitted as
+    /// `CXF_PROFILE_<NAME>_TIMESTAMP_TTL_SECONDS` only when set.
+    pub timestamp_ttl_seconds: Option<u64>,
+    /// Optional per-profile Timestamp future tolerance in seconds, emitted as
+    /// `CXF_PROFILE_<NAME>_TIMESTAMP_FUTURE_TOLERANCE_SECONDS` only when set.
+    pub timestamp_future_tolerance_seconds: Option<u64>,
     /// Optional per-profile HTTP status override for security (WSS) faults only,
     /// emitted as `CXF_PROFILE_<NAME>_FAULT_STATUS`.
     pub fault_status: Option<u16>,
@@ -252,6 +258,15 @@ impl CxfProfileEnvVars {
             vars.push((
                 format!("{}ALLOW_EXPIRED_PINNED_CERTIFICATE", prefix),
                 "true".to_string(),
+            ));
+        }
+        if let Some(v) = self.timestamp_ttl_seconds {
+            vars.push((format!("{}TIMESTAMP_TTL_SECONDS", prefix), v.to_string()));
+        }
+        if let Some(v) = self.timestamp_future_tolerance_seconds {
+            vars.push((
+                format!("{}TIMESTAMP_FUTURE_TOLERANCE_SECONDS", prefix),
+                v.to_string(),
             ));
         }
         if let Some(v) = self.fault_status {
@@ -1137,6 +1152,8 @@ mod tests {
                 allowed_signature_algorithms: None,
                 allowed_digest_algorithms: None,
                 allow_expired_pinned_certificate: false,
+                timestamp_ttl_seconds: None,
+                timestamp_future_tolerance_seconds: None,
                 fault_status: None,
                 tls: None,
             },
@@ -1162,6 +1179,8 @@ mod tests {
                 allowed_signature_algorithms: None,
                 allowed_digest_algorithms: None,
                 allow_expired_pinned_certificate: false,
+                timestamp_ttl_seconds: None,
+                timestamp_future_tolerance_seconds: None,
                 fault_status: None,
                 tls: None,
             },
@@ -1269,6 +1288,8 @@ mod tests {
             allowed_signature_algorithms: None,
             allowed_digest_algorithms: None,
             allow_expired_pinned_certificate: false,
+            timestamp_ttl_seconds: None,
+            timestamp_future_tolerance_seconds: None,
             fault_status: None,
             tls: None,
         }];
@@ -1315,14 +1336,16 @@ mod tests {
             ),
             allowed_digest_algorithms: Some("http://www.w3.org/2001/04/xmlenc#sha256".to_string()),
             allow_expired_pinned_certificate: true,
+            timestamp_ttl_seconds: Some(900),
+            timestamp_future_tolerance_seconds: Some(120),
             fault_status: Some(403),
             tls: None,
         };
 
         let env = vars.to_env_vars();
         // 3 required + 1 address + 8 security + 2 allowed_algorithms
-        // + 1 expired-pinned-cert opt-in + 1 fault_status = 16
-        assert_eq!(env.len(), 16);
+        // + 1 expired-pinned-cert opt-in + 2 timestamp window + 1 fault_status = 18
+        assert_eq!(env.len(), 18);
 
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"CXF_PROFILE_FULL_WSDL_PATH"));
@@ -1349,6 +1372,102 @@ mod tests {
             .find(|(k, _)| k == "CXF_PROFILE_FULL_FAULT_STATUS")
             .expect("fault_status env var emitted");
         assert_eq!(fault_status.1, "403");
+        let timestamp_ttl = env
+            .iter()
+            .find(|(k, _)| k == "CXF_PROFILE_FULL_TIMESTAMP_TTL_SECONDS")
+            .expect("timestamp ttl env var emitted");
+        assert_eq!(timestamp_ttl.1, "900");
+        let timestamp_future_tolerance = env
+            .iter()
+            .find(|(k, _)| k == "CXF_PROFILE_FULL_TIMESTAMP_FUTURE_TOLERANCE_SECONDS")
+            .expect("timestamp future tolerance env var emitted");
+        assert_eq!(timestamp_future_tolerance.1, "120");
+    }
+
+    #[test]
+    fn profile_env_vars_omits_timestamp_window_when_unset() {
+        let vars = CxfProfileEnvVars {
+            name: "default".to_string(),
+            wsdl_path: "/wsdl".to_string(),
+            service_name: "Svc".to_string(),
+            port_name: "Port".to_string(),
+            address: None,
+            keystore_path: None,
+            keystore_password: None,
+            truststore_path: None,
+            truststore_password: None,
+            sig_username: None,
+            sig_password: None,
+            enc_username: None,
+            security_actions_out: None,
+            security_actions_in: None,
+            signature_algorithm: None,
+            signature_digest_algorithm: None,
+            signature_c14n_algorithm: None,
+            signature_parts: None,
+            allowed_signature_algorithms: None,
+            allowed_digest_algorithms: None,
+            allow_expired_pinned_certificate: false,
+            timestamp_ttl_seconds: None,
+            timestamp_future_tolerance_seconds: None,
+            fault_status: None,
+            tls: None,
+        };
+
+        let env = vars.to_env_vars();
+        assert!(
+            !env.iter()
+                .any(|(key, _)| key.ends_with("TIMESTAMP_TTL_SECONDS")),
+            "unset ttl must not be emitted: {env:?}"
+        );
+        assert!(
+            !env.iter()
+                .any(|(key, _)| key.ends_with("TIMESTAMP_FUTURE_TOLERANCE_SECONDS")),
+            "unset future tolerance must not be emitted: {env:?}"
+        );
+    }
+
+    #[test]
+    fn profile_env_vars_emits_u64_max_timestamp_window_unchanged() {
+        let vars = CxfProfileEnvVars {
+            name: "max".to_string(),
+            wsdl_path: "/wsdl".to_string(),
+            service_name: "Svc".to_string(),
+            port_name: "Port".to_string(),
+            address: None,
+            keystore_path: None,
+            keystore_password: None,
+            truststore_path: None,
+            truststore_password: None,
+            sig_username: None,
+            sig_password: None,
+            enc_username: None,
+            security_actions_out: None,
+            security_actions_in: None,
+            signature_algorithm: None,
+            signature_digest_algorithm: None,
+            signature_c14n_algorithm: None,
+            signature_parts: None,
+            allowed_signature_algorithms: None,
+            allowed_digest_algorithms: None,
+            allow_expired_pinned_certificate: false,
+            timestamp_ttl_seconds: Some(u64::MAX),
+            timestamp_future_tolerance_seconds: Some(u64::MAX),
+            fault_status: None,
+            tls: None,
+        };
+
+        let env = vars.to_env_vars();
+        let ttl = env
+            .iter()
+            .find(|(k, _)| k == "CXF_PROFILE_MAX_TIMESTAMP_TTL_SECONDS")
+            .expect("timestamp ttl env var emitted");
+        assert_eq!(ttl.1, "18446744073709551615");
+        let future = env
+            .iter()
+            .find(|(k, _)| k == "CXF_PROFILE_MAX_TIMESTAMP_FUTURE_TOLERANCE_SECONDS")
+            .expect("timestamp future tolerance env var emitted");
+        assert_eq!(future.1, "18446744073709551615");
     }
 
     #[test]
@@ -1375,6 +1494,8 @@ mod tests {
             allowed_signature_algorithms: None,
             allowed_digest_algorithms: None,
             allow_expired_pinned_certificate: false,
+            timestamp_ttl_seconds: None,
+            timestamp_future_tolerance_seconds: None,
             fault_status: None,
             tls: None,
         };
@@ -1588,6 +1709,8 @@ mod tests {
             allowed_signature_algorithms: None,
             allowed_digest_algorithms: None,
             allow_expired_pinned_certificate: false,
+            timestamp_ttl_seconds: None,
+            timestamp_future_tolerance_seconds: None,
             fault_status: None,
             tls: None,
         };

@@ -20,6 +20,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 @DisplayName("SecurityProfileStore")
 class SecurityProfileStoreTest {
@@ -662,6 +664,193 @@ class SecurityProfileStoreTest {
     assertTrue(
         ex.getMessage().contains("CXF_PROFILE_OPTED_ALLOW_EXPIRED_PINNED_CERTIFICATE"),
         "expected message naming the variable but was: " + ex.getMessage());
+  }
+
+  private static Map<String, String> timestampWindowEnv() {
+    Map<String, String> env = new HashMap<>();
+    env.put("CXF_PROFILES", "win");
+    env.put("CXF_PROFILE_WIN_KEYSTORE_PATH", ksFile.toString());
+    env.put("CXF_PROFILE_WIN_KEYSTORE_PASSWORD", "kspass");
+    return env;
+  }
+
+  @Test
+  @DisplayName("store parses the timestamp window env vars")
+  void store_parses_timestamp_window_env() {
+    Map<String, String> env = timestampWindowEnv();
+    env.put("CXF_PROFILE_WIN_TIMESTAMP_TTL_SECONDS", "900");
+    env.put("CXF_PROFILE_WIN_TIMESTAMP_FUTURE_TOLERANCE_SECONDS", "120");
+
+    SecurityProfile p = createStore(env).getProfile("win");
+    assertEquals(900, p.timestampTtlSeconds());
+    assertEquals(120, p.timestampFutureToleranceSeconds());
+  }
+
+  @Test
+  @DisplayName("store defaults the timestamp window to 300 and 60")
+  void store_defaults_timestamp_window() {
+    SecurityProfile p = createStore(timestampWindowEnv()).getProfile("win");
+    assertEquals(300, p.timestampTtlSeconds());
+    assertEquals(60, p.timestampFutureToleranceSeconds());
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "TIMESTAMP_TTL_SECONDS, 0",
+    "TIMESTAMP_TTL_SECONDS, -5",
+    "TIMESTAMP_TTL_SECONDS, abc",
+    "TIMESTAMP_FUTURE_TOLERANCE_SECONDS, 0",
+    "TIMESTAMP_FUTURE_TOLERANCE_SECONDS, -5",
+    "TIMESTAMP_FUTURE_TOLERANCE_SECONDS, abc",
+  })
+  @DisplayName("store rejects an invalid timestamp window value naming the variable")
+  void store_rejects_invalid_timestamp_window(String knob, String raw) {
+    Map<String, String> env = timestampWindowEnv();
+    String envVar = "CXF_PROFILE_WIN_" + knob;
+    env.put(envVar, raw);
+
+    IllegalStateException ex = assertThrows(IllegalStateException.class, () -> createStore(env));
+    assertTrue(ex.getMessage().contains(envVar), ex.getMessage());
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "TIMESTAMP_TTL_SECONDS, 2147483648",
+    "TIMESTAMP_TTL_SECONDS, 18446744073709551615",
+    "TIMESTAMP_FUTURE_TOLERANCE_SECONDS, 2147483648",
+    "TIMESTAMP_FUTURE_TOLERANCE_SECONDS, 18446744073709551615",
+  })
+  @DisplayName("store rejects a timestamp window above Integer.MAX_VALUE naming the maximum")
+  void store_rejects_timestamp_window_above_int_max(String knob, String raw) {
+    Map<String, String> env = timestampWindowEnv();
+    String envVar = "CXF_PROFILE_WIN_" + knob;
+    env.put(envVar, raw);
+
+    IllegalStateException ex = assertThrows(IllegalStateException.class, () -> createStore(env));
+    assertTrue(ex.getMessage().contains(envVar), ex.getMessage());
+    assertTrue(ex.getMessage().contains("2147483647"), ex.getMessage());
+  }
+
+  @ParameterizedTest
+  @CsvSource({"TIMESTAMP_TTL_SECONDS", "TIMESTAMP_FUTURE_TOLERANCE_SECONDS"})
+  @DisplayName("store accepts a timestamp window at Integer.MAX_VALUE")
+  void store_accepts_timestamp_window_at_int_max(String knob) {
+    Map<String, String> env = timestampWindowEnv();
+    env.put("CXF_PROFILE_WIN_" + knob, "2147483647");
+
+    SecurityProfile p = createStore(env).getProfile("win");
+    int effective =
+        "TIMESTAMP_TTL_SECONDS".equals(knob)
+            ? p.timestampTtlSeconds()
+            : p.timestampFutureToleranceSeconds();
+    assertEquals(Integer.MAX_VALUE, effective);
+  }
+
+  @Test
+  @DisplayName("timestamp window warning fires only above the defaults")
+  void timestamp_window_warning_decision() {
+    SecurityProfile trusted =
+        SecurityProfile.builder("window").truststore(tsFile.toString(), "tspass").build();
+    assertTrue(SecurityProfileStore.timestampWindowWarning(trusted).isEmpty());
+
+    SecurityProfile shortTtl =
+        SecurityProfile.builder("window")
+            .truststore(tsFile.toString(), "tspass")
+            .timestampTtlSeconds(120)
+            .build();
+    assertTrue(SecurityProfileStore.timestampWindowWarning(shortTtl).isEmpty());
+
+    SecurityProfile explicitDefaults =
+        SecurityProfile.builder("window")
+            .truststore(tsFile.toString(), "tspass")
+            .timestampTtlSeconds(300)
+            .timestampFutureToleranceSeconds(60)
+            .build();
+    assertTrue(SecurityProfileStore.timestampWindowWarning(explicitDefaults).isEmpty());
+
+    SecurityProfile raisedTtl =
+        SecurityProfile.builder("window")
+            .truststore(tsFile.toString(), "tspass")
+            .timestampTtlSeconds(900)
+            .build();
+    String ttlMessage = SecurityProfileStore.timestampWindowWarning(raisedTtl).orElseThrow();
+    assertTrue(ttlMessage.contains("TIMESTAMP_TTL_SECONDS=900"), ttlMessage);
+    assertTrue(ttlMessage.contains("TIMESTAMP_FUTURE_TOLERANCE_SECONDS=60"), ttlMessage);
+    assertPresentWarningNamesProfileAndAdr(ttlMessage);
+
+    SecurityProfile raisedFuture =
+        SecurityProfile.builder("window")
+            .truststore(tsFile.toString(), "tspass")
+            .timestampFutureToleranceSeconds(120)
+            .build();
+    String futureMessage = SecurityProfileStore.timestampWindowWarning(raisedFuture).orElseThrow();
+    assertTrue(futureMessage.contains("TIMESTAMP_TTL_SECONDS=300"), futureMessage);
+    assertTrue(futureMessage.contains("TIMESTAMP_FUTURE_TOLERANCE_SECONDS=120"), futureMessage);
+    assertPresentWarningNamesProfileAndAdr(futureMessage);
+  }
+
+  private static void assertPresentWarningNamesProfileAndAdr(String message) {
+    assertTrue(message.contains("'window'"), message);
+    assertTrue(message.contains("ADR-0088"), message);
+    assertTrue(message.contains("3600 s"), message);
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "900, , 1",
+    ", 120, 1",
+    "900, 120, 1",
+    ", , 0",
+    "120, , 0",
+  })
+  @DisplayName("store logs the timestamp window warning at startup")
+  void store_logs_timestamp_window_warning(String ttl, String future, int expectedWarnings) {
+    Map<String, String> env = timestampWindowEnv();
+    if (ttl != null) {
+      env.put("CXF_PROFILE_WIN_TIMESTAMP_TTL_SECONDS", ttl);
+    }
+    if (future != null) {
+      env.put("CXF_PROFILE_WIN_TIMESTAMP_FUTURE_TOLERANCE_SECONDS", future);
+    }
+
+    List<LogRecord> records = new ArrayList<>();
+    Handler handler =
+        new Handler() {
+          @Override
+          public void publish(LogRecord record) {
+            records.add(record);
+          }
+
+          @Override
+          public void flush() {}
+
+          @Override
+          public void close() {}
+        };
+    Logger logger = Logger.getLogger(SecurityProfileStore.class.getName());
+    Level previousLevel = logger.getLevel();
+    logger.addHandler(handler);
+    logger.setLevel(Level.ALL);
+    try {
+      createStore(env);
+    } finally {
+      logger.removeHandler(handler);
+      logger.setLevel(previousLevel);
+    }
+
+    List<String> warnings = new ArrayList<>();
+    for (LogRecord record : records) {
+      if (record.getLevel() == Level.WARNING
+          && record.getMessage() != null
+          && record.getMessage().contains("widens the inbound Timestamp window")) {
+        warnings.add(record.getMessage());
+      }
+    }
+    assertEquals(expectedWarnings, warnings.size(), warnings.toString());
+    for (String warning : warnings) {
+      assertTrue(warning.contains("'win'"), warning);
+      assertTrue(warning.contains("ADR-0088"), warning);
+    }
   }
 
   private static SecurityProfile.Builder legacySigningProfile(String name) {

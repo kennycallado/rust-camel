@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.stream.Stream;
+import org.apache.cxf.ws.security.wss4j.AbstractWSS4JInterceptor;
 import org.apache.cxf.ws.security.wss4j.WSS4JInInterceptor;
 import org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor;
 import org.apache.wss4j.common.ConfigurationConstants;
@@ -19,6 +20,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 
 @DisplayName("SecurityProfile")
@@ -1156,6 +1158,82 @@ class SecurityProfileTest {
     } finally {
       Files.deleteIfExists(expired);
     }
+  }
+
+  @Test
+  @DisplayName("timestamp window defaults to 300 s TTL and 60 s future tolerance")
+  void timestamp_window_defaults_to_300_and_60() {
+    SecurityProfile p =
+        SecurityProfile.builder("window").truststore(keystorePath.toString(), "changeit").build();
+    assertEquals(300, p.timestampTtlSeconds());
+    assertEquals(60, p.timestampFutureToleranceSeconds());
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    "ttl, 0",
+    "ttl, -1",
+    "future, 0",
+    "future, -1",
+  })
+  @DisplayName("timestamp window rejects zero and negative values")
+  void timestamp_window_rejects_zero_and_negative(String knob, int value) {
+    SecurityProfile.Builder builder =
+        SecurityProfile.builder("window").truststore(keystorePath.toString(), "changeit");
+    String envVar;
+    if ("ttl".equals(knob)) {
+      builder.timestampTtlSeconds(value);
+      envVar = "CXF_PROFILE_WINDOW_TIMESTAMP_TTL_SECONDS";
+    } else {
+      builder.timestampFutureToleranceSeconds(value);
+      envVar = "CXF_PROFILE_WINDOW_TIMESTAMP_FUTURE_TOLERANCE_SECONDS";
+    }
+    IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, builder::build);
+    assertTrue(ex.getMessage().contains(envVar), ex.getMessage());
+    assertTrue(ex.getMessage().contains("positive integer"), ex.getMessage());
+  }
+
+  @ParameterizedTest
+  @CsvSource({"ttl", "future"})
+  @DisplayName("timestamp window rejects a profile without verification material")
+  void timestamp_window_rejects_inert_profile(String knob) {
+    SecurityProfile.Builder builder = SecurityProfile.builder("inert");
+    if ("ttl".equals(knob)) {
+      builder.timestampTtlSeconds(900);
+    } else {
+      builder.timestampFutureToleranceSeconds(900);
+    }
+    IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, builder::build);
+    assertTrue(ex.getMessage().contains("no truststore or keystore"), ex.getMessage());
+  }
+
+  @Test
+  @DisplayName("timestamp window accepts Integer.MAX_VALUE")
+  void timestamp_window_accepts_int_max() {
+    SecurityProfile p =
+        SecurityProfile.builder("window")
+            .truststore(keystorePath.toString(), "changeit")
+            .timestampTtlSeconds(Integer.MAX_VALUE)
+            .timestampFutureToleranceSeconds(Integer.MAX_VALUE)
+            .build();
+    assertEquals(Integer.MAX_VALUE, p.timestampTtlSeconds());
+    assertEquals(Integer.MAX_VALUE, p.timestampFutureToleranceSeconds());
+  }
+
+  @Test
+  @DisplayName("producer in-interceptor ignores the timestamp window")
+  void producer_in_interceptor_ignores_timestamp_window() {
+    SecurityProfile p =
+        SecurityProfile.builder("producer-window")
+            .truststore(keystorePath.toString(), "changeit")
+            .actionsIn("Timestamp Signature")
+            .timestampTtlSeconds(900)
+            .timestampFutureToleranceSeconds(300)
+            .build();
+    var interceptor = assertInstanceOf(AbstractWSS4JInterceptor.class, p.createInInterceptor());
+    Map<String, Object> props = interceptor.getProperties();
+    assertFalse(props.containsKey(ConfigurationConstants.TTL_TIMESTAMP));
+    assertFalse(props.containsKey(ConfigurationConstants.TTL_FUTURE_TIMESTAMP));
   }
 
   private static void assertBuildRejectedNaming(SecurityProfile.Builder builder, String envVar) {

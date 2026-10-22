@@ -392,6 +392,38 @@ truststore_password = "changeit"
 allow_expired_pinned_certificate = true
 ```
 
+### Timestamp freshness window (consumer)
+
+A consumer profile can widen the inbound WS-Security `Timestamp` freshness window. The default is the fixed WSS4J window: `Created` may be at most 300 s old and at most 60 s in the future.
+
+| Option | Environment variable | Default |
+| --- | --- | --- |
+| `timestamp_ttl_seconds` | `CXF_PROFILE_<NAME>_TIMESTAMP_TTL_SECONDS` | `300` |
+| `timestamp_future_tolerance_seconds` | `CXF_PROFILE_<NAME>_TIMESTAMP_FUTURE_TOLERANCE_SECONDS` | `60` |
+
+`timestamp_ttl_seconds` bounds how old `Created` may be. `timestamp_future_tolerance_seconds` bounds how far ahead of our clock `Created` may be. An omitted option keeps the default.
+
+Each option must be an integer number of seconds from 1 to 2147483647 inclusive (about 68 years, the WSS4J `int` limit). Zero is rejected at pool-config load with `CamelError::Config`, and by the bridge with a startup error that names the variable. The bridge also rejects a negative or non-integer value and names the variable. A set option on a profile with neither a keystore nor a truststore is rejected, because the window would be inert without verification material. Larger values are rejected at startup with an error naming the field and the maximum; no value is clamped silently (ADR-0088).
+
+When either value is above its default, the bridge logs one startup WARN that names the profile and both effective values. Values at or below both defaults log no WARN.
+
+The window applies to consumer inbound verification only. The producer path is unchanged and carries no timestamp TTL property. WSS4J validates every `Timestamp` present in the header, so the window also applies to a profile whose inbound actions are `Signature` only. A raised TTL does not accept a `Timestamp` whose `Expires` has passed.
+
+Replay retention does not grow with the window. Each profile has one shared replay cache. For a signed message whose signature follows a `Timestamp`, the replay key is the `Created` string plus a hash of the signature value bytes plus a hash of the verification key encoding; it does not use `wsu:Id`. A byte-identical resend is rejected while the entry is live. An entry is retained until `Expires` when `Expires` is in the future and at most 3600 s away; otherwise it is retained for 300 s. The 300 s case covers no `Expires`, a past `Expires`, and an `Expires` more than 3600 s away. A multi-year fixture is therefore remembered for 300 s. A larger TTL widens acceptance, never retention.
+
+```toml
+[[components.cxf.profiles]]
+name = "partner_112"
+wsdl_path = "wsdl/partner.wsdl"
+service_name = "{http://example.com/partner}PartnerService"
+port_name = "{http://example.com/partner}PartnerPort"
+
+[components.cxf.profiles.security]
+truststore_path = "/etc/cxf/partner-112.jks"
+truststore_password = "changeit"
+timestamp_ttl_seconds = 315360000
+```
+
 ### Producer transport TLS
 
 A producer profile can present a client certificate and validate the server over HTTPS. The material is a nested, all-or-nothing table under `[components.cxf.profiles.security.tls]`:

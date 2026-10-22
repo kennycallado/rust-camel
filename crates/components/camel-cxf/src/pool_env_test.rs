@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use camel_bridge::process::{BridgeProcessConfig, CxfProfileEnvVars, CxfTlsEnvVars, Redacted};
 
-use crate::config::{CxfListenerTls, CxfProfileConfig, CxfSecurityFields};
+use crate::config::{CxfListenerTls, CxfPoolConfig, CxfProfileConfig, CxfSecurityFields};
 use crate::pool::env_var_keys;
 
 /// Realistic profile set as built by `start_bridge_inner`: one profile whose
@@ -44,6 +44,8 @@ fn secret_profiles() -> Vec<CxfProfileEnvVars> {
         ),
         allowed_digest_algorithms: Some("http://www.w3.org/2000/09/xmldsig#sha1".to_string()),
         allow_expired_pinned_certificate: false,
+        timestamp_ttl_seconds: None,
+        timestamp_future_tolerance_seconds: None,
         fault_status: None,
         tls: Some(CxfTlsEnvVars {
             keystore_path: Some("/etc/cxf/tls-keystore.p12".to_string()),
@@ -428,6 +430,117 @@ fn pool_env_emits_allow_expired_pinned_certificate_only_when_true() {
         !env.keys()
             .any(|key| key.ends_with("ALLOW_EXPIRED_PINNED_CERTIFICATE")),
         "default-off profile must not emit the opt-in: {env:?}"
+    );
+}
+
+// --- Per-profile timestamp freshness window (Task 4) ---
+
+/// Profile carrying the timestamp window values as parsed from
+/// `[profiles.security]`; the truststore pair keeps the config valid.
+fn timestamp_window_profile(
+    name: &str,
+    ttl: Option<u64>,
+    future_tolerance: Option<u64>,
+) -> CxfProfileConfig {
+    CxfProfileConfig {
+        name: name.to_string(),
+        address: None,
+        wsdl_path: "/etc/cxf/baleares.wsdl".to_string(),
+        service_name: "Svc".to_string(),
+        port_name: "Port".to_string(),
+        security: CxfSecurityFields {
+            truststore_path: Some("/etc/cxf/truststore.jks".to_string()),
+            truststore_password: Some("changeit".to_string()),
+            timestamp_ttl_seconds: ttl,
+            timestamp_future_tolerance_seconds: future_tolerance,
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn pool_env_carries_timestamp_window_from_profile() {
+    let profiles = crate::pool::profile_env_vars_for(&[timestamp_window_profile(
+        "window",
+        Some(900),
+        Some(120),
+    )]);
+    let config = crate::pool::bridge_config_with_env_trace(
+        "slot-ts",
+        PathBuf::from("/tmp/cxf-bridge"),
+        &profiles,
+        None,
+        15_000,
+        None,
+    );
+    let env = env_map(&config);
+    assert_eq!(
+        env.get("CXF_PROFILE_WINDOW_TIMESTAMP_TTL_SECONDS").copied(),
+        Some("900")
+    );
+    assert_eq!(
+        env.get("CXF_PROFILE_WINDOW_TIMESTAMP_FUTURE_TOLERANCE_SECONDS")
+            .copied(),
+        Some("120")
+    );
+
+    let default =
+        crate::pool::profile_env_vars_for(&[timestamp_window_profile("default", None, None)]);
+    let config = crate::pool::bridge_config_with_env_trace(
+        "slot-ts-default",
+        PathBuf::from("/tmp/cxf-bridge"),
+        &default,
+        None,
+        15_000,
+        None,
+    );
+    let env = env_map(&config);
+    assert!(
+        !env.contains_key("CXF_PROFILE_DEFAULT_TIMESTAMP_TTL_SECONDS"),
+        "unset ttl must not be emitted: {env:?}"
+    );
+    assert!(
+        !env.contains_key("CXF_PROFILE_DEFAULT_TIMESTAMP_FUTURE_TOLERANCE_SECONDS"),
+        "unset future tolerance must not be emitted: {env:?}"
+    );
+}
+
+#[test]
+fn pool_env_carries_int_max_timestamp_window_from_toml() {
+    let toml_str = r#"
+        [[profiles]]
+        name = "huge"
+        wsdl_path = "/etc/cxf/huge.wsdl"
+        service_name = "Svc"
+        port_name = "Port"
+
+        [profiles.security]
+        truststore_path = "/etc/cxf/truststore.jks"
+        truststore_password = "changeit"
+        timestamp_ttl_seconds = 2147483647
+        timestamp_future_tolerance_seconds = 2147483647
+    "#;
+    let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("valid toml");
+    cfg.validate().expect("int max window validates");
+
+    let profiles = crate::pool::profile_env_vars_for(&cfg.profiles);
+    let config = crate::pool::bridge_config_with_env_trace(
+        "slot-huge",
+        PathBuf::from("/tmp/cxf-bridge"),
+        &profiles,
+        None,
+        15_000,
+        None,
+    );
+    let env = env_map(&config);
+    assert_eq!(
+        env.get("CXF_PROFILE_HUGE_TIMESTAMP_TTL_SECONDS").copied(),
+        Some("2147483647")
+    );
+    assert_eq!(
+        env.get("CXF_PROFILE_HUGE_TIMESTAMP_FUTURE_TOLERANCE_SECONDS")
+            .copied(),
+        Some("2147483647")
     );
 }
 

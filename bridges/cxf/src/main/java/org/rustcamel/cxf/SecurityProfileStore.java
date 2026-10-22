@@ -69,6 +69,11 @@ public class SecurityProfileStore {
       String expiredPinnedCertVar = prefix + "ALLOW_EXPIRED_PINNED_CERTIFICATE";
       boolean allowExpiredPinnedCertificate =
           parseAllowExpiredPinnedCertificate(expiredPinnedCertVar, getenv(expiredPinnedCertVar));
+      String timestampTtlVar = prefix + "TIMESTAMP_TTL_SECONDS";
+      Integer timestampTtlSeconds = parseTimestampSeconds(timestampTtlVar, getenv(timestampTtlVar));
+      String timestampFutureToleranceVar = prefix + "TIMESTAMP_FUTURE_TOLERANCE_SECONDS";
+      Integer timestampFutureToleranceSeconds =
+          parseTimestampSeconds(timestampFutureToleranceVar, getenv(timestampFutureToleranceVar));
 
       SecurityProfile profile =
           SecurityProfile.builder(name)
@@ -92,6 +97,8 @@ public class SecurityProfileStore {
               .allowedSignatureAlgorithms(getenv(prefix + "ALLOWED_SIGNATURE_ALGORITHMS"))
               .allowedDigestAlgorithms(getenv(prefix + "ALLOWED_DIGEST_ALGORITHMS"))
               .allowExpiredPinnedCertificate(allowExpiredPinnedCertificate)
+              .timestampTtlSeconds(timestampTtlSeconds)
+              .timestampFutureToleranceSeconds(timestampFutureToleranceSeconds)
               .faultStatus(faultStatus)
               .build();
 
@@ -99,6 +106,7 @@ public class SecurityProfileStore {
       LOG.info("Loaded security profile: " + name);
       sha1AllowedWarning(profile).ifPresent(LOG::warning);
       expiredPinnedCertWarning(profile).ifPresent(LOG::warning);
+      timestampWindowWarning(profile).ifPresent(LOG::warning);
       signingKnobMismatchWarning(profile).ifPresent(LOG::warning);
     }
 
@@ -168,6 +176,30 @@ public class SecurityProfileStore {
   }
 
   /**
+   * Startup WARN when a profile widens the inbound Timestamp freshness window above the WSS4J
+   * defaults. A wider window keeps a captured signed message acceptable for longer; replay
+   * retention is unchanged, so the message can be replayed after its cache entry expires. Pure
+   * decision point so tests can assert the wording without log capture (ADR-0088).
+   */
+  static Optional<String> timestampWindowWarning(SecurityProfile profile) {
+    int ttl = profile.timestampTtlSeconds();
+    int future = profile.timestampFutureToleranceSeconds();
+    if (ttl <= SecurityProfile.DEFAULT_TIMESTAMP_TTL_SECONDS
+        && future <= SecurityProfile.DEFAULT_TIMESTAMP_FUTURE_TOLERANCE_SECONDS) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        "WS-Security profile '"
+            + profile.name()
+            + "' widens the inbound Timestamp window (TIMESTAMP_TTL_SECONDS="
+            + ttl
+            + ", TIMESTAMP_FUTURE_TOLERANCE_SECONDS="
+            + future
+            + "; defaults 300/60); a captured signed message stays acceptable for longer while"
+            + " replay retention stays at most 3600 s; accepted risk, see ADR-0088");
+  }
+
+  /**
    * Parses the optional {@code CXF_PROFILE_<NAME>_ALLOW_EXPIRED_PINNED_CERTIFICATE} opt-in. Only an
    * absent/blank value (false), {@code true}, and {@code false} are valid; anything else fails loud
    * before the profile is built.
@@ -186,6 +218,36 @@ public class SecurityProfileStore {
     }
     throw new IllegalStateException(
         envVar + " must be 'true' or 'false' when set, but was '" + raw + "'");
+  }
+
+  /**
+   * Parses an optional inbound Timestamp-window env var. Accepts 1 to {@link Integer#MAX_VALUE}
+   * (2147483647, the WSS4J {@code int} limit, about 68 years); larger values fail startup.
+   *
+   * @return the parsed value, or {@code null} when unset/blank
+   * @throws IllegalStateException naming the variable on zero, negative, non-integer input, or a
+   *     value above the maximum
+   */
+  static Integer parseTimestampSeconds(String envVar, String raw) {
+    if (raw == null || raw.isBlank()) {
+      return null;
+    }
+    String message =
+        envVar + " must be a positive integer number of seconds when set, but was '" + raw + "'";
+    long v;
+    try {
+      v = Long.parseUnsignedLong(raw.trim());
+    } catch (NumberFormatException e) {
+      throw new IllegalStateException(message);
+    }
+    if (v == 0) {
+      throw new IllegalStateException(message);
+    }
+    if (Long.compareUnsigned(v, Integer.MAX_VALUE) > 0) {
+      throw new IllegalStateException(
+          envVar + " must be at most 2147483647 seconds (WSS4J int limit), but was '" + raw + "'");
+    }
+    return (int) v;
   }
 
   /**

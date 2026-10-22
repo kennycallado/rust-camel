@@ -135,6 +135,18 @@ faults, and there is no global override. The override is a response-shaping valu
 not an authentication decision: it writes no principal and no `camel.auth.*`
 property.
 
+`[profiles.security] timestamp_ttl_seconds` (default `300`) and
+`timestamp_future_tolerance_seconds` (default `60`) are optional integers from
+1 to 2147483647 s (about 68 years, the WSS4J `int` limit) that widen the
+consumer inbound WS-Security `Timestamp` window; larger values are rejected at
+startup (ADR-0088). They are emitted as
+`CXF_PROFILE_<NAME>_TIMESTAMP_TTL_SECONDS` and
+`CXF_PROFILE_<NAME>_TIMESTAMP_FUTURE_TOLERANCE_SECONDS`. `CxfPoolConfig::validate`
+returns `CamelError::Config` for `0` and for a set value on a profile with
+neither a keystore nor a truststore, where the window would be inert. Profile
+loading validates these values regardless of endpoint role; the producer
+in-interceptor does not apply them.
+
 ## Consumer signer identity
 
 The listener exports the request signer as the `SignerIdentity` field of the
