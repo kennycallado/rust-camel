@@ -57,6 +57,7 @@ fn consumer_request(request_id: &str, signer: Option<SignerIdentity>) -> Consume
         soap_action: String::new(),
         security_profile: "esap".to_string(),
         signer,
+        soap_headers: vec![],
     }
 }
 

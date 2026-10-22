@@ -64,6 +64,7 @@ pub(crate) fn profile_env_vars_for(profiles: &[CxfProfileConfig]) -> Vec<CxfProf
             timestamp_ttl_seconds: p.security.timestamp_ttl_seconds,
             timestamp_future_tolerance_seconds: p.security.timestamp_future_tolerance_seconds,
             fault_status: p.security.fault_status,
+            exposed_soap_headers: p.security.exposed_soap_headers.clone(),
             tls: p.security.tls.as_ref().map(|t| t.to_env()),
         })
         .collect()

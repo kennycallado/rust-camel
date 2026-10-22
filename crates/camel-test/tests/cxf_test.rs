@@ -381,6 +381,14 @@ fn cxf_wss_signed_request_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cxf-wss-signed-request.xml")
 }
 
+/// The same signed SOAP 1.2 request (Body signature, no `wsu:Timestamp`) plus a
+/// non-signed application header (`{http://tempuri.org/commonSchema}requestHeaderType`)
+/// that a consumer profile can opt into via `exposed_soap_headers`.
+fn cxf_wss_signed_request_with_header_fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/cxf-wss-signed-request-with-header.xml")
+}
+
 /// Security fields for a WSS profile: same JKS as keystore and truststore, with
 /// an optional `fault_status` override.
 fn wss_security(fault_status: Option<u16>) -> CxfSecurityFields {
@@ -459,6 +467,7 @@ async fn cxf_producer_wrong_tls_password_never_reaches_ready() {
         timestamp_ttl_seconds: None,
         timestamp_future_tolerance_seconds: None,
         fault_status: None,
+        exposed_soap_headers: vec![],
         tls: Some(CxfTlsEnvVars {
             keystore_path: Some(cxf_tls_keystore_fixture()),
             keystore_password: Some(Redacted::new("not-the-store-password".to_string())),
@@ -759,6 +768,7 @@ async fn cxf_native_health_check_responds_within_5s() {
         timestamp_ttl_seconds: None,
         timestamp_future_tolerance_seconds: None,
         fault_status: None,
+        exposed_soap_headers: vec![],
         tls: None,
     }];
 
@@ -1350,6 +1360,7 @@ fn matrix_profile(name: &str, wsdl_path: &str) -> CxfProfileEnvVars {
         timestamp_ttl_seconds: None,
         timestamp_future_tolerance_seconds: None,
         fault_status: None,
+        exposed_soap_headers: vec![],
         tls: None,
     }
 }

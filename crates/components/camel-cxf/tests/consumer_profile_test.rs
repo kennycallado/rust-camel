@@ -420,6 +420,7 @@ async fn duplicate_profile_fails_at_start_and_first_keeps_receiving() -> Result<
             soap_action: String::new(),
             security_profile: "v11".into(),
             signer: None,
+            soap_headers: vec![],
         }))
         .await?;
     tokio::time::timeout(Duration::from_secs(5), completion)

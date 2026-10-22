@@ -3,6 +3,7 @@ package org.rustcamel.cxf;
 import com.google.protobuf.ByteString;
 import cxf_bridge.ConsumerRequest;
 import cxf_bridge.ConsumerResponse;
+import cxf_bridge.SoapHeader;
 import io.quarkus.runtime.StartupEvent;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -20,6 +21,7 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import java.net.URI;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.UUID;
@@ -634,11 +636,18 @@ public class SoapEndpointPublisher {
 
           String securedXml = requestXml;
           java.util.Optional<cxf_bridge.SignerIdentity> signer = java.util.Optional.empty();
+          List<SoapHeader> soapHeaders;
           if (wssProcessor.canVerifyInbound()) {
             WssSecurityProcessor.VerifiedInboundMessage verified =
                 wssProcessor.processInbound(securedXml, soapVersion);
             securedXml = verified.xml();
             signer = verified.signer();
+            soapHeaders = verified.soapHeaders();
+          } else {
+            // The no-WSS path has no verified SIGN results, so exported headers are never
+            // signed. The pre-WSS document is the request document: no security processing
+            // modified it.
+            soapHeaders = SoapHeaderExporter.export(requestDoc, profile.exposedSoapHeaders(), null);
           }
 
           // Operation resolution is mandatory for every listener request. The Body root QName and
@@ -671,7 +680,8 @@ public class SoapEndpointPublisher {
                   .setPayload(ByteString.copyFromUtf8(requestBody))
                   .putAllHeaders(headers)
                   .setSoapAction(normalizedAction == null ? "" : normalizedAction)
-                  .setSecurityProfile(profileName);
+                  .setSecurityProfile(profileName)
+                  .addAllSoapHeaders(soapHeaders);
           // Only a verified Body-covering signature may populate the field; when no signer is
           // present the field stays absent (unknown).
           if (signer.isPresent()) {
@@ -747,6 +757,8 @@ public class SoapEndpointPublisher {
             boolean isMissingBody = hasInChain(cause, MissingSoapBodyException.class);
             boolean isInvalidOperation =
                 hasInChain(cause, WsdlOperationCatalog.InvalidOperationException.class);
+            boolean isInvalidSoapHeaders =
+                hasInChain(cause, SoapHeaderExporter.SoapHeaderExportException.class);
             boolean isSecurityFailure = hasInChain(cause, WSSecurityException.class);
             boolean isTimeout = hasInChain(cause, java.util.concurrent.TimeoutException.class);
 
@@ -773,6 +785,12 @@ public class SoapEndpointPublisher {
               faultClass = FaultClass.SENDER;
               faultCode = "soap:Client";
               faultString = "invalid operation selection: " + sanitize(cause.getMessage());
+            } else if (isInvalidSoapHeaders) {
+              // The exporter never reads header values into its messages and this is never a WSS
+              // fault, so fault_status must not rewrite the Sender/500 outcome.
+              faultClass = FaultClass.SENDER;
+              faultCode = "soap:Client";
+              faultString = "invalid SOAP header export: " + sanitize(cause.getMessage());
             } else if (isSecurityFailure) {
               faultClass = FaultClass.SENDER;
               isWssFault = true;

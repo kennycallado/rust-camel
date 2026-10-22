@@ -107,6 +107,7 @@ fn test_consumer_request(
         soap_action: soap_action.to_string(),
         security_profile: String::new(),
         signer: None,
+        soap_headers: vec![],
     }
 }
 
@@ -236,6 +237,7 @@ async fn test_request_id_correlation_multiple_concurrent()
                 soap_action: "urn:bulk".to_string(),
                 security_profile: String::new(),
                 signer: None,
+                soap_headers: vec![],
             }))
             .await?;
     }
@@ -289,6 +291,7 @@ async fn test_consumer_receives_headers_from_request()
             soap_action: "urn:withHeaders".to_string(),
             security_profile: String::new(),
             signer: None,
+            soap_headers: vec![],
         }))
         .await?;
 
@@ -397,6 +400,7 @@ async fn test_consumer_multiple_headers_preserved()
             soap_action: "urn:multiHeaders".to_string(),
             security_profile: String::new(),
             signer: None,
+            soap_headers: vec![],
         }))
         .await?;
 
@@ -462,6 +466,7 @@ async fn test_consumer_50_concurrent_requests_correlated()
                 soap_action: "urn:concurrent".to_string(),
                 security_profile: String::new(),
                 signer: None,
+                soap_headers: vec![],
             }))
             .await?;
     }

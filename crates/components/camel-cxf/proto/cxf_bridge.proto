@@ -39,6 +39,16 @@ message SoapResponse {
   string fault_string = 5; // human-readable fault message
 }
 
+// Inbound application header explicitly exported by the consumer profile's
+// allow-list. Never merged into `headers`: gRPC metadata keys are lowercased
+// and matched case-insensitively, so an HTTP key could spoof a SOAP value.
+message SoapHeader {
+  string ns = 1;          // namespace URI (never a reserved WSS/SOAP namespace)
+  string local_name = 2;  // element local name; unique per request
+  string xml = 3;         // serialized element XML (xpath-friendly), bounded
+  bool signed = 4;        // true only when a verified SIGN result covers this element
+}
+
 // Bridge → Rust: incoming SOAP request (consumer mode)
 message ConsumerRequest {
   string request_id = 1; // UUID for correlation
@@ -48,6 +58,7 @@ message ConsumerRequest {
   string soap_action = 5;
   string security_profile = 6;
   optional SignerIdentity signer = 7; // verified signer identity; absent = unknown
+  repeated SoapHeader soap_headers = 8; // allow-listed application headers; additive (old builds ignore it)
 }
 
 // Verified inbound signer descriptor: bounded strings only, no DER bytes.

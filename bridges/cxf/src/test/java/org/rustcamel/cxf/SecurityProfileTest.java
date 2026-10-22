@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.stream.Stream;
+import javax.xml.namespace.QName;
 import org.apache.cxf.ws.security.wss4j.AbstractWSS4JInterceptor;
 import org.apache.cxf.ws.security.wss4j.WSS4JInInterceptor;
 import org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor;
@@ -1234,6 +1235,118 @@ class SecurityProfileTest {
     Map<String, Object> props = interceptor.getProperties();
     assertFalse(props.containsKey(ConfigurationConstants.TTL_TIMESTAMP));
     assertFalse(props.containsKey(ConfigurationConstants.TTL_FUTURE_TIMESTAMP));
+  }
+
+  @Test
+  @DisplayName("exposedSoapHeaders parses the partner QNames in configuration order")
+  void exposedSoapHeaders_parsesThePartnersQnames() {
+    SecurityProfile profile =
+        SecurityProfile.builder("partner")
+            .exposedSoapHeaders(
+                List.of(
+                    "{http://tempuri.org/commonSchema}requestHeaderType",
+                    "{http://tempuri.org/resources}RequestHeaderElement"))
+            .build();
+    assertEquals(
+        List.of(
+            new QName("http://tempuri.org/commonSchema", "requestHeaderType"),
+            new QName("http://tempuri.org/resources", "RequestHeaderElement")),
+        profile.exposedSoapHeaders());
+  }
+
+  @Test
+  @DisplayName("exposedSoapHeaders is empty when absent")
+  void exposedSoapHeaders_absentIsEmpty() {
+    SecurityProfile profile = SecurityProfile.builder("absent").build();
+    assertEquals(List.of(), profile.exposedSoapHeaders());
+  }
+
+  @ParameterizedTest
+  @MethodSource("reservedNamespaces")
+  @DisplayName("exposedSoapHeaders rejects each reserved namespace")
+  void exposedSoapHeaders_rejectsEachReservedNamespace(String namespace) {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                SecurityProfile.builder("reserved")
+                    .exposedSoapHeaders(List.of("{" + namespace + "}Security"))
+                    .build());
+    assertTrue(
+        ex.getMessage().contains("reserved"),
+        "expected the message to call the namespace reserved but was: " + ex.getMessage());
+  }
+
+  static Stream<String> reservedNamespaces() {
+    return SoapHeaderExporter.RESERVED_NAMESPACES.stream();
+  }
+
+  @ParameterizedTest
+  @MethodSource("malformedExposedSoapHeaderEntries")
+  @DisplayName("exposedSoapHeaders rejects malformed entries naming the entry")
+  void exposedSoapHeaders_rejectsMalformedEntries(String entry) {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SecurityProfile.builder("malformed").exposedSoapHeaders(List.of(entry)).build());
+    assertTrue(
+        ex.getMessage().contains(entry),
+        "expected the message to name the entry '" + entry + "' but was: " + ex.getMessage());
+  }
+
+  static Stream<String> malformedExposedSoapHeaderEntries() {
+    return Stream.of(
+        "requestHeaderType",
+        "{http://x/}",
+        "{http://x}bad local",
+        "{http://x,com}requestHeaderType",
+        "{http://x}a{b}",
+        "{http://x\u2003y}requestHeaderType",
+        "{http://x\u00A0y}requestHeaderType");
+  }
+
+  @Test
+  @DisplayName("exposedSoapHeaders rejects more than sixteen entries naming the cap")
+  void exposedSoapHeaders_rejectsMoreThanSixteen() {
+    List<String> entries = new java.util.ArrayList<>();
+    for (int i = 0; i < 17; i++) {
+      entries.add("{http://x}Header" + i);
+    }
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> SecurityProfile.builder("cap").exposedSoapHeaders(entries).build());
+    assertTrue(
+        ex.getMessage().contains("CXF_PROFILE_CAP_EXPOSED_SOAP_HEADERS"),
+        "expected the message to name the env var but was: " + ex.getMessage());
+    assertTrue(
+        ex.getMessage().contains("16"),
+        "expected the message to name the 16-entry cap but was: " + ex.getMessage());
+  }
+
+  @Test
+  @DisplayName("exposedSoapHeaders rejects an exact duplicate QName")
+  void exposedSoapHeaders_rejectsDuplicateQname() {
+    String entry = "{http://x}requestHeaderType";
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            SecurityProfile.builder("duplicate").exposedSoapHeaders(List.of(entry, entry)).build());
+  }
+
+  @Test
+  @DisplayName("exposedSoapHeaders rejects local names that collide case-insensitively")
+  void exposedSoapHeaders_rejectsCaseInsensitiveLocalCollision() {
+    IllegalArgumentException ex =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                SecurityProfile.builder("collision")
+                    .exposedSoapHeaders(List.of("{http://a}Tenant", "{http://b}tenant"))
+                    .build());
+    assertTrue(
+        ex.getMessage().contains("CxfSoapHeader."),
+        "expected the message to explain the exchange key but was: " + ex.getMessage());
   }
 
   private static void assertBuildRejectedNaming(SecurityProfile.Builder builder, String envVar) {

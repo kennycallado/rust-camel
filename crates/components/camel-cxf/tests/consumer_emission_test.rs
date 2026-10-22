@@ -234,6 +234,7 @@ async fn cxf_consume_success_emits_operation()
             soap_action: "urn:op".to_string(),
             security_profile: String::new(),
             signer: None,
+            soap_headers: vec![],
         }))
         .await?;
 
@@ -295,6 +296,7 @@ async fn cxf_consume_route_error_emits_error_family()
             soap_action: "urn:op".to_string(),
             security_profile: String::new(),
             signer: None,
+            soap_headers: vec![],
         }))
         .await?;
 
@@ -356,6 +358,7 @@ async fn cxf_consume_failure_with_lever_off_still_emits_error_family()
             soap_action: "urn:op".to_string(),
             security_profile: String::new(),
             signer: None,
+            soap_headers: vec![],
         }))
         .await?;
 
@@ -413,6 +416,7 @@ async fn cxf_marshalling_failure_retains_b_prime_and_double_counts()
             soap_action: "urn:op".to_string(),
             security_profile: String::new(),
             signer: None,
+            soap_headers: vec![],
         }))
         .await?;
 
@@ -505,6 +509,7 @@ async fn cxf_stream_output_emits_correlated_receiver_fault()
             soap_action: "urn:ReceiveMessageOp".to_string(),
             security_profile: String::new(),
             signer: None,
+            soap_headers: vec![],
         }))
         .await?;
 

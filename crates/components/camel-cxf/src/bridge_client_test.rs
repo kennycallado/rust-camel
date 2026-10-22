@@ -102,6 +102,7 @@ async fn near_cap_payload_decodes_end_to_end() {
         soap_action: String::new(),
         security_profile: String::new(),
         signer: None,
+        soap_headers: vec![],
     };
 
     let port = spawn_mock_bridge(request).await.expect("spawn mock bridge");

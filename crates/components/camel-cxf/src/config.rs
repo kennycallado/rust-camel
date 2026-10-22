@@ -256,6 +256,11 @@ pub struct CxfSecurityFields {
     /// starts.
     #[serde(default)]
     pub fault_status: Option<u16>,
+    /// Per-profile allow-list of `{namespace}local` QNames for SOAP headers
+    /// exported on inbound consumer requests (max 16; values are names, not
+    /// PII).
+    #[serde(default)]
+    pub exposed_soap_headers: Vec<String>,
     /// Nested `[profiles.security.tls]` producer transport TLS material.
     #[serde(default)]
     pub tls: Option<CxfTlsConfig>,
@@ -304,8 +309,117 @@ impl fmt::Debug for CxfSecurityFields {
                 &self.timestamp_future_tolerance_seconds,
             )
             .field("fault_status", &self.fault_status)
+            .field("exposed_soap_headers", &self.exposed_soap_headers)
             .field("tls", &self.tls)
             .finish()
+    }
+}
+
+/// Namespaces reserved for WS-Security and SOAP envelope infrastructure. An
+/// allow-list entry from any of these would let an application route export
+/// security material as a header, so startup rejects it.
+const RESERVED_SOAP_HEADER_NAMESPACES: [&str; 7] = [
+    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd",
+    "http://docs.oasis-open.org/wss/oasis-wss-wssecurity-secext-1.1.xsd",
+    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd",
+    "http://www.w3.org/2000/09/xmldsig#",
+    "http://www.w3.org/2001/04/xmlenc#",
+    "http://schemas.xmlsoap.org/soap/envelope/",
+    "http://www.w3.org/2003/05/soap-envelope",
+];
+
+/// Split a `{namespace}local` allow-list entry. Returns `None` when the
+/// namespace is missing/empty, a delimiter is present, or the local name is
+/// empty.
+fn parse_exposed_header_qname(entry: &str) -> Option<(&str, &str)> {
+    let rest = entry.strip_prefix('{')?;
+    let (namespace, local) = rest.split_once('}')?;
+    if namespace.is_empty()
+        || local.is_empty()
+        || namespace
+            .chars()
+            .any(|c| matches!(c, '{' | '}' | ',') || c.is_whitespace())
+    {
+        return None;
+    }
+    Some((namespace, local))
+}
+
+/// `[A-Za-z_][A-Za-z0-9._-]*`, ASCII only.
+fn is_valid_exposed_header_local(local: &str) -> bool {
+    let mut chars = local.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+impl CxfSecurityFields {
+    /// Fail-closed validation for the per-profile SOAP header allow-list: at
+    /// most 16 entries, each a `{namespace}local` QName with an ASCII local
+    /// name, no reserved WS-Security/SOAP envelope namespace, no duplicate
+    /// QName, and no local name that collides under ASCII case-insensitive
+    /// comparison (the exchange key is the local name).
+    fn validate_exposed_soap_headers(
+        &self,
+        profile: &str,
+    ) -> Result<(), camel_component_api::CamelError> {
+        const MAX_EXPOSED_SOAP_HEADERS: usize = 16;
+        let entries = &self.exposed_soap_headers;
+        if entries.len() > MAX_EXPOSED_SOAP_HEADERS {
+            return Err(camel_component_api::CamelError::Config(format!(
+                "cxf profile '{profile}': security.exposed_soap_headers lists {} entries; at \
+                 most {MAX_EXPOSED_SOAP_HEADERS} are allowed",
+                entries.len()
+            )));
+        }
+
+        let mut parsed: Vec<(&str, &str)> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let Some((namespace, local)) = parse_exposed_header_qname(entry) else {
+                return Err(camel_component_api::CamelError::Config(format!(
+                    "cxf profile '{profile}': security.exposed_soap_headers entry '{entry}' is \
+                     not a '{{namespace}}local' QName with a non-empty namespace free of '{{', \
+                     '}}', ',', and whitespace"
+                )));
+            };
+            if !is_valid_exposed_header_local(local) {
+                return Err(camel_component_api::CamelError::Config(format!(
+                    "cxf profile '{profile}': security.exposed_soap_headers entry '{entry}' has \
+                     an invalid local name; expected ASCII [A-Za-z_][A-Za-z0-9._-]*"
+                )));
+            }
+            if RESERVED_SOAP_HEADER_NAMESPACES.contains(&namespace) {
+                return Err(camel_component_api::CamelError::Config(format!(
+                    "cxf profile '{profile}': security.exposed_soap_headers entry '{entry}' uses \
+                     reserved namespace '{namespace}' (WS-Security/SOAP envelope namespaces \
+                     cannot be exported)"
+                )));
+            }
+            parsed.push((namespace, local));
+        }
+
+        for (index, (namespace, local)) in parsed.iter().enumerate() {
+            for (previous_namespace, previous_local) in &parsed[..index] {
+                if previous_namespace == namespace && previous_local == local {
+                    return Err(camel_component_api::CamelError::Config(format!(
+                        "cxf profile '{profile}': security.exposed_soap_headers entry \
+                         '{{{namespace}}}{local}' duplicates an earlier entry"
+                    )));
+                }
+                if previous_local.eq_ignore_ascii_case(local) {
+                    return Err(camel_component_api::CamelError::Config(format!(
+                        "cxf profile '{profile}': security.exposed_soap_headers local name \
+                         '{local}' collides case-insensitively with '{previous_local}'; the \
+                         exchange key is the local name and lookup is case-insensitive"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -621,6 +735,9 @@ impl CxfPoolConfig {
                 .security
                 .validate_allowed_algorithms(&profile.name)?;
             profile.security.validate_timestamp_window(&profile.name)?;
+            profile
+                .security
+                .validate_exposed_soap_headers(&profile.name)?;
             if let Some(tls) = &profile.security.tls {
                 tls.validate(&profile.name)?;
             }
@@ -2446,5 +2563,195 @@ mod tests {
             cfg.validate().is_ok(),
             "omitted no-TLS no-bind must be valid"
         );
+    }
+
+    // ── Exposed SOAP header allow-list (Task 2.1) ──────────────────────────
+
+    const WSSE_10_NS: &str =
+        "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd";
+    const WSSE_11_NS: &str = "http://docs.oasis-open.org/wss/oasis-wss-wssecurity-secext-1.1.xsd";
+    const WSU_NS: &str =
+        "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd";
+    const DS_NS: &str = "http://www.w3.org/2000/09/xmldsig#";
+    const XENC_NS: &str = "http://www.w3.org/2001/04/xmlenc#";
+    const SOAP11_NS: &str = "http://schemas.xmlsoap.org/soap/envelope/";
+    const SOAP12_NS: &str = "http://www.w3.org/2003/05/soap-envelope";
+
+    fn exposed_soap_header_config(entries: Vec<String>) -> CxfPoolConfig {
+        CxfPoolConfig {
+            profiles: vec![profile_with_security(
+                "partner",
+                CxfSecurityFields {
+                    exposed_soap_headers: entries,
+                    ..Default::default()
+                },
+            )],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn exposed_soap_headers_parse_and_default() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "partner"
+            wsdl_path = "/wsdl/partner.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            exposed_soap_headers = [
+                "{http://tempuri.org/commonSchema}requestHeaderType",
+                "{http://tempuri.org/resources}RequestHeaderElement",
+            ]
+        "#;
+        let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("valid toml");
+        assert!(cfg.validate().is_ok(), "partner QNames must validate");
+        assert_eq!(
+            cfg.profiles[0].security.exposed_soap_headers,
+            vec![
+                "{http://tempuri.org/commonSchema}requestHeaderType".to_string(),
+                "{http://tempuri.org/resources}RequestHeaderElement".to_string(),
+            ]
+        );
+
+        let omitted = r#"
+            [[profiles]]
+            name = "partner"
+            wsdl_path = "/wsdl/partner.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+        "#;
+        let cfg: CxfPoolConfig = toml::from_str(omitted).expect("valid toml");
+        assert!(
+            cfg.profiles[0].security.exposed_soap_headers.is_empty(),
+            "an omitted allow-list must default to empty"
+        );
+    }
+
+    #[test]
+    fn exposed_soap_headers_reject_reserved_namespace() {
+        for ns in [
+            WSSE_10_NS, WSSE_11_NS, WSU_NS, DS_NS, XENC_NS, SOAP11_NS, SOAP12_NS,
+        ] {
+            let cfg = exposed_soap_header_config(vec![format!("{{{ns}}}Security")]);
+            match cfg.validate().unwrap_err() {
+                camel_component_api::CamelError::Config(msg) => {
+                    assert!(
+                        msg.contains("security.exposed_soap_headers"),
+                        "{ns}: error must name the option, got: {msg}"
+                    );
+                    assert!(msg.contains("reserved"), "{ns}: got: {msg}");
+                    assert!(msg.contains("partner"), "{ns}: got: {msg}");
+                }
+                other => panic!("{ns}: expected CamelError::Config, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn exposed_soap_headers_reject_malformed_and_cap() {
+        for (label, entry) in [
+            ("missing namespace", "requestHeaderType".to_string()),
+            (
+                "space in namespace",
+                "{http://tempuri.org/common Schema}requestHeaderType".to_string(),
+            ),
+            (
+                "comma in namespace",
+                "{http://tempuri.org/common,Schema}requestHeaderType".to_string(),
+            ),
+            (
+                "EM SPACE in namespace",
+                "{http://tempuri.org/a\u{2003}b}x".to_string(),
+            ),
+            (
+                "NBSP in namespace",
+                "{http://tempuri.org/a\u{a0}b}x".to_string(),
+            ),
+            (
+                "non-ASCII local",
+                "{http://tempuri.org/commonSchema}réquete".to_string(),
+            ),
+        ] {
+            let cfg = exposed_soap_header_config(vec![entry.clone()]);
+            match cfg.validate().unwrap_err() {
+                camel_component_api::CamelError::Config(msg) => {
+                    assert!(
+                        msg.contains("security.exposed_soap_headers"),
+                        "{label}: error must name the option, got: {msg}"
+                    );
+                    assert!(
+                        msg.contains(&entry),
+                        "{label}: error must name the entry, got: {msg}"
+                    );
+                    assert!(msg.contains("partner"), "{label}: got: {msg}");
+                }
+                other => panic!("{label}: expected CamelError::Config, got {other:?}"),
+            }
+        }
+
+        let entries: Vec<String> = (0..17)
+            .map(|i| format!("{{http://tempuri.org/ns}}Header{i}"))
+            .collect();
+        let cfg = exposed_soap_header_config(entries);
+        match cfg.validate().unwrap_err() {
+            camel_component_api::CamelError::Config(msg) => {
+                assert!(
+                    msg.contains("security.exposed_soap_headers"),
+                    "error must name the option, got: {msg}"
+                );
+                assert!(
+                    msg.contains("at most 16"),
+                    "error must name the cap, got: {msg}"
+                );
+                assert!(msg.contains("partner"), "got: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exposed_soap_headers_reject_duplicate_and_case_collision() {
+        let duplicate = exposed_soap_header_config(vec![
+            "{http://tempuri.org/commonSchema}requestHeaderType".to_string(),
+            "{http://tempuri.org/commonSchema}requestHeaderType".to_string(),
+        ]);
+        match duplicate.validate().unwrap_err() {
+            camel_component_api::CamelError::Config(msg) => {
+                assert!(msg.contains("security.exposed_soap_headers"), "got: {msg}");
+                assert!(msg.contains("duplicate"), "got: {msg}");
+                assert!(msg.contains("partner"), "got: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+
+        let collision = exposed_soap_header_config(vec![
+            "{http://tempuri.org/commonSchema}Tenant".to_string(),
+            "{http://tempuri.org/resources}tenant".to_string(),
+        ]);
+        match collision.validate().unwrap_err() {
+            camel_component_api::CamelError::Config(msg) => {
+                assert!(msg.contains("security.exposed_soap_headers"), "got: {msg}");
+                assert!(msg.contains("case-insensitive"), "got: {msg}");
+                assert!(msg.contains("partner"), "got: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+
+        let exact_local_collision = exposed_soap_header_config(vec![
+            "{http://a}Tenant".to_string(),
+            "{http://b}Tenant".to_string(),
+        ]);
+        match exact_local_collision.validate().unwrap_err() {
+            camel_component_api::CamelError::Config(msg) => {
+                assert!(msg.contains("security.exposed_soap_headers"), "got: {msg}");
+                assert!(msg.contains("case-insensitive"), "got: {msg}");
+                assert!(msg.contains("partner"), "got: {msg}");
+            }
+            other => panic!("expected CamelError::Config, got {other:?}"),
+        }
     }
 }

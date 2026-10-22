@@ -40,8 +40,9 @@ use crate::support::wait::wait_until;
 use crate::support::{bridge_bg_rt, install_crypto_provider, send_to_direct};
 use crate::wire::{is_soap_envelope_ns, resolved_name};
 use crate::{
-    cxf_wsdl_path, cxf_wss_keystore_fixture, http_client, init_tracing, post_soap,
-    reserve_local_port, wss_security, wss_single_profile_component,
+    cxf_wsdl_path, cxf_wss_keystore_fixture, cxf_wss_signed_request_with_header_fixture,
+    http_client, init_tracing, post_soap, reserve_local_port, wss_security,
+    wss_single_profile_component,
 };
 
 /// WS-Security (SOAP message security) header namespace.
@@ -632,6 +633,88 @@ async fn wss_e2e_leg_c_default_profile_rejects_legacy_sha1() {
     assert!(
         consumed.get_received_exchanges().await.is_empty(),
         "the rejected legacy-signed request must never reach the route"
+    );
+
+    h_consumer.stop().await;
+}
+
+/// Allow-listed application header (T9): a signed SOAP 1.2 request that also
+/// carries an application header is accepted, and the header is exported as
+/// exchange data only. The profile allow-lists
+/// `{http://tempuri.org/commonSchema}requestHeaderType`, so the bridge emits
+/// `CxfSoapHeader.requestHeaderType` with the header XML and
+/// `CxfSoapHeaderSigned.requestHeaderType = "false"` (the signature covers the
+/// Body only). Verified Body-signer metadata remains independent of the unsigned
+/// application header, which creates no authenticated principal:
+/// `principal_from_exchange` stays `None`.
+#[tokio::test(flavor = "multi_thread")]
+async fn cxf_native_wss_exports_allow_listed_soap_header() {
+    use camel_api::security_policy::principal_from_exchange;
+
+    init_tracing();
+    install_crypto_provider();
+    let _binary = require_cxf_bridge_binary();
+    let wsdl_path = cxf_wsdl_path();
+
+    let fixture_xml = std::fs::read_to_string(cxf_wss_signed_request_with_header_fixture())
+        .expect("checked-in signed request with application header must exist");
+
+    let security = CxfSecurityFields {
+        exposed_soap_headers: vec![
+            "{http://tempuri.org/commonSchema}requestHeaderType".to_string(),
+        ],
+        ..wss_security(None)
+    };
+    let (h_consumer, base) =
+        start_wss_consumer("wss_e2e_exposed_header", security, &wsdl_path).await;
+
+    let res = post_soap(&base, "text/xml", "sayHello", fixture_xml.clone()).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the signed request carrying an application header must pass WS-Security verification, \
+         body:\n{fixture_xml}"
+    );
+
+    let consumed = h_consumer.mock().get_endpoint("consumed").unwrap();
+    wait_until(
+        "exposed-header consumer received the signed request",
+        Duration::from_secs(10),
+        Duration::from_millis(200),
+        || {
+            let consumed = consumed.clone();
+            async move { Ok(!consumed.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await
+    .unwrap();
+
+    let hits = consumed.get_received_exchanges().await;
+    let exchange = &hits[0];
+    let header_xml = exchange
+        .input
+        .header("CxfSoapHeader.requestHeaderType")
+        .and_then(|value| value.as_str())
+        .expect("the allow-listed application header must be exported as exchange data");
+    assert!(
+        header_xml.contains("organisation"),
+        "the exported header must carry its organisation element, got: {header_xml}"
+    );
+    assert!(
+        header_xml.contains("28071"),
+        "the exported header must carry its organisation value, got: {header_xml}"
+    );
+    assert_eq!(
+        exchange
+            .input
+            .header("CxfSoapHeaderSigned.requestHeaderType")
+            .and_then(|value| value.as_str()),
+        Some("false"),
+        "the Body-only signature must not mark the application header as signed"
+    );
+    assert!(
+        principal_from_exchange(exchange).is_none(),
+        "an application header is data, not authentication"
     );
 
     h_consumer.stop().await;

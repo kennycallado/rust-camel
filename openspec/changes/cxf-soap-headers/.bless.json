@@ -1,0 +1,47 @@
+{
+  "verdict": "BLESSED",
+  "expert": "experts/e_gpt",
+  "kind": "implementation",
+  "hash": "sha256:57cdfbf14d81b5be16e57a0c04304301b6492443a7b305bc7be2f8fec44defce",
+  "hash_method": "xtask hash-artifacts --change-dir openspec/changes/cxf-soap-headers",
+  "change": "cxf-soap-headers",
+  "base": "c0fd1bd73",
+  "reviewed_head": "16e7e8b90b8c28c1105c28fd69b28ca6ba62c32f",
+  "expert_task_id": "ses_ea0c3a6e3ffeePZUgrUK3gILLG",
+  "findings": [
+    {
+      "severity": "low",
+      "file": "crates/camel-test/tests/cxf_test/wss_e2e.rs",
+      "line": 647,
+      "finding": "Comment incorrectly claimed no signer descriptor is attached to the signed request.",
+      "resolution": "Clarify that verified Body-signer metadata is independent of the unsigned application header and that the header creates no authenticated principal.",
+      "fix_commit": "00969a63d944cece557cf8dec7eb2337d55e7b60"
+    }
+  ],
+  "implementation_head_after_comment_fix": "00969a63d944cece557cf8dec7eb2337d55e7b60",
+  "implementation_diff_hash_after_comment_fix": "sha256:2d694568091a9f4b351a71a767614917d5456d45c99ad61dd815b66e75779b7d",
+  "implementation_diff_hash_method": "sha256 of git diff --binary c0fd1bd73..00969a63d944cece557cf8dec7eb2337d55e7b60",
+  "gates_rerun": [
+    {
+      "command": "cargo xtask lint-ignore",
+      "exit_code": 0,
+      "containment": "systemd-run user scope; TMPDIR=/home/shared/tmp"
+    },
+    {
+      "command": "cargo fmt --check --all",
+      "exit_code": 0,
+      "containment": "systemd-run user scope; TMPDIR=/home/shared/tmp"
+    },
+    {
+      "command": "git diff --check",
+      "exit_code": 0
+    }
+  ],
+  "acceptance_notes": [
+    "No landing-blocking fixes required; verdict was BLESSED, not BLESS-WITH-FIXES.",
+    "T9 runtime CI deferral explicitly accepted: native binary absent locally; feature-enabled compilation and clippy passed.",
+    "Source-native CI runs the complete cxf_test target. Published bridge smoke filters T9 out and is not T9 execution evidence.",
+    "Schema no-drift exception accepted: no generated schema covers CxfSecurityFields.",
+    "No merge, archive, bd close, version bump, push, or tag performed."
+  ]
+}

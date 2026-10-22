@@ -2,6 +2,7 @@ package org.rustcamel.cxf;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -69,8 +70,32 @@ class SignedRequestFixtureGeneratorTest {
   private static final String SOAP11_NS = "http://schemas.xmlsoap.org/soap/envelope/";
   private static final String RSA_SHA1 = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
   private static final String SHA1 = "http://www.w3.org/2000/09/xmldsig#sha1";
+  private static final String RSA_SHA256 = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+  private static final String SHA256 = "http://www.w3.org/2001/04/xmlenc#sha256";
   private static final String EXCLUSIVE_C14N = "http://www.w3.org/2001/10/xml-exc-c14n#";
   private static final String DS_NS = "http://www.w3.org/2000/09/xmldsig#";
+
+  /**
+   * SOAP 1.2 {@code sayHello} request with no Headers; the app header is inserted by the factory.
+   */
+  private static final String SOAP12_HEADERLESS_REQUEST =
+      "<soapenv:Envelope xmlns:soapenv=\""
+          + SOAP12_NS
+          + "\" xmlns:hel=\""
+          + HELLO_NS
+          + "\"><soapenv:Body><hel:sayHelloRequest><name>signed</name></hel:sayHelloRequest>"
+          + "</soapenv:Body></soapenv:Envelope>";
+
+  /**
+   * The application header carried UNSIGNED by the Rust fixture (T9 asserts {@code signed=false}).
+   */
+  private static final String HEADER_XML =
+      "<rh:requestHeaderType xmlns:rh=\"http://tempuri.org/commonSchema\">"
+          + "<rh:user>alice</rh:user><rh:messageId>m-1</rh:messageId>"
+          + "<rh:organisation>28071</rh:organisation></rh:requestHeaderType>";
+
+  private static final String APP_HEADER_NS = "http://tempuri.org/commonSchema";
+  private static final String APP_HEADER_QNAME = "{" + APP_HEADER_NS + "}requestHeaderType";
 
   @Test
   void generate() throws Exception {
@@ -99,6 +124,85 @@ class SignedRequestFixtureGeneratorTest {
     // signature over the SOAP Body, the direct Body child is the WSDL input element, the decoy
     // Header Body survives, and no Timestamp leaks in.
     verifySignedRequest(keystore, signed);
+
+    Files.writeString(Path.of(out), signed);
+
+    assertArrayEquals(
+        keystoreBefore,
+        Files.readAllBytes(keystore),
+        "generating the fixture must not mutate the signing keystore");
+  }
+
+  /**
+   * Test-support generator for the header-bearing Rust fixture ({@code
+   * crates/camel-test/tests/fixtures/cxf-wss-signed-request-with-header.xml}).
+   *
+   * <p>Skipped during normal test runs. To (re)generate the fixture, set {@code
+   * CXF_SIGNED_FIXTURE_JKS} to the checked-in JKS and {@code CXF_SIGNED_FIXTURE_WITH_HEADER_OUT} to
+   * the destination path:
+   *
+   * <pre>
+   *   CXF_SIGNED_FIXTURE_JKS=.../cxf-wss-test-keystore.jks \
+   *   CXF_SIGNED_FIXTURE_WITH_HEADER_OUT=.../cxf-wss-signed-request-with-header.xml \
+   *     ./gradlew test --tests "org.rustcamel.cxf.SignedRequestFixtureGeneratorTest"
+   * </pre>
+   *
+   * <p>The request is a SOAP 1.2 Body signature with <b>no</b> {@code wsu:Timestamp}. The
+   * application header is carried but deliberately <b>not</b> covered by the signature, so the
+   * native test proves {@code signed=false} for a header outside the signed parts.
+   */
+  @Test
+  void generateWithHeader() throws Exception {
+    String jks = System.getenv("CXF_SIGNED_FIXTURE_JKS");
+    String out = System.getenv("CXF_SIGNED_FIXTURE_WITH_HEADER_OUT");
+    Assumptions.assumeTrue(
+        jks != null && out != null,
+        "set CXF_SIGNED_FIXTURE_JKS and CXF_SIGNED_FIXTURE_WITH_HEADER_OUT to regenerate the "
+            + "header-bearing signed fixture");
+
+    Path keystore = Path.of(jks);
+    byte[] keystoreBefore = Files.readAllBytes(keystore);
+
+    String signed =
+        SignedSoapHeaderEnvelopeFactory.signSoap11(
+            SOAP12_HEADERLESS_REQUEST,
+            keystore,
+            TestKeystoreHelper.KEY_ALIAS,
+            RSA_SHA256,
+            SHA256,
+            HEADER_XML,
+            false);
+
+    // Prove the emitted fixture before committing it with the production inbound path: the same
+    // trusted keystore verifies the Body signature, exactly one allow-listed header is exported,
+    // and that header is NOT covered by the signature (the fixture's contract for T9).
+    SecurityProfile verifier =
+        SecurityProfile.builder("esap")
+            .keystore(jks, TestKeystoreHelper.KEYSTORE_PASSWORD)
+            .sigUser(TestKeystoreHelper.KEY_ALIAS, TestKeystoreHelper.KEYSTORE_PASSWORD)
+            .exposedSoapHeaders(List.of(APP_HEADER_QNAME))
+            .build();
+    WssSecurityProcessor.VerifiedInboundMessage verified =
+        new WssSecurityProcessor(verifier).processInbound(signed);
+
+    assertNotNull(verified, "the generated header fixture must verify inbound");
+    assertTrue(
+        verified.signer().isPresent(),
+        "the generated header fixture must export a Body-covering signer");
+    assertEquals(1, verified.soapHeaders().size(), "the generator must export exactly one header");
+    assertEquals(
+        "requestHeaderType",
+        verified.soapHeaders().get(0).getLocalName(),
+        "the exported header must be the allow-listed application header");
+    assertFalse(
+        verified.soapHeaders().get(0).getSigned(),
+        "the fixture header is outside the signed parts and must stay unsigned");
+
+    Document doc = SoapEnvelopeHelper.parseResponse(signed);
+    assertEquals(
+        0,
+        doc.getElementsByTagNameNS("*", "Timestamp").getLength(),
+        "no wsu:Timestamp may appear in the fixture");
 
     Files.writeString(Path.of(out), signed);
 

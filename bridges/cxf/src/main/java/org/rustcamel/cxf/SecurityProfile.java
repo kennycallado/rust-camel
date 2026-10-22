@@ -3,6 +3,7 @@ package org.rustcamel.cxf;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -11,6 +12,7 @@ import java.util.Set;
 import java.util.logging.Logger;
 import javax.security.auth.callback.Callback;
 import javax.security.auth.callback.CallbackHandler;
+import javax.xml.namespace.QName;
 import org.apache.cxf.binding.soap.SoapMessage;
 import org.apache.cxf.interceptor.Interceptor;
 import org.apache.cxf.message.Message;
@@ -147,6 +149,9 @@ public class SecurityProfile {
    */
   private final Integer faultStatus;
 
+  // --- Exposed application SOAP headers (validated allow-list) ---
+  private final List<QName> exposedSoapHeaders;
+
   // --- Cached Crypto (lazy, thread-safe) ---
   private volatile Crypto signatureCrypto;
   private volatile Crypto verificationCrypto;
@@ -183,6 +188,7 @@ public class SecurityProfile {
     this.timestampTtlSeconds = b.timestampTtlSeconds;
     this.timestampFutureToleranceSeconds = b.timestampFutureToleranceSeconds;
     this.faultStatus = b.faultStatus;
+    this.exposedSoapHeaders = b.exposedSoapHeaders;
   }
 
   // --- Accessors ---
@@ -374,6 +380,11 @@ public class SecurityProfile {
   /** Optional WSS-only HTTP status override (400-599), or {@code null} for the default matrix. */
   public Integer faultStatus() {
     return faultStatus;
+  }
+
+  /** Validated allow-list of application SOAP header QNames, in configuration order. */
+  public List<QName> exposedSoapHeaders() {
+    return exposedSoapHeaders;
   }
 
   // --- Predicates ---
@@ -660,6 +671,8 @@ public class SecurityProfile {
     private Integer timestampTtlSeconds;
     private Integer timestampFutureToleranceSeconds;
     private Integer faultStatus;
+    private List<String> exposedSoapHeadersRaw;
+    private List<QName> exposedSoapHeaders = List.of();
 
     private Builder(String name) {
       this.name = name;
@@ -791,6 +804,15 @@ public class SecurityProfile {
       return this;
     }
 
+    /**
+     * Replaces the application SOAP header allow-list with raw {@code {namespace}local} entries,
+     * already split into individual entries by the caller.
+     */
+    public Builder exposedSoapHeaders(List<String> entries) {
+      this.exposedSoapHeadersRaw = entries == null ? null : List.copyOf(entries);
+      return this;
+    }
+
     public SecurityProfile build() {
       validateInboundActions();
       validateExpiredPinnedCertificate();
@@ -798,6 +820,7 @@ public class SecurityProfile {
       validateOutboundActions();
       validateSignatureKnobs();
       validateAllowedAlgorithmLists();
+      validateExposedSoapHeaders();
       return new SecurityProfile(this);
     }
 
@@ -882,6 +905,63 @@ public class SecurityProfile {
                 + " allow-list would be silently inert without verification material"
                 + " (cxf.truststore.path or cxf.keystore.path)");
       }
+    }
+
+    /**
+     * Fail-loud checks on the application SOAP header allow-list. The grammar is fixed and
+     * ASCII-only so the comma-joined env carrier round-trips losslessly. Reserved WS-Security/SOAP
+     * namespaces, malformed entries, the 16-entry cap, duplicate QNames, and local names that
+     * collide under case-insensitive lookup are all rejected at build.
+     */
+    private void validateExposedSoapHeaders() {
+      String envVar = "CXF_PROFILE_" + name.toUpperCase(Locale.ROOT) + "_EXPOSED_SOAP_HEADERS";
+      List<String> raw = exposedSoapHeadersRaw;
+      if (raw == null || raw.isEmpty()) {
+        exposedSoapHeaders = List.of();
+        return;
+      }
+      if (raw.size() > SoapHeaderExporter.MAX_HEADERS) {
+        throw new IllegalArgumentException(
+            envVar
+                + " lists "
+                + raw.size()
+                + " entries but at most "
+                + SoapHeaderExporter.MAX_HEADERS
+                + " application SOAP headers may be exposed per profile");
+      }
+      List<QName> parsed = new ArrayList<>(raw.size());
+      Set<QName> seenQNames = new HashSet<>();
+      Set<String> seenLocalNames = new HashSet<>();
+      for (String entry : raw) {
+        QName qName = parseExposedSoapHeader(envVar, entry);
+        if (SoapHeaderExporter.isReservedNamespace(qName.getNamespaceURI())) {
+          throw new IllegalArgumentException(
+              envVar
+                  + " entry '"
+                  + entry
+                  + "' uses reserved namespace '"
+                  + qName.getNamespaceURI()
+                  + "'; WS-Security and SOAP envelope headers are never exposed");
+        }
+        if (!seenQNames.add(qName)) {
+          throw new IllegalArgumentException(
+              envVar
+                  + " lists duplicate QName '"
+                  + entry
+                  + "'; each header may be listed only once");
+        }
+        if (!seenLocalNames.add(qName.getLocalPart().toLowerCase(Locale.ROOT))) {
+          throw new IllegalArgumentException(
+              envVar
+                  + " entry '"
+                  + entry
+                  + "' collides with another entry's local name under case-insensitive"
+                  + " comparison; the exchange key is CxfSoapHeader.<localName> and"
+                  + " Message::header_ic matches case-insensitively");
+        }
+        parsed.add(qName);
+      }
+      exposedSoapHeaders = List.copyOf(parsed);
     }
 
     /**
@@ -1076,6 +1156,67 @@ public class SecurityProfile {
       }
     }
     return List.copyOf(algorithms);
+  }
+
+  /**
+   * Parses one {@code {namespace}local} allow-list entry by hand (no whitespace regex). The
+   * namespace may not contain braces, commas, or Unicode whitespace; the local name must match
+   * {@code [A-Za-z_][A-Za-z0-9._-]*}.
+   */
+  private static QName parseExposedSoapHeader(String envVar, String entry) {
+    if (entry == null || !entry.startsWith("{")) {
+      throw malformedExposedSoapHeader(envVar, entry);
+    }
+    int namespaceEnd = entry.indexOf('}');
+    if (namespaceEnd < 0) {
+      throw malformedExposedSoapHeader(envVar, entry);
+    }
+    String namespace = entry.substring(1, namespaceEnd);
+    String localName = entry.substring(namespaceEnd + 1);
+    if (namespace.isEmpty()
+        || localName.isEmpty()
+        || namespace.indexOf('{') >= 0
+        || namespace.indexOf('}') >= 0
+        || localName.indexOf('{') >= 0
+        || localName.indexOf('}') >= 0
+        || !isValidSoapHeaderLocalName(localName)) {
+      throw malformedExposedSoapHeader(envVar, entry);
+    }
+    for (int i = 0; i < namespace.length(); ) {
+      int codePoint = namespace.codePointAt(i);
+      if (codePoint == ',' || BlankTlsValue.isWhiteSpaceCodePoint(codePoint)) {
+        throw malformedExposedSoapHeader(envVar, entry);
+      }
+      i += Character.charCount(codePoint);
+    }
+    return new QName(namespace, localName);
+  }
+
+  private static IllegalArgumentException malformedExposedSoapHeader(String envVar, String entry) {
+    return new IllegalArgumentException(
+        envVar
+            + " entry '"
+            + entry
+            + "' is not a valid {namespace}local QName; the namespace must be non-empty and"
+            + " contain no '{', '}', ',' or whitespace, and the local name must match"
+            + " [A-Za-z_][A-Za-z0-9._-]*");
+  }
+
+  private static boolean isValidSoapHeaderLocalName(String localName) {
+    if (localName.isEmpty()) return false;
+    if (!isAsciiSoapHeaderNameStart(localName.charAt(0))) return false;
+    for (int i = 1; i < localName.length(); i++) {
+      if (!isAsciiSoapHeaderNamePart(localName.charAt(i))) return false;
+    }
+    return true;
+  }
+
+  private static boolean isAsciiSoapHeaderNameStart(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+  }
+
+  private static boolean isAsciiSoapHeaderNamePart(char c) {
+    return isAsciiSoapHeaderNameStart(c) || (c >= '0' && c <= '9') || c == '.' || c == '-';
   }
 
   private static boolean allowsSha1(List<String> algorithms) {

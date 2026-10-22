@@ -6,6 +6,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import cxf_bridge.SignerIdentity;
+import cxf_bridge.SoapHeader;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -15,6 +16,7 @@ import java.security.MessageDigest;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
+import javax.xml.namespace.QName;
 import javax.xml.parsers.DocumentBuilderFactory;
 import org.apache.wss4j.common.ext.WSSecurityException;
 import org.apache.wss4j.dom.WSConstants;
@@ -192,6 +194,75 @@ class WssSecurityProcessorTest {
     assertTrue(
         signer.getFingerprintSha256().matches("[0-9a-f]{64}"),
         "fingerprint must be 64 lowercase hex characters");
+  }
+
+  // --- Application SOAP header export ---
+
+  @Test
+  void processInbound_exportsAllowListedHeader() throws Exception {
+    SecurityProfile profile =
+        SecurityProfile.builder("test")
+            .keystore(keystorePath.toString(), "changeit")
+            .truststore(keystorePath.toString(), "changeit")
+            .sigUser(TestKeystoreHelper.KEY_ALIAS, "changeit")
+            .encUser(TestKeystoreHelper.KEY_ALIAS)
+            .actionsOut("Signature")
+            .actionsIn("Signature")
+            .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+            .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
+            .exposedSoapHeaders(List.of("{http://tempuri.org/commonSchema}requestHeaderType"))
+            .build();
+
+    String signed = new WssSecurityProcessor(profile).processOutbound(soap11WithAppHeader());
+    WssSecurityProcessor.VerifiedInboundMessage verified =
+        new WssSecurityProcessor(profile).processInbound(signed);
+
+    List<SoapHeader> exported = verified.soapHeaders();
+    assertEquals(1, exported.size(), "exactly the allow-listed header is exported");
+    SoapHeader header = exported.get(0);
+    assertEquals("http://tempuri.org/commonSchema", header.getNs());
+    assertEquals("requestHeaderType", header.getLocalName());
+    assertEquals(
+        "hello",
+        SoapEnvelopeHelper.parseResponse(header.getXml()).getDocumentElement().getTextContent());
+    assertFalse(header.getSigned(), "a Body-only signature does not cover the application header");
+  }
+
+  @Test
+  void processInbound_neverExportsSecurity() throws Exception {
+    SecurityProfile profile =
+        SecurityProfile.builder("test")
+            .keystore(keystorePath.toString(), "changeit")
+            .truststore(keystorePath.toString(), "changeit")
+            .sigUser(TestKeystoreHelper.KEY_ALIAS, "changeit")
+            .encUser(TestKeystoreHelper.KEY_ALIAS)
+            .actionsOut("Signature")
+            .actionsIn("Signature")
+            .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+            .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
+            .build();
+
+    String signed = new WssSecurityProcessor(profile).processOutbound(soap11WithAppHeader());
+    Document signedDoc = SoapEnvelopeHelper.parseResponse(signed);
+
+    // A profile cannot build this allow-list: the WSSE namespace is always rejected. Call the
+    // exporter directly to prove the reserved-namespace skip is the second line of defence.
+    List<SoapHeader> exported =
+        SoapHeaderExporter.export(
+            signedDoc,
+            List.of(
+                new QName(
+                    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd",
+                    "Security"),
+                new QName("http://tempuri.org/commonSchema", "requestHeaderType")),
+            null);
+
+    assertEquals(1, exported.size(), "only the application header may be exported");
+    assertEquals("requestHeaderType", exported.get(0).getLocalName());
+    assertTrue(
+        exported.stream()
+            .noneMatch(header -> SoapHeaderExporter.isReservedNamespace(header.getNs())),
+        "a wsse:Security header is never exported");
   }
 
   // --- Body-coverage scoping of SIGN results ---
@@ -500,6 +571,18 @@ class WssSecurityProcessorTest {
       hex.append(Character.forDigit((b >> 4) & 0xf, 16)).append(Character.forDigit(b & 0xf, 16));
     }
     return hex.toString();
+  }
+
+  /** SOAP 1.1 envelope carrying an application header before wsse:Security is inserted. */
+  private static String soap11WithAppHeader() {
+    return """
+        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+          <soapenv:Header>
+            <rh:requestHeaderType xmlns:rh="http://tempuri.org/commonSchema">hello</rh:requestHeaderType>
+          </soapenv:Header>
+          <soapenv:Body><test:Hello xmlns:test="http://test.example.com">World</test:Hello></soapenv:Body>
+        </soapenv:Envelope>
+        """;
   }
 
   /** Plain SOAP 1.1 envelope used as the real signing input. */

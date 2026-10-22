@@ -7,6 +7,7 @@ import com.google.protobuf.ByteString;
 import cxf_bridge.ConsumerRequest;
 import cxf_bridge.ConsumerResponse;
 import cxf_bridge.SignerIdentity;
+import cxf_bridge.SoapHeader;
 import io.vertx.core.AsyncResult;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
@@ -30,11 +31,14 @@ import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import javax.security.auth.x500.X500Principal;
+import javax.xml.namespace.QName;
 import org.apache.wss4j.common.ext.WSSecurityException;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -78,6 +82,15 @@ class SoapEndpointPublisherTest {
   /** The fixture's request-reply operation body and declared action ({@code urn:echo}). */
   private static final String ECHO_ELEMENT =
       "<e:echoRequest xmlns:e=\"urn:oneway:363\">hello</e:echoRequest>";
+
+  private static final String APP_HEADER_NS = "http://tempuri.org/commonSchema";
+  private static final String APP_HEADER_QNAME = "{" + APP_HEADER_NS + "}requestHeaderType";
+  private static final String HEADER_XML =
+      "<rh:requestHeaderType xmlns:rh=\"http://tempuri.org/commonSchema\">"
+          + "<rh:organisation>28071</rh:organisation></rh:requestHeaderType>";
+  private static final String PARTNER_TWO_HEADER_NS = "http://tempuri.org/resources";
+  private static final String OTHER_HEADER_QNAME =
+      "{" + PARTNER_TWO_HEADER_NS + "}RequestHeaderElement";
 
   private static final String EMPTY_ACTION_SERVICE = "{urn:oneway:363:empty}EmptyActionService";
   private static final String EMPTY_ACTION_PORT = "{urn:oneway:363:empty}EmptyActionPort";
@@ -341,6 +354,306 @@ class SoapEndpointPublisherTest {
     assertFalse(
         spoofedCaptor.getAllValues().get(2).hasSigner(),
         "Client-supplied signer headers must not export a signer");
+  }
+
+  // --- Application SOAP header export (T1, T3, T4, T5, T5b, T5c, T7, T10) ---
+
+  @Test
+  void allow_listed_header_is_exported() throws Exception {
+    SecurityProfile signing = signingHeaderProfile(APP_HEADER_QNAME);
+    String plain = envelope11WithHeaders(appHeader("requestHeaderType", "hello"));
+    String signed = new WssSecurityProcessor(signing).processOutbound(plain);
+
+    driveRequestOutcome(signed, "text/xml", signing, completedOk());
+
+    ConsumerRequest dispatched = captureDispatchedRequest(1);
+    assertEquals(1, dispatched.getSoapHeadersCount(), "one allow-listed header is exported");
+    SoapHeader header = dispatched.getSoapHeaders(0);
+    assertEquals(APP_HEADER_NS, header.getNs());
+    assertEquals("requestHeaderType", header.getLocalName());
+    Element root = SoapEnvelopeHelper.parseResponse(header.getXml()).getDocumentElement();
+    assertEquals(APP_HEADER_NS, root.getNamespaceURI());
+    assertEquals("requestHeaderType", root.getLocalName());
+    assertEquals("hello", root.getTextContent());
+  }
+
+  @Test
+  void signed_flag_true_for_covered_header() throws Exception {
+    SecurityProfile profile = signingHeaderProfile(APP_HEADER_QNAME);
+    String signed =
+        SignedSoapHeaderEnvelopeFactory.signSoap11(
+            envelope11(ECHO_ELEMENT),
+            keystorePath,
+            TestKeystoreHelper.KEY_ALIAS,
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+            "http://www.w3.org/2001/04/xmlenc#sha256",
+            HEADER_XML,
+            true);
+
+    driveRequestOutcome(signed, "text/xml", profile, completedOk());
+
+    ConsumerRequest dispatched = captureDispatchedRequest(1);
+    assertEquals(1, dispatched.getSoapHeadersCount(), "one allow-listed header is exported");
+    SoapHeader header = dispatched.getSoapHeaders(0);
+    assertEquals(APP_HEADER_NS, header.getNs());
+    assertEquals("requestHeaderType", header.getLocalName());
+    assertTrue(
+        header.getSigned(), "a header covered by the verified signature must be marked signed");
+  }
+
+  @Test
+  void signedHeaderCoverage_bodyOnlySignatureLeavesHeaderUnsigned() throws Exception {
+    SecurityProfile profile = signingHeaderProfile(APP_HEADER_QNAME);
+    String signed =
+        SignedSoapHeaderEnvelopeFactory.signSoap11(
+            envelope11(ECHO_ELEMENT),
+            keystorePath,
+            TestKeystoreHelper.KEY_ALIAS,
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256",
+            "http://www.w3.org/2001/04/xmlenc#sha256",
+            HEADER_XML,
+            false);
+
+    driveRequestOutcome(signed, "text/xml", profile, completedOk());
+
+    ConsumerRequest dispatched = captureDispatchedRequest(1);
+    assertEquals(1, dispatched.getSoapHeadersCount(), "one allow-listed header is exported");
+    SoapHeader header = dispatched.getSoapHeaders(0);
+    assertEquals(APP_HEADER_NS, header.getNs());
+    assertEquals("requestHeaderType", header.getLocalName());
+    assertFalse(header.getSigned(), "a Body-only signature leaves the application header unsigned");
+  }
+
+  @Test
+  void unlisted_header_is_ignored() throws Exception {
+    SecurityProfile profile = headerAllowListProfile(APP_HEADER_QNAME);
+    String request =
+        envelope11WithHeaders(
+            appHeader("requestHeaderType", "allowed"), appHeader("otherHeaderType", "ignored"));
+
+    driveRequestOutcome(request, "text/xml", profile, completedOk());
+
+    ConsumerRequest dispatched = captureDispatchedRequest(1);
+    assertEquals(1, dispatched.getSoapHeadersCount(), "only the allow-listed header is exported");
+    assertEquals("requestHeaderType", dispatched.getSoapHeaders(0).getLocalName());
+  }
+
+  @Test
+  void duplicate_qname_faults() throws Exception {
+    SecurityProfile profile = headerAllowListProfile(APP_HEADER_QNAME);
+    String request =
+        envelope11WithHeaders(
+            appHeader("requestHeaderType", "TOPSECRET-DUP-1"),
+            appHeader("requestHeaderType", "TOPSECRET-DUP-2"));
+
+    HttpOutcome outcome = driveRequestOutcome(request, "text/xml", profile, completedOk());
+
+    assertEquals(500, outcome.status(), outcome.body());
+    assertSenderFault(outcome.body(), "1.1");
+    assertTrue(
+        outcome.body().contains("invalid SOAP header export"),
+        "the fault must name the export failure: " + outcome.body());
+    assertFalse(
+        outcome.body().contains("TOPSECRET-DUP"), "the fault must not carry header content");
+    verify(cxfServerManager, never()).handleSoapRequest(any());
+  }
+
+  @Test
+  void size_caps_fault() throws Exception {
+    String singleMarker = "TOPSECRET-SINGLE";
+    SecurityProfile singleProfile = headerAllowListProfile(APP_HEADER_QNAME);
+    HttpOutcome single =
+        driveRequestOutcome(
+            envelope11WithHeaders(appHeader("requestHeaderType", singleMarker + "A".repeat(20000))),
+            "text/xml",
+            singleProfile,
+            completedOk());
+    assertEquals(500, single.status(), single.body());
+    assertSenderFault(single.body(), "1.1");
+    assertTrue(single.body().contains("invalid SOAP header export"), single.body());
+    assertFalse(single.body().contains(singleMarker), "the fault must not carry header content");
+    verify(cxfServerManager, never()).handleSoapRequest(any());
+
+    String aggregateMarker = "TOPSECRET-AGG";
+    List<String> localNames = List.of("h1", "h2", "h3", "h4", "h5");
+    StringBuilder headers = new StringBuilder();
+    for (String localName : localNames) {
+      headers.append(appHeader(localName, aggregateMarker + "A".repeat(13900)));
+    }
+    SecurityProfile aggregateProfile =
+        headerAllowListProfile(
+            localNames.stream()
+                .map(localName -> "{" + APP_HEADER_NS + "}" + localName)
+                .toArray(String[]::new));
+    HttpOutcome aggregate =
+        driveRequestOutcome(
+            envelope11WithHeaders(headers.toString()), "text/xml", aggregateProfile, completedOk());
+    assertEquals(500, aggregate.status(), aggregate.body());
+    assertSenderFault(aggregate.body(), "1.1");
+    assertTrue(aggregate.body().contains("invalid SOAP header export"), aggregate.body());
+    assertFalse(
+        aggregate.body().contains(aggregateMarker), "the fault must not carry header content");
+    verify(cxfServerManager, never()).handleSoapRequest(any());
+  }
+
+  @Test
+  void cap_fault_ignores_fault_status_override() throws Exception {
+    SecurityProfile profile =
+        SecurityProfile.builder(TEST_PROFILE_NAME)
+            .exposedSoapHeaders(List.of(APP_HEADER_QNAME))
+            .faultStatus(403)
+            .build();
+
+    HttpOutcome outcome =
+        driveRequestOutcome(
+            envelope11WithHeaders(appHeader("requestHeaderType", "A".repeat(20000))),
+            "text/xml",
+            profile,
+            completedOk());
+
+    assertEquals(500, outcome.status(), "a header-export fault is never a WSS fault");
+    assertNotEquals(403, outcome.status());
+    assertSenderFault(outcome.body(), "1.1");
+    verify(cxfServerManager, never()).handleSoapRequest(any());
+  }
+
+  @Test
+  void cap_fault_from_verified_wss_ignores_fault_status_override() throws Exception {
+    SecurityProfile profile =
+        SecurityProfile.builder(TEST_PROFILE_NAME)
+            .keystore(keystorePath.toString(), "changeit")
+            .truststore(keystorePath.toString(), "changeit")
+            .sigUser(TestKeystoreHelper.KEY_ALIAS, "changeit")
+            .encUser(TestKeystoreHelper.KEY_ALIAS)
+            .actionsOut("Signature")
+            .actionsIn("Signature")
+            .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+            .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
+            .exposedSoapHeaders(List.of(APP_HEADER_QNAME))
+            .faultStatus(403)
+            .build();
+
+    String marker = "TOPSECRET-WSS";
+    String plain =
+        envelope11WithHeaders(appHeader("requestHeaderType", marker + "A".repeat(20000)));
+    String signed = new WssSecurityProcessor(profile).processOutbound(plain);
+
+    HttpOutcome outcome = driveRequestOutcome(signed, "text/xml", profile, completedOk());
+
+    assertEquals(500, outcome.status(), "a header-export fault from the WSS path is Sender/500");
+    assertNotEquals(403, outcome.status());
+    assertSenderFault(outcome.body(), "1.1");
+    assertTrue(outcome.body().contains("invalid SOAP header export"), outcome.body());
+    assertFalse(outcome.body().contains(marker), "the fault must not carry header content");
+    verify(cxfServerManager, never()).handleSoapRequest(any());
+  }
+
+  @Test
+  void exact_limits_reach_the_route() throws Exception {
+    String exactContent =
+        contentExactlyFilling("requestHeaderType", SoapHeaderExporter.MAX_HEADER_BYTES);
+    SecurityProfile exactProfile = headerAllowListProfile(APP_HEADER_QNAME);
+    HttpOutcome exact =
+        driveRequestOutcome(
+            envelope11WithHeaders(appHeader("requestHeaderType", exactContent)),
+            "text/xml",
+            exactProfile,
+            completedOk());
+    assertEquals(200, exact.status(), exact.body());
+    assertFalse(exact.body().contains("Fault"), exact.body());
+
+    List<String> localNames = List.of("h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8");
+    int perHeader = SoapHeaderExporter.MAX_TOTAL_BYTES / localNames.size();
+    StringBuilder headers = new StringBuilder();
+    for (String localName : localNames) {
+      headers.append(appHeader(localName, contentExactlyFilling(localName, perHeader)));
+    }
+    SecurityProfile totalProfile =
+        headerAllowListProfile(
+            localNames.stream()
+                .map(localName -> "{" + APP_HEADER_NS + "}" + localName)
+                .toArray(String[]::new));
+    resetPublisher();
+    HttpOutcome total =
+        driveRequestOutcome(
+            envelope11WithHeaders(headers.toString()), "text/xml", totalProfile, completedOk());
+    assertEquals(200, total.status(), total.body());
+    assertFalse(total.body().contains("Fault"), total.body());
+
+    ArgumentCaptor<ConsumerRequest> requestCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
+    verify(cxfServerManager, times(2)).handleSoapRequest(requestCaptor.capture());
+    List<ConsumerRequest> requests = requestCaptor.getAllValues();
+
+    assertEquals(1, requests.get(0).getSoapHeadersCount());
+    assertEquals(
+        SoapHeaderExporter.MAX_HEADER_BYTES,
+        requests.get(0).getSoapHeaders(0).getXml().getBytes(StandardCharsets.UTF_8).length);
+
+    assertEquals(localNames.size(), requests.get(1).getSoapHeadersCount());
+    int totalBytes = 0;
+    for (SoapHeader header : requests.get(1).getSoapHeadersList()) {
+      int bytes = header.getXml().getBytes(StandardCharsets.UTF_8).length;
+      assertTrue(
+          bytes < SoapHeaderExporter.MAX_HEADER_BYTES,
+          "each aggregate header must stay below the single-header cap: " + bytes);
+      totalBytes += bytes;
+    }
+    assertEquals(SoapHeaderExporter.MAX_TOTAL_BYTES, totalBytes);
+  }
+
+  @Test
+  void signed_flag_false_without_wss() throws Exception {
+    SecurityProfile profile = headerAllowListProfile(APP_HEADER_QNAME);
+
+    driveRequestOutcome(
+        envelope11WithHeaders(appHeader("requestHeaderType", "hello")),
+        "text/xml",
+        profile,
+        completedOk());
+
+    ConsumerRequest dispatched = captureDispatchedRequest(1);
+    assertEquals(1, dispatched.getSoapHeadersCount());
+    assertFalse(
+        dispatched.getSoapHeaders(0).getSigned(), "the no-WSS path never marks a header as signed");
+  }
+
+  @Test
+  void several_qnames_per_profile() throws Exception {
+    String request =
+        envelope11WithHeaders(
+            appHeader("requestHeaderType", "one"),
+            headerElement(PARTNER_TWO_HEADER_NS, "rh2", "RequestHeaderElement", "two"));
+
+    SecurityProfile partnerTwo =
+        listenerHeaderProfile("partner_two", APP_HEADER_QNAME, OTHER_HEADER_QNAME);
+    SecurityProfile partnerOne = listenerHeaderProfile("partner_one", APP_HEADER_QNAME);
+    when(profileStore.profiles())
+        .thenReturn(Map.of("partner_two", partnerTwo, "partner_one", partnerOne));
+
+    // Both requests run through the SAME publisher instance so any per-profile exporter state is
+    // shared; only the addressed profile (path + store lookup) changes.
+    when(httpRequest.path()).thenReturn("/cxf/partner_two");
+    when(profileStore.getProfile("partner_two")).thenReturn(partnerTwo);
+    driveRequestOutcome(request, "text/xml", partnerTwo, completedOk());
+
+    when(httpRequest.path()).thenReturn("/cxf/partner_one");
+    when(profileStore.getProfile("partner_one")).thenReturn(partnerOne);
+    driveRequestOutcome(request, "text/xml", partnerOne, completedOk());
+
+    ArgumentCaptor<ConsumerRequest> requestCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
+    verify(cxfServerManager, times(2)).handleSoapRequest(requestCaptor.capture());
+    List<ConsumerRequest> requests = requestCaptor.getAllValues();
+
+    assertEquals("partner_two", requests.get(0).getSecurityProfile());
+    assertEquals(
+        Set.of(APP_HEADER_QNAME, OTHER_HEADER_QNAME),
+        exportedQNames(requests.get(0)),
+        "the first profile exports exactly both allow-listed QNames");
+    assertEquals("partner_one", requests.get(1).getSecurityProfile());
+    assertEquals(
+        Set.of(APP_HEADER_QNAME),
+        exportedQNames(requests.get(1)),
+        "the same request under a narrower profile exports only its one allowed QName");
   }
 
   @Test
@@ -3082,6 +3395,92 @@ class SoapEndpointPublisherTest {
         + "\"><soapenv:Body>"
         + body
         + "</soapenv:Body></soapenv:Envelope>";
+  }
+
+  /** SOAP 1.1 envelope with the supplied application header elements before the Body. */
+  private static String envelope11WithHeaders(String... headerElements) {
+    return "<soapenv:Envelope xmlns:soapenv=\""
+        + SOAP11_NS
+        + "\"><soapenv:Header>"
+        + String.join("", headerElements)
+        + "</soapenv:Header><soapenv:Body>"
+        + ECHO_ELEMENT
+        + "</soapenv:Body></soapenv:Envelope>";
+  }
+
+  private static String appHeader(String localName, String content) {
+    return headerElement(APP_HEADER_NS, "rh", localName, content);
+  }
+
+  private static String headerElement(
+      String namespace, String prefix, String localName, String content) {
+    return "<" + prefix + ":" + localName + " xmlns:" + prefix + "=\"" + namespace + "\">" + content
+        + "</" + prefix + ":" + localName + ">";
+  }
+
+  /** A listener profile named for the addressed path, carrying the fixture WSDL metadata. */
+  private static SecurityProfile listenerHeaderProfile(String name, String... qNames)
+      throws Exception {
+    return SecurityProfile.builder(name)
+        .wsdlPath(fixtureWsdlPath())
+        .serviceName(FIXTURE_SERVICE)
+        .portName(FIXTURE_PORT)
+        .exposedSoapHeaders(List.of(qNames))
+        .build();
+  }
+
+  private static Set<String> exportedQNames(ConsumerRequest request) {
+    return request.getSoapHeadersList().stream()
+        .map(header -> "{" + header.getNs() + "}" + header.getLocalName())
+        .collect(Collectors.toSet());
+  }
+
+  private static SecurityProfile headerAllowListProfile(String... qNames) {
+    return SecurityProfile.builder(TEST_PROFILE_NAME).exposedSoapHeaders(List.of(qNames)).build();
+  }
+
+  private static SecurityProfile signingHeaderProfile(String... qNames) {
+    return SecurityProfile.builder(TEST_PROFILE_NAME)
+        .keystore(keystorePath.toString(), "changeit")
+        .truststore(keystorePath.toString(), "changeit")
+        .sigUser(TestKeystoreHelper.KEY_ALIAS, "changeit")
+        .encUser(TestKeystoreHelper.KEY_ALIAS)
+        .actionsOut("Signature")
+        .actionsIn("Signature")
+        .signatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256")
+        .signatureDigestAlgorithm("http://www.w3.org/2001/04/xmlenc#sha256")
+        .exposedSoapHeaders(List.of(qNames))
+        .build();
+  }
+
+  /** The serialized byte length the exporter sees for one application header in its envelope. */
+  private static int exportedHeaderBytes(String localName, String content) throws Exception {
+    Document doc =
+        SoapEnvelopeHelper.parseResponse(envelope11WithHeaders(appHeader(localName, content)));
+    List<SoapHeader> exported =
+        SoapHeaderExporter.export(doc, List.of(new QName(APP_HEADER_NS, localName)), null);
+    return exported.get(0).getXml().getBytes(StandardCharsets.UTF_8).length;
+  }
+
+  /** ASCII content that makes the serialized header exactly {@code targetBytes} long. */
+  private static String contentExactlyFilling(String localName, int targetBytes) throws Exception {
+    // Measure with one character so the serializer emits paired tags (an empty element is
+    // self-closed and has a different overhead).
+    int overhead = exportedHeaderBytes(localName, "A") - 1;
+    int length = targetBytes - overhead;
+    assertTrue(length > 0, "target must exceed the header's serialization overhead");
+    String content = "A".repeat(length);
+    assertEquals(
+        targetBytes,
+        exportedHeaderBytes(localName, content),
+        "the constructed header must serialize to exactly " + targetBytes + " bytes");
+    return content;
+  }
+
+  private ConsumerRequest captureDispatchedRequest(int expectedCalls) {
+    ArgumentCaptor<ConsumerRequest> requestCaptor = ArgumentCaptor.forClass(ConsumerRequest.class);
+    verify(cxfServerManager, times(expectedCalls)).handleSoapRequest(requestCaptor.capture());
+    return requestCaptor.getAllValues().get(expectedCalls - 1);
   }
 
   private static String envelope12(String body) {

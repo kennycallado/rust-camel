@@ -47,6 +47,7 @@ fn secret_profiles() -> Vec<CxfProfileEnvVars> {
         timestamp_ttl_seconds: None,
         timestamp_future_tolerance_seconds: None,
         fault_status: None,
+        exposed_soap_headers: vec!["{http://partner.example/ns}header-SENTINEL".to_string()],
         tls: Some(CxfTlsEnvVars {
             keystore_path: Some("/etc/cxf/tls-keystore.p12".to_string()),
             keystore_password: Some(Redacted::new("tlspass-ks".to_string())),
@@ -122,6 +123,10 @@ fn env_var_keys_logs_key_names_for_diagnostics() {
         rendered.contains("CXF_PROFILE_BALEARES_ENC_USERNAME"),
         "got: {rendered}"
     );
+    assert!(
+        rendered.contains("CXF_PROFILE_BALEARES_EXPOSED_SOAP_HEADERS"),
+        "got: {rendered}"
+    );
 }
 
 #[test]
@@ -137,6 +142,13 @@ fn env_var_keys_render_never_contains_username_values() {
     let rendered = format!("{:?}", env_var_keys(&bridge_env_vars_with_secrets()));
     assert!(!rendered.contains("sig-user-9"), "leak: {rendered}");
     assert!(!rendered.contains("enc-user-7"), "leak: {rendered}");
+}
+
+#[test]
+fn env_var_keys_render_never_contains_exposed_header_values() {
+    let rendered = format!("{:?}", env_var_keys(&bridge_env_vars_with_secrets()));
+    assert!(!rendered.contains("header-SENTINEL"), "leak: {rendered}");
+    assert!(!rendered.contains("partner.example"), "leak: {rendered}");
 }
 
 #[test]
@@ -271,6 +283,10 @@ fn bridge_env_trace_site_renders_keys_not_values() {
         captured.contains("CXF_PROFILE_BALEARES_ALLOWED_DIGEST_ALGORITHMS"),
         "missing key in {captured}"
     );
+    assert!(
+        captured.contains("CXF_PROFILE_BALEARES_EXPOSED_SOAP_HEADERS"),
+        "missing key in {captured}"
+    );
 
     // VALUES absent — a revert to `env_vars = ?config.env_vars` dumps all of
     // these (address credentials, usernames, Deref-unwrapped passwords).
@@ -279,6 +295,8 @@ fn bridge_env_trace_site_renders_keys_not_values() {
     assert!(!captured.contains("tok=abc"), "leak: {captured}");
     assert!(!captured.contains("sig-user-9"), "leak: {captured}");
     assert!(!captured.contains("enc-user-7"), "leak: {captured}");
+    assert!(!captured.contains("header-SENTINEL"), "leak: {captured}");
+    assert!(!captured.contains("partner.example"), "leak: {captured}");
     assert!(!captured.contains("kspass-1"), "leak: {captured}");
     assert!(!captured.contains("tspass-2"), "leak: {captured}");
     assert!(!captured.contains("sigpass-3"), "leak: {captured}");

@@ -100,6 +100,9 @@ public class SecurityProfileStore {
               .timestampTtlSeconds(timestampTtlSeconds)
               .timestampFutureToleranceSeconds(timestampFutureToleranceSeconds)
               .faultStatus(faultStatus)
+              .exposedSoapHeaders(
+                  parseExposedSoapHeaders(
+                      prefix + "EXPOSED_SOAP_HEADERS", getenv(prefix + "EXPOSED_SOAP_HEADERS")))
               .build();
 
       profiles.put(name, profile);
@@ -330,6 +333,29 @@ public class SecurityProfileStore {
               + " (expected 400-599; fault_status overrides WSS faults only)");
     }
     return value;
+  }
+
+  /**
+   * Splits the comma-separated {@code EXPOSED_SOAP_HEADERS} carrier without parsing QNames: the
+   * profile builder is the single validation point. A null/blank value means the feature is off and
+   * returns {@code null}. A blank segment is a typo and fails startup naming the variable.
+   */
+  static List<String> parseExposedSoapHeaders(String envVar, String raw) {
+    if (raw == null || raw.isBlank()) {
+      return null;
+    }
+    List<String> entries = new ArrayList<>();
+    for (String segment : raw.split(",", -1)) {
+      String trimmed = segment.trim();
+      if (trimmed.isEmpty()) {
+        throw new IllegalStateException(
+            envVar
+                + " contains a blank header entry; remove the empty segment or omit the"
+                + " variable to disable application SOAP header export");
+      }
+      entries.add(trimmed);
+    }
+    return List.copyOf(entries);
   }
 
   /**

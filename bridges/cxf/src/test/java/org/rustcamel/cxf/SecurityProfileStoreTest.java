@@ -16,6 +16,7 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import javax.xml.namespace.QName;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -851,6 +852,52 @@ class SecurityProfileStoreTest {
       assertTrue(warning.contains("'win'"), warning);
       assertTrue(warning.contains("ADR-0088"), warning);
     }
+  }
+
+  @Test
+  @DisplayName("EXPOSED_SOAP_HEADERS reaches the profile as a validated QName")
+  void exposedSoapHeaders_envVarReachesTheProfile() {
+    Map<String, String> env = new HashMap<>();
+    env.put("CXF_PROFILES", "p1");
+    env.put(
+        "CXF_PROFILE_P1_EXPOSED_SOAP_HEADERS",
+        "{http://tempuri.org/commonSchema}requestHeaderType");
+
+    SecurityProfile profile = createStore(env).getProfile("p1");
+
+    assertEquals(
+        List.of(new QName("http://tempuri.org/commonSchema", "requestHeaderType")),
+        profile.exposedSoapHeaders());
+  }
+
+  @Test
+  @DisplayName("blank EXPOSED_SOAP_HEADERS leaves the allow-list empty")
+  void exposedSoapHeaders_blankVarIsEmpty() {
+    Map<String, String> env = new HashMap<>();
+    env.put("CXF_PROFILES", "p1");
+    env.put("CXF_PROFILE_P1_EXPOSED_SOAP_HEADERS", "   ");
+
+    SecurityProfile profile = createStore(env).getProfile("p1");
+
+    assertEquals(List.of(), profile.exposedSoapHeaders());
+  }
+
+  @Test
+  @DisplayName("a reserved WS-Security QName fails startup")
+  void exposedSoapHeaders_reservedNamespaceFailsStartup() {
+    Map<String, String> env = new HashMap<>();
+    env.put("CXF_PROFILES", "p1");
+    env.put(
+        "CXF_PROFILE_P1_EXPOSED_SOAP_HEADERS",
+        "{http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd}"
+            + "Security");
+
+    IllegalArgumentException ex =
+        assertThrows(IllegalArgumentException.class, () -> createStore(env));
+
+    assertTrue(
+        ex.getMessage().contains("reserved namespace"),
+        "expected a reserved-namespace failure but was: " + ex.getMessage());
   }
 
   private static SecurityProfile.Builder legacySigningProfile(String name) {

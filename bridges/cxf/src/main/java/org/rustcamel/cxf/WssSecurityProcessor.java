@@ -1,6 +1,7 @@
 package org.rustcamel.cxf;
 
 import cxf_bridge.SignerIdentity;
+import cxf_bridge.SoapHeader;
 import java.io.ByteArrayInputStream;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -54,10 +55,12 @@ public class WssSecurityProcessor {
   private static final int MAX_CERT_DER_BYTES = 64 * 1024;
 
   /**
-   * Result of inbound WS-Security processing: the verified XML and the optional signer descriptor.
-   * The signer is present only when a validated, trusted {@code SIGN} result covers the SOAP Body.
+   * Result of inbound WS-Security processing: the verified XML, the optional signer descriptor, and
+   * the allow-listed application SOAP headers. The signer is present only when a validated, trusted
+   * {@code SIGN} result covers the SOAP Body.
    */
-  public record VerifiedInboundMessage(String xml, Optional<SignerIdentity> signer) {}
+  public record VerifiedInboundMessage(
+      String xml, Optional<SignerIdentity> signer, List<SoapHeader> soapHeaders) {}
 
   private final SecurityProfile profile;
 
@@ -195,7 +198,7 @@ public class WssSecurityProcessor {
   public VerifiedInboundMessage processInbound(String soapXml, String soapVersion)
       throws Exception {
     if (!canVerifyInbound() || soapXml == null || soapXml.isBlank()) {
-      return new VerifiedInboundMessage(soapXml, Optional.empty());
+      return new VerifiedInboundMessage(soapXml, Optional.empty(), List.of());
     }
 
     Document doc = parseXml(soapXml);
@@ -243,7 +246,10 @@ public class WssSecurityProcessor {
       signer = extractBodySigner(doc, results);
     }
 
-    return new VerifiedInboundMessage(domToString(doc), signer);
+    List<SoapHeader> soapHeaders =
+        SoapHeaderExporter.export(doc, profile.exposedSoapHeaders(), results);
+
+    return new VerifiedInboundMessage(domToString(doc), signer, soapHeaders);
   }
 
   // --- Helpers ---

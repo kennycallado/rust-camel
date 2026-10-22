@@ -411,9 +411,44 @@ The window applies to consumer inbound verification only. The producer path is u
 
 Replay retention does not grow with the window. Each profile has one shared replay cache. For a signed message whose signature follows a `Timestamp`, the replay key is the `Created` string plus a hash of the signature value bytes plus a hash of the verification key encoding; it does not use `wsu:Id`. A byte-identical resend is rejected while the entry is live. An entry is retained until `Expires` when `Expires` is in the future and at most 3600 s away; otherwise it is retained for 300 s. The 300 s case covers no `Expires`, a past `Expires`, and an `Expires` more than 3600 s away. A multi-year fixture is therefore remembered for 300 s. A larger TTL widens acceptance, never retention.
 
+### Exposing application SOAP headers
+
+A consumer profile can export selected application SOAP headers to the route. The allow-list is a per-profile list of QNames in `{namespace}local` form, with at most 16 entries.
+
+| Option | Environment variable | Property | Default |
+| --- | --- | --- | --- |
+| `exposed_soap_headers` | `CXF_PROFILE_<NAME>_EXPOSED_SOAP_HEADERS` | `cxf.security.exposed.soap.headers` | _(none)_ |
+
+Startup validation is fail-closed. A profile is rejected when:
+
+- An entry is not a `{namespace}local` QName with a non-empty namespace free of `{`, `}`, `,`, and whitespace, and an ASCII local name matching `[A-Za-z_][A-Za-z0-9._-]*`.
+- The namespace is one of the reserved WSSE 1.0, WSSE 1.1, WSU, DS, XENC, or SOAP envelope namespaces.
+- The list has more than 16 entries.
+- Two entries share a QName.
+- Two entries have local names that differ only by ASCII case. The exchange key is `CxfSoapHeader.<localName>` and lookup is case-insensitive.
+
+`wsse:Security` is never exported. An absent or empty list exports no SOAP headers.
+
+For each exported element the bridge writes two exchange headers:
+
+| Header | Value |
+| --- | --- |
+| `CxfSoapHeader.<localName>` | Serialized element XML. Use it in an XPath expression. |
+| `CxfSoapHeaderSigned.<localName>` | `"true"` when a verified signature covers the element, otherwise `"false"`. |
+
+An unlisted header is ignored silently. It does not fault the request.
+
+A request fails with a Sender fault before any route dispatch when one exported header exceeds 16,384 UTF-8 bytes of serialized XML, when the exported headers exceed 65,536 UTF-8 bytes in total, or when two elements with the same allow-listed QName appear. The limits are inclusive: exactly 16,384 and 65,536 bytes pass. The cap counts UTF-8 bytes, not characters. The fault is not a WS-Security fault, so the profile `fault_status` override does not rewrite it. Neither the fault message nor a log line contains a header value.
+
+Trust limit: `signed=true` only when a verified `SIGN` result references the exported element itself. A signature that covers only the Body leaves the flag `false`, and an encryption-only reference does not set it. A failed signature remains a WS-Security failure; the bridge never downgrades the request to unsigned dispatch. Treat `CxfSoapHeaderSigned.<localName> = "false"` as untrusted data. Do not drive authorization from an unsigned header unless TLS covers the hop (ADR-0032).
+
 ```toml
 [[components.cxf.profiles]]
-name = "partner_112"
+name = "partner-112"
+exposed_soap_headers = [
+  "{http://tempuri.org/commonSchema}requestHeaderType",
+  "{http://tempuri.org/resources}RequestHeaderElement",
+]
 wsdl_path = "wsdl/partner.wsdl"
 service_name = "{http://example.com/partner}PartnerService"
 port_name = "{http://example.com/partner}PartnerPort"

@@ -18,8 +18,8 @@ final class BlankTlsValue {
     return value != null && value.codePoints().allMatch(BlankTlsValue::isWhiteSpaceCodePoint);
   }
 
-  /** The 25 Unicode {@code White_Space} codepoints. */
-  private static boolean isWhiteSpaceCodePoint(int codePoint) {
+  /** The 25 Unicode {@code White_Space} codepoints. Shared with the SOAP-header validator. */
+  static boolean isWhiteSpaceCodePoint(int codePoint) {
     switch (codePoint) {
       case '\t': // U+0009
       case '\n': // U+000A

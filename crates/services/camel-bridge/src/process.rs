@@ -193,6 +193,10 @@ pub struct CxfProfileEnvVars {
     /// Optional per-profile HTTP status override for security (WSS) faults only,
     /// emitted as `CXF_PROFILE_<NAME>_FAULT_STATUS`.
     pub fault_status: Option<u16>,
+    /// Per-profile SOAP header allow-list, emitted as
+    /// `CXF_PROFILE_<NAME>_EXPOSED_SOAP_HEADERS` (comma-joined) only when
+    /// non-empty.
+    pub exposed_soap_headers: Vec<String>,
     /// Producer transport TLS material (`[profiles.security.tls]`).
     pub tls: Option<CxfTlsEnvVars>,
 }
@@ -271,6 +275,12 @@ impl CxfProfileEnvVars {
         }
         if let Some(v) = self.fault_status {
             vars.push((format!("{}FAULT_STATUS", prefix), v.to_string()));
+        }
+        if !self.exposed_soap_headers.is_empty() {
+            vars.push((
+                format!("{}EXPOSED_SOAP_HEADERS", prefix),
+                self.exposed_soap_headers.join(","),
+            ));
         }
         if let Some(ref tls) = self.tls {
             vars.extend(tls.to_env_vars(&prefix));
@@ -1155,6 +1165,7 @@ mod tests {
                 timestamp_ttl_seconds: None,
                 timestamp_future_tolerance_seconds: None,
                 fault_status: None,
+                exposed_soap_headers: vec![],
                 tls: None,
             },
             CxfProfileEnvVars {
@@ -1182,6 +1193,7 @@ mod tests {
                 timestamp_ttl_seconds: None,
                 timestamp_future_tolerance_seconds: None,
                 fault_status: None,
+                exposed_soap_headers: vec![],
                 tls: None,
             },
         ];
@@ -1291,6 +1303,7 @@ mod tests {
             timestamp_ttl_seconds: None,
             timestamp_future_tolerance_seconds: None,
             fault_status: None,
+            exposed_soap_headers: vec![],
             tls: None,
         }];
 
@@ -1339,6 +1352,7 @@ mod tests {
             timestamp_ttl_seconds: Some(900),
             timestamp_future_tolerance_seconds: Some(120),
             fault_status: Some(403),
+            exposed_soap_headers: vec![],
             tls: None,
         };
 
@@ -1411,6 +1425,7 @@ mod tests {
             timestamp_ttl_seconds: None,
             timestamp_future_tolerance_seconds: None,
             fault_status: None,
+            exposed_soap_headers: vec![],
             tls: None,
         };
 
@@ -1454,6 +1469,7 @@ mod tests {
             timestamp_ttl_seconds: Some(u64::MAX),
             timestamp_future_tolerance_seconds: Some(u64::MAX),
             fault_status: None,
+            exposed_soap_headers: vec![],
             tls: None,
         };
 
@@ -1497,6 +1513,7 @@ mod tests {
             timestamp_ttl_seconds: None,
             timestamp_future_tolerance_seconds: None,
             fault_status: None,
+            exposed_soap_headers: vec![],
             tls: None,
         };
 
@@ -1505,6 +1522,56 @@ mod tests {
             !env.iter()
                 .any(|(key, _)| key.ends_with("ALLOW_EXPIRED_PINNED_CERTIFICATE")),
             "default-off must not emit the opt-in: {env:?}"
+        );
+    }
+
+    #[test]
+    fn cxf_profile_env_var_emits_exposed_soap_headers() {
+        const FIRST: &str = "{http://tempuri.org/commonSchema}requestHeaderType";
+        const SECOND: &str = "{http://tempuri.org/resources}RequestHeaderElement";
+
+        let mut vars = CxfProfileEnvVars {
+            name: "partner".to_string(),
+            wsdl_path: "/wsdl".to_string(),
+            service_name: "Svc".to_string(),
+            port_name: "Port".to_string(),
+            address: None,
+            keystore_path: None,
+            keystore_password: None,
+            truststore_path: None,
+            truststore_password: None,
+            sig_username: None,
+            sig_password: None,
+            enc_username: None,
+            security_actions_out: None,
+            security_actions_in: None,
+            signature_algorithm: None,
+            signature_digest_algorithm: None,
+            signature_c14n_algorithm: None,
+            signature_parts: None,
+            allowed_signature_algorithms: None,
+            allowed_digest_algorithms: None,
+            allow_expired_pinned_certificate: false,
+            fault_status: None,
+            timestamp_ttl_seconds: None,
+            timestamp_future_tolerance_seconds: None,
+            exposed_soap_headers: vec![FIRST.to_string(), SECOND.to_string()],
+            tls: None,
+        };
+
+        let env = vars.to_env_vars();
+        let (_, value) = env
+            .iter()
+            .find(|(key, _)| key == "CXF_PROFILE_PARTNER_EXPOSED_SOAP_HEADERS")
+            .expect("exposed header allow-list env var emitted");
+        assert_eq!(value, &format!("{FIRST},{SECOND}"));
+
+        vars.exposed_soap_headers.clear();
+        let env = vars.to_env_vars();
+        assert!(
+            !env.iter()
+                .any(|(key, _)| key.ends_with("EXPOSED_SOAP_HEADERS")),
+            "empty allow-list must not emit the env var: {env:?}"
         );
     }
 
@@ -1712,6 +1779,7 @@ mod tests {
             timestamp_ttl_seconds: None,
             timestamp_future_tolerance_seconds: None,
             fault_status: None,
+            exposed_soap_headers: vec![],
             tls: None,
         };
         let debug_output = format!("{profile:?}");
