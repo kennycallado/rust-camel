@@ -154,6 +154,32 @@ class XsdValidationIntegrationTest {
   }
 
   @Test
+  void invalidPatternKeepsXercesMessageAndPattern() {
+    var schema =
+        "<xs:schema xmlns:xs=\""
+            + XS
+            + "\"><xs:element name=\"v\"><xs:simpleType>"
+            + "<xs:restriction base=\"xs:string\"><xs:pattern value=\"[unclosed\"/>"
+            + "</xs:restriction></xs:simpleType></xs:element></xs:schema>";
+
+    var resp =
+        xsd.registerSchema(
+                RegisterSchemaRequest.newBuilder()
+                    .setSchemaId("bad-pattern")
+                    .setSchema(bytes(schema))
+                    .build())
+            .await()
+            .atMost(Duration.ofSeconds(10));
+
+    assertEquals(BridgeError.Kind.COMPILATION_FAILED, resp.getError().getKind());
+    var detail = resp.getError().getDetail();
+    assertTrue(detail.contains("[unclosed"), detail);
+    assertTrue(detail.contains("not a valid regular expression"), detail);
+    assertTrue(detail.contains("Unexpected end of the pattern in a character class"), detail);
+    assertTrue(detail.length() <= 512, "detail must stay bounded");
+  }
+
+  @Test
   void externalSchemaImportDenied() {
     var schemaWithExternalImport =
         """

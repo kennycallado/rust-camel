@@ -47,14 +47,18 @@ quarkus:
   native:
     resources:
       includes:
-        # Xerces 2.12.2 keeps all message bundles as direct children of
-        # org/apache/xerces/impl/msg/ — re-verify the glob on a xercesImpl bump.
+        # Xerces diagnostic bundles. Re-verify these globs on a xercesImpl bump:
+        #   unzip -l xercesImpl-*.jar | grep '\.properties'
+        # They MUST live here: bundle entries placed in the application's own
+        # META-INF/native-image/resource-config.json did not reach the native
+        # image (verified with glob and with pattern entries), so a bundle
+        # listed only there is absent and Xerces reports "Installation Problem???".
         - org/apache/xerces/impl/msg/*
+        - org/apache/xerces/impl/xpath/regex/message*.properties
         - application.yml
         - tls/placeholder-ca.pem
         - tls/placeholder-server.pem
         - tls/placeholder-server.key
-        - org/apache/xerces/impl/msg/*
     # NOTE: quarkus.native.additional-build-args is intentionally NOT set here.
     # It is provided solely via the QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS env var
     # in build-native.sh. Setting it in BOTH places makes SmallRye prioritize the

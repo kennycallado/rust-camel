@@ -75,6 +75,31 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
     return collapsed.substring(0, MAX_ERROR_TEXT - 3) + "...";
   }
 
+  /**
+   * The throwable's message followed by the distinct messages of its causes, so a wrapped Xerces
+   * diagnostic (and the offending pattern it quotes) is not lost behind a null or generic outer
+   * message. The result is bounded by {@link #bound} when it reaches the wire.
+   */
+  static String withCauses(Throwable t) {
+    var text = new StringBuilder();
+    var depth = 0;
+    for (var cause = t; cause != null && depth < 8; cause = cause.getCause(), depth++) {
+      var message = cause.getMessage();
+      // Substring "already covered" check, not equality: a cause whose text is
+      // entirely present in an accumulated message adds nothing. A short cause
+      // that happens to be a substring of unrelated text would be dropped; if
+      // that ever happens, switch to exact equality.
+      if (message == null || message.isBlank() || text.indexOf(message) >= 0) {
+        continue;
+      }
+      if (!text.isEmpty()) {
+        text.append(" | ");
+      }
+      text.append(message);
+    }
+    return text.isEmpty() ? t.getClass().getSimpleName() : text.toString();
+  }
+
   /** A bounded, safe stand-in for an untrusted key in a diagnostic. */
   static String snippet(String text) {
     if (text == null) {
@@ -123,7 +148,7 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
                 return registerError(
                     schemaId,
                     BridgeError.Kind.INTERNAL,
-                    "registerSchema failed: " + e.getMessage(),
+                    "registerSchema failed: " + withCauses(e),
                     null);
               }
             });
@@ -277,12 +302,12 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
       return ValidateResponse.newBuilder()
           .setValid(false)
           .setError(
-              error(BridgeError.Kind.COMPILATION_FAILED, "SCHEMA_PARSE_ERROR: " + e.getMessage()))
+              error(BridgeError.Kind.COMPILATION_FAILED, "SCHEMA_PARSE_ERROR: " + withCauses(e)))
           .build();
     } catch (Exception e) {
       return ValidateResponse.newBuilder()
           .setValid(false)
-          .setError(error(BridgeError.Kind.INTERNAL, "validate failed: " + e.getMessage()))
+          .setError(error(BridgeError.Kind.INTERNAL, "validate failed: " + withCauses(e)))
           .build();
     }
   }
@@ -361,9 +386,7 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
 
   private static String refusalMessage(SAXException e) {
     var refusal = refusalCause(e);
-    return refusal != null && refusal.getMessage() != null
-        ? refusal.getMessage()
-        : String.valueOf(e.getMessage());
+    return refusal != null && refusal.getMessage() != null ? refusal.getMessage() : withCauses(e);
   }
 
   private static final class ValidationIssueCollector implements ErrorHandler {

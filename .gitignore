@@ -60,6 +60,8 @@ benchmarks/harness/out/
 !/.bless.json
 !openspec/changes/**/.bless.json
 .review.json
+# Persist the owner-requested final implementation blessing at repository root.
+!/.bless.json
 benchmarks/runner/DIGEST
 
 .opencode/fleet/

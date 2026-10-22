@@ -59,6 +59,10 @@ XSD validation delegates to the `xml-bridge` gRPC backend. The bridge starts as 
 
 Validation failure returns a `CamelError` to the route's error handler. Empty bodies, when `failOnNullBody=true` (default), also return an error. Pass `failOnNullBody=false` to let empty bodies flow through without validation. The same toggle exists for `headerName` mode via `failOnNullHeader`. The `validator` endpoint supports Producers only. Consumer creation returns an error.
 
+### Schema diagnostics
+
+The native `xml-bridge` packages the Xerces message bundles, including the regular-expression bundle. An `xs:pattern` that Xerces rejects is reported with the offending pattern and the Xerces parse message, up to a 512-character bound. A very long pattern can push the parse message past that bound. Older bridge builds hid the message behind `Installation Problem??? Couldn't load messages`. If you see that text, upgrade the bridge.
+
 ## Bridge lifecycle
 
 `CamelContext::stop()` does not clean up the `xml-bridge` child process. The `camel run` CLI registers a `BridgeCleanup` lifecycle service that calls `XsdBridgeBackend::shutdown()` on stop. Library embedders must retain the value from `ValidatorComponent::xsd_bridge_backend()` and call `shutdown().await` when it is `Some`. This requirement only applies after an XSD route starts the bridge. JSON and YAML routes never start it.
