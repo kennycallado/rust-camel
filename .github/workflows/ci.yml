@@ -167,6 +167,16 @@ jobs:
         # makes gated-test compile drift fail CI. No Docker or runtime
         # required — cargo check only.
         run: cargo check -p camel-test --features integration-tests --tests
+      - name: Compile-gate narrow cxf integration feature
+        # bd rc-z1ea2: --all-features clippy and the wide
+        # --features integration-tests steps activate dep:camel-component-cxf
+        # as part of a wider union, so neither can catch a defect confined to
+        # the integration-tests-cxf feature line. Without this gate, a compile
+        # break in the narrow cxf_test target stays invisible to CI.
+        # This command mirrors the compile the published-bridge smoke runs
+        # (compile + link, no execution). No Docker or runtime is required,
+        # keeping the gate cheap.
+        run: cargo test -p camel-test --features integration-tests-cxf --test cxf_test --no-run
       - name: Test (full workspace)
         run: cargo test --workspace
       - name: Test camel-cli (exec flavor)
