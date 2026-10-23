@@ -127,6 +127,14 @@ fn default_bridge_start_timeout_ms() -> u64 {
     30_000
 }
 
+fn default_pool_idle_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_pool_expiration_check_ms() -> u64 {
+    30_000
+}
+
 pub fn default_broker_reconnect_interval_ms() -> u64 {
     5_000
 }
@@ -610,6 +618,10 @@ pub struct JmsPoolConfig {
     pub max_bridges: usize,
     #[serde(default = "default_bridge_start_timeout_ms")]
     pub bridge_start_timeout_ms: u64,
+    #[serde(default = "default_pool_idle_timeout_ms")]
+    pub pool_idle_timeout_ms: u64,
+    #[serde(default = "default_pool_expiration_check_ms")]
+    pub pool_expiration_check_ms: u64,
     #[serde(default = "default_broker_reconnect_interval_ms")]
     pub broker_reconnect_interval_ms: u64,
     #[serde(default = "default_health_check_interval_ms")]
@@ -632,6 +644,8 @@ impl Default for JmsPoolConfig {
             brokers: HashMap::new(),
             max_bridges: default_max_bridges(),
             bridge_start_timeout_ms: default_bridge_start_timeout_ms(),
+            pool_idle_timeout_ms: default_pool_idle_timeout_ms(),
+            pool_expiration_check_ms: default_pool_expiration_check_ms(),
             broker_reconnect_interval_ms: default_broker_reconnect_interval_ms(),
             health_check_interval_ms: default_health_check_interval_ms(),
             health_timeout_ms: default_health_timeout_ms(),
@@ -711,6 +725,18 @@ impl JmsPoolConfig {
             return Err(CamelError::Config(
                 "bridge_start_timeout_ms must be > 0".to_string(),
             ));
+        }
+        if !(1_000..=86_400_000).contains(&self.pool_idle_timeout_ms) {
+            return Err(CamelError::Config(format!(
+                "pool_idle_timeout_ms must be in 1000..=86400000 ms (got {}): shorter holds fewer idle connections on the broker but reopens more often on slow cadences",
+                self.pool_idle_timeout_ms
+            )));
+        }
+        if !(1_000..=86_400_000).contains(&self.pool_expiration_check_ms) {
+            return Err(CamelError::Config(format!(
+                "pool_expiration_check_ms must be in 1000..=86400000 ms (got {}): this is how long expired connections linger before the sweep removes them",
+                self.pool_expiration_check_ms
+            )));
         }
         if self.health_check_interval_ms == 0 {
             return Err(CamelError::Config(
@@ -1148,6 +1174,84 @@ mod tests {
             "got: {}",
             err
         );
+    }
+
+    fn assert_pool_knob_rejected(field: &str, value: u64) {
+        let mut cfg = JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::ActiveMq);
+        match field {
+            "pool_idle_timeout_ms" => cfg.pool_idle_timeout_ms = value,
+            "pool_expiration_check_ms" => cfg.pool_expiration_check_ms = value,
+            other => panic!("unknown field {other}"),
+        }
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            matches!(err, camel_component_api::CamelError::Config(_)),
+            "expected CamelError::Config, got: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains(field), "missing field name in: {msg}");
+        assert!(msg.contains("1000"), "missing range lower bound in: {msg}");
+        assert!(
+            msg.contains("86400000"),
+            "missing range upper bound in: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_pool_idle_timeout() {
+        assert_pool_knob_rejected("pool_idle_timeout_ms", 0);
+    }
+
+    #[test]
+    fn validate_rejects_sub_second_pool_idle_timeout() {
+        assert_pool_knob_rejected("pool_idle_timeout_ms", 999);
+    }
+
+    #[test]
+    fn validate_rejects_above_max_pool_idle_timeout() {
+        assert_pool_knob_rejected("pool_idle_timeout_ms", 86_400_001);
+    }
+
+    #[test]
+    fn validate_rejects_zero_pool_expiration_check() {
+        assert_pool_knob_rejected("pool_expiration_check_ms", 0);
+    }
+
+    #[test]
+    fn validate_rejects_sub_second_pool_expiration_check() {
+        assert_pool_knob_rejected("pool_expiration_check_ms", 999);
+    }
+
+    #[test]
+    fn validate_rejects_above_max_pool_expiration_check() {
+        assert_pool_knob_rejected("pool_expiration_check_ms", 86_400_001);
+    }
+
+    #[test]
+    fn validate_accepts_pool_knob_endpoints() {
+        let mut cfg = JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::ActiveMq);
+        cfg.pool_idle_timeout_ms = 1_000;
+        cfg.pool_expiration_check_ms = 1_000;
+        cfg.validate().unwrap();
+        cfg.pool_idle_timeout_ms = 86_400_000;
+        cfg.pool_expiration_check_ms = 86_400_000;
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn pool_knob_serde_defaults() {
+        let cfg = JmsPoolConfig::default();
+        assert_eq!(cfg.pool_idle_timeout_ms, 30_000);
+        assert_eq!(cfg.pool_expiration_check_ms, 30_000);
+
+        let toml = r#"
+[brokers.default]
+broker_url = "tcp://localhost:61616"
+broker_type = "activemq"
+"#;
+        let cfg: JmsPoolConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.pool_idle_timeout_ms, 30_000);
+        assert_eq!(cfg.pool_expiration_check_ms, 30_000);
     }
 
     #[test]

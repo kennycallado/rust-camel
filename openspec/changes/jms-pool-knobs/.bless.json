@@ -1,0 +1,8 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:1eea70c89c39cf73fea726e91b6ed8c0ae38ef9220e098d22b6807ff33d0c9a1",
+  "expert": "experts/e_gpt",
+  "date": "2026-10-23",
+  "notes": "Plan-bless round 1: BLESS-WITH-FIXES (5: 2.1 compile-order temps, wrong env-capture harness name, 2.2 monitor-capture migration, 3.1 parameterized coverage, 1.1 full-range assertions). Round 2: BLESS-WITH-FIXES (1 residual: 3648 caller belongs to 2.2). Round 3: BLESS. Spec bless: 91188d25. Plan reviewer r_gpt: APPROVE-WITH-FINDINGS (Config error variant, applied) after 3 NEED-MORE-CONTEXT dispatches (scope-coaxed; deviation noted in park report)."
+}

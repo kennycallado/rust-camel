@@ -147,20 +147,13 @@ public class JmsClientFactory {
         {
           ActiveMQConnectionFactory cf = buildActiveMqFactory(url, user, pass);
           rawFactory = cf;
-          PooledConnectionFactory pool = new PooledConnectionFactory(cf);
-          pool.setMaxConnections(5);
-          pool.start();
-          return pool;
+          return buildPooledActiveMqFactory(cf, config);
         }
       case "artemis":
         {
           var cf = buildArtemisFactory(url, user, pass);
           rawFactory = cf;
-          JmsPoolConnectionFactory pool = new JmsPoolConnectionFactory();
-          pool.setConnectionFactory(cf);
-          pool.setMaxConnections(5);
-          pool.start();
-          return pool;
+          return buildPooledArtemisFactory(cf, config);
         }
       default:
         {
@@ -168,6 +161,31 @@ public class JmsClientFactory {
               "Unsupported broker_type: '" + type + "'. Valid values: activemq, artemis");
         }
     }
+  }
+
+  // Package-private (not private) testability seam mirroring buildActiveMqFactory: constructs and
+  // starts the Classic producer pool with the validated pool knobs. Setters run before start().
+  static PooledConnectionFactory buildPooledActiveMqFactory(
+      ActiveMQConnectionFactory cf, BridgeConfig config) {
+    PooledConnectionFactory pool = new PooledConnectionFactory(cf);
+    pool.setMaxConnections(5);
+    pool.setIdleTimeout((int) config.poolIdleTimeoutMs());
+    pool.setTimeBetweenExpirationCheckMillis(config.poolExpirationCheckMs());
+    pool.start();
+    return pool;
+  }
+
+  // Package-private (not private) testability seam for the Artemis broker branch. The pooled-jms
+  // setters differ from the Classic PooledConnectionFactory names. Setters run before start().
+  static JmsPoolConnectionFactory buildPooledArtemisFactory(
+      ConnectionFactory cf, BridgeConfig config) {
+    JmsPoolConnectionFactory pool = new JmsPoolConnectionFactory();
+    pool.setConnectionFactory(cf);
+    pool.setMaxConnections(5);
+    pool.setConnectionIdleTimeout((int) config.poolIdleTimeoutMs());
+    pool.setConnectionCheckInterval(config.poolExpirationCheckMs());
+    pool.start();
+    return pool;
   }
 
   // Package-private (not private) so JmsClientFactoryPrefixTest can exercise the effective prefix;

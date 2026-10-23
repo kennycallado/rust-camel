@@ -346,6 +346,8 @@ impl BridgeProcessConfig {
         username: Option<String>,
         password: Option<Redacted<String>>,
         start_timeout_ms: u64,
+        pool_idle_timeout_ms: u64,
+        pool_expiration_check_ms: u64,
         journal_dir: Option<String>,
         broker_key: Option<String>,
     ) -> Self {
@@ -354,6 +356,14 @@ impl BridgeProcessConfig {
             (
                 "BRIDGE_BROKER_TYPE".to_string(),
                 broker_type.as_env_str().to_string(),
+            ),
+            (
+                "JMS_POOL_IDLE_TIMEOUT_MS".to_string(),
+                pool_idle_timeout_ms.to_string(),
+            ),
+            (
+                "JMS_POOL_EXPIRATION_CHECK_MS".to_string(),
+                pool_expiration_check_ms.to_string(),
             ),
         ];
         if let Some(u) = &username {
@@ -917,6 +927,8 @@ mod tests {
             Some("user".to_string()),
             Some(Redacted::new("pass".to_string())),
             1000,
+            30_000,
+            30_000,
             None,
             None,
         );
@@ -939,6 +951,8 @@ mod tests {
                 None,
                 None,
                 1000,
+                30_000,
+                30_000,
                 Some("/var/lib/state/rust-camel/jms-bridge".into()),
                 Some("broker-key".into()),
             );
@@ -959,6 +973,8 @@ mod tests {
             None,
             None,
             1000,
+            30_000,
+            30_000,
             None,
             None,
         );
@@ -968,6 +984,31 @@ mod tests {
                 .iter()
                 .any(|(key, _)| key == "JMS_ATTEMPT_JOURNAL_DIR" || key == "JMS_BRIDGE_BROKER_KEY")
         );
+    }
+
+    #[test]
+    fn jms_pool_knob_env_vars_present() {
+        let config = BridgeProcessConfig::jms(
+            PathBuf::from("/tmp/jms-bridge"),
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            Some("user".to_string()),
+            Some(Redacted::new("pass".to_string())),
+            1000,
+            60_000,
+            5_000,
+            None,
+            None,
+        );
+        assert!(
+            config
+                .env_vars
+                .contains(&("JMS_POOL_IDLE_TIMEOUT_MS".to_string(), "60000".to_string()))
+        );
+        assert!(config.env_vars.contains(&(
+            "JMS_POOL_EXPIRATION_CHECK_MS".to_string(),
+            "5000".to_string()
+        )));
     }
 
     #[test]
@@ -1123,6 +1164,8 @@ mod tests {
             None,
             None,
             1000,
+            30_000,
+            30_000,
             None,
             None,
         );
@@ -1584,6 +1627,8 @@ mod tests {
             None,
             None,
             0,
+            30_000,
+            30_000,
             None,
             None,
         );
@@ -1600,6 +1645,8 @@ mod tests {
             None,
             None,
             0,
+            30_000,
+            30_000,
             None,
             None,
         );
@@ -1674,6 +1721,8 @@ mod tests {
             Some("user".to_string()),
             Some(Redacted::new("super_secret".to_string())),
             1000,
+            30_000,
+            30_000,
             None,
             None,
         );

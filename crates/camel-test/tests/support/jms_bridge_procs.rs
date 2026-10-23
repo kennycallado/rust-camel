@@ -120,6 +120,8 @@ pub async fn spawn_jms_bridge_configured(
         Some(username.to_string()),
         Some(Redacted::new(password.to_string())),
         90_000,
+        30_000,
+        30_000,
         Some(journal_dir.to_string_lossy().into_owned()),
         Some(broker_key),
     );

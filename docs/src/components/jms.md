@@ -178,6 +178,28 @@ The bridge pool assigns one bridge per broker. The first send or consume starts 
 
 The Consumer observes bridge state through a watch channel. A pending bridge returns `Pending` from `poll_ready`. A degraded bridge returns `Err` with the reason. The producer waits for the bridge to become `Ready` before sending.
 
+## Producer pool idle knobs
+
+The producer pool keeps pooled JMS connections for reuse. Two knobs control how long a connection stays idle and how often the pool sweeps expired connections.
+
+```toml
+[default.components.jms]
+pool_idle_timeout_ms = 30000
+pool_expiration_check_ms = 30000
+```
+
+`pool_idle_timeout_ms` (default 30000) sets how long an idle pooled producer connection is kept before the pool drops it. `pool_expiration_check_ms` (default 30000) sets how often the pool sweeps for expired connections. The sweep interval is also how long an expired connection can linger on the broker after its idle timeout ends.
+
+Both knobs accept 1000 to 86400000 ms. A value outside that range fails validation at startup.
+
+A shorter `pool_idle_timeout_ms` holds fewer idle connections on the broker but reopens more often on slow send cadences. A longer value reduces reconnects but leaves more idle connections on the broker. A shorter `pool_expiration_check_ms` removes expired connections sooner but sweeps more often. A longer value reduces sweep overhead but leaves expired connections on the broker longer.
+
+We observed the following behaviour against ActiveMQ 5.17.6 (`camel-112`). The producer pool reopened connections when the send cadence exceeded the idle timeout. Expired connections left the broker in batches. These observations do not establish a general cause; they describe the tested version.
+
+A knob value applies when the bridge process starts. A configuration change takes effect at the next bridge spawn. It does not reconfigure a live bridge.
+
+The pinned JMS client libraries default the expiration check interval to disabled (`-1`, lazy cleanup on borrow). The bridge deliberately sets a 30000 ms sweep interval so the cadence is explicit and predictable. Applying these knobs requires the updated Java bridge. An older bridge binary ignores the environment variables.
+
 ## Health and broker status
 
 A completed health RPC proves that the bridge process is alive. This rule holds when the response reports a broker problem. A failed probe is an RPC error or an expired `health_timeout_ms`. Only `health_failure_threshold` consecutive failed probes restart a bridge. A successful RPC resets the failure count.

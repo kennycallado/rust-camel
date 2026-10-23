@@ -1092,6 +1092,8 @@ pub(crate) async fn ready_stub_process(
         None,
         None,
         2_000,
+        30_000,
+        30_000,
         Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
         Some("0123456789abcdef0123456789abcdef".to_string()),
     );

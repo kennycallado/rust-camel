@@ -180,9 +180,11 @@ and every `REFRESH_AFTER_MS` (5 s); reads never admit refresh work. The wire
 fields `status` and `age_ms` are additive protobuf additions; older bridges
 decode as `UNSPECIFIED`/0 and keep the legacy mapping. The explicit-status
 guarantees need the updated Java bridge; this mission ships no bridge version
-bump. Producer idleTimeout stays excluded (`rc-w06u6`). A future consumer
-transport-listener integration would feed generation-fenced events into the
-same cache; it is explicitly not implemented.
+bump. The producer pool idle timeout and expiration check are now configurable
+pool knobs wired through the spawn environment (`rc-w06u6`): Rust passes
+`JMS_POOL_IDLE_TIMEOUT_MS` and `JMS_POOL_EXPIRATION_CHECK_MS` on every spawn.
+A future consumer transport-listener integration would feed generation-fenced
+events into the same cache; it is explicitly not implemented.
 
 ## Broker-native precedence
 

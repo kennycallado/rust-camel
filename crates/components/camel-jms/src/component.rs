@@ -461,6 +461,12 @@ pub struct JmsBridgePool {
     pub(crate) slots: DashMap<String, Arc<BridgeSlot>>,
     pub(crate) config: HashMap<String, BrokerConfig>,
     pub(crate) bridge_start_timeout_ms: u64,
+    /// Idle-connection timeout forwarded to the bridge's JMS pool
+    /// (`JMS_POOL_IDLE_TIMEOUT_MS` on every spawn, including restarts).
+    pub(crate) pool_idle_timeout_ms: u64,
+    /// Expiration-sweep cadence forwarded to the bridge's JMS pool
+    /// (`JMS_POOL_EXPIRATION_CHECK_MS` on every spawn, including restarts).
+    pub(crate) pool_expiration_check_ms: u64,
     pub(crate) reconnect: NetworkRetryPolicy,
     pub(crate) health_check_interval_ms: u64,
     /// Configured liveness deadline for one health RPC (`health_timeout_ms`).
@@ -529,6 +535,8 @@ impl JmsBridgePool {
             slots: DashMap::new(),
             config: pool_config.brokers,
             bridge_start_timeout_ms: pool_config.bridge_start_timeout_ms,
+            pool_idle_timeout_ms: pool_config.pool_idle_timeout_ms,
+            pool_expiration_check_ms: pool_config.pool_expiration_check_ms,
             reconnect,
             health_check_interval_ms: pool_config.health_check_interval_ms,
             health_timeout_ms: pool_config.health_timeout_ms,
@@ -692,6 +700,8 @@ impl JmsBridgePool {
             &self.bridge_version,
             &self.bridge_cache_dir,
             self.bridge_start_timeout_ms,
+            self.pool_idle_timeout_ms,
+            self.pool_expiration_check_ms,
             broker_name,
             &broker_url,
             &broker_type,
@@ -985,6 +995,8 @@ impl JmsBridgePool {
         let bridge_version = self.bridge_version.clone();
         let bridge_cache_dir = self.bridge_cache_dir.clone();
         let start_timeout_ms = self.bridge_start_timeout_ms;
+        let pool_idle_timeout_ms = self.pool_idle_timeout_ms;
+        let pool_expiration_check_ms = self.pool_expiration_check_ms;
         let health_broker_probe_mode = self.health_broker_probe_mode;
         let handle_ref = Arc::clone(&slot.health_monitor_handle);
         let shutting_down = Arc::clone(&self.shutting_down);
@@ -1187,6 +1199,8 @@ impl JmsBridgePool {
                                         &bridge_version,
                                         &bridge_cache_dir,
                                         start_timeout_ms,
+                                        pool_idle_timeout_ms,
+                                        pool_expiration_check_ms,
                                         &slot.name,
                                         &slot.broker_url,
                                         &slot.broker_type,
@@ -1202,6 +1216,8 @@ impl JmsBridgePool {
                             &bridge_version,
                             &bridge_cache_dir,
                             start_timeout_ms,
+                            pool_idle_timeout_ms,
+                            pool_expiration_check_ms,
                             &slot.name,
                             &slot.broker_url,
                             &slot.broker_type,
@@ -1306,6 +1322,8 @@ impl JmsBridgePool {
         bridge_version: &str,
         bridge_cache_dir: &std::path::Path,
         start_timeout_ms: u64,
+        pool_idle_timeout_ms: u64,
+        pool_expiration_check_ms: u64,
         broker_name: &str,
         broker_url: &str,
         broker_type: &BrokerType,
@@ -1350,6 +1368,8 @@ impl JmsBridgePool {
                 .as_ref()
                 .map(|(_, p)| camel_bridge::process::Redacted::new(p.clone())),
             start_timeout_ms,
+            pool_idle_timeout_ms,
+            pool_expiration_check_ms,
             Some(journal_dir.to_string_lossy().into_owned()),
             Some(broker_key),
         );
@@ -3466,6 +3486,8 @@ mod tests {
             None,
             None,
             300,
+            30_000,
+            30_000,
             Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
             Some("0123456789abcdef0123456789abcdef".to_string()),
         );
@@ -3580,6 +3602,8 @@ mod tests {
             None,
             None,
             300,
+            30_000,
+            30_000,
             Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
             Some("0123456789abcdef0123456789abcdef".to_string()),
         );
@@ -3649,6 +3673,8 @@ mod tests {
             crate::BRIDGE_VERSION,
             dir.path(),
             200,
+            30_000,
+            30_000,
             "default",
             "tcp://localhost:61616",
             &BrokerType::ActiveMq,
@@ -3681,6 +3707,185 @@ mod tests {
         .expect("pool config must be valid");
 
         assert_eq!(pool.health_broker_probe_mode, HealthBrokerProbeMode::Skip);
+    }
+
+    // ── Task 2.2: pool knobs retained across bridge restarts ────────────────
+
+    /// Writes the env-recording stub shared by the task 2.2 spawn tests. Every
+    /// launch appends one `KEY=VALUE`-pair record to `envfile` and its pid to
+    /// `pidfile` before announcing `ready` on an unreachable port.
+    #[cfg(unix)]
+    fn pool_knob_stub(dir: &std::path::Path) -> std::path::PathBuf {
+        let envfile = dir.join("spawn-env.txt");
+        let pidfile = dir.join("child.pid");
+        write_stub(
+            dir,
+            "stub-bridge.sh",
+            &format!(
+                "#!/bin/sh\necho $$ >> '{}'\nprintf 'JMS_POOL_IDLE_TIMEOUT_MS=%s JMS_POOL_EXPIRATION_CHECK_MS=%s\\n' \"$JMS_POOL_IDLE_TIMEOUT_MS\" \"$JMS_POOL_EXPIRATION_CHECK_MS\" >> '{}'\nprintf '%s\\n' '{{\"status\":\"ready\",\"port\":1}}'\nexec sleep 30\n",
+                pidfile.display(),
+                envfile.display(),
+            ),
+        )
+    }
+
+    /// Task 2.2: the configured pool knobs must reach the child environment of
+    /// the initial spawn (pool acquisition) AND of the monitor's replacement
+    /// spawn driven with an empty replacement-outcome queue.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn pool_knobs_reach_initial_and_replacement_spawn_env() {
+        // rustls 0.23 requires a process-level CryptoProvider before the
+        // post-ready mTLS connect runs in `start_bridge_process`.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
+
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let envfile = dir.path().join("spawn-env.txt");
+        let pidfile = dir.path().join("child.pid");
+        let stub = pool_knob_stub(dir.path());
+
+        let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
+        let _guard = env_guard(env_key);
+        // SAFETY: test-scoped env mutation.
+        unsafe { std::env::set_var(env_key, &stub) };
+
+        let pool = JmsBridgePool::from_config(JmsPoolConfig {
+            pool_idle_timeout_ms: 60_000,
+            pool_expiration_check_ms: 5_000,
+            bridge_start_timeout_ms: 300,
+            ..JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::ActiveMq)
+        })
+        .expect("pool config must be valid");
+
+        let (replacement_tx, mut replacement_rx) = tokio::sync::mpsc::unbounded_channel();
+        *pool
+            .replacement_processed
+            .lock()
+            .expect("replacement_processed mutex poisoned") = Some(replacement_tx);
+
+        // Initial launch through pool acquisition records the first env copy.
+        let slot = pool
+            .get_or_create_slot("default")
+            .await
+            .expect("initial slot acquisition");
+
+        // The failed initial start degrades the slot; the monitor then drives
+        // one real replacement launch (empty replacement-outcome queue).
+        // Synchronize on the bounded replacement-processed notification.
+        let _replacement = tokio::time::timeout(Duration::from_secs(5), replacement_rx.recv())
+            .await
+            .expect("replacement-processed notification within 5s")
+            .expect("replacement_processed channel open");
+
+        // Clean up monitor + child (bounded) before asserting.
+        let _ = slot.publish_shutdown();
+        if let Some(mut handle) = slot.health_monitor_handle.lock().await.take()
+            && tokio::time::timeout(Duration::from_secs(2), &mut handle)
+                .await
+                .is_err()
+        {
+            handle.abort();
+            let _ = handle.await;
+        }
+        stop_slot_process(slot.as_ref()).await;
+
+        let recorded = std::fs::read_to_string(&envfile).expect("stub must record spawn env");
+        let launches: Vec<&str> = recorded.lines().collect();
+        assert!(
+            launches.len() >= 2,
+            "initial and replacement launches must both record env, got:\n{recorded}"
+        );
+        for (i, launch) in launches.iter().take(2).enumerate() {
+            let pairs: Vec<&str> = launch.split_whitespace().collect();
+            assert!(
+                pairs.contains(&"JMS_POOL_IDLE_TIMEOUT_MS=60000"),
+                "launch {i} env must contain JMS_POOL_IDLE_TIMEOUT_MS=60000, got: {launch}"
+            );
+            assert!(
+                pairs.contains(&"JMS_POOL_EXPIRATION_CHECK_MS=5000"),
+                "launch {i} env must contain JMS_POOL_EXPIRATION_CHECK_MS=5000, got: {launch}"
+            );
+        }
+
+        for pid_line in std::fs::read_to_string(&pidfile)
+            .expect("stub must record pids")
+            .lines()
+        {
+            let pid: u32 = pid_line.trim().parse().expect("stub pid");
+            assert!(pid > 0);
+            assert!(wait_pid_gone(pid).await, "child {pid} must be terminated");
+        }
+    }
+
+    /// Task 2.2: with a default `JmsPoolConfig` the default knob values
+    /// (30_000 ms) must reach the initial spawn environment.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn pool_knob_defaults_reach_initial_spawn_env() {
+        // rustls 0.23 requires a process-level CryptoProvider before the
+        // post-ready mTLS connect runs in `start_bridge_process`.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
+
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let envfile = dir.path().join("spawn-env.txt");
+        let stub = pool_knob_stub(dir.path());
+
+        let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
+        let _guard = env_guard(env_key);
+        // SAFETY: test-scoped env mutation.
+        unsafe { std::env::set_var(env_key, &stub) };
+
+        // Default `JmsPoolConfig`; only the broker map is required to drive
+        // the initial launch through pool acquisition.
+        let pool = JmsBridgePool::from_config(JmsPoolConfig {
+            brokers: HashMap::from([(
+                "default".to_string(),
+                BrokerConfig {
+                    broker_url: "tcp://localhost:61616".to_string(),
+                    broker_type: BrokerType::ActiveMq,
+                    username: None,
+                    password: None,
+                },
+            )]),
+            ..JmsPoolConfig::default()
+        })
+        .expect("pool config must be valid");
+
+        let slot = pool
+            .get_or_create_slot("default")
+            .await
+            .expect("initial slot acquisition");
+
+        // Clean up monitor + child (bounded) before asserting.
+        let _ = slot.publish_shutdown();
+        if let Some(mut handle) = slot.health_monitor_handle.lock().await.take()
+            && tokio::time::timeout(Duration::from_secs(2), &mut handle)
+                .await
+                .is_err()
+        {
+            handle.abort();
+            let _ = handle.await;
+        }
+        stop_slot_process(slot.as_ref()).await;
+
+        let recorded = std::fs::read_to_string(&envfile).expect("stub must record spawn env");
+        let initial = recorded
+            .lines()
+            .next()
+            .expect("initial launch must record spawn env");
+        let pairs: Vec<&str> = initial.split_whitespace().collect();
+        assert!(
+            pairs.contains(&"JMS_POOL_IDLE_TIMEOUT_MS=30000"),
+            "initial spawn env must contain JMS_POOL_IDLE_TIMEOUT_MS=30000, got: {initial}"
+        );
+        assert!(
+            pairs.contains(&"JMS_POOL_EXPIRATION_CHECK_MS=30000"),
+            "initial spawn env must contain JMS_POOL_EXPIRATION_CHECK_MS=30000, got: {initial}"
+        );
     }
 
     // ── Task 2.4: configured liveness timeout/threshold in the real monitor ──
@@ -3761,6 +3966,8 @@ mod tests {
             None,
             None,
             2_000,
+            30_000,
+            30_000,
             Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
             Some("0123456789abcdef0123456789abcdef".to_string()),
         );

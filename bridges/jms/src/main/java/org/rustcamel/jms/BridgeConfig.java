@@ -24,6 +24,8 @@ import java.util.Map;
  *   <li>{@code JMS_ATTEMPT_JOURNAL_MAX_BYTES} in {@code [65536, 268435456]}, default {@code
  *       4194304}
  *   <li>{@code JMS_MAX_DELIVERY_ATTEMPTS} in {@code [1, 100]}, default {@code 6}
+ *   <li>{@code JMS_POOL_IDLE_TIMEOUT_MS} and {@code JMS_POOL_EXPIRATION_CHECK_MS} in {@code [1000,
+ *       86400000]}, default {@code 30000}
  * </ul>
  *
  * <p>Broker health probes honor {@code JMS_HEALTH_BROKER_PROBE_MODE}: {@code reuse} (the default)
@@ -38,6 +40,8 @@ public class BridgeConfig {
   static final String JOURNAL_MAX_BYTES_ENV = "JMS_ATTEMPT_JOURNAL_MAX_BYTES";
   static final String MAX_DELIVERY_ATTEMPTS_ENV = "JMS_MAX_DELIVERY_ATTEMPTS";
   static final String HEALTH_BROKER_PROBE_MODE_ENV = "JMS_HEALTH_BROKER_PROBE_MODE";
+  static final String POOL_IDLE_TIMEOUT_MS_ENV = "JMS_POOL_IDLE_TIMEOUT_MS";
+  static final String POOL_EXPIRATION_CHECK_MS_ENV = "JMS_POOL_EXPIRATION_CHECK_MS";
 
   static final long JOURNAL_RETENTION_MS_MIN = 60_000L;
   static final long JOURNAL_RETENTION_MS_MAX = 31_536_000_000L;
@@ -54,6 +58,14 @@ public class BridgeConfig {
   static final long MAX_DELIVERY_ATTEMPTS_MIN = 1L;
   static final long MAX_DELIVERY_ATTEMPTS_MAX = 100L;
   static final long MAX_DELIVERY_ATTEMPTS_DEFAULT = 6L;
+
+  static final long POOL_IDLE_TIMEOUT_MS_MIN = 1_000L;
+  static final long POOL_IDLE_TIMEOUT_MS_MAX = 86_400_000L;
+  static final long POOL_IDLE_TIMEOUT_MS_DEFAULT = 30_000L;
+
+  static final long POOL_EXPIRATION_CHECK_MS_MIN = 1_000L;
+  static final long POOL_EXPIRATION_CHECK_MS_MAX = 86_400_000L;
+  static final long POOL_EXPIRATION_CHECK_MS_DEFAULT = 30_000L;
 
   private final Map<String, String> env;
 
@@ -237,6 +249,46 @@ public class BridgeConfig {
         MAX_DELIVERY_ATTEMPTS_MIN,
         MAX_DELIVERY_ATTEMPTS_MAX,
         MAX_DELIVERY_ATTEMPTS_DEFAULT);
+  }
+
+  /**
+   * Validated connection-pool idle timeout, in milliseconds.
+   *
+   * @return {@code JMS_POOL_IDLE_TIMEOUT_MS}, default {@code 30000}
+   * @throws IllegalArgumentException when the value is non-numeric or outside {@code [1000,
+   *     86400000]}
+   */
+  public long poolIdleTimeoutMs() {
+    return poolKnob(
+        POOL_IDLE_TIMEOUT_MS_ENV,
+        env.get(POOL_IDLE_TIMEOUT_MS_ENV),
+        POOL_IDLE_TIMEOUT_MS_MIN,
+        POOL_IDLE_TIMEOUT_MS_MAX,
+        POOL_IDLE_TIMEOUT_MS_DEFAULT);
+  }
+
+  /**
+   * Validated interval between pooled-connection expiration checks, in milliseconds.
+   *
+   * @return {@code JMS_POOL_EXPIRATION_CHECK_MS}, default {@code 30000}
+   * @throws IllegalArgumentException when the value is non-numeric or outside {@code [1000,
+   *     86400000]}
+   */
+  public long poolExpirationCheckMs() {
+    return poolKnob(
+        POOL_EXPIRATION_CHECK_MS_ENV,
+        env.get(POOL_EXPIRATION_CHECK_MS_ENV),
+        POOL_EXPIRATION_CHECK_MS_MIN,
+        POOL_EXPIRATION_CHECK_MS_MAX,
+        POOL_EXPIRATION_CHECK_MS_DEFAULT);
+  }
+
+  private static long poolKnob(String variable, String raw, long min, long max, long defaultValue) {
+    try {
+      return bounded(variable, raw, min, max, defaultValue);
+    } catch (JournalPermanentException error) {
+      throw new IllegalArgumentException(error.getMessage(), error);
+    }
   }
 
   /**
