@@ -59,8 +59,6 @@ benchmarks/harness/out/
 # Final implementation blessing records are committed per change.
 !openspec/changes/**/.bless.json
 .review.json
-# Persist the owner-requested final implementation blessing at repository root.
-!/.bless.json
 benchmarks/runner/DIGEST
 
 .opencode/fleet/
