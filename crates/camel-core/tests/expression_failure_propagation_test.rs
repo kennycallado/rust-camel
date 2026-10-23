@@ -148,6 +148,20 @@ async fn run_route(
     Result<Exchange, CamelError>,
     camel_component_mock::MockComponent,
 ) {
+    run_route_with_message(route_id, steps, handler, Message::new("payload")).await
+}
+
+/// [`run_route`] with a caller-chosen initial message (for flows that must
+/// start from a typed body such as `Body::Xml` instead of the default text).
+async fn run_route_with_message(
+    route_id: &str,
+    steps: Vec<BuilderStep>,
+    handler: Option<ErrorHandlerConfig>,
+    message: Message,
+) -> (
+    Result<Exchange, CamelError>,
+    camel_component_mock::MockComponent,
+) {
     let (mut ctx, mock) = new_context().await;
     let mut def = RouteDefinition::new(format!("direct:{route_id}"), steps).with_route_id(route_id);
     if let Some(handler) = handler {
@@ -157,12 +171,7 @@ async fn run_route(
         .await
         .expect("route must compile");
     ctx.start().await.expect("context start");
-    let result = send_direct(
-        &ctx,
-        &format!("direct:{route_id}"),
-        Exchange::new(Message::new("payload")),
-    )
-    .await;
+    let result = send_direct(&ctx, &format!("direct:{route_id}"), Exchange::new(message)).await;
     let _ = ctx.stop().await;
     (result, mock)
 }
@@ -918,6 +927,114 @@ async fn catch_on_when_error_chains_original() {
 }
 
 // ---------------------------------------------------------------------------
+// XPath failure class + catch-chain compatibility (xpath-error-cause 1.4)
+// ---------------------------------------------------------------------------
+
+/// The catch `on_when` xpath predicate parses the malformed `Body::Xml` body:
+/// the surfaced `ExpressionFailed` is class `Parse` (typed payload) and its
+/// cause is the intact original try-body error (`boom-A`) — the mapper-diagnostic
+/// cause is replaced by the original, reachable both as `cause` and through the
+/// standard `Error::source()` traversal.
+#[cfg(feature = "lang-xpath")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn do_try_xpath_onwhen_predicate_failure_chains_original() {
+    let steps = vec![BuilderStep::DeclarativeDoTry {
+        try_steps: vec![failing_processor()],
+        catch: vec![DoTryCatchClauseBuilder {
+            exception: Some(vec!["ProcessorError".to_string()]),
+            when: None,
+            on_when: Some(expr("xpath", "/root/flag='yes'")),
+            disposition: camel_api::ExceptionDisposition::Handled,
+            steps: vec![],
+        }],
+        finally: None,
+    }];
+    let (result, _mock) = run_route_with_message(
+        "xpath-onwhen-chain",
+        steps,
+        None,
+        Message::new(camel_api::body::Body::Xml("<root><unclosed>".to_string())),
+    )
+    .await;
+    let err = result.expect_err("xpath onWhen predicate failure must surface");
+    match &err {
+        CamelError::ExpressionFailed {
+            language,
+            verb,
+            class,
+            cause,
+            ..
+        } => {
+            assert_eq!(language, "xpath");
+            assert_eq!(verb, "catch on_when");
+            assert_eq!(
+                *class,
+                ExpressionErrorClass::Parse,
+                "malformed Body::Xml must classify as Parse"
+            );
+            let cause = cause.as_deref().expect("original error must be chained");
+            assert!(
+                cause.to_string().contains("boom-A"),
+                "chained cause must render the original ProcessorError, got {cause}"
+            );
+        }
+        other => panic!("expected ExpressionFailed with cause, got {other:?}"),
+    }
+    let mut cursor = std::error::Error::source(&err);
+    let mut reached = false;
+    while let Some(src) = cursor {
+        if src.to_string().contains("boom-A") {
+            // The reached error must be the intact original `CamelError`. The
+            // `cause` is a `Box<CamelError>`, so the trait object may sit at
+            // the box layer — downcast through either shape.
+            let original: &CamelError = src
+                .downcast_ref::<Box<CamelError>>()
+                .map(|boxed| &**boxed)
+                .or_else(|| src.downcast_ref::<CamelError>())
+                .expect("reached source must be the intact original CamelError");
+            assert!(
+                original.to_string().contains("boom-A"),
+                "reached CamelError must render boom-A, got {original:?}"
+            );
+            reached = true;
+            break;
+        }
+        cursor = src.source();
+    }
+    assert!(
+        reached,
+        "Error::source() traversal must reach the original error rendering boom-A"
+    );
+}
+
+/// A genuinely-eval-time xpath failure (undefined variable) still surfaces as
+/// class `Runtime`, so callers matching `Runtime` keep matching. Compatibility
+/// coverage: passes both before and after the typed-payload change.
+#[cfg(feature = "lang-xpath")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn xpath_eval_failure_still_runtime_for_callers() {
+    let steps = vec![BuilderStep::DeclarativeSetBody {
+        value: ValueSourceDef::Expression(expr("xpath", "$__undefined_var__")),
+    }];
+    let (result, _mock) = run_route_with_message(
+        "xpath-eval-runtime",
+        steps,
+        None,
+        Message::new(camel_api::body::Body::Xml("<root/>".to_string())),
+    )
+    .await;
+    let err = result.expect_err("undefined xpath variable must fail at evaluation");
+    assert_expression_failed(
+        &err,
+        "xpath-eval-runtime",
+        "xpath",
+        "set_body",
+        ExpressionErrorClass::Runtime,
+        Pos::Any,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Redaction end-to-end (task 1.9 step 5)
 // ---------------------------------------------------------------------------
 
@@ -1266,8 +1383,8 @@ async fn substituted_env_slot_runtime() {
 /// `$$` is NOT a Simple-template escape at the source level: `$${env:NAME}`
 /// reaches the evaluator as `$` plus a live `${env:NAME}` delegate. `env` is
 /// unregistered, so the step fails at runtime (class Runtime, position absent).
-/// The failure detail is discarded by `to_expression_failed` (`cause: None`), so
-/// no error text is asserted here.
+/// The free-form `EvalError` detail keeps `cause: None`, so no error text is
+/// asserted here.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn escaped_env_slot_fails_at_runtime() {
     let steps = vec![BuilderStep::DeclarativeSetBody {

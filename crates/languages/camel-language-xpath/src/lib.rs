@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 use async_trait::async_trait;
+use camel_api::ExpressionErrorClass;
 use camel_language_api::{Body, Exchange, Value};
 use camel_language_api::{Expression, Language, LanguageError, Predicate};
 use serde_json::Value as JsonValue;
@@ -72,14 +73,18 @@ fn extract_xml(exchange: &Exchange) -> Result<String, LanguageError> {
         other => other
             .clone()
             .try_into_xml()
-            .map_err(|e| {
-                LanguageError::EvalError(format!("body is not XML and cannot be coerced: {e}"))
+            .map_err(|_| LanguageError::EvalFailure {
+                class: ExpressionErrorClass::Conversion,
+                position: None,
+                detail: Some("body is not XML and cannot be coerced".into()),
             })
             .and_then(|b| match b {
                 Body::Xml(s) => Ok(s),
-                _ => Err(LanguageError::EvalError(
-                    "body coercion did not produce XML".into(),
-                )),
+                _ => Err(LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Conversion,
+                    position: None,
+                    detail: Some("body coercion did not produce XML".into()),
+                }),
             }),
     }
 }
@@ -123,16 +128,22 @@ fn run_query(
     if let Some(max) = config.max_input_bytes
         && xml.len() > max
     {
-        return Err(LanguageError::EvalError(
-            "input exceeds maximum allowed size".into(),
-        ));
+        return Err(LanguageError::EvalFailure {
+            class: ExpressionErrorClass::Limit,
+            position: None,
+            detail: Some("input exceeds maximum allowed size".into()),
+        });
     }
     let package = parser::parse(xml).map_err(|_| {
         // sxd parse errors can embed document-derived content (e.g. MismatchedTag
         // includes tag names from the exchange body which may be sensitive).
         // Return a generic message; do NOT include the raw error in logs or errors.
         debug!("xpath: body XML could not be parsed");
-        LanguageError::EvalError("xml parse error: body is not valid XML".to_string())
+        LanguageError::EvalFailure {
+            class: ExpressionErrorClass::Parse,
+            position: None,
+            detail: Some("body is not valid XML".into()),
+        }
     })?;
     let doc = package.as_document();
     // TODO(XPH-001): Namespace declarations are not yet supported. The context
@@ -144,9 +155,11 @@ fn run_query(
         // type mismatch). No document-derived values are embedded, but we follow the
         // same conservative pattern: generic message, no raw external error strings.
         debug!("xpath: expression evaluation failed");
-        LanguageError::EvalError(
-            "xpath query failed: expression could not be evaluated".to_string(),
-        )
+        LanguageError::EvalFailure {
+            class: ExpressionErrorClass::Runtime,
+            position: None,
+            detail: Some("xpath query failed: expression could not be evaluated".into()),
+        }
     })?;
 
     Ok(match result {
@@ -256,6 +269,7 @@ impl Language for XPathLanguage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::{CamelError, ExpressionErrorClass};
     use camel_language_api::Message;
     use std::cell::Cell;
 
@@ -279,6 +293,45 @@ mod tests {
 
     async fn empty_exchange() -> Exchange {
         Exchange::new(Message::default())
+    }
+
+    fn eval_meta() -> camel_language_api::EvalMeta {
+        camel_language_api::EvalMeta {
+            language: "xpath".to_string(),
+            route_id: "r1".to_string(),
+            step_id: "s1".to_string(),
+            verb: "set_body".to_string(),
+            target: None,
+        }
+    }
+
+    /// Map a language error through the production carrier and return its
+    /// class, the rendered cause, and the mapped error.
+    fn mapped_class_and_cause(err: LanguageError) -> (ExpressionErrorClass, String, CamelError) {
+        let mapped = camel_language_api::to_expression_failed(err, &eval_meta());
+        let (class, cause) = match &mapped {
+            CamelError::ExpressionFailed { class, cause, .. } => (
+                *class,
+                cause
+                    .as_ref()
+                    .expect("expected a redacted cause")
+                    .to_string(),
+            ),
+            other => panic!("expected ExpressionFailed, got {other:?}"),
+        };
+        (class, cause, mapped)
+    }
+
+    /// Render every link of the error chain starting at `err`.
+    fn render_error_chain(err: &dyn std::error::Error) -> String {
+        let mut rendered = err.to_string();
+        let mut next = err.source();
+        while let Some(link) = next {
+            rendered.push_str(" | ");
+            rendered.push_str(&link.to_string());
+            next = link.source();
+        }
+        rendered
     }
 
     #[tokio::test]
@@ -509,13 +562,37 @@ mod tests {
         let expr = lang.create_expression("/root").unwrap();
         let big_xml = format!("<root>{}</root>", "x".repeat(200));
         let ex = exchange_with_xml(&big_xml).await;
-        let result = expr.evaluate(&ex).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            LanguageError::EvalError(msg) => {
-                assert!(msg.contains("input exceeds maximum allowed size"));
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("oversized input must fail");
+
+        match &err {
+            LanguageError::EvalFailure {
+                class,
+                position,
+                detail,
+            } => {
+                assert_eq!(*class, ExpressionErrorClass::Limit);
+                assert_eq!(*position, None);
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("input exceeds maximum allowed size")
+                );
             }
-            other => panic!("expected EvalError, got {other:?}"),
+            other => panic!("expected EvalFailure Limit, got {other:?}"),
+        }
+
+        let mapped = camel_language_api::to_expression_failed(err, &eval_meta());
+        match mapped {
+            CamelError::ExpressionFailed { class, cause, .. } => {
+                assert_eq!(class, ExpressionErrorClass::Limit);
+                assert_eq!(
+                    cause.expect("expected redacted cause").to_string(),
+                    "Processor error: input exceeds maximum allowed size"
+                );
+            }
+            other => panic!("expected ExpressionFailed, got {other:?}"),
         }
     }
 
@@ -527,8 +604,191 @@ mod tests {
         let pred = lang.create_predicate("/root").unwrap();
         let big_xml = format!("<root>{}</root>", "x".repeat(200));
         let ex = exchange_with_xml(&big_xml).await;
-        let result = pred.matches(&ex).await;
-        assert!(result.is_err());
+        match pred
+            .matches(&ex)
+            .await
+            .expect_err("oversized input must fail")
+        {
+            LanguageError::EvalFailure { class, .. } => {
+                assert_eq!(class, ExpressionErrorClass::Limit);
+            }
+            other => panic!("expected EvalFailure Limit, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn coercion_failure_classifies_as_conversion() {
+        let lang = XPathLanguage::new();
+        let expr = lang.create_expression("/root").unwrap();
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::Json(serde_json::json!("SECRETSENTINEL"));
+
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("json scalar cannot be coerced to XML");
+        match &err {
+            LanguageError::EvalFailure { class, .. } => {
+                assert_eq!(*class, ExpressionErrorClass::Conversion);
+            }
+            other => panic!("expected EvalFailure Conversion, got {other:?}"),
+        }
+
+        let (class, cause, _) = mapped_class_and_cause(err);
+        assert_eq!(class, ExpressionErrorClass::Conversion);
+        assert_eq!(
+            cause,
+            "Processor error: body is not XML and cannot be coerced"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_xml_classifies_as_parse() {
+        let lang = XPathLanguage::new();
+        let expr = lang.create_expression("/root").unwrap();
+        let ex = exchange_with_xml("<root><unclosed>").await;
+
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("malformed XML must fail");
+        match &err {
+            LanguageError::EvalFailure { class, .. } => {
+                assert_eq!(*class, ExpressionErrorClass::Parse);
+            }
+            other => panic!("expected EvalFailure Parse, got {other:?}"),
+        }
+
+        let (class, cause, _) = mapped_class_and_cause(err);
+        assert_eq!(class, ExpressionErrorClass::Parse);
+        assert_eq!(cause, "Processor error: body is not valid XML");
+    }
+
+    #[tokio::test]
+    async fn genuine_eval_failure_keeps_runtime() {
+        let lang = XPathLanguage::new();
+        let expr = lang.create_expression("$__undefined_var__").unwrap();
+        let ex = exchange_with_xml("<root/>").await;
+
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("undefined variable must fail at evaluation");
+        match &err {
+            LanguageError::EvalFailure { class, .. } => {
+                assert_eq!(*class, ExpressionErrorClass::Runtime);
+            }
+            other => panic!("expected EvalFailure Runtime, got {other:?}"),
+        }
+
+        let (class, cause, _) = mapped_class_and_cause(err);
+        assert_eq!(class, ExpressionErrorClass::Runtime);
+        assert_eq!(
+            cause,
+            "Processor error: xpath query failed: expression could not be evaluated"
+        );
+    }
+
+    #[tokio::test]
+    async fn mapped_100kb_size_vs_malformed_distinguishable() {
+        let limit = 96 * 1024;
+        let lang = XPathLanguage::with_config(XPathConfig {
+            max_input_bytes: Some(limit),
+        });
+        let expr = lang.create_expression("/root").unwrap();
+
+        let body_a = format!("<root>{}</root>", "x".repeat(limit));
+        assert!(body_a.len() > limit, "body A must exceed the size limit");
+        let ex_a = exchange_with_xml(&body_a).await;
+        let err_a = expr
+            .evaluate(&ex_a)
+            .await
+            .expect_err("oversized body must fail");
+        let (class_a, cause_a, _) = mapped_class_and_cause(err_a);
+        assert_eq!(class_a, ExpressionErrorClass::Limit);
+        assert!(cause_a.contains("input exceeds maximum allowed size"));
+
+        let body_b = format!("<root><a>{}</root>", "y".repeat(limit - 32));
+        assert!(
+            body_b.len() < limit,
+            "body B must stay below the size limit: {} vs {limit}",
+            body_b.len()
+        );
+        let ex_b = exchange_with_xml(&body_b).await;
+        let err_b = expr
+            .evaluate(&ex_b)
+            .await
+            .expect_err("malformed body must fail");
+        let (class_b, cause_b, _) = mapped_class_and_cause(err_b);
+        assert_eq!(class_b, ExpressionErrorClass::Parse);
+        assert!(cause_b.contains("body is not valid XML"));
+
+        assert_ne!(class_a, class_b);
+        assert_ne!(cause_a, cause_b);
+    }
+
+    #[tokio::test]
+    async fn sentinel_never_enters_mapped_cause() {
+        const SENTINEL: &str = "SECRETSENTINEL";
+        let limit = 96 * 1024;
+        let lang = XPathLanguage::with_config(XPathConfig {
+            max_input_bytes: Some(limit),
+        });
+        let expr = lang.create_expression("/root").unwrap();
+
+        // Limit: sentinel inside the padding text, body above the limit.
+        let body_a = format!("<root>{SENTINEL}{}</root>", "x".repeat(limit));
+        assert!(body_a.len() > limit);
+        let ex_a = exchange_with_xml(&body_a).await;
+        let err_a = expr
+            .evaluate(&ex_a)
+            .await
+            .expect_err("oversized body must fail");
+        let (class_a, cause_a, mapped_a) = mapped_class_and_cause(err_a);
+        assert_eq!(class_a, ExpressionErrorClass::Limit);
+        assert!(!cause_a.contains(SENTINEL));
+        assert!(!render_error_chain(&mapped_a).contains(SENTINEL));
+
+        // Parse: sentinel inside an unclosed tag name, body below the limit.
+        let body_b = format!("<root><{SENTINEL}>{}</root>", "y".repeat(limit - 64));
+        assert!(
+            body_b.len() < limit,
+            "body B must stay below the size limit: {} vs {limit}",
+            body_b.len()
+        );
+        let ex_b = exchange_with_xml(&body_b).await;
+        let err_b = expr
+            .evaluate(&ex_b)
+            .await
+            .expect_err("malformed body must fail");
+        let (class_b, cause_b, mapped_b) = mapped_class_and_cause(err_b);
+        assert_eq!(class_b, ExpressionErrorClass::Parse);
+        assert!(!cause_b.contains(SENTINEL));
+        assert!(!render_error_chain(&mapped_b).contains(SENTINEL));
+
+        // Conversion: sentinel as a JSON scalar body.
+        let mut ex_c = Exchange::new(Message::default());
+        ex_c.input.body = Body::Json(serde_json::json!(SENTINEL));
+        let err_c = expr
+            .evaluate(&ex_c)
+            .await
+            .expect_err("json scalar cannot be coerced");
+        let (class_c, cause_c, mapped_c) = mapped_class_and_cause(err_c);
+        assert_eq!(class_c, ExpressionErrorClass::Conversion);
+        assert!(!cause_c.contains(SENTINEL));
+        assert!(!render_error_chain(&mapped_c).contains(SENTINEL));
+
+        // Runtime: undefined variable evaluated against a body containing the sentinel.
+        let runtime_expr = lang.create_expression("$__undefined_var__").unwrap();
+        let ex_d = exchange_with_xml(&format!("<root>{SENTINEL}</root>")).await;
+        let err_d = runtime_expr
+            .evaluate(&ex_d)
+            .await
+            .expect_err("undefined variable must fail");
+        let (class_d, cause_d, mapped_d) = mapped_class_and_cause(err_d);
+        assert_eq!(class_d, ExpressionErrorClass::Runtime);
+        assert!(!cause_d.contains(SENTINEL));
+        assert!(!render_error_chain(&mapped_d).contains(SENTINEL));
     }
 
     /// Regression test for FC-LANG-RECOMPILE: proves the XPath is compiled

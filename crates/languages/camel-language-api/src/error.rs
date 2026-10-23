@@ -64,6 +64,33 @@ impl LanguageError {
         LanguageError::EvalError(format!("in expression `{expr}`: {message}"))
     }
 
+    /// Contractually redacted diagnostic detail, when the variant carries one.
+    ///
+    /// `Some` is returned ONLY for payloads whose contract excludes runtime
+    /// exchange and provider data: `EvalFailure::detail` (already redacted by
+    /// the emitting language), and the type/destination names of
+    /// `TypeMismatch` and `ConversionError`. Free-form payloads (`EvalError`,
+    /// `ParseError`, and the registry/lifecycle variants) may embed
+    /// expression, exchange, or provider text, so they return `None`; callers
+    /// must not forward them as diagnostic causes.
+    pub fn redacted_detail(&self) -> Option<String> {
+        match self {
+            Self::EvalFailure { detail, .. } => detail.clone(),
+            Self::TypeMismatch {
+                expected, actual, ..
+            } => Some(format!("expected {expected}, actual {actual}")),
+            Self::ConversionError {
+                source_type,
+                target,
+            } => Some(format!("cannot convert {source_type} to {target}")),
+            Self::ParseError { .. }
+            | Self::EvalError(_)
+            | Self::UnknownVariable(_)
+            | Self::NotFound(_)
+            | Self::NotSupported { .. } => None,
+        }
+    }
+
     /// Typed failure classification for structured transport
     /// (see `crate::eval::to_expression_failed`).
     ///

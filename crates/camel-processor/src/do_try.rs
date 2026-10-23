@@ -44,17 +44,25 @@ impl CatchMatcher {
 /// Chain the original try error into a failed catch-predicate error
 /// (language-value-boundary: catch `when` / `on_when` failure envelope).
 ///
-/// Predicate evaluation errors arrive as `CamelError::ExpressionFailed` with
-/// `cause: None`. The copy keeps every field unchanged except `cause`, which
-/// holds the original error so the chain stays retrievable. Errors that carry
-/// no `cause` slot (or an existing chain) pass through untouched.
+/// The copy keeps every field unchanged except `cause`, which holds the
+/// original error so the chain stays retrievable. Two kinds of cause are
+/// replaced: an empty slot (`cause: None`) and a mapper-generated diagnostic
+/// cause identified by the camel-language-api provenance marker (never by
+/// variant or string shape). Genuine caller-supplied chains — including
+/// hand-built `ProcessorError`/`ProcessorErrorWithSource` causes — pass
+/// through untouched. Errors that carry no `cause` slot pass through
+/// untouched as well.
 pub(crate) fn chain_predicate_error(
     mut predicate_err: CamelError,
     original: CamelError,
 ) -> CamelError {
-    if let CamelError::ExpressionFailed { cause, .. } = &mut predicate_err
-        && cause.is_none()
-    {
+    let should_chain = match &predicate_err {
+        CamelError::ExpressionFailed { cause, .. } => {
+            cause.is_none() || camel_language_api::is_expression_detail_cause(&predicate_err)
+        }
+        _ => false,
+    };
+    if should_chain && let CamelError::ExpressionFailed { cause, .. } = &mut predicate_err {
         *cause = Some(Box::new(original));
     }
     predicate_err
@@ -1114,6 +1122,112 @@ mod tests {
         match result {
             Err(CamelError::ExpressionFailed { .. }) => {}
             other => panic!("expected Err(ExpressionFailed), got {other:?}"),
+        }
+    }
+
+    // ── Mapper-generated cause replacement (task 1.3) ──
+
+    use camel_language_api::{EvalMeta, LanguageError, to_expression_failed};
+
+    fn caller_diagnostic_failed(cause: CamelError) -> CamelError {
+        CamelError::ExpressionFailed {
+            language: "rhai".to_string(),
+            route_id: "r1".to_string(),
+            step_id: "s1".to_string(),
+            verb: "when".to_string(),
+            class: ExpressionErrorClass::Runtime,
+            position: None,
+            conversion: None,
+            cause: Some(Box::new(cause)),
+        }
+    }
+
+    #[test]
+    fn chain_replaces_mapper_generated_cause() {
+        let meta = EvalMeta {
+            language: "xpath".into(),
+            route_id: "r1".into(),
+            step_id: "s1".into(),
+            verb: "when".into(),
+            target: None,
+        };
+        let mapper_err = to_expression_failed(
+            LanguageError::EvalFailure {
+                class: ExpressionErrorClass::Parse,
+                position: None,
+                detail: Some("body is not valid XML".into()),
+            },
+            &meta,
+        );
+
+        let result = chain_predicate_error(mapper_err, CamelError::ProcessorError("boom".into()));
+
+        match result {
+            CamelError::ExpressionFailed {
+                cause: Some(cause), ..
+            } => {
+                assert!(
+                    cause.to_string().contains("boom"),
+                    "mapper diagnostic cause must be replaced by the original, got: {cause}"
+                );
+            }
+            other => panic!("expected ExpressionFailed with chained cause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chain_preserves_caller_cause() {
+        let predicate_err =
+            caller_diagnostic_failed(CamelError::ProcessorError("caller diagnostic".into()));
+
+        let result =
+            chain_predicate_error(predicate_err, CamelError::ProcessorError("boom".into()));
+
+        match result {
+            CamelError::ExpressionFailed {
+                cause: Some(cause), ..
+            } => {
+                let rendered = cause.to_string();
+                assert!(
+                    rendered.contains("caller diagnostic"),
+                    "caller cause must pass through untouched, got: {rendered}"
+                );
+                assert!(
+                    !rendered.contains("boom"),
+                    "caller cause must not be replaced, got: {rendered}"
+                );
+            }
+            other => panic!("expected ExpressionFailed with caller cause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chain_preserves_caller_source_bearing_cause() {
+        let predicate_err = caller_diagnostic_failed(CamelError::ProcessorErrorWithSource(
+            "caller diagnostic".into(),
+            Arc::new(std::io::Error::other("caller source")),
+        ));
+
+        let result =
+            chain_predicate_error(predicate_err, CamelError::ProcessorError("boom".into()));
+
+        match result {
+            CamelError::ExpressionFailed {
+                cause: Some(cause), ..
+            } => {
+                let rendered = cause.to_string();
+                assert!(
+                    rendered.contains("caller diagnostic"),
+                    "caller cause must pass through untouched, got: {rendered}"
+                );
+                let source = std::error::Error::source(cause.as_ref())
+                    .unwrap_or_else(|| panic!("caller source must survive, cause: {cause:?}"));
+                assert!(
+                    source.to_string().contains("caller source"),
+                    "caller source must survive untouched, got: {source}"
+                );
+            }
+            other => panic!("expected ExpressionFailed with caller cause, got {other:?}"),
         }
     }
 }

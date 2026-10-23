@@ -59,10 +59,15 @@ pub struct EvalMeta {
 /// The class and position come from the error itself (defaulting to class
 /// `Runtime`, position `None` when the variant carries none). `ConversionError`
 /// populates `conversion`; when its target is a generic placeholder (see
-/// [`GENERIC_TARGETS`]) and `meta.target` is known, the placeholder is
+/// `GENERIC_TARGETS`) and `meta.target` is known, the placeholder is
 /// rewritten to the trusted destination. Runtime-derived strings (script map
 /// keys, exchange header keys) are never written into the
 /// [`ConversionDetail`].
+///
+/// The `cause` carries a fixed redacted detail (via
+/// [`LanguageError::redacted_detail`]) when the error variant has a payload
+/// that is contractually free of exchange/provider data; free-form payloads
+/// keep `cause: None`.
 pub fn to_expression_failed(err: LanguageError, meta: &EvalMeta) -> CamelError {
     let class = err.class().unwrap_or(ExpressionErrorClass::Runtime);
     let position = err.position();
@@ -90,7 +95,52 @@ pub fn to_expression_failed(err: LanguageError, meta: &EvalMeta) -> CamelError {
         class,
         position,
         conversion,
-        cause: None,
+        cause: err.redacted_detail().map(|d| {
+            Box::new(CamelError::ProcessorErrorWithSource(
+                d,
+                Arc::new(ExpressionDetailCause),
+            ))
+        }),
+    }
+}
+
+/// Crate-private provenance marker for the cause that [`to_expression_failed`]
+/// attaches when it carries a contractually redacted detail.
+///
+/// `std::error::Error` requires `Debug`; the marker never carries payload.
+#[derive(Debug)]
+struct ExpressionDetailCause;
+
+impl std::fmt::Display for ExpressionDetailCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("expression evaluation diagnostic")
+    }
+}
+
+impl std::error::Error for ExpressionDetailCause {}
+
+/// Whether `err` is an [`CamelError::ExpressionFailed`] produced by
+/// [`to_expression_failed`] with a contractually redacted detail attached as
+/// its cause.
+///
+/// Detection is exact mapper provenance, never shape matching: the chained
+/// cause must be a [`CamelError::ProcessorErrorWithSource`] whose `source`
+/// carries the crate-private `ExpressionDetailCause` marker. A hand-built
+/// `ProcessorErrorWithSource` cannot carry that private type and is therefore
+/// rejected.
+pub fn is_expression_detail_cause(err: &CamelError) -> bool {
+    let CamelError::ExpressionFailed {
+        cause: Some(cause), ..
+    } = err
+    else {
+        return false;
+    };
+    match &**cause {
+        CamelError::ProcessorErrorWithSource(_, src) => src
+            .as_ref()
+            .downcast_ref::<ExpressionDetailCause>()
+            .is_some(),
+        _ => false,
     }
 }
 
@@ -247,9 +297,161 @@ mod tests {
             CamelError::ExpressionFailed {
                 class: ExpressionErrorClass::Runtime,
                 position: None,
+                cause: None,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn to_expression_failed_carries_redacted_detail_as_cause() {
+        use std::error::Error;
+
+        let err = LanguageError::EvalFailure {
+            class: ExpressionErrorClass::Arithmetic,
+            position: None,
+            detail: Some("overflow".into()),
+        };
+        let out = to_expression_failed(err, &test_meta(None));
+        let CamelError::ExpressionFailed { cause, .. } = out else {
+            panic!("expected ExpressionFailed");
+        };
+        let cause = cause.expect("redacted detail must be attached as cause");
+        assert_eq!(cause.to_string(), "Processor error: overflow");
+        assert!(
+            cause.as_ref().source().is_some(),
+            "cause must expose the marker as its source"
+        );
+    }
+
+    #[test]
+    fn to_expression_failed_keeps_cause_none_for_free_form() {
+        let eval = to_expression_failed(LanguageError::EvalError("x".into()), &test_meta(None));
+        assert!(matches!(
+            eval,
+            CamelError::ExpressionFailed { cause: None, .. }
+        ));
+
+        let parse = to_expression_failed(
+            LanguageError::ParseError {
+                expr: "e".into(),
+                reason: "r".into(),
+            },
+            &test_meta(None),
+        );
+        assert!(matches!(
+            parse,
+            CamelError::ExpressionFailed { cause: None, .. }
+        ));
+    }
+
+    #[test]
+    fn redacted_detail_covers_typed_variants() {
+        let mismatch = LanguageError::TypeMismatch {
+            expected: "bool".into(),
+            actual: "string".into(),
+            position: None,
+        };
+        assert_eq!(
+            mismatch.redacted_detail(),
+            Some("expected bool, actual string".to_string())
+        );
+
+        let conversion = LanguageError::ConversionError {
+            source_type: "null".into(),
+            target: "f64".into(),
+        };
+        assert_eq!(
+            conversion.redacted_detail(),
+            Some("cannot convert null to f64".to_string())
+        );
+
+        assert_eq!(LanguageError::EvalError("x".into()).redacted_detail(), None);
+        assert_eq!(
+            LanguageError::ParseError {
+                expr: "e".into(),
+                reason: "r".into(),
+            }
+            .redacted_detail(),
+            None
+        );
+    }
+
+    #[test]
+    fn is_expression_detail_cause_is_exact() {
+        let mapped = to_expression_failed(
+            LanguageError::EvalFailure {
+                class: ExpressionErrorClass::Arithmetic,
+                position: None,
+                detail: Some("overflow".into()),
+            },
+            &test_meta(None),
+        );
+        assert!(is_expression_detail_cause(&mapped));
+
+        let hand_built = CamelError::ExpressionFailed {
+            language: "rhai".into(),
+            route_id: "r1".into(),
+            step_id: "set_property#0".into(),
+            verb: "set_property".into(),
+            class: ExpressionErrorClass::Runtime,
+            position: None,
+            conversion: None,
+            cause: Some(Box::new(CamelError::ProcessorError(
+                "caller diagnostic".into(),
+            ))),
+        };
+        assert!(!is_expression_detail_cause(&hand_built));
+
+        let no_cause = CamelError::ExpressionFailed {
+            language: "rhai".into(),
+            route_id: "r1".into(),
+            step_id: "set_property#0".into(),
+            verb: "set_property".into(),
+            class: ExpressionErrorClass::Runtime,
+            position: None,
+            conversion: None,
+            cause: None,
+        };
+        assert!(!is_expression_detail_cause(&no_cause));
+    }
+
+    #[test]
+    fn mapped_typed_variants_carry_cause() {
+        let mismatch = to_expression_failed(
+            LanguageError::TypeMismatch {
+                expected: "bool".into(),
+                actual: "string".into(),
+                position: None,
+            },
+            &test_meta(None),
+        );
+        assert!(is_expression_detail_cause(&mismatch));
+        let CamelError::ExpressionFailed { class, cause, .. } = mismatch else {
+            panic!("expected ExpressionFailed");
+        };
+        assert_eq!(class, ExpressionErrorClass::TypeMismatch);
+        assert_eq!(
+            cause.expect("typed mismatch cause").to_string(),
+            "Processor error: expected bool, actual string"
+        );
+
+        let conversion = to_expression_failed(
+            LanguageError::ConversionError {
+                source_type: "null".into(),
+                target: "f64".into(),
+            },
+            &test_meta(None),
+        );
+        assert!(is_expression_detail_cause(&conversion));
+        let CamelError::ExpressionFailed { class, cause, .. } = conversion else {
+            panic!("expected ExpressionFailed");
+        };
+        assert_eq!(class, ExpressionErrorClass::Conversion);
+        assert_eq!(
+            cause.expect("typed conversion cause").to_string(),
+            "Processor error: cannot convert null to f64"
+        );
     }
 
     #[test]

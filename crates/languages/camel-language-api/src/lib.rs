@@ -16,7 +16,10 @@ pub use camel_api::exchange::Exchange;
 pub use camel_api::message::Message;
 pub use camel_api::{ErrorPosition, ExpressionErrorClass};
 pub use error::LanguageError;
-pub use eval::{EvalMeta, LanguageExpressionEval, LanguagePredicateEval, to_expression_failed};
+pub use eval::{
+    EvalMeta, LanguageExpressionEval, LanguagePredicateEval, is_expression_detail_cause,
+    to_expression_failed,
+};
 pub use language_limits::{
     JsEngineConfig, JsLimitsConfig, LanguagesConfig, MinijinjaEngineConfig, MinijinjaLimitsConfig,
     RhaiEngineConfig, RhaiLimitsConfig,

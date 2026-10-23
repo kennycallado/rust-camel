@@ -1,0 +1,15 @@
+{
+  "kind": "plan",
+  "change": "xpath-error-cause",
+  "verdict": "BLESS",
+  "hash": "sha256:edf79b98c66aae82af1c3cebee1b880c4aea62a0209518b39453936d5a6915f0",
+  "expert": "experts/e_gpt",
+  "rounds": [
+    {"round": 1, "verdict": "BLESS-WITH-FIXES", "session": "ses_e95a3a89cffelZVJn0y49NzwS5", "findings": 10},
+    {"round": 2, "verdict": "BLESS", "session": "ses_e959e43b3ffeJTRAXDoGS4v3KN", "findings": 0}
+  ],
+  "plan_review": [
+    {"reviewer": "reviewers/r_gpt", "session": "ses_e95a5574effeESWsgMvuvX5nuv", "verdict": "APPROVE-WITH-FINDINGS", "findings_fixed": 3}
+  ],
+  "date": "2026-10-23"
+}

@@ -97,9 +97,9 @@ pub enum ExpressionErrorClass {
     Limit,
     /// Evaluation exceeded its time budget.
     Timeout,
-    /// The result could not be converted to the declared destination type.
+    /// The result or input body could not be converted to the declared destination type.
     Conversion,
-    /// The expression source could not be parsed.
+    /// The expression or document source could not be parsed.
     Parse,
 }
 
