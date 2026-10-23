@@ -13,6 +13,24 @@ Each handler wraps its `HealthSource` call in `tokio::time::timeout`. A timeout 
 produces an `Unhealthy` report with a failed `probe-timeout` service entry. The default handler
 timeout is `DEFAULT_HANDLER_TIMEOUT` (6 seconds), and callers can set a different positive value.
 
+Every response body is a `HealthReport` with `status`, `services`, and `timestamp`. Each
+`ServiceHealth` entry has `name`, `status`, and `message`. Probe bodies use the same shape as
+`/health`.
+
+- Degraded or Unhealthy: `services` names the offending service or services and gives their
+  messages. It is never empty when a service failed or degraded, except for status-only sources.
+  The trait-default `liveness_report`, `readiness_report`, `startup_report`, and `health_report`
+  methods return an empty `services` array for any aggregate status.
+- Healthy: pass-through. A detail-capable source lists all relevant services, even when Healthy.
+  `services` is empty only when the evaluation produced no entries. An entry status (for example
+  `Stopped`) never changes the aggregate status on its own.
+- Timeout on a probe: the handler synthesizes one `probe-timeout` entry whose message names the
+  probe (`liveness`, `readiness`, or `startup`). Ordinary failures never carry a synthetic
+  `probe-timeout` entry.
+
+These endpoints are unauthenticated by convention (ADR-0052). Probe bodies carry the same message
+content as `/health`, so components must not place credentials or hosts in health check messages.
+
 ## Timeout ordering
 
 `HealthServer::stop()` computes the shutdown timeout at runtime as

@@ -2,15 +2,48 @@
 
 rust-camel exposes health endpoints through the `ObservabilityConfig.health`
 block. When enabled, a HealthServer starts on the configured host and port. It
-serves four HTTP endpoints:
+serves four HTTP endpoints. `/healthz`, `/readyz`, and `/startupz` are cluster
+probes. `/health` is the diagnostic report endpoint.
 
 - `/healthz`: liveness probe. Returns 200 while the runtime is alive.
 - `/readyz`: readiness probe. Returns 200 when all routes are Healthy or Degraded. Returns 503 when any route is Unhealthy.
 - `/startupz`: startup probe. Same response rules as `/readyz`.
-- `/health`: detailed JSON report with per-route status. Always returns 200.
+- `/health`: detailed JSON report with per-service status. Always returns 200.
 
 A probe handler that times out fails closed. The probe returns 503 with an
 `Unhealthy` status.
+
+## Probe bodies
+
+Every response body is a `HealthReport` with `status`, `services`, and
+`timestamp` fields. Each entry in `services` is a `ServiceHealth` object with
+`name`, `status`, and `message` fields. Probe bodies use the same shape as the
+`/health` report.
+
+When the aggregate status is Degraded or Unhealthy, `services` names the
+offending service or services and gives their messages. A failed or degraded
+service never leaves `services` empty. The exception is a status-only source.
+The trait-default report methods of such a source return an empty `services`
+array for any aggregate status.
+
+The Healthy shape passes through unchanged. A detail-capable source lists all
+relevant services, even when the aggregate status is Healthy. `services` is
+empty only when the evaluation produced no entries. An entry status (for
+example `Stopped`) never changes the aggregate status on its own.
+
+These endpoints are unauthenticated by convention (ADR-0052). Probe bodies
+carry the same message content as `/health`, so they carry the same
+redaction responsibility: components must not place credentials or hosts in
+health check messages.
+
+On the three probes, a handler timeout synthesizes one `probe-timeout` service
+entry. Its message names the probe: `liveness`, `readiness`, or `startup`. An
+ordinary failure never carries a `probe-timeout` entry. On `/health`, a timeout
+returns an `Unhealthy` report with a `probe-timeout` entry, and the HTTP status
+is still 200.
+
+The status codes are unchanged: 200 for Healthy or Degraded, 503 for Unhealthy
+on the three probes.
 
 ## Configuration
 

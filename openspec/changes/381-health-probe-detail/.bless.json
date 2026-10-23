@@ -1,0 +1,13 @@
+{
+  "kind": "plan",
+  "change": "381-health-probe-detail",
+  "verdict": "BLESS",
+  "hash": "sha256:53911fcc794dad0bef6fbf84cabc3ab067a3773df01b30229c55d1b0235bc241",
+  "expert": "experts/e_gpt",
+  "attempts": 2,
+  "first_verdict": "BLESS-WITH-FIXES",
+  "findings_resolved": 2,
+  "plan_reviewer": "reviewers/r_gpt",
+  "plan_review_attempts": 2,
+  "timestamp": "2026-10-23"
+}

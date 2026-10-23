@@ -39,9 +39,64 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 type HealthState = Arc<Mutex<Vec<(String, Arc<AtomicU8>)>>>;
 
+const LIFECYCLE_FAILED_MESSAGE: &str = "service lifecycle state: Failed";
+
+fn lifecycle_service_status(raw: u8) -> ServiceStatus {
+    match raw {
+        1 => ServiceStatus::Started,
+        0 => ServiceStatus::Stopped,
+        _ => ServiceStatus::Failed,
+    }
+}
+
+fn lifecycle_service_health(name: &str, status: ServiceStatus) -> ServiceHealth {
+    ServiceHealth {
+        name: name.to_string(),
+        status,
+        message: if matches!(status, ServiceStatus::Failed) {
+            Some(LIFECYCLE_FAILED_MESSAGE.to_string())
+        } else {
+            None
+        },
+    }
+}
+
 struct ContextHealthSource {
     health_registry: Arc<HealthCheckRegistry>,
     services: HealthState,
+}
+
+impl ContextHealthSource {
+    async fn evaluate_readiness(&self) -> HealthReport {
+        let lifecycle: Vec<(String, u8)> = {
+            let guard = self.services.lock().await;
+            guard
+                .iter()
+                .map(|(name, state)| (name.clone(), state.load(Ordering::SeqCst)))
+                .collect()
+        };
+        // Derive the short-circuit from the same snapshot that is reported, so a
+        // concurrent Failed→Started transition cannot yield an Unhealthy report
+        // that names no offender.
+        let has_failed = lifecycle.iter().any(|(_, raw)| *raw == 2);
+
+        // Precedence preserved from `readiness()`: a failed lifecycle entry
+        // short-circuits before the registry is consulted.
+        let mut report = if has_failed {
+            HealthReport {
+                status: HealthStatus::Unhealthy,
+                ..Default::default()
+            }
+        } else {
+            self.health_registry.check_all().await
+        };
+
+        for (name, raw) in lifecycle {
+            let svc_health = lifecycle_service_health(&name, lifecycle_service_status(raw));
+            report.services.push(svc_health);
+        }
+        report
+    }
 }
 
 #[async_trait]
@@ -57,13 +112,34 @@ impl HealthSource for ContextHealthSource {
     }
 
     async fn readiness(&self) -> HealthStatus {
+        self.evaluate_readiness().await.status
+    }
+
+    async fn readiness_report(&self) -> HealthReport {
+        self.evaluate_readiness().await
+    }
+
+    async fn liveness_report(&self) -> HealthReport {
         let guard = self.services.lock().await;
-        let has_failed = guard.iter().any(|(_, s)| s.load(Ordering::SeqCst) == 2);
-        drop(guard);
-        if has_failed {
-            return HealthStatus::Unhealthy;
+        let mut status = HealthStatus::Healthy;
+        let services: Vec<ServiceHealth> = guard
+            .iter()
+            .map(|(name, state)| {
+                let svc_health = lifecycle_service_health(
+                    name,
+                    lifecycle_service_status(state.load(Ordering::SeqCst)),
+                );
+                if matches!(svc_health.status, ServiceStatus::Failed) {
+                    status = HealthStatus::Unhealthy;
+                }
+                svc_health
+            })
+            .collect();
+        HealthReport {
+            status,
+            services,
+            ..Default::default()
         }
-        self.health_registry.check_all().await.status
     }
 
     async fn health_report(&self) -> HealthReport {
@@ -2010,6 +2086,7 @@ format = "json"
 mod context_health_source_tests {
     use super::*;
     use camel_api::{AsyncHealthCheck, CheckResult};
+    use std::sync::atomic::AtomicBool;
 
     struct FixedCheck {
         check_name: String,
@@ -2022,6 +2099,23 @@ mod context_health_source_tests {
             &self.check_name
         }
         async fn check(&self) -> CheckResult {
+            self.result.clone()
+        }
+    }
+
+    struct RecordingCheck {
+        check_name: String,
+        result: CheckResult,
+        consulted: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncHealthCheck for RecordingCheck {
+        fn name(&self) -> &str {
+            &self.check_name
+        }
+        async fn check(&self) -> CheckResult {
+            self.consulted.store(true, Ordering::SeqCst);
             self.result.clone()
         }
     }
@@ -2091,6 +2185,149 @@ mod context_health_source_tests {
 
         assert_eq!(report.status, HealthStatus::Healthy);
         assert!(report.services.is_empty());
+    }
+
+    #[tokio::test]
+    async fn readiness_report_names_failed_lifecycle_entry_without_registry_consult() {
+        let consulted = Arc::new(AtomicBool::new(false));
+        let registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        registry.register_for_route(
+            "route",
+            Arc::new(RecordingCheck {
+                check_name: "route-check".to_string(),
+                result: CheckResult::healthy("route-check"),
+                consulted: Arc::clone(&consulted),
+            }),
+        );
+        registry.mark_route_started("route");
+
+        let state: HealthState = Arc::new(Mutex::new(vec![(
+            "db".to_string(),
+            Arc::new(AtomicU8::new(2)),
+        )]));
+        let source = make_source(registry, state);
+        let report = source.readiness_report().await;
+
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert_eq!(report.services.len(), 1, "{:?}", report.services);
+        let entry = &report.services[0];
+        assert_eq!(entry.name, "db");
+        assert_eq!(entry.message.as_deref(), Some(LIFECYCLE_FAILED_MESSAGE));
+        assert!(
+            !consulted.load(Ordering::SeqCst),
+            "registry must not be consulted"
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_report_aggregate_matches_readiness_status() {
+        let registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        registry.register_for_route(
+            "route",
+            Arc::new(FixedCheck {
+                check_name: "datasource:sql".to_string(),
+                result: CheckResult::degraded("datasource:sql", "replica lag"),
+            }),
+        );
+        registry.mark_route_started("route");
+
+        let state: HealthState = Arc::new(Mutex::new(vec![(
+            "health".to_string(),
+            Arc::new(AtomicU8::new(1)),
+        )]));
+        let source = make_source(registry, state);
+
+        let status = source.readiness().await;
+        let report = source.readiness_report().await;
+
+        assert_eq!(status, report.status);
+        let entry = report
+            .services
+            .iter()
+            .find(|s| s.name == "datasource:sql")
+            .expect("degraded check should appear in readiness report");
+        assert_eq!(entry.message.as_deref(), Some("replica lag"));
+    }
+
+    #[tokio::test]
+    async fn readiness_report_status_and_entries_come_from_same_snapshot() {
+        let registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        let state: HealthState = Arc::new(Mutex::new(vec![(
+            "db".to_string(),
+            Arc::new(AtomicU8::new(2)),
+        )]));
+        let source = make_source(registry, state);
+
+        let report = source.readiness_report().await;
+
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert!(
+            report
+                .services
+                .iter()
+                .any(|s| s.name == "db" && s.status == ServiceStatus::Failed),
+            "Unhealthy status must be explained by an offender in the same report: {:?}",
+            report.services
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_report_stopped_entry_does_not_change_status() {
+        let registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        let state: HealthState = Arc::new(Mutex::new(vec![(
+            "health".to_string(),
+            Arc::new(AtomicU8::new(0)),
+        )]));
+        let source = make_source(registry, state);
+
+        let report = source.readiness_report().await;
+
+        assert_eq!(report.status, HealthStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn liveness_report_lists_lifecycle_entries_ignores_readiness_failures() {
+        let registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        registry.register_for_route(
+            "route",
+            Arc::new(FixedCheck {
+                check_name: "datasource:queue".to_string(),
+                result: CheckResult::unhealthy("datasource:queue", "unreachable"),
+            }),
+        );
+        registry.mark_route_started("route");
+
+        let state: HealthState = Arc::new(Mutex::new(vec![
+            ("alpha".to_string(), Arc::new(AtomicU8::new(1))),
+            ("beta".to_string(), Arc::new(AtomicU8::new(0))),
+        ]));
+        let source = make_source(registry, state);
+
+        let report = source.liveness_report().await;
+
+        assert_eq!(report.status, HealthStatus::Healthy);
+        let names: Vec<&str> = report.services.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    #[tokio::test]
+    async fn liveness_report_failed_entry_carries_fallback_message() {
+        let registry = Arc::new(HealthCheckRegistry::new(Duration::from_secs(5)));
+        let state: HealthState = Arc::new(Mutex::new(vec![(
+            "db".to_string(),
+            Arc::new(AtomicU8::new(2)),
+        )]));
+        let source = make_source(registry, state);
+
+        let report = source.liveness_report().await;
+
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert_eq!(report.services.len(), 1);
+        assert_eq!(report.services[0].name, "db");
+        assert_eq!(
+            report.services[0].message.as_deref(),
+            Some(LIFECYCLE_FAILED_MESSAGE)
+        );
     }
 }
 

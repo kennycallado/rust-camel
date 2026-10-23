@@ -91,6 +91,36 @@ pub trait HealthSource: Send + Sync {
         }
     }
 
+    /// Default: bare-status [`HealthReport`] for liveness, with an empty
+    /// `services` array. Detail-capable sources override this to populate
+    /// [`HealthReport::services`].
+    async fn liveness_report(&self) -> HealthReport {
+        HealthReport {
+            status: self.liveness().await,
+            ..Default::default()
+        }
+    }
+
+    /// Default: bare-status [`HealthReport`] for readiness, with an empty
+    /// `services` array. Detail-capable sources override this to populate
+    /// [`HealthReport::services`].
+    async fn readiness_report(&self) -> HealthReport {
+        HealthReport {
+            status: self.readiness().await,
+            ..Default::default()
+        }
+    }
+
+    /// Default: bare-status [`HealthReport`] for startup, with an empty
+    /// `services` array. Detail-capable sources override this to populate
+    /// [`HealthReport::services`].
+    async fn startup_report(&self) -> HealthReport {
+        HealthReport {
+            status: self.startup().await,
+            ..Default::default()
+        }
+    }
+
     /// Default: `Healthy` — non-K8s implementors need not override.
     async fn startup(&self) -> HealthStatus {
         HealthStatus::Healthy
@@ -286,5 +316,49 @@ mod tests {
         assert_eq!(back.name, "opensearch");
         assert_eq!(back.status, HealthStatus::Unhealthy);
         assert_eq!(back.message.as_deref(), Some("timeout"));
+    }
+
+    #[tokio::test]
+    async fn report_defaults_mirror_bare_status() {
+        struct MinimalSource;
+        #[async_trait]
+        impl HealthSource for MinimalSource {
+            async fn liveness(&self) -> HealthStatus {
+                HealthStatus::Healthy
+            }
+
+            async fn readiness(&self) -> HealthStatus {
+                HealthStatus::Healthy
+            }
+        }
+
+        let s = MinimalSource;
+        for report in [
+            s.liveness_report().await,
+            s.readiness_report().await,
+            s.startup_report().await,
+        ] {
+            assert_eq!(report.status, HealthStatus::Healthy);
+            assert!(report.services.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn report_defaults_carry_unhealthy_status() {
+        struct UnreadySource;
+        #[async_trait]
+        impl HealthSource for UnreadySource {
+            async fn liveness(&self) -> HealthStatus {
+                HealthStatus::Healthy
+            }
+
+            async fn readiness(&self) -> HealthStatus {
+                HealthStatus::Unhealthy
+            }
+        }
+
+        let report = UnreadySource.readiness_report().await;
+        assert_eq!(report.status, HealthStatus::Unhealthy);
+        assert!(report.services.is_empty());
     }
 }
