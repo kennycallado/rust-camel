@@ -8,6 +8,10 @@ HealthResponse SHALL add an explicit status (UNSPECIFIED=0, UP, STALE, UNKNOWN, 
 
 The engine readiness adapter and monitor SHALL retain the last verified broker state on explicit STALE, UNKNOWN, SKIPPED, or unknown future status values. UP and DOWN SHALL update verification. Before any verification readiness SHALL be Degraded (200); after UP an unverified observation SHALL remain Healthy (200); after DOWN it SHALL remain Unhealthy (503). Retained verification SHALL reset for an absent/not-ready slot or replacement Ready channel. RPC errors and timeouts SHALL remain Unhealthy and SHALL NOT create broker verification. UNSPECIFIED responses SHALL retain the previous boolean mapping for older bridges. Readiness SHALL NOT request a process restart. Monitor logging SHALL report numeric stale age at most once per status transition and SHALL NOT report an unverified observation as newly disconnected. Logs SHALL exclude provider messages and credentials.
 
+<!-- openspec-scenario-ops
+dropped: Unknown and skipped do not make a live bridge NotReady | superseded: an explicit unverified status no longer degrades a live bridge, it retains the last verified state (Unverified observations retain verification)
+-->
+
 #### Scenario: Long poll interval without traffic
 
 - **GIVEN** a deterministic clock and scheduler, a successful fake probe, and no producer traffic
@@ -53,6 +57,26 @@ The engine readiness adapter and monitor SHALL retain the last verified broker s
 - **WHEN** another health RPC and an unrelated RPC execute
 - **THEN** both SHALL complete without waiting for the broker check
 - **AND** repeated calls SHALL NOT add workers or queue probes
+
+#### Scenario: A hung refresh cannot preserve a false fresh status
+
+- **GIVEN** a previously verified-up broker and a refresh blocked indefinitely
+- **WHEN** the snapshot or refresh age exceeds 10000 ms
+- **THEN** health SHALL promptly return stale/unverified with its age, not a fresh ok result
+- **AND** no additional refresh worker SHALL be created
+
+#### Scenario: A late send cannot resurrect old broker status
+
+- **GIVEN** a send initiated in a generation that reset or shutdown invalidates
+- **WHEN** the send completes successfully
+- **THEN** its health update SHALL NOT overwrite the current generation's snapshot
+
+#### Scenario: T5 slow probe does not hold RPCs hostage
+
+- **GIVEN** a broker check blocked behind a deterministic test latch
+- **WHEN** another health RPC and an unrelated RPC execute before the latch is released
+- **THEN** both SHALL complete without waiting for that broker check
+- **AND** repeated health calls SHALL NOT spawn additional workers or queue repeated refreshes
 
 #### Scenario: T6 delayed broker remains live
 
