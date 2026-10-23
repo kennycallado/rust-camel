@@ -488,3 +488,166 @@ fn token_free_override_notanumber_rejected() {
         "typed error must point at the field/type: {msg}"
     );
 }
+
+// --- Boolean coercion in the typed probe (config-bool-env) ---
+
+/// An unset var behind a `:-true` default resolves to the string `"true"`,
+/// which the typed probe coerces to a real boolean at the boundary.
+#[test]
+fn placeholder_bool_field_default_coerces() {
+    let _guard = common::env_lock();
+    ensure_unset("CFG_WATCH");
+    let dir = write_main(
+        r#"watch = "${env:CFG_WATCH:-true}"
+"#,
+        &[],
+    );
+
+    let cfg = load(&dir).expect("boolean default must coerce at the boundary");
+    assert!(cfg.watch);
+}
+
+/// Same shape with the var SET to `false`: the substituted value coerces,
+/// not the default.
+#[test]
+fn placeholder_bool_field_resolved_env_coerces() {
+    let _guard = common::env_lock();
+    let _env = EnvCleanup::set("CFG_WATCH", "false");
+    let dir = write_main(
+        r#"watch = "${env:CFG_WATCH:-true}"
+"#,
+        &[],
+    );
+
+    let cfg = load(&dir).expect("substituted env value must coerce");
+    assert!(!cfg.watch);
+}
+
+/// A literal quoted boolean carries no token, never enters the provenance
+/// set, and stays rejected — pinned companion to the boolean coercion tests.
+#[test]
+fn literal_quoted_boolean_still_rejected_alongside_probe() {
+    let _guard = common::env_lock();
+    let dir = write_main(
+        r#"log_level = "${env:CFG_LL_OK:-info}"
+watch = "true"
+"#,
+        &[],
+    );
+
+    let err = load(&dir).expect_err("literal quoted boolean must stay rejected");
+    let msg = err.to_string();
+    assert!(msg.contains("watch"), "error must name the field: {msg}");
+}
+
+/// String-typed positions are never probed: pass-1 succeeds, the boolean
+/// default stays a string.
+#[test]
+fn string_field_boolean_default_stays_string() {
+    let _guard = common::env_lock();
+    ensure_unset("CFG_LL");
+    let dir = write_main(
+        r#"log_level = "${env:CFG_LL:-true}"
+"#,
+        &[],
+    );
+
+    let cfg = load(&dir).expect("string field with boolean default must load");
+    assert_eq!(cfg.log_level, "true");
+}
+
+/// The strict lexical gate rejects every spelling but exact `true`/`false`:
+/// no aliases, no case folding, no match on `1`, no surrounding whitespace.
+#[test]
+fn placeholder_bool_field_out_of_set_keeps_first_pass_error() {
+    let _guard = common::env_lock();
+    ensure_unset("CFG_WATCH");
+    for default in ["yes", "TRUE", "1", "true "] {
+        let dir = write_main(&format!("watch = \"${{env:CFG_WATCH:-{default}}}\"\n"), &[]);
+        let err = load(&dir).expect_err(&format!("default {default:?} must be rejected"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("watch"),
+            "error for default {default:?} must name the field: {msg}"
+        );
+    }
+}
+
+/// Probe cap with mixed value kinds: eight boolean candidates plus one
+/// integer candidate exceed the cap, so the first-pass error stands. The
+/// in-cap companion (seven booleans + one integer) loads, proving the cap —
+/// not candidate count alone — declines the nine-candidate document.
+#[test]
+fn probe_cap_eight_bools_one_int_nine_candidates_fails() {
+    let _guard = common::env_lock();
+    for name in [
+        "CFG_CAPB1",
+        "CFG_CAPB2",
+        "CFG_CAPB3",
+        "CFG_CAPB4",
+        "CFG_CAPB5",
+        "CFG_CAPB6",
+        "CFG_CAPB7",
+        "CFG_CAPB8",
+        "CFG_CAPB_INT",
+    ] {
+        ensure_unset(name);
+    }
+    let nine = concat!(
+        "watch = \"${env:CFG_CAPB1:-true}\"\n",
+        "timeout_ms = \"${env:CFG_CAPB_INT:-5000}\"\n",
+        "\n",
+        "[observability.prometheus]\n",
+        "enabled = \"${env:CFG_CAPB2:-true}\"\n",
+        "\n",
+        "[observability.health]\n",
+        "enabled = \"${env:CFG_CAPB3:-true}\"\n",
+        "\n",
+        "[observability.otel]\n",
+        "enabled = \"${env:CFG_CAPB4:-true}\"\n",
+        "logs_enabled = \"${env:CFG_CAPB5:-true}\"\n",
+        "\n",
+        "[binds.\"127.0.0.1:8081\"]\n",
+        "allow_public_exposure = \"${env:CFG_CAPB6:-false}\"\n",
+        "\n",
+        "[binds.\"127.0.0.1:8082\"]\n",
+        "allow_public_exposure = \"${env:CFG_CAPB7:-false}\"\n",
+        "\n",
+        "[binds.\"127.0.0.1:8083\"]\n",
+        "allow_public_exposure = \"${env:CFG_CAPB8:-false}\"\n",
+    );
+    let dir = write_main(nine, &[]);
+    let err = load(&dir).expect_err("nine candidates must exceed the probe cap");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Failed to deserialize merged config"),
+        "cap decline must surface the FIRST-PASS deserialize error: {msg}"
+    );
+
+    // Companion: drop the third binds entry → seven booleans + one integer →
+    // eight candidates → loads.
+    let eight = concat!(
+        "watch = \"${env:CFG_CAPB1:-true}\"\n",
+        "timeout_ms = \"${env:CFG_CAPB_INT:-5000}\"\n",
+        "\n",
+        "[observability.prometheus]\n",
+        "enabled = \"${env:CFG_CAPB2:-true}\"\n",
+        "\n",
+        "[observability.health]\n",
+        "enabled = \"${env:CFG_CAPB3:-true}\"\n",
+        "\n",
+        "[observability.otel]\n",
+        "enabled = \"${env:CFG_CAPB4:-true}\"\n",
+        "logs_enabled = \"${env:CFG_CAPB5:-true}\"\n",
+        "\n",
+        "[binds.\"127.0.0.1:8081\"]\n",
+        "allow_public_exposure = \"${env:CFG_CAPB6:-false}\"\n",
+        "\n",
+        "[binds.\"127.0.0.1:8082\"]\n",
+        "allow_public_exposure = \"${env:CFG_CAPB7:-false}\"\n",
+    );
+    let dir = write_main(eight, &[]);
+    let cfg = load(&dir).expect("eight mixed candidates must load through the probe");
+    assert!(cfg.watch);
+    assert_eq!(cfg.timeout_ms, 5000);
+}

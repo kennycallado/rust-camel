@@ -3,7 +3,8 @@
 //!
 //! After a FAILED typed parse of an interpolated document, candidate leaves
 //! (whole-scalar substituted placeholders under the top-level `routes:` key
-//! whose value is a clean integer) are coerced to numbers in cloned trees;
+//! whose value is a clean integer or boolean) are coerced to typed scalars
+//! in cloned trees;
 //! candidate index subsets are tried smallest-first in document order
 //! (cap 8), with the caller's QUIET parser as the oracle. First parse success
 //! wins; otherwise the original first-pass error stands. Every document that
@@ -41,7 +42,8 @@ const MAX_PROBE_CANDIDATES: usize = 8;
 // SYNC: this rule is mirrored by camel-config's `clean_i64`
 // (crates/camel-config/src/env_int_probe.rs) and camel-lint's
 // typing-mirror carve-out (rschema.rs); crate purity forbids the
-// dependency. Update all three together.
+// dependency. Update all three together. The boolean mirrors are
+// camel-config's `clean_bool` (same file) and [`clean_boolean`] below.
 pub(crate) fn clean_integer(s: &str) -> Option<serde_yml::Value> {
     let digits = s.strip_prefix('-').unwrap_or(s);
     let lexically_clean = match digits.as_bytes() {
@@ -63,6 +65,20 @@ pub(crate) fn clean_integer(s: &str) -> Option<serde_yml::Value> {
         return Some(serde_yml::Value::Number(serde_yml::Number::from(n)));
     }
     None
+}
+
+/// Clean boolean: exactly the lowercase literals `true` and `false`
+/// (byte-exact match — no trim, no case folding, no `yes`/`no`, no `1`/`0`).
+/// Returns the boolean leaf the candidate is coerced to.
+// SYNC: this rule is mirrored by camel-config's `clean_bool`
+// (crates/camel-config/src/env_int_probe.rs); crate purity forbids the
+// dependency. Update the pair together.
+fn clean_boolean(s: &str) -> Option<serde_yml::Value> {
+    match s {
+        "true" => Some(serde_yml::Value::Bool(true)),
+        "false" => Some(serde_yml::Value::Bool(false)),
+        _ => None,
+    }
 }
 
 /// Resolve a structural provenance path against a tree; `None` when a
@@ -104,7 +120,8 @@ fn resolve_path_mut<'a>(
 
 /// Candidate leaves for the probe: provenance paths that (a) start with the
 /// top-level `routes` key and (b) resolve to a `Value::String` whose text
-/// [`clean_integer`] accepts. Document order preserved (provenance order).
+/// [`clean_integer`] or [`clean_boolean`] accepts. Document order preserved
+/// (provenance order).
 fn candidates(tree: &serde_yml::Value, provenance: &[ProvenancePath]) -> Vec<ProvenancePath> {
     provenance
         .iter()
@@ -115,7 +132,9 @@ fn candidates(tree: &serde_yml::Value, provenance: &[ProvenancePath]) -> Vec<Pro
             )
         })
         .filter(|path| match resolve_path(tree, path) {
-            Some(serde_yml::Value::String(s)) => clean_integer(s).is_some(),
+            Some(serde_yml::Value::String(s)) => {
+                clean_integer(s).is_some() || clean_boolean(s).is_some()
+            }
             _ => false,
         })
         .cloned()
@@ -144,7 +163,8 @@ fn next_combination(indices: &mut [usize], universe: usize) -> bool {
 
 /// Typed probe parse: run `parse(doc_text)`; on failure, coerce candidate
 /// leaves (from `provenance`, see [`candidates`]) to their clean-integer
-/// numbers in fresh copies of the document and retry smallest-first.
+/// numbers or clean booleans in fresh copies of the document and retry
+/// smallest-first.
 ///
 /// `parse` MUST be a QUIET parser for this seam: speculative attempts are
 /// expected failures and MUST NOT emit `error!`/`warn!`. The CALLER emits
@@ -172,7 +192,7 @@ where
         // to navigate; the first-pass error stands.
         Err(_) => return Err(first_error),
     };
-    // Candidate paths paired with their coerced numbers. `candidates`
+    // Candidate paths paired with their coerced scalars. `candidates`
     // accepted these exact paths against the same text moments ago, so the
     // anomaly branches are unreachable; skipping (never unwrapping) keeps
     // the loop total regardless.
@@ -180,12 +200,12 @@ where
     let mut coerced_values: Vec<serde_yml::Value> = Vec::new();
     for path in candidates(&base_tree, provenance) {
         let coerced = resolve_path(&base_tree, &path).and_then(|leaf| match leaf {
-            serde_yml::Value::String(s) => clean_integer(s),
+            serde_yml::Value::String(s) => clean_integer(s).or_else(|| clean_boolean(s)),
             _ => None,
         });
-        if let Some(number) = coerced {
+        if let Some(value) = coerced {
             candidate_paths.push(path);
-            coerced_values.push(number);
+            coerced_values.push(value);
         }
     }
     if candidate_paths.is_empty() || candidate_paths.len() > MAX_PROBE_CANDIDATES {
@@ -214,7 +234,7 @@ where
 }
 
 /// Parse `doc_text` fresh, coerce the candidate leaves named by `indices`
-/// to their numbers, serialize with the crate YAML shim, and run `parse`.
+/// to their typed scalars, serialize with the crate YAML shim, and run `parse`.
 /// Skips (returns `Err`) on any navigation anomaly — a subset that cannot
 /// be applied is simply not a parsing subset.
 fn try_coerced_subset<P>(
@@ -397,6 +417,119 @@ mod tests {
                 }
                 other => panic!("expected throttle step {i}, got: {other:?}"),
             }
+        }
+    }
+
+    // ── Boolean coercion (task 2.1) ──────────────────────────────────────
+
+    const BOOL_ROUTE_DOC: &str = "routes:\n  - id: bool-one\n    from: \"direct:start\"\n    auto_startup: ${env:RC_AUTO:-false}\n    steps:\n      - throttle:\n          max_requests: 1\n          period_secs: 1\n";
+
+    #[test]
+    fn probe_fixes_bool_route_field_with_default() {
+        let routes = probe_defaults(BOOL_ROUTE_DOC).expect("probe must fix the bool route field");
+        assert!(!routes[0].auto_startup());
+    }
+
+    #[test]
+    fn probe_bool_route_field_honors_explicit_lookup() {
+        let (text, provenance) = interpolate_yaml_source_with_provenance(BOOL_ROUTE_DOC, &|name| {
+            (name == "RC_AUTO").then(|| "true".to_string())
+        })
+        .expect("interpolation");
+        let provenance = provenance.expect("tree-walk path carries provenance");
+        let routes = parse_with_probe(&text, Some(&provenance), crate::yaml::parse_yaml_for_probe)
+            .expect("probe must fix the explicit bool");
+        assert!(routes[0].auto_startup());
+    }
+
+    #[test]
+    fn literal_quoted_bool_at_bool_position_stays_rejected() {
+        let raw = "routes:\n  - id: quoted-bool\n    from: \"direct:start\"\n    auto_startup: \"true\"\n    steps:\n      - throttle:\n          max_requests: 1\n          period_secs: 1\n";
+        let err = match probe_defaults(raw) {
+            Ok(_) => panic!("a quoted literal must not be coerced"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("type mismatch: expected bool, found string"),
+            "expected the pass-1 bool/string error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn probe_string_position_bool_default_stays_string() {
+        let raw = "routes:\n  - id: str-bool\n    from: \"direct:start\"\n    steps:\n      - set_header:\n          key: k\n          value: ${env:RC_STR:-true}\n";
+        let routes = probe_defaults(raw).expect("string position must load");
+        assert_set_header_string(&routes, "true");
+    }
+
+    #[test]
+    fn probe_bool_out_of_set_keeps_pass1_error() {
+        for default in ["yes", "TRUE", "1", "true "] {
+            let raw = format!(
+                "routes:\n  - id: bad-bool\n    from: \"direct:start\"\n    auto_startup: ${{env:RC_B:-{default}}}\n    steps:\n      - throttle:\n          max_requests: 1\n          period_secs: 1\n"
+            );
+            let err = match probe_defaults(&raw) {
+                Ok(_) => panic!("non-clean bool default `{default}` must not fix the doc"),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                err.contains("type mismatch: expected bool, found string"),
+                "expected the pass-1 bool/string error for `{default}`, got: {err}"
+            );
+        }
+    }
+
+    /// Nine-route document: routes `1..=bool_routes` carry an
+    /// `auto_startup` bool placeholder (default `false`); the remaining
+    /// routes have no `auto_startup`; the last route carries one int
+    /// throttle placeholder.
+    fn mixed_cap_doc(bool_routes: usize) -> String {
+        let mut doc = String::from("routes:\n");
+        for i in 1..=9 {
+            doc.push_str(&format!("  - id: capb-{i}\n    from: \"direct:start\"\n"));
+            if i <= bool_routes {
+                doc.push_str(&format!("    auto_startup: ${{env:RC_CAPB_{i}:-false}}\n"));
+            }
+            if i == 9 {
+                doc.push_str(
+                    "    steps:\n      - throttle:\n          max_requests: ${env:RC_CAPB_INT:-2}\n          period_secs: 1\n",
+                );
+            } else {
+                doc.push_str(
+                    "    steps:\n      - set_header:\n          key: k\n          value: x\n",
+                );
+            }
+        }
+        doc
+    }
+
+    #[test]
+    fn probe_cap_eight_bools_one_int_nine_candidates_fails() {
+        let err = match probe_defaults(&mixed_cap_doc(8)) {
+            Ok(_) => panic!("nine combined candidates exceed the cap; pass-1 error must stand"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains("type mismatch: expected bool, found string"),
+            "expected the pass-1 bool/string error, got: {err}"
+        );
+
+        let routes =
+            probe_defaults(&mixed_cap_doc(7)).expect("seven bools plus one int are within the cap");
+        for (i, route) in routes.iter().take(7).enumerate() {
+            assert!(
+                !route.auto_startup(),
+                "route {i} must honor the false default"
+            );
+        }
+        for (i, route) in routes.iter().enumerate().skip(7) {
+            assert!(route.auto_startup(), "route {i} must keep the default true");
+        }
+        match &routes[8].steps()[0] {
+            camel_core::route::BuilderStep::Throttle { config, .. } => {
+                assert_eq!(config.max_requests, 2);
+            }
+            other => panic!("expected throttle step, got: {other:?}"),
         }
     }
 

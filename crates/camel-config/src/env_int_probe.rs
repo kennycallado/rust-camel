@@ -3,9 +3,9 @@
 //!
 //! After a FAILED strict deserialize (`toml::Value::try_into::<CamelConfig>`)
 //! of a resolved tree, candidate leaves (whole-scalar substituted
-//! placeholders whose value is a clean i64) are coerced to integers in
-//! cloned trees; candidate index subsets are tried ascending size
-//! (lexicographic), with the strict parse as the oracle. First parse
+//! placeholders whose value is a clean i64 or a clean boolean) are coerced
+//! to typed values in cloned trees; candidate index subsets are tried
+//! ascending size (lexicographic), with the strict parse as the oracle. First parse
 //! success wins; otherwise the original first-pass error stands. Every
 //! document that deserializes today is unaffected — probing runs only
 //! after failure.
@@ -112,6 +112,20 @@ fn clean_i64(s: &str) -> Option<i64> {
     s.parse::<i64>().ok()
 }
 
+/// Clean boolean: exactly the lowercase literals `true` and `false`
+/// (byte-exact match — no trim, no case folding, no `yes`/`no`, no `1`/`0`).
+/// Returns the boolean the candidate coerces to.
+// SYNC: this rule is mirrored by camel-dsl's `clean_boolean`
+// (crates/camel-dsl/src/env_int_probe.rs); crate purity forbids the
+// dependency. Update the pair together.
+fn clean_bool(s: &str) -> Option<bool> {
+    match s {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
 /// Advance `indices` to the next combination of its size over `0..universe`
 /// in lexicographic order; `false` when the enumeration is exhausted.
 fn next_combination(indices: &mut [usize], universe: usize) -> bool {
@@ -135,8 +149,9 @@ fn next_combination(indices: &mut [usize], universe: usize) -> bool {
 /// Strict deserialization with a typed probe fallback
 /// (env-int-placeholder-typing). First pass is today's strict `try_into`;
 /// on failure, provenance leaves whose (post-resolution) string value is a
-/// clean i64 are coerced to `toml::Value::Integer` in cloned trees, candidate
-/// index subsets tried ascending size (lexicographic). First parse success
+/// clean i64 or a clean boolean are coerced to `toml::Value::Integer` /
+/// `toml::Value::Boolean` in cloned trees, candidate index subsets tried
+/// ascending size (lexicographic). First parse success
 /// wins; otherwise the original first-pass error stands. Documents that
 /// deserialize today are unaffected — probing runs only after failure.
 pub(crate) fn deserialize_with_probe(
@@ -150,16 +165,18 @@ pub(crate) fn deserialize_with_probe(
     };
 
     // Candidate leaves, document order: provenance paths that resolve to a
-    // String whose text `clean_i64` accepts.
+    // String whose text `clean_i64` or `clean_bool` accepts.
     let mut probe_tree = merged_tree.clone();
-    let mut candidates: Vec<(Vec<ConfigSeg>, i64)> = Vec::new();
+    let mut candidates: Vec<(Vec<ConfigSeg>, toml::Value)> = Vec::new();
     for segs in provenance.paths() {
         let coerced = match leaf_mut(&mut probe_tree, segs) {
-            Some(toml::Value::String(s)) => clean_i64(s),
+            Some(toml::Value::String(s)) => clean_i64(s)
+                .map(toml::Value::Integer)
+                .or_else(|| clean_bool(s).map(toml::Value::Boolean)),
             _ => None,
         };
-        if let Some(number) = coerced {
-            candidates.push((segs.clone(), number));
+        if let Some(value) = coerced {
+            candidates.push((segs.clone(), value));
         }
     }
     if candidates.is_empty() || candidates.len() > MAX_PROBE_CANDIDATES {
@@ -172,9 +189,9 @@ pub(crate) fn deserialize_with_probe(
         loop {
             let mut tree = merged_tree.clone();
             for &idx in &indices {
-                let (segs, number) = &candidates[idx];
+                let (segs, value) = &candidates[idx];
                 if let Some(leaf) = leaf_mut(&mut tree, segs) {
-                    *leaf = toml::Value::Integer(*number);
+                    *leaf = value.clone();
                 }
             }
             let attempt: Result<CamelConfig, _> = tree.try_into();

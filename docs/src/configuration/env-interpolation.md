@@ -33,6 +33,30 @@ client_secret = "${env:KC_SECRET}"
 endpoint = "${env:OTEL_ENDPOINT:-http://localhost:4317}"
 ```
 
+## Typed values
+
+String fields keep the resolved text on every surface. Integer-typed fields
+already coerce through the typed probe after a failed strict parse, as
+[`camel-config` CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-config/CONTEXT.md)
+records.
+
+Boolean-typed fields coerce only when the resolved value is exactly `true`
+or exactly `false`. The check is byte-exact and lowercase:
+
+```toml
+watch = "${env:WATCH:-true}"
+```
+
+```yaml
+auto_startup: ${env:AUTO_START:-false}
+```
+
+Any other spelling fails typed deserialization — for example `TRUE`,
+`yes`/`no`, `1`/`0`, or surrounding whitespace. On `Camel.toml`, the error
+names the field. In route files, the load fails with the original parse
+error. A literal quoted `"true"` with no placeholder never coerces, because
+it carries no token.
+
 ## Escapes
 
 | Input | Output |

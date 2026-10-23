@@ -1,0 +1,14 @@
+{
+  "kind": "plan",
+  "change": "config-bool-env",
+  "verdict": "APPROVE",
+  "hash": "sha256:d2c3c3c0a9d58534870f101b084a7e39eede1c7f98ac89cc500c38f08a8b86d7",
+  "expert": "experts/e_gpt",
+  "session": "ses_e960c33ebffe5WKv2idJVoUxgO",
+  "date": "2026-10-23",
+  "reviewer_loop": [
+    { "reviewer": "reviewers/r_gpt", "verdict": "REJECT", "session": "ses_e96119798ffex9QO5nkrcfH09U", "findings": 3 },
+    { "reviewer": "reviewers/r_gpt", "verdict": "REJECT", "session": "ses_e960e2e84ffeLDo6fXwmKtUHIZ", "findings": 1 },
+    { "reviewer": "reviewers/r_gpt", "verdict": "APPROVE", "session": "ses_e960cfde5ffe5MzIwuNmFjHX9Z", "findings": 0 }
+  ]
+}
