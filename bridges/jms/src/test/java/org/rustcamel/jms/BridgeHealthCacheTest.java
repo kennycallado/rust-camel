@@ -28,6 +28,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongConsumer;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
+import jms_bridge.HealthResponse;
+import jms_bridge.HealthStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -38,6 +40,7 @@ class BridgeHealthCacheTest {
   private final List<BrokerProbe> probes = new CopyOnWriteArrayList<>();
   private final AtomicInteger executorCreations = new AtomicInteger();
   private final AtomicReference<ExecutorService> createdWorker = new AtomicReference<>();
+  private final AtomicReference<FakeScheduler> createdScheduler = new AtomicReference<>();
 
   @AfterEach
   void stopOwnedWorkers() {
@@ -51,6 +54,39 @@ class BridgeHealthCacheTest {
         // Best-effort teardown of test-owned probe executors.
       }
     }
+  }
+
+  @Test
+  void snapshotResponseCarriesExplicitStatusAndAge() {
+    HealthResponse unknown = HealthSnapshot.unknown(1L, 100L).toResponse();
+    assertEquals(HealthStatus.UNKNOWN, unknown.getStatus());
+    assertTrue(unknown.getHealthy());
+    assertFalse(unknown.getBrokerConnected());
+    assertEquals(0L, unknown.getAgeMs());
+
+    HealthResponse skipped = HealthSnapshot.skipped(1L, 100L).toResponse();
+    assertEquals(HealthStatus.SKIPPED, skipped.getStatus());
+    assertTrue(skipped.getHealthy());
+    assertFalse(skipped.getBrokerConnected());
+    assertEquals(0L, skipped.getAgeMs());
+
+    HealthResponse stale = HealthSnapshot.stale(1L, 60_000L, 100L).toResponse();
+    assertEquals(HealthStatus.STALE, stale.getStatus());
+    assertTrue(stale.getHealthy());
+    assertFalse(stale.getBrokerConnected());
+    assertEquals(60_000L, stale.getAgeMs());
+
+    HealthResponse up = HealthSnapshot.up(1L, 100L).toResponse();
+    assertEquals(HealthStatus.UP, up.getStatus());
+    assertTrue(up.getHealthy());
+    assertTrue(up.getBrokerConnected());
+    assertEquals(0L, up.getAgeMs());
+
+    HealthResponse down = HealthSnapshot.down(1L, "broker unreachable", 100L).toResponse();
+    assertEquals(HealthStatus.DOWN, down.getStatus());
+    assertFalse(down.getHealthy());
+    assertFalse(down.getBrokerConnected());
+    assertEquals(0L, down.getAgeMs());
   }
 
   @Test
@@ -72,12 +108,136 @@ class BridgeHealthCacheTest {
         assertFalse(snapshot.brokerConnected());
         assertEquals("broker status not yet checked", snapshot.message());
       }
+      tick(cache);
       awaitCondition("probe invocation", () -> probe.probeCalls.get() == 1);
+      for (int call = 0; call < 4; call++) {
+        clock.set(clock.get() + BridgeHealthCache.REFRESH_AFTER_MS);
+        tick(cache);
+      }
       assertEquals(1, probe.probeCalls.get());
       assertEquals(1, executorCreations.get());
     } finally {
       gate.countDown();
     }
+  }
+
+  @Test
+  void scheduledRefreshKeepsLongPollFreshWithoutTraffic() throws Exception {
+    MutableClock clock = new MutableClock();
+    clock.set(0L);
+    FakeProbe probe = new FakeProbe((call, generation) -> BrokerProbeResult.up());
+    FakeScheduler scheduler = new FakeScheduler();
+    BridgeHealthCache cache = cache(probe, false, clock, scheduler);
+
+    scheduler.runTick();
+    awaitStatus(cache, HealthSnapshot.Status.UP);
+    awaitWorkerIdle(createdWorker.get());
+    HealthSnapshot initial = cache.current();
+    assertEquals(HealthSnapshot.Status.UP, initial.status());
+
+    for (long tickAt = BridgeHealthCache.REFRESH_AFTER_MS;
+        tickAt <= 60_000L;
+        tickAt += BridgeHealthCache.REFRESH_AFTER_MS) {
+      clock.set(tickAt);
+      scheduler.runTick();
+      awaitWorkerIdle(createdWorker.get());
+    }
+
+    HealthSnapshot afterLongPoll = cache.current();
+    assertEquals(HealthSnapshot.Status.UP, afterLongPoll.status());
+    assertTrue(afterLongPoll.healthy());
+    assertTrue(afterLongPoll.brokerConnected());
+    assertTrue(probe.probeCalls.get() > 1, "scheduler did not refresh without reads or sends");
+  }
+
+  @Test
+  void scheduledProbeFailureStillReportsDown() throws Exception {
+    MutableClock clock = new MutableClock();
+    FakeProbe probe =
+        new FakeProbe(
+            (call, generation) -> {
+              if (call == 1) {
+                return BrokerProbeResult.up();
+              }
+              throw new IllegalStateException("broker connection lost");
+            });
+    FakeScheduler scheduler = new FakeScheduler();
+    BridgeHealthCache cache = cache(probe, false, clock, scheduler);
+
+    clock.set(0L);
+    scheduler.runTick();
+    awaitStatus(cache, HealthSnapshot.Status.UP);
+    awaitWorkerIdle(createdWorker.get());
+
+    clock.set(BridgeHealthCache.REFRESH_AFTER_MS);
+    scheduler.runTick();
+    awaitStatus(cache, HealthSnapshot.Status.DOWN);
+    awaitWorkerIdle(createdWorker.get());
+
+    HealthSnapshot snapshot = cache.current();
+    assertEquals(HealthSnapshot.Status.DOWN, snapshot.status());
+    assertFalse(snapshot.healthy());
+    assertFalse(snapshot.brokerConnected());
+  }
+
+  @Test
+  void scheduledTicksRemainSingleFlightAndStopOnClose() throws Exception {
+    MutableClock clock = new MutableClock();
+    AtomicInteger inFlight = new AtomicInteger();
+    AtomicInteger maxInFlight = new AtomicInteger();
+    CountDownLatch probeEntered = new CountDownLatch(1);
+    CountDownLatch releaseProbe = new CountDownLatch(1);
+    AtomicLong blockedGeneration = new AtomicLong(-1L);
+    FakeProbe probe =
+        new FakeProbe(
+            (call, generation) -> {
+              int concurrent = inFlight.incrementAndGet();
+              maxInFlight.accumulateAndGet(concurrent, Math::max);
+              try {
+                blockedGeneration.set(generation);
+                probeEntered.countDown();
+                releaseProbe.await();
+                return BrokerProbeResult.up();
+              } finally {
+                inFlight.decrementAndGet();
+              }
+            });
+    FakeScheduler scheduler = new FakeScheduler();
+    BridgeHealthCache cache = cache(probe, false, clock, scheduler);
+
+    scheduler.runTick();
+    assertTrue(probeEntered.await(5, TimeUnit.SECONDS), "initial scheduled probe did not start");
+    long invalidatedGeneration = blockedGeneration.get() + 1;
+    for (int extraTick = 0; extraTick < 5; extraTick++) {
+      clock.set(clock.get() + BridgeHealthCache.REFRESH_AFTER_MS);
+      scheduler.runTick();
+    }
+
+    cache.invalidate();
+    assertEquals(invalidatedGeneration, cache.generation());
+
+    releaseProbe.countDown();
+    awaitWorkerIdle(createdWorker.get());
+
+    assertEquals(1, maxInFlight.get(), "more than one probe ran concurrently");
+    assertEquals(1, probe.probeCalls.get(), "scheduled ticks queued refresh work");
+    assertEquals(
+        HealthSnapshot.Status.UNKNOWN,
+        cache.snapshotValue().status(),
+        "late old-generation probe published");
+    assertEquals(
+        invalidatedGeneration,
+        cache.snapshotValue().generation(),
+        "late old-generation probe published");
+
+    cache.close();
+    assertTrue(scheduler.isShutdown(), "scheduler was not shut down on close");
+    int probeCallsAtClose = probe.probeCalls.get();
+    scheduler.runTick();
+    assertEquals(probeCallsAtClose, probe.probeCalls.get(), "probe admitted after close");
+    assertEquals(HealthSnapshot.Status.UNKNOWN, cache.snapshotValue().status());
+    assertFalse(cache.snapshotValue().brokerConnected());
+    assertEquals(invalidatedGeneration + 1, cache.snapshotValue().generation());
   }
 
   @Test
@@ -89,7 +249,7 @@ class BridgeHealthCacheTest {
                 call == 1 ? BrokerProbeResult.up() : BrokerProbeResult.down("broker unreachable"));
     BridgeHealthCache cache = cache(probe, false, clock);
 
-    cache.current();
+    tick(cache);
     awaitStatus(cache, HealthSnapshot.Status.UP);
     awaitWorkerIdle(createdWorker.get());
     HealthSnapshot up = cache.current();
@@ -99,7 +259,7 @@ class BridgeHealthCacheTest {
     assertEquals("ok", up.message());
 
     clock.set(5_001L);
-    cache.current();
+    tick(cache);
     awaitStatus(cache, HealthSnapshot.Status.DOWN);
     awaitWorkerIdle(createdWorker.get());
     HealthSnapshot down = cache.current();
@@ -135,7 +295,7 @@ class BridgeHealthCacheTest {
     FakeProbe probe = new FakeProbe((call, generation) -> BrokerProbeResult.up());
     BridgeHealthCache cache = cache(probe, false, clock);
 
-    cache.current();
+    tick(cache);
     awaitStatus(cache, HealthSnapshot.Status.UP);
     awaitWorkerIdle(createdWorker.get());
     HealthSnapshot snapshot = cache.current();
@@ -161,12 +321,13 @@ class BridgeHealthCacheTest {
             });
     BridgeHealthCache cache = cache(probe, false, clock);
     try {
-      cache.current();
+      tick(cache);
       awaitStatus(cache, HealthSnapshot.Status.UP);
       awaitWorkerIdle(createdWorker.get());
       clock.set(5_001L);
       HealthSnapshot admitted = cache.current();
       assertTrue(admitted.brokerConnected());
+      tick(cache);
       awaitCondition("second probe invocation", () -> probe.probeCalls.get() == 2);
 
       clock.set(10_001L);
@@ -191,7 +352,7 @@ class BridgeHealthCacheTest {
     FakeProbe probe = new FakeProbe((call, generation) -> BrokerProbeResult.up());
     BridgeHealthCache cache = cache(probe, false, clock);
 
-    cache.current();
+    tick(cache);
     awaitStatus(cache, HealthSnapshot.Status.UP);
     awaitWorkerIdle(createdWorker.get());
     clock.set(5_001L);
@@ -200,6 +361,7 @@ class BridgeHealthCacheTest {
     assertTrue(halfTtl.healthy());
     assertTrue(halfTtl.brokerConnected());
 
+    tick(cache);
     awaitCondition("second probe invocation", () -> probe.probeCalls.get() == 2);
     awaitCondition("second publish", () -> cache.snapshotValue().checkedAtMillis() == 5_001L);
     awaitWorkerIdle(createdWorker.get());
@@ -224,12 +386,12 @@ class BridgeHealthCacheTest {
             });
     BridgeHealthCache cache = cache(probe, false, clock);
     try {
-      cache.current();
+      tick(cache);
       awaitStatus(cache, HealthSnapshot.Status.UP);
       awaitWorkerIdle(createdWorker.get());
 
       clock.set(5_001L);
-      cache.current();
+      tick(cache);
       awaitCondition("hung refresh started", () -> probe.probeCalls.get() == 2);
 
       clock.set(9_000L);
@@ -286,7 +448,7 @@ class BridgeHealthCacheTest {
     BridgeHealthCache cache = cache(probe, false, clock);
     cacheReference.set(cache);
 
-    cache.current();
+    tick(cache);
     awaitWorkerIdle(createdWorker.get());
 
     assertTrue(probe.invalidatedGenerations.contains(2L));
@@ -322,7 +484,7 @@ class BridgeHealthCacheTest {
             });
     BridgeHealthCache cache = cache(probe, false, clock);
     try {
-      cache.current();
+      tick(cache);
       assertTrue(entered.await(5, TimeUnit.SECONDS), "probe did not start");
       cache.invalidate();
       release.countDown();
@@ -356,7 +518,7 @@ class BridgeHealthCacheTest {
     BridgeHealthCache cache = cache(probe, false, clock);
     try {
       for (int call = 0; call < 5; call++) {
-        cache.current();
+        tick(cache);
       }
       assertTrue(entered.await(5, TimeUnit.SECONDS), "probe did not start");
       for (int call = 0; call < 3; call++) {
@@ -444,7 +606,7 @@ class BridgeHealthCacheTest {
                 });
     BridgeHealthCache cache = cache(probe, false, clock);
     try {
-      cache.current();
+      tick(cache);
       assertTrue(probeEntered.await(5, TimeUnit.SECONDS), "probe did not start");
 
       long started = System.nanoTime();
@@ -504,7 +666,12 @@ class BridgeHealthCacheTest {
             });
     BridgeHealthCache cache =
         new BridgeHealthCache(
-            probe, false, clock.supplier(), trackingExecutorFactory(), () -> gatedCloseWorker);
+            probe,
+            false,
+            clock.supplier(),
+            trackingExecutorFactory(),
+            () -> gatedCloseWorker,
+            FakeScheduler::new);
     Thread.interrupted();
     try {
       gatedCloseWorker.execute(
@@ -619,7 +786,7 @@ class BridgeHealthCacheTest {
     int probeCalls = probe.probeCalls.get();
     long closeGeneration = generation + 1;
     try {
-      cache.current();
+      tick(cache);
       assertTrue(entered.await(5, TimeUnit.SECONDS), "probe did not start");
       generation = cache.generation();
       probeCalls = probe.probeCalls.get();
@@ -683,6 +850,7 @@ class BridgeHealthCacheTest {
         .when(rejecting)
         .execute(any(Runnable.class));
 
+    FakeScheduler scheduler = new FakeScheduler();
     BridgeHealthCache cache =
         new BridgeHealthCache(
             probe,
@@ -691,15 +859,18 @@ class BridgeHealthCacheTest {
             () -> {
               executorCreations.incrementAndGet();
               return rejecting;
-            });
+            },
+            BridgeHealthCache::newCloseWorker,
+            () -> scheduler);
 
+    scheduler.runTick();
     HealthSnapshot first = cache.current();
     assertEquals(HealthSnapshot.Status.UNKNOWN, first.status());
     assertEquals(0, probe.probeCalls.get());
 
-    HealthSnapshot second = cache.current();
-    assertEquals(HealthSnapshot.Status.UNKNOWN, second.status());
+    scheduler.runTick();
     awaitCondition("probe invocation", () -> probe.probeCalls.get() == 1);
+    awaitWorkerIdle(delegate);
     assertEquals(1, probe.probeCalls.get());
     assertEquals(1, executorCreations.get());
   }
@@ -739,12 +910,12 @@ class BridgeHealthCacheTest {
     probes.add(probe);
     BridgeHealthCache cache = cache(probe, false, clock);
 
-    cache.current();
+    tick(cache);
     awaitStatus(cache, HealthSnapshot.Status.UP);
     awaitWorkerIdle(createdWorker.get());
 
     clock.set(10_001L);
-    cache.current();
+    tick(cache);
     awaitCondition(
         "expired refresh publish",
         () -> verifies.get() == 2 && cache.snapshotValue().checkedAtMillis() == 10_001L);
@@ -753,7 +924,24 @@ class BridgeHealthCacheTest {
   }
 
   private BridgeHealthCache cache(BrokerProbe probe, boolean skip, MutableClock clock) {
-    return new BridgeHealthCache(probe, skip, clock.supplier(), trackingExecutorFactory());
+    return cache(probe, skip, clock, new FakeScheduler());
+  }
+
+  private BridgeHealthCache cache(
+      BrokerProbe probe, boolean skip, MutableClock clock, FakeScheduler scheduler) {
+    createdScheduler.set(scheduler);
+    return new BridgeHealthCache(
+        probe,
+        skip,
+        clock.supplier(),
+        trackingExecutorFactory(),
+        BridgeHealthCache::newCloseWorker,
+        () -> scheduler);
+  }
+
+  /** Drives one scheduler tick explicitly; reads no longer admit refresh work. */
+  private void tick(BridgeHealthCache cache) {
+    createdScheduler.get().runTick();
   }
 
   private Supplier<ExecutorService> trackingExecutorFactory() {
@@ -935,6 +1123,39 @@ class BridgeHealthCacheTest {
 
     LongSupplier supplier() {
       return this::get;
+    }
+  }
+
+  /** Deterministic {@link BridgeHealthCache.RefreshScheduler} seam driven tick by tick. */
+  static final class FakeScheduler implements BridgeHealthCache.RefreshScheduler {
+    private final AtomicLong periodMillis = new AtomicLong(-1L);
+    private final AtomicBoolean shutdown = new AtomicBoolean();
+    private volatile Runnable tick;
+
+    @Override
+    public void schedule(Runnable tick, long periodMillis) {
+      this.tick = tick;
+      this.periodMillis.set(periodMillis);
+    }
+
+    void runTick() {
+      Runnable scheduled = tick;
+      if (scheduled != null) {
+        scheduled.run();
+      }
+    }
+
+    long periodMillis() {
+      return periodMillis.get();
+    }
+
+    boolean isShutdown() {
+      return shutdown.get();
+    }
+
+    @Override
+    public void shutdown() {
+      shutdown.set(true);
     }
   }
 

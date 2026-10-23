@@ -27,7 +27,9 @@ use crate::config::{
     attempt_journal_broker_key, default_attempt_journal_dir, ensure_attempt_journal_dir,
 };
 use crate::consumer::JmsConsumer;
-use crate::health::JmsHealthCheck;
+use crate::health::{
+    BrokerHealthMemory, BrokerHealthObservation, BrokerHealthStatus, JmsHealthCheck,
+};
 use crate::producer::JmsProducer;
 use crate::proto::{HealthRequest, bridge_service_client::BridgeServiceClient};
 
@@ -156,18 +158,34 @@ pub(crate) enum ProbeOutcome {
     RpcError,
 }
 
-/// Test-only broker-status transition recorded by
-/// [`BrokerStatusReporter::report_broker_status`].
-#[cfg(test)]
+/// Broker-status transition emitted by
+/// [`BrokerStatusReporter::report_broker_status`]. The reporter uses it as
+/// the emission gate so a repeated kind (or an age-only STALE change) does
+/// not warn twice; under `cfg(test)` the matching transitions are also
+/// recorded on the pool seam for assertions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BrokerStatusTransition {
-    /// `healthy=true, broker_connected=true`.
+    /// Verified UP (explicit UP or legacy `healthy=true, broker_connected=true`).
     VerifiedUp,
-    /// `healthy=false, broker_connected=false`.
+    /// Verified DOWN (explicit DOWN or legacy `healthy=false,
+    /// broker_connected=false`).
     BrokerDown,
     /// Any other pair (live but not verified connected).
     Unverified,
+    /// Entered STALE with the numeric cache age; emitted once per entry into
+    /// STALE, never repeated for age-only changes.
+    Stale { age_ms: u64 },
 }
+
+/// Fixed, credential-safe event messages for broker-status transitions.
+/// They are bound to the monitor's `warn!` calls and to the test capture
+/// seam, so neither may ever grow provider message text, broker URLs, or
+/// credential material.
+const BROKER_STATUS_CHANGED_MSG: &str = "JMS bridge broker status changed";
+const BROKER_STATUS_STALE_MSG: &str = "JMS bridge broker status stale; connectivity unverified, \
+     retained verified broker state in effect";
+const BROKER_STATUS_UNVERIFIED_MSG: &str =
+    "JMS bridge broker status unverified; retained verified broker state in effect";
 
 /// Test-only replacement launch result prepared for the monitor's
 /// replacement branch (task 2.4).
@@ -231,15 +249,28 @@ pub(crate) struct ReplacementProcessed {
     pub state: BridgeState,
 }
 
-/// Reports `(healthy, broker_connected)` transitions for the health monitor.
+/// Reports broker-status transitions for the health monitor.
 ///
-/// One bounded, credential-safe `tracing::warn!` is emitted only when the
-/// pair changes: the message is fixed and never carries the broker URL,
-/// username, password, or provider message. Under `cfg(test)` the matching
-/// [`BrokerStatusTransition`] is recorded so tests observe transitions
-/// without exposing raw credentials. Broker status reporting never restarts
-/// the bridge.
+/// Each completed health RPC is fed through a [`BrokerHealthMemory`] as a
+/// [`BrokerHealthObservation`]: explicit UP/DOWN update the retained
+/// verification, unverified statuses (STALE, UNKNOWN, SKIPPED, future) and
+/// legacy UNSPECIFIED booleans never create verification. One bounded,
+/// credential-safe `tracing::warn!` is emitted only on a status transition —
+/// entering STALE logs the fixed message with the numeric `age_ms` once, and
+/// an age-only change never logs again. An explicit unverified observation is
+/// reported as unverified, never as a newly disconnected broker, and never
+/// creates verified DOWN. The message is fixed and never carries the broker
+/// URL, username, password, or the provider message. Under `cfg(test)` the
+/// matching [`BrokerStatusTransition`] is recorded so tests observe
+/// transitions without exposing raw credentials. Broker status reporting
+/// never restarts the bridge.
 pub(crate) struct BrokerStatusReporter {
+    /// Retained broker verification and last observation kind for this
+    /// monitor epoch; reset when the bridge is replaced.
+    memory: BrokerHealthMemory,
+    /// Last emitted transition; gates repeated emission when only the
+    /// observation kind or the stale age changed.
+    last_emitted: Option<BrokerStatusTransition>,
     #[cfg(test)]
     transitions: Arc<std::sync::Mutex<Vec<BrokerStatusTransition>>>,
 }
@@ -248,40 +279,94 @@ impl BrokerStatusReporter {
     /// Builds the reporter from the pool's status seam.
     fn from_pool(_pool: &JmsBridgePool) -> Self {
         Self {
+            memory: BrokerHealthMemory::default(),
+            last_emitted: None,
             #[cfg(test)]
             transitions: Arc::clone(&_pool.broker_status_transitions),
         }
     }
 
-    /// Emits one bounded warning when the `(healthy, broker_connected)` pair
-    /// differs from `last`, then records the transition under `cfg(test)`.
-    fn report_broker_status(
-        &self,
-        last: &mut Option<(bool, bool)>,
-        healthy: bool,
-        broker_connected: bool,
-    ) {
-        let pair = (healthy, broker_connected);
-        if *last == Some(pair) {
+    /// Clears retained verification and the emission gate for a replacement
+    /// bridge epoch (a replacement monitor constructs a fresh reporter; a
+    /// replaced Ready channel resets it in place).
+    fn reset(&mut self) {
+        self.memory.reset(None);
+        self.last_emitted = None;
+    }
+
+    /// Test-only view of the retained verification: `Some(true)` = verified
+    /// UP, `Some(false)` = verified DOWN, `None` = unverified.
+    #[cfg(test)]
+    fn verified(&self) -> Option<bool> {
+        self.memory.verified()
+    }
+
+    /// Feeds one completed-RPC observation through the memory and emits a
+    /// bounded warning only on a real status transition.
+    fn report_broker_status(&mut self, observation: BrokerHealthObservation) {
+        let entering_stale = observation.status == BrokerHealthStatus::Stale
+            && self.memory.last_kind() != Some(BrokerHealthStatus::Stale);
+        self.memory.observe(observation);
+        let transition = match observation.status {
+            BrokerHealthStatus::Up => BrokerStatusTransition::VerifiedUp,
+            BrokerHealthStatus::Down => BrokerStatusTransition::BrokerDown,
+            BrokerHealthStatus::Stale => BrokerStatusTransition::Stale {
+                age_ms: observation.age_ms,
+            },
+            // Explicit unverified kinds are never disconnection evidence.
+            BrokerHealthStatus::Unknown
+            | BrokerHealthStatus::Skipped
+            | BrokerHealthStatus::Future => BrokerStatusTransition::Unverified,
+            BrokerHealthStatus::Unspecified => {
+                match (observation.healthy, observation.broker_connected) {
+                    (true, true) => BrokerStatusTransition::VerifiedUp,
+                    (false, false) => BrokerStatusTransition::BrokerDown,
+                    _ => BrokerStatusTransition::Unverified,
+                }
+            }
+        };
+        // STALE emits only when entering STALE (age-only changes stay
+        // silent); every other transition emits only when it differs from
+        // the last emitted one.
+        let emit = match &transition {
+            BrokerStatusTransition::Stale { .. } => entering_stale,
+            other => self.last_emitted.as_ref() != Some(other),
+        };
+        if !emit {
             return;
         }
-        *last = Some(pair);
+        self.last_emitted = Some(transition);
         #[cfg(test)]
-        {
-            let transition = match pair {
-                (true, true) => BrokerStatusTransition::VerifiedUp,
-                (false, false) => BrokerStatusTransition::BrokerDown,
-                _ => BrokerStatusTransition::Unverified,
-            };
-            self.transitions
-                .lock()
-                .expect("broker_status_transitions mutex poisoned")
-                .push(transition);
+        self.transitions
+            .lock()
+            .expect("broker_status_transitions mutex poisoned")
+            .push(transition);
+        match transition {
+            BrokerStatusTransition::Stale { age_ms } => {
+                // `"{}"` is required: a bare const path would be recorded as
+                // a tracing field, not as the event message.
+                warn!(age_ms, "{}", BROKER_STATUS_STALE_MSG);
+            }
+            BrokerStatusTransition::Unverified => {
+                warn!("{}", BROKER_STATUS_UNVERIFIED_MSG);
+            }
+            BrokerStatusTransition::VerifiedUp => {
+                warn!(
+                    healthy = true,
+                    broker_connected = true,
+                    "{}",
+                    BROKER_STATUS_CHANGED_MSG
+                );
+            }
+            BrokerStatusTransition::BrokerDown => {
+                warn!(
+                    healthy = false,
+                    broker_connected = false,
+                    "{}",
+                    BROKER_STATUS_CHANGED_MSG
+                );
+            }
         }
-        warn!(
-            healthy,
-            broker_connected, "JMS bridge broker status changed"
-        );
     }
 }
 
@@ -904,7 +989,7 @@ impl JmsBridgePool {
         let handle_ref = Arc::clone(&slot.health_monitor_handle);
         let shutting_down = Arc::clone(&self.shutting_down);
         let broker_name = slot.name.clone();
-        let reporter = BrokerStatusReporter::from_pool(self);
+        let mut reporter = BrokerStatusReporter::from_pool(self);
         #[cfg(test)]
         let replacement_attempts = Arc::clone(&self.replacement_attempts);
         #[cfg(test)]
@@ -916,7 +1001,6 @@ impl JmsBridgePool {
 
         let handle = tokio::spawn(async move {
             let mut consecutive_failures: u32 = 0;
-            let mut last_broker_status: Option<(bool, bool)> = None;
             #[cfg(test)]
             let mut probe_index: usize = 0;
             loop {
@@ -955,11 +1039,12 @@ impl JmsBridgePool {
                                 // Ready. Broker conditions never restart the
                                 // bridge.
                                 consecutive_failures = 0;
-                                reporter.report_broker_status(
-                                    &mut last_broker_status,
-                                    resp.healthy,
-                                    resp.broker_connected,
-                                );
+                                reporter.report_broker_status(BrokerHealthObservation {
+                                    status: BrokerHealthStatus::from_raw(resp.status),
+                                    healthy: resp.healthy,
+                                    broker_connected: resp.broker_connected,
+                                    age_ms: resp.age_ms,
+                                });
                             }
                             Ok(Err(e)) => {
                                 consecutive_failures = consecutive_failures.saturating_add(1);
@@ -1145,6 +1230,10 @@ impl JmsBridgePool {
                                     // A successful install resets the liveness
                                     // counter for the replacement bridge.
                                     consecutive_failures = 0;
+                                    // The replacement bridge is a new broker
+                                    // status epoch: retained verification and
+                                    // the emission gate must not carry over.
+                                    reporter.reset();
                                     #[cfg(test)]
                                     {
                                         installed_pid = pid;
@@ -3637,6 +3726,8 @@ mod tests {
             healthy,
             broker_connected,
             message: "scripted".to_string(),
+            status: 0,
+            age_ms: 0,
         }
     }
 
@@ -4311,6 +4402,377 @@ mod tests {
             "the slot's actual process PID must be unchanged"
         );
         fx.shutdown().await;
+    }
+
+    // ── Task 3.1: broker status transitions without false disconnections ──
+
+    use crate::health::{BrokerHealthObservation, BrokerHealthStatus};
+
+    /// One raw broker observation for the reporter tests.
+    fn broker_observation(
+        status: BrokerHealthStatus,
+        healthy: bool,
+        broker_connected: bool,
+        age_ms: u64,
+    ) -> BrokerHealthObservation {
+        BrokerHealthObservation {
+            status,
+            healthy,
+            broker_connected,
+            age_ms,
+        }
+    }
+
+    /// Env marker marking the isolated event-capture child process.
+    const EVENT_CAPTURE_CHILD_ENV: &str = "JMS_BROKER_STATUS_EVENT_CAPTURE_CHILD";
+    /// Full test path spawned for the isolated event-capture run.
+    const EVENT_CAPTURE_TEST: &str =
+        "component::tests::monitor_stale_preserves_verified_state_and_logs_once";
+
+    /// One real `tracing` event field. `typed` records that the value
+    /// arrived through a typed visitor method (`record_u64`/`record_bool`),
+    /// proving the field is a real number or boolean rather than debug text.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CapturedField {
+        name: String,
+        value: String,
+        typed: bool,
+    }
+
+    /// One real emitted `tracing` event.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CapturedEvent {
+        level: String,
+        target: String,
+        fields: Vec<CapturedField>,
+    }
+
+    struct FieldCollector(Vec<CapturedField>);
+
+    impl tracing::field::Visit for FieldCollector {
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.0.push(CapturedField {
+                name: field.name().to_string(),
+                value: value.to_string(),
+                typed: true,
+            });
+        }
+
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.0.push(CapturedField {
+                name: field.name().to_string(),
+                value: value.to_string(),
+                typed: true,
+            });
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push(CapturedField {
+                name: field.name().to_string(),
+                value: format!("{value:?}"),
+                typed: false,
+            });
+        }
+    }
+
+    /// In-process subscriber collecting every emitted `tracing` event.
+    #[derive(Debug)]
+    struct CollectingSubscriber {
+        events: Arc<std::sync::Mutex<Vec<CapturedEvent>>>,
+        next_id: std::sync::atomic::AtomicU64,
+    }
+
+    impl tracing::Subscriber for CollectingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _attributes: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(
+                self.next_id
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            )
+        }
+
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut collector = FieldCollector(Vec::new());
+            event.record(&mut collector);
+            self.events
+                .lock()
+                .expect("captured events mutex poisoned")
+                .push(CapturedEvent {
+                    level: event.metadata().level().to_string(),
+                    target: event.metadata().target().to_string(),
+                    fields: collector.0,
+                });
+        }
+
+        fn enter(&self, _span: &tracing::Id) {}
+
+        fn exit(&self, _span: &tracing::Id) {}
+
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::always()
+        }
+
+        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+            Some(tracing::level_filters::LevelFilter::TRACE)
+        }
+    }
+
+    /// Child mode: reports the full response sequence under the collecting
+    /// subscriber and asserts the real emitted events: exactly one event per
+    /// real transition, the exact field set (typed numeric `age_ms`, typed
+    /// booleans, message), the fixed credential-safe messages, no event for
+    /// the age-only 120000 STALE change, retained UP/DOWN verification, and
+    /// no leaked provider text, credential, or `disconnected` wording.
+    fn run_event_capture_child() {
+        let pool = JmsBridgePool::from_config(JmsPoolConfig::default())
+            .expect("default jms pool config must be valid");
+        let mut reporter = BrokerStatusReporter::from_pool(&pool);
+
+        // Provider message text exactly as the bridge would send it: this
+        // and its embedded credential must never appear in any emitted
+        // event field.
+        let provider_message = "broker status stale; creds admin:hunter2 tcp://host:61616";
+
+        let events: Arc<std::sync::Mutex<Vec<CapturedEvent>>> = Arc::default();
+        let subscriber = CollectingSubscriber {
+            events: Arc::clone(&events),
+            next_id: std::sync::atomic::AtomicU64::new(1),
+        };
+
+        let sequence = [
+            (
+                broker_observation(BrokerHealthStatus::Up, true, true, 0),
+                Some(true),
+            ),
+            (
+                broker_observation(BrokerHealthStatus::Stale, true, false, 60_000),
+                Some(true),
+            ),
+            (
+                broker_observation(BrokerHealthStatus::Stale, true, false, 120_000),
+                Some(true),
+            ),
+            (
+                broker_observation(BrokerHealthStatus::Unknown, true, false, 0),
+                Some(true),
+            ),
+            (
+                broker_observation(BrokerHealthStatus::Skipped, true, false, 0),
+                Some(true),
+            ),
+            (
+                broker_observation(BrokerHealthStatus::Down, false, false, 0),
+                Some(false),
+            ),
+            (
+                broker_observation(BrokerHealthStatus::Stale, true, false, 60_000),
+                Some(false),
+            ),
+        ];
+
+        tracing::subscriber::with_default(subscriber, || {
+            for (obs, want_verified) in sequence {
+                reporter.report_broker_status(obs);
+                assert_eq!(
+                    reporter.verified(),
+                    want_verified,
+                    "retained verification after {obs:?}"
+                );
+            }
+        });
+
+        let events = events
+            .lock()
+            .expect("captured events mutex poisoned")
+            .clone();
+        let target = "camel_component_jms::component";
+        let bool_field = |name: &str, value: bool| CapturedField {
+            name: name.to_string(),
+            value: value.to_string(),
+            typed: true,
+        };
+        let age_field = |value: u64| CapturedField {
+            name: "age_ms".to_string(),
+            value: value.to_string(),
+            typed: true,
+        };
+        let message_field = |value: &str| CapturedField {
+            name: "message".to_string(),
+            value: value.to_string(),
+            typed: false,
+        };
+        // The format-string `message` field is always declared first in the
+        // event metadata, ahead of the explicit fields.
+        let expected = [
+            (
+                vec![
+                    message_field(BROKER_STATUS_CHANGED_MSG),
+                    bool_field("healthy", true),
+                    bool_field("broker_connected", true),
+                ],
+                "verified UP",
+            ),
+            (
+                vec![message_field(BROKER_STATUS_STALE_MSG), age_field(60_000)],
+                "entering STALE with numeric age",
+            ),
+            (
+                vec![message_field(BROKER_STATUS_UNVERIFIED_MSG)],
+                "explicit unverified",
+            ),
+            (
+                vec![
+                    message_field(BROKER_STATUS_CHANGED_MSG),
+                    bool_field("healthy", false),
+                    bool_field("broker_connected", false),
+                ],
+                "verified DOWN",
+            ),
+            (
+                vec![message_field(BROKER_STATUS_STALE_MSG), age_field(60_000)],
+                "second entering STALE retains DOWN",
+            ),
+        ];
+        assert_eq!(
+            events.len(),
+            expected.len(),
+            "exactly one event per real transition, none for the age-only \
+             120000 change: {events:?}"
+        );
+        for (event, (fields, what)) in events.iter().zip(&expected) {
+            assert_eq!(event.level, "WARN", "{what}: {event:?}");
+            assert_eq!(event.target, target, "{what}: {event:?}");
+            assert_eq!(&event.fields, fields, "{what}: exact field set: {event:?}");
+        }
+        for event in &events {
+            for field in &event.fields {
+                assert!(
+                    !field.value.contains(provider_message) && !field.value.contains("hunter2"),
+                    "provider message and credentials must never appear: {event:?}"
+                );
+                assert!(
+                    !field.value.contains("120000"),
+                    "an age-only change must not log again: {event:?}"
+                );
+                assert!(
+                    !field.value.contains("disconnected"),
+                    "an unverified observation must not be logged as newly \
+                     disconnected: {event:?}"
+                );
+            }
+        }
+        println!("captured tracing events: {events:#?}");
+    }
+
+    /// Parent mode: spawns this test executable on itself with `--exact` and
+    /// a private env marker. The child owns a fresh tracing
+    /// callsite-interest cache, so its collecting subscriber receives every
+    /// emitted event deterministically — inside the shared suite process the
+    /// parallel monitor tests can register these `warn!` callsites first
+    /// with no subscriber, which nondeterministically drops events from a
+    /// per-test subscriber.
+    fn run_event_capture_parent() {
+        let exe = std::env::current_exe().expect("current test executable path");
+        let output = std::process::Command::new(exe)
+            .args(["--exact", EVENT_CAPTURE_TEST, "--nocapture"])
+            .env(EVENT_CAPTURE_CHILD_ENV, "1")
+            .output()
+            .expect("spawn isolated event-capture subprocess");
+        assert!(
+            output.status.success(),
+            "isolated event-capture child failed: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// Consecutive STALE observations keep the last verified state, log the
+    /// stale transition once with the numeric age, never log an unverified
+    /// observation as a newly disconnected broker, and never leak the
+    /// provider message or credentials. The assertions observe real emitted
+    /// `tracing` events captured in an isolated subprocess.
+    #[test]
+    fn monitor_stale_preserves_verified_state_and_logs_once() {
+        if std::env::var_os(EVENT_CAPTURE_CHILD_ENV).is_some() {
+            run_event_capture_child();
+        } else {
+            run_event_capture_parent();
+        }
+    }
+
+    /// A replacement monitor/channel epoch starts without inherited
+    /// verification: a STALE replacement response reports unverified, and
+    /// completed RPCs count zero replacement attempts.
+    #[test]
+    fn monitor_status_resets_for_replacement() {
+        let pool = JmsBridgePool::from_config(JmsPoolConfig::default())
+            .expect("default jms pool config must be valid");
+        let mut reporter = BrokerStatusReporter::from_pool(&pool);
+
+        // Old epoch: a completed RPC verifies the bridge UP.
+        reporter.report_broker_status(broker_observation(BrokerHealthStatus::Up, true, true, 0));
+        assert_eq!(reporter.verified(), Some(true), "old epoch verified up");
+
+        // Replacement epoch: a replaced Ready channel resets the reporter in
+        // place (a replacement monitor constructs a fresh reporter with the
+        // same fresh-memory start).
+        reporter.reset();
+        reporter.report_broker_status(broker_observation(
+            BrokerHealthStatus::Stale,
+            true,
+            false,
+            60_000,
+        ));
+
+        assert_eq!(
+            reporter.verified(),
+            None,
+            "a replacement epoch must not inherit the old bridge's UP"
+        );
+        assert_eq!(
+            broker_transitions(&pool),
+            vec![
+                BrokerStatusTransition::VerifiedUp,
+                BrokerStatusTransition::Stale { age_ms: 60_000 },
+            ],
+            "the replacement STALE must report unverified, not retained health"
+        );
+
+        // A replacement monitor constructs a fresh reporter: also no
+        // inherited verification.
+        let mut fresh = BrokerStatusReporter::from_pool(&pool);
+        fresh.report_broker_status(broker_observation(
+            BrokerHealthStatus::Stale,
+            true,
+            false,
+            60_000,
+        ));
+        assert_eq!(fresh.verified(), None, "a new monitor starts unverified");
+        assert_eq!(
+            broker_transitions(&pool),
+            vec![
+                BrokerStatusTransition::VerifiedUp,
+                BrokerStatusTransition::Stale { age_ms: 60_000 },
+                BrokerStatusTransition::Stale { age_ms: 60_000 },
+            ],
+        );
+
+        assert_eq!(
+            replacement_attempts(&pool),
+            0,
+            "completed RPCs must never count a replacement attempt"
+        );
     }
 
     /// Task 2.5: a coalesced wake runs one immediate probe without changing

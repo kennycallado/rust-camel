@@ -1781,10 +1781,13 @@ mod tests {
             &self,
             _request: Request<HealthRequest>,
         ) -> Result<Response<HealthResponse>, Status> {
+            // Legacy bridge answer: no explicit status, UNSPECIFIED with zero age.
             Ok(Response::new(HealthResponse {
                 healthy: true,
                 broker_connected: true,
                 message: "ok".to_string(),
+                status: 0,
+                age_ms: 0,
             }))
         }
 
@@ -1855,10 +1858,13 @@ mod tests {
             self.health_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let _ = self.health_events.send(());
+            // Legacy bridge answer: no explicit status, UNSPECIFIED with zero age.
             Ok(Response::new(HealthResponse {
                 healthy: true,
                 broker_connected: true,
                 message: "ok".to_string(),
+                status: 0,
+                age_ms: 0,
             }))
         }
 
@@ -1996,10 +2002,13 @@ mod tests {
             self.health_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let _ = self.health_events.send(());
+            // Legacy bridge answer: no explicit status, UNSPECIFIED with zero age.
             Ok(Response::new(HealthResponse {
                 healthy: true,
                 broker_connected: true,
                 message: "ok".to_string(),
+                status: 0,
+                age_ms: 0,
             }))
         }
 
@@ -2111,10 +2120,13 @@ mod tests {
             &self,
             _request: Request<HealthRequest>,
         ) -> Result<Response<HealthResponse>, Status> {
+            // Legacy bridge answer: no explicit status, UNSPECIFIED with zero age.
             Ok(Response::new(HealthResponse {
                 healthy: true,
                 broker_connected: true,
                 message: "ok".to_string(),
+                status: 0,
+                age_ms: 0,
             }))
         }
 
@@ -2199,10 +2211,13 @@ mod tests {
             &self,
             _request: Request<HealthRequest>,
         ) -> Result<Response<HealthResponse>, Status> {
+            // Legacy bridge answer: no explicit status, UNSPECIFIED with zero age.
             Ok(Response::new(HealthResponse {
                 healthy: true,
                 broker_connected: true,
                 message: "ok".to_string(),
+                status: 0,
+                age_ms: 0,
             }))
         }
 
@@ -2274,10 +2289,13 @@ mod tests {
             &self,
             _request: Request<HealthRequest>,
         ) -> Result<Response<HealthResponse>, Status> {
+            // Legacy bridge answer: no explicit status, UNSPECIFIED with zero age.
             Ok(Response::new(HealthResponse {
                 healthy: true,
                 broker_connected: true,
                 message: "ok".to_string(),
+                status: 0,
+                age_ms: 0,
             }))
         }
 
@@ -2356,10 +2374,13 @@ mod tests {
             &self,
             _request: Request<HealthRequest>,
         ) -> Result<Response<HealthResponse>, Status> {
+            // Legacy bridge answer: no explicit status, UNSPECIFIED with zero age.
             Ok(Response::new(HealthResponse {
                 healthy: true,
                 broker_connected: true,
                 message: "ok".to_string(),
+                status: 0,
+                age_ms: 0,
             }))
         }
 
@@ -2560,10 +2581,13 @@ mod tests {
             &self,
             _request: Request<HealthRequest>,
         ) -> Result<Response<HealthResponse>, Status> {
+            // Legacy bridge answer: no explicit status, UNSPECIFIED with zero age.
             Ok(Response::new(HealthResponse {
                 healthy: true,
                 broker_connected: true,
                 message: "ok".to_string(),
+                status: 0,
+                age_ms: 0,
             }))
         }
 
@@ -4074,10 +4098,13 @@ mod tests {
             &self,
             _request: Request<HealthRequest>,
         ) -> Result<Response<HealthResponse>, Status> {
+            // Legacy bridge answer: no explicit status, UNSPECIFIED with zero age.
             Ok(Response::new(HealthResponse {
                 healthy: true,
                 broker_connected: true,
                 message: "ok".to_string(),
+                status: 0,
+                age_ms: 0,
             }))
         }
 

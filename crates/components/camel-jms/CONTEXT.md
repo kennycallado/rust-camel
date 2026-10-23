@@ -153,6 +153,37 @@ Bridge restart stays inside `JmsBridgePool`. Consumer task failure remains
 route-supervised. `JmsConsumer::stop` cancels, joins with a five-second grace,
 and then aborts remaining tasks. This shutdown sequence complies with ADR-0007.
 
+## Broker status retention
+
+The readiness adapter (`health.rs`) keeps one `BrokerHealthMemory` per broker.
+A completed health RPC is one observation: an explicit `BrokerHealthStatus`
+(`Up`, `Stale`, `Unknown`, `Skipped`, `Down`, `Unspecified`, or `Future` for
+out-of-range numbers), the legacy booleans, and a numeric `age_ms`. `Up` and
+`Down` write retained verification. `Stale`, `Unknown`, `Skipped`, and
+`Future` preserve it: they map to `Healthy` after a verified-up observation,
+to `Degraded` with no retained verification (startup), and to `Unhealthy`
+after a verified-down observation. `Unspecified` keeps the legacy boolean
+mapping and never updates verification.
+
+Retained verification resets when the slot is absent, not ready
+(`ready_identity()` returns `None`), or replaced (a new Ready-channel identity
+tracked through the watch mark). An RPC error or timeout returns an unhealthy
+`CheckResult`; it is not verified broker state and never writes verification.
+A bridge that has not started reports `Degraded` and resets the memory.
+
+The health monitor emits one bounded `warn!` per transition. `STALE` emits
+only on entering `STALE`; age-only changes stay silent. Transitions carry no
+restart signal and no consecutive-broker debounce.
+
+The bridge-side cache (`BridgeHealthCache`) schedules its refresh at startup
+and every `REFRESH_AFTER_MS` (5 s); reads never admit refresh work. The wire
+fields `status` and `age_ms` are additive protobuf additions; older bridges
+decode as `UNSPECIFIED`/0 and keep the legacy mapping. The explicit-status
+guarantees need the updated Java bridge; this mission ships no bridge version
+bump. Producer idleTimeout stays excluded (`rc-w06u6`). A future consumer
+transport-listener integration would feed generation-fenced events into the
+same cache; it is explicitly not implemented.
+
 ## Broker-native precedence
 
 The bridge cap is terminal only when it fires before a provider or broker

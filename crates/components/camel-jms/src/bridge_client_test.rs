@@ -152,6 +152,8 @@ impl BridgeService for MockJmsBridge {
             healthy: true,
             broker_connected: true,
             message: "ok".to_string(),
+            status: 0,
+            age_ms: 0,
         }))
     }
 
@@ -773,6 +775,8 @@ impl BridgeService for ScriptedHealthService {
                     healthy: true,
                     broker_connected: true,
                     message: "ok".to_string(),
+                    status: 0,
+                    age_ms: 0,
                 })
             });
         // The gate is applied before the reply; the queue lock is never held

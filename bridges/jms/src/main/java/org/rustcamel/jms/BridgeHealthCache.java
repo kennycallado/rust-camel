@@ -3,19 +3,23 @@ package org.rustcamel.jms;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 /**
- * Immutable broker-health snapshot cache with single-flight background refresh.
+ * Immutable broker-health snapshot cache with scheduler-driven single-flight refresh.
  *
- * <p>{@link #current()} never blocks and never probes the broker. At most one refresh is admitted
- * at a time on the one daemon worker owned by this cache. Invalidation advances the generation and
- * preserves an in-flight timestamp until that worker exits, so a late result or send cannot publish
- * into the new generation. Terminal {@link #close()} runs provider cleanup on one dedicated daemon
- * worker and returns within a fixed bound even when that cleanup hangs.
+ * <p>An owned daemon scheduler requests refresh at startup and every {@link #REFRESH_AFTER_MS},
+ * independently of reads or sends; {@link #current()} never blocks, never probes the broker, and
+ * never admits refresh work. At most one refresh is admitted at a time on the one daemon worker
+ * owned by this cache. Invalidation advances the generation and preserves an in-flight timestamp
+ * until that worker exits, so a late result or send cannot publish into the new generation.
+ * Terminal {@link #close()} cancels the scheduler before worker and provider teardown, runs
+ * provider cleanup on one dedicated daemon worker, and returns within a fixed bound even when that
+ * cleanup hangs.
  */
 public final class BridgeHealthCache {
 
@@ -30,6 +34,7 @@ public final class BridgeHealthCache {
   private final LongSupplier clock;
   private final ExecutorService worker;
   private final ExecutorService closeWorker;
+  private final RefreshScheduler scheduler;
   private final AtomicReference<Thread> closeRunner = new AtomicReference<>();
   private final AtomicReference<CacheState> state;
 
@@ -41,7 +46,13 @@ public final class BridgeHealthCache {
    * @param clock millisecond clock used for status ages
    */
   public BridgeHealthCache(BrokerProbe probe, boolean skip, LongSupplier clock) {
-    this(probe, skip, clock, BridgeHealthCache::newWorker);
+    this(
+        probe,
+        skip,
+        clock,
+        BridgeHealthCache::newWorker,
+        BridgeHealthCache::newCloseWorker,
+        BridgeHealthCache::newScheduler);
   }
 
   /** Package-private constructor with an executor seam for deterministic test teardown. */
@@ -50,27 +61,51 @@ public final class BridgeHealthCache {
       boolean skip,
       LongSupplier clock,
       Supplier<ExecutorService> executorFactory) {
-    this(probe, skip, clock, executorFactory, BridgeHealthCache::newCloseWorker);
+    this(
+        probe,
+        skip,
+        clock,
+        executorFactory,
+        BridgeHealthCache::newCloseWorker,
+        BridgeHealthCache::newScheduler);
   }
 
-  /** Package-private constructor with an additional seam for the dedicated close executor. */
+  /**
+   * Package-private constructor with executor and scheduler seams for deterministic tests.
+   *
+   * @param probe generation-scoped broker probe
+   * @param skip when true, health reports skipped without broker I/O and no refresh is scheduled
+   * @param clock millisecond clock used for status ages
+   * @param executorFactory refresh worker factory
+   * @param closeWorkerFactory dedicated close worker factory
+   * @param schedulerFactory refresh scheduler factory
+   */
   BridgeHealthCache(
       BrokerProbe probe,
       boolean skip,
       LongSupplier clock,
       Supplier<ExecutorService> executorFactory,
-      Supplier<ExecutorService> closeWorkerFactory) {
+      Supplier<ExecutorService> closeWorkerFactory,
+      Supplier<RefreshScheduler> schedulerFactory) {
     this.probe = probe;
     this.skip = skip;
     this.clock = clock;
     this.worker = executorFactory.get();
     this.closeWorker = closeWorkerFactory.get();
+    this.scheduler = schedulerFactory.get();
     long now = clock.getAsLong();
     this.state =
         new AtomicReference<>(new CacheState(1L, HealthSnapshot.unknown(1L, now), null, false));
+    if (!skip) {
+      this.scheduler.schedule(this::onScheduledRefresh, REFRESH_AFTER_MS);
+    }
   }
 
-  /** Returns the current snapshot without blocking or probing the broker. */
+  /**
+   * Returns the cached snapshot without blocking and without probing the broker. The mapping is
+   * pure: a read never admits refresh work; the owned scheduler requests refresh at startup and
+   * every {@link #REFRESH_AFTER_MS} independently of reads or sends.
+   */
   public HealthSnapshot current() {
     long now = clock.getAsLong();
     CacheState observed = state.get();
@@ -89,25 +124,11 @@ public final class BridgeHealthCache {
 
     if (snapshotAge >= HEALTH_TTL_MS || (refreshInFlight && inflightAge >= HEALTH_TTL_MS)) {
       long age = refreshInFlight ? Math.max(snapshotAge, inflightAge) : snapshotAge;
-      if (!refreshInFlight) {
-        admitRefresh(observed.generation(), now);
-      }
       return HealthSnapshot.stale(observed.generation(), age, now);
     }
 
-    if (observed.snapshot().status() == HealthSnapshot.Status.UNKNOWN) {
-      if (!refreshInFlight) {
-        admitRefresh(observed.generation(), now);
-        return observed.snapshot();
-      }
+    if (observed.snapshot().status() == HealthSnapshot.Status.UNKNOWN && refreshInFlight) {
       return HealthSnapshot.unknown(observed.generation(), now);
-    }
-
-    if (snapshotAge >= REFRESH_AFTER_MS) {
-      if (!refreshInFlight) {
-        admitRefresh(observed.generation(), now);
-      }
-      return observed.snapshot();
     }
 
     return observed.snapshot();
@@ -170,7 +191,8 @@ public final class BridgeHealthCache {
    * Terminal teardown with once-only semantics.
    *
    * <p>The winning caller advances the generation, installs an unknown snapshot, and preserves the
-   * in-flight admission until the refresh worker exits. Provider detach is non-blocking, the
+   * in-flight admission until the refresh worker exits. Scheduled refresh admissions are cancelled
+   * first so no tick can admit work after teardown starts. Provider detach is non-blocking, the
    * refresh worker is stopped for at most two seconds, and provider close runs on the one dedicated
    * close worker for at most one second before it is interrupted. A queued terminal close is never
    * cancelled: graceful shutdown lets it run once the worker is free, even when the caller was
@@ -196,6 +218,8 @@ public final class BridgeHealthCache {
         break;
       }
     }
+
+    scheduler.shutdown();
 
     try {
       probe.invalidate(nextGeneration);
@@ -242,6 +266,25 @@ public final class BridgeHealthCache {
     Thread running = closeRunner.get();
     if (running != null && running != Thread.currentThread()) {
       running.interrupt();
+    }
+  }
+
+  /**
+   * Runs one scheduler-driven refresh admission. Admission reuses the worker single-flight CAS, so
+   * a tick that lands while a refresh is in flight is a no-op, and a tick after close or on a
+   * generation superseded by {@link #invalidate()} admits nothing.
+   */
+  private void onScheduledRefresh() {
+    if (skip) {
+      return;
+    }
+    try {
+      CacheState observed = state.get();
+      if (!observed.closed()) {
+        admitRefresh(observed.generation(), clock.getAsLong());
+      }
+    } catch (RuntimeException ignored) {
+      // A failing tick must never suppress the scheduler's subsequent executions.
     }
   }
 
@@ -352,13 +395,45 @@ public final class BridgeHealthCache {
         });
   }
 
-  private static ExecutorService newCloseWorker() {
+  /** Package-private close worker factory, visible for the deterministic test seam. */
+  static ExecutorService newCloseWorker() {
     return Executors.newSingleThreadExecutor(
         runnable -> {
           Thread thread = new Thread(runnable, "jms-health-close");
           thread.setDaemon(true);
           return thread;
         });
+  }
+
+  private static RefreshScheduler newScheduler() {
+    ScheduledExecutorService executor =
+        Executors.newSingleThreadScheduledExecutor(
+            runnable -> {
+              Thread thread = new Thread(runnable, "jms-health-refresh-scheduler");
+              thread.setDaemon(true);
+              return thread;
+            });
+    return new RefreshScheduler() {
+      @Override
+      public void schedule(Runnable tick, long periodMillis) {
+        executor.scheduleAtFixedRate(tick, 0L, periodMillis, TimeUnit.MILLISECONDS);
+      }
+
+      @Override
+      public void shutdown() {
+        executor.shutdownNow();
+      }
+    };
+  }
+
+  /** Package-private refresh scheduling seam for deterministic tests. */
+  interface RefreshScheduler {
+
+    /** Schedules {@code tick} to run once immediately and then every {@code periodMillis}. */
+    void schedule(Runnable tick, long periodMillis);
+
+    /** Cancels future ticks; idempotent. */
+    void shutdown();
   }
 
   /** Waits up to {@code timeout} while preserving the caller's interrupt flag and total bound. */

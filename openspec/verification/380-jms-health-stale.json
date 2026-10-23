@@ -1,0 +1,84 @@
+{
+  "mission": 380,
+  "issue": "rc-bgv1f",
+  "status": "verified-and-parked-for-owner",
+  "verified_head": "eeaffafde9f74641412bed106d51e0457defadc3",
+  "implementation_diff_hash": "sha256:3c14adf59c3bbca5f0c4ce3927a1f749a97d509b2763ff0defec478ca79ad344",
+  "plan_hash": "sha256:97562d049725ecf941b7b6239b7599314b82cbeed0ebf504f44e9075e78eae5f",
+  "gate_registry": "AGENTS.md ## QUALITY GATES, plus conductor additions",
+  "containment": "systemd-run --user --collect; MemoryMax=12G; MemorySwapMax=2G; TMPDIR=/home/shared/tmp; worktree only",
+  "gate_exit_codes": {
+    "cargo build --workspace": 0,
+    "fmt check": 0,
+    "clippy registry command 1": 0,
+    "clippy registry command 2": 0,
+    "clippy registry command 3": 0,
+    "clippy registry command 4": 0,
+    "lint-unwrap": 0,
+    "lint-secrets": 0,
+    "lint-single-source": 0,
+    "lint-non-exhaustive": 0,
+    "lint-log-levels": 0,
+    "lint-log-redaction": 0,
+    "lint-cancel-tokens": 0,
+    "lint-test-sleep": 0,
+    "lint-unbounded-wait": 0,
+    "lint-ignore": 0,
+    "lint-publish-cycles": 0,
+    "lint-publish-registration": 0,
+    "lint-component-deps": 0,
+    "lint-bridge-versions": 0,
+    "lint-gate-forwarding": 0,
+    "lint-context-citations": 0,
+    "lint-metric-labels": 0,
+    "schema-check": 0,
+    "doc-build": 0,
+    "doc-guide-test": 0,
+    "cargo-audit": 0,
+    "cargo test --workspace --lib": 0,
+    "cargo test -p camel-core --test hexagonal_architecture_boundaries_test": 0,
+    "RUSTDOCFLAGS=-D warnings cargo doc -p camel-component-jms --no-deps": 0,
+    "bridges/jms: ./gradlew spotlessCheck test": 0,
+    "openspec validate jms-health-stale --type change --json": 0
+  },
+  "gate_coverage": {
+    "commands_passed": 32,
+    "not_applicable": [],
+    "skipped": [{"gate": "lint-commits", "reason": "Conductor exclusion: remote git fetch and branch-diff checks belong to CI"}],
+    "pre_existing_failure_exemptions": [],
+    "unresolved_failures": []
+  },
+  "test_totals": {"workspace_library_passed": 11259, "workspace_library_ignored": 3, "workspace_library_suites": 72, "jms_library_passed": 264, "java_passed": 217},
+  "primary_regressions": [
+    {
+      "name": "scheduledRefreshKeepsLongPollFreshWithoutTraffic",
+      "command": "bridges/jms: ./gradlew test --tests org.rustcamel.jms.BridgeHealthCacheTest",
+      "arrange_act_assert": "Fake clock starts at zero; run scheduled 5-second ticks without reads or sends until 60 seconds; final read is UP and brokerConnected=true",
+      "red": {"exit_code": 1, "evidence": "Without scheduler wiring, timed out waiting for snapshot status UP"},
+      "green": {"exit_code": 0, "evidence": "Scheduled refreshes maintain UP at the isolated 60-second read"}
+    },
+    {
+      "name": "jms_health_stale_keeps_last_verified_state",
+      "command": "cargo test -p camel-component-jms --lib health::tests",
+      "arrange_act_assert": "UP, STALE, STALE, UNKNOWN, SKIPPED stay Healthy; DOWN then STALE stay Unhealthy",
+      "red": {"exit_code": 101, "evidence": "Before retention, Degraded differed from expected Healthy"},
+      "green": {"exit_code": 0, "evidence": "No readiness downgrade caused solely by unverified status"}
+    }
+  ],
+  "additional_proofs": [
+    "scheduledProbeFailureStillReportsDown: genuine probe failure remains DOWN with healthy=false",
+    "snapshotResponseCarriesExplicitStatusAndAge: all statuses and stale numeric age preserve existing booleans",
+    "jms_health_ready_identity_stable_until_replacement: real watch cursor does not cause phantom replacement",
+    "jms_health_replacement_during_identity_observation_resets_verification: deterministic check/ack interleaving fails before atomic snapshot fix",
+    "jms_health_replacement_during_probe_discards_obsolete_verification: deterministic in-flight replacement fails before post-await response fence",
+    "monitor_stale_preserves_verified_state_and_logs_once: actual tracing event fields/counts captured in isolated subprocess; removing or duplicating warn produces test failure"
+  ],
+  "resolved_gate_failures": [
+    {"gate": "lint-unwrap", "initial_exit_code": 1, "fix": "Recover poisoned identity-tracker mutex without production expect"},
+    {"gate": "Java harness", "initial_exit_code": 127, "fix": "Pass installed JDK 21 JAVA_HOME to contained Gradle unit"}
+  ],
+  "reviews": {"spec": "BLESSED", "plan": "BLESSED", "tasks": "APPROVE", "holistic": "APPROVE", "stage4_expert": "APPROVE"},
+  "integration_verification": "integration-verification-deferred-to-CI: no live-broker or native-image soak claimed; three workspace ignored tests remain ignored",
+  "open_decisions": [],
+  "landing": "No merge, archive, issue closure, version bump, push, or tag. Owner handles landing and bridge release."
+}

@@ -1,6 +1,9 @@
 syntax = "proto3";
 package jms_bridge;
 
+option java_package = "jms_bridge";
+option java_multiple_files = true;
+
 service BridgeService {
   rpc Send(SendRequest) returns (SendResponse);
   rpc Subscribe(SubscribeRequest) returns (stream JmsMessage);
@@ -39,10 +42,21 @@ message JmsMessage {
 
 message HealthRequest {}
 
+enum HealthStatus {
+  UNSPECIFIED = 0;
+  UP = 1;
+  STALE = 2;
+  UNKNOWN = 3;
+  SKIPPED = 4;
+  DOWN = 5;
+}
+
 message HealthResponse {
   bool healthy = 1;
   bool broker_connected = 2;
   string message = 3;
+  HealthStatus status = 4;
+  uint64 age_ms = 5;
 }
 
 enum CompletionOutcome {

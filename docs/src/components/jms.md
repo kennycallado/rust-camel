@@ -182,19 +182,28 @@ The Consumer observes bridge state through a watch channel. A pending bridge ret
 
 A completed health RPC proves that the bridge process is alive. This rule holds when the response reports a broker problem. A failed probe is an RPC error or an expired `health_timeout_ms`. Only `health_failure_threshold` consecutive failed probes restart a bridge. A successful RPC resets the failure count.
 
-The health RPC returns a cached broker status snapshot and does not wait for broker connectivity. The snapshot has a 10 s TTL and a background refresh starts after 5 s. The readiness adapter maps the response as follows.
+The health RPC returns a cached broker status snapshot and does not wait for broker connectivity. The snapshot has a 10 s TTL, and an owned daemon scheduler refreshes it at startup and every 5 s. Reads never admit refresh work; each read observes the published snapshot independently. With the updated bridge, the response carries an explicit numeric `status` (`UP`, `STALE`, `UNKNOWN`, `SKIPPED`, `DOWN`) and a numeric stale age `age_ms`. The `healthy` and `brokerConnected` booleans keep their meaning.
 
-| Broker status | `healthy` | `brokerConnected` | Readiness |
-| --- | --- | --- | --- |
-| Verified up | true | true | Healthy (200) |
-| Verified down | false | false | Unhealthy (503) |
-| Not yet checked | true | false | Degraded (200) |
-| Skipped | true | false | Degraded (200) |
-| Stale | true | false | Degraded (200) |
+The readiness adapter retains the last verified broker state per bridge and maps the response as follows.
 
-A response that reports the broker verified down maps to `Unhealthy` 503. It is not merely a message attached to a healthy response. A healthy RPC that reports `healthy=false` maps to `Unhealthy` 503, and the adapter does not wait for an RPC failure. An RPC error or timeout also maps to `Unhealthy` 503.
+| Broker status | Retained verification | Readiness |
+| --- | --- | --- |
+| UP | sets verified-up | Healthy (200) |
+| DOWN | sets verified-down | Unhealthy (503) |
+| STALE, UNKNOWN, SKIPPED, future | last verified-up | Healthy (200) |
+| STALE, UNKNOWN, SKIPPED, future | none (startup) | Degraded (200) |
+| STALE, UNKNOWN, SKIPPED, future | last verified-down | Unhealthy (503) |
+| UNSPECIFIED (older bridge) | never updated | legacy boolean mapping |
 
-A not yet checked broker reports unknown status. Unknown, skipped, and stale status map to `Degraded` 200, so readiness passes. The process is live and ready, and broker connectivity is not verified. Broker status fields never trigger a process restart.
+The legacy boolean mapping is the original table: verified up maps to `Healthy`, verified down maps to `Unhealthy`, and each unverified status (`Not yet checked`, `Skipped`, `Stale`) maps to `Degraded`.
+
+For an older bridge that sends no explicit status (`UNSPECIFIED`), a response that reports the broker verified down maps to `Unhealthy` 503, and a healthy RPC that reports `healthy=false` maps to `Unhealthy` 503 without waiting for an RPC failure; the booleans are authoritative only in this legacy case. An RPC error or timeout maps to `Unhealthy` 503 for every bridge; it says nothing verified about the broker and does not change the retained state.
+
+At startup, before any verified observation, an unverified status reports `Degraded` 200: the process is live and ready, and broker connectivity is not yet verified. After a verified-up observation, a stale or otherwise unverified observation keeps `Healthy` 200 — a stale snapshot is not disconnection evidence. After a verified-down observation, an unverified observation keeps `Unhealthy` 503. The retained state resets when the bridge slot is absent, not ready, or replaced. Broker status fields never trigger a process restart.
+
+The monitor emits one bounded warning per broker-status transition. A `STALE` warning fires only when the status enters `STALE`; age-only changes stay silent. These reports add no restart signal, no consecutive-broker debounce, and no operational knob.
+
+Producer idle handling is out of scope for broker-status reporting (`rc-w06u6`). A future consumer transport-listener integration may feed transport events into the same generation-fenced status cache; it is explicitly not implemented.
 
 `health_broker_probe_mode` selects the broker probe strategy. `reuse` (the default) keeps one provider diagnostic connection across refreshes. `skip` performs no broker I/O and opens no connection. Unsupported values are rejected at startup.
 
@@ -202,7 +211,7 @@ A not yet checked broker reports unknown status. Unknown, skipped, and stale sta
 
 One channel refresh has a fixed 2 s budget. The budget covers process-lock acquisition and the selected connector future. Progress does not renew the budget. After a failed or expired refresh, the caller requests a liveness probe within 500 ms. It never restarts the process. Slow broker work alone cannot restart a live bridge.
 
-The broker-latency isolation guarantee requires the updated Java health handler. The update needs no protobuf change. An older blocking bridge cannot provide the guarantee.
+The explicit-status guarantees require the updated Java health handler. The new fields are additive protobuf additions, and this mission ships no bridge version bump. An older bridge keeps the legacy boolean mapping.
 
 ## Trust boundary
 

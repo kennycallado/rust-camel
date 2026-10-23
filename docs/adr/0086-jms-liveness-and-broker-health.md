@@ -1,7 +1,10 @@
 # ADR-0086: JMS liveness and broker health
 
-- Status: Accepted (decided 2026-10-20)
+- Status: Accepted (decided 2026-10-20; amended 2026-10-23)
 - Source: openspec change `jms-health-liveness`
+- Amendment: openspec change `jms-health-stale` — explicit broker status,
+  retained verification, and additive wire fields supersede the
+  stale-always-`Degraded` readiness semantics
 - Cross-refs: ADR-0036 (bridge IPC security), ADR-0052 (diagnostics
   exposure), CONTEXT-MAP readiness rule (`Degraded` vs `Unhealthy`)
 
@@ -62,11 +65,21 @@ increments, threshold checks, and reset points.
 Broker status is a cached snapshot with these limits:
 
 - `HEALTH_TTL_MS` is 10000 ms.
-- A proactive refresh starts after 5000 ms.
+- An owned daemon scheduler requests a refresh at startup and then every
+  5000 ms. Reads never admit refresh work; each read observes the
+  published snapshot independently.
 - One owned daemon worker performs at most one refresh at a time.
 - There is no refresh queue.
 - Broker I/O holds no service-wide lock.
 - A result from an invalidated generation cannot overwrite current status.
+
+With the updated bridge, the health response carries the broker state as
+explicit additive fields: a numeric `status` (`UP`, `STALE`, `UNKNOWN`,
+`SKIPPED`, `DOWN`) and a numeric `age_ms` stale age that is meaningful for
+`STALE`. Future numbers outside the known range are preserved, never
+rewritten. The `healthy` and `brokerConnected` booleans keep their
+meaning. The fields are additive protobuf additions; an older bridge omits
+both, and its response decodes as `UNSPECIFIED` with age 0.
 
 In `reuse` mode the bridge retains one provider diagnostic connection across
 refreshes. It does not open a fresh broker connection for each health check.
@@ -83,6 +96,13 @@ The readiness adapter maps a completed RPC to the broker status in the
 response. The distinction between live-unverified and verified-down is
 binding.
 
+The table below is the legacy mapping for responses without explicit
+status (`UNSPECIFIED`). Superseded (2026-10-23, change
+`jms-health-stale`): for responses that carry explicit status, the
+always-`Degraded` semantics of the Not-yet-checked, Skipped, and Stale
+rows are replaced by the retention mapping in the "Explicit status
+retains the last verified state" section below.
+
 | Broker status | `healthy` | `brokerConnected` | Readiness |
 | --- | --- | --- | --- |
 | Verified up | true | true | Healthy (200) |
@@ -91,14 +111,18 @@ binding.
 | Skipped | true | false | Degraded (200) |
 | Stale | true | false | Degraded (200) |
 
-This split defines readiness:
+For legacy `UNSPECIFIED` responses this split defines readiness; explicit
+statuses never use these boolean rules:
 
-- Live-unverified status maps to `Degraded` 200. The process is live and
-  ready, and broker connectivity is not verified.
-- Verified-down status maps to `Unhealthy` 503.
-- A healthy RPC that reports `healthy=false` maps to `Unhealthy` 503. The
-  adapter does not wait for an RPC failure.
+- A live-unverified legacy observation maps to `Degraded` 200. The process
+  is live and ready, and broker connectivity is not verified.
+- A legacy observation that reports `healthy=false` maps to `Unhealthy`
+  503. The adapter does not wait for an RPC failure.
 - An RPC failure or timeout also maps to `Unhealthy` 503.
+
+For responses that carry explicit status, the retention mapping in the
+"Explicit status retains the last verified state" section below is
+authoritative.
 
 Readiness does not request a process restart. Broker status never publishes
 lifecycle `Degraded` for the restart policy.
@@ -106,6 +130,51 @@ lifecycle `Degraded` for the restart policy.
 JMS health fields do not control data-plane admission or settlement. They
 describe process liveness and broker reachability only. Delivery success is
 not a health guarantee.
+
+### Explicit status retains the last verified state
+
+With a bridge that sends explicit status, the readiness adapter retains
+the last verified state per bridge identity and applies this mapping:
+
+| Broker status | Retained verification | Readiness |
+| --- | --- | --- |
+| UP | sets verified-up | Healthy (200) |
+| DOWN | sets verified-down | Unhealthy (503) |
+| STALE, UNKNOWN, SKIPPED, future | last verified-up | Healthy (200) |
+| STALE, UNKNOWN, SKIPPED, future | none (startup) | Degraded (200) |
+| STALE, UNKNOWN, SKIPPED, future | last verified-down | Unhealthy (503) |
+| UNSPECIFIED (legacy bridge) | never updated | legacy boolean mapping |
+
+- An unverified observation with no retained verification (startup, or
+  right after a reset) maps to `Degraded` 200. The process is live and
+  ready; broker connectivity is not yet verified.
+- An unverified observation after a verified-up observation keeps
+  `Healthy` 200. A stale snapshot is not disconnection evidence.
+- An unverified observation after a verified-down observation keeps
+  `Unhealthy` 503 until a new verified observation arrives.
+- Retained verification resets when the bridge slot is absent, not ready,
+  or replaced (a new Ready channel identity). The next observation starts
+  from the startup rule.
+- `UNSPECIFIED` keeps the boolean mapping of the legacy table above and
+  never updates retained verification.
+- An RPC error or timeout maps to `Unhealthy` 503. It is process-liveness
+  evidence; it is not verified broker state and does not update retained
+  verification.
+
+The health monitor reports status transitions as bounded warnings. A
+`STALE` warning emits only when the status enters `STALE`; age-only
+changes stay silent. These reports add no restart signal, no consecutive
+broker-status debounce, and no operational knob. The liveness threshold,
+its counters, and their reset points are unchanged. The producer
+idleTimeout exclusion stands (`rc-w06u6`): broker-status reporting does
+not touch producer idle handling.
+
+A future consumer transport-listener integration may feed transport events
+into the same generation-fenced broker-status cache as additional refresh
+inputs. It is explicitly not implemented: the cache admits only
+scheduler-driven refreshes today. No live-broker or native-image
+verification is claimed by this amendment; the accepted limitation below
+stands.
 
 ## Consequences
 
@@ -121,16 +190,21 @@ is accepted because it removes restart loops caused by broker latency. Real
 dead-process recovery still occurs through the existing bounded restart
 path.
 
-The bridge version and the protobuf contract stay unchanged. The change is
-an engine policy and health-handler behavior, not a wire-format change.
+The explicit-status fields are additive protobuf additions, so the wire
+contract stays compatible. The guarantees of this amendment need the
+updated Java bridge implementation; this mission does not bump the bridge
+version. An older bridge keeps the legacy boolean mapping.
 
 A refresh can expire at 2 s while a replacement holds the process lock. In
 that case the caller requests a probe and never restarts the process. Slow
 broker work alone cannot restart a live bridge.
 
 The readiness split now distinguishes live-unverified from verified-down.
-Operators see `Degraded` 200 for unknown, skipped, or stale broker status.
-They see `Unhealthy` 503 for verified-down status or a failed health RPC.
+Operators see `Degraded` 200 while broker verification is absent: at
+startup and after a bridge replacement. An unverified observation after a
+verified-up state keeps `Healthy` 200; after a verified-down state it
+keeps `Unhealthy` 503. A failed health RPC maps to `Unhealthy` 503
+without writing broker verification.
 
 The producer and consumer counter semantics stay unchanged. No threshold or
 reset point moves.
