@@ -28,6 +28,236 @@ fn cxf_reconnect_default() -> NetworkRetryPolicy {
     }
 }
 
+/// Captures the `FIELDS` slice that serde's derived `Deserialize` passes to
+/// `deserialize_struct`, without deserializing a value. The map visitor is
+/// empty, so all-`default` structs succeed and required-field structs fail
+/// with "missing field"; both outcomes are ignored because `FIELDS` is
+/// recorded before any value is requested.
+struct FieldsRecorder(Option<&'static [&'static str]>);
+
+struct EmptyMapAccess;
+
+impl<'de> serde::de::MapAccess<'de> for EmptyMapAccess {
+    type Error = serde::de::value::Error;
+
+    fn next_key_seed<K>(&mut self, _seed: K) -> Result<Option<K::Value>, Self::Error>
+    where
+        K: serde::de::DeserializeSeed<'de>,
+    {
+        Ok(None)
+    }
+
+    fn next_value_seed<V>(&mut self, _seed: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::DeserializeSeed<'de>,
+    {
+        Err(serde::de::Error::custom("fields recorder"))
+    }
+}
+
+impl<'de> serde::Deserializer<'de> for &mut FieldsRecorder {
+    type Error = serde::de::value::Error;
+
+    fn deserialize_any<V>(self, _visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        Err(serde::de::Error::custom("fields recorder"))
+    }
+
+    fn deserialize_struct<V>(
+        self,
+        _name: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        self.0 = Some(fields);
+        visitor.visit_map(EmptyMapAccess)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map enum identifier ignored_any
+    }
+}
+
+fn struct_fields<T: serde::de::DeserializeOwned>() -> &'static [&'static str] {
+    let mut recorder = FieldsRecorder(None);
+    let _ = <T as serde::Deserialize>::deserialize(&mut recorder);
+    recorder
+        .0
+        .expect("derive passed FIELDS to deserialize_struct") // allow-unwrap
+}
+
+const POOL_IDENTITY: &str = "[components.cxf]";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigLevel {
+    Pool,
+    Profile,
+    Security,
+    Tls,
+}
+
+impl ConfigLevel {
+    fn fields(self) -> &'static [&'static str] {
+        match self {
+            Self::Pool => struct_fields::<CxfPoolConfigRaw>(),
+            Self::Profile => struct_fields::<CxfProfileConfig>(),
+            Self::Security => struct_fields::<CxfSecurityFields>(),
+            Self::Tls => struct_fields::<CxfTlsConfig>(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ProfileIdentity<'a> {
+    Named(&'a str),
+    Index(usize),
+    Placeholder,
+}
+
+impl ProfileIdentity<'_> {
+    fn render(self) -> String {
+        match self {
+            Self::Named(name) => format!("profiles.{name}"),
+            Self::Index(index) => format!("profiles[{index}]"),
+            Self::Placeholder => "profiles.<name>".to_string(),
+        }
+    }
+}
+
+fn profile_identity<'a>(table: &'a toml::Table, index: usize) -> ProfileIdentity<'a> {
+    match table.get("name") {
+        Some(toml::Value::String(name)) => ProfileIdentity::Named(name),
+        _ => ProfileIdentity::Index(index),
+    }
+}
+
+fn first_profile_identity(table: &toml::Table) -> ProfileIdentity<'_> {
+    match table.get("profiles") {
+        Some(toml::Value::Array(profiles)) => profiles
+            .iter()
+            .enumerate()
+            .find_map(|(index, entry)| match entry {
+                toml::Value::Table(profile) => Some(profile_identity(profile, index)),
+                _ => None,
+            })
+            .unwrap_or(ProfileIdentity::Placeholder),
+        _ => ProfileIdentity::Placeholder,
+    }
+}
+
+fn level_location(level: ConfigLevel, identity: ProfileIdentity<'_>) -> String {
+    match level {
+        ConfigLevel::Pool => POOL_IDENTITY.to_string(),
+        ConfigLevel::Profile => identity.render(),
+        ConfigLevel::Security => format!("{}.security", identity.render()),
+        ConfigLevel::Tls => format!("{}.security.tls", identity.render()),
+    }
+}
+
+fn other_locations(key: &str, current: ConfigLevel, identity: ProfileIdentity<'_>) -> Vec<String> {
+    [
+        ConfigLevel::Pool,
+        ConfigLevel::Profile,
+        ConfigLevel::Security,
+        ConfigLevel::Tls,
+    ]
+    .into_iter()
+    .filter(|level| *level != current && level.fields().contains(&key))
+    .map(|level| level_location(level, identity))
+    .collect()
+}
+
+fn record_violation(
+    violations: &mut Vec<(String, String, String)>,
+    level: ConfigLevel,
+    identity: ProfileIdentity<'_>,
+    key: &str,
+) {
+    let identity_text = level_location(level, identity);
+    let message = if level == ConfigLevel::Pool && key == "listener_tls" {
+        format!(
+            "'listener_tls' is not a TOML key for {identity_text}; set listener TLS material \
+             with the five flat pool keys: soap_tls_cert_path, soap_tls_key_path, \
+             soap_tls_client_ca_path, soap_tls_pkcs12_path, soap_tls_pkcs12_password"
+        )
+    } else {
+        let locations = other_locations(key, level, identity);
+        if locations.is_empty() {
+            let mut accepted = level.fields().to_vec();
+            accepted.sort_unstable();
+            format!(
+                "unknown key '{key}' for {identity_text}; accepted keys: {}",
+                accepted.join(", ")
+            )
+        } else {
+            let locations = locations
+                .into_iter()
+                .map(|location| format!("`{location}`"))
+                .collect::<Vec<_>>()
+                .join(" or ");
+            format!("'{key}' is accepted under {locations}, not under {identity_text}")
+        }
+    };
+    violations.push((identity_text, key.to_string(), message));
+}
+
+fn walk_table_keys(
+    violations: &mut Vec<(String, String, String)>,
+    table: &toml::Table,
+    level: ConfigLevel,
+    identity: ProfileIdentity<'_>,
+) {
+    for key in table.keys() {
+        if !level.fields().contains(&key.as_str()) {
+            record_violation(violations, level, identity, key);
+        }
+    }
+}
+
+/// Walks the raw TOML surface and rejects unknown or misplaced keys before
+/// serde decodes the table. Diagnostics name keys, accepted locations, and the
+/// offending identity only — never config values. `[reconnect]` is a typed
+/// nested surface and is intentionally not walked.
+fn validate_table_shape(table: &toml::Table) -> Result<(), camel_component_api::CamelError> {
+    let mut violations: Vec<(String, String, String)> = Vec::new();
+    let pool_identity = first_profile_identity(table);
+    walk_table_keys(&mut violations, table, ConfigLevel::Pool, pool_identity);
+
+    if let Some(toml::Value::Array(profiles)) = table.get("profiles") {
+        for (index, entry) in profiles.iter().enumerate() {
+            let toml::Value::Table(profile) = entry else {
+                continue;
+            };
+            let identity = profile_identity(profile, index);
+            walk_table_keys(&mut violations, profile, ConfigLevel::Profile, identity);
+            if let Some(toml::Value::Table(security)) = profile.get("security") {
+                walk_table_keys(&mut violations, security, ConfigLevel::Security, identity);
+                if let Some(toml::Value::Table(tls)) = security.get("tls") {
+                    walk_table_keys(&mut violations, tls, ConfigLevel::Tls, identity);
+                }
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        return Ok(());
+    }
+    violations.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let message = violations
+        .iter()
+        .map(|(_, _, message)| message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(camel_component_api::CamelError::Config(message))
+}
+
 /// Validates that a profile name contains only `[a-z0-9_]+`.
 pub fn validate_profile_name(name: &str) -> Result<(), camel_component_api::CamelError> {
     if name.is_empty() {
@@ -593,7 +823,7 @@ impl fmt::Debug for CxfListenerTls {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-#[serde(try_from = "CxfPoolConfigRaw")]
+#[serde(try_from = "toml::Table")]
 pub struct CxfPoolConfig {
     #[serde(default)]
     pub profiles: Vec<CxfProfileConfig>,
@@ -906,6 +1136,19 @@ impl TryFrom<CxfPoolConfigRaw> for CxfPoolConfig {
         };
         cfg.validate()?;
         Ok(cfg)
+    }
+}
+
+impl TryFrom<toml::Table> for CxfPoolConfig {
+    type Error = camel_component_api::CamelError;
+
+    fn try_from(table: toml::Table) -> Result<Self, Self::Error> {
+        validate_table_shape(&table)?;
+        let raw: CxfPoolConfigRaw = table
+            .clone()
+            .try_into()
+            .map_err(|e: toml::de::Error| camel_component_api::CamelError::Config(e.to_string()))?;
+        Self::try_from(raw)
     }
 }
 
@@ -2752,6 +2995,400 @@ mod tests {
                 assert!(msg.contains("partner"), "got: {msg}");
             }
             other => panic!("expected CamelError::Config, got {other:?}"),
+        }
+    }
+
+    // ── Strict shape walk (Task 1.1) ──────────────────────────────────────
+
+    #[test]
+    fn unknown_key_in_profile_table_rejected() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "p"
+            wsdl_path = "/wsdl/p.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+            exposd_soap_headers = true
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exposd_soap_headers"), "got: {msg}");
+        assert!(msg.contains("profiles.p"), "got: {msg}");
+        assert!(msg.contains("unknown"), "got: {msg}");
+        assert!(msg.contains("wsdl_path"), "accepted keys missing: {msg}");
+    }
+
+    #[test]
+    fn unknown_key_in_security_table_rejected() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "p"
+            wsdl_path = "/wsdl/p.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            sig_usrname = "x"
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("sig_usrname"), "got: {msg}");
+        assert!(msg.contains("profiles.p.security"), "got: {msg}");
+        assert!(msg.contains("sig_username"), "accepted keys missing: {msg}");
+    }
+
+    #[test]
+    fn unknown_key_in_security_tls_table_rejected() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "p"
+            wsdl_path = "/wsdl/p.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security.tls]
+            keystore_paht = "x"
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("keystore_paht"), "got: {msg}");
+        assert!(msg.contains("unknown"), "got: {msg}");
+        assert!(msg.contains("profiles.p.security.tls"), "got: {msg}");
+        assert!(
+            msg.contains("keystore_path"),
+            "accepted keys missing: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_key_in_pool_table_rejected() {
+        let err = toml::from_str::<CxfPoolConfig>("max_bridge = 2").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("max_bridge"), "got: {msg}");
+        assert!(msg.contains("[components.cxf]"), "got: {msg}");
+        assert!(msg.contains("unknown"), "got: {msg}");
+        assert!(msg.contains("max_bridges"), "accepted keys missing: {msg}");
+        assert!(msg.contains("profiles"), "accepted keys missing: {msg}");
+    }
+
+    #[test]
+    fn profile_without_name_falls_back_to_index() {
+        let toml_str = r#"
+            [[profiles]]
+            wsdl_path = "/wsdl/p.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+            exposed_soap_headers = ["{http://a}b"]
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        assert!(err.to_string().contains("profiles[0]"), "got: {err}");
+    }
+
+    #[test]
+    fn non_string_name_falls_back_to_index() {
+        let toml_str = r#"
+            [[profiles]]
+            name = 42
+            wsdl_path = "/wsdl/p.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+            exposed_soap_headers = ["{http://a}b"]
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        assert!(err.to_string().contains("profiles[0]"), "got: {err}");
+    }
+
+    #[test]
+    fn misplaced_exposed_soap_headers_names_path() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "p"
+            wsdl_path = "/wsdl/p.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+            exposed_soap_headers = ["{http://a}b"]
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exposed_soap_headers"), "got: {msg}");
+        assert!(msg.contains("profiles.p.security"), "got: {msg}");
+        assert!(msg.contains("profiles.p"), "got: {msg}");
+    }
+
+    #[test]
+    fn multi_location_key_lists_both_locations() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "p"
+            wsdl_path = "/wsdl/p.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+            keystore_path = "x"
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("profiles.p.security"), "got: {msg}");
+        assert!(msg.contains("profiles.p.security.tls"), "got: {msg}");
+    }
+
+    #[test]
+    fn single_location_key_names_one_location() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "p"
+            wsdl_path = "/wsdl/p.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            keystore_type = "PKCS12"
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("accepted under `profiles.p.security.tls`"),
+            "got: {msg}"
+        );
+        assert!(
+            !msg.contains("accepted under `profiles.p.security`"),
+            "must not name the wrong level: {msg}"
+        );
+    }
+
+    #[test]
+    fn pool_level_profile_key_names_per_profile_path() {
+        let toml_str = r#"
+            exposed_soap_headers = ["{http://a}b"]
+
+            [[profiles]]
+            name = "p"
+            wsdl_path = "/wsdl/p.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exposed_soap_headers"), "got: {msg}");
+        assert!(msg.contains("[components.cxf]"), "got: {msg}");
+        assert!(msg.contains("profiles."), "got: {msg}");
+        assert!(msg.contains(".security"), "got: {msg}");
+    }
+
+    #[test]
+    fn listener_tls_table_rejected_with_flat_key_hint() {
+        let toml_str = r#"
+            listener_tls = { cert_path = "x" }
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("listener_tls"), "got: {msg}");
+        assert!(msg.contains("[components.cxf]"), "got: {msg}");
+        for key in [
+            "soap_tls_cert_path",
+            "soap_tls_key_path",
+            "soap_tls_client_ca_path",
+            "soap_tls_pkcs12_path",
+            "soap_tls_pkcs12_password",
+        ] {
+            assert!(msg.contains(key), "missing {key} in: {msg}");
+        }
+    }
+
+    #[test]
+    fn violations_aggregate_in_one_sorted_error() {
+        let mut toml_str = String::from("max_bridge = 2\n");
+        for i in 0..11 {
+            toml_str.push_str(&format!(
+                "\n[[profiles]]\nwsdl_path = \"/wsdl/{i}.wsdl\"\nservice_name = \"Svc{i}\"\nport_name = \"Port{i}\"\n"
+            ));
+            if i == 2 || i == 10 {
+                toml_str.push_str("exposed_soap_headers = [\"{http://a}b\"]\n");
+            }
+        }
+        let first = toml::from_str::<CxfPoolConfig>(&toml_str)
+            .unwrap_err()
+            .to_string();
+        let second = toml::from_str::<CxfPoolConfig>(&toml_str)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(first, second, "walker diagnostics must be deterministic");
+
+        let pool = first.find("[components.cxf]").expect("pool line");
+        let ten = first.find("profiles[10]").expect("profiles[10] line");
+        let two = first.find("profiles[2]").expect("profiles[2] line");
+        assert!(pool < ten, "pool line must sort first: {first}");
+        assert!(
+            ten < two,
+            "profiles[10] must sort before profiles[2]: {first}"
+        );
+    }
+
+    #[test]
+    fn walker_diagnostics_never_echo_values() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "p"
+            wsdl_path = "/wsdl/p.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+            api_key = "supersecret-value"
+        "#;
+        let err = toml::from_str::<CxfPoolConfig>(toml_str).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("api_key"), "got: {msg}");
+        assert!(!msg.contains("supersecret-value"), "value leaked: {msg}");
+    }
+
+    #[test]
+    fn env_var_assembly_unchanged() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "p"
+            address = "http://localhost:9000/ws/p"
+            wsdl_path = "/wsdl/p.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            sig_username = "user"
+            keystore_path = "/security/ks.p12"
+            keystore_password = "security-pass"
+            exposed_soap_headers = ["{http://a}b", "{http://c}d"]
+
+            [profiles.security.tls]
+            keystore_path = "/tls/ks.p12"
+            keystore_password = "tls-pass"
+            truststore_path = "/tls/ts.p12"
+            truststore_password = "tls-trust-pass"
+        "#;
+        let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("valid toml");
+        let vars = crate::pool::profile_env_vars_for(&cfg.profiles);
+        let env: std::collections::BTreeMap<String, String> =
+            vars[0].to_env_vars().into_iter().collect();
+        let expected: std::collections::BTreeSet<&str> = [
+            "CXF_PROFILE_P_WSDL_PATH",
+            "CXF_PROFILE_P_SERVICE_NAME",
+            "CXF_PROFILE_P_PORT_NAME",
+            "CXF_PROFILE_P_ADDRESS",
+            "CXF_PROFILE_P_KEYSTORE_PATH",
+            "CXF_PROFILE_P_KEYSTORE_PASSWORD",
+            "CXF_PROFILE_P_SIG_USERNAME",
+            "CXF_PROFILE_P_EXPOSED_SOAP_HEADERS",
+            "CXF_PROFILE_P_TLS_KEYSTORE_PATH",
+            "CXF_PROFILE_P_TLS_KEYSTORE_PASSWORD",
+            "CXF_PROFILE_P_TLS_KEYSTORE_TYPE",
+            "CXF_PROFILE_P_TLS_TRUSTSTORE_PATH",
+            "CXF_PROFILE_P_TLS_TRUSTSTORE_PASSWORD",
+            "CXF_PROFILE_P_TLS_TRUSTSTORE_TYPE",
+        ]
+        .into_iter()
+        .collect();
+        let actual: std::collections::BTreeSet<&str> = env.keys().map(String::as_str).collect();
+        assert_eq!(actual, expected, "env var key set changed");
+        assert_eq!(
+            env.get("CXF_PROFILE_P_EXPOSED_SOAP_HEADERS")
+                .map(String::as_str),
+            Some("{http://a}b,{http://c}d")
+        );
+    }
+
+    #[test]
+    fn correct_placement_still_loads() {
+        let toml_str = r#"
+            [[profiles]]
+            name = "p"
+            wsdl_path = "/wsdl/p.wsdl"
+            service_name = "Svc"
+            port_name = "Port"
+
+            [profiles.security]
+            exposed_soap_headers = ["{http://a}b", "{http://c}d"]
+        "#;
+        let cfg: CxfPoolConfig = toml::from_str(toml_str).expect("valid toml");
+        assert_eq!(
+            cfg.profiles[0].security.exposed_soap_headers,
+            vec!["{http://a}b".to_string(), "{http://c}d".to_string()]
+        );
+        let vars = crate::pool::profile_env_vars_for(&cfg.profiles);
+        let env: std::collections::BTreeMap<String, String> =
+            vars[0].to_env_vars().into_iter().collect();
+        assert_eq!(
+            env.get("CXF_PROFILE_P_EXPOSED_SOAP_HEADERS")
+                .map(String::as_str),
+            Some("{http://a}b,{http://c}d")
+        );
+    }
+
+    #[test]
+    fn docs_key_table_matches_enforced_keys() {
+        let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../docs/src/components/ws-soap.md");
+        let doc = std::fs::read_to_string(&doc_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", doc_path.display()));
+
+        const HEADING: &str = "#### Accepted configuration keys per level";
+        let after_heading = doc
+            .split_once(HEADING)
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing '{HEADING}' in {} — the accepted-keys table is part of the contract",
+                    doc_path.display()
+                )
+            });
+        // The table ends at the next heading; later prose may mention key names.
+        let section = after_heading.split("\n#").next().unwrap_or_default();
+
+        let levels: [(&str, std::collections::BTreeSet<&str>); 4] = [
+            (
+                "[components.cxf]",
+                struct_fields::<CxfPoolConfigRaw>()
+                    .iter()
+                    .copied()
+                    .collect(),
+            ),
+            (
+                "[[components.cxf.profiles]]",
+                struct_fields::<CxfProfileConfig>()
+                    .iter()
+                    .copied()
+                    .collect(),
+            ),
+            (
+                "profiles.<name>.security",
+                struct_fields::<CxfSecurityFields>()
+                    .iter()
+                    .copied()
+                    .collect(),
+            ),
+            (
+                "profiles.<name>.security.tls",
+                struct_fields::<CxfTlsConfig>().iter().copied().collect(),
+            ),
+        ];
+
+        for (level, enforced) in levels {
+            let needle = format!("| `{level}` |");
+            let row = section
+                .lines()
+                .find(|line| line.trim_start().starts_with(&needle))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "accepted-keys table has no row for level `{level}` (enforced keys: {enforced:?})"
+                    )
+                });
+            let keys_cell = row.split('|').nth(2).unwrap_or_default();
+            let documented: std::collections::BTreeSet<&str> = keys_cell
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+                .collect();
+            assert_eq!(
+                documented, enforced,
+                "documented accepted keys for level `{level}` diverge from the enforced struct fields"
+            );
         }
     }
 }

@@ -184,6 +184,25 @@ A background health monitor probes the bridge on a configurable interval (defaul
 
 On shutdown the order matters. Call `pool.begin_shutdown()` before `ctx.stop()` so the health monitor does not race a restart against shutdown. The CLI handles this for you with Ctrl+C.
 
+## CXF configuration
+
+The TOML surface is validated level by level before the typed decode.
+
+#### Accepted configuration keys per level
+
+| Level | Accepted keys |
+| --- | --- |
+| `[components.cxf]` | `profiles`, `max_bridges`, `bridge_start_timeout_ms`, `health_check_interval_ms`, `bridge_cache_dir`, `version`, `bind_address`, `soap_tls_cert_path`, `soap_tls_key_path`, `soap_tls_client_ca_path`, `soap_tls_pkcs12_path`, `soap_tls_pkcs12_password`, `reconnect` |
+| `[[components.cxf.profiles]]` | `name`, `address`, `wsdl_path`, `service_name`, `port_name`, `security` |
+| `profiles.<name>.security` | `keystore_path`, `keystore_password`, `truststore_path`, `truststore_password`, `sig_username`, `sig_password`, `enc_username`, `security_actions_out`, `security_actions_in`, `signature_algorithm`, `signature_digest_algorithm`, `signature_c14n_algorithm`, `signature_parts`, `allowed_signature_algorithms`, `allowed_digest_algorithms`, `allow_expired_pinned_certificate`, `timestamp_ttl_seconds`, `timestamp_future_tolerance_seconds`, `fault_status`, `exposed_soap_headers`, `tls` |
+| `profiles.<name>.security.tls` | `keystore_path`, `keystore_password`, `keystore_type`, `truststore_path`, `truststore_password`, `truststore_type` |
+
+An unknown key, or a known key placed in the wrong table, fails the load with an error that names the profile (or `[components.cxf]`), the key, and where the key is accepted. Keys accepted at more than one level (`keystore_path`, `keystore_password`, `truststore_path`, `truststore_password`) name every location. The list above is the contract: it is derived from the config structs and enforced fail-closed at load, so a key that is not listed for a level is dead config and is rejected (dead-config-policy).
+
+A `listener_tls` table is not TOML surface — configure pool listener TLS with the five flat `soap_tls_*` keys. The `CXF_PROFILE_*` environment-variable surface handed to the bridge is unchanged: environment variables are not config keys and are not validated here.
+
+One boundary: the strict check validates the `reconnect` KEY at pool level but does not look inside its value; the nested retry-policy keys are owned by the shared `NetworkRetryPolicy` type (camel-component-api) and keep their own validation.
+
 ## CXF producer
 
 `cxf://http://host:port/path?...` sends the Exchange body as a SOAP request. The body bytes go over gRPC with the configured `security_profile` selector. The bridge resolves the profile, signs the envelope with the profile's certificate when WS-Security is configured, and POSTs the request to the SOAP target. The response bytes come back as the Exchange body.

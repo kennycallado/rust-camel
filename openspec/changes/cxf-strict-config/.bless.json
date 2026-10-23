@@ -1,0 +1,16 @@
+{
+  "kind": "plan",
+  "change": "cxf-strict-config",
+  "verdict": "BLESS",
+  "hash": "sha256:a34f273de562b11170cdfaa9cd2a5799a6dd41350ecb2e9f26eac07c5ea90a36",
+  "expert": "experts/e_gpt",
+  "date": "2026-10-23",
+  "history": [
+    {"gate": "spec", "verdict": "BLESS-WITH-FIXES", "hash": "sha256:b8fde448e1013c919549e282c0d64fccb71b24d46344ac98b03d095c9adca480", "expert": "experts/e_gpt"},
+    {"gate": "spec", "verdict": "BLESS", "hash": "sha256:29a26afa2202da6a9256d568a16dda4109fb81c899ec0313743aba2fdd0886fa", "expert": "experts/e_gpt"},
+    {"gate": "plan", "verdict": "BLESS-WITH-FIXES", "hash": "sha256:fd5eb367e37532d1494e4a1ce5b2eb4b28c8c14750e9bec5e30562967f05def7", "expert": "experts/e_gpt"},
+    {"gate": "plan", "verdict": "BLESS", "hash": "sha256:a34f273de562b11170cdfaa9cd2a5799a6dd41350ecb2e9f26eac07c5ea90a36", "expert": "experts/e_gpt"}
+  ],
+  "pre_flight_expert": {"expert": "experts/e_opus", "verdict": "SOUND-WITH-CHANGES"},
+  "review_loop": ["r_gpt r1 REJECT (dispatch path typo)", "r_gpt r2 REJECT (4 findings) -> fixed", "r_gpt r3 APPROVE"]
+}
