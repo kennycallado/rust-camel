@@ -22,6 +22,24 @@ const DEFAULT_MAX_DEPTH: usize = 64;
 /// Matches the spirit of the XPath language's input cap.
 const DEFAULT_MAX_INPUT_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 
+/// How a JSONPath predicate converts its query result to a boolean.
+///
+/// Selected through [`JsonPathConfig::predicate_mode`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum JsonPathPredicateMode {
+    /// Only a JSON boolean result is a valid predicate result. Any other
+    /// value kind is a `type-mismatch` error; no truthiness coercion is
+    /// applied (change `language-value-boundary`, sealed Q3).
+    #[default]
+    Strict,
+    /// Cardinality coercion over the raw match sequence: zero matches
+    /// (including a missing path) are `false`; exactly one boolean match is
+    /// that boolean; every other non-empty match sequence is `true`. No
+    /// value-based truthiness is imported (empty strings and `0` stay
+    /// `true` — this is not XPath `boolean()` value semantics).
+    Matches,
+}
+
 /// Configuration for [`JsonPathLanguage`] resource limits.
 #[derive(Debug, Clone)]
 pub struct JsonPathConfig {
@@ -31,6 +49,9 @@ pub struct JsonPathConfig {
     /// Maximum allowed nesting depth for JSON values.
     /// Defaults to `DEFAULT_MAX_DEPTH` (64).
     pub max_depth: Option<usize>,
+    /// Predicate conversion mode. Defaults to
+    /// [`JsonPathPredicateMode::Strict`].
+    pub predicate_mode: JsonPathPredicateMode,
 }
 
 impl JsonPathConfig {
@@ -45,6 +66,7 @@ impl Default for JsonPathConfig {
         Self {
             max_input_bytes: Some(DEFAULT_MAX_INPUT_BYTES),
             max_depth: None,
+            predicate_mode: JsonPathPredicateMode::default(),
         }
     }
 }
@@ -164,14 +186,22 @@ fn extract_json(exchange: &Exchange, config: &JsonPathConfig) -> Result<JsonValu
     }
 }
 
-fn run_query(query: &JpQuery, json: &JsonValue) -> Result<JsonValue, LanguageError> {
+/// Run a parsed JSONPath query and return every raw match in order.
+fn run_query_all(query: &JpQuery, json: &JsonValue) -> Result<Vec<JsonValue>, LanguageError> {
     let results = js_path_process(query, json)
         .map_err(|e| LanguageError::EvalError(format!("jsonpath query '{query}' failed: {e}")))?;
-    let values: Vec<&JsonValue> = results.into_iter().map(|r| r.val).collect();
-    Ok(match values.len() {
-        0 => JsonValue::Null,
-        1 => values[0].clone(),
-        _ => JsonValue::Array(values.into_iter().cloned().collect()),
+    Ok(results.into_iter().map(|r| r.val.clone()).collect())
+}
+
+/// Collapse the raw match sequence into the value-source result shape:
+/// zero matches are `null`, a single match keeps its type, and multiple
+/// matches become an array.
+fn run_query(query: &JpQuery, json: &JsonValue) -> Result<JsonValue, LanguageError> {
+    let values = run_query_all(query, json)?;
+    Ok(match values.as_slice() {
+        [] => JsonValue::Null,
+        [one] => one.clone(),
+        _ => JsonValue::Array(values),
     })
 }
 
@@ -191,17 +221,34 @@ impl Expression for JsonPathExpression {
 impl Predicate for JsonPathPredicate {
     async fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
         let json = extract_json(exchange, &self.config)?;
-        let result = run_query(&self.query, &json)?;
-        // Strict bool: only a JSON boolean is a valid predicate result. No
-        // truthiness coercion — `"false"`, `0`, `[]`, `{}`, and `null` are all
-        // type errors (change `language-value-boundary`, sealed Q3).
-        match &result {
-            JsonValue::Bool(b) => Ok(*b),
-            other => Err(LanguageError::TypeMismatch {
-                expected: "bool".to_string(),
-                actual: json_type_name(other).to_string(),
-                position: None,
-            }),
+        match self.config.predicate_mode {
+            JsonPathPredicateMode::Matches => {
+                // Cardinality coercion over the raw match sequence, before
+                // value-source normalization: zero matches (missing path) are
+                // false, a sole boolean keeps its value (a literal `false`
+                // stays false), and every other non-empty sequence is true.
+                let values = run_query_all(&self.query, &json)?;
+                Ok(match values.as_slice() {
+                    [] => false,
+                    [JsonValue::Bool(b)] => *b,
+                    _ => true,
+                })
+            }
+            JsonPathPredicateMode::Strict => {
+                let result = run_query(&self.query, &json)?;
+                // Strict bool: only a JSON boolean is a valid predicate
+                // result. No truthiness coercion — `"false"`, `0`, `[]`,
+                // `{}`, and `null` are all type errors (change
+                // `language-value-boundary`, sealed Q3).
+                match &result {
+                    JsonValue::Bool(b) => Ok(*b),
+                    other => Err(LanguageError::TypeMismatch {
+                        expected: "bool".to_string(),
+                        actual: json_type_name(other).to_string(),
+                        position: None,
+                    }),
+                }
+            }
         }
     }
 }
@@ -656,6 +703,7 @@ mod tests {
         let config = JsonPathConfig {
             max_input_bytes: Some(10), // very small — but body is already JSON
             max_depth: Some(3),
+            predicate_mode: JsonPathPredicateMode::Strict,
         };
         let lang = JsonPathLanguage::with_config(config);
         let expr = lang.create_expression("$.a").unwrap();
@@ -738,6 +786,96 @@ mod tests {
             COMPILE_COUNT.with(std::cell::Cell::get),
             after_create,
             "matches must NOT trigger re-compilation"
+        );
+    }
+
+    fn matches_mode_lang() -> JsonPathLanguage {
+        JsonPathLanguage::with_config(JsonPathConfig {
+            predicate_mode: JsonPathPredicateMode::Matches,
+            ..JsonPathConfig::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn matches_mode_cardinality_table() {
+        // Ruling (mission 399, oracle 2026-10-24): in `matches` mode the raw
+        // match sequence decides — zero matches are false, a sole boolean
+        // keeps its value, every other non-empty sequence is true. No value
+        // truthiness: empty strings and 0 are true; an existing null value
+        // is true.
+        let lang = matches_mode_lang();
+        let table = [
+            // (body, query, expected)
+            (
+                r#"{"items":[{"price":20},{"price":5}]}"#,
+                "$.items[?@.price>10]",
+                true,
+            ),
+            (r#"{"items":[{"price":20}]}"#, "$.items[?@.price>10]", true),
+            (r#"{"items":[{"price":5}]}"#, "$.items[?@.price>10]", false),
+            (r#"{"items":[1,2]}"#, "$.missing", false),
+            (r#"{"val":{}}"#, "$.val", true),
+            (r#"{"val":[]}"#, "$.val", true),
+            (r#"{"val":""}"#, "$.val", true),
+            (r#"{"val":"false"}"#, "$.val", true),
+            (r#"{"val":0}"#, "$.val", true),
+            (r#"{"val":null}"#, "$.val", true),
+            (r#"{"val":true}"#, "$.val", true),
+            (r#"{"val":false}"#, "$.val", false),
+        ];
+        for (body, query, expected) in table {
+            let pred = lang.create_predicate(query).unwrap();
+            let ex = exchange_with_json(body).await;
+            let got = pred.matches(&ex).await.unwrap_or_else(|e| {
+                panic!("matches mode must not error for {query} on {body}: {e:?}")
+            });
+            assert_eq!(got, expected, "query {query} on {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_stays_default_and_repro_cases_remain_type_errors() {
+        // The owner-approved strict default is unchanged: the two mission
+        // repro cases stay type errors unless `Matches` is configured.
+        let lang = default_lang().await;
+        let ex = exchange_with_json(r#"{"items":[{"price":20},{"price":5}]}"#).await;
+        let pred = lang.create_predicate("$.items[?@.price>10]").unwrap();
+        match pred.matches(&ex).await {
+            Err(LanguageError::TypeMismatch {
+                actual,
+                position: None,
+                ..
+            }) => {
+                // One item (price 20) matches the filter; the single match
+                // collapses to that object.
+                assert_eq!(actual, "object");
+            }
+            other => panic!("strict default must stay a type error, got: {other:?}"),
+        }
+        let pred = lang.create_predicate("$.missing").unwrap();
+        match pred.matches(&ex).await {
+            Err(LanguageError::TypeMismatch {
+                actual,
+                position: None,
+                ..
+            }) => {
+                assert_eq!(actual, "null");
+            }
+            other => panic!("strict default must stay a type error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn matches_mode_evaluation_failure_stays_typed_error() {
+        // Coercion applies to match results only: a body that cannot be
+        // evaluated still fails with a typed error and is NOT coerced to
+        // false.
+        let lang = matches_mode_lang();
+        let pred = lang.create_predicate("$.val").unwrap();
+        let ex = exchange_with_text_body("not json at all").await;
+        assert!(
+            pred.matches(&ex).await.is_err(),
+            "evaluation failure must not coerce to false"
         );
     }
 }
