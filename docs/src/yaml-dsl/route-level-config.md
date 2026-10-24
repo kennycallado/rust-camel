@@ -22,6 +22,13 @@ where each one goes.
 The retry block carries redelivery parameters only. It rejects unknown
 fields. `handled_by` is not a retry field; it lives on the clause.
 
+Retry runs `max_attempts` retries after the initial attempt whether or not
+`dead_letter_channel` is configured. When retries are exhausted, the exchange
+is delivered once to the dead-letter channel or the clause handler, if
+configured. The error still propagates unless the matched clause sets
+`handled: true` (or `continued: true`). If the delivery itself fails, the
+original error propagates.
+
 ## OnException clause
 | Field | Type | Required | Description |
 |---|---|---|---|
