@@ -300,6 +300,7 @@ async fn subscribe_bounded(
         consumer.subscribe(SubscribeRequest {
             destination: queue.to_string(),
             subscription_id: subscription_id.clone(),
+            message_selector: String::new(),
         }),
     )
     .await

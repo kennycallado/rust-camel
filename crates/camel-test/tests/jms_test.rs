@@ -383,6 +383,218 @@ async fn jms_producer_sends_multiple_messages() {
     }
 }
 
+/// Task 3.1: a `messageSelector` filters at the broker — the non-matching
+/// message is withheld before delivery and never reaches the route. Selector
+/// semantics need a real broker; the JVM/Rust unit tests prove plumbing only.
+#[tokio::test(flavor = "multi_thread")]
+async fn jms_consumer_selector_filters_activemq_queue() {
+    init_tracing();
+    install_crypto_provider();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(shared_jms_activemq().await)
+        .build()
+        .await;
+
+    let consumer_route = RouteBuilder::from(
+        "jms:queue:test-selector-q?messageSelector=orderRegion%20%3D%20%27EU%27",
+    )
+    .to("mock:selector-q")
+    .route_id("jms-selector-q-consumer")
+    .build()
+    .unwrap();
+
+    // Properties are set through the existing producer helper pattern
+    // (`set_header` + `jmsHeaderAllowlist`), one matching and one non-matching.
+    let matching_producer =
+        RouteBuilder::from("timer:selector-q-match?period=300&delay=500&repeatCount=1")
+            .set_body("selector-match-queue".to_string())
+            .set_header("orderRegion", Value::String("EU".to_string()))
+            .to("jms:queue:test-selector-q?jmsHeaderAllowlist=orderRegion")
+            .route_id("jms-selector-q-match-producer")
+            .build()
+            .unwrap();
+
+    let non_matching_producer =
+        RouteBuilder::from("timer:selector-q-miss?period=300&delay=500&repeatCount=1")
+            .set_body("selector-miss-queue".to_string())
+            .set_header("orderRegion", Value::String("US".to_string()))
+            .to("jms:queue:test-selector-q?jmsHeaderAllowlist=orderRegion")
+            .route_id("jms-selector-q-miss-producer")
+            .build()
+            .unwrap();
+
+    h.add_route(consumer_route).await.unwrap();
+    h.add_route(matching_producer).await.unwrap();
+    h.add_route(non_matching_producer).await.unwrap();
+    h.start().await;
+
+    let endpoint = h.mock().get_endpoint("selector-q").unwrap();
+    // Positive arm: the matching message is received within the bounded wait
+    // the file already uses. Negative arm: the non-matching message is NOT
+    // received within the same bounded wait — the arm flips to `Ok` only if the
+    // broker fails to withhold, so a healthy selector leaves it timing out
+    // (still bounded) and the assert below proves the withholding.
+    let (matched, missed) = tokio::join!(
+        wait_until(
+            "jms selector delivers the matching queue message",
+            Duration::from_secs(35),
+            Duration::from_millis(200),
+            || {
+                let endpoint = endpoint.clone();
+                async move {
+                    Ok(endpoint
+                        .get_received_exchanges()
+                        .await
+                        .iter()
+                        .any(|ex| ex.input.body.as_text() == Some("selector-match-queue")))
+                }
+            },
+        ),
+        wait_until(
+            "jms selector must withhold the non-matching queue message (must never flip)",
+            Duration::from_secs(35),
+            Duration::from_millis(200),
+            || {
+                let endpoint = endpoint.clone();
+                async move {
+                    Ok(endpoint
+                        .get_received_exchanges()
+                        .await
+                        .iter()
+                        .any(|ex| ex.input.body.as_text() == Some("selector-miss-queue")))
+                }
+            },
+        ),
+    );
+    matched.expect("the matching message must be received within the bounded wait");
+    assert!(
+        missed.is_err(),
+        "the non-matching message must NOT be received within the bounded wait"
+    );
+
+    h.stop().await;
+
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert!(
+        exchanges
+            .iter()
+            .any(|ex| ex.input.body.as_text() == Some("selector-match-queue")),
+        "the matching message must reach the route"
+    );
+    assert!(
+        exchanges
+            .iter()
+            .all(|ex| ex.input.body.as_text() != Some("selector-miss-queue")),
+        "the broker must withhold the non-matching message"
+    );
+}
+
+/// Task 3.1: same publish/receive pattern as the queue test against a topic
+/// destination. Topics retain nothing before the subscription exists, so the
+/// producers retry a few times past the subscribe race (repeats may publish
+/// more matching messages; the assertions are presence/absence, never counts).
+#[tokio::test(flavor = "multi_thread")]
+async fn jms_consumer_selector_filters_activemq_topic() {
+    init_tracing();
+    install_crypto_provider();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(shared_jms_activemq().await)
+        .build()
+        .await;
+
+    let consumer_route = RouteBuilder::from(
+        "jms:topic:test-selector-topic?messageSelector=orderRegion%20%3D%20%27EU%27",
+    )
+    .to("mock:selector-topic")
+    .route_id("jms-selector-topic-consumer")
+    .build()
+    .unwrap();
+
+    let matching_producer =
+        RouteBuilder::from("timer:selector-topic-match?period=1000&delay=3000&repeatCount=3")
+            .set_body("selector-match-topic".to_string())
+            .set_header("orderRegion", Value::String("EU".to_string()))
+            .to("jms:topic:test-selector-topic?jmsHeaderAllowlist=orderRegion")
+            .route_id("jms-selector-topic-match-producer")
+            .build()
+            .unwrap();
+
+    let non_matching_producer =
+        RouteBuilder::from("timer:selector-topic-miss?period=1000&delay=3000&repeatCount=3")
+            .set_body("selector-miss-topic".to_string())
+            .set_header("orderRegion", Value::String("US".to_string()))
+            .to("jms:topic:test-selector-topic?jmsHeaderAllowlist=orderRegion")
+            .route_id("jms-selector-topic-miss-producer")
+            .build()
+            .unwrap();
+
+    h.add_route(consumer_route).await.unwrap();
+    h.add_route(matching_producer).await.unwrap();
+    h.add_route(non_matching_producer).await.unwrap();
+    h.start().await;
+
+    let endpoint = h.mock().get_endpoint("selector-topic").unwrap();
+    let (matched, missed) = tokio::join!(
+        wait_until(
+            "jms selector delivers the matching topic message",
+            Duration::from_secs(35),
+            Duration::from_millis(200),
+            || {
+                let endpoint = endpoint.clone();
+                async move {
+                    Ok(endpoint
+                        .get_received_exchanges()
+                        .await
+                        .iter()
+                        .any(|ex| ex.input.body.as_text() == Some("selector-match-topic")))
+                }
+            },
+        ),
+        wait_until(
+            "jms selector must withhold the non-matching topic message (must never flip)",
+            Duration::from_secs(35),
+            Duration::from_millis(200),
+            || {
+                let endpoint = endpoint.clone();
+                async move {
+                    Ok(endpoint
+                        .get_received_exchanges()
+                        .await
+                        .iter()
+                        .any(|ex| ex.input.body.as_text() == Some("selector-miss-topic")))
+                }
+            },
+        ),
+    );
+    matched.expect("the matching message must be received within the bounded wait");
+    assert!(
+        missed.is_err(),
+        "the non-matching message must NOT be received within the bounded wait"
+    );
+
+    h.stop().await;
+
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert!(
+        exchanges
+            .iter()
+            .any(|ex| ex.input.body.as_text() == Some("selector-match-topic")),
+        "the matching message must reach the route"
+    );
+    assert!(
+        exchanges
+            .iter()
+            .all(|ex| ex.input.body.as_text() != Some("selector-miss-topic")),
+        "the broker must withhold the non-matching message"
+    );
+}
+
 /// Regression test for: bridge crashes ~7s after start when Artemis uses mandatory auth.
 ///
 /// Root cause: `cached_channel_healthy` used a 1s timeout, but the Artemis health check
@@ -646,6 +858,7 @@ async fn subscribe_bounded(
         consumer.subscribe(SubscribeRequest {
             destination: queue.to_string(),
             subscription_id: subscription_id.clone(),
+            message_selector: String::new(),
         }),
     )
     .await

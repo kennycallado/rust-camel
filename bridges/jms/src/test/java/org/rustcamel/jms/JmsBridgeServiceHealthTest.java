@@ -548,6 +548,17 @@ class JmsBridgeServiceHealthTest {
     assertEquals(1L, cache.generation());
   }
 
+  @Test
+  void healthResponseAdvertisesSelectorCapability() {
+    HealthResponse response = JmsBridgeService.healthResponse(HealthSnapshot.up(1L, 0L), null);
+    assertTrue(
+        response.getCapabilitiesList().contains("broker-tls-v1"),
+        "the TLS capability must stay advertised: " + response.getCapabilitiesList());
+    assertTrue(
+        response.getCapabilitiesList().contains("message-selector-v1"),
+        "the message selector capability must be advertised: " + response.getCapabilitiesList());
+  }
+
   private JmsBridgeService newService() {
     JmsBridgeService created = new JmsBridgeService();
     clientFactory = mock(JmsClientFactory.class);

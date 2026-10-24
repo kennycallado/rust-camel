@@ -20,6 +20,13 @@ use crate::config::redact_broker_url;
 /// `version_or_path` is the launched bridge binary path the call site tracks.
 pub(crate) const MISSING_BROKER_TLS_CAPABILITY: &str = "lacks broker-tls-v1; use the pinned bridge";
 
+/// Missing-capability clause for the message-selector gate (task 1.2). The
+/// surfaced message is `bridge {pinned_version} {MISSING_MESSAGE_SELECTOR_CAPABILITY}`
+/// where `pinned_version` is `crate::BRIDGE_VERSION`, the build-pinned bridge
+/// version the call site substitutes (same shape as the TLS gate text).
+pub(crate) const MISSING_MESSAGE_SELECTOR_CAPABILITY: &str =
+    "lacks message-selector-v1; use a jms bridge >= 0.11.0";
+
 /// Last broker failure observed from a bridge `Health` response (task 8.1).
 ///
 /// Stored on the broker handle by the health monitor and read by the consumer
@@ -55,6 +62,54 @@ pub fn ensure_tls_capability(
     if tls_configured && !capabilities.iter().any(|c| c == "broker-tls-v1") {
         return Err(BridgeError::PermanentFailure(format!(
             "bridge {MISSING_BROKER_TLS_CAPABILITY}"
+        )));
+    }
+    Ok(())
+}
+
+/// Capability gate for message selectors (task 1.2).
+///
+/// A route configuring a message selector requires a bridge build that reports
+/// the `message-selector-v1` capability. An older bridge reports no
+/// capabilities (proto3 default: empty), which fails closed. Without a
+/// configured selector a missing capability is not fatal and the gate returns
+/// `Ok`.
+///
+/// Same error shape as [`ensure_tls_capability`]: a permanent (config-class)
+/// rejection ([`BridgeError::PermanentFailure`]) whose text names the missing
+/// capability and the required bridge version. Call sites kill the launched
+/// bridge and map it to their permanent-error channel without retry.
+pub(crate) fn ensure_selector_capability(
+    capabilities: &[String],
+    selector_required: bool,
+) -> Result<(), BridgeError> {
+    if selector_required && !capabilities.iter().any(|c| c == "message-selector-v1") {
+        return Err(BridgeError::PermanentFailure(format!(
+            "bridge {MISSING_MESSAGE_SELECTOR_CAPABILITY}"
+        )));
+    }
+    Ok(())
+}
+
+/// Startup capability gate for message selectors (task 1.2).
+///
+/// The shared startup-gate decision seam: the real launch path
+/// (`start_bridge_process_with_config`) calls this over the freshly collected
+/// startup Health evidence and surfaces the error as its permanent
+/// (config-class) rejection. The text is the three-fragment diagnostic — the
+/// missing capability `message-selector-v1`, the required bridge version
+/// `0.11.0`, and the pinned bridge version the component was built for
+/// (`crate::BRIDGE_VERSION`, the same substitution shape as the TLS startup
+/// text). Evidence is re-collected per launch, so a previous bridge instance
+/// never authorizes its replacement.
+pub(crate) fn evaluate_startup_selector_gate(
+    capabilities: &[String],
+    selector_required: bool,
+) -> Result<(), BridgeError> {
+    if selector_required && !capabilities.iter().any(|c| c == "message-selector-v1") {
+        return Err(BridgeError::PermanentFailure(format!(
+            "bridge {} {MISSING_MESSAGE_SELECTOR_CAPABILITY}",
+            crate::BRIDGE_VERSION
         )));
     }
     Ok(())
@@ -225,6 +280,37 @@ mod tests {
         assert!(
             !msg.contains("secret-value"),
             "must not contain the raw credential: {msg}"
+        );
+    }
+
+    /// Task 1.2: the `message-selector-v1` gate is a no-op without a
+    /// configured selector, passes when the capability is advertised, and
+    /// fails closed (same permanent error shape as the TLS gate) with text
+    /// naming the capability and the required bridge version.
+    #[test]
+    fn ensure_selector_capability_unit() {
+        assert!(
+            ensure_selector_capability(&[], false).is_ok(),
+            "a missing capability is not fatal without a configured selector"
+        );
+        assert!(
+            ensure_selector_capability(&["message-selector-v1".to_string()], true).is_ok(),
+            "message-selector-v1 present must pass the gate"
+        );
+        let err = ensure_selector_capability(&["broker-tls-v1".to_string()], true)
+            .expect_err("a configured selector requires message-selector-v1");
+        let text = err.to_string();
+        assert!(
+            text.contains("message-selector-v1"),
+            "gate error must name the missing capability: {text}"
+        );
+        assert!(
+            text.contains("0.11.0"),
+            "gate error must name the required bridge version: {text}"
+        );
+        assert!(
+            matches!(err, BridgeError::PermanentFailure(_)),
+            "the gate must classify as a permanent (config-class) rejection: {err:?}"
         );
     }
 

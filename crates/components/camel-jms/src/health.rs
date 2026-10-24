@@ -728,6 +728,7 @@ mod tests {
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
+            selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert(broker.to_string(), Arc::clone(&slot));
         (pool, slot)

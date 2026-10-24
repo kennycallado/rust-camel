@@ -250,6 +250,7 @@ async fn near_cap_body_decodes_end_to_end() {
         .subscribe(SubscribeRequest {
             destination: "queue.decode.limit.test".to_string(),
             subscription_id: "near-cap-test".to_string(),
+            message_selector: String::new(),
         })
         .await
         .expect("subscribe accepted");
@@ -290,6 +291,7 @@ async fn content_type_round_trips_through_stream() {
         .subscribe(SubscribeRequest {
             destination: "queue.ct.test".to_string(),
             subscription_id: "ct-round-trip".to_string(),
+            message_selector: String::new(),
         })
         .await
         .expect("subscribe accepted");
@@ -327,6 +329,7 @@ async fn duplicate_subscription_id_surfaces_already_exists() {
         .subscribe(SubscribeRequest {
             destination: "queue.dup.test".to_string(),
             subscription_id: "dup-test".to_string(),
+            message_selector: String::new(),
         })
         .await
         .expect("first subscribe accepted");
@@ -335,6 +338,7 @@ async fn duplicate_subscription_id_surfaces_already_exists() {
         .subscribe(SubscribeRequest {
             destination: "queue.dup.test".to_string(),
             subscription_id: "dup-test".to_string(),
+            message_selector: String::new(),
         })
         .await
     {
@@ -449,6 +453,7 @@ async fn traceparent_injected_on_every_rpc_shape() {
         .subscribe(SubscribeRequest {
             destination: "queue.tp.test".into(),
             subscription_id: "tp-test".into(),
+            message_selector: String::new(),
         })
         .await
         .expect("subscribe accepted");
@@ -515,6 +520,7 @@ async fn no_traceparent_without_active_context() {
         .subscribe(SubscribeRequest {
             destination: "queue.tp.test".into(),
             subscription_id: "tp-fallback".into(),
+            message_selector: String::new(),
         })
         .await
         .expect("subscribe accepted");
@@ -856,6 +862,265 @@ pub(crate) async fn connect_scripted(port: u16) -> tonic::transport::Channel {
         .await
         .expect("scripted server connect within 5s")
         .expect("connected scripted channel")
+}
+
+// ── Task 1.2: selector-gate slot fixtures (shared by component/consumer tests) ──
+
+/// Hand-built Ready slot pointed at the in-process mock plus a fast health
+/// monitor: the selector-gate tests need real monitor probes without a
+/// process launch.
+pub(crate) async fn selector_monitor_fixture(port: u16) -> (Arc<JmsBridgePool>, Arc<BridgeSlot>) {
+    let endpoint = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+        .expect("valid endpoint uri");
+    let channel = tokio::time::timeout(Duration::from_secs(5), endpoint.connect())
+        .await
+        .expect("connect must not time out")
+        .expect("connect to mock bridge");
+    let pool = Arc::new(
+        JmsBridgePool::from_config(crate::config::JmsPoolConfig {
+            health_check_interval_ms: 20,
+            health_timeout_ms: 500,
+            health_failure_threshold: 5,
+            ..crate::config::JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                crate::BrokerType::Generic,
+            )
+        })
+        .expect("selector monitor pool config must be valid"),
+    );
+    let (state_tx, state_rx) = tokio::sync::watch::channel(BridgeState::Ready { channel });
+    let slot = Arc::new(BridgeSlot {
+        name: "default".to_string(),
+        broker_url: "tcp://localhost:61616".to_string(),
+        broker_type: crate::BrokerType::Generic,
+        credentials: None,
+        state_rx,
+        state_tx,
+        process: Arc::new(tokio::sync::Mutex::new(None)),
+        health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        probe_wake: Arc::new(tokio::sync::Notify::new()),
+        last_broker_failure: std::sync::Mutex::new(None),
+        selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
+    pool.slots.insert("default".to_string(), Arc::clone(&slot));
+    pool.spawn_health_monitor(Arc::clone(&slot)).await;
+    (pool, slot)
+}
+
+/// Waits (bounded) until the slot publishes `Parked`, returning the reason.
+pub(crate) async fn wait_parked(slot: &Arc<BridgeSlot>) -> String {
+    let mut rx = slot.state_rx.clone();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let BridgeState::Parked(reason) = &*rx.borrow() {
+                return reason.clone();
+            }
+            rx.changed().await.expect("slot state channel open");
+        }
+    })
+    .await
+    .expect("slot must park within 5s")
+}
+
+/// Stops the monitor and any installed child of a test slot.
+pub(crate) async fn shutdown_test_slot(slot: &Arc<BridgeSlot>) {
+    let _ = slot.state_tx.send_replace(BridgeState::Stopped);
+    if let Some(mut handle) = slot.health_monitor_handle.lock().await.take()
+        && tokio::time::timeout(Duration::from_secs(2), &mut handle)
+            .await
+            .is_err()
+    {
+        handle.abort();
+        let _ = handle.await;
+    }
+    stop_slot_process(slot).await;
+}
+
+/// Senders backing the open subscribe streams of the selector-gate mock
+/// ([`SelectorGateBridge`]): dropping one ends that subscription's stream.
+type SelectorStreamSenders =
+    Arc<Mutex<Vec<tokio::sync::mpsc::UnboundedSender<Result<JmsMessage, Status>>>>>;
+
+/// Task 1.2 fixture: one bridge mock carrying BOTH selector-gate surfaces —
+/// a Health response whose `capabilities`/`status` the test controls per
+/// phase, and recorded `Subscribe` traffic. Ownership follows the
+/// [`spawn_scripted_health`] shape: no detached server survives a test. Every
+/// subscribe stream stays open until [`SelectorGateBridge::end_streams`] drops
+/// its sender, so "no further Subscribe calls" is observable without sleeps.
+pub(crate) struct SelectorGateBridge {
+    pub port: u16,
+    /// Capabilities advertised by the next Health responses. Flipping this
+    /// models a replaced (older) bridge instance mid-test.
+    pub capabilities: Arc<Mutex<Vec<String>>>,
+    /// Raw `HealthResponse.status` (task 1.2: broker status never gates).
+    pub status: Arc<Mutex<i32>>,
+    /// Every `SubscribeRequest` received, in arrival order.
+    pub subscribes: Arc<Mutex<Vec<SubscribeRequest>>>,
+    /// One event per received Subscribe (bounded waits in tests).
+    subscribe_events: tokio::sync::mpsc::UnboundedReceiver<()>,
+    /// Senders backing the open subscribe streams.
+    stream_senders: SelectorStreamSenders,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl SelectorGateBridge {
+    /// Awaits the next Subscribe under a 5s bound.
+    pub(crate) async fn next_subscribe(&mut self) {
+        tokio::time::timeout(Duration::from_secs(5), self.subscribe_events.recv())
+            .await
+            .expect("subscribe event within 5s")
+            .expect("subscribe events channel open");
+    }
+
+    /// Replaces the advertised capabilities (model a new bridge instance).
+    pub(crate) fn set_capabilities(&self, caps: &[&str]) {
+        *self
+            .capabilities
+            .lock()
+            .expect("capabilities mutex poisoned") =
+            caps.iter().map(|c| (*c).to_string()).collect();
+    }
+
+    /// Subscribe requests recorded so far.
+    pub(crate) fn subscribe_count(&self) -> usize {
+        self.subscribes
+            .lock()
+            .expect("subscribes mutex poisoned")
+            .len()
+    }
+
+    /// Ends every open subscribe stream (the consumer then re-attaches or
+    /// terminates).
+    pub(crate) fn end_streams(&self) {
+        self.stream_senders
+            .lock()
+            .expect("stream senders mutex poisoned")
+            .clear();
+    }
+
+    /// Shuts the server down under a bounded timeout.
+    pub(crate) async fn shutdown(self) {
+        let Self {
+            shutdown, mut task, ..
+        } = self;
+        let _ = shutdown.send(());
+        if tokio::time::timeout(Duration::from_secs(2), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SelectorGateService {
+    capabilities: Arc<Mutex<Vec<String>>>,
+    status: Arc<Mutex<i32>>,
+    subscribes: Arc<Mutex<Vec<SubscribeRequest>>>,
+    subscribe_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    stream_senders: SelectorStreamSenders,
+}
+
+#[async_trait::async_trait]
+impl BridgeService for SelectorGateService {
+    async fn send(&self, _request: Request<SendRequest>) -> Result<Response<SendResponse>, Status> {
+        Err(Status::unimplemented(
+            "selector-gate fixture serves Subscribe and Health",
+        ))
+    }
+
+    type SubscribeStream = Pin<Box<dyn Stream<Item = Result<JmsMessage, Status>> + Send>>;
+
+    async fn subscribe(
+        &self,
+        request: Request<SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
+        self.subscribes
+            .lock()
+            .expect("subscribes mutex poisoned")
+            .push(request.into_inner());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.stream_senders
+            .lock()
+            .expect("stream senders mutex poisoned")
+            .push(tx);
+        let _ = self.subscribe_tx.send(());
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+        )))
+    }
+
+    async fn health(
+        &self,
+        _request: Request<HealthRequest>,
+    ) -> Result<Response<HealthResponse>, Status> {
+        Ok(Response::new(HealthResponse {
+            healthy: true,
+            broker_connected: true,
+            message: "ok".to_string(),
+            status: *self.status.lock().expect("status mutex poisoned"),
+            age_ms: 0,
+            capabilities: self
+                .capabilities
+                .lock()
+                .expect("capabilities mutex poisoned")
+                .clone(),
+            ..Default::default()
+        }))
+    }
+
+    async fn complete(
+        &self,
+        _request: Request<CompletionRequest>,
+    ) -> Result<Response<CompletionResponse>, Status> {
+        Ok(Response::new(CompletionResponse { accepted: true }))
+    }
+}
+
+/// Spawns the selector-gate mock advertising `capabilities` until the test
+/// flips them.
+pub(crate) async fn spawn_selector_gate_bridge(capabilities: &[&str]) -> SelectorGateBridge {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind selector-gate listener");
+    let port = listener.local_addr().expect("local addr").port();
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+    let caps = Arc::new(Mutex::new(
+        capabilities.iter().map(|c| (*c).to_string()).collect(),
+    ));
+    let status = Arc::new(Mutex::new(0i32));
+    let subscribes = Arc::new(Mutex::new(Vec::new()));
+    let (subscribe_tx, subscribe_events) = tokio::sync::mpsc::unbounded_channel();
+    let stream_senders = Arc::new(Mutex::new(Vec::new()));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let service = SelectorGateService {
+        capabilities: Arc::clone(&caps),
+        status: Arc::clone(&status),
+        subscribes: Arc::clone(&subscribes),
+        subscribe_tx,
+        stream_senders: Arc::clone(&stream_senders),
+    };
+    let task = tokio::spawn(async move {
+        let _ = tonic::transport::Server::builder()
+            .add_service(BridgeServiceServer::new(service))
+            .serve_with_incoming_shutdown(incoming, async move {
+                let _ = shutdown_rx.await;
+            })
+            .await;
+    });
+    SelectorGateBridge {
+        port,
+        capabilities: caps,
+        status,
+        subscribes,
+        subscribe_events,
+        stream_senders,
+        shutdown: shutdown_tx,
+        task,
+    }
 }
 
 /// Test fixture owning the real health monitor, the scripted health server,

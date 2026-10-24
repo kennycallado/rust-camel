@@ -57,6 +57,12 @@ java {
     targetCompatibility = JavaVersion.VERSION_21
 }
 
+// The full JVM suite (embedded TLS brokers + per-test consumers + Quarkus test model) exceeds
+// Gradle's default 512m test-worker heap and dies with cascading OutOfMemoryError failures.
+tasks.test {
+    maxHeapSize = "3g"
+}
+
 spotless {
     java {
         target("src/**/*.java")

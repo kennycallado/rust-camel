@@ -430,7 +430,13 @@ impl JmsEndpointConfig {
                         acknowledgement_mode = AcknowledgementMode::from_str(v)?;
                     }
                     "messageSelector" | "message_selector" if !v.is_empty() => {
-                        message_selector = Some(v.to_string());
+                        let decoded = percent_decode_lossy(v);
+                        if decoded.trim().is_empty() {
+                            return Err(camel_component_api::CamelError::ProcessorError(
+                                "invalid messageSelector: must not be whitespace-only".to_string(),
+                            ));
+                        }
+                        message_selector = Some(decoded);
                     }
                     "concurrentConsumers" | "concurrent_consumers" => {
                         concurrent_consumers = v.parse::<u32>().map_err(|_| {
@@ -783,15 +789,11 @@ fn query_keys(query: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Full single-pass `%HH` decode of a query option name (any two hex digits
-/// after `%`, case-insensitive; invalid sequences copied verbatim),
-/// lowercased — the same key-matching decode the canonical redactor uses,
-/// because a denylist matches literal text (`pass%77ord` must hit
-/// `password`): percent-encoded evasions of the TLS-store rule cannot slip
-/// through. Invalid UTF-8 from a decoded byte becomes `U+FFFD`, which
-/// cannot match an ASCII needle.
-fn decoded_query_key(key: &str) -> String {
-    let bytes = key.as_bytes();
+/// Full single-pass `%HH` decode of a string (any two hex digits after `%`,
+/// case-insensitive; invalid sequences copied verbatim). Invalid UTF-8 from a
+/// decoded byte becomes `U+FFFD`.
+fn percent_decode_lossy(s: &str) -> String {
+    let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
@@ -807,7 +809,17 @@ fn decoded_query_key(key: &str) -> String {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).to_lowercase()
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Full single-pass `%HH` decode of a query option name
+/// (`percent_decode_lossy`), lowercased — the same key-matching decode the
+/// canonical redactor uses, because a denylist matches literal text
+/// (`pass%77ord` must hit `password`): percent-encoded evasions of the
+/// TLS-store rule cannot slip through. Invalid UTF-8 from a decoded byte
+/// becomes `U+FFFD`, which cannot match an ASCII needle.
+fn decoded_query_key(key: &str) -> String {
+    percent_decode_lossy(key).to_lowercase()
 }
 
 /// Whether a query option is a `jms.*` TLS-store setting: an option in the
@@ -2005,14 +2017,22 @@ broker_type = "activemq"
         let cfg =
             JmsEndpointConfig::from_uri("jms:queue:orders?messageSelector=priority%20%3E%205")
                 .unwrap();
-        // URL encoding is NOT decoded by from_uri — the raw value is stored
-        assert_eq!(cfg.message_selector, Some("priority%20%3E%205".to_string()));
+        // Decode boundary is parse time: the DECODED expression is stored so
+        // the broker filters on `priority > 5`, never on the encoded form.
+        assert_eq!(cfg.message_selector, Some("priority > 5".to_string()));
     }
 
     #[test]
     fn parse_empty_message_selector_is_none() {
         let cfg = JmsEndpointConfig::from_uri("jms:queue:orders?message_selector=").unwrap();
         assert_eq!(cfg.message_selector, None);
+    }
+
+    #[test]
+    fn parse_whitespace_only_message_selector_rejected() {
+        let err =
+            JmsEndpointConfig::from_uri("jms:queue:orders?message_selector=%20%20").unwrap_err();
+        assert!(err.to_string().contains("messageSelector"), "got: {}", err);
     }
 
     #[test]

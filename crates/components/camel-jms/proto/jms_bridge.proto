@@ -25,6 +25,7 @@ message SendResponse {
 message SubscribeRequest {
   string destination = 1;
   string subscription_id = 2;
+  string message_selector = 3;
 }
 
 message JmsMessage {

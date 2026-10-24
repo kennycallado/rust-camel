@@ -1,0 +1,16 @@
+{
+  "change": "389-jms-selector",
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:fa6499717c56af583556a31eb76078be395b241dce038d55b07cc1a8c971307e",
+  "expert": "experts/e_gpt",
+  "task_id": "ses_e940f7eceffeFqi0kbrRkbHxna",
+  "reviewer": "reviewers/r_gpt",
+  "reviewer_verdict": "APPROVE (after one REJECT round: replacement-startup test, invalid-selector Java test, full-crate+camel-bridge acceptance — all fixed)",
+  "spec_bless": {"verdict": "BLESS", "hash": "sha256:caebda6d71c2f83819d2d086b9a8f97bcc8dcd1e9fdae244e595f6979dfe48ed", "task_id": "ses_e941cb922ffe0jNkp2BOxKWx3Z"},
+  "plan_rounds": [
+    {"round": 1, "verdict": "REJECT", "task_id": "ses_e9416564cffemV6aluR7g0l4N5", "findings": "wiring ownership (endpoint vs slot scope), decode boundary contradiction (config.rs pins raw encoded), integration feature gate missing"},
+    {"round": 2, "verdict": "REJECT", "task_id": "ses_e94126f5affejgFD5fmdGDv5tO", "findings": "BridgeSlot stores no capability evidence (attach gate needed bounded fresh Health check); tls_configured static-capture channel cannot cover late attach (needs shared selector_required flag)"},
+    {"round": 3, "verdict": "BLESS", "task_id": "ses_e940f7eceffeFqi0kbrRkbHxna", "hash": "sha256:fa6499717c56af583556a31eb76078be395b241dce038d55b07cc1a8c971307e"}
+  ]
+}

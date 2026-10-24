@@ -31,6 +31,9 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
   /** Capability advertising the broker TLS contract added by the classic-TLS workstream. */
   static final String CAP_BROKER_TLS_V1 = "broker-tls-v1";
 
+  /** Capability advertising the message-selector subscription support (389-jms-selector). */
+  static final String CAP_MESSAGE_SELECTOR_V1 = "message-selector-v1";
+
   @Inject JmsProducer producer;
   @Inject jakarta.enterprise.inject.Instance<JmsConsumer> consumerFactory;
   @Inject JmsClientFactory clientFactory;
@@ -122,6 +125,9 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
         runtime.lockWaitMs(),
         runtime.missingEnv(),
         runtime.maxAttempts());
+    // The request's selector rides on the injected instance like the other subscribe inputs,
+    // assigned before the consume loop starts. Blank means no selector.
+    consumer.messageSelector = request.getMessageSelector();
 
     boolean refused;
     JmsConsumer existing;
@@ -266,6 +272,7 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
   static HealthResponse healthResponse(HealthSnapshot snapshot, BrokerFailureClass failureClass) {
     return snapshot.toResponse().toBuilder()
         .addCapabilities(CAP_BROKER_TLS_V1)
+        .addCapabilities(CAP_MESSAGE_SELECTOR_V1)
         .setFailureClass(BrokerFailureClass.toProto(failureClass))
         .build();
   }

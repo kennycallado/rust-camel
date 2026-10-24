@@ -251,19 +251,48 @@ impl std::fmt::Display for WaitReadyError {
     }
 }
 
+/// True when the endpoint configures a non-blank message selector (task 1.2).
+///
+/// A blank/whitespace-only value is rejected at URI parsing, so this is a
+/// defensive second look at the stored decoded selector: it arms the shared
+/// capability requirement and the consumer-attach gate.
+fn selector_required(endpoint_config: &JmsEndpointConfig) -> bool {
+    endpoint_config
+        .message_selector
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
 async fn await_ready_channel(
     pool: &JmsBridgePool,
     broker_name: &str,
+    selector_required: bool,
 ) -> Result<Channel, WaitReadyError> {
     let slot = pool
-        .get_or_create_slot(broker_name)
+        .get_or_create_slot(broker_name, selector_required)
         .await
         .map_err(WaitReadyError::Transient)?;
     let mut rx = slot.state_rx.clone();
 
     loop {
-        match &*rx.borrow() {
-            BridgeState::Ready { channel } => return Ok(channel.clone()),
+        // Clone the state out of the watch borrow so no `watch::Ref` guard
+        // spans the attach-gate await below (the future must stay `Send`).
+        let state = rx.borrow().clone();
+        match state {
+            BridgeState::Ready { channel } => {
+                // Task 1.2: consumer-attach selector gate. The shared
+                // requirement is already latched (get_or_create_slot above),
+                // and the gate issues ONE fresh Health RPC before the
+                // consumer's first Subscribe — at slot start or late. A
+                // failure parks the slot permanently and fails this consumer
+                // terminally (no silent start).
+                if selector_required {
+                    pool.selector_attach_gate(&slot, &channel)
+                        .await
+                        .map_err(WaitReadyError::Terminal)?;
+                }
+                return Ok(channel);
+            }
             BridgeState::Parked(reason) => {
                 // Fail closed: a parked slot is terminal; waiting can never
                 // succeed until an operator repairs it and restarts the
@@ -271,7 +300,7 @@ async fn await_ready_channel(
                 // not spend an unlimited reconnect budget on it (Finding 1).
                 return Err(WaitReadyError::Terminal(parked_operator_error(
                     broker_name,
-                    reason,
+                    &reason,
                 )));
             }
             BridgeState::Stopped => {
@@ -425,13 +454,8 @@ async fn consumer_loop(
 ) -> Result<(), CamelError> {
     let destination = destination(endpoint_config);
     let map_headers = endpoint_config.map_jms_headers;
-    let selector = endpoint_config.message_selector.clone();
     let mut consecutive_transport_failures: u32 = 0;
     let mut attempt: u32 = 0;
-
-    // JMS-010: message selector — pass to bridge subscription when available
-    // TODO(JMS-010): pass selector to bridge subscription
-    let _selector = selector;
 
     // Manual retry loops (not retry_async / retry_async_cancelable) — three
     // retry sites nested inside this outer loop:
@@ -465,7 +489,7 @@ async fn consumer_loop(
                 );
                 break;
             }
-            result = await_ready_channel(pool, broker_name) => {
+            result = await_ready_channel(pool, broker_name, selector_required(endpoint_config)) => {
                 match result {
                     Ok(channel) => channel,
                     Err(WaitReadyError::Terminal(e)) => {
@@ -546,6 +570,7 @@ async fn consumer_loop(
             result = client.subscribe(SubscribeRequest {
                 destination: destination.clone(),
                 subscription_id: subscription_id.clone(),
+                message_selector: endpoint_config.message_selector.clone().unwrap_or_default(),
             }) => result,
         } {
             Ok(resp) => {
@@ -961,7 +986,10 @@ impl Consumer for JmsConsumer {
         // missing bridge binaries or unreachable brokers are reported immediately
         // instead of looping silently.
         {
-            let slot = self.pool.get_or_create_slot(&self.broker_name).await?;
+            let slot = self
+                .pool
+                .get_or_create_slot(&self.broker_name, selector_required(&self.endpoint_config))
+                .await?;
             match &*slot.state_rx.borrow() {
                 BridgeState::Ready { .. } => {} // bridge is up — proceed
                 // A concurrent caller observes Starting while the slot
@@ -1116,13 +1144,15 @@ mod tests {
         TestBridgeFixture, env_guard, next_refresh_attempt, ready_stub_process, refresh_attempts,
         replacement_attempts, spawn_scripted_health, stop_slot_process,
     };
-    use crate::component::{BridgeSlot, ProbeOutcome};
+    use crate::component::{BridgeSlot, ProbeOutcome, StartBridgeError};
     use crate::config::{JmsPoolConfig, jms_reconnect_default};
+    use crate::diagnostics::evaluate_startup_selector_gate;
     use crate::proto::bridge_service_server::{BridgeService, BridgeServiceServer};
     use crate::proto::{
         CompletionOutcome, CompletionRequest, CompletionResponse, HealthRequest, HealthResponse,
         SendRequest, SendResponse,
     };
+    use camel_bridge::process::BridgeProcessConfig;
     use camel_component_api::ExchangeEnvelope;
     use camel_component_api::test_support::{
         PanicRuntimeObservability, RecordingRuntimeObservability,
@@ -1312,12 +1342,13 @@ mod tests {
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
+            selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
 
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            await_ready_channel(&pool, "default"),
+            await_ready_channel(&pool, "default", false),
         )
         .await
         .expect("await_ready_channel must not hang on a parked slot");
@@ -1359,6 +1390,7 @@ mod tests {
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
+            selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -1419,6 +1451,7 @@ mod tests {
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
+            selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         // Retain the Arc so the test can reach state_tx/state_rx after the pool
         // is moved into the consumer (matches the component.rs slot fixtures).
@@ -1794,10 +1827,10 @@ mod tests {
     // ── rc-5e4l: subscription_id uniqueness ──────────────────────────────────
 
     /// In-process bridge mock that records every outgoing SubscribeRequest
-    /// subscription_id (mirrors `spawn_mock_bridge` in bridge_client_test.rs).
+    /// (mirrors `spawn_mock_bridge` in bridge_client_test.rs).
     #[derive(Clone)]
     struct RecordingBridge {
-        recorded: Arc<Mutex<Vec<String>>>,
+        recorded: Arc<Mutex<Vec<SubscribeRequest>>>,
     }
 
     #[async_trait]
@@ -1818,7 +1851,7 @@ mod tests {
             self.recorded
                 .lock()
                 .expect("recorder mutex poisoned")
-                .push(request.into_inner().subscription_id);
+                .push(request.into_inner());
             // Empty stream: consumer_loop sees Ok(None) immediately and, with
             // max_attempts=1, terminates after exactly one subscribe.
             Ok(Response::new(Box::pin(futures::stream::empty::<
@@ -1830,13 +1863,19 @@ mod tests {
             &self,
             _request: Request<HealthRequest>,
         ) -> Result<Response<HealthResponse>, Status> {
-            // Legacy bridge answer: no explicit status, UNSPECIFIED with zero age.
+            // Task 1.2: model a modern, selector-capable bridge so the
+            // fail-closed capability gate lets selector routes reach their
+            // Subscribe (the legacy empty answer parks them).
             Ok(Response::new(HealthResponse {
                 healthy: true,
                 broker_connected: true,
                 message: "ok".to_string(),
                 status: 0,
                 age_ms: 0,
+                capabilities: vec![
+                    "broker-tls-v1".to_string(),
+                    "message-selector-v1".to_string(),
+                ],
                 ..Default::default()
             }))
         }
@@ -1851,7 +1890,9 @@ mod tests {
         }
     }
 
-    async fn spawn_recording_bridge(recorded: Arc<Mutex<Vec<String>>>) -> std::io::Result<u16> {
+    async fn spawn_recording_bridge(
+        recorded: Arc<Mutex<Vec<SubscribeRequest>>>,
+    ) -> std::io::Result<u16> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
@@ -2478,7 +2519,7 @@ mod tests {
     /// uuid-shaped ids (not a test of uuid randomness itself).
     #[tokio::test]
     async fn two_subscribes_mint_distinct_subscription_ids() {
-        let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded: Arc<Mutex<Vec<SubscribeRequest>>> = Arc::new(Mutex::new(Vec::new()));
         let port = spawn_recording_bridge(Arc::clone(&recorded))
             .await
             .expect("spawn recording bridge");
@@ -2510,6 +2551,7 @@ mod tests {
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
+            selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -2544,12 +2586,16 @@ mod tests {
             .await;
         }
 
-        let ids = recorded.lock().expect("recorder mutex poisoned");
+        let requests = recorded.lock().expect("recorder mutex poisoned");
         assert_eq!(
-            ids.len(),
+            requests.len(),
             2,
             "two subscribe flows must each mint exactly one subscription_id"
         );
+        let ids: Vec<&str> = requests
+            .iter()
+            .map(|r| r.subscription_id.as_str())
+            .collect();
         assert!(
             !ids[0].is_empty() && !ids[1].is_empty(),
             "subscription_ids must be non-empty"
@@ -2566,6 +2612,598 @@ mod tests {
                 "uuid-shaped subscription_id: {id}"
             );
         }
+    }
+
+    /// Task 1.1 (JMS-010): the decoded `message_selector` configured on the
+    /// endpoint URI must reach the bridge `SubscribeRequest` — an encoded
+    /// selector reaching the broker would filter on the wrong expression.
+    #[tokio::test]
+    async fn selector_reaches_subscribe_request() {
+        let recorded: Arc<Mutex<Vec<SubscribeRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let port = spawn_recording_bridge(Arc::clone(&recorded))
+            .await
+            .expect("spawn recording bridge");
+        let pool = pool_with_mock_channel(port).await;
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "jms-selector".to_string(),
+        );
+        let endpoint_cfg =
+            JmsEndpointConfig::from_uri("jms:queue:orders?message_selector=priority%20%3E%205")
+                .expect("uri with selector must parse");
+        // max_attempts=1 → exactly one subscribe, then the empty stream ends
+        // the loop (same shape as `two_subscribes_mint_distinct_subscription_ids`).
+        let _ = consumer_loop(
+            &pool,
+            "default",
+            &endpoint_cfg,
+            &reconnect_after(1),
+            CancellationToken::new(),
+            &ctx,
+            0,
+            rt(),
+        )
+        .await;
+
+        let captured = recorded.lock().expect("recorder mutex poisoned");
+        assert_eq!(captured.len(), 1, "exactly one subscribe request");
+        assert_eq!(
+            captured[0].message_selector, "priority > 5",
+            "encoded selector must reach the bridge decoded"
+        );
+        assert_eq!(captured[0].destination, "queue:orders");
+    }
+
+    /// Task 1.1 (JMS-010): without a `message_selector` option the outgoing
+    /// `SubscribeRequest` is unchanged — empty selector, and destination /
+    /// uuid-shaped `subscription_id` equal what the pre-change assertions
+    /// capture.
+    #[tokio::test]
+    async fn no_selector_request_unchanged() {
+        let recorded: Arc<Mutex<Vec<SubscribeRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let port = spawn_recording_bridge(Arc::clone(&recorded))
+            .await
+            .expect("spawn recording bridge");
+        let pool = pool_with_mock_channel(port).await;
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "jms-no-selector".to_string(),
+        );
+        let endpoint_cfg = JmsEndpointConfig::from_uri("jms:queue:orders")
+            .expect("uri without selector must parse");
+        // max_attempts=1 → exactly one subscribe, then the empty stream ends
+        // the loop (same shape as `two_subscribes_mint_distinct_subscription_ids`).
+        let _ = consumer_loop(
+            &pool,
+            "default",
+            &endpoint_cfg,
+            &reconnect_after(1),
+            CancellationToken::new(),
+            &ctx,
+            0,
+            rt(),
+        )
+        .await;
+
+        let captured = recorded.lock().expect("recorder mutex poisoned");
+        assert_eq!(captured.len(), 1, "exactly one subscribe request");
+        assert!(
+            captured[0].message_selector.is_empty(),
+            "absent selector must serialize as empty"
+        );
+        assert_eq!(captured[0].destination, "queue:orders");
+        let id = &captured[0].subscription_id;
+        assert!(!id.is_empty(), "subscription_id must be non-empty");
+        assert_eq!(id.len(), 36, "uuid-shaped subscription_id: {id}");
+        assert_eq!(
+            id.matches('-').count(),
+            4,
+            "uuid-shaped subscription_id: {id}"
+        );
+    }
+
+    // ── Task 1.2: fail-closed message-selector-v1 capability gate ────────────
+
+    use crate::bridge_client_test::{
+        connect_scripted, selector_monitor_fixture, shutdown_test_slot, spawn_selector_gate_bridge,
+        wait_parked,
+    };
+
+    /// Writes an executable stub bridge child announcing `port` on the ready
+    /// line (task 1.2 launch-path tests: the gate window's channel is
+    /// substituted, so the announced port is inert). Returns the stub path and
+    /// its pidfile.
+    #[cfg(unix)]
+    fn ready_line_stub(
+        dir: &std::path::Path,
+        tag: &str,
+        port: u16,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let pidfile = dir.join(format!("{tag}.pid"));
+        let stub = dir.join(format!("{tag}.sh"));
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nprintf '%s\\n' '{{\"status\":\"ready\",\"port\":{port}}}'\nexec sleep 30\n",
+                pidfile.display()
+            ),
+        )
+        .expect("write ready stub");
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
+            .expect("ready stub exec bit");
+        (stub, pidfile)
+    }
+
+    /// Bounded wait until `pid` is gone (task 1.2 kill assertions; mirrors the
+    /// `wait_pid_gone` helper in the component test module).
+    #[cfg(unix)]
+    async fn wait_pid_gone(pid: u32) -> bool {
+        for _ in 0..100 {
+            let alive = tokio::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// Diagnostic contract (task 1.2): the park/error text names the missing
+    /// capability, the required bridge version, and the pinned bridge version.
+    fn assert_selector_park_text(text: &str) {
+        for needle in ["message-selector-v1", "0.11.0", crate::BRIDGE_VERSION] {
+            assert!(
+                text.contains(needle),
+                "text must contain '{needle}': {text}"
+            );
+        }
+    }
+
+    /// Spawns `consumer_loop` for one route; the token requests a normal
+    /// shutdown once the test's barrier is reached.
+    fn spawn_route_consumer(
+        pool: Arc<JmsBridgePool>,
+        endpoint_cfg: JmsEndpointConfig,
+        route_id: &str,
+    ) -> (JoinHandle<Result<(), CamelError>>, CancellationToken) {
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let route_id = route_id.to_string();
+        let handle = tokio::spawn(async move {
+            let (route_tx, _route_rx) = mpsc::channel(16);
+            let ctx = ConsumerContext::new(route_tx, CancellationToken::new(), route_id);
+            consumer_loop(
+                &pool,
+                "default",
+                &endpoint_cfg,
+                &reconnect_after(3),
+                worker_cancel,
+                &ctx,
+                0,
+                rt(),
+            )
+            .await
+        });
+        (handle, cancel)
+    }
+
+    /// Task 1.2: the STARTUP selector gate. The shared decision seam rejects
+    /// empty evidence when a selector is required (three-fragment error), and
+    /// the REAL launch path (`start_bridge_process_with_config`) invokes it:
+    /// the launch is rejected permanently, the gated child is killed, and the
+    /// launch-fixture path parks the slot with EXACTLY that error before any
+    /// Subscribe reaches the bridge.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_parks_when_selector_configured_and_capability_missing() {
+        // Unit level: the shared startup seam itself.
+        let seam_err = evaluate_startup_selector_gate(&[], true).expect_err(
+            "empty capabilities must fail the startup gate when a selector is required",
+        );
+        assert_selector_park_text(&seam_err.to_string());
+        assert!(
+            evaluate_startup_selector_gate(&[], false).is_ok(),
+            "without a selector requirement the startup gate passes trivially"
+        );
+
+        // Launch path: Health evidence `capabilities: vec![]`, the requirement
+        // armed exactly as a selector route arms it.
+        let bridge = spawn_selector_gate_bridge(&[]).await;
+        let channel = connect_scripted(bridge.port).await;
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let (stub, pidfile) = ready_line_stub(dir.path(), "startup-gate", 1);
+        let config = BridgeProcessConfig::jms(
+            stub,
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            2_000,
+            30_000,
+            30_000,
+            Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
+            Some("0123456789abcdef0123456789abcdef".to_string()),
+            None,
+        );
+        let result = JmsBridgePool::start_bridge_process_with_config(
+            &config,
+            2_000,
+            false,
+            &std::sync::atomic::AtomicBool::new(true),
+            Some(channel),
+        )
+        .await;
+        let reason = match result {
+            Err(StartBridgeError::Permanent(reason)) => reason,
+            Err(StartBridgeError::Other(e)) => {
+                panic!("the startup gate must classify permanently: {e}")
+            }
+            Ok(_) => panic!("the startup selector gate must reject the launch"),
+        };
+        assert_selector_park_text(&reason);
+        // Mirrors the TLS precedent (startup_gate_kills_bridge_and_fails_permanently):
+        // the gated child is killed, not leaked.
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+        assert!(pid > 0, "the stub must have written its pid");
+        assert!(
+            wait_pid_gone(pid).await,
+            "the gated child {pid} must be killed, not leaked"
+        );
+
+        // The launch-fixture path parks with EXACTLY the startup gate error.
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::Generic,
+            ))
+            .expect("startup gate pool config must be valid"),
+        );
+        let (state_tx, state_rx) = tokio::sync::watch::channel(BridgeState::Starting);
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::Generic,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
+            selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+        JmsBridgePool::apply_initial_start_result(
+            &slot,
+            Err(StartBridgeError::Permanent(reason.clone())),
+        )
+        .await;
+        match &*slot.state_rx.borrow() {
+            BridgeState::Parked(parked) => assert_eq!(
+                parked, &reason,
+                "the launch-fixture path must park with exactly the startup gate error"
+            ),
+            other => panic!("the slot must park permanently: {other:?}"),
+        }
+
+        // ...before any Subscribe: a selector route is stopped by the parked
+        // slot and the bridge mock records ZERO Subscribe calls.
+        let endpoint_cfg =
+            JmsEndpointConfig::from_uri("jms:queue:orders?message_selector=priority%20%3E%205")
+                .expect("uri with selector must parse");
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "jms-selector-startup-park".to_string(),
+        );
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            consumer_loop(
+                &pool,
+                "default",
+                &endpoint_cfg,
+                &reconnect_after(1),
+                CancellationToken::new(),
+                &ctx,
+                0,
+                rt(),
+            ),
+        )
+        .await
+        .expect("a parked slot must fail fast")
+        .expect_err("a selector route on an old bridge must fail");
+        assert_selector_park_text(&err.to_string());
+        assert_eq!(
+            bridge.subscribe_count(),
+            0,
+            "the startup gate parked before any Subscribe"
+        );
+        bridge.shutdown().await;
+    }
+
+    /// Task 1.2: a selector-configured route on a bridge advertising
+    /// `message-selector-v1` passes the gate and the Subscribe call carries the
+    /// decoded selector.
+    #[tokio::test]
+    async fn startup_subscribes_when_selector_capability_present() {
+        let mut bridge =
+            spawn_selector_gate_bridge(&["broker-tls-v1", "message-selector-v1"]).await;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+
+        let endpoint_cfg =
+            JmsEndpointConfig::from_uri("jms:queue:orders?message_selector=priority%20%3E%205")
+                .expect("uri with selector must parse");
+        let (handle, cancel) =
+            spawn_route_consumer(Arc::clone(&pool), endpoint_cfg, "jms-selector-capable");
+
+        bridge.next_subscribe().await;
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("consumer exits on requested shutdown");
+
+        {
+            let captured = bridge.subscribes.lock().expect("subscribes mutex poisoned");
+            assert_eq!(captured.len(), 1, "exactly one subscribe request");
+            assert_eq!(
+                captured[0].message_selector, "priority > 5",
+                "the selector must reach the bridge decoded"
+            );
+            assert_eq!(captured[0].destination, "queue:orders");
+        }
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
+    }
+
+    /// Task 1.2: a NO-selector route on an old bridge (empty capabilities) is
+    /// unaffected — the gate passes trivially and the subscription proceeds.
+    #[tokio::test]
+    async fn no_selector_old_bridge_unaffected() {
+        let mut bridge = spawn_selector_gate_bridge(&[]).await;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+
+        let endpoint_cfg = JmsEndpointConfig::from_uri("jms:queue:orders")
+            .expect("uri without selector must parse");
+        let (handle, cancel) =
+            spawn_route_consumer(Arc::clone(&pool), endpoint_cfg, "jms-no-selector-old");
+
+        bridge.next_subscribe().await;
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("consumer exits on requested shutdown");
+
+        {
+            let captured = bridge.subscribes.lock().expect("subscribes mutex poisoned");
+            assert_eq!(captured.len(), 1, "the subscription must proceed");
+            assert!(
+                captured[0].message_selector.is_empty(),
+                "no selector must serialize as empty"
+            );
+        }
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
+    }
+
+    /// Task 1.2: capability evidence is authoritative regardless of broker
+    /// health status — a Health response with `status: STALE` advertising
+    /// `message-selector-v1` passes the gate on the capability alone and the
+    /// Subscribe call proceeds.
+    #[tokio::test]
+    async fn startup_gate_ignores_broker_health_status() {
+        let mut bridge = spawn_selector_gate_bridge(&["message-selector-v1"]).await;
+        // Raw `HealthStatus.STALE` = 2: unverified broker status must neither
+        // bypass nor weaken the capability gate.
+        *bridge.status.lock().expect("status mutex poisoned") = 2;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+
+        let endpoint_cfg =
+            JmsEndpointConfig::from_uri("jms:queue:orders?message_selector=priority%20%3E%205")
+                .expect("uri with selector must parse");
+        let (handle, cancel) =
+            spawn_route_consumer(Arc::clone(&pool), endpoint_cfg, "jms-selector-stale");
+
+        bridge.next_subscribe().await;
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("consumer exits on requested shutdown");
+
+        {
+            let captured = bridge.subscribes.lock().expect("subscribes mutex poisoned");
+            assert_eq!(
+                captured.len(),
+                1,
+                "the gate must pass on the capability alone and the Subscribe proceed"
+            );
+        }
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
+    }
+
+    /// Task 1.2: runtime capability loss parks permanently and stops
+    /// resubscription. The later Health responses (no capability) model the
+    /// replacement instance; the shared flag registered at consumer attach
+    /// arms the runtime gate, so the slot parks and no further Subscribe calls
+    /// are sent.
+    #[tokio::test]
+    async fn runtime_capability_loss_parks_permanently() {
+        let mut bridge = spawn_selector_gate_bridge(&["message-selector-v1"]).await;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+        let endpoint_cfg =
+            JmsEndpointConfig::from_uri("jms:queue:orders?message_selector=priority%20%3E%205")
+                .expect("uri with selector must parse");
+        let (handle, _cancel) =
+            spawn_route_consumer(Arc::clone(&pool), endpoint_cfg, "jms-selector-runtime-loss");
+
+        // First responses include the capability: the attach gate passes and
+        // exactly one Subscribe goes out.
+        bridge.next_subscribe().await;
+        assert_eq!(bridge.subscribe_count(), 1, "one Subscribe before the loss");
+
+        // The replaced (older) instance advertises nothing.
+        bridge.set_capabilities(&[]);
+        let reason = wait_parked(&slot).await;
+        assert_selector_park_text(&reason);
+
+        // Release the stream: the consumer re-attaches — or would resubscribe
+        // if the park had not stopped it terminally.
+        bridge.end_streams();
+        let result = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("consumer must terminate after the park")
+            .expect("consumer task must not panic");
+        let err = result.expect_err("the parked slot must fail the consumer terminally");
+        assert_selector_park_text(&err.to_string());
+        assert_eq!(
+            bridge.subscribe_count(),
+            1,
+            "no further Subscribe calls after capability loss"
+        );
+
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
+    }
+
+    /// Task 1.2: a selector consumer attaching to an already-running slot
+    /// whose bridge never advertised `message-selector-v1` (the startup gate
+    /// was bypassed before the selector route existed) is stopped by the
+    /// attach-path fresh Health check BEFORE its first Subscribe — the
+    /// Subscribe-call count does not increase and the consumer fails with the
+    /// three-fragment error.
+    #[tokio::test]
+    async fn selector_on_already_running_incapable_slot_parks_before_subscribe() {
+        let mut bridge = spawn_selector_gate_bridge(&[]).await;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+
+        // A NON-selector consumer keeps running against the incapable bridge
+        // (slot startup saw no selector requirement).
+        let no_selector_cfg = JmsEndpointConfig::from_uri("jms:queue:orders")
+            .expect("uri without selector must parse");
+        let (first_handle, _first_cancel) =
+            spawn_route_consumer(Arc::clone(&pool), no_selector_cfg, "jms-incapable-plain");
+        bridge.next_subscribe().await;
+        assert_eq!(
+            bridge.subscribe_count(),
+            1,
+            "baseline non-selector Subscribe"
+        );
+
+        // The selector route attaches late.
+        let selector_cfg =
+            JmsEndpointConfig::from_uri("jms:queue:orders?message_selector=priority%20%3E%205")
+                .expect("uri with selector must parse");
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "jms-incapable-selector".to_string(),
+        );
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            consumer_loop(
+                &pool,
+                "default",
+                &selector_cfg,
+                &reconnect_after(1),
+                CancellationToken::new(),
+                &ctx,
+                1,
+                rt(),
+            ),
+        )
+        .await
+        .expect("the attach gate must fail fast")
+        .expect_err("a selector consumer on an incapable bridge must fail");
+        assert_selector_park_text(&err.to_string());
+        assert_eq!(
+            bridge.subscribe_count(),
+            1,
+            "the attach gate must park before the selector consumer's Subscribe"
+        );
+
+        bridge.end_streams();
+        let _ = tokio::time::timeout(Duration::from_secs(5), first_handle)
+            .await
+            .expect("first consumer terminates");
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
+    }
+
+    /// Task 1.2: a selector consumer attaching LATE to a capable running slot
+    /// passes the fresh attach check and subscribes; when the shared flag (via
+    /// that registration) is armed and the bridge stops advertising the
+    /// capability, the runtime gate parks permanently with the three-fragment
+    /// error and no further Subscribe calls are sent.
+    #[tokio::test]
+    async fn late_selector_on_capable_slot_then_capability_loss_parks() {
+        let mut bridge = spawn_selector_gate_bridge(&["message-selector-v1"]).await;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+
+        // NON-selector consumer already running.
+        let no_selector_cfg = JmsEndpointConfig::from_uri("jms:queue:orders")
+            .expect("uri without selector must parse");
+        let (plain_handle, _plain_cancel) =
+            spawn_route_consumer(Arc::clone(&pool), no_selector_cfg, "jms-late-plain");
+        bridge.next_subscribe().await;
+
+        // The selector consumer attaches late: the fresh check passes and its
+        // Subscribe (carrying the selector) proceeds.
+        let selector_cfg =
+            JmsEndpointConfig::from_uri("jms:queue:orders?message_selector=priority%20%3E%205")
+                .expect("uri with selector must parse");
+        let (selector_handle, _selector_cancel) =
+            spawn_route_consumer(Arc::clone(&pool), selector_cfg, "jms-late-selector");
+        bridge.next_subscribe().await;
+        assert_eq!(bridge.subscribe_count(), 2, "both consumers subscribed");
+        {
+            let captured = bridge.subscribes.lock().expect("subscribes mutex poisoned");
+            assert_eq!(
+                captured[1].message_selector, "priority > 5",
+                "the late selector consumer's Subscribe must carry the selector"
+            );
+        }
+
+        // The bridge stops advertising the capability: the shared flag armed
+        // by the late registration trips the runtime gate.
+        bridge.set_capabilities(&[]);
+        let reason = wait_parked(&slot).await;
+        assert_selector_park_text(&reason);
+
+        bridge.end_streams();
+        for handle in [plain_handle, selector_handle] {
+            let result = tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .expect("consumer must terminate after the park")
+                .expect("consumer task must not panic");
+            let err = result.expect_err("the parked slot must fail consumers terminally");
+            assert_selector_park_text(&err.to_string());
+        }
+        assert_eq!(
+            bridge.subscribe_count(),
+            2,
+            "no further Subscribe calls after capability loss"
+        );
+
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
     }
 
     // ── Task 3.5: send_and_wait settlement harness ───────────────────────────
@@ -2742,6 +3380,7 @@ mod tests {
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
+            selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
         pool
@@ -2771,6 +3410,7 @@ mod tests {
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
+            selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
         pool
@@ -2801,6 +3441,7 @@ mod tests {
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
+            selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -2821,6 +3462,7 @@ mod tests {
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
+            selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
         slot
@@ -3342,7 +3984,10 @@ mod tests {
 
             // The slot is never parked or restarted: it stays Ready for other
             // routes and producers sharing it.
-            let slot = pool.get_or_create_slot("default").await.expect("slot");
+            let slot = pool
+                .get_or_create_slot("default", false)
+                .await
+                .expect("slot");
             assert!(
                 matches!(*slot.state_rx.borrow(), BridgeState::Ready { .. }),
                 "{mode:?}: a destination permanent failure must leave the broker slot Ready"
@@ -3509,7 +4154,7 @@ mod tests {
     /// handle, not a silent normal exit.
     #[tokio::test]
     async fn reconnect_exhaustion_is_surfaced() {
-        let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded: Arc<Mutex<Vec<SubscribeRequest>>> = Arc::new(Mutex::new(Vec::new()));
         let port = spawn_recording_bridge(Arc::clone(&recorded))
             .await
             .expect("spawn recording bridge");
@@ -3991,7 +4636,7 @@ mod tests {
         );
 
         let slot = ready_pool
-            .get_or_create_slot("default")
+            .get_or_create_slot("default", false)
             .await
             .expect("slot");
         assert!(
@@ -4223,7 +4868,10 @@ mod tests {
         .await
         .expect("spawn park-during-reconnect bridge");
         let pool = pool_with_mock_channel(port).await;
-        let slot = pool.get_or_create_slot("default").await.expect("slot");
+        let slot = pool
+            .get_or_create_slot("default", false)
+            .await
+            .expect("slot");
         let state_tx = slot.state_tx.clone();
 
         let (route_tx, _route_rx) = mpsc::channel(16);

@@ -53,6 +53,14 @@ public class JmsConsumer {
   private final long subscriptionGeneration = GENERATION_COUNTER.incrementAndGet();
 
   /**
+   * JMS message selector for this subscription, or {@code null} when none was requested. Assigned
+   * from the subscribe request on the injected instance before the consume loop starts and read
+   * only at consumer creation: the bridge never parses or rewrites the expression, so an invalid
+   * selector stays a broker-owned failure.
+   */
+  volatile String messageSelector;
+
+  /**
    * Owner-thread settlement state. The session is touched only by the owner thread; a gRPC {@code
    * Complete} handler never calls into JMS — it publishes one terminal decision and waits for the
    * owner thread to settle. All fields are guarded by {@link #settleLock}.
@@ -254,6 +262,11 @@ public class JmsConsumer {
    * handoff until a valid {@code Complete} decision arrives. The thread is the only thread that
    * touches the session.
    *
+   * <p>The message selector arrives through the {@link #messageSelector} field, assigned from the
+   * subscribe request before this call — the same pre-loop wiring as the journal runtime. The
+   * expression goes to the provider verbatim: an invalid selector is a broker-owned failure
+   * surfaced on the observer, never validated or rewritten locally.
+   *
    * @param finished shared flag indicating the stream has terminated. The gRPC cancel handler or
    *     this consumer's terminal callback sets it; the consumer only reads it, so the service's
    *     compared-and-set teardown stays the single owner of observer termination.
@@ -317,7 +330,11 @@ public class JmsConsumer {
       // A requested transactionMode=Session only warns on the Rust side.
       session = connection.createSession(false, Session.CLIENT_ACKNOWLEDGE);
       Destination dest = JmsProducer.parseDestination(session, destination);
-      consumer = session.createConsumer(dest);
+      if (messageSelector != null && !messageSelector.isBlank()) {
+        consumer = session.createConsumer(dest, messageSelector);
+      } else {
+        consumer = session.createConsumer(dest);
+      }
 
       if (!topic) {
         // Lazy ownership: acquire the destination journal before the first receive, on this owner

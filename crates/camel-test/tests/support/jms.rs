@@ -52,7 +52,7 @@ pub async fn shared_jms_activemq() -> JmsComponent {
             // individual test runtimes.
             let pool_init = pool.clone();
             let _ = bridge_bg_rt()
-                .spawn(async move { pool_init.get_or_create_slot("default").await })
+                .spawn(async move { pool_init.get_or_create_slot("default", false).await })
                 .await;
             JmsComponent::with_scheme("jms", pool)
         })
@@ -85,7 +85,7 @@ pub async fn shared_jms_artemis() -> JmsComponent {
             // Eagerly start the bridge slot on the permanent background runtime.
             let pool_init = pool.clone();
             let _ = bridge_bg_rt()
-                .spawn(async move { pool_init.get_or_create_slot("default").await })
+                .spawn(async move { pool_init.get_or_create_slot("default", false).await })
                 .await;
             JmsComponent::with_scheme("jms", pool)
         })
@@ -118,7 +118,7 @@ pub async fn shared_jms_artemis_auth() -> JmsComponent {
             // Eagerly start the bridge slot on the permanent background runtime.
             let pool_init = pool.clone();
             let _ = bridge_bg_rt()
-                .spawn(async move { pool_init.get_or_create_slot("default").await })
+                .spawn(async move { pool_init.get_or_create_slot("default", false).await })
                 .await;
             JmsComponent::with_scheme("jms", pool)
         })

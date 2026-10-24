@@ -78,7 +78,7 @@ artemis:<name>       # shorthand, defaults to queue
 | --- | --- | --- |
 | `broker` | configured `default_broker` | Named broker from the `[components.jms.brokers]` table |
 | `acknowledgementMode` | `Auto` | `Auto`, `Client`, `DupsOk`, or `Transacted` |
-| `messageSelector` | — | SQL-92 selector expression for filtering inbound messages |
+| `messageSelector` | — | Broker-side filter: a provider-specific SQL-like JMS selector expression. Non-matching messages are withheld at the broker before delivery. Not parsed or validated by rust-camel beyond non-blank. Requires jms bridge >= `camel_jms::BRIDGE_VERSION` (`message-selector-v1`); an older bridge parks the slot at startup with `bridge <version> lacks message-selector-v1; use a jms bridge >= camel_jms::BRIDGE_VERSION` |
 | `concurrentConsumers` | `1` | Number of parallel consumer tasks for this endpoint |
 | `transactionMode` | `None` | `None` or `Session` (Session is not yet implemented) |
 | `timeToLive` | — | Message time-to-live in milliseconds |
@@ -179,7 +179,7 @@ Switching a broker from `tcp://` to `ssl://` changes the attempt-journal broker 
 
 The body is typed from the JMS `content_type`. `text/*` becomes `Body::Text`. `application/json` becomes `Body::Json` when valid JSON. Binary content becomes `Body::Bytes`. A `TextMessage` carrying an explicit `ContentType` property (for example `application/xml` from a non-Camel producer, or from this component's own producer) now keeps that value, so such payloads surface as `Body::Bytes` instead of `Body::Text`. The consumer pre-flights the bridge slot before starting. A missing or degraded bridge fails fast with `JMS bridge not available`.
 
-The `concurrentConsumers` parameter spawns N parallel consumer tasks on the same destination. Each task subscribes independently and submits Exchanges into the shared route pipeline. `messageSelector` filters messages at the broker with a SQL-92 expression.
+The `concurrentConsumers` parameter spawns N parallel consumer tasks on the same destination. Each task subscribes independently and submits Exchanges into the shared route pipeline. `messageSelector` filters messages at the broker with a provider-specific SQL-like (JMS selector) expression: the broker applies the selector during delivery and withholds non-matching messages before they reach the route. rust-camel does not parse or validate the expression beyond requiring a non-blank value — an empty option (`messageSelector=` or `message_selector=`) means no selector, an absent option means no selector, and a whitespace-only value is a URI validation error. A selector requires jms bridge >= `camel_jms::BRIDGE_VERSION` advertising `message-selector-v1`; with an older bridge the slot parks at startup with `bridge <version> lacks message-selector-v1; use a jms bridge >= camel_jms::BRIDGE_VERSION`. JVM and Rust unit tests prove plumbing only; selector semantics are verified by the CI-owned live-broker suite (`jms_consumer_selector_filters_activemq_queue` and `jms_consumer_selector_filters_activemq_topic`).
 
 ## Producer
 

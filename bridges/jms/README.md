@@ -34,6 +34,13 @@ The snapshot has a 10 s TTL (`HEALTH_TTL_MS`). A background refresh starts after
 
 The broker-latency isolation guarantee requires this updated Java health handler. No protobuf change is needed. An older blocking bridge cannot provide the guarantee.
 
+### Advertised capabilities
+
+The health RPC's `capabilities` list reports what this bridge build supports:
+
+- `broker-tls-v1` — Classic broker TLS setup through the Rust `tls` table (see Broker TLS (Classic) below).
+- `message-selector-v1` — consumer-side broker filtering support: `SubscribeRequest` accepts a `message_selector` and the broker applies it during delivery.
+
 ## Message-type forwarding policy (ADR-0067)
 
 The bridge forwards broker messages to a bytes-only proto. Only `BytesMessage` and `TextMessage` carry a body. The other JMS types arrive empty-bodied with headers preserved. See [ADR-0067](../../docs/adr/0067-jms-message-type-forwarding-policy.md).

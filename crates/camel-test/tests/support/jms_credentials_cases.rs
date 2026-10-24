@@ -93,7 +93,8 @@ async fn dedicated_jms_component(broker: &ActiveMqBroker) -> JmsComponent {
     // Start the slot on the permanent background runtime so the tonic dispatch
     // task and health monitor are not killed when this test's runtime is dropped.
     let pool_init = pool.clone();
-    let handle = bridge_bg_rt().spawn(async move { pool_init.get_or_create_slot("default").await });
+    let handle =
+        bridge_bg_rt().spawn(async move { pool_init.get_or_create_slot("default", false).await });
     let _ = tokio::time::timeout(Duration::from_secs(90), handle).await;
     JmsComponent::with_scheme("jms", pool)
 }

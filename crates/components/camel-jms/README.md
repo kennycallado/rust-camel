@@ -28,6 +28,7 @@ Using `activemq:` or `artemis:` as scheme locks the `broker_type` automatically 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `broker` | `default_broker` from config | Named broker to use (must exist in the broker map) |
+| `messageSelector` | — | Consumer only. Applied at the broker: non-matching messages are withheld before delivery. The expression uses provider-specific SQL-like JMS selector syntax and is not parsed or validated by rust-camel beyond requiring a non-blank value (empty `messageSelector=`/`message_selector=` and an absent option both mean no selector; whitespace-only is a URI validation error). Requires jms bridge >= `camel_jms::BRIDGE_VERSION` advertising `message-selector-v1`; with an older bridge the slot parks at startup with `bridge <version> lacks message-selector-v1; use a jms bridge >= camel_jms::BRIDGE_VERSION`. JVM and Rust unit tests prove plumbing only — selector semantics are verified by the CI-owned live-broker suite. |
 | `jmsHeaderAllowlist` | empty | Producer only. Comma-separated exchange header names to forward as JMS properties. With the empty default no user header is forwarded. Credential, reserved `JMS*`, `jms`, and `camel` names are always denied. Use valid JMS property names (for example `orderId`, not `order-id`). |
 
 > `brokerUrl`, `username`, and `password` are **not** URI parameters — credentials live in `Camel.toml` or programmatic config. `broker_type` is inferred from the scheme (`activemq:` → ActiveMQ Classic, `artemis:` → Artemis) or from the broker config entry.
