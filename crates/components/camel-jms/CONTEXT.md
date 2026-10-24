@@ -186,6 +186,42 @@ pool knobs wired through the spawn environment (`rc-w06u6`): Rust passes
 A future consumer transport-listener integration would feed generation-fenced
 events into the same cache; it is explicitly not implemented.
 
+## Broker TLS
+
+A Classic (`activemq`) broker takes a `tls` table on its broker entry. The
+table parses into `BrokerTlsConfig` in `config.rs`: `ca_cert_path`,
+`client_cert_path`, `client_key_path`, and `server_name`. The table holds path
+strings and one SNI name; file contents never cross the Rust boundary. The gate
+is presence-based: any `tls` table, even an empty one, arms the rules in this
+section. An `artemis` broker with a `tls` table is rejected at startup in this
+release (rc-c4fbo).
+
+Verification is always on. No knob skips certificate or hostname verification,
+and `socket.*` / `transport.*` URL options of that class are rejected before
+any factory is built. `server_name` changes the expected identity only: SNI
+and the peer host relabel to that DNS name, and chain and hostname
+verification stay on. `server_name` is a DNS name; startup rejects an IP
+literal.
+
+`broker-tls-v1` is the capability gate between the component and the bridge.
+The bridge advertises it in the startup Health call. Any `tls` table requires
+it. When the capability is absent, the component kills the bridge process and
+fails permanently with a config-class failure, without retry: the gate fails
+closed, and an older bridge that reports no capabilities fails it too. Without
+a `tls` table the gate does not fire.
+
+`BrokerFailureClass` is the stable diagnostic vocabulary the bridge reports
+for a failed connection attempt: `UNSPECIFIED`, `NETWORK`, `TLS_TRUST`,
+`TLS_HOSTNAME`, `TLS_CLIENT_AUTH`, `TLS_PROTOCOL`, `TLS_PLAINTEXT_PEER`,
+`UNSUPPORTED_TRANSPORT`, `AUTH`, `CLIENT_ID_IN_USE`, `OTHER`. The classes are
+diagnostics, not a retry matrix.
+
+The component passes the TLS material to the bridge spawn environment through
+the `BRIDGE_BROKER_TLS_*` contract: `BRIDGE_BROKER_TLS_CA_CERT_PATH`,
+`BRIDGE_BROKER_TLS_CLIENT_CERT_PATH`, `BRIDGE_BROKER_TLS_CLIENT_KEY_PATH`, and
+`BRIDGE_BROKER_TLS_SERVER_NAME`. They are component-derived, not operator
+inputs. Operational detail lives in `../../../docs/src/components/jms.md`.
+
 ## Broker-native precedence
 
 The bridge cap is terminal only when it fires before a provider or broker

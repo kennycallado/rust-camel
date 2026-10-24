@@ -20,6 +20,14 @@ the decision or crate that defines it.
   synthetic error-bearing Exchange through `send_and_wait`. The route error
   handler owns the operational signal. [Error handling](error-handling.md),
   [ADR-0012](../adr/0012-log-level-convention-handler-contract-boundaries.md).
+- **broker-tls-v1 capability** — version gate between the camel-jms component and its Java
+  bridge for per-broker TLS. The bridge advertises it in the startup Health call. Any broker
+  `tls` table, even an empty one, requires it; when the capability is absent, the component
+  kills the bridge and fails permanently (fail closed).
+  [Broker TLS](../components/jms.md#broker-tls).
+- **BrokerFailureClass** — stable diagnostic vocabulary the JMS bridge reports for a failed
+  connection attempt (`NETWORK`, `TLS_TRUST`, `TLS_HOSTNAME`, and siblings). Routes and
+  operators classify on the class, not on message text. [Broker TLS](../components/jms.md#broker-tls).
 - **Cache EIP** — DSL steps (`cache`, `cache_invalidate`, `cache_peek_stale`,
   `cache_clear`, `cache_stats`) that compile to `OutcomeSegment` services in
   camel-core. `cache` coalesces concurrent misses on one key.
