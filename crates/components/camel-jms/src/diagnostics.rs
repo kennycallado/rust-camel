@@ -21,11 +21,15 @@ use crate::config::redact_broker_url;
 pub(crate) const MISSING_BROKER_TLS_CAPABILITY: &str = "lacks broker-tls-v1; use the pinned bridge";
 
 /// Missing-capability clause for the message-selector gate (task 1.2). The
-/// surfaced message is `bridge {pinned_version} {MISSING_MESSAGE_SELECTOR_CAPABILITY}`
+/// surfaced message is `bridge {pinned_version} {missing_message_selector_capability()}`
 /// where `pinned_version` is `crate::BRIDGE_VERSION`, the build-pinned bridge
 /// version the call site substitutes (same shape as the TLS gate text).
-pub(crate) const MISSING_MESSAGE_SELECTOR_CAPABILITY: &str =
-    "lacks message-selector-v1; use a jms bridge >= 0.11.0";
+pub(crate) fn missing_message_selector_capability() -> String {
+    format!(
+        "lacks message-selector-v1; requires a jms bridge >= {}",
+        crate::BRIDGE_VERSION
+    )
+}
 
 /// Last broker failure observed from a bridge `Health` response (task 8.1).
 ///
@@ -85,7 +89,7 @@ pub(crate) fn ensure_selector_capability(
 ) -> Result<(), BridgeError> {
     if selector_required && !capabilities.iter().any(|c| c == "message-selector-v1") {
         return Err(BridgeError::PermanentFailure(format!(
-            "bridge {MISSING_MESSAGE_SELECTOR_CAPABILITY}"
+            "bridge {}", missing_message_selector_capability()
         )));
     }
     Ok(())
@@ -98,7 +102,7 @@ pub(crate) fn ensure_selector_capability(
 /// startup Health evidence and surfaces the error as its permanent
 /// (config-class) rejection. The text is the three-fragment diagnostic — the
 /// missing capability `message-selector-v1`, the required bridge version
-/// `0.11.0`, and the pinned bridge version the component was built for
+/// the required bridge version (same as the pinned one), and the pinned bridge version the component was built for
 /// (`crate::BRIDGE_VERSION`, the same substitution shape as the TLS startup
 /// text). Evidence is re-collected per launch, so a previous bridge instance
 /// never authorizes its replacement.
@@ -108,8 +112,9 @@ pub(crate) fn evaluate_startup_selector_gate(
 ) -> Result<(), BridgeError> {
     if selector_required && !capabilities.iter().any(|c| c == "message-selector-v1") {
         return Err(BridgeError::PermanentFailure(format!(
-            "bridge {} {MISSING_MESSAGE_SELECTOR_CAPABILITY}",
-            crate::BRIDGE_VERSION
+            "bridge {} {}",
+            crate::BRIDGE_VERSION,
+            missing_message_selector_capability()
         )));
     }
     Ok(())
@@ -305,7 +310,7 @@ mod tests {
             "gate error must name the missing capability: {text}"
         );
         assert!(
-            text.contains("0.11.0"),
+            text.contains(crate::BRIDGE_VERSION),
             "gate error must name the required bridge version: {text}"
         );
         assert!(

@@ -28,7 +28,7 @@ use crate::config::{
 };
 use crate::consumer::JmsConsumer;
 use crate::diagnostics::{
-    LastBrokerFailure, MISSING_BROKER_TLS_CAPABILITY, MISSING_MESSAGE_SELECTOR_CAPABILITY,
+    missing_message_selector_capability, LastBrokerFailure, MISSING_BROKER_TLS_CAPABILITY,
     ensure_selector_capability, ensure_tls_capability, evaluate_startup_selector_gate,
 };
 use crate::health::{
@@ -827,7 +827,7 @@ impl JmsBridgePool {
             Ok(Err(_)) | Err(_) => {
                 let reason = "could not verify message-selector support: bridge health RPC \
                      failed or timed out; the bridge must report capability \
-                     message-selector-v1 from a jms bridge >= 0.11.0"
+                     message-selector-v1 from the pinned jms bridge"
                     .to_string();
                 warn!(
                     "Bridge for '{}' cannot verify message-selector support; killed and parking slot.",
@@ -839,8 +839,9 @@ impl JmsBridgePool {
         };
         if ensure_selector_capability(&resp.capabilities, true).is_err() {
             let reason = format!(
-                "bridge {} {MISSING_MESSAGE_SELECTOR_CAPABILITY}",
-                self.bridge_version
+                "bridge {} {}",
+                self.bridge_version,
+                missing_message_selector_capability()
             );
             warn!(
                 "Bridge for '{}' lacks message-selector-v1; killed and parking slot.",
@@ -1208,7 +1209,9 @@ impl JmsBridgePool {
                                         slot.name
                                     );
                                     Some(format!(
-                                        "bridge {bridge_version} {MISSING_MESSAGE_SELECTOR_CAPABILITY}"
+                                        "bridge {} {}",
+                                        bridge_version,
+                                        missing_message_selector_capability()
                                     ))
                                 } else {
                                     None
@@ -5806,7 +5809,7 @@ mod tests {
             }
             Ok(_) => panic!("the replacement must be rejected at startup"),
         };
-        for needle in ["message-selector-v1", "0.11.0", crate::BRIDGE_VERSION] {
+        for needle in ["message-selector-v1", crate::BRIDGE_VERSION] {
             assert!(
                 reason.contains(needle),
                 "park reason must contain '{needle}': {reason}"

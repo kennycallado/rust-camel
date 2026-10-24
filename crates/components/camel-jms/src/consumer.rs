@@ -2764,7 +2764,7 @@ mod tests {
     /// Diagnostic contract (task 1.2): the park/error text names the missing
     /// capability, the required bridge version, and the pinned bridge version.
     fn assert_selector_park_text(text: &str) {
-        for needle in ["message-selector-v1", "0.11.0", crate::BRIDGE_VERSION] {
+        for needle in ["message-selector-v1", crate::BRIDGE_VERSION] {
             assert!(
                 text.contains(needle),
                 "text must contain '{needle}': {text}"
