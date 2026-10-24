@@ -81,18 +81,39 @@ pub async fn ensure_binary(version: &str, cache_dir: &Path) -> Result<PathBuf, B
     ensure_binary_for_spec(&JMS_BRIDGE, version, cache_dir).await
 }
 
+/// Platform-specific file name for a bridge binary (`{name}.exe` on Windows).
+fn binary_file_name(spec: &BridgeSpec) -> Cow<'_, str> {
+    if cfg!(target_os = "windows") {
+        Cow::Owned(format!("{}.exe", spec.name))
+    } else {
+        Cow::Borrowed(spec.name)
+    }
+}
+
+/// Documented workspace layout for a bridge build:
+/// `{root}/bridges/{dir}/build/native/{name}`. Pure path construction, no
+/// existence check — callers decide whether the file is present.
+fn workspace_binary_path_from(root: &Path, spec: &BridgeSpec) -> PathBuf {
+    root.join("bridges")
+        .join(bridge_dir_name(spec))
+        .join("build")
+        .join("native")
+        .join(binary_file_name(spec).as_ref())
+}
+
+/// Workspace build path for `spec`, or `None` when not running inside the
+/// rust-camel workspace.
+fn workspace_binary_path(spec: &BridgeSpec) -> Option<PathBuf> {
+    let root = find_workspace_root()?;
+    Some(workspace_binary_path_from(&root, spec))
+}
+
 /// Locate or download a bridge binary for the provided spec.
 pub async fn ensure_binary_for_spec(
     spec: &BridgeSpec,
     version: &str,
     cache_dir: &Path,
 ) -> Result<PathBuf, BridgeError> {
-    let binary_file_name = if cfg!(target_os = "windows") {
-        Cow::Owned(format!("{}.exe", spec.name))
-    } else {
-        Cow::Borrowed(spec.name)
-    };
-
     // Development override: use a local binary directly, skip download + verification.
     if let Ok(local_path) = std::env::var(spec.env_binary_path) {
         let path = PathBuf::from(&local_path);
@@ -111,14 +132,7 @@ pub async fn ensure_binary_for_spec(
     }
 
     // Step 2: auto-detect local build from `cargo xtask build-jms-bridge`
-    if let Some(workspace_root) = find_workspace_root() {
-        let bridge_dir = bridge_dir_name(spec);
-        let local_path = workspace_root
-            .join("bridges")
-            .join(bridge_dir)
-            .join("build")
-            .join("native")
-            .join(&*binary_file_name);
+    if let Some(local_path) = workspace_binary_path(spec) {
         if local_path.is_file() {
             tracing::debug!(
                 "Found local xtask build at {} — skipping download",
@@ -143,7 +157,7 @@ pub async fn ensure_binary_for_spec(
         .join(version)
         .join(tarball_dir)
         .join("bin")
-        .join(&*binary_file_name);
+        .join(binary_file_name(spec).as_ref());
     let hash_path = cache_dir.join(version).join(".binary.sha256");
     if bin_path.exists()
         && hash_path.exists()
@@ -433,18 +447,19 @@ fn bridge_dir_name(spec: &BridgeSpec) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::XML_BRIDGE;
+    use crate::spec::{CXF_BRIDGE, XML_BRIDGE};
 
     /// Remove the explicit binary override so `ensure_binary_for_spec` falls
     /// through to the cache and download logic under test.
     ///
     /// SAFETY: edition 2024 marks `remove_var` unsafe because concurrent env
     /// access is racy. Every writer in this module removes the same variable
-    /// (and, when needed, sets the same loopback release URL), so no test can
-    /// observe an inconsistent value. The miss-test assertions tolerate any
-    /// non-`CacheUnwritable` error, so ambient mutation cannot flake them.
-    fn neutralize_binary_override() {
-        unsafe { std::env::remove_var(XML_BRIDGE.env_binary_path) };
+    /// per spec (and, when needed, sets the same loopback release URL), so no
+    /// test can observe an inconsistent value. The miss-test assertions
+    /// tolerate any non-`CacheUnwritable` error, so ambient mutation cannot
+    /// flake them.
+    fn neutralize_binary_override(spec: &BridgeSpec) {
+        unsafe { std::env::remove_var(spec.env_binary_path) };
     }
 
     /// True when the developer's workspace has a prebuilt shared binary for
@@ -452,20 +467,7 @@ mod tests {
     /// check before reaching the code under test (mirrors the resolution
     /// order at the top of the function).
     fn workspace_binary_present(spec: &BridgeSpec) -> bool {
-        let Some(root) = find_workspace_root() else {
-            return false;
-        };
-        let name = if cfg!(target_os = "windows") {
-            format!("{}.exe", spec.name)
-        } else {
-            spec.name.to_string()
-        };
-        root.join("bridges")
-            .join(bridge_dir_name(spec))
-            .join("build")
-            .join("native")
-            .join(name)
-            .is_file()
+        workspace_binary_path(spec).is_some_and(|p| p.is_file())
     }
 
     /// Point the release URL at a loopback port so a cache miss never contacts
@@ -475,9 +477,9 @@ mod tests {
     /// The override deliberately leaks for the rest of the test process: no
     /// other test in this binary reads the ambient release URL (they pass
     /// overrides as parameters), and same-value writes are benign.
-    fn set_loopback_release_url() {
+    fn set_loopback_release_url(spec: &BridgeSpec) {
         // SAFETY: see `neutralize_binary_override` — same-value writes only.
-        unsafe { std::env::set_var(XML_BRIDGE.env_release_url, "http://127.0.0.1:9") };
+        unsafe { std::env::set_var(spec.env_release_url, "http://127.0.0.1:9") };
     }
 
     #[tokio::test]
@@ -485,7 +487,7 @@ mod tests {
     async fn unwritable_cache_dir_yields_cache_unwritable_before_download() {
         use std::os::unix::fs::PermissionsExt;
 
-        neutralize_binary_override();
+        neutralize_binary_override(&XML_BRIDGE);
         if workspace_binary_present(&XML_BRIDGE) {
             return;
         }
@@ -506,7 +508,7 @@ mod tests {
             return;
         }
 
-        set_loopback_release_url();
+        set_loopback_release_url(&XML_BRIDGE);
 
         let result = ensure_binary_for_spec(&XML_BRIDGE, "0.0.0-test", &subdir).await;
 
@@ -526,7 +528,7 @@ mod tests {
     async fn verified_cache_hit_succeeds_without_write_probe() {
         use std::os::unix::fs::PermissionsExt;
 
-        neutralize_binary_override();
+        neutralize_binary_override(&XML_BRIDGE);
         if workspace_binary_present(&XML_BRIDGE) {
             return;
         }
@@ -565,13 +567,13 @@ mod tests {
 
     #[tokio::test]
     async fn writable_cache_miss_does_not_report_cache_unwritable() {
-        neutralize_binary_override();
+        neutralize_binary_override(&XML_BRIDGE);
         if workspace_binary_present(&XML_BRIDGE) {
             return;
         }
 
         let dir = tempfile::TempDir::new().expect("create temp dir");
-        set_loopback_release_url();
+        set_loopback_release_url(&XML_BRIDGE);
 
         let err = ensure_binary_for_spec(&XML_BRIDGE, "0.0.0-test", dir.path())
             .await
@@ -580,6 +582,145 @@ mod tests {
         assert!(
             !matches!(err, BridgeError::CacheUnwritable { .. }),
             "writable cache must not be reported as unwritable, got: {err:?}"
+        );
+    }
+
+    /// Removes the seeded dummy binary and any directories this test created.
+    /// `cleanup` runs before the assertion and again from `Drop`, so a failing
+    /// assertion cannot leak an unbuilt placeholder into the checkout.
+    struct SeededWorkspaceArtifacts {
+        file: Option<PathBuf>,
+        /// Created directories, outermost first; removed bottom-up.
+        dirs: Vec<PathBuf>,
+    }
+
+    impl SeededWorkspaceArtifacts {
+        fn cleanup(&mut self) {
+            if let Some(file) = self.file.take() {
+                let _ = std::fs::remove_file(file);
+            }
+            // Bottom-up: `remove_dir` refuses non-empty dirs, so pre-existing
+            // developer content is never touched.
+            while let Some(dir) = self.dirs.pop() {
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
+    }
+
+    impl Drop for SeededWorkspaceArtifacts {
+        fn drop(&mut self) {
+            self.cleanup();
+        }
+    }
+
+    fn is_read_only_error(err: &std::io::Error) -> bool {
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+        )
+    }
+
+    /// Independent oracle for the documented workspace layout. The expected
+    /// path is rebuilt here from local literals, without calling any of the
+    /// production helpers, so helper drift turns this test red.
+    #[test]
+    fn workspace_binary_path_matches_documented_layout() {
+        let root = tempfile::TempDir::new().expect("create temp dir");
+
+        for spec in [&JMS_BRIDGE, &XML_BRIDGE, &CXF_BRIDGE] {
+            let dir = spec.name.strip_suffix("-bridge").unwrap();
+            let expected_name = if cfg!(target_os = "windows") {
+                format!("{}.exe", spec.name)
+            } else {
+                spec.name.to_string()
+            };
+            let expected = root
+                .path()
+                .join("bridges")
+                .join(dir)
+                .join("build")
+                .join("native")
+                .join(expected_name);
+
+            assert_eq!(
+                workspace_binary_path_from(root.path(), spec),
+                expected,
+                "documented workspace layout drifted for {}",
+                spec.name
+            );
+        }
+    }
+
+    /// Wiring guard: production must resolve a binary seeded at the shared
+    /// workspace-layout path. The seed uses the helper (so this test stays
+    /// green under helper drift); `workspace_binary_path_matches_documented_layout`
+    /// is the independent oracle for the layout itself.
+    #[tokio::test]
+    async fn ensure_binary_uses_workspace_layout() {
+        neutralize_binary_override(&CXF_BRIDGE);
+        set_loopback_release_url(&CXF_BRIDGE);
+
+        let cache = tempfile::TempDir::new().expect("create temp dir");
+        let target = workspace_binary_path(&CXF_BRIDGE)
+            .expect("repo tree always satisfies the bridges/ sentinel");
+
+        let mut artifacts = SeededWorkspaceArtifacts {
+            file: None,
+            dirs: Vec::new(),
+        };
+
+        if !target.is_file() {
+            let native = target.parent().expect("binary has a parent").to_path_buf();
+            let build = native.parent().expect("native has a parent").to_path_buf();
+            let bridge = build.parent().expect("build has a parent").to_path_buf();
+            for dir in [&bridge, &build, &native] {
+                if dir.exists() {
+                    continue;
+                }
+                match std::fs::create_dir_all(dir) {
+                    Ok(()) => artifacts.dirs.push(dir.clone()),
+                    Err(e) if is_read_only_error(&e) => {
+                        eprintln!("SKIP: checkout not writable: {e}");
+                        return;
+                    }
+                    Err(e) => panic!("create {}: {e}", dir.display()),
+                }
+            }
+
+            let mut options = std::fs::File::options();
+            options.write(true).create_new(true);
+            match options.open(&target) {
+                Ok(mut file) => {
+                    // Register ownership before the fallible write: a write
+                    // panic must not leak a partial placeholder into the tree.
+                    artifacts.file = Some(target.clone());
+                    use std::io::Write;
+                    file.write_all(b"dummy-cxf-bridge")
+                        .expect("seed dummy workspace binary");
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    assert!(
+                        target.is_file(),
+                        "{} exists but is not a regular file",
+                        target.display()
+                    );
+                }
+                Err(e) if is_read_only_error(&e) => {
+                    eprintln!("SKIP: checkout not writable: {e}");
+                    return;
+                }
+                Err(e) => panic!("seed {}: {e}", target.display()),
+            }
+        }
+
+        let result = ensure_binary_for_spec(&CXF_BRIDGE, "0.0.0-test", cache.path()).await;
+
+        // Clean up before asserting so a failing assertion cannot leak.
+        artifacts.cleanup();
+
+        assert_eq!(
+            result.expect("production must resolve the seeded workspace binary"),
+            target
         );
     }
 
