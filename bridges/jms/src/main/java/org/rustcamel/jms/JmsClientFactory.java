@@ -3,17 +3,23 @@ package org.rustcamel.jms;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.jms.Connection;
 import javax.jms.ConnectionFactory;
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.TrustManager;
 import org.apache.activemq.ActiveMQConnectionFactory;
 import org.apache.activemq.artemis.api.core.TransportConfiguration;
 import org.apache.activemq.artemis.core.remoting.impl.netty.NettyConnectorFactory;
@@ -24,11 +30,14 @@ import org.apache.activemq.transport.TransportFactory;
 import org.apache.activemq.transport.tcp.TcpTransportFactory;
 import org.apache.activemq.util.FactoryFinder;
 import org.apache.activemq.util.URISupport;
+import org.jboss.logging.Logger;
 import org.messaginghub.pooled.jms.JmsPoolConnectionFactory;
 
 @ApplicationScoped
 public class JmsClientFactory {
   @Inject BridgeConfig config;
+
+  private static final Logger LOG = Logger.getLogger(JmsClientFactory.class);
 
   // Broker-facing TLS material contract (PKCS12, operator-provided). Distinct
   // from the IPC mTLS PEM pair used for gRPC transport security.
@@ -36,7 +45,33 @@ public class JmsClientFactory {
   private static final String TRUSTSTORE_PATH_ENV = "BRIDGE_BROKER_TRUSTSTORE_PATH";
   private static final String KEYSTORE_PASSWORD_ENV = "BRIDGE_BROKER_KEYSTORE_PASSWORD";
 
+  // Broker-facing TLS PEM material contract (task 5.1): CA bundle, optional client identity pair,
+  // and the broker identity name for SNI/endpoint-identification binding.
+  private static final String BROKER_TLS_CA_CERT_PATH_ENV = "BRIDGE_BROKER_TLS_CA_CERT_PATH";
+  private static final String BROKER_TLS_CLIENT_CERT_PATH_ENV =
+      "BRIDGE_BROKER_TLS_CLIENT_CERT_PATH";
+  private static final String BROKER_TLS_CLIENT_KEY_PATH_ENV = "BRIDGE_BROKER_TLS_CLIENT_KEY_PATH";
+  private static final String BROKER_TLS_SERVER_NAME_ENV = "BRIDGE_BROKER_TLS_SERVER_NAME";
+
   private static final AtomicBoolean NATIVE_INIT_DONE = new AtomicBoolean(false);
+  private static final AtomicBoolean TRANSPORTS_REGISTERED = new AtomicBoolean(false);
+
+  /**
+   * Native-safe FactoryFinder service map. Promoted from the local in {@link
+   * #initNativeImageWorkarounds} (identical contents, behavior-preserving) so tests can read it
+   * through {@link #knownServices()}.
+   */
+  private static final Map<String, java.util.function.Supplier<Object>> KNOWN_SERVICES =
+      new ConcurrentHashMap<>();
+
+  /**
+   * Broker-URL redaction key substrings, mirroring Rust {@code BROKER_SENSITIVE_KEY_SUBSTRINGS}
+   * ({@code crates/components/camel-jms/src/config.rs}): a query pair whose lowercased key contains
+   * any of these renders as {@code key=<redacted>}.
+   */
+  private static final String[] REDACTED_QUERY_KEY_SUBSTRINGS = {
+    "password", "passwd", "secret", "credential", "token", "username", "user"
+  };
 
   private volatile ConnectionFactory factory;
   // Raw (non-pooled) factory kept for long-lived consumer connections.
@@ -191,8 +226,50 @@ public class JmsClientFactory {
   // Package-private (not private) so JmsClientFactoryPrefixTest can exercise the effective prefix;
   // mirrors the existing transportConfig testability seam.
   static ActiveMQConnectionFactory buildActiveMqFactory(String url, String user, String pass) {
+    return buildActiveMqFactory(url, user, pass, readBrokerTlsEnv());
+  }
+
+  /**
+   * Factory selection by URL transport security (task 5.1), with explicit TLS env values as the
+   * testability seam ({@link System#getenv} is immutable in tests). When the URL — composite
+   * members included — has an {@code ssl} member the result is always a {@link
+   * BridgeActiveMqConnectionFactory}, in pinned-material mode when TLS env is present (CA or client
+   * pair or both) and in platform-trust mode otherwise; that single class is what makes the
+   * composite downgrade guard class-wide. Anything else keeps the plain {@link
+   * ActiveMQConnectionFactory} exactly as before.
+   */
+  static ActiveMQConnectionFactory buildActiveMqFactory(
+      String url, String user, String pass, BrokerTlsEnv tlsEnv) {
+    rejectTlsStoreUrlOptions(url);
     initNativeImageWorkarounds();
-    ActiveMQConnectionFactory cf = new ActiveMQConnectionFactory(url);
+    verifySchemesResolvable(url);
+    ActiveMQConnectionFactory cf;
+    if (urlHasSslMember(url)) {
+      KeyManager[] km = null;
+      TrustManager[] tm = null;
+      if (tlsEnv.anyPresent()) {
+        // TM from the CA path, or the platform default trust store when the CA path is null;
+        // KM only when the client cert+key pair is present.
+        tm = BrokerTlsMaterial.buildTrustManagers(tlsEnv.caCertPath());
+        if (tlsEnv.hasClientPair()) {
+          km = BrokerTlsMaterial.buildKeyManagers(tlsEnv.clientCertPath(), tlsEnv.clientKeyPath());
+        } else if (tlsEnv.clientCertPath() != null || tlsEnv.clientKeyPath() != null) {
+          throw new IllegalStateException(
+              "TLS client identity needs both "
+                  + BROKER_TLS_CLIENT_CERT_PATH_ENV
+                  + " and "
+                  + BROKER_TLS_CLIENT_KEY_PATH_ENV);
+        }
+        LOG.info("broker TLS material configured (pinned PEM material)");
+      } else {
+        LOG.info(
+            "broker TLS env not set: platform default trust, no client identity"
+                + " (composite downgrade guard still active)");
+      }
+      cf = new BridgeActiveMqConnectionFactory(url, km, tm, tlsEnv.serverName());
+    } else {
+      cf = new ActiveMQConnectionFactory(url);
+    }
     // Keep connection and client IDs unique across processes even if the native-image IdGenerator
     // run-time initialization setting is lost (rc-trxge). An explicit jms.connectionIDPrefix /
     // jms.clientIDPrefix is preserved as the base and the per-process token is appended; without
@@ -210,6 +287,62 @@ public class JmsClientFactory {
     if (user != null) cf.setUserName(user);
     if (pass != null) cf.setPassword(pass);
     return cf;
+  }
+
+  /**
+   * Rejects {@code jms.*} TLS-store URL options (task 6.1): ActiveMQ's bean-setting applies {@code
+   * jms.trustStore}/{@code jms.keyStore} (and password/type variants) to the connection factory
+   * superclass, whose {@code createTransport()} then rebuilds the TLS managers from those stores —
+   * overriding the tls-table PEM pinning (expert-reproduced: pinned issuer count 1 -&gt; 111 with
+   * JDK cacerts). TLS material comes only from the tls table. The rejected option NAME is decoded
+   * via {@link URISupport#parseParameters(URI)} and echoed; the option value never is.
+   */
+  private static void rejectTlsStoreUrlOptions(String url) {
+    Map<String, String> params;
+    try {
+      params = URISupport.parseParameters(URI.create(url));
+    } catch (URISyntaxException e) {
+      // Nominally unreachable: the ActiveMQConnectionFactory constructor parses the same URL first.
+      // Never echo the raw URL — it can carry jms.password or other credentials. Preserve the
+      // cause.
+      throw new IllegalArgumentException("Invalid broker URL query options", e);
+    }
+    for (String name : params.keySet()) {
+      String lower = name.toLowerCase(Locale.ROOT);
+      if (lower.startsWith("jms.")
+          && (lower.contains("truststore") || lower.contains("keystore"))) {
+        throw new IllegalStateException(
+            "UNSUPPORTED_TRANSPORT: jms TLS-store setting "
+                + name
+                + " rejected; TLS material comes only from the tls table");
+      }
+    }
+  }
+
+  /**
+   * Broker TLS env contract (PEM material + identity binding), read once per factory build. The
+   * explicit-values {@code buildActiveMqFactory} overload is the testability seam for it — {@link
+   * System#getenv} is process-immutable.
+   */
+  record BrokerTlsEnv(
+      String caCertPath, String clientCertPath, String clientKeyPath, String serverName) {
+    boolean hasClientPair() {
+      return clientCertPath != null && clientKeyPath != null;
+    }
+
+    /** CA path or any client identity value present — the pinned-material branch. */
+    boolean anyPresent() {
+      return caCertPath != null || clientCertPath != null || clientKeyPath != null;
+    }
+  }
+
+  /** Single env read point for the broker TLS PEM contract (package-visible indirection). */
+  static BrokerTlsEnv readBrokerTlsEnv() {
+    return new BrokerTlsEnv(
+        System.getenv(BROKER_TLS_CA_CERT_PATH_ENV),
+        System.getenv(BROKER_TLS_CLIENT_CERT_PATH_ENV),
+        System.getenv(BROKER_TLS_CLIENT_KEY_PATH_ENV),
+        System.getenv(BROKER_TLS_SERVER_NAME_ENV));
   }
 
   /**
@@ -484,10 +617,11 @@ public class JmsClientFactory {
     // Register TCP transport factory eagerly (bypass TRANSPORT_FACTORY_FINDER)
     TransportFactory.registerTransportFactory("tcp", new TcpTransportFactory());
 
+    registerTransportFactories();
+
     // Replace FactoryFinder's ObjectFactory with a native-safe version
     final FactoryFinder.ObjectFactory originalFactory = FactoryFinder.getObjectFactory();
-    final Map<String, java.util.function.Supplier<Object>> knownServices =
-        new ConcurrentHashMap<>();
+    final Map<String, java.util.function.Supplier<Object>> knownServices = KNOWN_SERVICES;
 
     // Wire format factories
     knownServices.put(
@@ -511,6 +645,320 @@ public class JmsClientFactory {
           }
           return originalFactory.create(path);
         });
+  }
+
+  /**
+   * Eager transport registrations shared by {@link #initNativeImageWorkarounds} and tests (task
+   * 4.1). Idempotent: guarded so repeated calls never double-register. Registers the bridge-owned
+   * {@code ssl} factory next to {@code tcp} and lists its FactoryFinder service path so native
+   * resolution needs no reflective fallback.
+   */
+  static void registerTransportFactories() {
+    if (!TRANSPORTS_REGISTERED.compareAndSet(false, true)) return;
+    TransportFactory.registerTransportFactory("ssl", new CamelSslTransportFactory());
+    KNOWN_SERVICES.put(
+        "META-INF/services/org/apache/activemq/transport/ssl", CamelSslTransportFactory::new);
+  }
+
+  /** Package-visible accessor for the native-safe FactoryFinder service map (tests). */
+  static Map<String, java.util.function.Supplier<Object>> knownServices() {
+    return KNOWN_SERVICES;
+  }
+
+  /**
+   * Startup self-check (task 4.1): every scheme in {@code brokerUrl} must resolve to a registered
+   * transport factory before any connect attempt. Member parsing mirrors Rust {@code
+   * composite_members}/{@code url_scheme} ({@code config.rs}): {@code failover://member?opts} keeps
+   * its query on the member, {@code failover:(m1,m2)?opts} yields the top-level comma-split list,
+   * and a plain {@code scheme://…} URL yields itself. An unresolvable scheme aborts startup with
+   * {@code UNSUPPORTED_TRANSPORT} and the redacted URL — credentials never echo.
+   */
+  static void verifySchemesResolvable(String brokerUrl) {
+    String redacted = redactUrl(brokerUrl);
+    for (String member : compositeMembers(brokerUrl)) {
+      String scheme = memberScheme(member);
+      try {
+        TransportFactory.findTransportFactory(new URI(member));
+      } catch (IOException | URISyntaxException e) {
+        throw new IllegalStateException(
+            "UNSUPPORTED_TRANSPORT: no transport factory for scheme "
+                + (scheme == null ? "<none>" : scheme)
+                + " in "
+                + redacted);
+      }
+    }
+  }
+
+  /**
+   * Members of a broker URL, verbatim (never rewritten): {@code failover://member?opts} yields the
+   * prefix-stripped member, {@code failover:(m1,m2)?opts} yields the parenthesized list split on
+   * top-level commas, and a plain URL yields itself. An empty or malformed member list yields an
+   * empty list (a validation error at the call site).
+   */
+  private static List<String> compositeMembers(String brokerUrl) {
+    String url = brokerUrl == null ? "" : brokerUrl.trim();
+    if (!url.startsWith("failover:")) {
+      return url.isEmpty() ? List.of() : List.of(url);
+    }
+    String after = url.substring("failover:".length());
+    if (after.startsWith("//")) {
+      after = after.substring(2);
+    }
+    after = after.stripLeading();
+    if (!after.startsWith("(")) {
+      String tail = after.trim();
+      return tail.isEmpty() ? List.of() : List.of(tail);
+    }
+    String inner = after.substring(1);
+    int close = -1;
+    int depth = 1;
+    for (int i = 0; i < inner.length(); i++) {
+      char c = inner.charAt(i);
+      if (c == '(') {
+        depth++;
+      } else if (c == ')') {
+        depth--;
+        if (depth == 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    if (close < 0) {
+      return List.of();
+    }
+    return splitTopLevelMembers(inner.substring(0, close));
+  }
+
+  /** Splits a composite member list on top-level commas, trimming and dropping empty members. */
+  private static List<String> splitTopLevelMembers(String list) {
+    List<String> members = new ArrayList<>();
+    int start = 0;
+    int nested = 0;
+    for (int i = 0; i < list.length(); i++) {
+      char c = list.charAt(i);
+      if (c == '(') {
+        nested++;
+      } else if (c == ')') {
+        nested = Math.max(0, nested - 1);
+      } else if (c == ',' && nested == 0) {
+        members.add(list.substring(start, i).trim());
+        start = i + 1;
+      }
+    }
+    members.add(list.substring(start).trim());
+    members.removeIf(String::isEmpty);
+    return members;
+  }
+
+  /**
+   * Transport scheme of a broker URL or composite member, mirroring Rust {@code url_scheme}: the
+   * text before the first {@code ://}; the parenthesized failover form {@code failover:(...)} has
+   * no {@code ://} boundary for its list, so {@code (} terminates the scheme and it yields {@code
+   * failover} (otherwise it would read {@code failover:(ssl}). Returns {@code null} for schemeless
+   * members.
+   */
+  private static String memberScheme(String member) {
+    String url = member.trim();
+    if (url.startsWith("failover:(")) {
+      return "failover";
+    }
+    int sep = url.indexOf("://");
+    if (sep < 0) {
+      return null;
+    }
+    String scheme = url.substring(0, sep).trim();
+    return scheme.isEmpty() ? null : scheme;
+  }
+
+  /**
+   * Whether the broker URL — composite members included — has an {@code ssl} member (task 5.1 TLS
+   * seam selection and {@link BridgeActiveMqConnectionFactory}'s downgrade guard): the same
+   * member-splitting logic as {@link #verifySchemesResolvable}.
+   */
+  static boolean urlHasSslMember(String brokerUrl) {
+    for (String member : compositeMembers(brokerUrl)) {
+      if ("ssl".equalsIgnoreCase(memberScheme(member))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Redacts a broker URL for diagnostics, mirroring Rust {@code redact_broker_url} ({@code
+   * config.rs}, the {@code camel_api::redact} contract): userinfo masked as {@code ***@} through
+   * the last {@code @} of every authority window, sensitive query pairs rendered as {@code
+   * key=<redacted>}, fragment dropped as {@code #[redacted]}, capped at 256 chars. The same policy
+   * as {@link HeaderPolicy}'s credential substrings — over-masking is safe, under-masking is not.
+   */
+  private static String redactUrl(String raw) {
+    if (isCompositeUrl(raw)) {
+      return redactCompositeUrl(raw);
+    }
+    return redactSingleUrl(raw);
+  }
+
+  /**
+   * Whether {@code raw} is the parenthesized composite form ({@code failover:(m1,m2)}) whose
+   * members need independent redaction: a single-member pass would split at the first {@code ?} and
+   * miss userinfo in later members.
+   */
+  private static boolean isCompositeUrl(String raw) {
+    String url = raw == null ? "" : raw.trim();
+    if (!url.startsWith("failover:")) {
+      return false;
+    }
+    String after = url.substring("failover:".length());
+    if (after.startsWith("//")) {
+      after = after.substring(2);
+    }
+    return after.stripLeading().startsWith("(");
+  }
+
+  /**
+   * Redacts each member of a parenthesized composite independently (recursively, so nested
+   * composites are covered) and reassembles the wrapper with any trailing options redacted.
+   */
+  private static String redactCompositeUrl(String raw) {
+    int open = raw.indexOf('(');
+    if (open < 0) {
+      return redactSingleUrl(raw);
+    }
+    int close = -1;
+    int depth = 0;
+    for (int i = open; i < raw.length(); i++) {
+      char c = raw.charAt(i);
+      if (c == '(') {
+        depth++;
+      } else if (c == ')') {
+        depth--;
+        if (depth == 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    if (close < 0) {
+      return redactSingleUrl(raw);
+    }
+    StringBuilder out = new StringBuilder(raw.substring(0, open + 1));
+    List<String> members = splitTopLevelMembers(raw.substring(open + 1, close));
+    for (int i = 0; i < members.size(); i++) {
+      if (i > 0) {
+        out.append(',');
+      }
+      out.append(redactUrl(members.get(i)));
+    }
+    out.append(')');
+    String suffix = raw.substring(close + 1);
+    if (!suffix.isEmpty()) {
+      out.append(redactSingleUrl(suffix));
+    }
+    return cap(out.toString());
+  }
+
+  /**
+   * Single-member redaction: fragments dropped, userinfo masked in every {@code
+   * scheme://user:pass@} authority window (including windows in query values), sensitive query keys
+   * as {@code key=<redacted>}, capped at 256 chars.
+   */
+  private static String redactSingleUrl(String raw) {
+    String body = raw;
+    String fragment = "";
+    int hash = body.indexOf('#');
+    if (hash >= 0) {
+      fragment = "#[redacted]";
+      body = body.substring(0, hash);
+    }
+    body = maskUserinfo(body);
+    int queryAt = body.indexOf('?');
+    String base = queryAt >= 0 ? body.substring(0, queryAt) : body;
+    String query = queryAt >= 0 ? body.substring(queryAt + 1) : "";
+    String redacted = base + (query.isEmpty() ? "" : "?" + redactQuery(query)) + fragment;
+    return cap(redacted);
+  }
+
+  private static String cap(String redacted) {
+    if (redacted.length() > 256) {
+      return redacted.substring(0, Character.isHighSurrogate(redacted.charAt(255)) ? 255 : 256);
+    }
+    return redacted;
+  }
+
+  /**
+   * Masks userinfo of every authority window as {@code ***@}: a window opens after a run of two or
+   * more slashes and ends at the next {@code /}, {@code ?}, {@code #}, or end of input; the bytes
+   * from window start through the LAST {@code @} are replaced (over-masking is safe).
+   */
+  private static String maskUserinfo(String base) {
+    StringBuilder out = new StringBuilder();
+    int pos = 0;
+    while (pos < base.length()) {
+      char c = base.charAt(pos);
+      if (c != '/') {
+        out.append(c);
+        pos++;
+        continue;
+      }
+      int run = pos;
+      while (run < base.length() && base.charAt(run) == '/') {
+        run++;
+      }
+      int slashes = run - pos;
+      out.append(base, pos, run);
+      pos = run;
+      if (slashes < 2) {
+        continue;
+      }
+      int windowEnd = pos;
+      while (windowEnd < base.length()
+          && base.charAt(windowEnd) != '/'
+          && base.charAt(windowEnd) != '?'
+          && base.charAt(windowEnd) != '#') {
+        windowEnd++;
+      }
+      String window = base.substring(pos, windowEnd);
+      int at = window.lastIndexOf('@');
+      if (at >= 0) {
+        out.append("***@").append(window.substring(at + 1));
+      } else {
+        out.append(window);
+      }
+      pos = windowEnd;
+    }
+    return out.toString();
+  }
+
+  /**
+   * Renders a query string with sensitive pairs redacted as {@code key=<redacted>}: the key bytes
+   * themselves can embed a secret, but the pair position (including {@code jms.*} keys) stays
+   * visible so transport policy remains diagnosable, mirroring Rust {@code redact_broker_url}.
+   */
+  private static String redactQuery(String query) {
+    String[] pairs = query.split("&", -1);
+    StringBuilder out = new StringBuilder();
+    for (int i = 0; i < pairs.length; i++) {
+      if (i > 0) {
+        out.append('&');
+      }
+      String pair = pairs[i];
+      int eq = pair.indexOf('=');
+      String key = eq >= 0 ? pair.substring(0, eq) : pair;
+      out.append(isSensitiveQueryKey(key) ? key + "=<redacted>" : pair);
+    }
+    return out.toString();
+  }
+
+  /** Whether a query key matches the {@link #REDACTED_QUERY_KEY_SUBSTRINGS} policy. */
+  private static boolean isSensitiveQueryKey(String key) {
+    String lower = key.toLowerCase(Locale.ROOT);
+    for (String needle : REDACTED_QUERY_KEY_SUBSTRINGS) {
+      if (lower.contains(needle)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   @PreDestroy

@@ -18,6 +18,7 @@ use crate::component::{
     bridge_service_client, is_bridge_transport_error, parked_operator_error,
 };
 use crate::config::{DestinationType, ExchangePattern, JmsEndpointConfig, JmsTransactionMode};
+use crate::diagnostics::render_failure_message;
 use crate::headers::apply_jms_headers;
 use crate::proto::{CompletionOutcome, CompletionRequest, JmsMessage, SubscribeRequest};
 
@@ -189,6 +190,40 @@ fn permanent_destination_error(
          '{destination}' (gRPC {:?}): {OPERATOR_REPAIR_HINT}",
         status.code()
     ))
+}
+
+/// Builds the broker-connection failure detail for the consumer error path
+/// (task 8.1).
+///
+/// Reads the last classified broker failure from the broker handle — the same
+/// [`crate::component::BridgeSlot`] the consumer already reaches for broker
+/// identity. When the bridge reported a class other than UNSPECIFIED, the
+/// detail is the LOCAL rendering of that class ([`render_failure_message`])
+/// instead of any remote message, preserving the never-echo-remote-text policy
+/// above. When no class is on record, the caller's `fallback` is returned
+/// unchanged: retry classification keys on the caller's error prefix and is
+/// unaffected by which detail the message carries.
+pub(crate) fn connection_failure_detail(
+    pool: &JmsBridgePool,
+    broker_name: &str,
+    fallback: &str,
+) -> String {
+    let classified = pool.slots.get(broker_name).and_then(|slot| {
+        let last = slot
+            .last_broker_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        last.clone()
+    });
+    match classified {
+        Some(failure) if failure.failure_class != 0 => render_failure_message(
+            failure.failure_class,
+            broker_name,
+            &failure.expected_identity,
+            &failure.connected_host,
+        ),
+        _ => fallback.to_string(),
+    }
 }
 
 /// Typed outcome of a failed [`await_ready_channel`], preserving the
@@ -552,8 +587,13 @@ async fn consumer_loop(
                         &status,
                     ));
                 }
+                // Task 8.1: when the broker handle carries a classified
+                // connection failure, the detail is the local rendering (never
+                // the remote status text). The transport prefix is preserved,
+                // so retry classification is unchanged.
                 let e = CamelError::ProcessorError(format!(
-                    "{BRIDGE_TRANSPORT_ERROR_PREFIX}subscribe error: {status}"
+                    "{BRIDGE_TRANSPORT_ERROR_PREFIX}subscribe error: {}",
+                    connection_failure_detail(pool, broker_name, &status.to_string())
                 ));
                 if is_bridge_transport_error(&e) {
                     consecutive_transport_failures += 1;
@@ -803,8 +843,13 @@ async fn consumer_loop(
                                     &status,
                                 ));
                             }
+                            // Task 8.1: same local rendering as the
+                            // subscribe site — a classified connection
+                            // failure replaces the remote status detail; the
+                            // transport prefix keeps the retry classification.
                             let subscribe_err = CamelError::ProcessorError(format!(
-                                "{BRIDGE_TRANSPORT_ERROR_PREFIX}subscribe error: {status}"
+                                "{BRIDGE_TRANSPORT_ERROR_PREFIX}subscribe error: {}",
+                                connection_failure_detail(pool, broker_name, &status.to_string())
                             ));
                             if is_bridge_transport_error(&subscribe_err) {
                                 consecutive_transport_failures += 1;
@@ -1266,6 +1311,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -1312,6 +1358,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -1371,6 +1418,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         // Retain the Arc so the test can reach state_tx/state_rx after the pool
         // is moved into the consumer (matches the component.rs slot fixtures).
@@ -1647,6 +1695,7 @@ mod tests {
                         broker_type: BrokerType::ActiveMq,
                         username: None,
                         password: None,
+                        tls: None,
                     },
                 )]),
                 bridge_start_timeout_ms: 100,
@@ -1788,6 +1837,7 @@ mod tests {
                 message: "ok".to_string(),
                 status: 0,
                 age_ms: 0,
+                ..Default::default()
             }))
         }
 
@@ -1865,6 +1915,7 @@ mod tests {
                 message: "ok".to_string(),
                 status: 0,
                 age_ms: 0,
+                ..Default::default()
             }))
         }
 
@@ -2009,6 +2060,7 @@ mod tests {
                 message: "ok".to_string(),
                 status: 0,
                 age_ms: 0,
+                ..Default::default()
             }))
         }
 
@@ -2127,6 +2179,7 @@ mod tests {
                 message: "ok".to_string(),
                 status: 0,
                 age_ms: 0,
+                ..Default::default()
             }))
         }
 
@@ -2218,6 +2271,7 @@ mod tests {
                 message: "ok".to_string(),
                 status: 0,
                 age_ms: 0,
+                ..Default::default()
             }))
         }
 
@@ -2296,6 +2350,7 @@ mod tests {
                 message: "ok".to_string(),
                 status: 0,
                 age_ms: 0,
+                ..Default::default()
             }))
         }
 
@@ -2381,6 +2436,7 @@ mod tests {
                 message: "ok".to_string(),
                 status: 0,
                 age_ms: 0,
+                ..Default::default()
             }))
         }
 
@@ -2453,6 +2509,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -2588,6 +2645,7 @@ mod tests {
                 message: "ok".to_string(),
                 status: 0,
                 age_ms: 0,
+                ..Default::default()
             }))
         }
 
@@ -2683,6 +2741,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), slot);
         pool
@@ -2711,6 +2770,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), slot);
         pool
@@ -2740,6 +2800,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         })
     }
 
@@ -2759,6 +2820,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(Some(process))),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
         slot
@@ -4105,6 +4167,7 @@ mod tests {
                 message: "ok".to_string(),
                 status: 0,
                 age_ms: 0,
+                ..Default::default()
             }))
         }
 

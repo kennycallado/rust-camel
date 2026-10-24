@@ -442,7 +442,35 @@ mod tests {
     use crate::BrokerType;
     use crate::component::BridgeSlot;
     use crate::config::JmsPoolConfig;
-    use crate::proto::HealthStatus as ProtoHealthStatus;
+    use crate::proto::{BrokerFailureClass, HealthResponse, HealthStatus as ProtoHealthStatus};
+
+    /// Task 3.1: the additive wire fields exist on the generated type, round
+    /// trip through prost, and default to "no capabilities / unspecified".
+    #[test]
+    fn health_response_new_fields_compile() {
+        use prost::Message;
+
+        let response = HealthResponse {
+            capabilities: vec!["broker-tls-v1".to_string()],
+            failure_class: BrokerFailureClass::TlsHostname as i32,
+            ..Default::default()
+        };
+        let encoded = response.encode_to_vec();
+        let decoded =
+            HealthResponse::decode(encoded.as_slice()).expect("health response must decode");
+        assert_eq!(decoded.capabilities, vec!["broker-tls-v1".to_string()]);
+        assert_eq!(
+            decoded.failure_class,
+            BrokerFailureClass::TlsHostname as i32
+        );
+
+        let default = HealthResponse::default();
+        assert!(default.capabilities.is_empty());
+        assert_eq!(
+            default.failure_class,
+            BrokerFailureClass::Unspecified as i32
+        );
+    }
 
     struct MockHealthProbe {
         responder: Arc<dyn Fn() -> HealthFuture + Send + Sync>,
@@ -699,6 +727,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert(broker.to_string(), Arc::clone(&slot));
         (pool, slot)

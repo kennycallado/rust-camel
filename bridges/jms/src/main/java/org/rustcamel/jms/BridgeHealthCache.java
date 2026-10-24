@@ -139,6 +139,11 @@ public final class BridgeHealthCache {
     return state.get().generation();
   }
 
+  /** Classification of the probe's last connect-path failure, or {@code null} when none. */
+  BrokerFailureClass lastFailureClass() {
+    return probe.lastFailureClass();
+  }
+
   /** Package-private test accessor for the published snapshot. */
   HealthSnapshot snapshotValue() {
     return state.get().snapshot();

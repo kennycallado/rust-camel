@@ -536,6 +536,20 @@ pub struct BrokerConfig {
     pub broker_type: BrokerType,
     pub username: Option<String>,
     pub password: Option<String>,
+    pub tls: Option<BrokerTlsConfig>,
+}
+
+/// Per-broker TLS material table (provider-neutral). Paths are validated
+/// fail-closed at startup by `validate_broker_tls`; file CONTENTS are
+/// never read in Rust — the table only ever holds path strings and the
+/// SNI name, so no output can leak key material.
+#[derive(Clone, PartialEq, serde::Deserialize, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerTlsConfig {
+    pub ca_cert_path: Option<String>,
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
+    pub server_name: Option<String>,
 }
 
 /// Sensitive query-key substrings for broker URL redaction (7 entries,
@@ -571,6 +585,473 @@ pub(crate) const BROKER_SENSITIVE_KEY_SUBSTRINGS: &[&str] = &[
 /// component's 7-entry key list.
 pub(crate) fn redact_broker_url(raw: &str) -> String {
     camel_api::redact::redact_url_with_query_allowlist(raw, BROKER_SENSITIVE_KEY_SUBSTRINGS)
+}
+
+/// Whether a query key matches the sensitive-key-substring policy. Runs the
+/// canonical redactor over a synthetic single-pair URL so the predicate
+/// (percent-decoded matching and credential-shape suppression) stays
+/// identical to [`redact_broker_url`].
+fn is_sensitive_query_key(key: &str) -> bool {
+    redact_broker_url(&format!("tcp://h?{key}=probe")).contains("<redacted>")
+}
+
+/// Render a query key for an error string. A sensitive key is masked whole
+/// (`<redacted>`) rather than as `key=<redacted>`: the key bytes themselves
+/// can embed the secret (`password-SECRET`), so echoing the key position
+/// would still leak it. Benign keys are returned unchanged.
+fn redact_query_key_for_error(key: &str) -> String {
+    if is_sensitive_query_key(key) {
+        "<redacted>".to_string()
+    } else {
+        key.to_string()
+    }
+}
+
+/// Redact a broker URL for a validation error. Same contract as
+/// [`redact_broker_url`] except that a query key matching the
+/// sensitive-substring policy is masked whole (`<redacted>`): the error also
+/// names the offending key, and the redactor's usual `key=<redacted>` form
+/// would still echo key bytes such as `password-SECRET`.
+fn redact_broker_url_for_error(raw: &str) -> String {
+    let Some((base, query)) = raw.split_once('?') else {
+        return redact_broker_url(raw);
+    };
+    let pairs: Vec<String> = query
+        .split('&')
+        .map(|pair| {
+            let key = pair.split('=').next().unwrap_or(pair);
+            if is_sensitive_query_key(key) {
+                "<redacted>".to_string()
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect();
+    redact_broker_url(&format!("{base}?{}", pairs.join("&")))
+}
+
+/// Broker URL schemes accepted by the top-level syntax check (JMS-016).
+/// Member-level transport policy is enforced separately by
+/// `validate_broker_tls` (which keeps `nio`/`nio+ssl` rejected and can
+/// name the unsupported transport).
+const KNOWN_URL_SCHEMES: &[&str] = &["tcp", "ssl", "failover", "ws", "wss"];
+
+/// Transport scheme of a broker URL or composite member: the text before
+/// the first `://`. The parenthesized failover form `failover:(...)` has
+/// no `://`, so `(` terminates the scheme; without this it would yield
+/// `failover:(ssl` and fail the known-scheme check. Returns `None` for
+/// schemeless members.
+fn url_scheme(url: &str) -> Option<&str> {
+    let url = url.trim();
+    if url.starts_with("failover:(") {
+        return Some("failover");
+    }
+    let (scheme, _) = url.split_once("://")?;
+    let scheme = scheme.trim();
+    if scheme.is_empty() {
+        None
+    } else {
+        Some(scheme)
+    }
+}
+
+/// Host component of a broker URL: the text after the first `://` up to the
+/// first `:`, `/`, `?`, `#`, `)`, or `,` (a port, path, query, fragment, or
+/// composite separator). Bracketed IPv6 literals keep their brackets. Used to
+/// compute the expected TLS identity when no `tls.server_name` is configured
+/// (task 8.1). Falls back to the whole input when the URL has no `://`.
+pub(crate) fn url_host(url: &str) -> &str {
+    let rest = match url.split_once("://") {
+        Some((_, rest)) => rest,
+        None => url,
+    };
+    if let Some(stripped) = rest.strip_prefix('[')
+        && let Some(end) = stripped.find(']')
+    {
+        return &rest[..end + 2];
+    }
+    let end = rest
+        .find([':', '/', '?', '#', ')', ','])
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// Parsed shape of a broker URL: composite members plus, for the
+/// `failover:(m1,m2)?outer` paren form, the outer (failover-transport)
+/// query. The `failover://member` form keeps its query on the member
+/// (prefix strip only — members are never rewritten).
+struct CompositeUrl<'a> {
+    members: Vec<&'a str>,
+    outer_query: Option<&'a str>,
+}
+
+fn parse_composite(broker_url: &str) -> CompositeUrl<'_> {
+    let url = broker_url.trim();
+    let Some(after) = url.strip_prefix("failover:") else {
+        return CompositeUrl {
+            members: if url.is_empty() {
+                Vec::new()
+            } else {
+                vec![url]
+            },
+            outer_query: None,
+        };
+    };
+    let after = after.strip_prefix("//").unwrap_or(after);
+    let after = after.trim_start();
+    let Some(inner) = after.strip_prefix('(') else {
+        let tail = after.trim();
+        return CompositeUrl {
+            members: if tail.is_empty() {
+                Vec::new()
+            } else {
+                vec![tail]
+            },
+            outer_query: None,
+        };
+    };
+    // Depth scan for the matching ')'; unbalanced input is malformed and
+    // yields an empty member list (rejected by the caller).
+    let mut depth = 1usize;
+    let mut close = None;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return CompositeUrl {
+            members: Vec::new(),
+            outer_query: None,
+        };
+    };
+    let list = &inner[..close];
+    // Depth-0 comma split keeps nested parens intact.
+    let mut members = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    for (i, c) in list.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                members.push(list[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    members.push(list[start..].trim());
+    members.retain(|m| !m.is_empty());
+    CompositeUrl {
+        members,
+        outer_query: inner[close + 1..].strip_prefix('?'),
+    }
+}
+
+/// Members of a broker URL, verbatim (never rewritten):
+/// `failover://member?opts` yields the prefix-stripped member,
+/// `failover:(m1,m2)?opts` yields the parenthesized list, and a plain
+/// `scheme://…` URL yields itself. An empty or malformed member list
+/// yields an empty `Vec` (a validation error at the call site).
+fn composite_members(broker_url: &str) -> Vec<String> {
+    parse_composite(broker_url)
+        .members
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Query keys of a URI query string (`a=1&b=2` -> `["a", "b"]`), fragment
+/// excluded. Keys without `=` are kept verbatim.
+fn query_keys(query: &str) -> Vec<&str> {
+    let query = query.split('#').next().unwrap_or(query);
+    query
+        .split('&')
+        .filter_map(|pair| {
+            let key = pair.split_once('=').map(|(k, _)| k).unwrap_or(pair);
+            if key.is_empty() { None } else { Some(key) }
+        })
+        .collect()
+}
+
+/// Full single-pass `%HH` decode of a query option name (any two hex digits
+/// after `%`, case-insensitive; invalid sequences copied verbatim),
+/// lowercased — the same key-matching decode the canonical redactor uses,
+/// because a denylist matches literal text (`pass%77ord` must hit
+/// `password`): percent-encoded evasions of the TLS-store rule cannot slip
+/// through. Invalid UTF-8 from a decoded byte becomes `U+FFFD`, which
+/// cannot match an ASCII needle.
+fn decoded_query_key(key: &str) -> String {
+    let bytes = key.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Some(hi) = (bytes[i + 1] as char).to_digit(16)
+            && let Some(lo) = (bytes[i + 2] as char).to_digit(16)
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_lowercase()
+}
+
+/// Whether a query option is a `jms.*` TLS-store setting: an option in the
+/// `jms.` namespace whose decoded name contains `truststore` or `keystore`
+/// (`jms.trustStore`, `jms.keyStore`, `jms.trustStorePassword`,
+/// `jms.keyStoreType`, `jms.TRUSTSTORE`, `jms.trust%53tore`, …), matched
+/// case-insensitively. ActiveMQ's bean-setting applies these to the
+/// connection factory superclass, whose `createTransport()` then rebuilds
+/// the TLS managers from those stores — overriding the tls-table PEM
+/// pinning — so they are never legal in a broker URL.
+fn is_tls_store_query_key(key: &str) -> bool {
+    let decoded = decoded_query_key(key);
+    decoded.starts_with("jms.") && (decoded.contains("truststore") || decoded.contains("keystore"))
+}
+
+/// DNS hostname shape for `tls.server_name`: dot-separated labels of 1-63
+/// chars matching `[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?`, total length
+/// <= 253.
+fn is_valid_dns_hostname(name: &str) -> bool {
+    if name.is_empty() || name.len() > 253 {
+        return false;
+    }
+    name.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    })
+}
+
+/// Fail-closed broker TLS/transport validation. Enforced in order:
+/// (a) artemis + tls is a rejected follow-up; nested `failover` members are
+/// rejected (classic failover does not nest); (b) composite members must
+/// share one transport security class (mixed `tcp`/`ssl` would silently
+/// downgrade during failover) — independent of `tls` presence; (c) with a
+/// `tls` table every member must be `ssl`; (d) client cert and key go
+/// together; (e) `server_name` requires an `ssl` member and must be a DNS
+/// hostname (not empty, not an IP literal); (f) query options on `ssl`
+/// members are `jms.*` only and never a TLS-store setting (`truststore`
+/// or `keystore` names — TLS material comes only from the tls table),
+/// composite outer options are `jms.*`, `maxReconnectAttempts`,
+/// `startupMaxReconnectAttempts` (the `nested.` prefix is rejected);
+/// (g) `jms.clientID` is endpoint-scoped and never
+/// legal in a broker URL; (h) activemq members allow `tcp`, `ssl`,
+/// `failover` only; (i) configured tls paths must exist, be readable, and
+/// never carry the `placeholder-` marker. Every error embeds the redacted
+/// broker URL; file contents are never read.
+fn validate_broker_tls(broker: &BrokerConfig) -> Result<(), String> {
+    let red = redact_broker_url_for_error(&broker.broker_url);
+
+    // (a) Artemis TLS is a tracked follow-up, not wired in this change.
+    if broker.broker_type == BrokerType::Artemis && broker.tls.is_some() {
+        return Err(format!(
+            "broker URL '{red}' configures a tls table with the artemis broker type: TLS for Artemis is a follow-up and is not wired here — drop the tls table or use broker_type = \"activemq\""
+        ));
+    }
+
+    let members = composite_members(&broker.broker_url);
+    let outer_query = parse_composite(&broker.broker_url).outer_query;
+    if members.is_empty() {
+        return Err(format!("broker URL '{red}' is a composite with no members"));
+    }
+
+    // (a.1) Classic failover does not nest: a member that is itself a
+    // `failover:(...)` composite hides its children from transport
+    // validation, so reject it fail-closed (redacted, contents never read).
+    for m in &members {
+        if url_scheme(m) == Some("failover") {
+            return Err(format!(
+                "broker URL '{red}' has nested failover member '{}': failover cannot be nested — list the transport members directly in the outer failover list",
+                redact_broker_url_for_error(m)
+            ));
+        }
+    }
+
+    // (b) Transport-security uniformity, independent of tls presence.
+    let tls_members = members
+        .iter()
+        .filter(|m| matches!(url_scheme(m), Some("ssl" | "wss" | "nio+ssl")))
+        .count();
+    if tls_members != 0 && tls_members != members.len() {
+        let named = members
+            .iter()
+            .map(|m| redact_broker_url_for_error(m))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "broker URL '{red}' has mixed transport security across members ({named}): all members must share one transport security class — a mixed list would silently downgrade to plaintext when failover picks a plaintext member"
+        ));
+    }
+
+    // (c)+(d)+(e) tls table must agree with the URL and be complete.
+    if let Some(tls) = &broker.tls {
+        for m in &members {
+            if url_scheme(m) != Some("ssl") {
+                return Err(format!(
+                    "broker URL '{red}' has member '{}' with scheme '{}' but a tls table is configured: every member must parse to the ssl scheme when tls is present",
+                    redact_broker_url_for_error(m),
+                    url_scheme(m).unwrap_or("(none)")
+                ));
+            }
+        }
+        let has_cert = tls.client_cert_path.is_some();
+        let has_key = tls.client_key_path.is_some();
+        if has_cert != has_key {
+            return Err(format!(
+                "broker URL '{red}': tls.client_cert_path and tls.client_key_path form an incomplete pair — configure both or neither (client_cert_path is {}, client_key_path is {})",
+                if has_cert { "set" } else { "missing" },
+                if has_key { "set" } else { "missing" }
+            ));
+        }
+        if let Some(server_name) = &tls.server_name {
+            if !members.iter().any(|m| url_scheme(m) == Some("ssl")) {
+                return Err(format!(
+                    "broker URL '{red}' sets tls.server_name but has no ssl member: server_name requires an ssl transport"
+                ));
+            }
+            if server_name.is_empty() {
+                return Err(format!(
+                    "broker URL '{red}': tls.server_name is empty: it must be a non-empty DNS hostname"
+                ));
+            }
+            if server_name.parse::<std::net::Ipv4Addr>().is_ok()
+                || server_name.parse::<std::net::Ipv6Addr>().is_ok()
+                || server_name.contains(':')
+            {
+                return Err(format!(
+                    "broker URL '{red}': tls.server_name '{server_name}' is an IP literal: the DNS hostname rule forbids IP literals"
+                ));
+            }
+            if !is_valid_dns_hostname(server_name) {
+                return Err(format!(
+                    "broker URL '{red}': tls.server_name '{server_name}' is not a syntactically valid DNS hostname (labels of 1-63 [A-Za-z0-9-] chars, dot-separated, total length <= 253)"
+                ));
+            }
+        }
+    }
+
+    // (f) ssl members accept jms.* query options only — and never a
+    // TLS-store setting (a `truststore`/`keystore` name in the jms.*
+    // namespace: ActiveMQ bean-sets it onto the connection factory and
+    // createTransport() rebuilds the TLS managers from that store,
+    // overriding the tls-table PEM pinning — TLS material comes only
+    // from the tls table). Composite outer options are jms.*,
+    // maxReconnectAttempts, startupMaxReconnectAttempts (the nested.
+    // prefix is rejected).
+    for m in &members {
+        if url_scheme(m) != Some("ssl") {
+            continue;
+        }
+        if let Some((_, query)) = m.split_once('?') {
+            for key in query_keys(query) {
+                if !key.starts_with("jms.") {
+                    return Err(format!(
+                        "broker URL '{red}': ssl member '{}' has query option '{}': only jms.* query options are allowed on ssl members",
+                        redact_broker_url_for_error(m),
+                        redact_query_key_for_error(key)
+                    ));
+                }
+                if is_tls_store_query_key(key) {
+                    return Err(format!(
+                        "broker URL '{red}': ssl member '{}' has query option '{}': jms TLS-store settings are rejected — TLS material comes only from the tls table",
+                        redact_broker_url_for_error(m),
+                        redact_query_key_for_error(key)
+                    ));
+                }
+            }
+        }
+    }
+    if let Some(query) = outer_query {
+        for key in query_keys(query) {
+            let allowed = key.starts_with("jms.")
+                || key == "maxReconnectAttempts"
+                || key == "startupMaxReconnectAttempts";
+            if !allowed {
+                return Err(format!(
+                    "broker URL '{red}': composite outer query option '{}' is not allowed (allowed: jms.*, maxReconnectAttempts, startupMaxReconnectAttempts — the nested. prefix is rejected)",
+                    redact_query_key_for_error(key)
+                ));
+            }
+        }
+    }
+
+    // (g) Client identity is endpoint-scoped, never broker-URL-scoped.
+    let mut all_queries: Vec<&str> = Vec::new();
+    for m in &members {
+        if let Some((_, query)) = m.split_once('?') {
+            all_queries.push(query);
+        }
+    }
+    if let Some(query) = outer_query {
+        all_queries.push(query);
+    }
+    for query in all_queries {
+        for key in query_keys(query) {
+            if key.eq_ignore_ascii_case("jms.clientID") {
+                return Err(format!(
+                    "broker URL '{red}' carries query key '{}': client identity is endpoint-scoped — set it on the jms endpoint, not in the broker URL",
+                    redact_query_key_for_error(key)
+                ));
+            }
+        }
+    }
+
+    // (h) activemq member transport allowlist (keeps ws/wss/nio rejected).
+    if broker.broker_type == BrokerType::ActiveMq {
+        for m in &members {
+            match url_scheme(m) {
+                Some("tcp" | "ssl" | "failover") => {}
+                other => {
+                    return Err(format!(
+                        "broker URL '{red}': member '{}' uses unsupported transport scheme '{}': supported schemes are tcp, ssl, failover",
+                        redact_broker_url_for_error(m),
+                        other.unwrap_or("(none)")
+                    ));
+                }
+            }
+        }
+    }
+
+    // (i) Configured material must exist and be readable, and must never
+    // be placeholder material. Only opened — contents are never read.
+    if let Some(tls) = &broker.tls {
+        let paths = [
+            tls.ca_cert_path.as_ref(),
+            tls.client_cert_path.as_ref(),
+            tls.client_key_path.as_ref(),
+        ];
+        for path in paths.into_iter().flatten() {
+            if path.contains("placeholder-") {
+                return Err(format!(
+                    "broker URL '{red}': tls material path '{path}' contains the forbidden 'placeholder-' marker: placeholder material must never be configured"
+                ));
+            }
+            if std::fs::File::open(path).is_err() {
+                return Err(format!(
+                    "broker URL '{red}': tls material path '{path}' is missing or unreadable: configured tls material must exist and be readable"
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 impl std::fmt::Debug for BrokerConfig {
@@ -670,6 +1151,7 @@ impl JmsPoolConfig {
                 broker_type,
                 username: None,
                 password: None,
+                tls: None,
             },
         );
         Self {
@@ -689,8 +1171,6 @@ impl JmsPoolConfig {
             return Err(CamelError::Config("max_bridges must be >= 1".to_string()));
         }
 
-        let known_schemes = ["tcp://", "ssl://", "failover://", "ws://", "wss://"];
-
         for (name, bc) in &self.brokers {
             if bc.broker_url.is_empty() {
                 return Err(CamelError::ProcessorError(format!(
@@ -699,7 +1179,8 @@ impl JmsPoolConfig {
                 )));
             }
 
-            let has_known_scheme = known_schemes.iter().any(|s| bc.broker_url.starts_with(s));
+            let scheme = url_scheme(&bc.broker_url);
+            let has_known_scheme = scheme.is_some_and(|s| KNOWN_URL_SCHEMES.contains(&s));
             if !has_known_scheme {
                 // Re-review of F5-2: validation errors are persisted to the
                 // redb journal — the broker URL must be redacted here too,
@@ -708,7 +1189,10 @@ impl JmsPoolConfig {
                     "broker '{}' has an invalid broker_url '{}': must start with one of {:?}",
                     name,
                     redact_broker_url(&bc.broker_url),
-                    known_schemes
+                    KNOWN_URL_SCHEMES
+                        .iter()
+                        .map(|s| format!("{s}://"))
+                        .collect::<Vec<_>>()
                 )));
             }
 
@@ -717,6 +1201,12 @@ impl JmsPoolConfig {
                     "broker '{}' uses failover:// with the artemis broker type (URL '{}'): the Artemis sidecar does not unwrap failover wrappers — use a single primary broker URL or multiple broker entries",
                     name,
                     redact_broker_url(&bc.broker_url)
+                )));
+            }
+
+            if let Err(msg) = validate_broker_tls(bc) {
+                return Err(CamelError::ProcessorError(format!(
+                    "broker '{name}': {msg}"
                 )));
             }
         }
@@ -780,6 +1270,7 @@ mod tests {
                 broker_type: BrokerType::Artemis,
                 username: None,
                 password: None,
+                tls: None,
             },
         );
         let err = cfg.validate().unwrap_err().to_string();
@@ -827,6 +1318,20 @@ mod tests {
 
         // clean URL untouched
         assert_eq!(redact_broker_url("tcp://host:61616"), "tcp://host:61616");
+    }
+
+    /// Task 8.1: the expected TLS identity falls back to the URL host, so
+    /// `url_host` must strip port, path, query, and composite separators.
+    #[test]
+    fn url_host_extracts_host_from_broker_urls() {
+        assert_eq!(url_host("ssl://10.0.0.5:61617"), "10.0.0.5");
+        assert_eq!(url_host("tcp://mq.internal:61616"), "mq.internal");
+        assert_eq!(
+            url_host("ssl://mq.internal:61617/path?x=1#frag"),
+            "mq.internal"
+        );
+        assert_eq!(url_host("failover:(ssl://a:1,tcp://b:2)"), "a");
+        assert_eq!(url_host("ssl://[::1]:61617"), "[::1]");
     }
 
     /// Delegation pin: `redact_broker_url` is a thin wrapper over the
@@ -1019,6 +1524,7 @@ mod tests {
             broker_type: BrokerType::ActiveMq,
             username: Some("admin".to_string()),
             password: Some("topsecret".to_string()),
+            tls: None,
         };
         let dbg = format!("{cfg:?}");
         assert!(!dbg.contains("topsecret"), "Debug must not leak: {dbg}");
@@ -1035,6 +1541,7 @@ mod tests {
             broker_type: BrokerType::ActiveMq,
             username: None,
             password: None,
+            tls: None,
         };
         let dbg = format!("{cfg:?}");
         assert!(!dbg.contains("secret"), "encoded credential leaked: {dbg}");
@@ -1152,6 +1659,7 @@ mod tests {
             broker_type: BrokerType::ActiveMq,
             username: Some("admin".to_string()),
             password: Some("secret".to_string()),
+            tls: None,
         };
         let s = format!("{bc:?}");
         assert!(s.contains("<redacted>"), "got: {s}");
@@ -1385,12 +1893,13 @@ broker_type = "activemq"
 
     #[test]
     fn accepts_known_broker_url_schemes() {
+        // ws:// and wss:// are syntactically known but rejected as
+        // unsupported activemq transports by `validate_broker_tls`
+        // (see `ws_and_nio_schemes_rejected`).
         for url in &[
             "tcp://localhost:61616",
             "ssl://localhost:61617",
             "failover://tcp://localhost:61616",
-            "ws://localhost:61618",
-            "wss://localhost:61619",
         ] {
             let cfg = JmsPoolConfig::single_broker(*url, BrokerType::ActiveMq);
             assert!(cfg.validate().is_ok(), "scheme should be accepted: {url}");
@@ -1904,5 +2413,398 @@ broker_type = "activemq"
                 .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "key must be lowercase hex: {a}"
         );
+    }
+
+    // ── Task 1.1: BrokerTlsConfig + fail-closed broker TLS validation ────────
+
+    fn tls_broker(url: &str, tls: Option<BrokerTlsConfig>) -> BrokerConfig {
+        BrokerConfig {
+            broker_url: url.to_string(),
+            broker_type: BrokerType::ActiveMq,
+            username: None,
+            password: None,
+            tls,
+        }
+    }
+
+    fn empty_tls() -> BrokerTlsConfig {
+        BrokerTlsConfig {
+            ca_cert_path: None,
+            client_cert_path: None,
+            client_key_path: None,
+            server_name: None,
+        }
+    }
+
+    /// Dummy CA + client pair written into `dir`. Validation must only open
+    /// these paths — never read their contents.
+    fn file_backed_tls(dir: &std::path::Path) -> Result<BrokerTlsConfig, std::io::Error> {
+        let ca = dir.join("ca.pem");
+        let cert = dir.join("client.pem");
+        let key = dir.join("client-key.pem");
+        for p in [&ca, &cert, &key] {
+            std::fs::write(p, b"-----NOT-REAL-PEM-----")?;
+        }
+        Ok(BrokerTlsConfig {
+            ca_cert_path: Some(ca.display().to_string()),
+            client_cert_path: Some(cert.display().to_string()),
+            client_key_path: Some(key.display().to_string()),
+            server_name: None,
+        })
+    }
+
+    #[test]
+    fn tls_config_accepts_pinned_ca_and_mtls() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let tls = file_backed_tls(dir.path())?;
+        let bc = tls_broker("ssl://mq:61617", Some(tls));
+        if let Err(e) = validate_broker_tls(&bc) {
+            panic!("pinned CA + client pair must pass: {e}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tls_on_artemis_rejected() {
+        let bc = BrokerConfig {
+            broker_type: BrokerType::Artemis,
+            ..tls_broker("ssl://mq:61617", Some(empty_tls()))
+        };
+        let err = validate_broker_tls(&bc).unwrap_err();
+        assert!(err.contains("artemis"), "got: {err}");
+    }
+
+    #[test]
+    fn tls_on_plaintext_url_rejected() {
+        let bc = tls_broker("tcp://mq:61616", Some(empty_tls()));
+        let err = validate_broker_tls(&bc).unwrap_err();
+        assert!(err.contains("tcp"), "error must name the scheme: {err}");
+        assert!(err.contains("tls"), "error must name the tls table: {err}");
+    }
+
+    #[test]
+    fn mixed_composite_rejected() {
+        for tls in [None, Some(empty_tls())] {
+            let bc = tls_broker("failover:(tcp://a:61616,ssl://b:61617)", tls);
+            let err = validate_broker_tls(&bc).unwrap_err();
+            assert!(err.contains("mixed"), "got: {err}");
+            assert!(err.contains("tcp://a:61616"), "must name member: {err}");
+            assert!(err.contains("ssl://b:61617"), "must name member: {err}");
+
+            // The same rejection must flow through the production entry.
+            let mut cfg = JmsPoolConfig::default();
+            cfg.brokers.insert("primary".to_string(), bc);
+            let prod_err = cfg.validate().unwrap_err().to_string();
+            assert!(prod_err.contains("mixed"), "production path: {prod_err}");
+            assert!(
+                prod_err.contains("tcp://a:61616"),
+                "production path must name member: {prod_err}"
+            );
+            assert!(
+                prod_err.contains("ssl://b:61617"),
+                "production path must name member: {prod_err}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_failover_rejected() {
+        for tls in [None, Some(empty_tls())] {
+            let bc = tls_broker("failover:(failover:(tcp://a:61616,ssl://b:61617))", tls);
+            let err = validate_broker_tls(&bc).unwrap_err();
+            assert!(
+                err.contains("nested failover"),
+                "error must name nested failover: {err}"
+            );
+
+            // The same rejection must flow through the production entry.
+            let mut cfg = JmsPoolConfig::default();
+            cfg.brokers.insert("primary".to_string(), bc);
+            let prod_err = cfg.validate().unwrap_err().to_string();
+            assert!(
+                prod_err.contains("nested failover"),
+                "production path: {prod_err}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_ssl_composite_accepted() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let tls = file_backed_tls(dir.path())?;
+        let bc = tls_broker("failover:(ssl://a:61617,ssl://b:61617)", Some(tls));
+        assert!(
+            validate_broker_tls(&bc).is_ok(),
+            "all-ssl composite must pass"
+        );
+
+        // The parenthesized failover form must also clear the production
+        // scheme check, not only validate_broker_tls.
+        let mut cfg = JmsPoolConfig::default();
+        cfg.brokers.insert("primary".to_string(), bc);
+        if let Err(e) = cfg.validate() {
+            panic!("all-ssl composite must pass production validation: {e}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn client_cert_without_key_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let cert = dir.path().join("client.pem");
+        std::fs::write(&cert, b"-----NOT-REAL-PEM-----")?;
+        let tls = BrokerTlsConfig {
+            ca_cert_path: None,
+            client_cert_path: Some(cert.display().to_string()),
+            client_key_path: None,
+            server_name: None,
+        };
+        let bc = tls_broker("ssl://mq:61617", Some(tls));
+        let err = validate_broker_tls(&bc).unwrap_err();
+        assert!(
+            err.contains("client_cert_path"),
+            "must name the pair: {err}"
+        );
+        assert!(err.contains("client_key_path"), "must name the pair: {err}");
+        Ok(())
+    }
+
+    #[test]
+    fn server_name_ip_literal_rejected() {
+        let tls = BrokerTlsConfig {
+            server_name: Some("10.0.0.5".to_string()),
+            ..empty_tls()
+        };
+        let bc = tls_broker("ssl://mq:61617", Some(tls));
+        let err = validate_broker_tls(&bc).unwrap_err();
+        assert!(err.contains("server_name"), "rule must be named: {err}");
+        assert!(err.contains("IP literal"), "rule must be named: {err}");
+
+        let tls = BrokerTlsConfig {
+            server_name: Some(String::new()),
+            ..empty_tls()
+        };
+        let bc = tls_broker("ssl://mq:61617", Some(tls));
+        let err = validate_broker_tls(&bc).unwrap_err();
+        assert!(err.contains("server_name"), "rule must be named: {err}");
+        assert!(err.contains("empty"), "rule must be named: {err}");
+    }
+
+    #[test]
+    fn server_name_on_plaintext_rejected() {
+        let tls = BrokerTlsConfig {
+            server_name: Some("mq.internal.example".to_string()),
+            ..empty_tls()
+        };
+        let bc = tls_broker("tcp://mq:61616", Some(tls));
+        assert!(
+            validate_broker_tls(&bc).is_err(),
+            "server_name without an ssl member must be rejected"
+        );
+    }
+
+    #[test]
+    fn verify_hostname_socket_option_rejected() {
+        let bc = tls_broker("ssl://h:1?socket.verifyHostName=false", None);
+        let err = validate_broker_tls(&bc).unwrap_err();
+        assert!(
+            err.contains("socket.verifyHostName"),
+            "forbidden option must be named: {err}"
+        );
+    }
+
+    /// Pin-preservation (security review HIGH finding): a broker URL may carry
+    /// `jms.trustStore`/`jms.keyStore` (and password/type variants) as `jms.*`
+    /// query options; ActiveMQ's bean-setting applies them to the connection
+    /// factory superclass, whose `createTransport()` then REBUILDS the TLS
+    /// managers from those stores — overriding the tls-table PEM pinning
+    /// (expert-reproduced: pinned issuer count 1 -> 111 with JDK cacerts).
+    /// Rejected at validation.
+    #[test]
+    fn tls_store_url_options_rejected() {
+        for option in ["jms.trustStore", "jms.keyStore"] {
+            let bc = tls_broker(&format!("ssl://h:1?{option}=store.jks"), None);
+            let err = validate_broker_tls(&bc).unwrap_err();
+            assert!(err.contains(option), "rejected option must be named: {err}");
+            assert!(
+                err.contains("tls table"),
+                "error must point at the tls table: {err}"
+            );
+
+            // The same rejection must flow through the production entry.
+            let mut cfg = JmsPoolConfig::default();
+            cfg.brokers.insert("primary".to_string(), bc);
+            let prod_err = cfg.validate().unwrap_err().to_string();
+            assert!(prod_err.contains(option), "production path: {prod_err}");
+        }
+    }
+
+    /// A query key matching the sensitive-key-substring policy must never be
+    /// echoed: the key bytes can embed the secret (`password-SECRET`), so the
+    /// key position and the redacted URL both render a bare `<redacted>`.
+    #[test]
+    fn sensitive_key_in_error_redacted() {
+        let bc = tls_broker("ssl://h:1?password-SECRET=x", None);
+        let err = match validate_broker_tls(&bc) {
+            Ok(()) => panic!("sensitive-key URL must be rejected"),
+            Err(err) => err,
+        };
+        assert!(!err.contains("SECRET"), "raw key bytes leaked: {err}");
+        assert_eq!(
+            err,
+            "broker URL 'ssl://h:1?<redacted>': ssl member 'ssl://h:1?<redacted>' has query option '<redacted>': only jms.* query options are allowed on ssl members"
+        );
+    }
+
+    #[test]
+    fn nested_outer_option_rejected() {
+        let bc = tls_broker(
+            "failover:(ssl://h:1)?nested.socket.verifyHostName=false",
+            None,
+        );
+        let err = validate_broker_tls(&bc).unwrap_err();
+        assert!(err.contains("nested"), "nested option must be named: {err}");
+    }
+
+    #[test]
+    fn max_reconnect_attempts_outer_accepted() {
+        let bc = tls_broker("failover:(ssl://h:1)?maxReconnectAttempts=10", None);
+        assert!(
+            validate_broker_tls(&bc).is_ok(),
+            "maxReconnectAttempts is a legal outer option"
+        );
+    }
+
+    #[test]
+    fn jms_client_id_in_url_rejected() {
+        let bc = tls_broker("ssl://h:1?jms.clientID=x", None);
+        let err = validate_broker_tls(&bc).unwrap_err();
+        assert!(
+            err.contains("endpoint"),
+            "error must name endpoint scope: {err}"
+        );
+    }
+
+    #[test]
+    fn ws_and_nio_schemes_rejected() {
+        for (url, scheme) in [
+            ("ws://h:1", "ws"),
+            ("wss://h:1", "wss"),
+            ("nio://h:1", "nio"),
+        ] {
+            let bc = tls_broker(url, None);
+            let err = validate_broker_tls(&bc).unwrap_err();
+            assert!(err.contains("unsupported transport"), "got: {err}");
+            assert!(err.contains(scheme), "transport must be named: {err}");
+        }
+    }
+
+    #[test]
+    fn unknown_tls_key_rejected() {
+        let toml_src = r#"
+[brokers.default]
+broker_url = "ssl://mq:61617"
+broker_type = "activemq"
+
+[brokers.default.tls]
+insecure_skip_verify = true
+"#;
+        let err = toml::from_str::<JmsPoolConfig>(toml_src).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("insecure_skip_verify"), "unknown key: {msg}");
+    }
+
+    #[test]
+    fn placeholder_path_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let p = dir.path().join("placeholder-ca.pem");
+        std::fs::write(&p, b"-----NOT-REAL-PEM-----")?;
+        let tls = BrokerTlsConfig {
+            ca_cert_path: Some(p.display().to_string()),
+            ..empty_tls()
+        };
+        let bc = tls_broker("ssl://mq:61617", Some(tls));
+        let err = validate_broker_tls(&bc).unwrap_err();
+        assert!(err.contains("placeholder"), "got: {err}");
+
+        // A never-created path is rejected as unreadable.
+        let missing = dir.path().join("missing-ca.pem");
+        let tls = BrokerTlsConfig {
+            ca_cert_path: Some(missing.display().to_string()),
+            ..empty_tls()
+        };
+        let bc = tls_broker("ssl://mq:61617", Some(tls));
+        let err = validate_broker_tls(&bc).unwrap_err();
+        assert!(err.contains("unreadable"), "got: {err}");
+        Ok(())
+    }
+
+    #[test]
+    fn placeholder_directory_marker_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let material = dir.path().join("placeholder-material");
+        std::fs::create_dir_all(&material)?;
+        let p = material.join("ca.pem");
+        std::fs::write(&p, b"-----NOT-REAL-PEM-----")?;
+        let tls = BrokerTlsConfig {
+            ca_cert_path: Some(p.display().to_string()),
+            ..empty_tls()
+        };
+        let bc = tls_broker("ssl://mq:61617", Some(tls));
+        let err = validate_broker_tls(&bc).unwrap_err();
+        assert!(
+            err.contains("placeholder"),
+            "directory marker must trip the check: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn debug_renders_paths_not_contents() -> Result<(), Box<dyn std::error::Error>> {
+        // Type-level guarantee: the table holds path strings only, never
+        // bytes, so file contents cannot appear in any output.
+        fn assert_option_string_field(_: &Option<String>) {}
+        let dir = tempfile::tempdir()?;
+        let p = dir.path().join("ca.pem");
+        std::fs::write(&p, b"MAGIC-CONTENTS-MARKER-42")?;
+        let tls = BrokerTlsConfig {
+            ca_cert_path: Some(p.display().to_string()),
+            client_cert_path: Some("/etc/certs/client.pem".to_string()),
+            client_key_path: Some("/etc/certs/client-key.pem".to_string()),
+            server_name: Some("mq.internal.example".to_string()),
+        };
+        assert_option_string_field(&tls.ca_cert_path);
+        assert_option_string_field(&tls.client_cert_path);
+        assert_option_string_field(&tls.client_key_path);
+        assert_option_string_field(&tls.server_name);
+        let rendered = format!("{tls:?}");
+        assert!(
+            rendered.contains(&p.display().to_string()),
+            "path must render: {rendered}"
+        );
+        assert!(
+            rendered.contains("/etc/certs/client.pem"),
+            "path must render: {rendered}"
+        );
+        assert!(
+            !rendered.contains("MAGIC-CONTENTS-MARKER-42"),
+            "file contents must never render: {rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn valid_dns_server_names_accepted() {
+        for name in ["mq.internal.example", "a.b", "x-y.example"] {
+            let tls = BrokerTlsConfig {
+                server_name: Some(name.to_string()),
+                ..empty_tls()
+            };
+            let bc = tls_broker("ssl://mq:61617", Some(tls));
+            assert!(
+                validate_broker_tls(&bc).is_ok(),
+                "server_name {name} must be accepted"
+            );
+        }
     }
 }

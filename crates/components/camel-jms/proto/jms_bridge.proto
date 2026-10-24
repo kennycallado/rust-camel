@@ -51,12 +51,28 @@ enum HealthStatus {
   DOWN = 5;
 }
 
+enum BrokerFailureClass {
+  BROKER_FAILURE_CLASS_UNSPECIFIED = 0;
+  NETWORK = 1;
+  TLS_TRUST = 2;
+  TLS_HOSTNAME = 3;
+  TLS_CLIENT_AUTH = 4;
+  TLS_PROTOCOL = 5;
+  TLS_PLAINTEXT_PEER = 6;
+  UNSUPPORTED_TRANSPORT = 7;
+  AUTH = 8;
+  CLIENT_ID_IN_USE = 9;
+  OTHER = 10;
+}
+
 message HealthResponse {
   bool healthy = 1;
   bool broker_connected = 2;
   string message = 3;
   HealthStatus status = 4;
   uint64 age_ms = 5;
+  repeated string capabilities = 6;
+  BrokerFailureClass failure_class = 7;
 }
 
 enum CompletionOutcome {

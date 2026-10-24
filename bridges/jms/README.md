@@ -12,9 +12,9 @@ A Quarkus-based gRPC bridge that exposes JMS messaging to the Rust runtime. The 
 | `BRIDGE_BROKER_TYPE`            | `activemq`              | Broker adapter type. Valid values: `activemq`, `artemis`.                                                             |
 | `BRIDGE_USERNAME`               | _(none)_                | Broker username.                                                                                                      |
 | `BRIDGE_PASSWORD`               | _(none)_                | Broker password.                                                                                                      |
-| `BRIDGE_BROKER_KEYSTORE_PATH`   | _(none)_                | PKCS12 keystore for secure broker schemes. Operator-provided.                                                         |
-| `BRIDGE_BROKER_TRUSTSTORE_PATH` | _(none)_                | PKCS12 truststore for secure broker schemes. Operator-provided.                                                       |
-| `BRIDGE_BROKER_KEYSTORE_PASSWORD` | _(none)_              | Keystore password.                                                                                                    |
+| `BRIDGE_BROKER_KEYSTORE_PATH`   | _(none)_                | PKCS12 keystore for secure broker schemes (legacy, Artemis-only). Operator-provided.                                  |
+| `BRIDGE_BROKER_TRUSTSTORE_PATH` | _(none)_                | PKCS12 truststore for secure broker schemes (legacy, Artemis-only). Operator-provided.                                |
+| `BRIDGE_BROKER_KEYSTORE_PASSWORD` | _(none)_              | Keystore password (legacy, Artemis-only).                                                                             |
 | `QUARKUS_OTEL_SDK_DISABLED`        | `true`                | Set `false` to enable the bridge's OTel SDK (spans continue the Rust-side trace). Fail-closed pair with the endpoint var. |
 | `QUARKUS_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | _(none)_    | Trusted OTLP collector, e.g. `http://collector:4317`. Required when the SDK is enabled: startup aborts without it (no dial-out defaults). |
 
@@ -55,15 +55,19 @@ The types above settle through the completion path. Object, Map, and Stream mess
 The broker URL scheme selects plaintext or TLS connection setup:
 
 - Plaintext schemes: `tcp://`, `ws://`. No TLS material is required.
-- Secure schemes: `ssl://`, `wss://`. The full TLS material contract below applies.
+- Secure schemes: `ssl://`, `wss://`. Classic brokers configure TLS through the `tls` table (see below); Artemis uses the legacy keystore env contract (Artemis-only).
 
-### TLS material contract (secure schemes)
+### Broker TLS (Classic)
+
+Classic (`activemq`) brokers with an `ssl://` URL configure TLS through the Rust `tls` table, which reaches the bridge as the `BRIDGE_BROKER_TLS_*` paths/SNI environment: `ca_cert_path` pins a CA (it replaces platform trust), no CA means platform trust, and a `client_cert_path`/`client_key_path` pair adds mTLS. Startup aborts only when configured material is unusable (placeholder, missing, or unreadable) or the scheme has no registered transport.
+
+### TLS material contract (legacy Artemis keystore env, Artemis-only)
 
 When the broker URL scheme is `ssl://` or `wss://`, startup aborts unless all of the following hold:
 
 1. `BRIDGE_BROKER_KEYSTORE_PATH` and `BRIDGE_BROKER_TRUSTSTORE_PATH` point to existing PKCS12 files.
 2. `BRIDGE_BROKER_KEYSTORE_PASSWORD` is set.
-3. `BRIDGE_BROKER_TYPE` is `artemis`. Any other broker type with a secure scheme aborts startup, because the Classic connection path does not implement this TLS contract and would silently produce a plaintext connection.
+3. `BRIDGE_BROKER_TYPE` is `artemis`. This keystore env contract is Artemis-only: Classic configures TLS through the `tls` table (see above).
 
 Paths containing the `placeholder-` marker are rejected even when the file exists. A secure scheme never falls back to a plaintext connection.
 

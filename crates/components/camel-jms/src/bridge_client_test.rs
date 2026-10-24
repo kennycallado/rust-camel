@@ -154,6 +154,7 @@ impl BridgeService for MockJmsBridge {
             message: "ok".to_string(),
             status: 0,
             age_ms: 0,
+            ..Default::default()
         }))
     }
 
@@ -777,6 +778,7 @@ impl BridgeService for ScriptedHealthService {
                     message: "ok".to_string(),
                     status: 0,
                     age_ms: 0,
+                    ..Default::default()
                 })
             });
         // The gate is applied before the reply; the queue lock is never held
@@ -1096,6 +1098,7 @@ pub(crate) async fn ready_stub_process(
         30_000,
         Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
         Some("0123456789abcdef0123456789abcdef".to_string()),
+        None,
     );
     camel_bridge::process::BridgeProcess::start(&config)
         .await

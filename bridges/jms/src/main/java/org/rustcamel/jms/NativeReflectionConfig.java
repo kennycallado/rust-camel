@@ -24,6 +24,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
       "org.apache.activemq.transport.tcp.TcpTransportFactory",
       "org.apache.activemq.transport.failover.FailoverTransportFactory",
       "org.apache.activemq.transport.nio.NIOTransportFactory",
+      // Bridge-owned ssl factory (defence in depth for the reflective FactoryFinder fallback)
+      "org.rustcamel.jms.CamelSslTransportFactory",
       // Marshaller factories (one per OpenWire version — broker negotiates version at connect)
       "org.apache.activemq.openwire.v1.MarshallerFactory",
       "org.apache.activemq.openwire.v9.MarshallerFactory",

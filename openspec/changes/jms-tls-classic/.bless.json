@@ -1,0 +1,20 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:9511878fff9c194877126c436b571fbf6ca68cc38745cb34619b781362045c5a",
+  "expert": "e_gpt",
+  "date": "2026-10-23",
+  "supersedes_spec_hash": "sha256:dc45365a0b04a63fd0a6b16c2f1529a67d4b358b7ca55bbc113e8042aba886fd",
+  "reviewer_loop": {
+    "reviewer": "r_gpt",
+    "rounds": 6,
+    "final": "APPROVE",
+    "note": "rounds fixed: guard branch bypass, wrapper super/delegate bug, missing classifier mappings, tls-conditional mixed rejection, render signature, FQN, fake smoke, pure-fn gate test, DNS regex, CertPathBuilderException, clientID text matching, server-side SNI assertion, failover runnability, guard-bypass via shared helper, state ordering (createConnection + InheritableThreadLocal), trust material in production-path test"
+  },
+  "bless_passes": [
+    {"pass": 1, "verdict": "REJECT", "findings": 5, "note": "env_remove on Command (BLOCKER), fixtures producer, consumer delivery, package name camel-component-jms, standalone gradle"},
+    {"pass": 2, "verdict": "BLESS-WITH-FIXES", "findings": 3, "note": "directory-vs-package paths, gradle project location, exact-class grep"},
+    {"pass": 3, "verdict": "BLESS-WITH-FIXES", "findings": 1, "note": "APP_HOME prefix for gradlew wrapper"},
+    {"pass": 4, "verdict": "BLESS", "findings": 0}
+  ]
+}

@@ -17,6 +17,7 @@ pub mod bundle;
 pub mod component;
 pub mod config;
 pub mod consumer;
+pub mod diagnostics;
 pub mod headers;
 pub mod health;
 pub(crate) mod metadata;

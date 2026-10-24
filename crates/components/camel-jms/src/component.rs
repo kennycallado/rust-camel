@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use camel_bridge::{
     download::ensure_binary,
     health::wait_for_health,
-    process::{BridgeError, BridgeProcess, BridgeProcessConfig, BrokerType},
+    process::{BridgeError, BridgeProcess, BridgeProcessConfig, BrokerType, JmsTlsEnv},
 };
 use camel_component_api::{
     BoxProcessor, CamelError, Component, Consumer, Endpoint, Exchange, NetworkRetryPolicy,
@@ -23,10 +23,11 @@ use tower::Service;
 use tracing::{info, warn};
 
 use crate::config::{
-    BrokerConfig, HealthBrokerProbeMode, JmsEndpointConfig, JmsPoolConfig,
+    BrokerConfig, BrokerTlsConfig, HealthBrokerProbeMode, JmsEndpointConfig, JmsPoolConfig,
     attempt_journal_broker_key, default_attempt_journal_dir, ensure_attempt_journal_dir,
 };
 use crate::consumer::JmsConsumer;
+use crate::diagnostics::{LastBrokerFailure, MISSING_BROKER_TLS_CAPABILITY, ensure_tls_capability};
 use crate::health::{
     BrokerHealthMemory, BrokerHealthObservation, BrokerHealthStatus, JmsHealthCheck,
 };
@@ -370,6 +371,18 @@ impl BrokerStatusReporter {
     }
 }
 
+/// Map the broker TLS table onto the bridge's plain-data env payload. `None`
+/// when the broker has no `tls` table, so the spawn still removes inherited
+/// `BRIDGE_BROKER_TLS_*` exports without injecting anything.
+fn jms_tls_env(tls: Option<&BrokerTlsConfig>) -> Option<JmsTlsEnv> {
+    tls.map(|tls| JmsTlsEnv {
+        ca_cert_path: tls.ca_cert_path.clone(),
+        client_cert_path: tls.client_cert_path.clone(),
+        client_key_path: tls.client_key_path.clone(),
+        server_name: tls.server_name.clone(),
+    })
+}
+
 // ── BridgeSlot ───────────────────────────────────────────────────────────────
 
 pub struct BridgeSlot {
@@ -386,6 +399,11 @@ pub struct BridgeSlot {
     pub(crate) health_monitor_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Coalesced liveness wake-up for the health monitor (task 2.5).
     pub(crate) probe_wake: Arc<tokio::sync::Notify>,
+    /// Last broker failure observed from a Health response (task 8.1),
+    /// stored by the health monitor and read by the consumer error path to
+    /// render a local, actionable diagnostic. `None` until the first Health
+    /// poll.
+    pub(crate) last_broker_failure: std::sync::Mutex<Option<LastBrokerFailure>>,
 }
 
 impl std::fmt::Debug for BridgeSlot {
@@ -669,6 +687,7 @@ impl JmsBridgePool {
         // Clone all required broker data before touching DashMap::entry().
         let broker_url = broker_config.broker_url.clone();
         let broker_type = broker_config.broker_type.clone();
+        let tls = jms_tls_env(broker_config.tls.as_ref());
         let credentials = match (&broker_config.username, &broker_config.password) {
             (Some(u), Some(p)) => Some((u.clone(), p.clone())),
             _ => None,
@@ -690,6 +709,7 @@ impl JmsBridgePool {
                     process: Arc::new(tokio::sync::Mutex::new(None)),
                     health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
                     probe_wake: Arc::new(tokio::sync::Notify::new()),
+                    last_broker_failure: std::sync::Mutex::new(None),
                 });
                 entry.insert(Arc::clone(&slot));
                 slot
@@ -706,6 +726,7 @@ impl JmsBridgePool {
             &broker_url,
             &broker_type,
             &credentials,
+            tls,
             self.health_broker_probe_mode,
         )
         .await;
@@ -1001,6 +1022,18 @@ impl JmsBridgePool {
         let handle_ref = Arc::clone(&slot.health_monitor_handle);
         let shutting_down = Arc::clone(&self.shutting_down);
         let broker_name = slot.name.clone();
+        // Restarts re-use the broker's TLS table, exactly like the initial
+        // launch; `None` still cuts inherited BRIDGE_BROKER_TLS_* exports.
+        let slot_tls = jms_tls_env(self.config.get(&broker_name).and_then(|c| c.tls.as_ref()));
+        // Task 8.1: expected TLS identity for the broker-failure diagnostics,
+        // computed once at spawn time: `tls.server_name` when configured, else
+        // the broker URL host. `tls_configured` arms the broker-tls-v1
+        // capability gate on every observed Health response.
+        let broker_tls = self.config.get(&broker_name).and_then(|c| c.tls.as_ref());
+        let tls_configured = broker_tls.is_some();
+        let expected_identity = broker_tls
+            .and_then(|t| t.server_name.clone())
+            .unwrap_or_else(|| crate::config::url_host(&slot.broker_url).to_string());
         let mut reporter = BrokerStatusReporter::from_pool(self);
         #[cfg(test)]
         let replacement_attempts = Arc::clone(&self.replacement_attempts);
@@ -1051,12 +1084,64 @@ impl JmsBridgePool {
                                 // Ready. Broker conditions never restart the
                                 // bridge.
                                 consecutive_failures = 0;
-                                reporter.report_broker_status(BrokerHealthObservation {
-                                    status: BrokerHealthStatus::from_raw(resp.status),
-                                    healthy: resp.healthy,
-                                    broker_connected: resp.broker_connected,
-                                    age_ms: resp.age_ms,
-                                });
+                                // Task 8.1: the broker-tls-v1 capability gate
+                                // over the observed build (the phase-2 startup
+                                // call site runs the same gate before Ready is
+                                // ever published). A TLS-configured broker
+                                // requires the capability; a missing one is
+                                // fatal: the slot's bridge is killed with the
+                                // same stop helper used for other fatal bridge
+                                // conditions and the permanent-error channel
+                                // (Parked) carries the rejection — a parked
+                                // slot is terminal, so no retry is scheduled.
+                                if ensure_tls_capability(&resp.capabilities, tls_configured)
+                                    .is_err()
+                                {
+                                    let old_process = {
+                                        let mut guard = slot.process.lock().await;
+                                        guard.take()
+                                    };
+                                    if let Some(p) = old_process {
+                                        let _ = p.stop().await;
+                                    }
+                                    let reason = format!(
+                                        "bridge {bridge_version} {MISSING_BROKER_TLS_CAPABILITY}"
+                                    );
+                                    warn!(
+                                        "Bridge for '{}' lacks broker-tls-v1; killed and parking slot.",
+                                        slot.name
+                                    );
+                                    let _ =
+                                        slot.publish_unless_terminal(BridgeState::Parked(reason));
+                                } else {
+                                    // Task 8.1: retain the last classified
+                                    // broker failure (updated on every Health
+                                    // poll) so the consumer error path can
+                                    // render a local, actionable diagnostic.
+                                    // Only local values enter the triple: the
+                                    // class discriminant, the spawn-time
+                                    // expected identity, and the redacted
+                                    // broker URL.
+                                    {
+                                        let mut last = slot
+                                            .last_broker_failure
+                                            .lock()
+                                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                        *last = Some(LastBrokerFailure {
+                                            failure_class: resp.failure_class,
+                                            expected_identity: expected_identity.clone(),
+                                            connected_host: crate::config::redact_broker_url(
+                                                &slot.broker_url,
+                                            ),
+                                        });
+                                    }
+                                    reporter.report_broker_status(BrokerHealthObservation {
+                                        status: BrokerHealthStatus::from_raw(resp.status),
+                                        healthy: resp.healthy,
+                                        broker_connected: resp.broker_connected,
+                                        age_ms: resp.age_ms,
+                                    });
+                                }
                             }
                             Ok(Err(e)) => {
                                 consecutive_failures = consecutive_failures.saturating_add(1);
@@ -1205,6 +1290,7 @@ impl JmsBridgePool {
                                         &slot.broker_url,
                                         &slot.broker_type,
                                         &slot.credentials,
+                                        slot_tls.clone(),
                                         health_broker_probe_mode,
                                     )
                                     .await
@@ -1222,6 +1308,7 @@ impl JmsBridgePool {
                             &slot.broker_url,
                             &slot.broker_type,
                             &slot.credentials,
+                            slot_tls.clone(),
                             health_broker_probe_mode,
                         )
                         .await;
@@ -1328,6 +1415,7 @@ impl JmsBridgePool {
         broker_url: &str,
         broker_type: &BrokerType,
         credentials: &Option<(String, String)>,
+        tls: Option<JmsTlsEnv>,
         health_broker_probe_mode: HealthBrokerProbeMode,
     ) -> Result<(BridgeProcess, Channel), StartBridgeError> {
         info!(
@@ -1358,6 +1446,9 @@ impl JmsBridgePool {
             ))
         })?;
         let broker_key = attempt_journal_broker_key(broker_name, broker_type, broker_url);
+        // Task 8.1: a `tls` table configures broker TLS and turns on the
+        // startup broker-tls-v1 capability gate.
+        let tls_configured = tls.is_some();
 
         let mut process_config = BridgeProcessConfig::jms(
             binary_path,
@@ -1372,20 +1463,31 @@ impl JmsBridgePool {
             pool_expiration_check_ms,
             Some(journal_dir.to_string_lossy().into_owned()),
             Some(broker_key),
+            tls,
         );
         process_config
             .env_vars
             .push(health_probe_env(health_broker_probe_mode));
 
-        Self::start_bridge_process_with_config(&process_config, start_timeout_ms).await
+        Self::start_bridge_process_with_config(&process_config, start_timeout_ms, tls_configured)
+            .await
     }
 
     /// Starts the configured bridge process and connects, classifying a
     /// permanent startup rejection before it can be flattened into a transient
     /// string.
+    ///
+    /// `tls_configured` drives the `broker-tls-v1` capability gate (task 8.1):
+    /// after a successful startup Health response a TLS-configured broker
+    /// requires a bridge build that reports the capability (an old bridge
+    /// reports none and fails closed). When the gate rejects, the launched
+    /// bridge is killed with the same `stop` helper used for other fatal
+    /// bridge conditions and the permanent (config-class) error is returned —
+    /// the permanent-error channel, never a retry.
     async fn start_bridge_process_with_config(
         process_config: &BridgeProcessConfig,
         start_timeout_ms: u64,
+        tls_configured: bool,
     ) -> Result<(BridgeProcess, Channel), StartBridgeError> {
         // Phase 1: spawn and read the ready handshake. `BridgeProcess::start`
         // bounds this internally by `start_timeout_ms` and returns a permanent
@@ -1394,6 +1496,10 @@ impl JmsBridgePool {
         let process = BridgeProcess::start(process_config)
             .await
             .map_err(classify_start_error)?;
+
+        // Task 8.1: capabilities of the Health response that satisfied the
+        // phase-2 probe, captured for the startup gate below.
+        let seen_capabilities = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
 
         // Phase 2: TLS connect and health, bounded separately by the configured
         // startup budget. The child is owned by `process`; if this phase fails
@@ -1404,9 +1510,14 @@ impl JmsBridgePool {
 
             wait_for_health(&channel, Duration::from_secs(10), |ch| {
                 let mut client = bridge_service_client(ch);
+                let capabilities = Arc::clone(&seen_capabilities);
                 async move {
-                    let resp = client.health(HealthRequest {}).await?;
-                    Ok(resp.into_inner().healthy)
+                    let resp = client.health(HealthRequest {}).await?.into_inner();
+                    *capabilities
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        resp.capabilities.clone();
+                    Ok(resp.healthy)
                 }
             })
             .await
@@ -1424,6 +1535,23 @@ impl JmsBridgePool {
                 "JMS bridge start timed out after {start_timeout_ms}ms"
             )))
         })??;
+
+        // Task 8.1: the broker-tls-v1 capability gate. The gate classifies
+        // the failure; this call site names the launched binary (the source it
+        // already tracks) in the surfaced message. The child is killed with the
+        // same stop helper used for other fatal bridge conditions, and the
+        // permanent-error channel carries the rejection without retry.
+        let gate_capabilities = seen_capabilities
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if ensure_tls_capability(&gate_capabilities, tls_configured).is_err() {
+            let _ = process.stop().await;
+            return Err(StartBridgeError::Permanent(format!(
+                "bridge {} {MISSING_BROKER_TLS_CAPABILITY}",
+                process_config.binary_path.display()
+            )));
+        }
 
         Ok((process, channel))
     }
@@ -1908,6 +2036,7 @@ mod tests {
                     broker_type: BrokerType::Artemis,
                     username: None,
                     password: None,
+                    tls: None,
                 },
             )]),
             ..JmsPoolConfig::default()
@@ -1971,6 +2100,7 @@ mod tests {
                             broker_type: BrokerType::ActiveMq,
                             username: None,
                             password: None,
+                            tls: None,
                         },
                     ),
                     (
@@ -1980,6 +2110,7 @@ mod tests {
                             broker_type: BrokerType::Artemis,
                             username: None,
                             password: None,
+                            tls: None,
                         },
                     ),
                 ]),
@@ -2017,6 +2148,7 @@ mod tests {
                         broker_type: BrokerType::ActiveMq,
                         username: None,
                         password: None,
+                        tls: None,
                     },
                 )]),
                 bridge_start_timeout_ms: 100,
@@ -2066,6 +2198,7 @@ mod tests {
                         broker_type: BrokerType::ActiveMq,
                         username: None,
                         password: None,
+                        tls: None,
                     },
                 )]),
                 bridge_start_timeout_ms: 100,
@@ -2131,6 +2264,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(Some(second_dead_process))),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -2254,6 +2388,7 @@ mod tests {
                             broker_type: BrokerType::ActiveMq,
                             username: None,
                             password: None,
+                            tls: None,
                         },
                     ),
                     (
@@ -2263,6 +2398,7 @@ mod tests {
                             broker_type: BrokerType::ActiveMq,
                             username: None,
                             password: None,
+                            tls: None,
                         },
                     ),
                     (
@@ -2272,6 +2408,7 @@ mod tests {
                             broker_type: BrokerType::ActiveMq,
                             username: None,
                             password: None,
+                            tls: None,
                         },
                     ),
                 ]),
@@ -2295,6 +2432,7 @@ mod tests {
                 process: Arc::new(tokio::sync::Mutex::new(None)),
                 health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
                 probe_wake: Arc::new(tokio::sync::Notify::new()),
+                last_broker_failure: std::sync::Mutex::new(None),
             });
             pool.slots.insert(name.to_string(), slot);
         }
@@ -2321,6 +2459,7 @@ mod tests {
                         broker_type: BrokerType::ActiveMq,
                         username: None,
                         password: None,
+                        tls: None,
                     },
                 )]),
                 max_bridges: 2,
@@ -2342,6 +2481,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("b1".to_string(), slot);
 
@@ -2377,6 +2517,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -2421,6 +2562,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -2473,6 +2615,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -2519,6 +2662,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -2594,6 +2738,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -2657,6 +2802,7 @@ mod tests {
                         broker_type: BrokerType::ActiveMq,
                         username: None,
                         password: None,
+                        tls: None,
                     },
                 )]),
                 health_check_interval_ms: 100,
@@ -2698,6 +2844,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: monitor_handle_ref,
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -2720,6 +2867,7 @@ mod tests {
                         broker_type: BrokerType::ActiveMq,
                         username: None,
                         password: None,
+                        tls: None,
                     },
                 )]),
                 health_check_interval_ms: 100,
@@ -2740,6 +2888,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -2909,6 +3058,7 @@ mod tests {
                             broker_type: BrokerType::ActiveMq,
                             username: None,
                             password: None,
+                            tls: None,
                         },
                     ),
                     (
@@ -2918,6 +3068,7 @@ mod tests {
                             broker_type: BrokerType::ActiveMq,
                             username: None,
                             password: None,
+                            tls: None,
                         },
                     ),
                     (
@@ -2927,6 +3078,7 @@ mod tests {
                             broker_type: BrokerType::ActiveMq,
                             username: None,
                             password: None,
+                            tls: None,
                         },
                     ),
                 ]),
@@ -2949,6 +3101,7 @@ mod tests {
                 process: Arc::new(tokio::sync::Mutex::new(None)),
                 health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
                 probe_wake: Arc::new(tokio::sync::Notify::new()),
+                last_broker_failure: std::sync::Mutex::new(None),
             });
             pool.slots.insert(name.to_string(), slot);
         }
@@ -3012,6 +3165,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(Some(second_dead_process))),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -3088,6 +3242,7 @@ mod tests {
                         broker_type: BrokerType::ActiveMq,
                         username: None,
                         password: None,
+                        tls: None,
                     },
                 )]),
                 health_check_interval_ms: 50,
@@ -3132,6 +3287,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: monitor_handle_ref,
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -3195,6 +3351,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         };
 
         JmsBridgePool::apply_initial_start_result(
@@ -3225,6 +3382,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         };
         JmsBridgePool::apply_initial_start_result(
             &transient,
@@ -3265,6 +3423,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         JmsBridgePool::apply_initial_start_result(
             slot.as_ref(),
@@ -3328,6 +3487,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         };
 
         slot.publish_shutdown();
@@ -3359,6 +3519,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         };
 
         slot.publish_shutdown();
@@ -3395,6 +3556,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         };
 
         JmsBridgePool::apply_initial_start_result(
@@ -3447,6 +3609,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         });
         slot.publish_shutdown();
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
@@ -3490,6 +3653,7 @@ mod tests {
             30_000,
             Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
             Some("0123456789abcdef0123456789abcdef".to_string()),
+            None,
         );
         let process = BridgeProcess::start(&config)
             .await
@@ -3506,6 +3670,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         };
         // Shutdown wins before the restart result is installed.
         slot.publish_shutdown();
@@ -3606,9 +3771,10 @@ mod tests {
             30_000,
             Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
             Some("0123456789abcdef0123456789abcdef".to_string()),
+            None,
         );
 
-        let result = JmsBridgePool::start_bridge_process_with_config(&config, 300).await;
+        let result = JmsBridgePool::start_bridge_process_with_config(&config, 300, false).await;
         match result {
             Err(StartBridgeError::Permanent(reason)) => {
                 assert!(
@@ -3628,6 +3794,91 @@ mod tests {
             .unwrap_or(0);
         assert!(pid > 0, "stub must have written its pid");
         assert!(wait_pid_gone(pid).await, "child {pid} must be terminated");
+    }
+
+    /// Task 8.1: a TLS-configured broker whose Health response reports no
+    /// capabilities fails the `broker-tls-v1` gate on the startup Health
+    /// handling — the spawned bridge process is killed (the same `stop` helper
+    /// used for other fatal bridge conditions) and the permanent error names
+    /// the capability.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_gate_kills_bridge_and_fails_permanently() {
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        // Real spawned bridge child: the kill seam is the pidfile +
+        // `wait_pid_gone` pair the process-lifecycle tests observe.
+        let child = stub_bridge_process(dir.path(), "gated").await;
+        let child_pid = child.child_pid().expect("stub child pid");
+
+        // TLS-configured broker arms the capability gate.
+        let mut brokers = std::collections::HashMap::new();
+        brokers.insert(
+            "default".to_string(),
+            BrokerConfig {
+                broker_url: "ssl://10.0.0.5:61617".to_string(),
+                broker_type: BrokerType::ActiveMq,
+                username: None,
+                password: None,
+                tls: Some(BrokerTlsConfig {
+                    ca_cert_path: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                    server_name: None,
+                }),
+            },
+        );
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig {
+                brokers,
+                health_check_interval_ms: 20,
+                health_timeout_ms: 250,
+                health_failure_threshold: 5,
+                ..JmsPoolConfig::default()
+            })
+            .expect("gate pool config must be valid"),
+        );
+        let slot = test_slot("default");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        // Stubbed Health response with EMPTY capabilities (the proto3 default
+        // an old bridge would send).
+        let server =
+            spawn_scripted_health(vec![ScriptedHealth::Respond(scripted_response(true, true))])
+                .await;
+        let mut fx =
+            TestBridgeFixture::start(pool.clone(), Arc::clone(&slot), server, Some(child)).await;
+
+        let ack = fx.next_probe().await;
+        assert!(
+            matches!(ack.outcome, ProbeOutcome::Success),
+            "the stubbed Health response must be processed: {ack:?}"
+        );
+        let parked_reason = match &ack.state {
+            BridgeState::Parked(reason) => reason.clone(),
+            other => panic!("the gate error must ride the permanent-error channel: {other:?}"),
+        };
+        assert!(
+            parked_reason.contains("broker-tls-v1"),
+            "the permanent error must name the missing capability: {parked_reason}"
+        );
+
+        assert!(
+            wait_pid_gone(child_pid).await,
+            "the gated child {child_pid} must be killed, not leaked"
+        );
+
+        // No retry is scheduled: `Parked` is the permanent-error channel and a
+        // terminal state — the monitor's restart flow never touches it and the
+        // route fails through `parked_operator_error` without the backoff path
+        // (tasks 4.3/4.7). The harness cannot observe the backoff path
+        // directly; asserting the Parked publication is the observable
+        // permanent channel.
+        assert!(
+            matches!(&*slot.state_rx.borrow(), BridgeState::Parked(_)),
+            "the slot must stay parked without retry"
+        );
+
+        fx.shutdown().await;
     }
 
     #[test]
@@ -3679,6 +3930,7 @@ mod tests {
             "tcp://localhost:61616",
             &BrokerType::ActiveMq,
             &None,
+            None,
             HealthBrokerProbeMode::Skip,
         )
         .await;
@@ -3849,6 +4101,7 @@ mod tests {
                     broker_type: BrokerType::ActiveMq,
                     username: None,
                     password: None,
+                    tls: None,
                 },
             )]),
             ..JmsPoolConfig::default()
@@ -3895,7 +4148,7 @@ mod tests {
         next_refresh_attempt, probe_gate, push_replacement, ready_stub_process, refresh_attempts,
         replacement_attempts, slot_child_pid, spawn_scripted_health, stop_slot_process,
     };
-    use crate::proto::HealthResponse;
+    use crate::proto::{BrokerFailureClass, HealthResponse};
 
     /// Builds a fresh non-terminal slot for monitor tests (task 2.4).
     fn test_slot(name: &str) -> Arc<BridgeSlot> {
@@ -3910,6 +4163,7 @@ mod tests {
             process: Arc::new(tokio::sync::Mutex::new(None)),
             health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
             probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
         })
     }
 
@@ -3933,7 +4187,96 @@ mod tests {
             message: "scripted".to_string(),
             status: 0,
             age_ms: 0,
+            ..Default::default()
         }
+    }
+
+    /// Task 8.1 wiring: a Health response carrying `failure_class =
+    /// TLS_HOSTNAME` is stored on the broker handle by the health monitor and
+    /// rendered by the consumer error path as the D1 local message — expected
+    /// identity, redacted host, both remediations, and no remote text.
+    #[tokio::test]
+    async fn tls_hostname_diagnostic_wiring_end_to_end() {
+        let mut brokers = std::collections::HashMap::new();
+        brokers.insert(
+            "default".to_string(),
+            BrokerConfig {
+                broker_url: "ssl://10.0.0.5:61617".to_string(),
+                broker_type: BrokerType::ActiveMq,
+                username: None,
+                password: None,
+                tls: Some(BrokerTlsConfig {
+                    ca_cert_path: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                    server_name: Some("mq.internal".to_string()),
+                }),
+            },
+        );
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig {
+                brokers,
+                health_check_interval_ms: 20,
+                health_timeout_ms: 250,
+                health_failure_threshold: 5,
+                ..JmsPoolConfig::default()
+            })
+            .expect("wiring pool config must be valid"),
+        );
+
+        let (state_tx, state_rx) = tokio::sync::watch::channel(BridgeState::Starting);
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "ssl://10.0.0.5:61617".to_string(),
+            broker_type: BrokerType::ActiveMq,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
+        });
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        // A capability-reporting bridge whose broker handshake failed with a
+        // hostname mismatch (bridge alive, broker not connected).
+        let mut response = scripted_response(true, false);
+        response.capabilities = vec!["broker-tls-v1".to_string()];
+        response.failure_class = BrokerFailureClass::TlsHostname as i32;
+        let server = spawn_scripted_health(vec![ScriptedHealth::Respond(response)]).await;
+        let mut fx = TestBridgeFixture::start(pool.clone(), Arc::clone(&slot), server, None).await;
+
+        let ack = fx.next_probe().await;
+        assert!(
+            matches!(ack.outcome, ProbeOutcome::Success),
+            "the scripted Health response must be processed: {ack:?}"
+        );
+
+        // Delivery path of step 3: the consumer error path reads the stored
+        // triple from the broker handle and renders the D1 message.
+        let rendered = crate::consumer::connection_failure_detail(
+            &pool,
+            "default",
+            "fallback must not be used when a class is on record",
+        );
+        for needle in [
+            "mq.internal",
+            "10.0.0.5",
+            "Use a broker address the certificate names",
+            "brokers.default.tls.server_name to a DNS name in the certificate",
+        ] {
+            assert!(
+                rendered.contains(needle),
+                "D1 message must contain '{needle}': {rendered}"
+            );
+        }
+        assert!(
+            !rendered.contains("scripted"),
+            "the D1 message must not carry remote text: {rendered}"
+        );
+
+        fx.shutdown().await;
     }
 
     /// Ready-handshake stub child: writes its pid, announces `ready`, sleeps.
@@ -3970,6 +4313,7 @@ mod tests {
             30_000,
             Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
             Some("0123456789abcdef0123456789abcdef".to_string()),
+            None,
         );
         BridgeProcess::start(&config)
             .await

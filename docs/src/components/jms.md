@@ -109,6 +109,70 @@ password    = "admin"      # optional
 
 The bridge binary downloads on first use. It comes from a configured release URL and is cached at `~/.cache/rust-camel/jms-bridge/`. The download is SHA256-verified. Set `CAMEL_JMS_BRIDGE_BINARY_PATH` to point at a local build for development.
 
+## Broker TLS
+
+Classic (`activemq`) brokers configure broker TLS with a `tls` table on the broker entry. The table holds path strings and one SNI name only. File contents never cross the Rust boundary.
+
+```toml
+[default.components.jms.brokers.main]
+broker_url  = "ssl://broker.example.com:61617"
+broker_type = "activemq"
+username    = "admin"
+password    = "admin"
+
+[default.components.jms.brokers.main.tls]
+ca_cert_path     = "/etc/camel/ca.pem"         # pinned CA (replaces platform trust)
+client_cert_path = "/etc/camel/client.pem"     # optional: mTLS client certificate
+client_key_path  = "/etc/camel/client-key.pem"
+server_name      = "broker.example.com"       # optional: DNS name in the certificate
+```
+
+`broker_type = "artemis"` with a `tls` table is rejected at startup in this release. Artemis keeps the legacy keystore env contract (see the JMS bridge README).
+
+### Trust and client authentication
+
+| Configuration | Trust anchor | Client certificate |
+| --- | --- | --- |
+| `ssl://` without a `tls` table | platform trust | none |
+| `ca_cert_path` | the pinned CA replaces platform trust (it never adds to it) | none |
+| `ca_cert_path` + `client_cert_path` + `client_key_path` | the pinned CA | sent (mTLS) |
+| `client_cert_path` + `client_key_path` without `ca_cert_path` | platform trust | sent (mTLS) |
+
+The platform-trust positive (a public-CA broker with no `tls` table) cannot be tested hermetically; CI proves only the negative (a private-CA broker without a pinned CA fails with `TLS_TRUST`).
+
+`client_cert_path` and `client_key_path` go together. A table with only one of the pair is rejected at startup. A configured path must exist and be readable, and must never carry the `placeholder-` marker; unusable material aborts startup.
+
+Verification is always on. There is no knob to skip certificate or hostname verification. URL options of the `socket.*` / `transport.*` class (for example `socket.verifyHostName=false`) are rejected before any factory is built.
+
+### Addressing by IP
+
+The identity check verifies the dialed host against the certificate. To connect by IP address, the certificate must carry an IP SAN for that address. Alternatively, dial a DNS name the certificate carries as a DNS SAN and set `server_name` to that name. `server_name` is a DNS hostname only and is never an IP literal: startup rejects IP literals there.
+
+With `server_name` set, identity binds to that name strictly (SNI and peer host are both relabeled to it). Without `server_name`, the broker URL host is dialed and verified normally: a DNS name is matched against DNS SANs, an IP against IP SANs.
+
+A hostname mismatch surfaces as the `TLS_HOSTNAME` failure class. The rendered message names the broker, the expected identity, the redacted connected host, and both remediations:
+
+```text
+broker 'main': TLS certificate does not match 'broker.example.com' (connected to ssl://broker.example.com:61617). Use a broker address the certificate names (DNS or IP SAN), or set brokers.main.tls.server_name to a DNS name in the certificate.
+```
+
+### failover with TLS
+
+Both `failover://member` and the canonical `failover:(m1,m2)?options` form are accepted for Classic brokers. Composite rules:
+
+- All members must share one transport security class. A mixed `tcp` + `ssl` composite is rejected: failover must never downgrade silently. This rule applies with and without a `tls` table.
+- With a `tls` table, every member must be `ssl://`.
+- Member query options on `ssl://` members are `jms.*` only. Composite outer options are restricted to `jms.*`, `maxReconnectAttempts`, and `startupMaxReconnectAttempts`. The `nested.` prefix and any other outer option are rejected.
+- Broker-directed transport replacement is disabled programmatically: advertised URI updates (`updateURIsSupported`) and `ConnectionControl` reconnects (`reconnectSupported`) are both off for every composite with an `ssl` member, so a broker cannot swap in a plaintext member. Ordinary failover between the configured members still works.
+
+### The broker-tls-v1 capability gate
+
+A broker with a `tls` table requires a bridge build that reports the `broker-tls-v1` capability. The component checks the capability in the startup Health call. When it is absent, the component kills the bridge process and fails permanently (config class, no retry) with `bridge lacks broker-tls-v1; use the pinned bridge`. An older bridge reports no capabilities, so the gate fails closed. Without a `tls` table the gate does not fire.
+
+### Migration note (L8)
+
+Switching a broker from `tcp://` to `ssl://` changes the attempt-journal broker key: the key derives from the broker URL. The recorded poison counts (durable delivery-attempt reservations) for that broker reset. The old journal entries stay under the old key; the bridge does not delete them and does not carry them over. Expect the recorded counts to start from zero after the switch.
+
 ## Consumer
 
 `activemq:queue:orders` subscribes to a destination. The Consumer submits one Exchange per inbound JMS message. The Exchange body carries the message payload. With `mapJmsHeaders=true` (the default), the headers carry `JMSMessageID`, `JMSCorrelationID`, `JMSTimestamp`, `JMSDestination`, and `JMSPriority`.

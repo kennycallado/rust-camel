@@ -177,6 +177,7 @@ async fn main() -> Result<(), CamelError> {
                 broker_type: BrokerType::Artemis,
                 username: Some(BROKER_USER.to_string()),
                 password: Some(BROKER_PASS.to_string()),
+                tls: None,
             },
         )]),
         bridge_start_timeout_ms: 90_000,

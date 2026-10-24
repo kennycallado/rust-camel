@@ -81,6 +81,7 @@ async fn dedicated_jms_component(broker: &ActiveMqBroker) -> JmsComponent {
                 broker_type: BrokerType::ActiveMq,
                 username: Some(ACTIVEMQ_USER.to_string()),
                 password: Some(ACTIVEMQ_PASSWORD.to_string()),
+                tls: None,
             },
         )]),
         bridge_start_timeout_ms: 90_000,

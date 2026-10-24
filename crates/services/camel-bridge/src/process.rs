@@ -81,6 +81,32 @@ pub enum BridgeError {
     },
 }
 
+/// Broker TLS env var names (Task 2.1). The values are identical to the names.
+pub const BRIDGE_BROKER_TLS_CA_CERT_PATH: &str = "BRIDGE_BROKER_TLS_CA_CERT_PATH";
+pub const BRIDGE_BROKER_TLS_CLIENT_CERT_PATH: &str = "BRIDGE_BROKER_TLS_CLIENT_CERT_PATH";
+pub const BRIDGE_BROKER_TLS_CLIENT_KEY_PATH: &str = "BRIDGE_BROKER_TLS_CLIENT_KEY_PATH";
+pub const BRIDGE_BROKER_TLS_SERVER_NAME: &str = "BRIDGE_BROKER_TLS_SERVER_NAME";
+
+/// Every broker TLS key a JMS bridge `Command` must `env_remove` before
+/// injecting configured values, so inherited operator exports can never reach
+/// the child (Task 2.1).
+pub const BRIDGE_BROKER_TLS_ENV_KEYS: [&str; 4] = [
+    BRIDGE_BROKER_TLS_CA_CERT_PATH,
+    BRIDGE_BROKER_TLS_CLIENT_CERT_PATH,
+    BRIDGE_BROKER_TLS_CLIENT_KEY_PATH,
+    BRIDGE_BROKER_TLS_SERVER_NAME,
+];
+
+/// Broker TLS paths/SNI emitted as `BRIDGE_BROKER_TLS_*` (plain data: this
+/// crate does not depend on `camel-component-jms` config types).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JmsTlsEnv {
+    pub ca_cert_path: Option<String>,
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
+    pub server_name: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BrokerType {
@@ -303,6 +329,10 @@ pub struct BridgeProcessConfig {
     pub password: Option<Redacted<String>>,
     pub start_timeout_ms: u64,
     pub env_vars: Vec<(String, String)>,
+    /// Keys removed from the spawned `Command`'s inherited environment before
+    /// [`env_vars`](Self::env_vars) is injected. JMS bridges list the four
+    /// `BRIDGE_BROKER_TLS_*` keys; other bridge kinds keep this empty.
+    pub env_remove_keys: Vec<String>,
     /// When `true`, the supervisor awaits the bridge's `soap-ready` announcement
     /// in addition to the gRPC `ready` line (either order) before `start()`
     /// returns. Only a CXF bridge configured with a SOAP bind sets it; every
@@ -325,6 +355,7 @@ impl fmt::Debug for BridgeProcessConfig {
                 "env_vars",
                 &format!("[REDACTED; {} entries]", self.env_vars.len()),
             )
+            .field("env_remove_keys", &self.env_remove_keys)
             .field("expect_soap_ready", &self.expect_soap_ready)
             .finish()
     }
@@ -350,6 +381,7 @@ impl BridgeProcessConfig {
         pool_expiration_check_ms: u64,
         journal_dir: Option<String>,
         broker_key: Option<String>,
+        tls: Option<JmsTlsEnv>,
     ) -> Self {
         let mut env_vars = vec![
             ("BRIDGE_BROKER_URL".to_string(), broker_url.clone()),
@@ -378,6 +410,24 @@ impl BridgeProcessConfig {
         if let Some(key) = broker_key {
             env_vars.push(("JMS_BRIDGE_BROKER_KEY".to_string(), key));
         }
+        let env_remove_keys = BRIDGE_BROKER_TLS_ENV_KEYS
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect();
+        if let Some(tls) = tls {
+            if let Some(value) = tls.ca_cert_path {
+                env_vars.push((BRIDGE_BROKER_TLS_CA_CERT_PATH.to_string(), value));
+            }
+            if let Some(value) = tls.client_cert_path {
+                env_vars.push((BRIDGE_BROKER_TLS_CLIENT_CERT_PATH.to_string(), value));
+            }
+            if let Some(value) = tls.client_key_path {
+                env_vars.push((BRIDGE_BROKER_TLS_CLIENT_KEY_PATH.to_string(), value));
+            }
+            if let Some(value) = tls.server_name {
+                env_vars.push((BRIDGE_BROKER_TLS_SERVER_NAME.to_string(), value));
+            }
+        }
         Self {
             spec: &JMS_BRIDGE,
             binary_path,
@@ -387,6 +437,7 @@ impl BridgeProcessConfig {
             password,
             start_timeout_ms,
             env_vars,
+            env_remove_keys,
             expect_soap_ready: false,
         }
     }
@@ -402,6 +453,7 @@ impl BridgeProcessConfig {
             password: None,
             start_timeout_ms,
             env_vars: vec![],
+            env_remove_keys: vec![],
             expect_soap_ready: false,
         }
     }
@@ -429,6 +481,7 @@ impl BridgeProcessConfig {
             password: None,
             start_timeout_ms,
             env_vars,
+            env_remove_keys: vec![],
             expect_soap_ready: false,
         }
     }
@@ -758,6 +811,12 @@ impl BridgeProcess {
             .stdout(std::process::Stdio::piped())
             .stderr(stderr_stdio);
 
+        // Cut inherited operator exports of the configured keys before injecting
+        // the Rust-owned values (Task 2.1: broker TLS inheritance isolation).
+        for key in &config.env_remove_keys {
+            command.env_remove(key);
+        }
+
         // Inject bridge-specific env vars (e.g. JMS broker URL/credentials via ::jms()).
         for (key, value) in &config.env_vars {
             command.env(key, value);
@@ -931,6 +990,7 @@ mod tests {
             30_000,
             None,
             None,
+            None,
         );
         assert_eq!(cfg.spec.name, "jms-bridge");
     }
@@ -955,6 +1015,7 @@ mod tests {
                 30_000,
                 Some("/var/lib/state/rust-camel/jms-bridge".into()),
                 Some("broker-key".into()),
+                None,
             );
             assert!(config.env_vars.contains(&(
                 "JMS_ATTEMPT_JOURNAL_DIR".into(),
@@ -975,6 +1036,7 @@ mod tests {
             1000,
             30_000,
             30_000,
+            None,
             None,
             None,
         );
@@ -999,6 +1061,7 @@ mod tests {
             5_000,
             None,
             None,
+            None,
         );
         assert!(
             config
@@ -1009,6 +1072,238 @@ mod tests {
             "JMS_POOL_EXPIRATION_CHECK_MS".to_string(),
             "5000".to_string()
         )));
+    }
+
+    #[test]
+    fn tls_env_emitted_for_configured_broker() {
+        let config = BridgeProcessConfig::jms(
+            PathBuf::from("/tmp/jms-bridge"),
+            "ssl://localhost:61617".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            1000,
+            30_000,
+            30_000,
+            None,
+            None,
+            Some(JmsTlsEnv {
+                ca_cert_path: Some("/certs/ca.pem".to_string()),
+                client_cert_path: Some("/certs/client.pem".to_string()),
+                client_key_path: Some("/certs/client-key.pem".to_string()),
+                server_name: Some("mq.internal.example".to_string()),
+            }),
+        );
+        assert!(config.env_vars.contains(&(
+            BRIDGE_BROKER_TLS_CA_CERT_PATH.to_string(),
+            "/certs/ca.pem".to_string()
+        )));
+        assert!(config.env_vars.contains(&(
+            BRIDGE_BROKER_TLS_CLIENT_CERT_PATH.to_string(),
+            "/certs/client.pem".to_string()
+        )));
+        assert!(config.env_vars.contains(&(
+            BRIDGE_BROKER_TLS_CLIENT_KEY_PATH.to_string(),
+            "/certs/client-key.pem".to_string()
+        )));
+        assert!(config.env_vars.contains(&(
+            BRIDGE_BROKER_TLS_SERVER_NAME.to_string(),
+            "mq.internal.example".to_string()
+        )));
+    }
+
+    #[test]
+    fn tls_env_absent_keys_removed() {
+        let config = BridgeProcessConfig::jms(
+            PathBuf::from("/tmp/jms-bridge"),
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            1000,
+            30_000,
+            30_000,
+            None,
+            None,
+            None,
+        );
+        for key in BRIDGE_BROKER_TLS_ENV_KEYS {
+            assert!(
+                config.env_remove_keys.contains(&key.to_string()),
+                "inherited {key} must be removed on the child Command"
+            );
+            assert!(
+                !config.env_vars.iter().any(|(name, _)| name == key),
+                "unconfigured {key} must not be injected"
+            );
+        }
+    }
+
+    /// Env marker marking the isolated TLS env-spawn child process.
+    const TLS_SPAWN_ISOLATION_CHILD_ENV: &str = "CAMEL_TEST_TLS_ISOLATION_INNER";
+    /// Full test path spawned for the isolated TLS env-spawn run.
+    const TLS_SPAWN_ISOLATION_TEST: &str = "process::tests::tls_spawn_isolation_inner";
+
+    /// Task 2.1 spawn-path regression: the configured remove list is applied to
+    /// the real child `Command` before `env_vars` injection. A parent export of
+    /// a broker TLS key must never reach the bridge, and a configured value must
+    /// win over the stale inherited one (remove-then-inject ordering).
+    ///
+    /// The scenario mutates the process-global environment, so it runs in a
+    /// re-executed child process with a single-test envelope instead of racing
+    /// the parallel suite's shared environment.
+    #[cfg(unix)]
+    #[test]
+    fn tls_spawn_removes_inherited_and_injects_configured() {
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(e) => panic!("current test executable path: {e}"),
+        };
+        let output = match std::process::Command::new(exe)
+            .args([
+                "--exact",
+                TLS_SPAWN_ISOLATION_TEST,
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(TLS_SPAWN_ISOLATION_CHILD_ENV, "1")
+            .output()
+        {
+            Ok(output) => output,
+            Err(e) => panic!("spawn isolated TLS env test: {e}"),
+        };
+        assert!(
+            output.status.success(),
+            "isolated TLS env child failed: status={:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// Child body for the isolated TLS env-spawn scenario. Inert unless the
+    /// parent set the marker, so it is a no-op in normal suite runs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tls_spawn_isolation_inner() {
+        if std::env::var(TLS_SPAWN_ISOLATION_CHILD_ENV).ok().as_deref() != Some("1") {
+            return;
+        }
+
+        let prior = std::env::var_os(BRIDGE_BROKER_TLS_CA_CERT_PATH);
+        // SAFETY: this body only runs in the re-executed child, where
+        // `--test-threads=1` plus an exact filter make it the only test, and
+        // the child under test is spawned after the mutation from this thread.
+        unsafe { std::env::set_var(BRIDGE_BROKER_TLS_CA_CERT_PATH, "stale-value") };
+
+        let observed_dir = tempfile::tempdir().expect("observed env tempdir");
+        let observed_a = observed_dir.path().join("a.env");
+        let observed_b = observed_dir.path().join("b.env");
+
+        let body = |path: &std::path::Path| {
+            format!(
+                "env > '{}'; echo '{{\"status\":\"ready\",\"port\":12345}}'",
+                path.display()
+            )
+        };
+        let (_script_dir_a, script_a) = fake_bridge_script(&body(&observed_a));
+        let (_script_dir_b, script_b) = fake_bridge_script(&body(&observed_b));
+
+        let mut config = fake_bridge_config(&script_a, false, 10_000);
+        config.env_remove_keys = vec![BRIDGE_BROKER_TLS_CA_CERT_PATH.to_string()];
+        config.env_vars = vec![];
+        let process = BridgeProcess::start(&config)
+            .await
+            .unwrap_or_else(|e| panic!("remove-only spawn must start: {e}"));
+        let child_env_a = std::fs::read_to_string(&observed_a).expect("child env snapshot a");
+        assert!(
+            !child_env_a
+                .lines()
+                .any(|line| line == format!("{BRIDGE_BROKER_TLS_CA_CERT_PATH}=stale-value")),
+            "inherited stale TLS CA path must be removed from the child env"
+        );
+        assert!(
+            !child_env_a.contains("stale-value"),
+            "stale value must not leak through any inherited variable"
+        );
+        process
+            .stop()
+            .await
+            .unwrap_or_else(|e| panic!("remove-only fake bridge must stop cleanly: {e}"));
+
+        let mut config = fake_bridge_config(&script_b, false, 10_000);
+        config.env_remove_keys = vec![BRIDGE_BROKER_TLS_CA_CERT_PATH.to_string()];
+        config.env_vars = vec![(
+            BRIDGE_BROKER_TLS_CA_CERT_PATH.to_string(),
+            "/good/path".to_string(),
+        )];
+        let process = BridgeProcess::start(&config)
+            .await
+            .unwrap_or_else(|e| panic!("remove-then-inject spawn must start: {e}"));
+        let child_env_b = std::fs::read_to_string(&observed_b).expect("child env snapshot b");
+        assert!(
+            child_env_b
+                .lines()
+                .any(|line| line == format!("{BRIDGE_BROKER_TLS_CA_CERT_PATH}=/good/path")),
+            "configured TLS CA path must win over the stale inherited value"
+        );
+        assert!(
+            !child_env_b.contains("stale-value"),
+            "remove-then-inject must not leave the inherited value behind"
+        );
+        process
+            .stop()
+            .await
+            .unwrap_or_else(|e| panic!("remove-then-inject fake bridge must stop cleanly: {e}"));
+
+        match prior {
+            Some(value) => {
+                // SAFETY: single-test child process; restores the pre-test value.
+                unsafe { std::env::set_var(BRIDGE_BROKER_TLS_CA_CERT_PATH, value) };
+            }
+            None => {
+                // SAFETY: single-test child process; restores the pre-test absence.
+                unsafe { std::env::remove_var(BRIDGE_BROKER_TLS_CA_CERT_PATH) };
+            }
+        }
+    }
+
+    #[test]
+    fn partial_tls_emits_only_present() {
+        let config = BridgeProcessConfig::jms(
+            PathBuf::from("/tmp/jms-bridge"),
+            "ssl://localhost:61617".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            1000,
+            30_000,
+            30_000,
+            None,
+            None,
+            Some(JmsTlsEnv {
+                ca_cert_path: Some("/certs/ca.pem".to_string()),
+                ..JmsTlsEnv::default()
+            }),
+        );
+        assert!(config.env_vars.contains(&(
+            BRIDGE_BROKER_TLS_CA_CERT_PATH.to_string(),
+            "/certs/ca.pem".to_string()
+        )));
+        for key in [
+            BRIDGE_BROKER_TLS_CLIENT_CERT_PATH,
+            BRIDGE_BROKER_TLS_CLIENT_KEY_PATH,
+            BRIDGE_BROKER_TLS_SERVER_NAME,
+        ] {
+            assert!(
+                !config.env_vars.iter().any(|(name, _)| name == key),
+                "absent {key} must not be injected"
+            );
+            assert!(
+                config.env_remove_keys.contains(&key.to_string()),
+                "{key} must still be removed"
+            );
+        }
     }
 
     #[test]
@@ -1166,6 +1461,7 @@ mod tests {
             1000,
             30_000,
             30_000,
+            None,
             None,
             None,
         );
@@ -1631,6 +1927,7 @@ mod tests {
             30_000,
             None,
             None,
+            None,
         );
         let result = config.validate();
         assert!(result.is_err());
@@ -1647,6 +1944,7 @@ mod tests {
             0,
             30_000,
             30_000,
+            None,
             None,
             None,
         );
@@ -1725,6 +2023,7 @@ mod tests {
             30_000,
             None,
             None,
+            None,
         );
         // The Redacted<T> password field must show [REDACTED] in debug output.
         // env_vars is a separate Vec<(String, String)> used for process injection
@@ -1754,6 +2053,7 @@ mod tests {
                 "KEYSTORE_PASSWORD".to_string(),
                 "SENTINEL-ENV-PASS".to_string(),
             )],
+            env_remove_keys: vec![],
             expect_soap_ready: false,
         };
         let debug_output = format!("{cfg:?}");
@@ -1785,6 +2085,7 @@ mod tests {
                 "KEYSTORE_PASSWORD".to_string(),
                 "SENTINEL-ENV-PASS".to_string(),
             )],
+            env_remove_keys: vec![],
             expect_soap_ready: false,
         };
         let debug_output = format!("{cfg:?}");

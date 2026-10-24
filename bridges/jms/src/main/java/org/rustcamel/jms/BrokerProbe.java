@@ -28,4 +28,13 @@ public interface BrokerProbe {
 
   /** Terminal teardown: detach the retained diagnostic once and bound provider cleanup. */
   void close();
+
+  /**
+   * Classification of the last connect-path failure, or {@code null} when none was recorded.
+   *
+   * <p>Probes without diagnostics keep the default: no failure to report.
+   */
+  default BrokerFailureClass lastFailureClass() {
+    return null;
+  }
 }

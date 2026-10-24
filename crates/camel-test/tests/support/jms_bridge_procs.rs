@@ -10,7 +10,7 @@
 /// instructions when no binary is available, mirroring `xml_bridge.rs`.
 use std::path::PathBuf;
 
-use camel_bridge::process::{BridgeProcess, BridgeProcessConfig, BrokerType, Redacted};
+use camel_bridge::process::{BridgeProcess, BridgeProcessConfig, BrokerType, JmsTlsEnv, Redacted};
 use tonic::transport::Channel;
 
 pub const ENV_JMS_BRIDGE_BIN: &str = "CAMEL_JMS_BRIDGE_BINARY_PATH";
@@ -101,6 +101,45 @@ pub async fn spawn_jms_bridge_configured(
     username: &str,
     password: &str,
 ) -> (BridgeProcess, Channel) {
+    spawn_configured_with_tls(binary, broker_url, broker_type, username, password, None).await
+}
+
+/// Spawns one jms-bridge process against a broker with a `tls` table (task
+/// 9.1): Classic, admin/admin, broker TLS material. The table is emitted as
+/// `BRIDGE_BROKER_TLS_*` exactly as the component emits it for a configured
+/// broker (`ca_cert_path` pins a CA, a `client_cert_path`/`client_key_path`
+/// pair adds mTLS, `server_name` binds identity) — this is the process-level
+/// seam the CI-owned broker-TLS smoke drives.
+pub async fn spawn_jms_bridge_tls(
+    binary: &std::path::Path,
+    broker_url: &str,
+    tls: &camel_component_jms::config::BrokerTlsConfig,
+) -> (BridgeProcess, Channel) {
+    let env = JmsTlsEnv {
+        ca_cert_path: tls.ca_cert_path.clone(),
+        client_cert_path: tls.client_cert_path.clone(),
+        client_key_path: tls.client_key_path.clone(),
+        server_name: tls.server_name.clone(),
+    };
+    spawn_configured_with_tls(
+        binary,
+        broker_url,
+        BrokerType::ActiveMq,
+        "admin",
+        "admin",
+        Some(env),
+    )
+    .await
+}
+
+async fn spawn_configured_with_tls(
+    binary: &std::path::Path,
+    broker_url: &str,
+    broker_type: BrokerType,
+    username: &str,
+    password: &str,
+    tls: Option<JmsTlsEnv>,
+) -> (BridgeProcess, Channel) {
     let journal_root = tempfile::TempDir::new()
         .expect("create temp attempt-journal root")
         .keep();
@@ -124,6 +163,7 @@ pub async fn spawn_jms_bridge_configured(
         30_000,
         Some(journal_dir.to_string_lossy().into_owned()),
         Some(broker_key),
+        tls,
     );
     BridgeProcess::start_and_connect(&config)
         .await

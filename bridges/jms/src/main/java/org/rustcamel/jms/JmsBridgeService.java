@@ -28,6 +28,9 @@ import org.jboss.logging.Logger;
 public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
   private static final Logger LOG = Logger.getLogger(JmsBridgeService.class);
 
+  /** Capability advertising the broker TLS contract added by the classic-TLS workstream. */
+  static final String CAP_BROKER_TLS_V1 = "broker-tls-v1";
+
   @Inject JmsProducer producer;
   @Inject jakarta.enterprise.inject.Instance<JmsConsumer> consumerFactory;
   @Inject JmsClientFactory clientFactory;
@@ -251,8 +254,20 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
 
   @Override
   public void health(HealthRequest request, StreamObserver<HealthResponse> responseObserver) {
-    responseObserver.onNext(healthCache().current().toResponse());
+    BridgeHealthCache cache = healthCache();
+    responseObserver.onNext(healthResponse(cache.current(), cache.lastFailureClass()));
     responseObserver.onCompleted();
+  }
+
+  /**
+   * Builds the health wire response, advertising the bridge capability and the classification of
+   * the last broker failure. The failure class is the only failure detail on the wire.
+   */
+  static HealthResponse healthResponse(HealthSnapshot snapshot, BrokerFailureClass failureClass) {
+    return snapshot.toResponse().toBuilder()
+        .addCapabilities(CAP_BROKER_TLS_V1)
+        .setFailureClass(BrokerFailureClass.toProto(failureClass))
+        .build();
   }
 
   /**

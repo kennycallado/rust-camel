@@ -98,6 +98,7 @@ async fn run() -> Result<(), String> {
                 broker_type,
                 username: Some(username),
                 password: Some(password),
+                tls: None,
             },
         )]),
         bridge_start_timeout_ms: BRIDGE_START_TIMEOUT_MS,

@@ -18,6 +18,7 @@ import org.apache.activemq.artemis.api.core.client.ClientSessionFactory;
 import org.apache.activemq.artemis.api.core.client.FailoverEventType;
 import org.apache.activemq.artemis.api.core.client.ServerLocator;
 import org.apache.activemq.transport.TransportListener;
+import org.jboss.logging.Logger;
 
 /**
  * Retains one provider-specific diagnostic resource per probe generation.
@@ -28,6 +29,8 @@ import org.apache.activemq.transport.TransportListener;
  * close caller thread, and no service-wide lock is held while provider code runs.
  */
 public final class JmsBrokerProbe implements BrokerProbe {
+
+  private static final Logger LOG = Logger.getLogger(JmsBrokerProbe.class);
 
   /** Package-private test seam for provider diagnostic resources. */
   interface Diagnostic {
@@ -46,6 +49,7 @@ public final class JmsBrokerProbe implements BrokerProbe {
 
   private final BridgeConfig config;
   private final DiagnosticFactory factory;
+  private volatile Throwable lastBrokerFailure;
   private final AtomicReference<ProbeState> state =
       new AtomicReference<>(new ProbeState(1L, null, false));
   private final AtomicInteger retirementPending = new AtomicInteger();
@@ -301,11 +305,24 @@ public final class JmsBrokerProbe implements BrokerProbe {
     }
   }
 
-  private static BrokerProbeResult failure(Exception error) {
+  /**
+   * Retains the last connect-path failure for health reporting. The remote text stays in the local
+   * warn log; the wire only ever carries the classification.
+   */
+  private BrokerProbeResult failure(Exception error) {
+    lastBrokerFailure = error;
+    LOG.warn("Broker probe failed: " + BrokerFailureClassifier.classify(error).name(), error);
     if (error instanceof InterruptedException) {
       Thread.currentThread().interrupt();
     }
     return BrokerProbeResult.down(error.getClass().getSimpleName() + " during broker probe");
+  }
+
+  /** Classification of the last connect-path failure, or {@code null} when none was recorded. */
+  @Override
+  public BrokerFailureClass lastFailureClass() {
+    Throwable failure = lastBrokerFailure;
+    return failure == null ? null : BrokerFailureClassifier.classify(failure);
   }
 
   private Diagnostic openDiagnostic(

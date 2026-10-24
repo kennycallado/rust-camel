@@ -16,8 +16,16 @@ use super::wait::wait_until;
 
 /// OpenWire broker port.
 pub const ACTIVEMQ_PORT: u16 = 61616;
+/// OpenWire TLS broker port — the `ssl://` transport connector a custom
+/// `activemq.xml` installs ([`ActiveMqBrokerOptions::expose_tls_connector`]).
+pub const ACTIVEMQ_TLS_PORT: u16 = 61617;
 /// Jetty web console / Jolokia port.
 pub const ACTIVEMQ_WEB_PORT: u16 = 8161;
+
+/// Broker `conf/` directory inside the `apache/activemq-classic` image
+/// (`ACTIVEMQ_HOME=/opt/apache-activemq`). Option-supplied files land here
+/// before the container starts.
+const ACTIVEMQ_CONF_DIR: &str = "/opt/apache-activemq/conf";
 
 pub const ACTIVEMQ_USER: &str = "admin";
 pub const ACTIVEMQ_PASSWORD: &str = "admin";
@@ -55,6 +63,20 @@ pub async fn shared_activemq() -> &'static (ContainerAsync<GenericImage>, String
         .await
 }
 
+/// Container-start options for [`ActiveMqBroker::start_with`] (task 9.1).
+/// The zero value reproduces [`ActiveMqBroker::start`] exactly; existing
+/// tests keep their behaviour unchanged.
+#[derive(Default)]
+pub struct ActiveMqBrokerOptions {
+    /// `(file name, contents)` entries copied into the broker's `conf/`
+    /// directory before the container starts. The TLS smoke fixture installs
+    /// a custom `activemq.xml` and its PKCS#12 keystore this way.
+    pub conf_files: Vec<(String, Vec<u8>)>,
+    /// Expose the TLS connector (container port 61617) and report its mapped
+    /// `ssl://` URL in [`ActiveMqBroker::ssl_broker_url`].
+    pub expose_tls_connector: bool,
+}
+
 /// A dedicated ActiveMQ Classic broker (its own container) plus a Jolokia
 /// client for its web console.
 ///
@@ -69,19 +91,41 @@ pub struct ActiveMqBroker {
     client: Client,
     pub broker_url: String,
     pub jolokia_url: String,
+    /// Mapped `ssl://` URL of the TLS connector, present only when the broker
+    /// was started with [`ActiveMqBrokerOptions::expose_tls_connector`].
+    pub ssl_broker_url: Option<String>,
 }
 
 impl ActiveMqBroker {
     /// Starts an isolated ActiveMQ Classic container with the web console
     /// exposed, then blocks until Jolokia answers.
     pub async fn start() -> Self {
-        let image = GenericImage::new("apache/activemq-classic", "5.18.3")
+        Self::start_with(ActiveMqBrokerOptions::default()).await
+    }
+
+    /// Starts an isolated ActiveMQ Classic container with the web console
+    /// exposed and the given conf-directory files / TLS connector, then
+    /// blocks until Jolokia answers.
+    pub async fn start_with(options: ActiveMqBrokerOptions) -> Self {
+        let expose_tls_connector = options.expose_tls_connector;
+        // Port exposure is an inherent `GenericImage` step, before the
+        // `ImageExt` conversions below.
+        let mut base = GenericImage::new("apache/activemq-classic", "5.18.3")
             .with_exposed_port(ContainerPort::Tcp(ACTIVEMQ_PORT))
-            .with_exposed_port(ContainerPort::Tcp(ACTIVEMQ_WEB_PORT))
+            .with_exposed_port(ContainerPort::Tcp(ACTIVEMQ_WEB_PORT));
+        if expose_tls_connector {
+            base = base.with_exposed_port(ContainerPort::Tcp(ACTIVEMQ_TLS_PORT));
+        }
+        let mut image = base
             .with_wait_for(WaitFor::message_on_stdout(
                 "Listening for connections at: tcp://",
             ))
             .with_startup_timeout(Duration::from_secs(120));
+        // Files are copied between container create and start, so the broker
+        // already sees its custom `activemq.xml` / keystore on first boot.
+        for (name, contents) in options.conf_files {
+            image = image.with_copy_to(format!("{ACTIVEMQ_CONF_DIR}/{name}"), contents);
+        }
 
         let container = image
             .start()
@@ -95,6 +139,15 @@ impl ActiveMqBroker {
             .get_host_port_ipv4(ACTIVEMQ_WEB_PORT)
             .await
             .expect("dedicated ActiveMQ web console port not available");
+        let ssl_broker_url = if expose_tls_connector {
+            let tls_port = container
+                .get_host_port_ipv4(ACTIVEMQ_TLS_PORT)
+                .await
+                .expect("dedicated ActiveMQ TLS port not available");
+            Some(format!("ssl://127.0.0.1:{tls_port}"))
+        } else {
+            None
+        };
 
         let broker = Self {
             _container: container,
@@ -104,6 +157,7 @@ impl ActiveMqBroker {
                 .expect("build reqwest client for Jolokia"),
             broker_url: format!("tcp://127.0.0.1:{broker_port}"),
             jolokia_url: format!("http://127.0.0.1:{web_port}/api/jolokia/"),
+            ssl_broker_url,
         };
         broker.wait_ready().await;
         eprintln!(
