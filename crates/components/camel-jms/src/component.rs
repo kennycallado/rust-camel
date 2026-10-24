@@ -626,6 +626,20 @@ impl JmsBridgePool {
         }
     }
 
+    /// Read-only lifecycle accessor: the pid of the live bridge child serving
+    /// `broker_name`, or `None` when the slot has no installed bridge process.
+    ///
+    /// This is the authoritative `BridgeProcess::child_pid` view used for the
+    /// crash-probe handoff; the pid is never re-derived from process groups.
+    /// `None` also covers an unknown/unconfigured broker name and a slot that
+    /// is starting, degraded without a process, or torn down.
+    pub async fn bridge_pid(&self, broker_name: &str) -> Option<u32> {
+        let name = self.resolve_broker_name(Some(broker_name)).ok()?;
+        let slot = self.slots.get(&name)?.clone();
+        let guard = slot.process.lock().await;
+        guard.as_ref().and_then(BridgeProcess::child_pid)
+    }
+
     /// Resolve broker type: activemq/artemis schemes hard-override config type; jms uses config.
     pub fn resolve_broker_type(&self, scheme: &str, broker_name: &str) -> BrokerType {
         let config_type = self
@@ -4336,6 +4350,115 @@ mod tests {
             pairs.contains(&"JMS_POOL_EXPIRATION_CHECK_MS=30000"),
             "initial spawn env must contain JMS_POOL_EXPIRATION_CHECK_MS=30000, got: {initial}"
         );
+    }
+
+    // ── Crash-probe handoff: read-only bridge_pid accessor ───────────────────
+
+    /// The crash-probe handoff reads the authoritative child pid through the
+    /// pool accessor and must observe teardown once the slot is shut down.
+    ///
+    /// The production acquisition path connects over mTLS to a real bridge, so
+    /// the live child is installed directly (the neighboring monitor fixtures'
+    /// pattern); the accessor logic under test is identical either way.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bridge_pid_accessor_returns_live_child_pid() {
+        use tonic::transport::Endpoint as TonicEndpoint;
+
+        // rustls 0.23 requires a process-level CryptoProvider before the
+        // bridge TLS material is generated.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let pidfile = dir.path().join("child.pid");
+        let stub = write_stub(
+            dir.path(),
+            "stub-bridge.sh",
+            &format!(
+                "#!/bin/sh\necho $$ > '{}'\nprintf '%s\\n' '{{\"status\":\"ready\",\"port\":1}}'\nexec sleep 30\n",
+                pidfile.display()
+            ),
+        );
+
+        let config = BridgeProcessConfig::jms(
+            stub,
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            2_000,
+            30_000,
+            30_000,
+            Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
+            Some("0123456789abcdef0123456789abcdef".to_string()),
+            None,
+        );
+        let process = BridgeProcess::start(&config)
+            .await
+            .expect("stub must reach the ready line");
+        let pid: u32 = std::fs::read_to_string(&pidfile)
+            .expect("stub must write its pid")
+            .trim()
+            .parse()
+            .expect("stub pid");
+
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig {
+                bridge_start_timeout_ms: 30_000,
+                ..JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::ActiveMq)
+            })
+            .expect("pool config must be valid"),
+        );
+        let slot = test_slot("default");
+        let installed = slot
+            .install_ready_process(
+                process,
+                TonicEndpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            )
+            .await;
+        assert!(installed.is_ok(), "live process must install");
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        // Acquisition returns the existing slot without launching a second
+        // bridge, keeping this test focused on the accessor.
+        let acquired = pool
+            .get_or_create_slot("default", false)
+            .await
+            .expect("slot acquisition");
+        assert!(Arc::ptr_eq(&acquired, &slot));
+
+        assert_eq!(
+            pool.bridge_pid("default").await,
+            Some(pid),
+            "the accessor must return the installed BridgeProcess child pid"
+        );
+
+        pool.shutdown().await.expect("pool shutdown");
+
+        // Bounded observation of teardown: the slot is removed and the child
+        // is reaped, so the accessor must stop reporting a pid. The poll
+        // lives in a helper (same shape as `wait_pid_gone`) so the test body
+        // stays free of bare sleeps.
+        wait_bridge_pid_none(&pool).await;
+        assert!(
+            wait_pid_gone(pid).await,
+            "the shutdown child {pid} must be terminated, not leaked"
+        );
+    }
+
+    /// Bounded (3s budget) poll until the pool's `bridge_pid` accessor reports
+    /// `None` for the crash-probe handoff slot; panics naming the accessor if
+    /// the slot still reports a pid at the deadline. Helper keeps the poll
+    /// sleep out of test bodies (lint-test-sleep).
+    #[cfg(unix)]
+    async fn wait_bridge_pid_none(pool: &JmsBridgePool) {
+        for _ in 0..150 {
+            if pool.bridge_pid("default").await.is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("bridge_pid must report None for 'default' after shutdown");
     }
 
     // ── Task 2.4: configured liveness timeout/threshold in the real monitor ──

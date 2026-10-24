@@ -30,7 +30,18 @@
 //!   default `admin`/`admin` for the Classic test container.
 //! - `CAMEL_JMS_CRASH_QUEUE` (optional): queue to consume, default
 //!   `queue.test-crash-probe`.
-//! - `XDG_STATE_HOME` (inherited): attempt-journal domain root.
+//! - `XDG_STATE_HOME` (inherited): attempt-journal domain root, and the
+//!   directory of the bridge-handoff artifact
+//!   `<XDG_STATE_HOME>/bridge-handoff-<probe-pid>.json`, a one-line JSON object
+//!   `{"probe_pid":<u32>,"bridge_pid":<u32>,"supervisor_pgid":<i32>}`. The
+//!   probe publishes it from its first accepted exchange, before the
+//!   marker/receipt, so "marker visible" implies "handoff published".
+//!
+//! Topology: the probe leads its own process group containing only itself.
+//! The bridge is owned by this probe process (`BridgeProcess`/`GroupGuard`)
+//! but lives in the watchdog-led supervisor process group. When the probe
+//! process dies the liveness pipe closes and the watchdog `SIGKILL`s the
+//! supervisor group (bridge included).
 //!
 //! Any setup failure prints a diagnostic to stderr and exits non-zero.
 
@@ -38,7 +49,7 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_jms::{BrokerConfig, BrokerType, JmsBridgePool, JmsComponent, JmsPoolConfig};
@@ -88,6 +99,7 @@ async fn run() -> Result<(), String> {
     let password =
         optional_env("CAMEL_JMS_PASSWORD").unwrap_or_else(|| DEFAULT_PASSWORD.to_string());
     let queue = optional_env("CAMEL_JMS_CRASH_QUEUE").unwrap_or_else(|| DEFAULT_QUEUE.to_string());
+    let xdg_state_home = xdg_state_home_root();
 
     let pool_config = JmsPoolConfig {
         max_bridges: 1,
@@ -106,7 +118,8 @@ async fn run() -> Result<(), String> {
     };
     let pool = JmsBridgePool::from_config(pool_config)
         .map_err(|e| format!("invalid JMS pool config: {e}"))?;
-    let component = JmsComponent::with_scheme("jms", std::sync::Arc::new(pool));
+    let pool = std::sync::Arc::new(pool);
+    let component = JmsComponent::with_scheme("jms", pool.clone());
 
     let mut ctx = CamelContext::builder()
         .build()
@@ -118,9 +131,21 @@ async fn run() -> Result<(), String> {
     let route = RouteBuilder::from(from_uri.as_str())
         .process(move |exchange: camel_api::Exchange| {
             let artifact = artifact.clone();
+            let pool = pool.clone();
+            let xdg_state_home = xdg_state_home.clone();
             // `ProbeRole` is `Copy`, so the `async move` block copies `role`
             // and the outer capture stays usable across invocations.
             async move {
+                // Publish the topology handoff FIRST: the marker/receipt below
+                // may only become visible once the bridge pid and its
+                // supervisor process group are on disk.
+                publish_bridge_handoff(&pool, &xdg_state_home)
+                    .await
+                    .map_err(|e| {
+                        camel_api::CamelError::ProcessorError(format!(
+                            "cannot publish bridge handoff: {e}"
+                        ))
+                    })?;
                 match role {
                     ProbeRole::Probe => write_probe_marker(&artifact)?,
                     ProbeRole::Survivor => write_survivor_receipt(&artifact, &exchange).await?,
@@ -245,6 +270,84 @@ fn parse_role(raw: Option<&str>) -> Result<ProbeRole, String> {
             "unknown CAMEL_JMS_CRASH_ROLE '{other}': expected probe, survivor, threshold, or gated"
         )),
     }
+}
+
+/// The XDG state root the component derives the journal domain from, with the
+/// same resolution as `camel-component-jms`: an absolute, non-empty
+/// `XDG_STATE_HOME`, else `$HOME/.local/state`. A run without either falls
+/// back to the relative default; the tests always set `XDG_STATE_HOME`.
+fn xdg_state_home_root() -> PathBuf {
+    if let Some(value) = std::env::var_os("XDG_STATE_HOME") {
+        let path = Path::new(&value);
+        if !value.is_empty() && path.is_absolute() {
+            return path.to_path_buf();
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let path = Path::new(&home);
+        if !home.is_empty() && path.is_absolute() {
+            return path.join(".local").join("state");
+        }
+    }
+    PathBuf::from(".local/state")
+}
+
+/// The compact one-line JSON handoff artifact payload.
+fn bridge_handoff_bytes(probe_pid: u32, bridge_pid: u32, supervisor_pgid: i32) -> String {
+    serde_json::json!({
+        "probe_pid": probe_pid,
+        "bridge_pid": bridge_pid,
+        "supervisor_pgid": supervisor_pgid,
+    })
+    .to_string()
+}
+
+/// Publish the bridge topology handoff at
+/// `<xdg_state_home>/bridge-handoff-<probe-pid>.json`.
+///
+/// The pool slot is installed asynchronously during startup, so a short
+/// bounded poll covers the slot-mutex timing. A missing pid at the deadline is
+/// a setup-grade failure: the probe exits non-zero and never writes a marker.
+async fn publish_bridge_handoff(pool: &JmsBridgePool, xdg_state_home: &Path) -> Result<(), String> {
+    const HANDOFF_PID_DEADLINE: Duration = Duration::from_secs(5);
+    const HANDOFF_PID_POLL: Duration = Duration::from_millis(200);
+
+    let deadline = Instant::now() + HANDOFF_PID_DEADLINE;
+    let bridge_pid = loop {
+        if let Some(pid) = pool.bridge_pid(BROKER_NAME).await {
+            break pid;
+        }
+        if Instant::now() >= deadline {
+            return Err("bridge pid never became available for the handoff artifact".into());
+        }
+        tokio::time::sleep(HANDOFF_PID_POLL).await;
+    };
+
+    #[cfg(unix)]
+    let supervisor_pgid = {
+        // SAFETY: `getpgid` only reads kernel process state; an error returns
+        // -1 rather than touching memory.
+        let pgid = unsafe { libc::getpgid(bridge_pid as i32) };
+        if pgid < 0 {
+            return Err(format!(
+                "cannot resolve the supervisor process group for bridge pid {bridge_pid}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        pgid
+    };
+    #[cfg(not(unix))]
+    let supervisor_pgid: i32 = 0;
+
+    let probe_pid = std::process::id();
+    let destination = xdg_state_home.join(format!("bridge-handoff-{probe_pid}.json"));
+    let bytes = bridge_handoff_bytes(probe_pid, bridge_pid, supervisor_pgid);
+    write_artifact_atomic(&destination, bytes.as_bytes()).map_err(|e| {
+        format!(
+            "cannot write bridge handoff artifact {}: {e}",
+            destination.display()
+        )
+    })
 }
 
 /// Publish `bytes` to `path` with atomic visibility.

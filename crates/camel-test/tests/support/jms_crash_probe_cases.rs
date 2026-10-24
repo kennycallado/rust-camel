@@ -19,8 +19,8 @@ use super::support::jms_bridge_procs::{
     require_jms_bridge_binary, spawn_jms_bridge, spawn_jms_bridge_configured,
 };
 use super::support::jms_crash_probe::{
-    ProbeBroker, find_group_process_by_exe, live_group_members, spawn_group_leader, spawn_probe,
-    spawn_probe_configured,
+    ProbeBroker, bridge_handoff_path, live_group_members, read_bridge_handoff, spawn_group_leader,
+    spawn_probe, spawn_probe_configured,
 };
 use super::support::jms_journal::{
     commit_observed, find_journal_file, journal_broker_dir, lock_owner_pid, lock_path, read_frames,
@@ -266,6 +266,48 @@ async fn jms_crash_probe_guard_reaps_descendant_after_leader_exit() {
     .unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// Regression: the handoff reader must reject an absent artifact and a stale
+/// one, naming BOTH process groups in the error so a topology failure is
+/// actionable. No broker and no runtime.
+#[cfg(unix)]
+#[test]
+fn jms_crash_probe_handoff_missing_or_stale_names_both_groups() {
+    let dir = tempfile::TempDir::new().expect("handoff directory");
+    let exe = Path::new("/bin/sh");
+
+    let absent = read_bridge_handoff(&bridge_handoff_path(dir.path(), 4242), 4242, exe)
+        .expect_err("an absent handoff must be an error");
+    assert!(
+        absent.contains("probe group 4242"),
+        "absent error must name probe group 4242: {absent}"
+    );
+    assert!(
+        absent.contains("supervisor group"),
+        "absent error must name the unknown supervisor group: {absent}"
+    );
+
+    let stale_path = bridge_handoff_path(dir.path(), 7777);
+    std::fs::write(
+        &stale_path,
+        r#"{"probe_pid":7777,"bridge_pid":1,"supervisor_pgid":1}"#,
+    )
+    .expect("write stale handoff");
+    let stale =
+        read_bridge_handoff(&stale_path, 4242, exe).expect_err("a stale handoff must be an error");
+    assert!(
+        stale.contains("stale"),
+        "stale error must say the handoff is stale: {stale}"
+    );
+    assert!(
+        stale.contains("probe group 4242"),
+        "stale error must name the expected probe group 4242: {stale}"
+    );
+    assert!(
+        stale.contains("supervisor group 1"),
+        "stale error must name the artifact's supervisor group 1: {stale}"
+    );
+}
+
 /// True while `pid` is a live (non-zombie) process. Reads `/proc/<pid>/stat`
 /// so a reaped-but-not-yet-cleaned zombie does not count as alive.
 #[cfg(unix)]
@@ -392,13 +434,15 @@ impl CrashBroker {
 /// - the probe's first accepted exchange writes the handoff marker and blocks;
 /// - the durable journal has exactly one `RESERVE` frame for the message and no
 ///   `COMMIT` before the kill;
-/// - `SIGKILL` reaches ONLY the probe, so its Java bridge is orphaned and stays
-///   alive while the survivor asserts;
+/// - `SIGKILL` reaches ONLY the probe; its death closes the liveness pipe, so
+///   the watchdog kills the supervisor group (bridge included) before the
+///   survivor asserts;
 /// - the survivor receives the same `JMSMessageID`, body, and user header, and
 ///   its Java bridge inherits the on-disk count and reserves a second time
 ///   (`CamelJmsReservationCount == 2`), which a fresh journal could not show;
 /// - the journal then holds two `RESERVE` frames and still no `COMMIT`;
-/// - the harness terminates the orphan bridge after the assertions.
+/// - the harness terminates the survivor after the assertions and its watchdog
+///   kills the survivor's bridge.
 #[cfg(unix)]
 async fn run_crash_before_completion_proof(broker: CrashBroker, queue: &str) {
     init_tracing();
@@ -515,16 +559,18 @@ async fn run_crash_before_completion_proof(broker: CrashBroker, queue: &str) {
 
     let lock = lock_path(&journal);
 
-    // Identify the EXACT owner bridge before the kill: the live process in the
-    // probe's process group whose executable is the native bridge binary. This
-    // matches a specific PID, never merely "some group member".
-    let bridge_pid =
-        find_group_process_by_exe(probe_pgid, &binary, probe_pgid).unwrap_or_else(|| {
-            panic!(
-                "no process running {} in probe group {probe_pgid}",
-                binary.display()
-            )
-        });
+    // The probe published its bridge topology before the marker, so the handoff
+    // is guaranteed visible here. Validate it instead of scanning the probe
+    // group: the bridge lives in the watchdog-led supervisor group, which a
+    // probe-group scan can never see.
+    let handoff = read_bridge_handoff(
+        &bridge_handoff_path(xdg_root.path(), probe_pgid as u32),
+        probe_pgid as u32,
+        &binary,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let bridge_pid = handoff.bridge_pid;
+    let supervisor_pgid = handoff.supervisor_pgid;
     let owner_before = lock_owner_pid(&lock)
         .unwrap_or_else(|e| panic!("lock owner query before kill failed: {e}"));
     assert_eq!(
@@ -533,8 +579,8 @@ async fn run_crash_before_completion_proof(broker: CrashBroker, queue: &str) {
         "the destination lock must be owned by the probe's exact bridge process {bridge_pid}"
     );
 
-    // Kill ONLY the probe. Its Java bridge becomes an orphan. A process-group
-    // kill here would destroy it before the survivor has asserted.
+    // Kill ONLY the probe. The bridge is not in the probe group, so it is not
+    // signalled here; the probe's death closes the liveness pipe instead.
     probe.kill_leader_only();
     let probe_pid = probe_pgid;
     wait_until(
@@ -545,97 +591,69 @@ async fn run_crash_before_completion_proof(broker: CrashBroker, queue: &str) {
     )
     .await
     .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(
-        find_group_process_by_exe(probe_pgid, &binary, probe_pgid),
-        Some(bridge_pid),
-        "the exact owner bridge {bridge_pid} must survive the probe kill"
-    );
+    // Death phase: the probe's death closed the liveness pipe, so the watchdog
+    // must SIGKILL the supervisor group (watchdog + exact owner bridge). A
+    // surviving bridge is a hard failure that names the watchdog.
+    wait_until(
+        "watchdog killed the exact owner bridge",
+        Duration::from_secs(30),
+        Duration::from_millis(100),
+        move || async move { Ok(!process_alive(bridge_pid)) },
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "{e}: the liveness-pipe watchdog did not kill bridge {bridge_pid} after probe group \
+             {probe_pgid} died; supervisor group {supervisor_pgid} still holds it — a bridge \
+             surviving the probe means the watchdog is broken"
+        )
+    });
+    wait_until(
+        "supervisor group empty after probe death",
+        Duration::from_secs(30),
+        Duration::from_millis(100),
+        move || async move { Ok(live_group_members(supervisor_pgid).is_empty()) },
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "{e}: supervisor group {supervisor_pgid} still holds live members after probe group \
+             {probe_pgid} died — the liveness-pipe watchdog is broken"
+        )
+    });
 
-    // Hardened observation: sample the fallible lock-owner evidence for 30s
-    // through the standard bounded poll. A successful query must keep naming
-    // the SAME exact owner; an open/fcntl error is a failure, never "unlocked".
-    // This records only what was observed, and makes no root-cause inference.
-    let last_sample: std::sync::Mutex<Result<Option<u32>, String>> =
-        std::sync::Mutex::new(Ok(owner_before));
-    let owner_changed = wait_until(
-        "destination lock stays with the exact bridge owner",
+    // The journal lock is an OS lock: the kernel releases it when the bridge
+    // process exits. Observe that release through the bounded poll.
+    let lock_watch = lock.clone();
+    wait_until(
+        "destination lock released at bridge exit",
         Duration::from_secs(30),
         Duration::from_millis(250),
-        || {
-            let sampled = lock_owner_pid(&lock);
-            *last_sample.lock().expect("last lock sample") = sampled.clone();
-            async move { Ok(sampled != Ok(Some(bridge_pid as u32))) }
+        move || {
+            let lock = lock_watch.clone();
+            async move {
+                match lock_owner_pid(&lock) {
+                    Ok(None) => Ok(true),
+                    Ok(Some(owner)) => Ok(owner != bridge_pid as u32),
+                    Err(_) => Ok(false),
+                }
+            }
         },
     )
     .await
-    .is_ok();
-    let observed_owner = last_sample.lock().expect("last lock sample").clone();
-    let owner_query_error = observed_owner.clone().err();
-    let continued_exact_owner = !owner_changed && observed_owner == Ok(Some(bridge_pid as u32));
-
-    if let Some(e) = owner_query_error {
-        panic!("apparatus error: lock owner query failed during observation: {e}");
-    }
-    if let Ok(Some(other)) = observed_owner
-        && other != bridge_pid as u32
-    {
+    .unwrap_or_else(|e| {
+        let observed = match lock_owner_pid(&lock) {
+            Ok(owner) => format!("{owner:?}"),
+            Err(err) => format!("<query error: {err}>"),
+        };
         panic!(
-            "apparatus error: destination lock owner changed from the probe bridge {bridge_pid} \
-             to {other} before any survivor existed"
-        );
-    }
-    if continued_exact_owner {
-        // Failure branch ONLY: terminate the orphan and collect post-exit
-        // diagnostics. The bridge is not our child, so confirm it exited and the
-        // group is empty; do NOT call it "reaped". Require a successful unlocked
-        // query before claiming the lock was released at process exit.
-        probe.kill_and_reap().await;
-        let exited = wait_until(
-            "owner bridge exited after group kill",
-            Duration::from_secs(30),
-            Duration::from_millis(100),
-            move || async move { Ok(!process_alive(bridge_pid)) },
+            "{e}: destination lock {} is still observed owned by {observed} after the \
+             liveness-pipe watchdog killed bridge {bridge_pid} (probe group {probe_pgid}, \
+             supervisor group {supervisor_pgid}) — the watchdog is broken",
+            lock.display()
         )
-        .await
-        .is_ok();
-        let group_empty = wait_until(
-            "probe process group empty",
-            Duration::from_secs(30),
-            Duration::from_millis(100),
-            move || async move { Ok(live_group_members(probe_pgid).is_empty()) },
-        )
-        .await
-        .is_ok();
-        let lock_after_exit = lock_owner_pid(&lock);
-        panic!(
-            "BLOCKED (rc-icvzl) [{}]: observed a continued exact-owner destination lock. Owner \
-             before SIGKILL = Some({bridge_pid}); after SIGKILL of only the probe, F_GETLK kept \
-             naming Some({bridge_pid}) for 30s (lock {}). Root cause UNRESOLVED (transport \
-             notification, cleanup timing, or another cause); this makes no claim about stream-end \
-             release. After terminating the group: bridge_exited={exited}, group_empty={group_empty}, \
-             lock_owner_after={lock_after_exit:?}. Reproduction: cargo test -p camel-test \
-             --features integration-tests --test jms_test -j4 \
-             jms_bridge_crash_before_completion_redelivers_{} -- --ignored --nocapture \
-             with an explicit CAMEL_JMS_BRIDGE_BINARY_PATH. Remove the ignore marker only after \
-             the genuine proof passes.",
-            broker.label(),
-            lock.display(),
-            broker.label(),
-        );
-    }
-
-    // Success path: the lock was released while the orphan is still alive, so
-    // preserve the EXACT owner bridge (never terminate it here) for the survivor
-    // assertions. This control-path check fails if cleanup ever becomes
-    // unconditional again.
-    assert_eq!(
-        find_group_process_by_exe(probe_pgid, &binary, probe_pgid),
-        Some(bridge_pid),
-        "the exact orphan bridge {bridge_pid} must be preserved on the success path"
-    );
-    eprintln!(
-        "orphan released the journal lock (observed owner {observed_owner:?}); survivor may acquire"
-    );
+    });
+    let lock_owner_after_release = lock_owner_pid(&lock);
 
     // Survivor: same queue and journal domain. It writes a receipt from its
     // first accepted exchange and blocks, so no COMMIT is ever observed.
@@ -702,36 +720,43 @@ async fn run_crash_before_completion_proof(broker: CrashBroker, queue: &str) {
     );
 
     // One auditable evidence line for the Phase-5 report: broker, exact ids,
-    // lock owners, durable reservation counts, and the exact orphan PID.
+    // lock owners, durable reservation counts, and the supervisor topology.
     eprintln!(
         "PROOF 5.2/5.3 [{}]: known_message_id={known_id} lock_owner_before={owner_before:?} \
-         lock_owner_after={observed_owner:?} probe_journal_reserves={probe_reserves} \
+         lock_owner_after_release={lock_owner_after_release:?} probe_journal_reserves={probe_reserves} \
          survivor_receipt_reservation_count={} survivor_journal_reserves={} commit_observed={} \
-         body_ok={} header_ok={} exact_orphan_pid={bridge_pid} orphan_alive_at_assert={}",
+         body_ok={} header_ok={} bridge_pid={bridge_pid} supervisor_pgid={supervisor_pgid} \
+         bridge_died_after_probe=true supervisor_group_empty=true lock_owner_released=true",
         broker.label(),
         receipt["reservation_count"].as_u64().unwrap_or_default(),
         reservation_count(&frames, &known_id),
         commit_observed(&frames, &known_id),
         receipt["body"].as_str() == Some(CRASH_BODY),
         receipt["headers"][broker.crash_header()].as_str() == Some(CRASH_HEADER_VALUE),
-        process_alive(bridge_pid),
     );
 
-    // The survivor is still blocked (no COMMIT) and the EXACT orphan bridge is
-    // still alive: only now do the assertions end and cleanup begin.
+    // The survivor is still blocked (no COMMIT): only now do the assertions end
+    // and cleanup begin.
     assert!(
         survivor.is_alive(),
         "the survivor must stay blocked so no COMMIT is observed"
     );
-    assert!(
-        process_alive(bridge_pid),
-        "the exact orphan bridge {bridge_pid} must stay alive until after the assertions"
-    );
 
-    // Terminate the survivor, then the orphan bridge (probe's process group).
-    // The bridge is not our child: confirm the EXACT PID exited and the group is
-    // empty; do NOT call it "reaped". The guard's stored pgid is the authority,
-    // independent of `Child::id()`.
+    // Read the survivor's own topology while it is alive: it published at its
+    // accepted exchange, and `kill_and_reap` disarms the pgid needed to locate
+    // the artifact.
+    let survivor_pgid = survivor.pgid().expect("survivor pgid");
+    let survivor_handoff = read_bridge_handoff(
+        &bridge_handoff_path(xdg_root.path(), survivor_pgid as u32),
+        survivor_pgid as u32,
+        &binary,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let survivor_bridge_pid = survivor_handoff.bridge_pid;
+
+    // Terminate the survivor; its death closes its liveness pipe, so its
+    // watchdog kills the survivor's bridge. The probe is already dead and its
+    // group is empty, so `kill_and_reap` only reaps the leader.
     survivor.kill_and_reap().await;
     probe.kill_and_reap().await;
     drop(producer);
@@ -745,13 +770,19 @@ async fn run_crash_before_completion_proof(broker: CrashBroker, queue: &str) {
     .await
     .unwrap_or_else(|e| panic!("{e}"));
     wait_until(
-        "probe process group empty after assertions",
+        "survivor bridge reaped by its watchdog",
         Duration::from_secs(30),
         Duration::from_millis(100),
-        move || async move { Ok(live_group_members(probe_pgid).is_empty()) },
+        move || async move { Ok(!process_alive(survivor_bridge_pid)) },
     )
     .await
-    .unwrap_or_else(|e| panic!("{e}"));
+    .unwrap_or_else(|e| {
+        panic!(
+            "{e}: survivor bridge {survivor_bridge_pid} (supervisor group {}) outlived the \
+             survivor (probe group {survivor_pgid}) — its liveness-pipe watchdog is broken",
+            survivor_handoff.supervisor_pgid
+        )
+    });
 }
 
 /// Task 5.2: Classic crash redelivery proof. Runs against a dedicated,

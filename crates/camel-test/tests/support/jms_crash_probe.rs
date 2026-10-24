@@ -2,11 +2,48 @@
 
 //! Lifecycle and configuration for the Phase-5 JMS crash probe.
 //!
-//! The probe is spawned as a fresh process-group leader so the test can reap it
-//! together with the Java bridge it spawns. Every input travels through the
-//! child environment; the parent test never mutates the global environment.
+//! # Topology
+//!
+//! ```text
+//! jms_test (parent)
+//! └── probe (process-group leader; its group holds ONLY the probe)
+//!     └── owns JmsBridgePool → BridgeProcess → GroupGuard
+//!         ├── watchdog `sh` (own group leader; holds the liveness-pipe read end)
+//!         └── jms-bridge (execs into the watchdog group: setpgid(0, watchdog_pgid))
+//! ```
+//!
+//! The probe is spawned as a fresh process-group leader so the test can signal
+//! exactly that group. The probe process owns the bridge (`JmsBridgePool` →
+//! `BridgeProcess` → `GroupGuard`), but the bridge does NOT live in the probe
+//! group: at exec it joins the watchdog-led supervisor process group
+//! (`setpgid(0, watchdog_pgid)`). The watchdog holds the read end of an
+//! `O_CLOEXEC` liveness pipe whose write end only the probe process holds. When
+//! the probe dies — even by `SIGKILL` — the write end closes, the watchdog's
+//! `read` returns EOF, and the watchdog `SIGKILL`s its own group.
+//!
+//! What dies when the probe dies:
+//!
+//! - nothing in the probe group: the probe was its only member, and it is the
+//!   process that died;
+//! - everything in the supervisor group: the watchdog and the Java bridge.
+//!
+//! The test therefore learns the bridge pid and the supervisor pgid from the
+//! handoff artifact the probe publishes at
+//! `<XDG_STATE_HOME>/bridge-handoff-<probe_pid>.json`, then proves the bridge
+//! died with the probe rather than surviving as an orphan.
+//!
+//! Every input travels through the child environment; the parent test never
+//! mutates the global environment.
+//!
+//! # Handoff schema
+//!
+//! The probe writes one JSON object, published atomically before its marker:
+//! `{"probe_pid":u32,"bridge_pid":u32,"supervisor_pgid":i32}`. Parsing it is
+//! not enough: [`read_bridge_handoff`] also cross-checks the bridge pid's
+//! liveness, executable, and process group, so a stale or recycled pid can
+//! never be mistaken for the owned bridge.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Owns the crash-probe child and the process group it leads.
@@ -32,18 +69,18 @@ impl ProbeGuard {
 
     /// The owned process-group id captured at spawn, if any. `Child::id()`
     /// returns `None` after a wait, so callers that need the group id for
-    /// orphan assertions must read it through this accessor, never re-derive it.
+    /// group assertions must read it through this accessor, never re-derive it.
     pub fn pgid(&self) -> Option<i32> {
         self.pgid
     }
 
-    /// Kill only the process-group leader (the probe itself), leaving every
-    /// descendant — notably the Java bridge — alive. The stored pgid is NOT
-    /// disarmed, so `kill_group`/`Drop` still reap the orphan later.
+    /// Kill only the process-group leader (the probe itself). Descendants that
+    /// stayed in the probe group keep running, and the stored pgid is NOT
+    /// disarmed, so `kill_group`/`Drop` still reaches them later.
     ///
-    /// Phase 5.2 requires this: killing the whole group at the handoff barrier
-    /// would kill the orphan bridge before the survivor has acquired the
-    /// journal and observed the inherited count.
+    /// Phase 5.2 requires a leader-only kill: the bridge is not in this group
+    /// (it joined the watchdog-led supervisor group at exec), so it dies only
+    /// when the probe's death closes the liveness pipe.
     pub fn kill_leader_only(&mut self) {
         let Some(pgid) = self.pgid else {
             return;
@@ -112,7 +149,9 @@ impl Drop for ProbeGuard {
 /// Spawn `command` as a fresh process-group leader wrapped in a [`ProbeGuard`].
 ///
 /// `process_group(0)` makes the child its own group leader, so a single
-/// `kill(-pgid)` reaps it and every descendant it spawned.
+/// `kill(-pgid)` reaps it and every descendant that stayed in that group. The
+/// crash-probe bridge leaves the group at exec (see the module topology), so it
+/// is killed by its watchdog instead.
 pub fn spawn_group_leader(mut command: tokio::process::Command) -> ProbeGuard {
     command.kill_on_drop(true);
     #[cfg(unix)]
@@ -231,8 +270,9 @@ pub fn spawn_probe_configured_with_logs(
 }
 
 /// The live, non-zombie process ids in the process group `pgid`, read from
-/// `/proc/<pid>/stat`. Used to prove an orphan bridge survives the probe kill
-/// and is gone after cleanup. Excludes the just-killed (zombie) leader.
+/// `/proc/<pid>/stat`. Used to prove the watchdog-left supervisor group empties
+/// after the probe dies and that the probe group holds no leftovers after
+/// cleanup. Excludes the just-killed (zombie) leader.
 #[cfg(unix)]
 pub fn live_group_members(pgid: i32) -> Vec<i32> {
     let mut members = Vec::new();
@@ -283,23 +323,156 @@ pub fn process_group_of(pid: i32) -> Option<i32> {
     fields.next()?.parse::<i32>().ok()
 }
 
-/// The live process in process group `pgid` that runs `exe`, excluding
-/// `exclude` (the leader). This identifies the EXACT bridge that owns the
-/// destination journal — not merely any group member.
+/// Path of the bridge topology handoff the probe publishes:
+/// `<xdg_state_home>/bridge-handoff-<probe_pid>.json`.
 #[cfg(unix)]
-pub fn find_group_process_by_exe(pgid: i32, exe: &std::path::Path, exclude: i32) -> Option<i32> {
-    let want = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
-    for pid in live_group_members(pgid) {
-        if pid == exclude || process_group_of(pid) != Some(pgid) {
-            continue;
-        }
-        let Some(got) = process_exe(pid) else {
-            continue;
-        };
-        let got = std::fs::canonicalize(&got).unwrap_or(got);
-        if got == want {
-            return Some(pid);
-        }
+pub fn bridge_handoff_path(xdg_state_home: &Path, probe_pid: u32) -> PathBuf {
+    xdg_state_home.join(format!("bridge-handoff-{probe_pid}.json"))
+}
+
+/// The bridge topology a probe published in its handoff artifact.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BridgeHandoff {
+    /// Pid of the Java bridge owned by the probe.
+    pub bridge_pid: i32,
+    /// Process-group id of the watchdog-led group the bridge joined.
+    pub supervisor_pgid: i32,
+}
+
+/// Read and validate the handoff at `path` for the probe whose pid is
+/// `expected_probe_pid` and whose bridge runs `expected_exe`.
+///
+/// Validation order:
+///
+/// 1. the file is readable and parses to an object with numeric `probe_pid`,
+///    `bridge_pid`, and `supervisor_pgid`;
+/// 2. the recorded `probe_pid` equals `expected_probe_pid` (a mismatch is a
+///    stale artifact from another probe);
+/// 3. the bridge pid is alive and not a zombie;
+/// 4. `/proc/<bridge_pid>/exe` canonicalizes to `expected_exe`;
+/// 5. the bridge's process group is the recorded supervisor group and that
+///    group is NOT the probe group.
+///
+/// Step 5 is the topology proof: the bridge must be in the watchdog-led
+/// supervisor group, never in the probe group the test is about to kill. Every
+/// error is an actionable one-liner naming the artifact, the offending value,
+/// and the expected one.
+#[cfg(unix)]
+pub fn read_bridge_handoff(
+    path: &Path,
+    expected_probe_pid: u32,
+    expected_exe: &Path,
+) -> Result<BridgeHandoff, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        format!(
+            "bridge handoff {} is absent or unreadable ({e}) for probe group {expected_probe_pid}; the supervisor group is unknown — was the handoff published before the marker?",
+            path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        format!(
+            "bridge handoff {} is not a JSON object ({e}) for probe group {expected_probe_pid}; the supervisor group is unknown — expected {{\"probe_pid\",\"bridge_pid\",\"supervisor_pgid\"}}",
+            path.display()
+        )
+    })?;
+    let invalid = |field: &str, got: &dyn std::fmt::Display| {
+        format!(
+            "bridge handoff {} has no numeric {field} (got {got}) for probe group {expected_probe_pid}; the supervisor group is unknown — expected a JSON number",
+            path.display()
+        )
+    };
+    let parsed_probe_pid = value
+        .get("probe_pid")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or_else(|| invalid("probe_pid", &value.get("probe_pid").unwrap_or(&value)))?;
+    let bridge_pid_u32 = value
+        .get("bridge_pid")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or_else(|| invalid("bridge_pid", &value.get("bridge_pid").unwrap_or(&value)))?;
+    let supervisor_pgid = value
+        .get("supervisor_pgid")
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|v| i32::try_from(v).ok())
+        .ok_or_else(|| {
+            invalid(
+                "supervisor_pgid",
+                &value.get("supervisor_pgid").unwrap_or(&value),
+            )
+        })?;
+    let bridge_pid =
+        i32::try_from(bridge_pid_u32).map_err(|_| invalid("bridge_pid", &bridge_pid_u32))?;
+
+    if parsed_probe_pid != expected_probe_pid {
+        return Err(format!(
+            "bridge handoff {} is stale: it names probe group {parsed_probe_pid} but the expected probe group {expected_probe_pid} is the one being killed; its supervisor group {supervisor_pgid} belongs to another probe",
+            path.display()
+        ));
     }
-    None
+
+    let stat = std::fs::read_to_string(format!("/proc/{bridge_pid}/stat")).map_err(|e| {
+        format!(
+            "bridge handoff {}: bridge pid {bridge_pid} (probe group {expected_probe_pid}) is not alive ({e}); the liveness-pipe watchdog likely already killed supervisor group {supervisor_pgid}",
+            path.display()
+        )
+    })?;
+    let state = stat
+        .rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .ok_or_else(|| {
+            format!(
+                "bridge handoff {}: cannot read the process state of bridge pid {bridge_pid} (probe group {expected_probe_pid}); expected a live member of supervisor group {supervisor_pgid}",
+                path.display()
+            )
+        })?;
+    if state == "Z" {
+        return Err(format!(
+            "bridge handoff {}: bridge pid {bridge_pid} (probe group {expected_probe_pid}) is a zombie; expected a live member of supervisor group {supervisor_pgid}",
+            path.display()
+        ));
+    }
+
+    let actual_exe = std::fs::read_link(format!("/proc/{bridge_pid}/exe")).map_err(|e| {
+        format!(
+            "bridge handoff {}: cannot resolve /proc/{bridge_pid}/exe ({e}) for probe group {expected_probe_pid}; expected {}",
+            path.display(),
+            expected_exe.display()
+        )
+    })?;
+    let want = std::fs::canonicalize(expected_exe).unwrap_or_else(|_| expected_exe.to_path_buf());
+    let got = std::fs::canonicalize(&actual_exe).unwrap_or(actual_exe);
+    if got != want {
+        return Err(format!(
+            "bridge handoff {}: bridge pid {bridge_pid} (probe group {expected_probe_pid}) runs {} but the expected executable is {}",
+            path.display(),
+            got.display(),
+            want.display()
+        ));
+    }
+
+    let actual_pgid = process_group_of(bridge_pid).ok_or_else(|| {
+        format!(
+            "bridge handoff {}: cannot read the process group of bridge pid {bridge_pid}; expected supervisor group {supervisor_pgid} and probe group {expected_probe_pid}",
+            path.display()
+        )
+    })?;
+    if actual_pgid != supervisor_pgid {
+        return Err(format!(
+            "bridge handoff {}: bridge pid {bridge_pid} is in process group {actual_pgid}, not the recorded supervisor group {supervisor_pgid}; probe group {expected_probe_pid} must not hold the bridge",
+            path.display()
+        ));
+    }
+    if supervisor_pgid == expected_probe_pid as i32 {
+        return Err(format!(
+            "bridge handoff {}: supervisor group {supervisor_pgid} equals probe group {expected_probe_pid}; the bridge must live in the watchdog-led group, not the probe group",
+            path.display()
+        ));
+    }
+
+    Ok(BridgeHandoff {
+        bridge_pid,
+        supervisor_pgid,
+    })
 }
