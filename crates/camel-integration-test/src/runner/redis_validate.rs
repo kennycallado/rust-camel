@@ -1739,6 +1739,7 @@ mod tests {
                     expectation: ValidateExpectation::Rows(bound_expected(CountBound::AtLeast(1))),
                     deadline: None,
                     elapsed_at_least: None,
+                    select: None,
                 }],
                 partners: None,
                 env: None,

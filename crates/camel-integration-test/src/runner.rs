@@ -971,6 +971,15 @@ pub(crate) fn render_expectation_mismatch(expectation: &Expectation, observed: &
         Expectation::EndsWith(suffix) => format!("did not end with `{suffix}`: {observed}"),
         Expectation::Exists => "expected a value, got null".to_string(),
         Expectation::JsonSubset(pattern) => format!("not a superset of {pattern}: {observed}"),
+        // The runner owns the absence projection's `Option` and spells
+        // the live message itself (it names the selector and the
+        // observed kind); this generic rendering is the defensive
+        // fallback and never echoes the value's content.
+        Expectation::Absent => {
+            "expected the selector to resolve to nothing, but a value is present \
+             (kind only, content withheld)"
+                .to_string()
+        }
         // The wildcard verb never fails; this arm is unreachable like
         // the fallback below.
         Expectation::Any => "the expectation matches any value".to_string(),
@@ -1080,6 +1089,7 @@ async fn validate_action(
         expectation,
         deadline,
         elapsed_at_least,
+        select,
     } = action
     else {
         return Err(unpaired_validate(index));
@@ -1118,7 +1128,17 @@ async fn validate_action(
             redis_validate_action(index, target, expected, *deadline, datasource_catalog).await
         }
         (_, ValidateExpectation::Message(expectation)) => {
-            let (value, subject) = match target {
+            // The loader pairs `select` with a `lastReceived` target
+            // and an `absent` expectation only; a caller bypassing the
+            // parser gets a named law failure, never a panic.
+            if select.is_some() && !matches!(target, ScenarioTarget::LastReceived(_)) {
+                return Err(ScenarioFailure::ValidationMismatch {
+                    action: index,
+                    detail: "`select` is only valid on a `lastReceived` validate target"
+                        .to_string(),
+                });
+            }
+            let (projection, subject) = match target {
                 ScenarioTarget::LastReceived(endpoint) => {
                     // The declared endpoint may carry query bytes: the
                     // subject renders redacted like every diagnostic
@@ -1153,17 +1173,29 @@ async fn validate_action(
                             });
                         }
                     }
+                    // A selected projection proves the source absent
+                    // when the selector resolves to nothing; the
+                    // message body stays the subject of the unselected
+                    // grammar.
+                    match select {
+                        Some(selector) => (
+                            select_from(message, selector),
+                            format!("`{selector}` last received on {redacted}"),
+                        ),
+                        None => (
+                            Some(message.body.clone()),
+                            format!("body last received on {redacted}"),
+                        ),
+                    }
+                }
+                ScenarioTarget::Variable(name) => {
                     (
-                        message.body.clone(),
-                        format!("body last received on {redacted}"),
+                        Some(vars.get(name).cloned().ok_or_else(|| {
+                            ScenarioFailure::VarUnresolved { name: name.clone() }
+                        })?),
+                        format!("variable `{name}`"),
                     )
                 }
-                ScenarioTarget::Variable(name) => (
-                    vars.get(name)
-                        .cloned()
-                        .ok_or_else(|| ScenarioFailure::VarUnresolved { name: name.clone() })?,
-                    format!("variable `{name}`"),
-                ),
                 // Taken by the arm above: the grammar never pairs a
                 // `partner` target with the message expectation.
                 ScenarioTarget::Partner(_) => return Err(unpaired_validate(index)),
@@ -1181,6 +1213,41 @@ async fn validate_action(
                 // target with the rows grammar only; a message
                 // expectation here means a caller bypassed the parser.
                 ScenarioTarget::Redis(_) => return Err(unpaired_validate(index)),
+            };
+            // Absence evaluates the projection's `Option` directly: a
+            // none-projection proves the selected source absent, a
+            // materialized value (including JSON null) is present and
+            // renders kind-only so a secret header never leaks into
+            // the failure text. The loader legalizes only
+            // (lastReceived, absent, select); every other pairing here
+            // is a defensive law failure, not a panic.
+            let value = match (expectation, projection) {
+                (Expectation::Absent, None) => return Ok(()),
+                (Expectation::Absent, Some(observed)) => {
+                    let Some(selector) = select.as_deref() else {
+                        return Err(ScenarioFailure::ValidationMismatch {
+                            action: index,
+                            detail: "`absent` requires `select`".to_string(),
+                        });
+                    };
+                    return Err(ScenarioFailure::ValidationMismatch {
+                        action: index,
+                        detail: format!(
+                            "{subject}: expected `{selector}` to be absent, but a value is present ({})",
+                            value_kind(&observed)
+                        ),
+                    });
+                }
+                (_, None) => {
+                    return Err(ScenarioFailure::ValidationMismatch {
+                        action: index,
+                        detail: format!(
+                            "{subject}: `{}` resolved to nothing",
+                            select.as_deref().unwrap_or("the projection")
+                        ),
+                    });
+                }
+                (_, Some(observed)) => observed,
             };
             // The per-form booleans delegate to the shared core
             // (`camel_matchers::expectation_matches`); the detail
@@ -1350,6 +1417,19 @@ fn select_from(message: &IncomingMessage, selector: &str) -> Option<Value> {
         }
         "path" if rest.is_none() => Some(message.path.clone().map_or(Value::Null, Value::String)),
         _ => None,
+    }
+}
+
+/// The JSON kind of an observed value, used where a diagnostic must
+/// say WHAT is present without saying what it says (a secret header).
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 

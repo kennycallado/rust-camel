@@ -98,6 +98,7 @@ async fn send_then_receive_within_deadline() {
             ))),
             deadline: None,
             elapsed_at_least: None,
+            select: None,
         },
     ]);
     let mut vars = ScenarioVars::new();
@@ -231,6 +232,7 @@ async fn variable_extraction_flows_forward() {
                 ))),
                 deadline: None,
                 elapsed_at_least: None,
+                select: None,
             },
         ])
     }
@@ -408,6 +410,7 @@ async fn selector_extracts_status_method_and_path() {
             ))),
             deadline: None,
             elapsed_at_least: None,
+            select: None,
         },
         ScenarioAction::Validate {
             target: ScenarioTarget::Variable("method".to_string()),
@@ -416,6 +419,7 @@ async fn selector_extracts_status_method_and_path() {
             ))),
             deadline: None,
             elapsed_at_least: None,
+            select: None,
         },
         ScenarioAction::Validate {
             target: ScenarioTarget::Variable("path".to_string()),
@@ -424,6 +428,7 @@ async fn selector_extracts_status_method_and_path() {
             ))),
             deadline: None,
             elapsed_at_least: None,
+            select: None,
         },
     ]);
     let mut vars = ScenarioVars::new();
@@ -463,6 +468,7 @@ async fn selector_header_lookup_is_case_insensitive() {
                 ))),
                 deadline: None,
                 elapsed_at_least: None,
+                select: None,
             },
         ])
     }
@@ -487,6 +493,236 @@ async fn selector_header_lookup_is_case_insensitive() {
 }
 
 // -------------------------------------------------------------------------
+// Absence assertions (`select` + `{absent: null}` on lastReceived)
+// -------------------------------------------------------------------------
+
+/// A received message carrying the given body and headers.
+fn message_with(body: Value, headers: BTreeMap<String, Value>) -> IncomingMessage {
+    IncomingMessage {
+        body,
+        headers,
+        status: None,
+        method: None,
+        path: None,
+        arrival: std::time::Instant::now(),
+    }
+}
+
+/// A one-entry header map.
+fn header(name: &str, value: Value) -> BTreeMap<String, Value> {
+    BTreeMap::from([(name.to_string(), value)])
+}
+
+/// Receive one message, then prove `selector` absent on the last
+/// received message.
+fn absence_probe_document(selector: &str) -> ScenarioDocument {
+    doc_with(vec![
+        ScenarioAction::Receive {
+            from: endpoint("partner://fake"),
+            deadline: Duration::from_secs(1),
+            extract: None,
+        },
+        ScenarioAction::Validate {
+            target: ScenarioTarget::LastReceived(endpoint("partner://fake")),
+            expectation: ValidateExpectation::Message(Expectation::Absent),
+            deadline: None,
+            elapsed_at_least: None,
+            select: Some(selector.to_string()),
+        },
+    ])
+}
+
+/// A header the response never sends resolves to nothing: the absence
+/// assertion passes.
+#[tokio::test]
+async fn absent_header_passes() {
+    let fake = FakeAdapter::scripted(vec![message_with(Value::Null, BTreeMap::new())]);
+    let router = router_for("partner://fake", fake);
+    let doc = absence_probe_document("headers.X-Internal-Token");
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(outcome.verdict, Some(ScenarioVerdict::Pass));
+    assert_eq!(outcome.per_action[1], Ok(ScenarioVerdict::Pass));
+}
+
+/// A present header fails the absence assertion kind-only: the value's
+/// content (a secret sentinel) never reaches the failure text.
+#[tokio::test]
+async fn present_header_fails_absent_without_disclosing_value() {
+    let fake = FakeAdapter::scripted(vec![message_with(
+        Value::Null,
+        header("X-Internal-Token", Value::String("s3cr3t".to_string())),
+    )]);
+    let router = router_for("partner://fake", fake);
+    let doc = absence_probe_document("headers.X-Internal-Token");
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(outcome.verdict, None);
+    match &outcome.per_action[1] {
+        Err(ScenarioFailure::ValidationMismatch { action: 1, detail }) => {
+            assert!(
+                detail.contains("X-Internal-Token"),
+                "the selector must be named: {detail}"
+            );
+            assert!(
+                detail.contains("present (string)"),
+                "the observed kind must be named: {detail}"
+            );
+            assert!(
+                !detail.contains("s3cr3t"),
+                "the header value must stay withheld: {detail}"
+            );
+        }
+        other => panic!("expected ValidationMismatch on action 1, got {other:?}"),
+    }
+}
+
+/// A JSON-null header value is materialized, not absent: the absence
+/// assertion fails with the `null` kind. The documented equals-null
+/// path still works through `extract` + a variable target.
+#[tokio::test]
+async fn null_valued_header_fails_absent() {
+    let fake = FakeAdapter::scripted(vec![message_with(
+        Value::Null,
+        header("X-Flag", Value::Null),
+    )]);
+    let router = router_for("partner://fake", fake);
+    let doc = absence_probe_document("headers.X-Flag");
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(outcome.verdict, None);
+    match &outcome.per_action[1] {
+        Err(ScenarioFailure::ValidationMismatch { action: 1, detail }) => {
+            assert!(
+                detail.contains("present (null)"),
+                "a materialized null is present: {detail}"
+            );
+        }
+        other => panic!("expected ValidationMismatch on action 1, got {other:?}"),
+    }
+
+    // The documented equals-null path: extract the header, assert the
+    // variable equals null.
+    let fake = FakeAdapter::scripted(vec![message_with(
+        Value::Null,
+        header("X-Flag", Value::Null),
+    )]);
+    let router = router_for("partner://fake", fake);
+    let doc = doc_with(vec![
+        ScenarioAction::Receive {
+            from: endpoint("partner://fake"),
+            deadline: Duration::from_secs(1),
+            extract: Some(BTreeMap::from([(
+                "flag".to_string(),
+                "headers.X-Flag".to_string(),
+            )])),
+        },
+        ScenarioAction::Validate {
+            target: ScenarioTarget::Variable("flag".to_string()),
+            expectation: ValidateExpectation::Message(Expectation::Equals(Value::Null)),
+            deadline: None,
+            elapsed_at_least: None,
+            select: None,
+        },
+    ]);
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(outcome.verdict, Some(ScenarioVerdict::Pass));
+}
+
+/// A JSON-null body leaf is materialized, not absent: the absence
+/// assertion fails with the `null` kind (a verdict-only assertion
+/// would pass for the wrong reason).
+#[tokio::test]
+async fn null_body_leaf_fails_absent() {
+    let fake = FakeAdapter::scripted(vec![message_with(
+        serde_json::json!({ "receiptId": null }),
+        BTreeMap::new(),
+    )]);
+    let router = router_for("partner://fake", fake);
+    let doc = absence_probe_document("body.receiptId");
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(outcome.verdict, None);
+    match &outcome.per_action[1] {
+        Err(ScenarioFailure::ValidationMismatch { action: 1, detail }) => {
+            assert!(
+                detail.contains("present (null)"),
+                "a materialized null leaf is present: {detail}"
+            );
+        }
+        other => panic!("expected ValidationMismatch on action 1, got {other:?}"),
+    }
+}
+
+/// A body path under a null body resolves to nothing: the absence
+/// assertion passes.
+#[tokio::test]
+async fn absent_body_path_passes() {
+    let fake = FakeAdapter::scripted(vec![message_with(Value::Null, BTreeMap::new())]);
+    let router = router_for("partner://fake", fake);
+    let doc = absence_probe_document("body.receiptId");
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(outcome.verdict, Some(ScenarioVerdict::Pass));
+}
+
+/// An absence assertion on an endpoint that received nothing keeps the
+/// existing no-message failure (unchanged behavior).
+#[tokio::test]
+async fn absent_on_endpoint_without_message_fails() {
+    let router = router_for("partner://fake", FakeAdapter::scripted(Vec::new()));
+    let doc = doc_with(vec![ScenarioAction::Validate {
+        target: ScenarioTarget::LastReceived(endpoint("partner://fake")),
+        expectation: ValidateExpectation::Message(Expectation::Absent),
+        deadline: None,
+        elapsed_at_least: None,
+        select: Some("headers.X-Internal-Token".to_string()),
+    }]);
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(outcome.verdict, None);
+    match &outcome.per_action[0] {
+        Err(ScenarioFailure::ValidationMismatch { action: 0, detail }) => {
+            assert!(
+                detail.contains("no message has been received"),
+                "the no-message diagnostic must stay: {detail}"
+            );
+        }
+        other => panic!("expected ValidationMismatch on action 0, got {other:?}"),
+    }
+}
+
+/// `extract` is unchanged by the absence feature: a selector that
+/// resolves to nothing still fails the receive with the byte-identical
+/// extraction detail.
+#[tokio::test]
+async fn extract_absent_header_still_hard_fails() {
+    let fake = FakeAdapter::scripted(vec![message_with(Value::Null, BTreeMap::new())]);
+    let router = router_for("partner://fake", fake);
+    let doc = doc_with(vec![ScenarioAction::Receive {
+        from: endpoint("partner://fake"),
+        deadline: Duration::from_secs(1),
+        extract: Some(BTreeMap::from([(
+            "token".to_string(),
+            "headers.X-Internal-Token".to_string(),
+        )])),
+    }]);
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(outcome.verdict, None);
+    match &outcome.per_action[0] {
+        Err(ScenarioFailure::ValidationMismatch { action: 0, detail }) => {
+            assert_eq!(
+                detail,
+                "extract of `headers.X-Internal-Token` into variable `token` resolved to nothing"
+            );
+        }
+        other => panic!("expected ValidationMismatch on action 0, got {other:?}"),
+    }
+}
+
+// -------------------------------------------------------------------------
 // Document-level execution (run_scenario_document)
 // -------------------------------------------------------------------------
 
@@ -508,6 +744,7 @@ async fn document_run_all_pass_records_verdict() {
             expectation: ValidateExpectation::Message(Expectation::Exists),
             deadline: None,
             elapsed_at_least: None,
+            select: None,
         },
     ]);
     // Seed the variable so the `Exists` validation passes.
@@ -599,6 +836,7 @@ async fn variable_mismatch_names_the_variable() {
             ))),
             deadline: None,
             elapsed_at_least: None,
+            select: None,
         },
     ]);
     let mut vars = ScenarioVars::new();
@@ -1224,6 +1462,7 @@ async fn body_validation_failure_carries_redacted_subject() {
             ))),
             deadline: None,
             elapsed_at_least: None,
+            select: None,
         },
     ]);
     let mut vars = ScenarioVars::new();
@@ -1257,6 +1496,7 @@ async fn unreceived_validate_carries_redacted_subject() {
         expectation: ValidateExpectation::Message(Expectation::Exists),
         deadline: None,
         elapsed_at_least: None,
+        select: None,
     }]);
     let mut vars = ScenarioVars::new();
     let failure = run_scenario(&doc, &router, &mut vars)
@@ -1733,6 +1973,7 @@ async fn validate_sql_routes_through_catalog() {
         }),
         deadline: None,
         elapsed_at_least: None,
+        select: None,
     }]);
     let router = PartnerRouter::new(BTreeMap::new());
     let mut vars = ScenarioVars::new();
@@ -1763,6 +2004,7 @@ async fn validate_sql_without_catalog_fails_closed() {
         }),
         deadline: None,
         elapsed_at_least: None,
+        select: None,
     }]);
     let router = PartnerRouter::new(BTreeMap::new());
     let mut vars = ScenarioVars::new();
@@ -1800,6 +2042,7 @@ async fn unpaired_validate_sql_message() {
         expectation: ValidateExpectation::Message(Expectation::Exists),
         deadline: None,
         elapsed_at_least: None,
+        select: None,
     }]);
     let router = PartnerRouter::new(BTreeMap::new());
     let mut vars = ScenarioVars::new();

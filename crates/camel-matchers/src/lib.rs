@@ -145,6 +145,10 @@ pub enum Expectation {
     /// Matches any value including null; the wildcard verb (`ignore`
     /// at the grammar layer, the Citrus `@ignore@` equivalent).
     Any,
+    /// The value under validation resolves to nothing (path-scoped
+    /// absence). Never matches a materialized value; the none-projection
+    /// is evaluated by the runner, not here.
+    Absent,
 }
 
 /// The sql-target row-shape expectation: exactly one row shape is
@@ -399,6 +403,10 @@ pub fn expectation_matches(expectation: &Expectation, value: &serde_json::Value)
         Expectation::Exists => value != &serde_json::Value::Null,
         Expectation::JsonSubset(pattern) => json_subset(pattern, value),
         Expectation::Any => true,
+        // Fail-closed: absence is not a property of any materialized
+        // value. The scenario runner owns the Option<Value> projection
+        // and never calls expectation_matches for a none-projection.
+        Expectation::Absent => false,
     }
 }
 
@@ -668,6 +676,23 @@ mod tests {
             &Expectation::Contains("nope".to_string()),
             &value
         ));
+    }
+
+    #[test]
+    fn absent_never_matches_materialized_values() {
+        let values = [
+            serde_json::Value::Null,
+            serde_json::json!(0),
+            serde_json::json!("x"),
+            serde_json::json!({}),
+            serde_json::json!([]),
+        ];
+        for value in &values {
+            assert!(
+                !expectation_matches(&Expectation::Absent, value),
+                "Absent must never match a materialized value: {value}"
+            );
+        }
     }
 
     #[test]

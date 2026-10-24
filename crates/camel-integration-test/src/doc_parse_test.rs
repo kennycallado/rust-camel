@@ -2237,6 +2237,583 @@ fn ignore_matches_any_cell() {
 }
 
 // ---------------------------------------------------------------------------
+// `absent` verb and `select` field (Task 1.2, scenario-absent-assertions):
+// the shared dual grammar gains the path-scoped absence verb, and the
+// `lastReceived` validate target gains the selector the runner projects
+// through. Every other grammar position and target rejects an `Absent`
+// expectation at load.
+// ---------------------------------------------------------------------------
+
+/// Asserts a load error is a `DocError::Validation` naming `index` and
+/// carrying `needle` in its message.
+fn assert_validation_error(err: &DocError, index: usize, needle: &str) {
+    match err {
+        DocError::Validation {
+            index: actual,
+            message,
+        } => {
+            assert_eq!(
+                *actual, index,
+                "error must name the action index: {message}"
+            );
+            assert!(
+                message.contains(needle),
+                "error must contain `{needle}`: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+/// `{absent: null}` parses to `Expectation::Absent`: the path-scoped
+/// absence verb, mirroring the `exists` no-argument law.
+#[test]
+fn absent_null_payload_parses_to_absent() {
+    let expectation = expectation_from_value(&json!({ "absent": null }), 0, "expectation")
+        .expect("absent with a null payload parses");
+    assert!(
+        matches!(expectation, Expectation::Absent),
+        "expected Expectation::Absent, got {expectation:?}"
+    );
+}
+
+/// A non-null payload is a grammar error mirroring `exists`: the
+/// absence verb takes no argument.
+#[test]
+fn absent_non_null_payload_is_grammar_error() {
+    let err = expectation_from_value(&json!({ "absent": "x" }), 0, "expectation")
+        .expect_err("absent with a payload must fail");
+    assert_validation_error(&err, 0, "`absent` takes no argument");
+}
+
+/// A bare `absent` string stays a literal equality: only the object
+/// form is the verb.
+#[test]
+fn bare_absent_string_stays_literal_equals() {
+    let expectation = expectation_from_value(&json!("absent"), 0, "expectation")
+        .expect("a bare string parses as a literal");
+    assert_eq!(expectation, Expectation::Equals(json!("absent")));
+}
+
+/// `select` on a non-`lastReceived` target is a load error: only the
+/// last received message carries the projectionable source.
+#[test]
+fn select_on_variable_target_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      variable: v
+    select: headers.X
+    expectation:
+      absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(&err, 0, "only valid on a `lastReceived`");
+}
+
+/// The select-target guard is independent of the absent pre-check: a
+/// plain expectation on a non-`lastReceived` target still reports the
+/// target restriction, not a matcher pairing error.
+#[test]
+fn select_on_variable_target_with_plain_expectation_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      variable: v
+    select: headers.X
+    expectation:
+      equals: v
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(
+        &err,
+        0,
+        "`select` is only valid on a `lastReceived` validate target",
+    );
+}
+
+/// `select` exists solely for absence assertions: pairing it with a
+/// materialized matcher is rejected at load.
+#[test]
+fn select_with_non_absent_expectation_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      lastReceived: "partner://app"
+    select: headers.X
+    expectation:
+      equals: v
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(&err, 0, "solely for absence");
+}
+
+/// An absence assertion without a selector has no subject to prove
+/// absent: `select` is mandatory.
+#[test]
+fn absent_without_select_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      lastReceived: "partner://app"
+    expectation:
+      absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(&err, 0, "requires `select`");
+}
+
+/// `absent` on a variable target is a load error: variables resolve to
+/// materialized values, never a none-projection.
+#[test]
+fn absent_on_variable_target_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      variable: v
+    expectation:
+      absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(&err, 0, "only valid on a `lastReceived`");
+}
+
+/// `absent` on a partner target is a load error with the same
+/// absence-specific diagnostic.
+#[test]
+fn absent_on_partner_target_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      partner: "partner://app"
+    expectation:
+      absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(&err, 0, "only valid on a `lastReceived`");
+}
+
+/// `absent` on a sql target is a load error with the same
+/// absence-specific diagnostic.
+#[test]
+fn absent_on_sql_target_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: ds
+        query: SELECT 1
+    expectation:
+      absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(&err, 0, "only valid on a `lastReceived`");
+}
+
+/// `absent` on a surreal target is a load error with the same
+/// absence-specific diagnostic.
+#[test]
+fn absent_on_surreal_target_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: ds
+        query: SELECT * FROM t
+    expectation:
+      absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(&err, 0, "only valid on a `lastReceived`");
+}
+
+/// `absent` on a redis target is a load error with the same
+/// absence-specific diagnostic.
+#[test]
+fn absent_on_redis_target_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      redis:
+        datasource: ds
+        key: k
+        type: string
+    expectation:
+      absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(&err, 0, "only valid on a `lastReceived`");
+}
+
+/// Redis cells delegate to the shared sql row grammar: an `absent` cell
+/// is rejected there with the absence-specific diagnostic.
+#[test]
+fn absent_in_redis_row_cell_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      redis:
+        datasource: ds
+        key: k
+        type: string
+    expectation:
+      rows: [[{absent: null}]]
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(
+        &err,
+        0,
+        "only valid on a `lastReceived` validate target with `select`",
+    );
+}
+
+/// An unknown selector head can never prove absence: the projection
+/// would always resolve.
+#[test]
+fn select_unknown_head_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      lastReceived: "partner://app"
+    select: header.X-Internal
+    expectation:
+      absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(&err, 0, "cannot prove absence");
+    assert_validation_error(&err, 0, "header.X-Internal");
+}
+
+/// A bare `body` selector always resolves, so it cannot prove absence.
+#[test]
+fn select_bare_head_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      lastReceived: "partner://app"
+    select: body
+    expectation:
+      absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(&err, 0, "cannot prove absence");
+    assert_validation_error(&err, 0, "`body`");
+}
+
+/// A scalar head (`status`) always resolves (absent scalars map to
+/// null), so it cannot prove absence.
+#[test]
+fn select_scalar_head_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      lastReceived: "partner://app"
+    select: status
+    expectation:
+      absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(&err, 0, "cannot prove absence");
+    assert_validation_error(&err, 0, "`status`");
+}
+
+/// A scalar sub-path (`status.why`) fails the head match like its bare
+/// scalar twin.
+#[test]
+fn select_scalar_subpath_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      lastReceived: "partner://app"
+    select: status.why
+    expectation:
+      absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(&err, 0, "cannot prove absence");
+    assert_validation_error(&err, 0, "status.why");
+}
+
+/// A recognized head with an empty sub-path always resolves to the
+/// whole header set or body, so it cannot prove absence either.
+#[test]
+fn select_empty_subpath_is_load_error() {
+    for selector in ["body.", "headers."] {
+        let err = parse_case(&format!(
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      lastReceived: "partner://app"
+    select: {selector}
+    expectation:
+      absent: null
+"#
+        ))
+        .expect_err("parse must fail");
+        assert_validation_error(&err, 0, "cannot prove absence");
+        assert_validation_error(&err, 0, &format!("`{selector}`"));
+    }
+}
+
+/// `send.expectReply` reuses the dual grammar but has no `select`
+/// projection: an `absent` reply expectation is rejected at load.
+#[test]
+fn absent_in_expect_reply_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to: direct:start
+    expectReply:
+      absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(
+        &err,
+        0,
+        "only valid on a `lastReceived` validate target with `select`",
+    );
+}
+
+/// A partner `requests` entry body reuses the dual grammar but has no
+/// `select` projection: an `absent` body expectation is rejected.
+#[test]
+fn absent_in_partner_request_body_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:0/order
+      provisioning: harness
+- validate:
+    target:
+      partner: http://127.0.0.1:0/order
+    expectation:
+      requests:
+      - body:
+          absent: null
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(
+        &err,
+        1,
+        "only valid on a `lastReceived` validate target with `select`",
+    );
+}
+
+/// A sql row cell reuses the dual grammar but has no `select`
+/// projection: an `absent` cell is rejected at load.
+#[test]
+fn absent_in_row_cell_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      sql:
+        datasource: ds
+        query: SELECT 1
+    expectation:
+      columns: [c]
+      rows: [[{absent: null}]]
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(
+        &err,
+        0,
+        "only valid on a `lastReceived` validate target with `select`",
+    );
+}
+
+/// The surreal target delegates its cell grammar to the shared sql row
+/// parser, so an `absent` cell is rejected there with the same
+/// absence-specific diagnostic.
+#[test]
+fn absent_in_surreal_row_cell_is_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      surreal:
+        datasource: ds
+        query: SELECT * FROM t
+    expectation:
+      columns: [c]
+      rows: [[{absent: null}]]
+"#,
+    )
+    .expect_err("parse must fail");
+    assert_validation_error(
+        &err,
+        0,
+        "only valid on a `lastReceived` validate target with `select`",
+    );
+}
+
+/// The valid grammar carries the selector onto the parsed action and
+/// pairs it with the `Absent` matcher.
+#[test]
+fn select_with_valid_grammar_parses() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- validate:
+    target:
+      lastReceived: "partner://app"
+    select: headers.X-Internal-Token
+    expectation:
+      absent: null
+"#,
+    )
+    .expect("parse must succeed");
+    match doc.scenario.first().expect("one action") {
+        ScenarioAction::Validate {
+            select,
+            expectation,
+            ..
+        } => {
+            assert_eq!(
+                select.as_deref(),
+                Some("headers.X-Internal-Token"),
+                "the parsed action must carry the selector"
+            );
+            assert_eq!(
+                expectation,
+                &ValidateExpectation::Message(Expectation::Absent),
+                "the expectation must parse as the absence matcher"
+            );
+        }
+        other => panic!("expected Validate, got {other:?}"),
+    }
+}
+
+/// The crate README and the book's "Asserting absence" section are the
+/// grammar's documentation. This test parses the guide's worked example
+/// VERBATIM, so a drift between the guide and the grammar fails here.
+/// When the guide example changes, copy it here and keep the two in
+/// step.
+#[test]
+fn guide_worked_example_parses() {
+    let doc = parse_case(
+        r#"
+routeFiles:
+  - routes/bridge.yaml
+scenario:
+  - send:
+      to: direct:start
+      body: order-7f3a
+  - receive:
+      from:
+        endpoint: http://127.0.0.1:0/upstream
+        provisioning: harness
+        bindVar: UPSTREAM
+      deadline: 5s
+      extract:
+        correlation: headers.X-Correlation-Id
+  - validate:
+      target:
+        lastReceived: http://127.0.0.1:0/upstream
+      select: headers.X-Internal-Token
+      expectation:
+        absent: null
+  - validate:
+      target:
+        variable: correlation
+      expectation:
+        exists: null
+"#,
+    )
+    .expect("the guide's worked example must load");
+
+    let (select, expectation) = doc
+        .scenario
+        .iter()
+        .find_map(|action| match action {
+            ScenarioAction::Validate {
+                select: Some(select),
+                expectation,
+                ..
+            } if select == "headers.X-Internal-Token" => Some((select, expectation)),
+            _ => None,
+        })
+        .expect("the example carries the absence validate");
+    assert_eq!(select, "headers.X-Internal-Token");
+    assert_eq!(
+        expectation,
+        &ValidateExpectation::Message(Expectation::Absent),
+        "the example must parse as the absence matcher"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // sql validate target (Task 2.2, sql-validate-target): the `sql` key,
 // the sql expectation grammar, and the ORDER-BY nondeterminism advisory.
 // ---------------------------------------------------------------------------

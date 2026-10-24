@@ -95,6 +95,7 @@ fn partner_validate(
         }),
         deadline,
         elapsed_at_least: None,
+        select: None,
     }
 }
 
@@ -189,6 +190,7 @@ fn partner_validate_requests(
         }),
         deadline,
         elapsed_at_least: None,
+        select: None,
     }
 }
 

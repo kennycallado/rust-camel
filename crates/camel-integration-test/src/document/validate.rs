@@ -111,6 +111,7 @@ fn is_matcher_key(key: &str) -> bool {
             | "startsWith"
             | "endsWith"
             | "exists"
+            | "absent"
             | "ignore"
             | "jsonSubset"
     )
@@ -161,6 +162,13 @@ pub(crate) fn expectation_from_value(
                     Err(invalid(format!("{field}: `exists` takes no argument")))
                 }
             }
+            "absent" => {
+                if payload.is_null() {
+                    Ok(Expectation::Absent)
+                } else {
+                    Err(invalid(format!("{field}: `absent` takes no argument")))
+                }
+            }
             "ignore" => {
                 if payload.is_null() {
                     Ok(Expectation::Any)
@@ -178,6 +186,40 @@ pub(crate) fn expectation_from_value(
         };
     }
     Ok(Expectation::Equals(value.clone()))
+}
+
+/// The restriction every grammar position outside a `lastReceived`
+/// validate target reports for the path-scoped `absent` verb. One text
+/// keeps the per-target and per-position diagnostics identical.
+pub(super) const ABSENT_RESTRICTION: &str =
+    "`absent` is only valid on a `lastReceived` validate target with `select`";
+
+/// Whether the raw expectation node declares the `absent` verb: an
+/// object whose single key is `absent` (the payload is checked by the
+/// verb parser). Used by the validate conversion's uniform pre-check
+/// before dispatching by target.
+pub(super) fn declares_absent(value: &Value) -> bool {
+    matches!(value, Value::Object(map) if map.len() == 1 && map.contains_key("absent"))
+}
+
+/// Rejects a path-scoped `Absent` expectation in a grammar position
+/// that shares [`expectation_from_value`] but has no `select`
+/// projection (`send.expectReply`, partner `requests` bodies, sql,
+/// surreal, and redis row cells). `field` prefixes the diagnostic at
+/// sites that already name their field.
+pub(crate) fn reject_absent(
+    expectation: &Expectation,
+    index: usize,
+    field: Option<&str>,
+) -> Result<(), DocError> {
+    if !matches!(expectation, Expectation::Absent) {
+        return Ok(());
+    }
+    let message = match field {
+        Some(field) => format!("{field}: {ABSENT_RESTRICTION}"),
+        None => ABSENT_RESTRICTION.to_string(),
+    };
+    Err(DocError::Validation { index, message })
 }
 
 /// Applies the partner expectation grammar: a map with exactly one
@@ -454,11 +496,9 @@ fn request_shape_from_value(
                 query = Some(subset);
             }
             "body" => {
-                body = Some(expectation_from_value(
-                    payload,
-                    index,
-                    "requests entry body",
-                )?);
+                let shape = expectation_from_value(payload, index, "requests entry body")?;
+                reject_absent(&shape, index, Some("requests entry body"))?;
+                body = Some(shape);
             }
             other => {
                 return Err(invalid(format!(
@@ -532,7 +572,9 @@ pub(crate) fn sql_expectation_from_value(
                     };
                     let mut row = Vec::with_capacity(cells.len());
                     for cell in cells {
-                        row.push(expectation_from_value(cell, index, "rows")?);
+                        let cell = expectation_from_value(cell, index, "rows")?;
+                        reject_absent(&cell, index, Some("rows"))?;
+                        row.push(cell);
                     }
                     parsed_rows.push(row);
                 }

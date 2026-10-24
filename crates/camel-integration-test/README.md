@@ -136,6 +136,92 @@ single key of its `target` map:
   next.
 - `sql`: datasource rows at rest, described under [SQL actions](#sql-actions).
 
+### Absence assertions (`absent` and `select`)
+
+A `lastReceived` validate can prove that one header or body path is
+absent. The action carries `select` and an `{absent: null}` expectation:
+
+```yaml
+- validate:
+    target: {lastReceived: http://127.0.0.1:0/upstream}
+    select: headers.X-Internal-Token
+    expectation: {absent: null}
+```
+
+The `absent` verb takes no argument, mirroring `exists`. A non-null
+payload fails load with "`<field>`: `absent` takes no argument". A bare
+string `absent` stays a literal equality; only the object form is the
+verb.
+
+`select` names the projection. A `headers.<name>` selector matches the
+header name ASCII-case-insensitively. A `body.<path>` selector walks a
+dotted object path. An absence `select` must carry one of those two
+heads and a non-empty sub-path. Bare `body` and `headers` select the
+whole part, and the scalar heads `status`, `method`, and `path` select
+the transport scalar; neither form can prove absence, so the loader
+rejects both. Absence is path-scoped: it proves that the selected path
+resolves to nothing, not that the whole message part is absent.
+
+The loader rejects these forms at load, and each message names the
+action index:
+
+- `absent` on any target other than `lastReceived`: "`absent` is only
+  valid on a `lastReceived` validate target with `select`".
+- `select` on any target other than `lastReceived`: "`select` is only
+  valid on a `lastReceived` validate target, got `<selector>`".
+- `select` with an expectation other than `absent`: "`select` exists
+  solely for absence assertions; pair it with `expectation: {absent:
+  null}`, got `<selector>`".
+- `absent` without `select`: "`absent` requires `select` naming the
+  header or body path to prove absent".
+- A `select` whose head is not `headers` or `body`, a bare head, or a
+  scalar head: "`select` head must be `headers.<name>` or
+  `body.<path>`; `<selector>` cannot prove absence (bare and scalar
+  heads always resolve)".
+- `absent` in `send.expectReply`, a partner `requests` body
+  expectation, or a sql, surreal, or redis row cell: "`<field>`:
+  `absent` is only valid on a `lastReceived` validate target with
+  `select`".
+
+The runner resolves the `lastReceived` subject as it does for every
+other expectation. An endpoint that received no message still fails
+with "no message has been received on `<endpoint>` to validate".
+
+A present value fails the absence assertion. The detail names the
+selector and the observed kind — `null`, `string`, `number`, `boolean`,
+`object`, or `array` — and never the content. The subject prefix is
+"`<selector>` last received on `<endpoint>`", so the full detail reads:
+
+```text
+`headers.X-Internal-Token` last received on http://127.0.0.1:41023/upstream: expected `headers.X-Internal-Token` to be absent, but a value is present (string)
+```
+
+This kind-only rule protects a secret that must not appear in shared
+scenario output. An absence diagnostic is a leak diagnostic.
+
+The case table is normative:
+
+| Case | `receive.extract` | `select` + `{absent: null}` |
+|---|---|---|
+| Absent header | hard failure (unchanged) | passes |
+| Present header, null value | yields null into the variable | FAILS, observed kind `present (null)`; assert equals-null through extract and a `variable` target |
+| Misspelled head (`header.X`) | runtime hard failure (unchanged) | load error |
+| Misspelled header name or body path | runtime hard failure (unchanged) | indistinguishable from absence, so the assertion passes; add a positive control |
+| Absent response body (null or empty) | bare `body` yields null (unchanged) | bare heads are load errors; `body.<path>` on a null or empty body passes |
+| Body leaf mapped to null (`{"a": null}`) | `body.a` yields null (unchanged) | FAILS; present-null is not absent |
+| Endpoint never received a message | n/a | fails with the existing no-message error |
+
+A misspelled header name or body path cannot be distinguished from an
+absent source. Add a positive control: also assert a value known to be
+present, for example an `extract` of a known header and a `variable`
+target with `{exists: null}`. `select` pairs only with `absent` in v1.
+
+Nothing in `receive.extract` changes. An extract whose source is absent
+keeps its hard failure. The migration is the workaround, not the
+behavior: a suite that extracts the whole headers object and regex
+allowlists it (camel-112) simplifies to one `select` + `absent`
+assertion.
+
 A `partner` target asserts the recorded-request traffic of a harness
 partner. The expectation declares exactly one bound form: `count: n`
 (exact), `atLeast: n`, `atMost: n`, or `atLeast: n` together with

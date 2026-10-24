@@ -339,6 +339,7 @@ fn wiring_excludes_plain_string_validate_partner() {
                 }),
                 deadline: None,
                 elapsed_at_least: None,
+                select: None,
             },
         ],
         partners: None,

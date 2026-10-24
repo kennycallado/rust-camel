@@ -57,7 +57,9 @@ pub use validate::{ScenarioTarget, SqlTarget, SurrealTarget, ValidateExpectation
 pub mod redis_target;
 pub use redis_target::{RedisTarget, RedisType};
 use redis_target::{redis_expectation_from_value, redis_target_from_value};
-use validate::{backticked, partner_expectation_from_value};
+use validate::{
+    ABSENT_RESTRICTION, backticked, declares_absent, partner_expectation_from_value, reject_absent,
+};
 pub(crate) use validate::{
     expectation_from_value, sql_expectation_from_value, sql_query_lacks_order_by,
 };
@@ -206,6 +208,11 @@ pub enum ScenarioAction {
         /// assertion anchors to the message's wire arrival, never the
         /// consumption time.
         elapsed_at_least: Option<Duration>,
+        /// Optional projection selector (`headers.<name>` or
+        /// `body.<path>`) for absence assertions. Only valid on a
+        /// `lastReceived` target paired with `Expectation::Absent`,
+        /// whose none-projection proves the selected source absent.
+        select: Option<String>,
     },
     /// Seed datasource state before the route assertions run (bd
     /// rc-25lup.1): execute the ordered `prepare` mutation statements
@@ -499,6 +506,10 @@ struct RawValidate {
     /// Raw humantime string; `lastReceived` targets only, parsed
     /// during validation so the error can name the action index.
     elapsed_at_least: Option<String>,
+    /// Optional selector for absence assertions; `lastReceived`
+    /// targets only, checked during validation so the error can name
+    /// the action index.
+    select: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,6 +1028,9 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                 .expect_reply
                 .map(|value| expectation_from_value(&value, index, "expectReply"))
                 .transpose()?;
+            if let Some(expectation) = &expect_reply {
+                reject_absent(expectation, index, Some("expectReply"))?;
+            }
             Ok(ScenarioAction::Send {
                 to: endpoint_from_raw(raw.to)?,
                 body: raw.body,
@@ -1088,6 +1102,23 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                     )));
                 }
             };
+            // Absence is a path-scoped projection on the last received
+            // message: on any other target `absent` and `select`
+            // declare nothing. The `absent` pre-check runs before the
+            // target-specific grammar so every non-`lastReceived`
+            // target reports the same absence-specific diagnostic.
+            if declares_absent(&raw.expectation)
+                && !matches!(target, ScenarioTarget::LastReceived(_))
+            {
+                return Err(action_error(ABSENT_RESTRICTION.to_string()));
+            }
+            if let Some(selector) = raw.select.as_deref()
+                && !matches!(target, ScenarioTarget::LastReceived(_))
+            {
+                return Err(action_error(format!(
+                    "`select` is only valid on a `lastReceived` validate target, got `{selector}`"
+                )));
+            }
             let expectation = match &target {
                 ScenarioTarget::Partner(_) => ValidateExpectation::Partner(
                     partner_expectation_from_value(&raw.expectation, index)?,
@@ -1122,6 +1153,43 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                     "expectation",
                 )?),
             };
+            // `select` exists solely for absence assertions in v1: the
+            // projection proves a header or body path absent, and every
+            // other pairing already has a matcher that expresses it.
+            let absent = matches!(
+                expectation,
+                ValidateExpectation::Message(Expectation::Absent)
+            );
+            if let Some(selector) = raw.select.as_deref()
+                && !absent
+            {
+                return Err(action_error(format!(
+                    "`select` exists solely for absence assertions; pair it with `expectation: {{absent: null}}`, got `{selector}`"
+                )));
+            }
+            if absent && !matches!(target, ScenarioTarget::LastReceived(_)) {
+                return Err(action_error(ABSENT_RESTRICTION.to_string()));
+            }
+            if absent && raw.select.is_none() {
+                return Err(action_error(
+                    "`absent` requires `select` naming the header or body path to prove absent"
+                        .to_string(),
+                ));
+            }
+            if let Some(selector) = raw.select.as_deref() {
+                // Bare `body`/`headers` and every scalar head always
+                // resolve to a value (absent scalars already map to
+                // null), so only a non-empty sub-path can produce the
+                // none-projection absence needs.
+                let provable = selector.split_once('.').is_some_and(|(head, rest)| {
+                    matches!(head, "headers" | "body") && !rest.is_empty()
+                });
+                if !provable {
+                    return Err(action_error(format!(
+                        "`select` head must be `headers.<name>` or `body.<path>`; `{selector}` cannot prove absence (bare and scalar heads always resolve)"
+                    )));
+                }
+            }
             // Nondeterminism advisory (bd rc-25lup.2): an ordered
             // `rows` assertion over a query without `ORDER BY` depends
             // on the database's row return order. Advisory only — the
@@ -1155,6 +1223,7 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
                 expectation,
                 deadline,
                 elapsed_at_least,
+                select: raw.select,
             })
         }
         crate::sql_action::SQL_ACTION_KEY => {

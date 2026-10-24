@@ -241,6 +241,7 @@ async fn inbound_response_validated_on_wire() {
                         )),
                         deadline: None,
                         elapsed_at_least: None,
+                        select: None,
                     }
                 } else {
                     action.clone()

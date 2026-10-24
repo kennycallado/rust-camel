@@ -206,6 +206,7 @@ fn method_scenario_document(
             ))),
             deadline: None,
             elapsed_at_least: None,
+            select: None,
         },
     ];
     ScenarioDocument {
@@ -320,6 +321,7 @@ async fn outbound_bridge_header_corruption_fails() {
                         )),
                         deadline: None,
                         elapsed_at_least: None,
+                        select: None,
                     }
                 } else {
                     action.clone()

@@ -59,6 +59,58 @@ one document stay ordered.
 
 Back-to-back `send:` actions with no intervening `receive:` dispatch genuinely concurrent requests. The crate [README](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/README.md) documents the burst-send recipe for asserting the concurrent arrivals. A `direct:` send may declare `expectReply` to assert the route's synchronous reply; the README's usage/grammar area details the verb. The scenario-tier field takes matcher verbs directly, unlike the unit tier's `expectReply` block.
 
+## Asserting absence
+
+A `validate` with a `lastReceived` target can prove that one header or body path is absent. The action declares a `select` selector and an `{absent: null}` expectation. The `absent` verb takes no argument. In YAML the key is `expectation:`, not `expect:`.
+
+A suite needs this assertion to prove an internal header does not leak. The route under test receives an inbound request and forwards it to an upstream partner. An internal gateway adds `X-Internal-Token`, and the route must not forward that header. The scenario sends one request to the route, receives the forwarded request on the harness partner endpoint, and asserts the header is absent:
+
+```yaml
+routeFiles:
+  - routes/bridge.yaml
+scenario:
+  - send:
+      to: direct:start
+      body: order-7f3a
+  - receive:
+      from:
+        endpoint: http://127.0.0.1:0/upstream
+        provisioning: harness
+        bindVar: UPSTREAM
+      deadline: 5s
+      extract:
+        correlation: headers.X-Correlation-Id
+  - validate:
+      target:
+        lastReceived: http://127.0.0.1:0/upstream
+      select: headers.X-Internal-Token
+      expectation:
+        absent: null
+  - validate:
+      target:
+        variable: correlation
+      expectation:
+        exists: null
+```
+
+The `receive.extract` and the second validate form the positive control. They assert that `X-Correlation-Id`, a header known to be present, reached the partner. The extract hard-fails when the header is absent, and the `variable` validate states the expectation explicitly. Without that control, a misspelled header name or body path would pass the absence assertion. The selector and a misspelled selector both resolve to nothing, so the runner cannot tell them apart. Always add a positive control for a value known to be present. The crate [README](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/README.md) is the grammar reference for `select`, the `absent` verb, and the full load-rejection list.
+
+`select` accepts `headers.<name>` and `body.<path>`. The header name matches ASCII-case-insensitively. The body path is dotted. A bare `body` or `headers` is a load error, and so is a scalar head such as `status`. The absence claim is path-scoped: it proves the selected path resolves to nothing, not that the whole message part is absent.
+
+| Case | `receive.extract` | `select` + `{absent: null}` |
+|---|---|---|
+| Absent header | hard failure (unchanged) | passes |
+| Present header, null value | yields null into the variable | FAILS, observed kind `present (null)`; assert equals-null through extract and a `variable` target |
+| Misspelled head (`header.X`) | runtime hard failure (unchanged) | load error |
+| Misspelled header name or body path | runtime hard failure (unchanged) | indistinguishable from absence, so the assertion passes; add a positive control |
+| Absent response body (null or empty) | bare `body` yields null (unchanged) | bare heads are load errors; `body.<path>` on a null or empty body passes |
+| Body leaf mapped to null (`{"a": null}`) | `body.a` yields null (unchanged) | FAILS; present-null is not absent |
+| Endpoint never received a message | n/a | fails with the existing no-message error |
+
+A failure names the selector and the observed kind, never the content. The kind is one of `null`, `string`, `number`, `boolean`, `object`, or `array`. The detail reads "`headers.X-Internal-Token` last received on `http://127.0.0.1:<port>/upstream`: expected `headers.X-Internal-Token` to be absent, but a value is present (string)". The kind-only rule protects a secret in shared scenario output.
+
+The migration is the workaround, not the behavior. `receive.extract` keeps its hard failure when the source is absent, so existing typo protection stays. A suite that extracts the whole headers object and regex allowlists it (camel-112) simplifies to one `select` + `absent` assertion.
+
 A scenario document may declare one document-level `logs:` block. The harness captures every tracing event emitted while the document runs, and it evaluates the block after the action list completes. Three clauses exist, and every declared clause must hold. `contains` lists substrings of captured event messages. `regex` lists unanchored patterns; each pattern matches against the composite camel-log message. `noLevelAbove` sets a level cap over the whole document window; the cap spans every target, route processors and harness tasks alike. An unknown level, an invalid pattern, or an unknown key fails the load.
 
 Log capture is process-global. Documents that run concurrently in one process attribute events conservatively: the harness files an event in every open window, so a sibling document's WARN can fail this document's `noLevelAbove` cap. Serialize log-asserting documents, or keep them on the current-thread itest path, when a document needs strict isolation.
