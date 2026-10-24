@@ -1,10 +1,23 @@
+//! Bridge child process ownership: spawn, readiness, teardown, and bounded output drains.
+//!
+//! On Linux and macOS a supervisor-first POSIX-shell watchdog over a parent-liveness
+//! pipe (`GroupGuard`, crate-internal) guarantees the bridge process group dies with the
+//! parent binary on every exit route — normal exit, panic, `SIGTERM`, `SIGINT`, and
+//! `SIGKILL` — using POSIX shell builtins, `setpgid`, `trap`, and `waitid`, with no
+//! `/proc` dependency. Windows has no process groups or POSIX shell, so
+//! [`BridgeProcess::stop`] and `Drop` kill the child directly; an unclean parent death
+//! can leak it. See [`BridgeProcess`].
+
 use std::fmt;
 use std::ops::Deref;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use thiserror::Error;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
+use crate::GroupGuard;
 use crate::spec::{BridgeSpec, CXF_BRIDGE, JMS_BRIDGE, XML_BRIDGE};
 
 // ---------------------------------------------------------------------------
@@ -67,6 +80,8 @@ pub enum BridgeError {
     Transport(String),
     #[error("Config error: {0}")]
     Config(String),
+    #[error("Bridge supervision error: {0}")]
+    Supervision(String),
     /// A startup permanent failure announced by the bridge (`{"status":
     /// "permanent-failure","reason":"..."}`) or inferred from the reserved exit
     /// code 78. Never retried (phase 4 parks the slot).
@@ -494,11 +509,40 @@ impl BridgeProcessConfig {
     }
 }
 
-/// R4-L7: bounded stdout drain — shared between production start() and tests.
-/// Never stops reading: the OS pipe must stay drained (stopping = pipe fill = child
-/// blocked = worse regression). Bound single-line size to 64 KiB; rate-limit logging
-/// to 100 lines/second with drop summary.
-async fn drain_stdout<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, token: CancellationToken) {
+/// Process-lifetime runtime hosting the owned child-output drains.
+///
+/// The drains must outlive the runtime that called [`BridgeProcess::start`].
+/// Spawning them on the caller's runtime means a caller that retires its
+/// runtime (for example a short-lived harness thread) aborts the drains and
+/// closes the pipe readers; the still-running child then gets `EPIPE` on its
+/// next stderr/stdout write. Keeping the drains here decouples their lifetime
+/// from the caller: only [`BridgeProcess::stop`]/`Drop` cancel them.
+static DRAIN_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+fn drain_runtime() -> &'static tokio::runtime::Runtime {
+    DRAIN_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_io()
+            .enable_time()
+            .thread_name("camel-bridge-drain")
+            .build()
+            // The first spawn cannot proceed without a drain runtime; failing
+            // to build one means the process is already out of OS resources.
+            .expect("build camel-bridge drain runtime") // allow-unwrap
+    })
+}
+
+/// R4-L7: bounded child-output drain — shared between production start() and
+/// tests. `label` distinguishes "stdout" from "stderr" in log messages. Never
+/// stops reading: the OS pipe must stay drained (stopping = pipe fill = child
+/// blocked = worse regression). Bound single-line size to 64 KiB; rate-limit
+/// logging to 100 lines/second with drop summary.
+async fn drain_child_output<R: tokio::io::AsyncBufRead + Unpin>(
+    mut reader: R,
+    token: CancellationToken,
+    label: &str,
+) {
     use tokio::io::AsyncBufReadExt;
     use tokio::time::{Duration, Instant};
 
@@ -528,7 +572,7 @@ async fn drain_stdout<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, token: 
                                     // log-policy: degraded
                                     if logged < LOG_BUDGET {
                                         tracing::warn!(
-                                            "bridge stdout: oversized line (>{MAX_LINE_BYTES} bytes), truncated"
+                                            "bridge {label}: oversized line (>{MAX_LINE_BYTES} bytes), truncated"
                                         );
                                         logged += 1;
                                     } else {
@@ -564,7 +608,7 @@ async fn drain_stdout<R: tokio::io::AsyncBufRead + Unpin>(mut reader: R, token: 
                     if dropped > 0 {
                         // log-policy: normal
                         tracing::debug!(
-                            "bridge stdout: dropped {dropped} lines in last interval"
+                            "bridge {label}: dropped {dropped} lines in last interval"
                         );
                     }
                     interval_start = Instant::now();
@@ -679,6 +723,7 @@ async fn read_ready_port<R: tokio::io::AsyncBufRead + Unpin>(
 }
 
 /// Classify EOF outside the readiness deadline, then bound cleanup separately.
+#[cfg(not(unix))]
 async fn eof_exit_error(child: &mut tokio::process::Child) -> BridgeError {
     use tokio::time::{Duration, timeout};
     match timeout(Duration::from_secs(2), child.wait()).await {
@@ -694,7 +739,26 @@ async fn eof_exit_error(child: &mut tokio::process::Child) -> BridgeError {
     }
 }
 
+/// Unix: the bridge has already exited at EOF. Wait bounded and non-reaping,
+/// then run the guard's serialized shutdown (group TERM → KILL → pgid
+/// invalidation → reap) and obtain the exit status from that same ordering.
+#[cfg(unix)]
+async fn eof_exit_error(guard: &GroupGuard) -> BridgeError {
+    use tokio::time::Duration;
+    match guard.shutdown_classified(Duration::from_secs(2)).await {
+        Ok(Some(status)) if status.code() == Some(78) => BridgeError::PermanentFailure(
+            "bridge exited with code 78 before announcing readiness".to_string(),
+        ),
+        Ok(_) | Err(_) => BridgeError::StdoutClosed,
+    }
+}
+
 pub struct BridgeProcess {
+    /// Unix: the guard owns the bridge child and its process group.
+    #[cfg(unix)]
+    guard: GroupGuard,
+    /// Non-unix: the bare child (no group supervision on this platform).
+    #[cfg(not(unix))]
     child: tokio::process::Child,
     grpc_port: u16,
     /// Announced SOAP listener port (`soap-ready` line). `None` when the bridge
@@ -702,8 +766,12 @@ pub struct BridgeProcess {
     /// builds a new process, so no stale port can survive into the next slot.
     soap_port: Option<u16>,
     tls: crate::tls::BridgeTlsMaterial,
+    /// Cancels the stdout drain task.
     token: CancellationToken,
     handle: Option<JoinHandle<()>>,
+    /// Cancels the stderr drain task (stderr is owned, never inherited).
+    stderr_token: CancellationToken,
+    stderr_handle: Option<JoinHandle<()>>,
 }
 
 impl BridgeProcess {
@@ -718,7 +786,14 @@ impl BridgeProcess {
 
     /// PID of the owned bridge child (read-only lifecycle accessor).
     pub fn child_pid(&self) -> Option<u32> {
-        self.child.id()
+        #[cfg(unix)]
+        {
+            self.guard.bridge_pid()
+        }
+        #[cfg(not(unix))]
+        {
+            self.child.id()
+        }
     }
 
     /// Connect a mTLS tonic channel to this bridge process.
@@ -754,6 +829,12 @@ impl BridgeProcess {
 
         let tls = crate::tls::BridgeTlsMaterial::generate()?;
 
+        // Supervisor-first (unix): the watchdog process group must exist before
+        // the bridge. Every early return below drops this guard, which is the
+        // sole cleanup backstop (group KILL + liveness-pipe EOF).
+        #[cfg(unix)]
+        let guard = GroupGuard::establish()?;
+
         // Port selection is JVM-authoritative (bd rc-s7dyw): 0 makes Quarkus
         // bind an OS-assigned port and announce the actual bound port. The
         // old bind-:0-read-drop here left the port unheld between the drop
@@ -761,7 +842,9 @@ impl BridgeProcess {
         // the bind no such window exists.
         let free_port: u16 = 0;
 
-        // If CAMEL_BRIDGE_LOG_STDERR is set, redirect stderr to a file for debugging.
+        // If CAMEL_BRIDGE_LOG_STDERR is set, redirect stderr to a file for
+        // debugging. Otherwise stderr is piped and drained: it is never
+        // inherited (a leaked child must not hold the parent's stderr).
         let stderr_stdio: std::process::Stdio =
             if let Ok(log_dir) = std::env::var("CAMEL_BRIDGE_LOG_STDERR") {
                 let log_filename = config
@@ -783,21 +866,16 @@ impl BridgeProcess {
                             "[camel-bridge] failed to create log file {}: {}",
                             log_path, e
                         );
-                        std::process::Stdio::inherit()
+                        std::process::Stdio::piped()
                     }
                 }
             } else {
-                std::process::Stdio::inherit()
+                std::process::Stdio::piped()
             };
 
         let mut command = Command::new(&config.binary_path);
-        // Owned cleanup: any early return from start() (timeout, malformed ready
-        // line, missing stdout) drops the child handle and kills the process —
-        // no leaked bridge keeps running with stale credentials.
         command
-            // Cancellation-safe ownership: if this future is dropped (outer
-            // timeout or abort) the raw child is killed instead of orphaned.
-            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
             .env("QUARKUS_HTTP_SSL_PORT", free_port.to_string())
             .env(
                 "QUARKUS_TLS_BRIDGE_KEY_STORE_PEM_0_CERT",
@@ -811,6 +889,11 @@ impl BridgeProcess {
             .stdout(std::process::Stdio::piped())
             .stderr(stderr_stdio);
 
+        // Non-unix keeps the bare-child lifecycle: kill_on_drop is its only
+        // cancellation-safe backstop (there is no guard/watchdog).
+        #[cfg(not(unix))]
+        command.kill_on_drop(true);
+
         // Cut inherited operator exports of the configured keys before injecting
         // the Rust-owned values (Task 2.1: broker TLS inheritance isolation).
         for key in &config.env_remove_keys {
@@ -822,10 +905,50 @@ impl BridgeProcess {
             command.env(key, value);
         }
 
-        let mut child = command.spawn()?;
+        // Spawn under the guard (unix) or bare (non-unix). The child's pipe
+        // ends register with the runtime active on THIS thread, so spawn inside
+        // the drain runtime: registering them on the caller's runtime would
+        // make the drain readers unusable (and closable) the moment that
+        // runtime is dropped.
+        #[cfg(unix)]
+        {
+            let _drain = drain_runtime().enter();
+            guard.spawn_bridge(command)?;
+        }
+        #[cfg(not(unix))]
+        let mut child = {
+            let _drain = drain_runtime().enter();
+            command.spawn()?
+        };
 
-        let stdout = child.stdout.take().ok_or(BridgeError::StdoutClosed)?;
-        let mut reader = tokio::io::BufReader::new(stdout);
+        #[cfg(unix)]
+        let mut reader = {
+            let stdout = guard
+                .take_bridge_stdout()
+                .ok_or(BridgeError::StdoutClosed)?;
+            tokio::io::BufReader::new(stdout)
+        };
+        #[cfg(not(unix))]
+        let mut reader = {
+            let stdout = child.stdout.take().ok_or(BridgeError::StdoutClosed)?;
+            tokio::io::BufReader::new(stdout)
+        };
+
+        // Owned stderr, drained IMMEDIATELY (before readiness parsing): a
+        // 200 KiB stderr burst must never fill the pipe and stall startup. The
+        // drain is bounded (64 KiB lines, rate-limited logs) and cancelled by
+        // `stop()`/`Drop`. With file redirection there is no pipe to drain.
+        let stderr_token = CancellationToken::new();
+        #[cfg(unix)]
+        let stderr_pipe = guard.take_bridge_stderr();
+        #[cfg(not(unix))]
+        let stderr_pipe = child.stderr.take();
+        let stderr_handle = stderr_pipe.map(|stderr| {
+            let child_token = stderr_token.clone();
+            drain_runtime().spawn(async move {
+                drain_child_output(tokio::io::BufReader::new(stderr), child_token, "stderr").await;
+            })
+        });
 
         // --- Ready-detection phase (bounded by ONE outer timeout + bounded line) ---
         // Startup protocol (Task 2.8): parse the gRPC `ready` line AND the
@@ -844,6 +967,9 @@ impl BridgeProcess {
             Ok(Ok(ports)) => ports,
             Ok(Err(BridgeError::StdoutClosed)) => {
                 // EOF classification must not lose exit 78 to the readiness deadline.
+                #[cfg(unix)]
+                let error = eof_exit_error(&guard).await;
+                #[cfg(not(unix))]
                 let error = eof_exit_error(&mut child).await;
                 // log-policy: system-broken
                 tracing::error!("bridge stdout closed before ready message");
@@ -861,32 +987,36 @@ impl BridgeProcess {
             }
         };
 
-        // --- Post-ready bounded drain (R4-L7) ---
+        // --- Post-ready bounded stdout drain (R4-L7) ---
         // Never stop reading: the OS pipe must stay drained (stopping = pipe fill
         // = child blocked = worse regression). Bound single-line size to 64 KiB;
         // rate-limit logging to 100 lines/second with drop summary.
         let token = CancellationToken::new();
         let child_token = token.clone();
-        let handle = tokio::spawn(async move {
-            drain_stdout(reader, child_token).await;
+        let handle = drain_runtime().spawn(async move {
+            drain_child_output(reader, child_token, "stdout").await;
         });
 
         Ok(BridgeProcess {
+            #[cfg(unix)]
+            guard,
+            #[cfg(not(unix))]
             child,
             grpc_port: port,
             soap_port,
             tls,
             token,
             handle: Some(handle),
+            stderr_token,
+            stderr_handle,
         })
     }
 
-    /// Gracefully stop: SIGTERM + wait for exit.
+    /// Gracefully stop: SIGTERM to the bridge group, bounded wait, then KILL.
     pub async fn stop(mut self) -> Result<(), BridgeError> {
-        use tokio::time::{Duration, sleep};
+        use tokio::time::Duration;
 
         self.token.cancel();
-
         if let Some(handle) = self.handle.take() {
             let join_result = tokio::time::timeout(Duration::from_secs(5), handle).await;
             if join_result.is_err() {
@@ -894,30 +1024,34 @@ impl BridgeProcess {
             }
         }
 
-        // Send SIGTERM first (graceful shutdown)
-        #[cfg(unix)]
-        {
-            let pid = self.child.id().unwrap_or(0);
-            if pid > 0 {
-                // SAFETY: libc::kill is called with the child process PID obtained from tokio.
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
-                }
+        self.stderr_token.cancel();
+        if let Some(handle) = self.stderr_handle.take() {
+            let join_result = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            if join_result.is_err() {
+                tracing::warn!("bridge stderr drain task did not exit after cancellation");
             }
         }
 
-        // On non-Unix (Windows), fall through to kill immediately
-        #[cfg(not(unix))]
-        let _ = self.child.start_kill();
+        // Unix: the guard owns the process group. No bare-PID signal is ever
+        // issued — the fixed TERM → bounded wait → KILL sequence runs inside
+        // `stop_group` and reaps both children.
+        #[cfg(unix)]
+        self.guard.stop_group(Duration::from_secs(5)).await?;
 
-        // Wait up to 5 seconds for graceful exit, then SIGKILL
-        tokio::select! {
-            result = self.child.wait() => {
-                result?;
-            }
-            _ = sleep(Duration::from_secs(5)) => {
-                let _ = self.child.start_kill();
-                self.child.wait().await?;
+        // Non-unix: preserve the bare-child kill/wait behavior exactly.
+        #[cfg(not(unix))]
+        {
+            use tokio::time::sleep;
+
+            let _ = self.child.start_kill();
+            tokio::select! {
+                result = self.child.wait() => {
+                    result?;
+                }
+                _ = sleep(Duration::from_secs(5)) => {
+                    let _ = self.child.start_kill();
+                    self.child.wait().await?;
+                }
             }
         }
         Ok(())
@@ -927,7 +1061,11 @@ impl BridgeProcess {
 impl Drop for BridgeProcess {
     fn drop(&mut self) {
         self.token.cancel();
-        // Best-effort only. Does NOT wait — cannot block in Drop.
+        self.stderr_token.cancel();
+        // Unix: the guard is the sole backstop. Its Drop performs a best-effort
+        // group KILL and closes the liveness pipe (EOF backstop); it never
+        // issues a bare-PID signal. Non-unix keeps the best-effort child kill.
+        #[cfg(not(unix))]
         let _ = self.child.start_kill();
     }
 }
@@ -1953,23 +2091,51 @@ mod tests {
 
     #[tokio::test]
     async fn test_bridge_stop_completes() {
-        use tokio::process::Command;
         use tokio::time::{Duration, timeout};
 
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg("trap '' TERM; while true; do echo tick; sleep 1; done")
-            .stdout(std::process::Stdio::null())
-            .spawn()
-            .expect("must spawn test child process");
+        let tls = crate::tls::BridgeTlsMaterial::generate().expect("test tls");
 
-        let bridge = BridgeProcess {
-            child,
-            grpc_port: 0,
-            soap_port: None,
-            tls: crate::tls::BridgeTlsMaterial::generate().expect("test tls"),
-            token: CancellationToken::new(),
-            handle: None,
+        #[cfg(unix)]
+        let bridge = {
+            let guard = GroupGuard::establish().expect("establish guard");
+            let mut command = tokio::process::Command::new("sh");
+            command
+                .arg("-c")
+                .arg("trap '' TERM; while true; do echo tick; sleep 1; done")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            guard.spawn_bridge(command).expect("spawn test child");
+            BridgeProcess {
+                guard,
+                grpc_port: 0,
+                soap_port: None,
+                tls,
+                token: CancellationToken::new(),
+                handle: None,
+                stderr_token: CancellationToken::new(),
+                stderr_handle: None,
+            }
+        };
+
+        #[cfg(not(unix))]
+        let bridge = {
+            let child = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg("trap '' TERM; while true; do echo tick; sleep 1; done")
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .expect("must spawn test child process");
+            BridgeProcess {
+                child,
+                grpc_port: 0,
+                soap_port: None,
+                tls,
+                token: CancellationToken::new(),
+                handle: None,
+                stderr_token: CancellationToken::new(),
+                stderr_handle: None,
+            }
         };
 
         let result = timeout(Duration::from_secs(10), bridge.stop()).await;
@@ -2393,7 +2559,7 @@ mod tests {
         let token = CancellationToken::new();
 
         // Call the production drain function directly (I-1: no duplicated logic)
-        let handle = tokio::spawn(drain_stdout(reader, token.clone()));
+        let handle = tokio::spawn(drain_child_output(reader, token.clone(), "stdout"));
 
         // Wait for child to exit
         let status = child.wait().await.expect("wait for child");
@@ -2410,7 +2576,7 @@ mod tests {
         // Use printf + head to generate 200 KiB of 'A' without python dependency.
         // Bound verification: the drain loop caps line_buf at MAX_LINE_BYTES (64 KiB)
         // via the `oversized` flag — bytes beyond the cap are discarded, not accumulated.
-        // Enforced by code inspection (src/process.rs drain_stdout: `line_buf.len() < MAX_LINE_BYTES`
+        // Enforced by code inspection (src/process.rs drain_child_output: `line_buf.len() < MAX_LINE_BYTES`
         // guard + `oversized = true` branch that skips push). This test verifies the function
         // completes within a tight time bound (500ms), which would fail if the loop stalled
         // or allocated unboundedly.
@@ -2424,7 +2590,7 @@ mod tests {
         let reader = tokio::io::BufReader::new(stdout);
         let token = CancellationToken::new();
 
-        let handle = tokio::spawn(drain_stdout(reader, token.clone()));
+        let handle = tokio::spawn(drain_child_output(reader, token.clone(), "stdout"));
 
         let status = child.wait().await.expect("wait for child");
         assert!(status.success(), "child should exit successfully");
@@ -2446,9 +2612,9 @@ mod tests {
         let token = CancellationToken::new();
 
         // Call the production drain function directly (I-1: no duplicated logic)
-        let handle = tokio::spawn(drain_stdout(reader, token.clone()));
+        let handle = tokio::spawn(drain_child_output(reader, token.clone(), "stdout"));
 
-        // drain_stdout polls `token.cancelled()` first in a biased select,
+        // drain_child_output polls `token.cancelled()` first in a biased select,
         // so cancelling before the task's first poll still exits promptly.
         token.cancel();
         let result = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
@@ -2466,7 +2632,7 @@ mod tests {
     /// otherwise trailing bytes after the ready message would be lost (a second
     /// reader would start at offset 0, missing data already consumed by phase 1).
     /// This test exercises the handoff by mimicking the ready-detection loop,
-    /// then calling drain_stdout with the same reader to verify trailing lines
+    /// then calling drain_child_output with the same reader to verify trailing lines
     /// are processed (not lost).
     #[tokio::test]
     async fn drain_handoff_preserves_trailing_bytes() {
@@ -2487,7 +2653,7 @@ mod tests {
 
         // --- Phase 2: drain with the SAME reader (I-2: handoff invariant) ---
         let token = CancellationToken::new();
-        let handle = tokio::spawn(drain_stdout(reader, token.clone()));
+        let handle = tokio::spawn(drain_child_output(reader, token.clone(), "stdout"));
 
         // Wait for child to exit; the echo script terminates promptly, the
         // bound only guards a hung child from hanging the test forever

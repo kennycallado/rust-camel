@@ -38,6 +38,18 @@ The connect step retries the TLS handshake up to ten times. Quarkus `PortAnnounc
 
 Stdout drain is bounded. Single lines cap at 64 KiB. Logging rate-limits to 100 lines per second with a drop summary. The drain never stops reading. An undrained OS pipe fills and blocks the child. Bounded size prevents memory growth. Rate-limited logging prevents log flooding. Both are required for stable long-running bridges.
 
+Child stderr is owned by the parent by default: it is piped and drained with the same bounded, rate-limited pattern, and the drain starts before readiness parsing. The child never inherits the parent's stderr. The [`CAMEL_BRIDGE_LOG_STDERR`](#environment-overrides) override keeps redirecting stderr to per-bridge files with unchanged semantics.
+
+## Child process lifetime
+
+On Linux and macOS the bridge child cannot outlive the parent binary. Normal exit, panic, `SIGTERM`, `SIGINT`, and `SIGKILL` all kill the whole bridge process group: the bridge, any launcher descendants it created, and the watchdog. The mechanism is a supervisor-first POSIX-shell watchdog over a parent-liveness pipe. The parent creates the pipe and arms the watchdog before the bridge exists, and the bridge joins the watchdog's process group at exec. Any parent death closes the pipe write end, the watchdog sees EOF, and it `SIGKILL`s its own group. The watchdog ignores `SIGTERM` so a graceful teardown cannot disarm it, and the implementation uses only POSIX shell builtins, `setpgid`, `trap`, and `waitid` — it does not depend on `/proc`. The guarantee holds by design on both platforms and is verified on Linux; the macOS evidence suite has not been run.
+
+Because the bridge runs outside the terminal's foreground process group, terminal `SIGINT`/`SIGHUP` reach the parent, not the bridge — the parent's cleanup handles them. Bridge `stdin` and `stdout` must stay piped (never a tty): a background process that reads or writes the terminal gets `SIGTTIN`/`SIGTTOU`.
+
+Teardown is group-scoped. The awaited `stop()` performs the graceful bounded sequence: `SIGTERM` to the group, a bounded non-reaping wait, unconditional group `SIGKILL`, invalidation of the stored group id, then reaping of the bridge and watchdog. A successful `stop()` return implies both children are reaped. `Drop` is a synchronous fallback, not a graceful shutdown: it immediately `SIGKILL`s the group and closes the parent-liveness pipe without waiting, so it neither gives the children a graceful teardown window nor guarantees they are reaped. Do not rely on `Drop` for graceful shutdown or reaping. Group signals are never sent after invalidation. This guarantee is the fix for the leaked-process evidence in bd `rc-r8od1`.
+
+Windows has no process groups and no POSIX shell, so supervision there is explicit-path teardown only. `stop()` and `Drop` kill the child directly; there is no group watchdog. If the parent dies uncleanly, the bridge and any descendants it spawned can survive. Treat that as a known leak rather than a supervised guarantee.
+
 ## Binary acquisition
 
 `ensure_binary` resolves the bridge binary in four steps:

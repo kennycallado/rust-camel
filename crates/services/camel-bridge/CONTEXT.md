@@ -38,6 +38,46 @@ crates own reconnect orchestration. They detect failure, replace the process, co
 the new channel, and call `BridgeReconnectHandler::on_reconnect` when they must restore
 stateful resources.
 
+## Child process lifetime
+
+`BridgeProcess` supervises its child through a supervisor-first POSIX-shell
+watchdog over a parent-liveness pipe on Linux and macOS. The watchdog is armed
+before the bridge is spawned, and the bridge joins the watchdog's process group
+at exec. When the parent dies for any reason — normal exit, panic, `SIGTERM`,
+`SIGINT`, or `SIGKILL` — the pipe write end closes, the watchdog sees EOF, and it
+`SIGKILL`s its own group. The bridge, launcher descendants, and the watchdog all
+die together. The mechanism uses only POSIX shell builtins, `setpgid`, `trap`,
+and `waitid`, with no `/proc` dependency. This guarantee is the fix for bd
+`rc-r8od1`.
+
+The watchdog is SIGTERM-immune (`trap "" TERM`), so a graceful stop cannot
+disarm the parent-death backstop. Teardown signals process groups only, never
+bare PIDs. The awaited `stop()` performs the graceful bounded sequence:
+`SIGTERM` to the group, a bounded non-reaping wait, unconditional group
+`SIGKILL`, invalidation of the stored group id, then reaping of both the bridge
+and the watchdog. A successful `stop()` return implies both children are reaped.
+`Drop` is a synchronous fallback, not a graceful shutdown: it immediately
+group-`SIGKILL`s and closes the liveness pipe without waiting, so it neither
+reaps the children nor gives them a graceful teardown window. Do not rely on
+`Drop` for graceful shutdown or reaping.
+
+Stderr is owned by default: it is piped and drained with the bounded pattern
+(64 KiB line cap, rate-limited forwarding, overflow dropped with a summary), and
+the drain starts immediately after spawn so stderr can never stall readiness or
+pin the parent's stderr. `CAMEL_BRIDGE_LOG_STDERR` keeps its existing
+file-redirect behavior and failure semantics. The drains run on a
+process-lifetime dedicated tokio runtime (`DRAIN_RUNTIME`), NOT on the caller's
+runtime — do not "fix" this back to caller-scoped spawning: dropping the
+caller's runtime would close the pipe readers and `SIGPIPE` a live bridge.
+
+The guarantee holds by design on Linux and macOS and is verified on Linux; the
+macOS evidence suite has not been run.
+
+Windows has no process groups and no POSIX shell. Supervision there is
+explicit-path teardown only: `stop()` and `Drop` kill the child directly, with no
+group watchdog. An unclean parent death can leave the bridge and its descendants
+running; that is a known leak, not a supervised guarantee.
+
 ## Credential redaction posture
 
 ADR-0051 applies to every diagnostic representation of bridge configuration.
