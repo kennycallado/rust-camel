@@ -431,6 +431,15 @@ pub(crate) fn contained_compile(
     path: &Path,
     f: impl FnOnce() -> Result<DescriptorPool, ProtoCompileError>,
 ) -> Result<DescriptorPool, ProtoCompileError> {
+    contained_value(path, f)
+}
+
+/// Generic form of [`contained_compile`] for callers that do not return a
+/// [`DescriptorPool`] (for example, preload-only snapshots).
+pub(crate) fn contained_value<T>(
+    path: &Path,
+    f: impl FnOnce() -> Result<T, ProtoCompileError>,
+) -> Result<T, ProtoCompileError> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|payload| {
         Err(ProtoCompileError::Compile {
             path: path.to_path_buf(),
@@ -457,7 +466,7 @@ pub(crate) fn contained_decode(
 
 /// True when `path` names a precompiled descriptor set by extension
 /// (`binpb`, `pb`, `desc`, `protoset`; ASCII case-insensitive).
-fn is_descriptor_set(path: &Path) -> bool {
+pub(crate) fn is_descriptor_set(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|ext| {
@@ -748,9 +757,30 @@ pub(crate) struct SourceSnapshot {
     files: Vec<File>,
     /// `Some(index)` into `files`, or `None` for a recorded missing import.
     entries: HashMap<String, Option<usize>>,
+    /// Names in preorder (the order they were pushed), used to iterate the
+    /// closure deterministically.
+    order: Vec<String>,
 }
 
 impl SourceSnapshot {
+    pub(crate) fn root_name(&self) -> &str {
+        &self.root_name
+    }
+
+    /// True when any import was recorded as missing during preload.
+    pub(crate) fn has_missing(&self) -> bool {
+        self.entries.values().any(Option::is_none)
+    }
+
+    /// Root plus its transitive imports as resolved, in preorder. Recorded
+    /// missing names are excluded.
+    pub(crate) fn resolved_files(&self) -> impl Iterator<Item = (&str, &File)> {
+        self.order.iter().filter_map(move |name| {
+            let index = self.entries.get(name.as_str()).copied().flatten()?;
+            Some((name.as_str(), &self.files[index]))
+        })
+    }
+
     fn file_descriptor_set(&self) -> FileDescriptorSet {
         FileDescriptorSet {
             file: self
@@ -765,6 +795,7 @@ impl SourceSnapshot {
         let index = self.files.len();
         self.files.push(file);
         self.entries.insert(name.to_owned(), Some(index));
+        self.order.push(name.to_owned());
     }
 
     fn record_missing(&mut self, name: &str) {
@@ -781,7 +812,7 @@ struct SnapshotResolver {
 
 impl FileResolver for SnapshotResolver {
     fn resolve_path(&self, _path: &Path) -> Option<String> {
-        Some(self.snapshot.root_name.clone())
+        Some(self.snapshot.root_name().to_owned())
     }
 
     fn open_file(&self, name: &str) -> Result<File, protox::Error> {
@@ -825,6 +856,7 @@ fn preload_with(
         root_name: root_name.clone(),
         files: Vec::new(),
         entries: HashMap::new(),
+        order: Vec::new(),
     };
 
     let root_file = chain
@@ -989,6 +1021,24 @@ pub(crate) fn preload_snapshot(
 ) -> Result<SourceSnapshot, ProtoCompileError> {
     let chain = build_chain(proto_path, includes);
     preload_with(proto_path, &chain)
+}
+
+/// [`preload_snapshot`] inside the compile panic-containment boundary.
+pub(crate) fn preload_snapshot_contained(
+    proto_path: &Path,
+    includes: &[PathBuf],
+) -> Result<SourceSnapshot, ProtoCompileError> {
+    contained_value(proto_path, || preload_snapshot(proto_path, includes))
+}
+
+/// Preloads an embedded source asset inside the compile panic-containment
+/// boundary. The chain is registry-only plus Google well-known types.
+pub(crate) fn preload_embedded_snapshot(
+    proto_path: &Path,
+) -> Result<SourceSnapshot, ProtoCompileError> {
+    contained_value(proto_path, || {
+        preload_with(proto_path, &build_embedded_chain())
+    })
 }
 
 /// Compiles an already-preloaded snapshot. Validates cycles, chain and work

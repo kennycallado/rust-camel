@@ -18,7 +18,7 @@ use camel_dataformat_protobuf::ProtobufDataFormat;
 let df = ProtobufDataFormat::new("protos/helloworld.proto", "helloworld.HelloRequest")?;
 ```
 
-The constructor compiles the proto file at runtime through `camel-proto-compiler`. Pass a shared `ProtoCache` to `new_with_cache` to reuse the compiled descriptor pool across formats.
+The constructor compiles the proto file at runtime through `camel-proto-compiler`. Pass a shared `ProtoCache` to `new_with_cache` to reuse the compiled descriptor pool across formats. The cache key covers the root `.proto` and its transitive imports as resolved, so editing an imported file invalidates the cached descriptor.
 
 ## Compilation
 

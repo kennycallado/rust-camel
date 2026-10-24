@@ -1,4 +1,4 @@
-//! In-process `.proto` compilation with SHA-256 content caching.
+//! In-process `.proto` compilation with import-aware content caching.
 //!
 //! Compilation runs inside the process with `protox`; no external compiler is
 //! used and nothing is written to a temporary directory. A precompiled

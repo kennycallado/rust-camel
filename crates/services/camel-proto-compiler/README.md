@@ -11,8 +11,7 @@
 - Compile `.proto` files to `DescriptorPool` at runtime with no external tool
 - Accept a precompiled `FileDescriptorSet` in place of a source file
 - Typed `ProtoCompileError` (`ProtoNotFound`, `Io`, `Compile`, `DescriptorDecode`), marked `#[non_exhaustive]`
-- Thread-safe cache keyed by `(proto path, SHA-256 content hash, ordered include-path hash)`. The include-path hash uses canonical paths when available and supplied paths otherwise.
-- FIFO cache eviction at the configurable `max_entries` ceiling (default 1000)
+- Thread-safe, memory-only cache. For `.proto` sources the key covers the whole compile input: the proto path, the ordered include-path hash, and a content fingerprint over the root plus its transitive imports as resolved (canonical import name, order-stable). Missing imports fail the compile and cache nothing. For precompiled descriptor sets the key is the path and content hash; includes are ignored. Hits re-read the import closure; only the compile is skipped. Eviction is FIFO (`with_max_entries`, default 1000).
 - Returns `prost-reflect` `DescriptorPool` directly (no round-trip)
 
 ## Source preflight
@@ -27,7 +26,6 @@ The compiler then validates the snapshot: no import cycles, the chain and work b
 - Bracket nesting deeper than 64 is rejected.
 - Source imports are bounded to 256 distinct include-resolved files and 64 MiB cumulative. Embedded well-known types count toward neither bound.
 - Every dependency graph is bounded to an import chain of 256 files and a public-import traversal work `W = N + sum E(d)` of 100 000. A source graph is also bounded to a lifetime `(N + 1) * W` of 100 000. These are conservative bounds on traversal calls, not exact operation counts.
-- `ProtoCache` does not invalidate when an imported file changes (`rc-me2ii`).
 
 ## Migration
 
