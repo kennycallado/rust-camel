@@ -54,7 +54,7 @@ async fn jsonpath_filter_with_json_body() {
         .build()
         .await;
 
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_jsonpath_registered(&mut guard);
     drop(guard);
 
@@ -99,7 +99,7 @@ async fn jsonpath_set_header_from_body() {
         .build()
         .await;
 
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_jsonpath_registered(&mut guard);
     drop(guard);
 
@@ -148,7 +148,7 @@ async fn jsonpath_set_body_extracts_field() {
         .build()
         .await;
 
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_jsonpath_registered(&mut guard);
     drop(guard);
 

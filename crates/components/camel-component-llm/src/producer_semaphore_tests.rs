@@ -91,7 +91,7 @@ async fn streaming_permit_held_until_stream_consumed() {
     drain_stream(&mut out1).await;
 
     // second can now proceed
-    let _ = second.await;
+    let _ = second.await; // allow-test-wait: permit released before join; call completes
 }
 
 #[tokio::test]
@@ -127,7 +127,7 @@ async fn streaming_permit_released_after_dedup_stream_drop() {
         "permit must be released after the deduped stream is consumed"
     );
     second
-        .await
+        .await // allow-test-wait: join target already finished before await
         .expect("second task join")
         .expect("second call ok");
     assert_eq!(mock.call_count(), 2, "second call reached the provider");

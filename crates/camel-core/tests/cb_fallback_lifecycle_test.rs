@@ -323,7 +323,7 @@ async fn stateful_fallback_step_lifecycle_invoked() {
         state.shutdown_done.load(Ordering::SeqCst),
         "fallback StepLifecycle::shutdown must complete after release"
     );
-    let _ = in_flight.await;
+    let _ = in_flight.await; // allow-test-wait: join own released producer task; drain completion already observed
 }
 
 /// Fail-closed: a non-empty fallback sidecar WITHOUT a circuit breaker is

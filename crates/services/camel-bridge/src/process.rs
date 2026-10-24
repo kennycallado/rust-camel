@@ -2562,7 +2562,7 @@ mod tests {
         let handle = tokio::spawn(drain_child_output(reader, token.clone(), "stdout"));
 
         // Wait for child to exit
-        let status = child.wait().await.expect("wait for child");
+        let status = child.wait().await.expect("wait for child"); // allow-test-wait: finite shell fixture exits; wait asserted
         assert!(status.success(), "child should exit successfully");
 
         // Drain task should complete promptly after child exits (EOF)
@@ -2572,6 +2572,8 @@ mod tests {
 
     #[tokio::test]
     async fn drain_oversized_line_bounded() {
+        use std::time::Duration;
+
         // Child writes a line >64 KiB without newline, then newline.
         // Use printf + head to generate 200 KiB of 'A' without python dependency.
         // Bound verification: the drain loop caps line_buf at MAX_LINE_BYTES (64 KiB)
@@ -2592,7 +2594,10 @@ mod tests {
 
         let handle = tokio::spawn(drain_child_output(reader, token.clone(), "stdout"));
 
-        let status = child.wait().await.expect("wait for child");
+        let status = tokio::time::timeout(Duration::from_secs(30), child.wait())
+            .await
+            .expect("child exit within 30s: pipe-drain stall suspected")
+            .expect("wait for child");
         assert!(status.success(), "child should exit successfully");
 
         // Tighter bound: 500ms (was 2s). If the cap were broken, the loop would

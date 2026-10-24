@@ -59,7 +59,7 @@ async fn test_pool_detects_unhealthy_bridge() -> Result<(), Box<dyn std::error::
 {
     let (port, state) = spawn_mock_bridge().await?;
     {
-        let mut healthy = state.healthy.lock().await;
+        let mut healthy = state.healthy.lock().await; // allow-test-wait: mock bridge state mutex; uncontended in-test
         *healthy = false;
     }
 

@@ -253,7 +253,7 @@ async fn stop_inside_loop_halts_route_and_preserves_iteration_mutations() {
 
     // Build a Direct producer to send and receive the result exchange
     let producer = {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();

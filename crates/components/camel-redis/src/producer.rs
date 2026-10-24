@@ -344,7 +344,7 @@ mod tests {
         let producer = RedisProducer::new(config, test_rt()).unwrap();
 
         let conn = producer.executor.conn_arc();
-        let guard = conn.lock().await;
+        let guard = conn.lock().await; // allow-test-wait: fresh producer; conn cell uncontended
         assert!(guard.is_none());
     }
 
@@ -371,7 +371,7 @@ mod tests {
         // Connection should be None initially
         {
             let conn = producer.executor.conn_arc();
-            let guard = conn.lock().await;
+            let guard = conn.lock().await; // allow-test-wait: fresh producer; conn cell uncontended
             assert!(guard.is_none());
         }
 

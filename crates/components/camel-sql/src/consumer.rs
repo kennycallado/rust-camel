@@ -966,7 +966,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         token.cancel();
 
-        let result = consumer_handle.await.expect("task should not panic");
+        let result = consumer_handle.await.expect("task should not panic"); // allow-test-wait: cancel token triggered before join
         // Should complete without panic (may be Ok or Err depending on timing)
         let _ = result;
     }
@@ -1417,7 +1417,7 @@ mod tests {
         match exchange.input.body {
             Body::Stream(ref stream_body) => {
                 let stream = stream_body.stream.clone();
-                let mut guard = stream.lock().await;
+                let mut guard = stream.lock().await; // allow-test-wait: stream slot after delivery; no holder
                 let stream_opt = guard.take();
                 assert!(stream_opt.is_some(), "stream should be present");
 
@@ -1505,7 +1505,7 @@ mod tests {
         match exchange.input.body {
             Body::Stream(ref stream_body) => {
                 let stream = stream_body.stream.clone();
-                let mut guard = stream.lock().await;
+                let mut guard = stream.lock().await; // allow-test-wait: stream slot after delivery; no holder
                 let stream_opt = guard.take();
 
                 use futures::StreamExt;

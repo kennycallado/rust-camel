@@ -4079,7 +4079,7 @@ async fn test_http_consumer_start_with_zero_max_inflight_rejects_503() {
     assert_eq!(resp.status().as_u16(), 503);
 
     token.cancel();
-    let _ = start_handle.await;
+    let _ = start_handle.await; // allow-test-wait: cancel token triggered before join
 }
 
 // -----------------------------------------------------------------------
@@ -4601,7 +4601,7 @@ async fn test_http_consumer_returns_503_when_inflight_limit_reached() {
     assert_eq!(second_resp.status().as_u16(), 503);
 
     let _ = unblock_first_tx.send(());
-    let first_resp = first_handle.await.unwrap();
+    let first_resp = first_handle.await.unwrap(); // allow-test-wait: unblock sent before join; request completes
     assert_eq!(first_resp.status().as_u16(), 200);
 
     token.cancel();
@@ -5120,9 +5120,13 @@ async fn test_integration_unregistered_path_returns_404() {
     // Wait until the server is actually accepting connections (CI runners can be slow).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        if tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
-            .await
-            .is_ok()
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            tokio::net::TcpStream::connect(format!("127.0.0.1:{port}")),
+        )
+        .await
+        .expect("HTTP readiness connect timed out")
+        .is_ok()
         {
             break;
         }
@@ -6972,7 +6976,12 @@ async fn readiness_survives_concurrent_registry_reset() {
     let mut setups = 0;
     loop {
         setups += 1;
-        let (_port, rx, token) = setup_consumer_on_free_port("/reset-hammer").await;
+        let (_port, rx, token) = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            setup_consumer_on_free_port("/reset-hammer"),
+        )
+        .await
+        .expect("consumer setup timed out");
         drop(rx);
         token.cancel();
         if (setups >= 25 && contended.load(std::sync::atomic::Ordering::SeqCst) >= 1)
@@ -7961,7 +7970,7 @@ async fn method_aware_dispatch_templated_path_extracts_params() {
     let body = resp.text().await.unwrap();
     assert_eq!(body, "id=42");
 
-    let _ = handle.await;
+    let _ = handle.await; // allow-test-wait: responder bounded by inner two-second timeout
 }
 
 #[tokio::test]
@@ -8047,7 +8056,7 @@ async fn regression_legacy_exact_api_route_still_works() {
     let body = resp.text().await.unwrap();
     assert_eq!(body, "legacy ok");
 
-    let _ = handle.await;
+    let _ = handle.await; // allow-test-wait: responder bounded by inner two-second timeout
 }
 
 #[allow(clippy::await_holding_lock)]

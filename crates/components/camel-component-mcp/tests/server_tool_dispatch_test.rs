@@ -221,7 +221,7 @@ async fn valid_args_reach_route() {
         .await
         .expect("valid arguments must be dispatched");
 
-    let (name, arguments) = route.await.expect("route task must finish");
+    let (name, arguments) = route.await.expect("route task must finish"); // allow-test-wait: route task join bounded by inner 2s recv timeout
     assert_eq!(name, "lookup");
     assert_eq!(arguments, serde_json::json!({ "id": "42" }));
     // The route's reply content returned as the tools/call content blocks.
@@ -399,5 +399,5 @@ async fn error_shaped_success_content_stays_success_and_flag_drives_error() {
             "the structured flag must drive failure semantics, content must not be sniffed"
         );
     }
-    route.await.expect("route task must finish");
+    route.await.expect("route task must finish"); // allow-test-wait: route task join bounded by inner 2s recv timeout
 }

@@ -8,6 +8,7 @@
 
 use std::time::Duration;
 
+use camel_component_api::test_support::timeout_wait;
 use tonic::{Request, Response, Status};
 
 use crate::client::xslt_transformer_client;
@@ -98,7 +99,13 @@ async fn near_cap_transform_result_decodes_end_to_end() {
 
     // Red baseline: tonic's 4 MiB default decode limit must reject this
     // payload, proving the mock genuinely exercises the decode limit.
-    let raw_channel = endpoint.connect().await.expect("connect to mock bridge");
+    let raw_channel = timeout_wait(
+        "bridge connect",
+        Duration::from_secs(30),
+        endpoint.connect(),
+    )
+    .await
+    .expect("connect to mock bridge");
     let mut raw_client = XsltTransformerClient::new(raw_channel);
     let _raw_err = raw_client
         .transform(Request::new(TransformRequest {
@@ -111,7 +118,13 @@ async fn near_cap_transform_result_decodes_end_to_end() {
         .expect_err("raw client must hit the 4 MiB default decode limit");
 
     // Production path: the helper's 17 MiB decode limit delivers byte-intact.
-    let channel = endpoint.connect().await.expect("connect to mock bridge");
+    let channel = timeout_wait(
+        "bridge connect",
+        Duration::from_secs(30),
+        endpoint.connect(),
+    )
+    .await
+    .expect("connect to mock bridge");
     let mut client = xslt_transformer_client(channel);
     let response = client
         .transform(Request::new(TransformRequest {

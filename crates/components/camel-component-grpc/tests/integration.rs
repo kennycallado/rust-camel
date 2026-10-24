@@ -1741,7 +1741,7 @@ async fn grpc_consumer_unary_dispatch_carries_in_flight_claim() {
     assert_eq!(response.into_inner().message, "Hello Claim");
 
     let claim = pipeline_task
-        .await
+        .await // allow-test-wait: join stand-in pipeline task bounded by inner 2s recv timeout
         .expect("pipeline join")
         .expect("unary dispatch must carry an acceptance-minted claim");
     assert_eq!(
@@ -1912,7 +1912,7 @@ async fn grpc_consumer_client_streaming_holds_claim_across_idle_gap() {
     cancel_token.cancel();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), consumer_task).await;
     drop(release_tx);
-    let _ = pipeline_task.await;
+    let _ = pipeline_task.await; // allow-test-wait: join pipeline task; every inner await has 2s timeout
 }
 
 /// Poll-free-friendly wait: yields between reads; bounded by `bound`.

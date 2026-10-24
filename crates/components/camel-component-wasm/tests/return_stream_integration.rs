@@ -101,7 +101,7 @@ async fn return_stream_clean_eof() {
             );
 
             // Lock the mutex and take the stream out of the Option.
-            let mut stream_guard = stream_body.stream.lock().await;
+            let mut stream_guard = stream_body.stream.lock().await; // allow-test-wait: stream body mutex owned solely by test; uncontended
             let mut stream = stream_guard
                 .take()
                 .expect("stream should be present on first consumption");
@@ -186,7 +186,7 @@ async fn return_stream_terminal_error() {
     let body = exchange.input.body.clone();
     match body {
         Body::Stream(stream_body) => {
-            let mut stream_guard = stream_body.stream.lock().await;
+            let mut stream_guard = stream_body.stream.lock().await; // allow-test-wait: stream body mutex owned solely by test; uncontended
             let mut stream = stream_guard
                 .take()
                 .expect("stream should be present on first consumption");
@@ -243,7 +243,7 @@ async fn return_stream_backpressure_slow_consumer() {
     let body = exchange.input.body.clone();
     match body {
         Body::Stream(stream_body) => {
-            let mut stream_guard = stream_body.stream.lock().await;
+            let mut stream_guard = stream_body.stream.lock().await; // allow-test-wait: stream body mutex owned solely by test; uncontended
             let mut stream = stream_guard
                 .take()
                 .expect("stream should be present on first consumption");
@@ -327,7 +327,7 @@ async fn return_stream_cancel_mid_consume() {
         let body = std::mem::replace(&mut exchange.input.body, Body::Empty);
         match body {
             Body::Stream(stream_body) => {
-                let mut stream_guard = stream_body.stream.lock().await;
+                let mut stream_guard = stream_body.stream.lock().await; // allow-test-wait: stream body mutex owned solely by test; uncontended
                 let mut stream = stream_guard
                     .take()
                     .expect("stream should be present on first consumption");

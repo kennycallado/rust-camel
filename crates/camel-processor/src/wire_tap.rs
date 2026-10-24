@@ -731,7 +731,7 @@ mod tests {
         }
 
         stop.store(true, Ordering::SeqCst);
-        let _ = sampler.await;
+        let _ = sampler.await; // allow-test-wait: stop flag set before join; sampler exits
 
         let observed = max_seen.load(Ordering::SeqCst);
         assert!(
@@ -857,7 +857,7 @@ mod tests {
         .await
         .is_ok();
         done.store(true, Ordering::SeqCst);
-        let _ = sampler.await;
+        let _ = sampler.await; // allow-test-wait: done flag set before join; sampler exits
 
         assert!(drained, "unbounded path tasks should drain to 0 within 2s");
         assert!(

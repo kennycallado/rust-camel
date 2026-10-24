@@ -280,6 +280,28 @@ pub fn acquire_deadline<'a, T: ?Sized>(
     }
 }
 
+/// Bound a one-shot test wait: drive `fut` under `deadline`, panic loudly on hang.
+///
+/// THE shared bounded test-wait helper — no per-crate reimplementation
+/// (spec unbounded-wait-bounding "Shared bounded test-wait helper timeout_wait").
+#[track_caller]
+pub fn timeout_wait<T>(
+    what: &str,
+    deadline: Duration,
+    fut: impl std::future::Future<Output = T>,
+) -> impl std::future::Future<Output = T> {
+    let caller = std::panic::Location::caller();
+    async move {
+        match tokio::time::timeout(deadline, fut).await {
+            Ok(out) => out,
+            Err(_) => panic!(
+                "test wait {what} did not complete within {deadline:?} \
+                 — test hang, site {caller}"
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +478,96 @@ mod lock_deadline_tests {
             msg.contains(&format!("site {site}")),
             "panic must name the exact acquisition call site: {msg}"
         );
+    }
+}
+
+/// Unit tests for `timeout_wait`: the hang panic (wait label, deadline,
+/// `#[track_caller]` site named), output passthrough on completion, and
+/// channel-closed (`None`) observed as a value — distinct from the
+/// deadline path. No sleeps in this module (lint-test-sleep).
+#[cfg(test)]
+mod timeout_wait_tests {
+    use std::time::Duration;
+
+    use super::timeout_wait;
+
+    #[test]
+    fn timeout_wait_panics_naming_what_deadline_and_site() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("current-thread tokio runtime");
+        // The panic unwinds before the async block could return `site`, so
+        // the captured location is smuggled out through a Cell (`&'static
+        // Location` is Copy, and the set happens before the hanging await).
+        let captured_site: std::cell::Cell<Option<&'static std::panic::Location<'static>>> =
+            std::cell::Cell::new(None);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rt.block_on(async {
+                // `checked_wait` is #[track_caller] and caller state
+                // propagates through #[track_caller] calls, so `site` and
+                // the panic's embedded caller are the SAME Location (the
+                // `checked_wait(...)` statement below). If `timeout_wait`
+                // ever loses #[track_caller], the panic names its own body
+                // line and the assertion after the catch_unwind fails.
+                #[track_caller]
+                fn checked_wait<T>(
+                    what: &str,
+                    deadline: Duration,
+                    fut: impl std::future::Future<Output = T>,
+                ) -> (
+                    &'static std::panic::Location<'static>,
+                    impl std::future::Future<Output = T>,
+                ) {
+                    let site = std::panic::Location::caller();
+                    (site, timeout_wait(what, deadline, fut))
+                }
+
+                let (site, fut) = checked_wait(
+                    "orders receive",
+                    Duration::from_millis(50),
+                    std::future::pending::<()>(),
+                );
+                captured_site.set(Some(site));
+                // Always panics at the deadline: pending() never resolves.
+                let _ = std::pin::pin!(fut).await;
+            });
+        }));
+        let err = result.expect_err("hung wait must panic");
+        let msg = err
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| err.downcast_ref::<&'static str>().copied())
+            .expect("panic payload downcasts to a string");
+        assert!(
+            msg.contains("orders receive"),
+            "panic must name the wait: {msg}"
+        );
+        assert!(msg.contains("50ms"), "panic must name the deadline: {msg}");
+        let site = captured_site
+            .get()
+            .expect("site captured before the hanging wait");
+        assert!(
+            msg.contains(&format!("site {site}")),
+            "panic must name this test's file location as the wait site: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_wait_passes_output_through() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<u32>(1);
+        tx.try_send(7).expect("value fits the channel");
+        drop(tx);
+        let got = timeout_wait("recv", Duration::from_secs(5), rx.recv()).await;
+        assert_eq!(got, Some(7));
+    }
+
+    #[tokio::test]
+    async fn timeout_wait_channel_closed_distinct_from_hang() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<u32>(1);
+        drop(tx);
+        let got = timeout_wait("recv", Duration::from_secs(5), rx.recv()).await;
+        assert_eq!(got, None);
     }
 }
 

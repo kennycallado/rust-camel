@@ -789,7 +789,7 @@ mod tests {
             OpenSearchEndpointConfig::from_uri("opensearch://localhost:9200/myindex").unwrap();
         let producer = OpenSearchProducer::new(config, test_rt());
 
-        let guard = producer.client.lock().await;
+        let guard = producer.client.lock().await; // allow-test-wait: fresh producer; client cell uncontended
         assert!(guard.is_none());
     }
 

@@ -182,7 +182,7 @@ routes:
     // For this smoke test we just verify the peek_stale step compiles and runs
     // by checking it's available via the repository directly
     {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let repo = ctx
             .cache_repository("memory")
             .expect("memory cache registered");

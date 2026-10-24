@@ -67,7 +67,7 @@ async fn make_producer_with_default_timeout(
 #[tokio::test]
 async fn test_invoke_success_sets_response_body() {
     let (mut producer, state) = make_producer().await;
-    *state.invoke_response_payload.lock().await = Some(b"ok-response".to_vec());
+    *state.invoke_response_payload.lock().await = Some(b"ok-response".to_vec()); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     let exchange = Exchange::new(Message::new(Body::Text("request".to_string())));
 
     let out = ready_call(&mut producer, exchange).await.expect("success");
@@ -80,7 +80,7 @@ async fn test_invoke_success_sets_response_body() {
 #[tokio::test]
 async fn test_invoke_fault_returns_error() {
     let (mut producer, state) = make_producer().await;
-    *state.invoke_fault.lock().await = Some(("Server".to_string(), "Boom".to_string()));
+    *state.invoke_fault.lock().await = Some(("Server".to_string(), "Boom".to_string())); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     let exchange = Exchange::new(Message::new(Body::Text("request".to_string())));
 
     let err = ready_call(&mut producer, exchange)
@@ -130,7 +130,7 @@ async fn test_operation_from_header_overrides_default() {
     let exchange = Exchange::new(msg);
 
     let _ = ready_call(&mut producer, exchange).await.expect("success");
-    let req = state.last_invoke.lock().await.clone().expect("last invoke");
+    let req = state.last_invoke.lock().await.clone().expect("last invoke"); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     assert_eq!(req.operation, "headerOperation");
 }
 
@@ -140,7 +140,7 @@ async fn test_operation_from_uri_when_no_header() {
     let exchange = Exchange::new(Message::new(Body::Text("request".to_string())));
 
     let _ = ready_call(&mut producer, exchange).await.expect("success");
-    let req = state.last_invoke.lock().await.clone().expect("last invoke");
+    let req = state.last_invoke.lock().await.clone().expect("last invoke"); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     assert_eq!(req.operation, "defaultOperation");
 }
 
@@ -150,7 +150,7 @@ async fn test_body_conversion_text_to_bytes() {
     let exchange = Exchange::new(Message::new(Body::Text("hello".to_string())));
 
     let _ = ready_call(&mut producer, exchange).await.expect("success");
-    let req = state.last_invoke.lock().await.clone().expect("last invoke");
+    let req = state.last_invoke.lock().await.clone().expect("last invoke"); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     assert_eq!(req.payload, b"hello");
 }
 
@@ -160,7 +160,7 @@ async fn test_body_conversion_xml_to_bytes() {
     let exchange = Exchange::new(Message::new(Body::Xml("<x/>".to_string())));
 
     let _ = ready_call(&mut producer, exchange).await.expect("success");
-    let req = state.last_invoke.lock().await.clone().expect("last invoke");
+    let req = state.last_invoke.lock().await.clone().expect("last invoke"); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     assert_eq!(req.payload, b"<x/>");
 }
 
@@ -170,7 +170,7 @@ async fn test_body_conversion_bytes_passthrough() {
     let exchange = Exchange::new(Message::new(Body::Bytes(bytes::Bytes::from_static(b"raw"))));
 
     let _ = ready_call(&mut producer, exchange).await.expect("success");
-    let req = state.last_invoke.lock().await.clone().expect("last invoke");
+    let req = state.last_invoke.lock().await.clone().expect("last invoke"); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     assert_eq!(req.payload, b"raw");
 }
 
@@ -180,14 +180,14 @@ async fn test_body_empty_sends_zero_length_payload() {
     let exchange = Exchange::new(Message::new(Body::Empty));
 
     let _ = ready_call(&mut producer, exchange).await.expect("success");
-    let req = state.last_invoke.lock().await.clone().expect("last invoke");
+    let req = state.last_invoke.lock().await.clone().expect("last invoke"); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     assert!(req.payload.is_empty());
 }
 
 #[tokio::test]
 async fn test_invoke_bridge_returns_soap_fault() {
     let (mut producer, state) = make_producer().await;
-    *state.invoke_fault.lock().await =
+    *state.invoke_fault.lock().await = // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
         Some(("soap:Client".to_string(), "Invalid request".to_string()));
     let exchange = Exchange::new(Message::new(Body::Text("<bad/>".to_string())));
     let err = ready_call(&mut producer, exchange)
@@ -204,7 +204,7 @@ async fn test_invoke_sends_address_in_request() {
     let (mut producer, state) = make_producer().await;
     let exchange = Exchange::new(Message::new(Body::Text("req".to_string())));
     let _ = ready_call(&mut producer, exchange).await;
-    let req = state.last_invoke.lock().await.clone().expect("last invoke");
+    let req = state.last_invoke.lock().await.clone().expect("last invoke"); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     assert!(req.address.contains("localhost:8080/ws"));
 }
 
@@ -215,14 +215,14 @@ async fn test_invoke_with_custom_timeout_forwarded() {
     msg.set_header("CamelCxfTimeoutMs", Value::String("5000".to_string()));
     let exchange = Exchange::new(msg);
     let _ = ready_call(&mut producer, exchange).await;
-    let req = state.last_invoke.lock().await.clone().expect("last invoke");
+    let req = state.last_invoke.lock().await.clone().expect("last invoke"); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     assert_eq!(req.timeout_ms, 5000);
 }
 
 #[tokio::test]
 async fn test_multiple_sequential_invocations() {
     let (mut producer, state) = make_producer().await;
-    *state.invoke_response_payload.lock().await = Some(b"response".to_vec());
+    *state.invoke_response_payload.lock().await = Some(b"response".to_vec()); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     for i in 0..5 {
         let exchange = Exchange::new(Message::new(Body::Text(format!("request-{i}"))));
         let out = ready_call(&mut producer, exchange).await.expect("success");
@@ -239,7 +239,7 @@ async fn test_invoke_json_body_converted_to_bytes() {
     let json_val = serde_json::json!({"key": "value"});
     let exchange = Exchange::new(Message::new(Body::Json(json_val)));
     let _ = ready_call(&mut producer, exchange).await;
-    let req = state.last_invoke.lock().await.clone().expect("last invoke");
+    let req = state.last_invoke.lock().await.clone().expect("last invoke"); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     let parsed: serde_json::Value = serde_json::from_slice(&req.payload).unwrap();
     assert_eq!(parsed["key"], "value");
 }
@@ -249,7 +249,7 @@ async fn test_invoke_sends_security_profile() {
     let (mut producer, state) = make_producer().await;
     let exchange = Exchange::new(Message::new(Body::Text("req".to_string())));
     let _ = ready_call(&mut producer, exchange).await;
-    let req = state.last_invoke.lock().await.clone().expect("last invoke");
+    let req = state.last_invoke.lock().await.clone().expect("last invoke"); // allow-test-wait: deterministic in-memory mock bridge, no network; mutex uncontended in-test
     assert_eq!(req.security_profile, "test");
 }
 

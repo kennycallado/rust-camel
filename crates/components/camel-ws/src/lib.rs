@@ -2795,7 +2795,7 @@ mod tests {
         assert_eq!(incoming, "hello-ws");
 
         consumer.stop().await.unwrap();
-        route_task.await.unwrap();
+        route_task.await.unwrap(); // allow-test-wait: consumer stopped before join; route exits
     }
 
     /// rc-nftni (drainclaim): server frame dispatch mints a claim at the

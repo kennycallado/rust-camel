@@ -1,4 +1,5 @@
 use super::*;
+use camel_component_api::test_support::timeout_wait;
 use camel_integration_test::parse_scenario_document;
 
 use std::fs;
@@ -574,7 +575,12 @@ scenario:
         !keys.iter().any(|key| key == "httpMethod"),
         "a non-secret uri option must never be classified secret: {keys:?}"
     );
-    let mut guard = ctx.lock().await;
+    let mut guard = timeout_wait(
+        "scenario context lock",
+        std::time::Duration::from_secs(30),
+        ctx.lock(),
+    )
+    .await;
     let _ = run.boot.shutdown(&mut guard).await;
 }
 

@@ -23,6 +23,7 @@ use camel_api::security_policy::{CredentialSource, SecurityPolicyConfig};
 use camel_auth::{RolePolicy, TokenAuthenticator, read_carrier};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::consumer::ExchangeEnvelope;
+use camel_component_api::test_support::timeout_wait;
 use camel_component_api::{
     Component, ConsumerContext, NoOpComponentContext, NoopRuntimeObservability,
     RuntimeObservability,
@@ -299,7 +300,9 @@ async fn request_headers_reach_exchange() {
         response.value
     );
 
-    route.await.expect("route task must finish");
+    timeout_wait("MCP route task join", Duration::from_secs(60), route)
+        .await
+        .expect("route task must finish");
     consumer.stop().await.expect("clean stop");
 }
 

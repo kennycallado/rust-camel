@@ -248,7 +248,7 @@ async fn multi_thread_document_fails_on_warn() {
     });
     let outcome = run_logs_document(MULTI_THREAD_DOC, "marker-warn.routes.yaml").await;
     drop(done);
-    let _ = noise.await;
+    let _ = noise.await; // allow-test-wait: join noise task bounded by inner 10s timeout
 
     assert_eq!(outcome.verdict, None, "both warns must fail: {outcome:?}");
     let failure = outcome

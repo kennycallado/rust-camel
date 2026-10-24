@@ -1,0 +1,119 @@
+crates/camel-cli/src/commands/test/scenario_tests.rs:577	A	timeout	ctx lock contended by live boot runtime; wrap timeout
+crates/camel-core/src/health_registry.rs:614	B	marker	join of test-spawned finite task; completion asserted
+crates/camel-core/src/lifecycle/adapters/consumer_management.rs:2334	B	marker	error latch settled before wait; zero grace; deterministic
+crates/camel-core/src/lifecycle/adapters/controller_actor.rs:634	B	marker	reply sent before join; start_route resolves
+crates/camel-core/src/lifecycle/adapters/controller_actor.rs:1078	B	marker	restart task finite; join asserted
+crates/camel-core/src/lifecycle/adapters/controller_actor.rs:1119	B	marker	restart task finite; join asserted
+crates/camel-core/src/lifecycle/adapters/inline_dispatcher_tests.rs:433	B	marker	permit acquired before any dispatch; uncontended
+crates/camel-core/src/lifecycle/adapters/redb_journal.rs:1210	A	timeout	journal open retries unbounded; join not structurally finite
+crates/camel-integration-test/src/boot_scenario_test.rs:870	A	timeout	pool acquire unbounded; sibling already timeout-wrapped
+crates/camel-integration-test/src/http_partner_test.rs:550	B	marker	response already received; far-side task finishing
+crates/camel-integration-test/src/log_capture.rs:299	B	marker	finite spawn tracing emit; completion asserted
+crates/camel-integration-test/src/runner/partner_validate_test.rs:453	A	timeout	raw_request read_to_end lacks deadline; join can hang
+crates/camel-integration-test/src/sql_validate_test.rs:264	B	marker	seed task finite; join result asserted
+crates/camel-integration-test/src/sql_validate_test.rs:314	B	marker	seed task finite; join result asserted
+crates/camel-integration-test/src/sql_validate_test.rs:394	B	marker	seed task finite; join result asserted
+crates/camel-lsp/src/lib.rs:479	B	marker	exit sent and stdio dropped before join
+crates/camel-processor/src/cache_eip.rs:2787	B	marker	release notified before joins; completion asserted
+crates/camel-processor/src/cache_eip.rs:2791	B	marker	release notified before joins; completion asserted
+crates/camel-processor/src/cache_eip.rs:2795	B	marker	release notified before joins; completion asserted
+crates/camel-processor/src/cache_eip.rs:2836	B	marker	release notified before joins; completion asserted
+crates/camel-processor/src/cache_eip.rs:2840	B	marker	release notified before joins; completion asserted
+crates/camel-processor/src/streaming_splitter.rs:364	B	marker	test-owned fragments mutex; producers finished
+crates/camel-processor/src/wire_tap.rs:734	B	marker	stop flag set before join; sampler exits
+crates/camel-processor/src/wire_tap.rs:860	B	marker	done flag set before join; sampler exits
+crates/camel-test/src/harness.rs:319	B	marker	fresh harness; no live lock holders
+crates/camel-test/src/harness.rs:377	B	marker	ctx lock after stop; no live holders
+crates/camel-test/src/harness.rs:406	B	marker	ctx lock after stop; no live holders
+crates/camel-test/src/time.rs:46	B	marker	paused time; advance drives completion
+crates/components/camel-component-api/src/network_retry_tests.rs:636	B	marker	cancel task exits on test-set flag
+crates/components/camel-component-api/src/network_retry_tests.rs:693	B	marker	cancel task exits on test-set flag
+crates/components/camel-component-api/src/network_retry_tests.rs:1172	B	marker	cancel task exits on test-set flag
+crates/components/camel-component-grpc/src/server.rs:1215	B	marker	handler returns after body stream close; join asserted
+crates/components/camel-component-grpc/src/server.rs:1250	B	marker	handler returns after body stream close; join asserted
+crates/components/camel-component-grpc/src/server.rs:1410	B	marker	handler fails fast on stopped consumer; join asserted
+crates/components/camel-component-grpc/src/server.rs:1429	B	marker	handler fails fast on stopped consumer; join asserted
+crates/components/camel-component-grpc/src/server.rs:1486	B	marker	reply channel dropped; handler returns error
+crates/components/camel-component-grpc/src/server.rs:1516	B	marker	handler replies once then returns; join asserted
+crates/components/camel-component-grpc/src/server.rs:1543	B	marker	handler replies once then returns; join asserted
+crates/components/camel-component-grpc/src/server.rs:1576	B	marker	handler replies once then returns; join asserted
+crates/components/camel-component-grpc/src/server.rs:1608	B	marker	handler replies once then returns; join asserted
+crates/components/camel-component-grpc/src/server.rs:2073	B	marker	reply sent before join; handler finished
+crates/components/camel-component-grpc/src/server.rs:2115	B	marker	reply sent before join; handler finished
+crates/components/camel-component-grpc/src/server.rs:2155	B	marker	reply sent before join; handler finished
+crates/components/camel-component-grpc/src/server.rs:2256	B	marker	reply sent before join; handler finished
+crates/components/camel-component-grpc/src/server.rs:2357	B	marker	abort before join; termination guaranteed
+crates/components/camel-component-llm/src/producer_semaphore_tests.rs:94	B	marker	permit released before join; call completes
+crates/components/camel-component-llm/src/producer_semaphore_tests.rs:129	B	marker	join target already finished before await
+crates/components/camel-component-llm/src/producer_timeout_tests.rs:43	B	marker	stream slot on returned exchange; no holder
+crates/components/camel-component-llm/src/producer_tools_tests.rs:116	B	marker	stream slot on returned exchange; no holder
+crates/components/camel-component-seda/src/lib.rs:4077	B	marker	release sent before join; pipeline completes
+crates/components/camel-component-seda/src/lib.rs:4151	B	marker	release sent before join; pipeline completes
+crates/components/camel-component-seda/src/lib.rs:4156	B	marker	release sent before join; pipeline completes
+crates/components/camel-component-seda/src/lib.rs:4248	B	marker	release sent before join; pipeline completes
+crates/components/camel-component-wasm/src/epoch.rs:180	B	marker	bounded progress loop; completion asserted
+crates/components/camel-controlbus/src/lib.rs:661	B	marker	record mutex uncontended after call returned
+crates/components/camel-cron/src/lib.rs:511	B	marker	cancel token triggered before join
+crates/components/camel-cron/src/tokio_impl.rs:103	B	marker	cancel token triggered before join
+crates/components/camel-cron/src/tokio_impl.rs:128	B	marker	cancel token triggered before join
+crates/components/camel-cxf/src/bridge_client_test.rs:112	A	timeout	tonic connect handshake unbounded; wrap timeout
+crates/components/camel-direct/src/direct_tests.rs:254	B	marker	cancel token triggered before join
+crates/components/camel-direct/src/direct_tests.rs:453	B	marker	cancel token triggered before join
+crates/components/camel-direct/src/direct_tests.rs:588	B	marker	cancel token triggered before join
+crates/components/camel-direct/src/direct_tests.rs:680	B	marker	semaphore released before join; call completes
+crates/components/camel-direct/src/direct_tests.rs:685	B	marker	semaphore released before join; call completes
+crates/components/camel-file/src/lib.rs:2403	B	marker	test-owned stream slot after delivery; no holder
+crates/components/camel-http/src/lib_tests.rs:4082	B	marker	cancel token triggered before join
+crates/components/camel-http/src/lib_tests.rs:4604	B	marker	unblock sent before join; request completes
+crates/components/camel-http/src/lib_tests.rs:5122	A	timeout	loop readiness poll; per-iteration connect unbounded
+crates/components/camel-http/src/lib_tests.rs:6973	A	timeout	loop setups; helper await unbounded per iteration
+crates/components/camel-http/src/lib_tests.rs:7964	B	marker	responder bounded by inner two-second timeout
+crates/components/camel-http/src/lib_tests.rs:8050	B	marker	responder bounded by inner two-second timeout
+crates/components/camel-jms/src/bridge_client_test.rs:242	A	timeout	tonic connect handshake unbounded; wrap timeout
+crates/components/camel-jms/src/bridge_client_test.rs:283	A	timeout	tonic connect handshake unbounded; wrap timeout
+crates/components/camel-jms/src/bridge_client_test.rs:320	A	timeout	tonic connect handshake unbounded; wrap timeout
+crates/components/camel-jms/src/bridge_client_test.rs:430	A	timeout	tonic connect handshake unbounded; wrap timeout
+crates/components/camel-jms/src/bridge_client_test.rs:497	A	timeout	tonic connect handshake unbounded; wrap timeout
+crates/components/camel-jms/src/component.rs:3011	B	marker	fresh test-created handle slot; uncontended
+crates/components/camel-jms/src/component.rs:3077	B	marker	handle stored before return; uncontended
+crates/components/camel-jms/src/component.rs:3290	B	marker	fresh pool; create lock uncontended
+crates/components/camel-jms/src/component.rs:3458	B	marker	fresh test-created handle slot; uncontended
+crates/components/camel-jms/src/component.rs:3622	B	marker	handle stored before return; uncontended
+crates/components/camel-jms/src/component.rs:4233	B	marker	handle slot uncontended after shutdown
+crates/components/camel-jms/src/component.rs:4315	B	marker	handle slot uncontended after shutdown
+crates/components/camel-jms/src/consumer.rs:2527	A	timeout	tonic connect handshake unbounded; wrap timeout
+crates/components/camel-opensearch/src/producer/mod.rs:792	B	marker	fresh producer; client cell uncontended
+crates/components/camel-rabbitmq/src/connection/tests.rs:140	B	marker	retry policy bounds attempts; immediate error stub
+crates/components/camel-rabbitmq/src/connection/tests.rs:463	A	timeout	parked connect in spawned caller; wrap timeout
+crates/components/camel-rabbitmq/src/connection/tests.rs:472	B	marker	abort before join; termination guaranteed
+crates/components/camel-rabbitmq/src/connection/tests.rs:490	B	marker	release notified before join; waiter settles
+crates/components/camel-rabbitmq/src/consumer/tests.rs:287	A	timeout	recv value sent by engine under test
+crates/components/camel-redis/src/executor.rs:975	B	marker	gate uncontended at spawn; bounded probe follows
+crates/components/camel-redis/src/producer.rs:347	B	marker	fresh producer; conn cell uncontended
+crates/components/camel-redis/src/producer.rs:374	B	marker	fresh producer; conn cell uncontended
+crates/components/camel-sql/src/consumer.rs:969	B	marker	cancel token triggered before join
+crates/components/camel-sql/src/consumer.rs:1420	B	marker	stream slot after delivery; no holder
+crates/components/camel-sql/src/consumer.rs:1508	B	marker	stream slot after delivery; no holder
+crates/components/camel-sql/src/health.rs:265	A	timeout	pool connect in setup unbounded; wrap timeout
+crates/components/camel-sql/src/pool_factory.rs:264	A	timeout	pool acquire can starve; wrap timeout
+crates/components/camel-sql/src/pool_factory.rs:265	A	timeout	pool acquire can starve; wrap timeout
+crates/components/camel-sql/src/pool_factory.rs:318	A	timeout	pool acquire can starve; wrap timeout
+crates/components/camel-stream/src/consumer_tests.rs:308	B	marker	finite test reader; consumer exits at EOF
+crates/components/camel-stream/src/consumer_tests.rs:325	B	marker	finite test reader; consumer exits at EOF
+crates/components/camel-stream/src/consumer_tests.rs:337	B	marker	finite test reader; consumer exits at EOF
+crates/components/camel-stream/src/consumer_tests.rs:353	B	marker	finite test reader; consumer exits at EOF
+crates/components/camel-stream/src/consumer_tests.rs:365	B	marker	finite test reader; consumer exits at EOF
+crates/components/camel-stream/src/consumer_tests.rs:376	B	marker	finite test reader; consumer exits at EOF
+crates/components/camel-stream/src/consumer_tests.rs:394	B	marker	finite test reader; consumer exits at EOF
+crates/components/camel-stream/src/consumer_tests.rs:413	B	marker	finite test reader; consumer exits at EOF
+crates/components/camel-stream/src/consumer_tests.rs:520	B	marker	finite test reader; consumer exits at EOF
+crates/components/camel-stream/src/consumer_tests.rs:560	B	marker	finite test reader; consumer exits at EOF
+crates/components/camel-stream/src/lib.rs:958	B	marker	finite producer call to test sink
+crates/components/camel-stream/src/lib.rs:959	B	marker	finite producer call to test sink
+crates/components/camel-validator/src/bridge_client_test.rs:118	A	timeout	tonic connect handshake unbounded; wrap timeout
+crates/components/camel-validator/src/bridge_client_test.rs:129	A	timeout	tonic connect handshake unbounded; wrap timeout
+crates/components/camel-ws/src/lib.rs:2798	B	marker	consumer stopped before join; route exits
+crates/components/camel-xslt/src/bridge_client_test.rs:101	A	timeout	tonic connect handshake unbounded; wrap timeout
+crates/components/camel-xslt/src/bridge_client_test.rs:114	A	timeout	tonic connect handshake unbounded; wrap timeout
+crates/services/camel-bridge/src/process.rs:2565	B	marker	finite shell fixture exits; wait asserted
+crates/services/camel-bridge/src/process.rs:2595	A	timeout	child blocks on full pipe if drain stalls; deadline-bound the wait

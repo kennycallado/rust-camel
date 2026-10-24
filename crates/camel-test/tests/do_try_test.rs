@@ -227,7 +227,7 @@ async fn do_try_propagate_does_not_reach_downstream() {
     // but the Propagate disposition rethrows the original error, so oneshot returns
     // an Err which must not panic.
     let producer = {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry
@@ -387,7 +387,7 @@ async fn do_try_propagate_reaches_route_on_exception() {
     // Propagate disposition rethrows the original error; oneshot returns Err which is
     // caught by the route-level onException. Don't use send_to_direct (it .expect()s Ok).
     let producer = {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry

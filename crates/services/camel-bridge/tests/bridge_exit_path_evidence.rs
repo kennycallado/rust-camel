@@ -1170,7 +1170,7 @@ async fn start_on_retired_thread(script: &Path) -> camel_bridge::process::Bridge
     });
     // The receiver itself is bounded: an abandoned blocking task would keep the
     // runtime alive at shutdown, reproducing the stall this suite exercises.
-    tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(30)))
+    tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(30))) // allow-test-wait: blocking recv_timeout(30s) bounds the blocking task join
         .await
         .expect("join retired-thread receiver")
         .unwrap_or_else(|err| match err {

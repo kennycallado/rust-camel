@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use camel_component_api::NoopRuntimeObservability;
 use camel_component_api::consumer::{Consumer, ConsumerContext};
-use camel_component_api::test_support::acquire_deadline;
+use camel_component_api::test_support::{acquire_deadline, timeout_wait};
 use camel_component_cxf::config::CxfPoolConfig;
 use camel_component_cxf::consumer::CxfConsumer;
 use camel_component_cxf::proto::{
@@ -440,7 +440,7 @@ async fn test_consumer_stream_closes_gracefully()
     // Drop the response sender so the mock bridge's response recording loop ends
     drop(response_tx);
     // Clear the mock bridge's internal sender so the inbound channel has no remaining senders
-    *state.consumer_requests_tx.lock().await = None;
+    *state.consumer_requests_tx.lock().await = None; // allow-test-wait: mock bridge state mutex; uncontended in-test
 
     // The inbound stream should eventually return None (channel closed)
     let result = tokio::time::timeout(Duration::from_secs(2), inbound.message()).await?;
@@ -512,9 +512,12 @@ async fn test_consumer_50_concurrent_requests_correlated()
 async fn consumer_task_exits_on_context_token_cancel()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (port, _state) = spawn_mock_bridge().await?;
-    let channel = Channel::from_shared(format!("http://127.0.0.1:{port}"))?
-        .connect()
-        .await?;
+    let channel = timeout_wait(
+        "bridge connect",
+        Duration::from_secs(60),
+        Channel::from_shared(format!("http://127.0.0.1:{port}"))?.connect(),
+    )
+    .await?;
 
     let slot = BridgeSlot::new_ready_for_test(channel);
     let pool = CxfBridgePool::from_config(CxfPoolConfig {

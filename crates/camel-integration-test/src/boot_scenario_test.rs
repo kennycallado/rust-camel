@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 
 use camel_api::CamelError;
+use camel_component_api::test_support::timeout_wait;
 
 use crate::boot_scenario::boot_scenario;
 use crate::env_layers::{LayeredEnv, ambient_std};
@@ -624,7 +625,7 @@ mod boot_freshness {
     use camel_api::datasource::DatasourceCatalog;
     use sqlx::Row;
 
-    use super::{DOC, ROUTE, boot_scenario, empty_env, project};
+    use super::{DOC, ROUTE, boot_scenario, empty_env, project, timeout_wait};
     use crate::sql_action::{SqlAction, execute_sql_prepare};
 
     // The landed family convention (camel-cli sql e2e precedent): with
@@ -867,7 +868,13 @@ provider = "sqlx"
         // Holding conn A forces the next acquire to hand out a
         // distinct pooled connection. The acquire is timeout-wrapped
         // so a broken pool fails fast instead of hanging the suite.
-        let mut conn_a = pool_a.acquire().await.expect("conn A");
+        let mut conn_a = timeout_wait(
+            "conn A pool acquire",
+            std::time::Duration::from_secs(30),
+            pool_a.acquire(),
+        )
+        .await
+        .expect("conn A");
         let mut conn_b = tokio::time::timeout(std::time::Duration::from_secs(10), pool_a.acquire())
             .await
             .expect("conn B acquire must not hang")

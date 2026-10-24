@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use camel_component_api::test_support::NoopRuntimeObservability;
+use camel_component_api::test_support::timeout_wait;
 use camel_component_api::{Consumer, ConsumerContext, NetworkRetryPolicy, StartupSignal};
 use camel_component_rabbitmq::config::RabbitEndpointConfig;
 use camel_component_rabbitmq::{ConnectFn, RabbitConnectionManager, RabbitConsumer};
@@ -91,5 +92,5 @@ async fn consumer_not_ready_until_connected() {
         .expect("consumer startup must succeed");
 
     ctx_cancel.cancel();
-    let _ = start.await;
+    let _ = timeout_wait("consumer start task join", Duration::from_secs(60), start).await;
 }

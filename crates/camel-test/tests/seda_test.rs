@@ -193,14 +193,14 @@ async fn seda_single_consumer_survives_context_restart() {
     // Stop/restart through the locked underlying context — NOT via
     // h.stop()/h.start(): h.stop() permanently latches the harness `stopped`
     // flag and would make the final teardown a no-op.
-    let mut ctx = h.ctx().lock().await;
+    let mut ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ctx.stop().await.unwrap();
     ctx.start().await.unwrap();
     drop(ctx);
 
     // Send one exchange into direct:in, holding a fresh lock across the whole
     // resolve/create/send sequence.
-    let ctx = h.ctx().lock().await;
+    let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     let component = ctx
         .registry()
         .get("direct")
@@ -259,7 +259,7 @@ async fn seda_single_consumer_survives_suspend_resume() {
     // Suspend the consumer route, then resume it: resume recreates the
     // consumer through the same endpoint state.
     {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let runtime = ctx.runtime();
         drop(ctx);
         runtime
@@ -287,7 +287,7 @@ async fn seda_single_consumer_survives_suspend_resume() {
     // happen, and a regression that never re-activates the consumer fails
     // the deadline instead of hanging.
     {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let component = ctx
             .registry()
             .get("direct")

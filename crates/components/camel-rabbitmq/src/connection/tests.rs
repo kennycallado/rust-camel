@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 use crate::config::rabbitmq_reconnect_default;
+use camel_component_api::test_support::timeout_wait;
 
 fn lapin_err(message: &str) -> lapin::Error {
     lapin::Error::from(io::Error::new(
@@ -137,7 +138,7 @@ async fn retry_policy_bounds_connect_attempts() {
         connect_fn,
     ));
 
-    let result = manager.connect().await;
+    let result = manager.connect().await; // allow-test-wait: retry policy bounds attempts; immediate error stub
 
     assert!(result.is_err(), "exhausted retries must return Err");
     assert_eq!(
@@ -460,7 +461,14 @@ async fn caller_abandoned_connect_does_not_wedge_single_flight() {
     // in-flight, then abandon the caller.
     let caller = tokio::spawn({
         let manager = Arc::clone(&manager);
-        async move { manager.connect().await }
+        async move {
+            timeout_wait(
+                "single-flight connect attempt",
+                Duration::from_secs(30),
+                manager.connect(),
+            )
+            .await
+        }
     });
     started.notified().await;
     assert_eq!(
@@ -469,7 +477,7 @@ async fn caller_abandoned_connect_does_not_wedge_single_flight() {
         "the claim must publish Connecting before the attempt starts"
     );
     caller.abort();
-    let _ = caller.await;
+    let _ = caller.await; // allow-test-wait: abort before join; termination guaranteed
 
     // The detached flight still owns the transition: a fresh bounded wait
     // observes Connecting, not a permanently wedged slot.
@@ -487,7 +495,7 @@ async fn caller_abandoned_connect_does_not_wedge_single_flight() {
     // Let the pending attempt fail; the owned flight must publish the
     // terminal Disconnected state and settle the waiter.
     release.notify_one();
-    let waited = waiter.await.expect("waiter task must not panic");
+    let waited = waiter.await.expect("waiter task must not panic"); // allow-test-wait: release notified before join; waiter settles
     assert!(waited.is_err(), "a failed single-flight settles as Err");
     assert_eq!(
         *manager.status_tx.borrow(),

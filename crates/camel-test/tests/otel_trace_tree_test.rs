@@ -483,7 +483,7 @@ fn tree_declarative_split_route() -> camel_core::route::RouteDefinition {
 async fn direct_hop_nests_subroute_root_under_caller_step() {
     let spans = test_spans().await;
     let h = CamelTestContext::builder().with_direct().build().await;
-    h.ctx().lock().await.set_tracing(true).await;
+    h.ctx().lock().await.set_tracing(true).await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
 
     h.add_route(tree_main_route()).await.expect("add tree-main");
     h.add_route(tree_sub_route()).await.expect("add tree-sub");
@@ -568,7 +568,7 @@ async fn direct_hop_nests_subroute_root_under_caller_step() {
 async fn split_fragments_nest_under_segment_span_one_trace() {
     let spans = test_spans().await;
     let h = CamelTestContext::builder().with_direct().build().await;
-    h.ctx().lock().await.set_tracing(true).await;
+    h.ctx().lock().await.set_tracing(true).await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
 
     h.add_route(tree_split_route())
         .await
@@ -931,7 +931,7 @@ async fn declarative_split_forest_above_threshold() {
 async fn root_and_segment_stay_internal() {
     let spans = test_spans().await;
     let h = CamelTestContext::builder().with_direct().build().await;
-    h.ctx().lock().await.set_tracing(true).await;
+    h.ctx().lock().await.set_tracing(true).await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
 
     h.add_route(tree_main_route()).await.expect("add tree-main");
     h.add_route(tree_sub_route()).await.expect("add tree-sub");

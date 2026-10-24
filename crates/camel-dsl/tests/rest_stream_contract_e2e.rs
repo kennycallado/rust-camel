@@ -37,7 +37,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use camel_api::{Body, CamelError, Exchange, Message, StreamBody, StreamMetadata};
-use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
+use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline, timeout_wait};
 use camel_core::route::BuilderStep;
 use camel_dsl::parse_yaml;
 use futures::StreamExt;
@@ -580,9 +580,13 @@ async fn client_disconnect_during_streamed_reply_keeps_server_healthy() {
 
     // First request: read until the first chunk is on the wire, then
     // drop the socket mid-reply.
-    let mut sock = tokio::net::TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("connect for disconnect test");
+    let mut sock = timeout_wait(
+        "connect for disconnect test",
+        Duration::from_secs(60),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .expect("connect for disconnect test");
     sock.write_all(b"GET /disconnect HTTP/1.1\r\nHost: l3-test\r\nConnection: close\r\n\r\n")
         .await
         .expect("write disconnect request");

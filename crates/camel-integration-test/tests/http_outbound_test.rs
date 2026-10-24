@@ -238,7 +238,7 @@ async fn outbound_bridge_validates_wire() {
     );
 
     // Teardown: the normal variant asserts clean completion.
-    let mut ctx = fixture.ctx.lock().await;
+    let mut ctx = fixture.ctx.lock().await; // allow-test-wait: harness ctx mutex; sole test owner, uncontended in-test
     fixture
         .boot
         .shutdown(&mut ctx)
@@ -263,7 +263,7 @@ async fn explicit_put_reaches_partner() {
         "the PUT send must reach the partner and validate: {outcome:?}"
     );
 
-    let mut ctx = fixture.ctx.lock().await;
+    let mut ctx = fixture.ctx.lock().await; // allow-test-wait: harness ctx mutex; sole test owner, uncontended in-test
     fixture
         .boot
         .shutdown(&mut ctx)
@@ -288,7 +288,7 @@ async fn bodyless_post_reaches_partner() {
         "the bodyless POST send must reach the partner and validate: {outcome:?}"
     );
 
-    let mut ctx = fixture.ctx.lock().await;
+    let mut ctx = fixture.ctx.lock().await; // allow-test-wait: harness ctx mutex; sole test owner, uncontended in-test
     fixture
         .boot
         .shutdown(&mut ctx)
@@ -353,7 +353,7 @@ async fn outbound_bridge_header_corruption_fails() {
         "the mismatch must name the header's variable: {mismatch}"
     );
 
-    let mut ctx = fixture.ctx.lock().await;
+    let mut ctx = fixture.ctx.lock().await; // allow-test-wait: harness ctx mutex; sole test owner, uncontended in-test
     fixture
         .boot
         .shutdown(&mut ctx)
@@ -370,7 +370,7 @@ async fn shutdown_failure_does_not_mask_verdict() {
     let fixture = boot_fixture().await;
     // Fault injection AFTER the boot, BEFORE the run: the failing
     // teardown dependency sits in the context's lifecycle drain.
-    fixture.ctx.lock().await.add_lifecycle(FailingTeardown);
+    fixture.ctx.lock().await.add_lifecycle(FailingTeardown); // allow-test-wait: harness ctx mutex; sole test owner, uncontended in-test
 
     let mut vars = ScenarioVars::new();
     let mut outcome: DocumentOutcome =
@@ -383,7 +383,7 @@ async fn shutdown_failure_does_not_mask_verdict() {
     // The shutdown-failure slot is the boot-owning caller's to fill
     // (the CLI after `handle.shutdown`, Task 3.5). This test fills it
     // exactly as that mapping will.
-    let mut ctx = fixture.ctx.lock().await;
+    let mut ctx = fixture.ctx.lock().await; // allow-test-wait: harness ctx mutex; sole test owner, uncontended in-test
     let shutdown = fixture.boot.shutdown(&mut ctx).await;
     outcome.final_failure = shutdown.err().map(|e| ScenarioFailure::ShutdownFailure {
         message: e.to_string(),
@@ -441,7 +441,7 @@ async fn outbound_receive_deadline_is_real() {
         "the 2s deadline must bound the wait, not hang"
     );
 
-    let mut ctx = fixture.ctx.lock().await;
+    let mut ctx = fixture.ctx.lock().await; // allow-test-wait: harness ctx mutex; sole test owner, uncontended in-test
     fixture
         .boot
         .shutdown(&mut ctx)

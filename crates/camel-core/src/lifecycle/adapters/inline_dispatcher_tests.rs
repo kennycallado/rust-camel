@@ -430,7 +430,7 @@ async fn dispatch_consumer_cancel_during_admission_returns_consumer_stopping() {
     let cap = as_capability(&dispatcher);
 
     // Externally hold the admission permit.
-    let guard = dispatcher.admission_for_test().lock().await;
+    let guard = dispatcher.admission_for_test().lock().await; // allow-test-wait: permit acquired before any dispatch; uncontended
 
     let parked = tokio::spawn(cap.dispatch(test_exchange("1")));
     tokio::time::sleep(Duration::from_millis(30)).await;

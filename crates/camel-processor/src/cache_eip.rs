@@ -2784,15 +2784,18 @@ mod tests {
 
         release.notify_waiters();
 
-        let leader_err = match leader.await.expect("leader task join") {
+        let leader_err = match leader.await.expect("leader task join") // allow-test-wait: release notified before joins; completion asserted
+        {
             PipelineOutcome::Failed(e) => e,
             other => panic!("expected leader Failed, got {other:?}"),
         };
-        let w1_err = match w1.await.expect("waiter 1 task join") {
+        let w1_err = match w1.await.expect("waiter 1 task join") // allow-test-wait: release notified before joins; completion asserted
+        {
             PipelineOutcome::Failed(e) => e,
             other => panic!("expected waiter 1 Failed, got {other:?}"),
         };
-        let w2_err = match w2.await.expect("waiter 2 task join") {
+        let w2_err = match w2.await.expect("waiter 2 task join") // allow-test-wait: release notified before joins; completion asserted
+        {
             PipelineOutcome::Failed(e) => e,
             other => panic!("expected waiter 2 Failed, got {other:?}"),
         };
@@ -2833,11 +2836,13 @@ mod tests {
 
         release.notify_waiters();
 
-        let leader_ex = match leader.await.expect("leader task join") {
+        let leader_ex = match leader.await.expect("leader task join") // allow-test-wait: release notified before joins; completion asserted
+        {
             PipelineOutcome::Stopped(ex) => ex,
             other => panic!("expected leader Stopped, got {other:?}"),
         };
-        let waiter_ex = match w1.await.expect("waiter task join") {
+        let waiter_ex = match w1.await.expect("waiter task join") // allow-test-wait: release notified before joins; completion asserted
+        {
             PipelineOutcome::Stopped(ex) => ex,
             other => panic!("expected waiter Stopped, got {other:?}"),
         };

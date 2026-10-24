@@ -132,7 +132,7 @@ async fn producer_create() {
     let db = direct_client(&endpoint, db_name).await;
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -188,7 +188,7 @@ async fn producer_select_one() {
 
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -246,7 +246,7 @@ async fn producer_select_all() {
 
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -304,7 +304,7 @@ async fn producer_query() {
 
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -363,7 +363,7 @@ async fn producer_update() {
 
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -418,7 +418,7 @@ async fn producer_delete() {
 
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -462,7 +462,7 @@ async fn producer_upsert() {
 
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -538,7 +538,7 @@ async fn producer_patch() {
 
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -603,7 +603,7 @@ async fn producer_run() {
 
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -667,7 +667,7 @@ async fn producer_relate() {
 
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -736,7 +736,7 @@ async fn producer_relate_body_and_header_carry_edge_id() {
 
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -849,7 +849,7 @@ async fn vector_search_via_producer() {
 
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -911,7 +911,7 @@ async fn vector_store_via_producer() {
 
     let h = setup_harness(&endpoint, db_name).await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;

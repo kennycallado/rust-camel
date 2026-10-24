@@ -286,11 +286,11 @@ async fn host_discovers_lists_calls_and_reads() {
         other => panic!("expected blob resource contents, got {other:?}"),
     }
 
-    tool_route.await.expect("tool route task must finish");
+    tool_route.await.expect("tool route task must finish"); // allow-test-wait: route task join bounded by inner 2s recv timeout
     customers_route
-        .await
+        .await // allow-test-wait: route task join bounded by inner 2s recv timeout
         .expect("customers route task must finish");
-    logo_route.await.expect("logo route task must finish");
+    logo_route.await.expect("logo route task must finish"); // allow-test-wait: route task join bounded by inner 2s recv timeout
 
     tool_consumer.stop().await.expect("clean stop");
     customers_consumer.stop().await.expect("clean stop");
@@ -394,9 +394,9 @@ async fn two_consumers_share_one_listener() {
         other => panic!("expected text resource contents, got {other:?}"),
     }
 
-    tool_route.await.expect("tool route task must finish");
+    tool_route.await.expect("tool route task must finish"); // allow-test-wait: route task join bounded by inner 2s recv timeout
     resource_route
-        .await
+        .await // allow-test-wait: route task join bounded by inner 2s recv timeout
         .expect("resource route task must finish");
 
     tool_consumer.stop().await.expect("clean stop");

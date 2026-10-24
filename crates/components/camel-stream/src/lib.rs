@@ -955,8 +955,8 @@ mod stream_producer_tests {
 
         let t1 = tokio::spawn(async move { p1.call(Exchange::new(Message::new("aa\naa"))).await });
         let t2 = tokio::spawn(async move { p2.call(Exchange::new(Message::new("bb\nbb"))).await });
-        t1.await.unwrap().unwrap();
-        t2.await.unwrap().unwrap();
+        t1.await.unwrap().unwrap(); // allow-test-wait: finite producer call to test sink
+        t2.await.unwrap().unwrap(); // allow-test-wait: finite producer call to test sink
 
         // Each multi-line body must land as ONE intact write; the two
         // logical writes may appear in either order but never interleave.

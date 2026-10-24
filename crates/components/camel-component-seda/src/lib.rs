@@ -4074,7 +4074,7 @@ mod in_flight_tests {
         await_in_flight(&counter, 1).await;
 
         release_tx.send(()).unwrap();
-        pipeline.await.unwrap();
+        pipeline.await.unwrap(); // allow-test-wait: release sent before join; pipeline completes
         consumer.stop().await.unwrap();
 
         // Full pipeline completion returns the counter to baseline.
@@ -4148,12 +4148,12 @@ mod in_flight_tests {
 
         // Complete subscriber A: its copy's claim releases; B's stays.
         release_a_tx.send(()).unwrap();
-        pipe_a.await.unwrap();
+        pipe_a.await.unwrap(); // allow-test-wait: release sent before join; pipeline completes
         await_in_flight(&counter, 1).await;
 
         // Complete subscriber B: back to baseline.
         release_b_tx.send(()).unwrap();
-        pipe_b.await.unwrap();
+        pipe_b.await.unwrap(); // allow-test-wait: release sent before join; pipeline completes
         await_in_flight(&counter, 0).await;
 
         consumer_a.stop().await.unwrap();
@@ -4245,7 +4245,7 @@ mod in_flight_tests {
         // Release: E1 completes, E2 and E3 drain through the pipeline,
         // every claim releases — eventual return to baseline.
         release_tx.send(()).unwrap();
-        pipeline.await.unwrap();
+        pipeline.await.unwrap(); // allow-test-wait: release sent before join; pipeline completes
         consumer.stop().await.unwrap();
         await_in_flight(&counter, 0).await;
     }

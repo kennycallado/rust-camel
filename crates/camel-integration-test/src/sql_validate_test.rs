@@ -261,7 +261,7 @@ mod executor {
         assert_eq!(outcome, Ok(()));
         // The spawned insert must have succeeded — a skipped seed
         // would otherwise mask a poll bug with a false pass.
-        let joined = insert.await;
+        let joined = insert.await; // allow-test-wait: seed task finite; join result asserted
         assert!(
             matches!(joined, Ok(())),
             "spawned insert failed: {joined:?}"
@@ -311,7 +311,7 @@ mod executor {
         )
         .await;
         assert_eq!(outcome, Ok(()));
-        let joined = insert.await;
+        let joined = insert.await; // allow-test-wait: seed task finite; join result asserted
         assert!(
             matches!(joined, Ok(())),
             "spawned insert failed: {joined:?}"
@@ -391,7 +391,7 @@ mod executor {
             panic!("expected ValidationMismatch, got {failure:?}");
         };
         assert!(detail.contains("actual 0 rows"), "got: {detail}");
-        let joined = delete.await;
+        let joined = delete.await; // allow-test-wait: seed task finite; join result asserted
         assert!(
             matches!(joined, Ok(())),
             "spawned delete failed: {joined:?}"

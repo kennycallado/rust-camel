@@ -40,7 +40,7 @@ async fn streaming_activity_timeout_fires() {
         .unwrap();
     let body = std::mem::replace(&mut out.input.body, Body::Empty);
     if let Body::Stream(sb) = body {
-        let mut guard = sb.stream.lock().await;
+        let mut guard = sb.stream.lock().await; // allow-test-wait: stream slot on returned exchange; no holder
         if let Some(stream) = guard.as_mut() {
             use futures::StreamExt;
             let res = stream.next().await.unwrap();

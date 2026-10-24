@@ -3,6 +3,7 @@
 mod support;
 
 use camel_bridge::process::{BridgeProcess, BridgeProcessConfig};
+use camel_component_api::test_support::timeout_wait;
 use camel_xslt::proto::{HealthCheckRequest, health_client::HealthClient};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use support::xml_bridge::require_xml_bridge_binary;
@@ -74,12 +75,16 @@ async fn wrong_ca_handshake_rejected() {
         .identity(Identity::from_pem(&wrong_client_pem, &wrong_client_key_pem))
         .domain_name("127.0.0.1");
 
-    let result = Endpoint::from_shared(uri)
-        .expect("uri")
-        .tls_config(tls_config)
-        .expect("tls config")
-        .connect()
-        .await;
+    let result = timeout_wait(
+        "mTLS handshake with mismatched CA",
+        std::time::Duration::from_secs(60),
+        Endpoint::from_shared(uri)
+            .expect("uri")
+            .tls_config(tls_config)
+            .expect("tls config")
+            .connect(),
+    )
+    .await;
 
     assert!(
         result.is_err(),

@@ -251,7 +251,7 @@ async fn test_direct_duplicate_consumer_returns_error() {
     ));
 
     token_a.cancel();
-    handle_a.await.unwrap();
+    handle_a.await.unwrap(); // allow-test-wait: cancel token triggered before join
 }
 
 #[tokio::test]
@@ -450,7 +450,7 @@ async fn test_direct_consumer_respects_cancellation() {
             .contains_key("cancel-test")
     );
 
-    let _ = handle.await;
+    let _ = handle.await; // allow-test-wait: cancel token triggered before join
 }
 
 #[tokio::test]
@@ -585,7 +585,7 @@ async fn test_direct_crashed_consumer_entry_is_overwritable() {
     .expect("replacement consumer registration must be observed within 3s");
 
     token.cancel();
-    handle.await.unwrap();
+    handle.await.unwrap(); // allow-test-wait: cancel token triggered before join
 }
 
 /// poll_ready on a registry entry left behind by a crashed consumer must
@@ -678,12 +678,12 @@ async fn call_blocks_on_semaphore_until_release() {
     release.notify_one();
 
     let reply_a = a
-        .await
+        .await // allow-test-wait: semaphore released before join; call completes
         .expect("call A task must not panic")
         .expect("call A must complete Ok once its reply arrives");
     assert_eq!(reply_a.input.body.as_text(), Some("a"));
     let reply_b = b
-        .await
+        .await // allow-test-wait: semaphore released before join; call completes
         .expect("call B task must not panic")
         .expect("call B must complete Ok after the permit is released");
     assert_eq!(reply_b.input.body.as_text(), Some("b"));

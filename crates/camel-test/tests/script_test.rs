@@ -34,7 +34,7 @@ async fn script_error_prevents_downstream_delivery() {
         .with_mock()
         .build()
         .await;
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_rhai_registered(&mut guard);
     drop(guard);
 
@@ -80,7 +80,7 @@ async fn script_sets_header() {
         .with_mock()
         .build()
         .await;
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_rhai_registered(&mut guard);
     drop(guard);
 
@@ -127,7 +127,7 @@ async fn script_reads_and_transforms_body() {
         .with_mock()
         .build()
         .await;
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_rhai_registered(&mut guard);
     drop(guard);
 
@@ -173,7 +173,7 @@ async fn script_sets_multiple_headers() {
         .with_mock()
         .build()
         .await;
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_rhai_registered(&mut guard);
     drop(guard);
 
@@ -224,7 +224,7 @@ async fn script_reads_existing_header() {
         .with_mock()
         .build()
         .await;
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_rhai_registered(&mut guard);
     drop(guard);
 
@@ -272,7 +272,7 @@ async fn script_sets_property() {
         .with_mock()
         .build()
         .await;
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_rhai_registered(&mut guard);
     drop(guard);
 
@@ -350,7 +350,7 @@ async fn script_empty_body_handled() {
         .with_mock()
         .build()
         .await;
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_rhai_registered(&mut guard);
     drop(guard);
 

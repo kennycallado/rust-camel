@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use camel_component_api::test_support::timeout_wait;
 use camel_component_api::{Body, Exchange, Message};
 use camel_component_cxf::config::CxfPoolConfig;
 use camel_component_cxf::producer::CxfProducer;
@@ -77,7 +78,7 @@ async fn make_pool_with_ready_slot() -> (Arc<CxfBridgePool>, MockState) {
 #[tokio::test]
 async fn test_producer_20_serial_invocations_succeed() {
     let (producer, state) = make_producer().await;
-    *state.invoke_response_payload.lock().await = Some(b"ok-response".to_vec());
+    *state.invoke_response_payload.lock().await = Some(b"ok-response".to_vec()); // allow-test-wait: mock bridge state mutex; uncontended in-test
 
     let producer = Arc::new(Mutex::new(producer));
     let num_tasks = 20;
@@ -87,7 +88,12 @@ async fn test_producer_20_serial_invocations_succeed() {
         let producer = Arc::clone(&producer);
         let handle = tokio::spawn(async move {
             let exchange = Exchange::new(Message::new(Body::Text(format!("request-{i}"))));
-            let mut guard = producer.lock().await;
+            let mut guard = timeout_wait(
+                "contended producer mutex",
+                Duration::from_secs(60),
+                producer.lock(),
+            )
+            .await;
             // Poll readiness (required by Tower contract with backpressure).
             {
                 let waker = futures::task::noop_waker();
@@ -109,7 +115,7 @@ async fn test_producer_20_serial_invocations_succeed() {
     }
 
     for (i, handle) in handles.into_iter().enumerate() {
-        handle
+        timeout_wait("spawned producer task", Duration::from_secs(60), handle)
             .await
             .unwrap_or_else(|e| panic!("task {i} panicked: {e}"));
     }
@@ -147,7 +153,7 @@ async fn test_pool_get_channel_concurrent_access() {
     }
 
     for (i, handle) in handles.into_iter().enumerate() {
-        handle
+        timeout_wait("spawned pool task", Duration::from_secs(60), handle)
             .await
             .unwrap_or_else(|e| panic!("task {i} panicked: {e}"));
     }

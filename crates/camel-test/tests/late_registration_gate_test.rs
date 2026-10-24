@@ -99,7 +99,7 @@ async fn late_public_route_real_loopback_served_e2e() {
     // sleep needed. A full second `h.start()` is not viable: the runtime
     // command bus refuses StartRoute for routes already Started.
     let runtime = {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         ctx.runtime()
     };
     runtime

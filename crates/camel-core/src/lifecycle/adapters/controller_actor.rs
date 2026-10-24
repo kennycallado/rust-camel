@@ -631,7 +631,7 @@ mod tests {
             _ => panic!("unexpected command variant"),
         }
 
-        let result = task.await.expect("join should succeed");
+        let result = task.await.expect("join should succeed"); // allow-test-wait: reply sent before join; start_route resolves
         assert!(result.is_ok());
     }
 
@@ -1075,7 +1075,7 @@ mod tests {
              expected to complete before restart's 100ms sleep"
         );
 
-        let restart_result = restart_fut.await.expect("restart join");
+        let restart_result = restart_fut.await.expect("restart join"); // allow-test-wait: restart task finite; join asserted
         assert!(restart_result.is_ok(), "route-a restart should succeed");
 
         handle.shutdown().await.expect("shutdown send");
@@ -1116,7 +1116,7 @@ mod tests {
         );
 
         // Now the restart completes.
-        let restart_result = restart_fut.await.expect("restart join");
+        let restart_result = restart_fut.await.expect("restart join"); // allow-test-wait: restart task finite; join asserted
         assert!(restart_result.is_ok(), "route-a restart should succeed");
 
         handle.shutdown().await.expect("shutdown send");

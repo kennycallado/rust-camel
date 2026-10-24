@@ -305,7 +305,7 @@ async fn one_line_one_exchange() {
     assert_eq!(recv_text(&mut rx).await, "a");
     assert_eq!(recv_text(&mut rx).await, "b");
     assert_eq!(recv_text(&mut rx).await, "c");
-    handle.await.unwrap().unwrap();
+    handle.await.unwrap().unwrap(); // allow-test-wait: finite test reader; consumer exits at EOF
     assert!(matches!(
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
@@ -322,7 +322,7 @@ async fn final_unterminated_line_emits() {
 
     assert_eq!(recv_text(&mut rx).await, "x");
     assert_eq!(recv_text(&mut rx).await, "y");
-    handle.await.unwrap().unwrap();
+    handle.await.unwrap().unwrap(); // allow-test-wait: finite test reader; consumer exits at EOF
 }
 
 #[tokio::test]
@@ -334,7 +334,7 @@ async fn crlf_stripped() {
     let handle = tokio::spawn(async move { consumer.start(ctx).await });
 
     assert_eq!(recv_text(&mut rx).await, "w");
-    handle.await.unwrap().unwrap();
+    handle.await.unwrap().unwrap(); // allow-test-wait: finite test reader; consumer exits at EOF
 }
 
 /// A trailing `\r` with no `\n` is DATA, not a terminator: only a `\r`
@@ -350,7 +350,7 @@ async fn cr_only_line_preserved() {
     let handle = tokio::spawn(async move { consumer.start(ctx).await });
 
     assert_eq!(recv_text(&mut rx).await, "x\r");
-    handle.await.unwrap().unwrap();
+    handle.await.unwrap().unwrap(); // allow-test-wait: finite test reader; consumer exits at EOF
 }
 
 #[tokio::test]
@@ -362,7 +362,7 @@ async fn raw_frame_one_exchange() {
     let handle = tokio::spawn(async move { consumer.start(ctx).await });
 
     assert_eq!(recv_bytes(&mut rx).await, b"l1\nl2\nl3\n");
-    handle.await.unwrap().unwrap();
+    handle.await.unwrap().unwrap(); // allow-test-wait: finite test reader; consumer exits at EOF
 }
 
 #[tokio::test]
@@ -373,7 +373,7 @@ async fn raw_empty_zero_exchanges() {
     );
     let handle = tokio::spawn(async move { consumer.start(ctx).await });
 
-    handle.await.unwrap().unwrap();
+    handle.await.unwrap().unwrap(); // allow-test-wait: finite test reader; consumer exits at EOF
     assert!(matches!(
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
@@ -391,7 +391,7 @@ async fn fixed_frames_and_partial_chunk() {
     assert_eq!(recv_bytes(&mut rx).await, b"0123");
     assert_eq!(recv_bytes(&mut rx).await, b"4567");
     assert_eq!(recv_bytes(&mut rx).await, b"89");
-    handle.await.unwrap().unwrap();
+    handle.await.unwrap().unwrap(); // allow-test-wait: finite test reader; consumer exits at EOF
 }
 
 /// Fixed framing must accumulate across short reads: the drip reader
@@ -410,7 +410,7 @@ async fn fixed_frames_short_reads_accumulate() {
 
     assert_eq!(recv_bytes(&mut rx).await, b"0123");
     assert_eq!(recv_bytes(&mut rx).await, b"45");
-    handle.await.unwrap().unwrap();
+    handle.await.unwrap().unwrap(); // allow-test-wait: finite test reader; consumer exits at EOF
 }
 
 /// LOAD-BEARING: a read IO error is NOT EOF — it must fail `start`
@@ -517,7 +517,7 @@ async fn eof_no_input_completes_gracefully() {
     );
     let handle = tokio::spawn(async move { consumer.start(ctx).await });
 
-    handle.await.unwrap().unwrap();
+    handle.await.unwrap().unwrap(); // allow-test-wait: finite test reader; consumer exits at EOF
     assert!(matches!(
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
@@ -557,7 +557,7 @@ async fn invalid_utf8_line_skipped_with_metric() {
 
     assert_eq!(recv_text(&mut rx).await, "ok");
     assert_eq!(recv_text(&mut rx).await, "ok2");
-    handle.await.unwrap().unwrap();
+    handle.await.unwrap().unwrap(); // allow-test-wait: finite test reader; consumer exits at EOF
     assert_eq!(
         *errors.lock().unwrap(),
         vec![(

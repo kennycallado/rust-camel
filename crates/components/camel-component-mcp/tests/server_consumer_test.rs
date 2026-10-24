@@ -26,6 +26,7 @@ use std::time::Duration;
 use camel_api::security_policy::{AccessMode, RouteSecurityPlan, TransportId};
 use camel_api::{Body, CamelError};
 use camel_component_api::consumer::ExchangeEnvelope;
+use camel_component_api::test_support::timeout_wait;
 use camel_component_api::{
     Component, Consumer, ConsumerContext, NoOpComponentContext, NoopRuntimeObservability,
     RuntimeObservability, SecurityContext,
@@ -452,15 +453,22 @@ async fn dsl_tls_reaches_listener() {
             .with_root_certificates(roots)
             .with_no_client_auth(),
     ));
-    let tcp = tokio::net::TcpStream::connect(handle.local_addr)
-        .await
-        .expect("tcp connect to the TLS listener");
+    let tcp = timeout_wait(
+        "tcp connect to the TLS listener",
+        Duration::from_secs(60),
+        tokio::net::TcpStream::connect(handle.local_addr),
+    )
+    .await
+    .expect("tcp connect to the TLS listener");
     let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from("localhost")
         .expect("localhost server name");
-    let _tls_stream = connector
-        .connect(server_name, tcp)
-        .await
-        .expect("TLS handshake against the DSL-declared cert must succeed");
+    let _tls_stream = timeout_wait(
+        "TLS handshake against the DSL-declared cert",
+        Duration::from_secs(60),
+        connector.connect(server_name, tcp),
+    )
+    .await
+    .expect("TLS handshake against the DSL-declared cert must succeed");
 
     consumer.stop().await.expect("clean stop");
 }

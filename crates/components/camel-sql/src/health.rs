@@ -130,6 +130,7 @@ mod tests {
     use camel_api::datasource::{
         DatasourceCatalog, DatasourceConfig, DatasourceHandle, GetPoolFuture, PoolFactory,
     };
+    use camel_component_api::test_support::timeout_wait;
     use std::any::Any;
 
     /// Catalog mock that hands out a pre-built pool for a single named datasource.
@@ -262,11 +263,15 @@ mod tests {
     async fn sql_health_check_healthy_via_datasource_when_pool_cell_empty() {
         sqlx::any::install_default_drivers();
         let pool = Arc::new(
-            sqlx::any::AnyPoolOptions::new()
-                .max_connections(1)
-                .connect("sqlite::memory:")
-                .await
-                .expect("sqlite pool"),
+            timeout_wait(
+                "sqlite pool connect",
+                Duration::from_secs(30),
+                sqlx::any::AnyPoolOptions::new()
+                    .max_connections(1)
+                    .connect("sqlite::memory:"),
+            )
+            .await
+            .expect("sqlite pool"),
         );
         let catalog: Arc<dyn DatasourceCatalog> = Arc::new(CatalogWithPool {
             name: "cartodb".to_string(),

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use camel_api::{Body, Exchange, Message};
+use camel_component_api::test_support::timeout_wait;
 use camel_component_llm::config::LlmEndpointConfig;
 use camel_component_llm::cost::PricingTable;
 use camel_component_llm::headers::*;
@@ -268,7 +269,9 @@ async fn single_flight_waiter_timeout_abandons_leader_keeps_running() {
     );
 
     // Wait for the leader to finish and cache the result
-    let leader_result = leader_task.await.expect("leader join ok");
+    let leader_result = timeout_wait("leader producer call", Duration::from_secs(60), leader_task)
+        .await
+        .expect("leader join ok");
     assert!(leader_result.is_ok(), "leader should succeed");
 
     // Now a third call with no timeout should get a cached hit

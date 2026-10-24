@@ -547,7 +547,7 @@ async fn plain_string_send_dials_literal_without_partner() {
     assert_eq!(response.status, Some(200));
     assert_eq!(response.body, Value::String("ok".to_string()));
 
-    let recorded = served.await.expect("the far-side task must finish");
+    let recorded = served.await.expect("the far-side task must finish"); // allow-test-wait: response already received; far-side task finishing
     assert!(
         recorded.starts_with("POST /x "),
         "the literal dial must carry the request line, got {recorded:?}"

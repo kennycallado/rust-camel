@@ -307,7 +307,7 @@ async fn top_level_direct_propagates_consumer_error() {
         .build()
         .await;
     {
-        let mut guard = h.ctx().lock().await;
+        let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         ensure_rhai_registered(&mut guard);
     }
 

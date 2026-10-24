@@ -972,7 +972,7 @@ mod tests {
         let holder_acquired = Arc::clone(&acquired);
         let holder_notify = Arc::clone(&notify);
         let holder = tokio::spawn(async move {
-            let _g = gate.lock().await;
+            let _g = gate.lock().await; // allow-test-wait: gate uncontended at spawn; bounded probe follows
             holder_acquired.store(true, Ordering::SeqCst);
             holder_notify.notified().await;
         });

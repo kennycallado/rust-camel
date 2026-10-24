@@ -658,7 +658,7 @@ mod tests {
         let result = producer.oneshot(exchange).await.unwrap();
         assert!(matches!(result.input.body, Body::Empty));
 
-        let recorded = commands.lock().await.clone();
+        let recorded = commands.lock().await.clone(); // allow-test-wait: record mutex uncontended after call returned
         assert_eq!(recorded, vec!["reload:my-route".to_string()]);
     }
 

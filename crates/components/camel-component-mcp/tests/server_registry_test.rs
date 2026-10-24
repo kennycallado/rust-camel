@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use camel_api::security_policy::{AccessMode, RouteSecurityPlan, TransportId};
+use camel_component_api::test_support::timeout_wait;
 use camel_component_mcp::McpServerRegistry;
 use camel_component_mcp::config::McpServerConfig;
 use camel_component_mcp::error::McpError;
@@ -38,7 +39,12 @@ async fn first_consumer_spawns_listener() {
         .await
         .unwrap();
 
-    let result = tokio::net::TcpStream::connect(handle.local_addr).await;
+    let result = timeout_wait(
+        "tcp connect to registry-spawned listener",
+        Duration::from_secs(60),
+        tokio::net::TcpStream::connect(handle.local_addr),
+    )
+    .await;
     assert!(
         result.is_ok(),
         "first consumer's listener must accept connections"

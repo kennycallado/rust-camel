@@ -176,6 +176,7 @@ impl PoolFactory for SqlPoolFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::test_support::timeout_wait;
 
     #[test]
     fn sql_pool_factory_name() {
@@ -261,8 +262,20 @@ mod tests {
 
         // Hold the first acquired connection while acquiring a second,
         // so both pooled connections exist concurrently.
-        let mut conn1 = pool.acquire().await.expect("first connection");
-        let mut conn2 = pool.acquire().await.expect("second connection");
+        let mut conn1 = timeout_wait(
+            "first pool acquire",
+            Duration::from_secs(30),
+            pool.acquire(),
+        )
+        .await
+        .expect("first connection");
+        let mut conn2 = timeout_wait(
+            "second pool acquire",
+            Duration::from_secs(30),
+            pool.acquire(),
+        )
+        .await
+        .expect("second connection");
         sqlx::query("SELECT 1")
             .execute(&mut *conn1)
             .await
@@ -315,7 +328,13 @@ mod tests {
             .expect("create");
         // Force a second connection: hold one acquire while running the
         // INSERT on another.
-        let conn1 = pool.acquire().await.expect("conn1");
+        let conn1 = timeout_wait(
+            "probe pool acquire",
+            Duration::from_secs(30),
+            pool.acquire(),
+        )
+        .await
+        .expect("conn1");
         sqlx::query("INSERT INTO probe VALUES ('x')")
             .execute(&*pool)
             .await

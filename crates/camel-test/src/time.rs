@@ -43,7 +43,7 @@ mod tests {
         });
 
         controller.advance(Duration::from_millis(100)).await;
-        let got = sleeper.await.unwrap();
+        let got = sleeper.await.unwrap(); // allow-test-wait: paused time; advance drives completion
         assert_eq!(got, 42);
 
         controller.resume();

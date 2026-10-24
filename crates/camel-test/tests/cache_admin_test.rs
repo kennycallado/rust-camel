@@ -242,7 +242,7 @@ async fn cache_invalidate_prefix_purges_namespace_redb() {
     // context's shutdown token so its sweep task tears down with the harness.
     let dir = tempfile::tempdir().expect("tempdir");
     {
-        let mut ctx = h.ctx().lock().await;
+        let mut ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let repo = RedbCacheRepository::new(
             "persistent",
             dir.path().join("cache.redb"),

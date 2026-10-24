@@ -357,7 +357,7 @@ mod tests {
         let task = tokio::spawn(async move {
             tracing::dispatcher::with_default(&dispatch, || tracing::warn!("spawned task marker"));
         });
-        task.await.expect("spawned task completes");
+        task.await.expect("spawned task completes"); // allow-test-wait: finite spawn tracing emit; completion asserted
         let events = window.close();
         assert!(
             events

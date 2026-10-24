@@ -611,7 +611,7 @@ mod tests {
         });
         let report = registry.check_all().await;
         assert_eq!(report.status, HealthStatus::Healthy);
-        h.await.unwrap();
+        h.await.unwrap(); // allow-test-wait: join of test-spawned finite task; completion asserted
     }
 
     struct CountingCheck {

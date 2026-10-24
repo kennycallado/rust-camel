@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use camel_component_api::test_support::timeout_wait;
 use camel_matchers::{RequestShape, ShapeAspect, request_shape_mismatch};
 
 use crate::adapters::PartnerRouter;
@@ -450,7 +451,9 @@ async fn poll_passes_once_count_settles() {
     )]);
     let mut vars = ScenarioVars::new();
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
-    settling.await.expect("the settling task must finish");
+    timeout_wait("settling task join", Duration::from_secs(30), settling)
+        .await
+        .expect("the settling task must finish");
 
     assert_eq!(
         outcome.verdict,

@@ -1,0 +1,82 @@
+crates/camel-core/tests/arc_snapshot_concurrency.rs:105	B	marker	9-party barrier; handle joins wrapped in 5s timeout bound test
+crates/camel-core/tests/arc_snapshot_concurrency.rs:124	B	marker	9-party barrier; handle joins wrapped in 5s timeout bound test
+crates/camel-core/tests/cb_fallback_lifecycle_test.rs:326	B	marker	join own released producer task; drain completion already observed
+crates/camel-dsl/tests/rest_stream_contract_e2e.rs:583	A	timeout	connect to test-owned listener; can hang on boot misbehaviour
+crates/camel-integration-test/tests/http_inbound_test.rs:170	A	timeout	connect to component-owned inbound listener after boot
+crates/camel-integration-test/tests/http_inbound_test.rs:187	B	marker	harness ctx mutex; sole test owner, uncontended in-test
+crates/camel-integration-test/tests/http_inbound_test.rs:282	B	marker	harness ctx mutex; sole test owner, uncontended in-test
+crates/camel-integration-test/tests/http_inbound_test.rs:304	A	timeout	connect to pinned component-owned listener
+crates/camel-integration-test/tests/http_inbound_test.rs:318	B	marker	harness ctx mutex; sole test owner, uncontended in-test
+crates/camel-integration-test/tests/http_outbound_test.rs:241	B	marker	harness ctx mutex; sole test owner, uncontended in-test
+crates/camel-integration-test/tests/http_outbound_test.rs:266	B	marker	harness ctx mutex; sole test owner, uncontended in-test
+crates/camel-integration-test/tests/http_outbound_test.rs:291	B	marker	harness ctx mutex; sole test owner, uncontended in-test
+crates/camel-integration-test/tests/http_outbound_test.rs:356	B	marker	harness ctx mutex; sole test owner, uncontended in-test
+crates/camel-integration-test/tests/http_outbound_test.rs:373	B	marker	harness ctx mutex; sole test owner, uncontended in-test
+crates/camel-integration-test/tests/http_outbound_test.rs:386	B	marker	harness ctx mutex; sole test owner, uncontended in-test
+crates/camel-integration-test/tests/http_outbound_test.rs:444	B	marker	harness ctx mutex; sole test owner, uncontended in-test
+crates/camel-integration-test/tests/http_partner_scripting_test.rs:1103	B	marker	harness ctx mutex; sole test owner, uncontended in-test
+crates/camel-integration-test/tests/log_assertion_test.rs:251	B	marker	join noise task bounded by inner 10s timeout
+crates/camel-integration-test/tests/partner_verification_test.rs:754	A	timeout	raw_post read_to_end lacks deadline; join can hang
+crates/camel-integration-test/tests/partner_verification_test.rs:865	B	marker	harness ctx mutex; sole test owner, uncontended in-test
+crates/camel-integration-test/tests/partner_verification_test.rs:997	A	timeout	raw_post read_to_end lacks deadline; join can hang
+crates/camel-integration-test/tests/partner_verification_test.rs:1074	A	timeout	raw_post read_to_end lacks deadline; join can hang
+crates/camel-integration-test/tests/partner_verification_test.rs:1147	A	timeout	raw_post read_to_end lacks deadline; join can hang
+crates/camel-integration-test/tests/partner_verification_test.rs:1272	A	timeout	raw_post read_to_end lacks deadline; join can hang
+crates/camel-integration-test/tests/partner_verification_test.rs:1323	A	timeout	raw_post read_to_end lacks deadline; join can hang
+crates/components/camel-component-grpc/tests/integration.rs:1743	B	marker	join stand-in pipeline task bounded by inner 2s recv timeout
+crates/components/camel-component-grpc/tests/integration.rs:1915	B	marker	join pipeline task; every inner await has 2s timeout
+crates/components/camel-component-grpc/tests/server_auth_test.rs:291	B	marker	join stand-in pipeline task bounded by inner 2s recv timeout
+crates/components/camel-component-grpc/tests/server_auth_test.rs:347	B	marker	join stand-in pipeline task bounded by inner 2s recv timeout
+crates/components/camel-component-grpc/tests/server_auth_test.rs:423	B	marker	join stand-in pipeline task bounded by inner 2s recv timeout
+crates/components/camel-component-grpc/tests/server_auth_test.rs:482	B	marker	join stand-in pipeline task bounded by inner 2s recv timeout
+crates/components/camel-component-grpc/tests/server_auth_test.rs:545	B	marker	join stand-in pipeline task enclosed in 30s timeout
+crates/components/camel-component-grpc/tests/server_auth_test.rs:627	B	marker	join stand-in pipeline task bounded by inner 2s recv timeout
+crates/components/camel-component-grpc/tests/server_auth_test.rs:697	B	marker	join stand-in pipeline task bounded by inner 2s recv timeout
+crates/components/camel-component-llm/tests/edge_cases.rs:55	B	marker	stream body mutex owned solely by test; uncontended
+crates/components/camel-component-llm/tests/ollama_live.rs:82	B	marker	stream body mutex owned solely by test; uncontended
+crates/components/camel-component-llm/tests/producer_cache.rs:271	A	timeout	join leader task; leader producer call has no timeout
+crates/components/camel-component-mcp/tests/dsl_e2e_test.rs:287	B	marker	route task join bounded by inner 2s recv timeout
+crates/components/camel-component-mcp/tests/dsl_e2e_test.rs:288	B	marker	route task join bounded by inner 2s recv timeout
+crates/components/camel-component-mcp/tests/server_consumer_e2e_test.rs:289	B	marker	route task join bounded by inner 2s recv timeout
+crates/components/camel-component-mcp/tests/server_consumer_e2e_test.rs:290	B	marker	route task join bounded by inner 2s recv timeout
+crates/components/camel-component-mcp/tests/server_consumer_e2e_test.rs:293	B	marker	route task join bounded by inner 2s recv timeout
+crates/components/camel-component-mcp/tests/server_consumer_e2e_test.rs:397	B	marker	route task join bounded by inner 2s recv timeout
+crates/components/camel-component-mcp/tests/server_consumer_e2e_test.rs:398	B	marker	route task join bounded by inner 2s recv timeout
+crates/components/camel-component-mcp/tests/server_consumer_test.rs:455	A	timeout	tcp connect to component-owned MCP listener
+crates/components/camel-component-mcp/tests/server_consumer_test.rs:460	A	timeout	TLS handshake with component-owned listener may stall
+crates/components/camel-component-mcp/tests/server_registry_test.rs:41	A	timeout	tcp connect to registry-spawned listener
+crates/components/camel-component-mcp/tests/server_tool_dispatch_test.rs:224	B	marker	route task join bounded by inner 2s recv timeout
+crates/components/camel-component-mcp/tests/server_tool_dispatch_test.rs:402	B	marker	route task join bounded by inner 2s recv timeout
+crates/components/camel-component-wasm/tests/return_stream_integration.rs:104	B	marker	stream body mutex owned solely by test; uncontended
+crates/components/camel-component-wasm/tests/return_stream_integration.rs:189	B	marker	stream body mutex owned solely by test; uncontended
+crates/components/camel-component-wasm/tests/return_stream_integration.rs:246	B	marker	stream body mutex owned solely by test; uncontended
+crates/components/camel-component-wasm/tests/return_stream_integration.rs:330	B	marker	stream body mutex owned solely by test; uncontended
+crates/components/camel-component-wasm/tests/source_stream_integration.rs:294	A	timeout	tcp connect to component-owned source HTTP listener
+crates/components/camel-component-wasm/tests/streaming_integration.rs:498	B	marker	stream body mutex owned solely by test; uncontended
+crates/components/camel-cxf/tests/concurrency_test.rs:80	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/concurrency_test.rs:90	A	timeout	contended test-local producer mutex; holder may stall
+crates/components/camel-cxf/tests/concurrency_test.rs:112	A	timeout	producer call invokes tonic over TCP without deadline
+crates/components/camel-cxf/tests/concurrency_test.rs:150	A	timeout	health tonic call lacks inner deadline; join can hang
+crates/components/camel-cxf/tests/consumer_unit_test.rs:443	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/consumer_unit_test.rs:515	A	timeout	connect to mock bridge endpoint; may hang
+crates/components/camel-cxf/tests/pool_lifecycle_test.rs:62	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:70	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:83	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:133	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:143	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:153	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:163	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:173	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:183	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:190	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:207	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:218	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:225	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:242	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/producer_unit_test.rs:252	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/ws_security_test.rs:52	A	timeout	connect to mock bridge endpoint; may hang
+crates/components/camel-cxf/tests/ws_security_test.rs:84	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-cxf/tests/ws_security_test.rs:109	A	timeout	connect to mock bridge endpoint; may hang
+crates/components/camel-cxf/tests/ws_security_test.rs:137	B	marker	mock bridge state mutex; uncontended in-test
+crates/components/camel-rabbitmq/tests/consumer_readiness.rs:94	A	timeout	join consumer start task after cancel; unbounded without timeout
+crates/services/camel-bridge/tests/bridge_exit_path_evidence.rs:1173	B	marker	blocking recv_timeout(30s) bounds the blocking task join

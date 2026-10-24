@@ -79,7 +79,7 @@ async fn ollama_chat_streaming() {
     );
 
     if let Body::Stream(ref sb) = result.input.body {
-        let mut guard = sb.stream.lock().await;
+        let mut guard = sb.stream.lock().await; // allow-test-wait: stream body mutex owned solely by test; uncontended
         if let Some(stream) = guard.take() {
             use futures::StreamExt;
             let mut stream = stream;

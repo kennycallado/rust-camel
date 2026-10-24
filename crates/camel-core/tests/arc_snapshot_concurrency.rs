@@ -102,7 +102,7 @@ async fn concurrent_swap_and_call_no_invalid_state() {
             }
 
             // Synchronize with swapper.
-            barrier.wait().await;
+            barrier.wait().await; // allow-test-wait: 9-party barrier; handle joins wrapped in 5s timeout bound test
 
             // Second batch: 50 calls — some may see S0, some S1
             // depending on timing. Both are valid pipelines.
@@ -121,7 +121,7 @@ async fn concurrent_swap_and_call_no_invalid_state() {
         let sw = Arc::clone(&sw);
         let barrier = Arc::clone(&barrier);
         handles.push(tokio::spawn(async move {
-            barrier.wait().await;
+            barrier.wait().await; // allow-test-wait: 9-party barrier; handle joins wrapped in 5s timeout bound test
             sw.store(Arc::new(SyncBoxProcessor::new(s1)));
         }));
     }

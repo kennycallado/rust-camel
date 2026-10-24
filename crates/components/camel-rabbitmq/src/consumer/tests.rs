@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use camel_component_api::test_support::NoopRuntimeObservability;
+use camel_component_api::test_support::timeout_wait;
 use futures::stream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -284,8 +285,7 @@ async fn consumer_stop_joins_loop() {
 
     // The engine dispatches the delivery and then blocks awaiting the
     // route reply. Hold the envelope unanswered to model a blocked route.
-    let _held_envelope = rx
-        .recv()
+    let _held_envelope = timeout_wait("delivery dispatch", Duration::from_secs(30), rx.recv())
         .await
         .expect("run_loop must dispatch the delivery");
 

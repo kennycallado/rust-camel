@@ -3008,7 +3008,7 @@ mod tests {
             .await
             .expect("health-monitor shutdown must complete within 10s");
         });
-        *monitor_handle_ref.lock().await = Some(handle);
+        *monitor_handle_ref.lock().await = Some(handle); // allow-test-wait: fresh test-created handle slot; uncontended
 
         let slot = Arc::new(BridgeSlot {
             name: "default".to_string(),
@@ -3074,7 +3074,7 @@ mod tests {
 
         // spawn_health_monitor stores the handle before returning, so the
         // guard is already Some here — no settle window needed.
-        let guard = slot.health_monitor_handle.lock().await;
+        let guard = slot.health_monitor_handle.lock().await; // allow-test-wait: handle stored before return; uncontended
         assert!(
             guard.is_some(),
             "health monitor handle must be stored after spawn_health_monitor"
@@ -3287,7 +3287,7 @@ mod tests {
 
         assert_eq!(pool.slots.len(), 2);
 
-        let guard = pool.bridge_create_lock.lock().await;
+        let guard = pool.bridge_create_lock.lock().await; // allow-test-wait: fresh pool; create lock uncontended
         let total_count = pool.slots.len();
         assert!(total_count >= pool.max_bridges);
         let result = if total_count >= pool.max_bridges {
@@ -3455,7 +3455,7 @@ mod tests {
 
         let monitor_handle_ref: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
             Arc::new(tokio::sync::Mutex::new(None));
-        *monitor_handle_ref.lock().await = Some(handle);
+        *monitor_handle_ref.lock().await = Some(handle); // allow-test-wait: fresh test-created handle slot; uncontended
 
         let slot = Arc::new(BridgeSlot {
             name: "default".to_string(),
@@ -3621,7 +3621,7 @@ mod tests {
         pool.spawn_health_monitor(Arc::clone(&slot)).await;
         let handle = slot
             .health_monitor_handle
-            .lock()
+            .lock() // allow-test-wait: handle stored before return; uncontended
             .await
             .take()
             .expect("health monitor handle stored");
@@ -4230,7 +4230,7 @@ mod tests {
 
         // Clean up monitor + child (bounded) before asserting.
         let _ = slot.publish_shutdown();
-        if let Some(mut handle) = slot.health_monitor_handle.lock().await.take()
+        if let Some(mut handle) = slot.health_monitor_handle.lock().await.take() // allow-test-wait: handle slot uncontended after shutdown
             && tokio::time::timeout(Duration::from_secs(2), &mut handle)
                 .await
                 .is_err()
@@ -4312,7 +4312,7 @@ mod tests {
 
         // Clean up monitor + child (bounded) before asserting.
         let _ = slot.publish_shutdown();
-        if let Some(mut handle) = slot.health_monitor_handle.lock().await.take()
+        if let Some(mut handle) = slot.health_monitor_handle.lock().await.take() // allow-test-wait: handle slot uncontended after shutdown
             && tokio::time::timeout(Duration::from_secs(2), &mut handle)
                 .await
                 .is_err()

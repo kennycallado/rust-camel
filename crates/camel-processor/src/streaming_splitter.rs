@@ -361,7 +361,7 @@ mod tests {
             .expect("splitter call");
 
         // ── Assert ─────────────────────────────────────────────────────────────
-        let guard = fragments.lock().await;
+        let guard = fragments.lock().await; // allow-test-wait: test-owned fragments mutex; producers finished
 
         // 1. Three fragments were produced
         assert_eq!(guard.len(), 3, "expected 3 NDJSON fragments");

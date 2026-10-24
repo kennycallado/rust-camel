@@ -13,6 +13,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use camel_component_api::test_support::timeout_wait;
 use camel_component_api::{Body, Exchange, Message, Value};
 use futures::Stream;
 use tonic::{Request, Response, Status};
@@ -239,11 +240,15 @@ async fn near_cap_body_decodes_end_to_end() {
 
     // Same channel-construction shape the bridge pool produces, connected to
     // the in-process mock instead of the Java bridge process.
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
-        .expect("valid endpoint uri")
-        .connect()
-        .await
-        .expect("connect to mock bridge");
+    let channel = timeout_wait(
+        "bridge connect",
+        Duration::from_secs(30),
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+            .expect("valid endpoint uri")
+            .connect(),
+    )
+    .await
+    .expect("connect to mock bridge");
     let mut client = bridge_service_client(channel);
 
     let resp = client
@@ -280,11 +285,15 @@ async fn content_type_round_trips_through_stream() {
     let captured = spawn_mock_bridge(message).await.expect("spawn mock bridge");
     let port = captured.port;
 
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
-        .expect("valid endpoint uri")
-        .connect()
-        .await
-        .expect("connect to mock bridge");
+    let channel = timeout_wait(
+        "bridge connect",
+        Duration::from_secs(30),
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+            .expect("valid endpoint uri")
+            .connect(),
+    )
+    .await
+    .expect("connect to mock bridge");
     let mut client = bridge_service_client(channel);
 
     let resp = client
@@ -317,11 +326,15 @@ async fn duplicate_subscription_id_surfaces_already_exists() {
     let captured = spawn_mock_bridge(message).await.expect("spawn mock bridge");
     let port = captured.port;
 
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
-        .expect("valid endpoint uri")
-        .connect()
-        .await
-        .expect("connect to mock bridge");
+    let channel = timeout_wait(
+        "bridge connect",
+        Duration::from_secs(30),
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+            .expect("valid endpoint uri")
+            .connect(),
+    )
+    .await
+    .expect("connect to mock bridge");
     let mut first = bridge_service_client(channel.clone());
     let mut second = bridge_service_client(channel);
 
@@ -426,12 +439,15 @@ async fn traceparent_injected_on_every_rpc_shape() {
     };
     let captured = spawn_mock_bridge(message).await.expect("spawn mock bridge");
 
-    let channel =
+    let channel = timeout_wait(
+        "bridge connect",
+        Duration::from_secs(30),
         tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", captured.port))
             .expect("valid endpoint uri")
-            .connect()
-            .await
-            .expect("connect to mock bridge");
+            .connect(),
+    )
+    .await
+    .expect("connect to mock bridge");
     let mut client = bridge_service_client(channel);
 
     client
@@ -493,12 +509,15 @@ async fn no_traceparent_without_active_context() {
     };
     let captured = spawn_mock_bridge(message).await.expect("spawn mock bridge");
 
-    let channel =
+    let channel = timeout_wait(
+        "bridge connect",
+        Duration::from_secs(30),
         tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", captured.port))
             .expect("valid endpoint uri")
-            .connect()
-            .await
-            .expect("connect to mock bridge");
+            .connect(),
+    )
+    .await
+    .expect("connect to mock bridge");
     let mut client = bridge_service_client(channel);
 
     client

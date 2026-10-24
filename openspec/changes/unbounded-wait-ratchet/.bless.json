@@ -1,0 +1,21 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:330d3497709dafc173fc5aeb4199c694ba8ce299e8d0a0b997571c535ddafc49",
+  "expert": "experts/e_gpt",
+  "rounds": [
+    {"verdict": "REJECT", "hash": "sha256:c735f41bbb562da25500560c65e8e682e12233ddceddc85b7c7e81fb182f93f1", "findings": 5, "session": "ses_e91d28667ffePG3B3df9TJTmEN"},
+    {"verdict": "BLESS-WITH-FIXES", "hash": "sha256:d8aea913bcf43cc6d204c835be9659cd3caa54227876c11eaa72789e316d9b29", "findings": 2, "session": "ses_e91cc43aeffeDp5MqtWZmIoNJo"},
+    {"verdict": "BLESS-WITH-FIXES", "hash": "sha256:f85c58f676e41b9b2d62eb43bde760de50250a7cd6a0c1ff67566b04e5154b11", "findings": 1, "session": "ses_e91ca6e94ffe1CN0fUGix2HqGm"},
+    {"verdict": "BLESS", "hash": "sha256:330d3497709dafc173fc5aeb4199c694ba8ce299e8d0a0b997571c535ddafc49", "findings": 0, "session": "ses_e91c92e22ffeRRAAJ5B3TJmvC0"}
+  ],
+  "spec_bless": {
+    "hash": "sha256:60b27240908f65dafc12fafa5dde390f0cb69587aafe5ec47e0a639f1171e204",
+    "expert": "experts/e_gpt"
+  },
+  "reviewer_loop": [
+    {"verdict": "REJECT", "findings": 6, "session": "ses_e91db94bfffeRy9FvcJQc4mOMp"},
+    {"verdict": "REJECT", "findings": 3, "session": "ses_e91d57be6ffeUlpaZxF3rutNDQ"},
+    {"verdict": "APPROVE", "findings": 0, "session": "ses_e91d3784cffea4zZ2mUOiIavUQ"}
+  ]
+}

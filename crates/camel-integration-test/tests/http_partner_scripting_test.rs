@@ -1100,7 +1100,7 @@ async fn two_layer_bindvar_both_visible() {
         recorded[2]
     );
 
-    let mut guard = ctx.lock().await;
+    let mut guard = ctx.lock().await; // allow-test-wait: harness ctx mutex; sole test owner, uncontended in-test
     run.boot
         .shutdown(&mut guard)
         .await

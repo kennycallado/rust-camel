@@ -42,7 +42,7 @@ async fn redis_string_commands() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -100,7 +100,7 @@ async fn redis_list_commands() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -158,7 +158,7 @@ async fn redis_hash_commands() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -217,7 +217,7 @@ async fn redis_set_commands() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -717,7 +717,7 @@ async fn redis_pubsub_producer() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -819,7 +819,7 @@ async fn redis_consumer_queue_mode() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -887,7 +887,7 @@ async fn redis_consumer_blpop_reads_left_side_first() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -971,7 +971,7 @@ async fn redis_consumer_brpop_reads_right_side_first() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -1058,7 +1058,7 @@ async fn redis_consumer_pubsub_mode() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;

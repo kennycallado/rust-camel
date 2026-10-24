@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use camel_component_api::test_support::timeout_wait;
 use camel_integration_test::runner::fill_bind_vars;
 use camel_integration_test::{
     DirectStimulus, HttpPartner, HttpRecorder, LayeredEnv, PartnerAdapter, PartnerRouter,
@@ -751,7 +752,9 @@ async fn deadline_polls_until_settle_e2e() {
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
-    dial.await.expect("the background dial task must join");
+    timeout_wait("background dial task join", Duration::from_secs(60), dial)
+        .await
+        .expect("the background dial task must join");
     assert_eq!(
         outcome.verdict,
         Some(ScenarioVerdict::Pass),
@@ -862,7 +865,7 @@ async fn route_retries_faulted_partner_then_count_e2e() {
         assert_eq!(request.path, "/order");
     }
 
-    let mut guard = ctx.lock().await;
+    let mut guard = ctx.lock().await; // allow-test-wait: harness ctx mutex; sole test owner, uncontended in-test
     run.boot
         .shutdown(&mut guard)
         .await
@@ -994,7 +997,9 @@ async fn at_least_settles_early() {
     let started = std::time::Instant::now();
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
-    burst.await.expect("the burst task must join");
+    timeout_wait("burst task join", Duration::from_secs(60), burst)
+        .await
+        .expect("the burst task must join");
 
     assert_eq!(
         outcome.verdict,
@@ -1071,7 +1076,9 @@ async fn at_most_waits_full_window() {
     let started = std::time::Instant::now();
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
-    straggler.await.expect("the straggler task must join");
+    timeout_wait("straggler task join", Duration::from_secs(60), straggler)
+        .await
+        .expect("the straggler task must join");
 
     assert_eq!(
         outcome.verdict,
@@ -1144,7 +1151,9 @@ async fn at_most_fails_fast_when_ceiling_crossed_mid_window() {
     let started = std::time::Instant::now();
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
     let elapsed = started.elapsed();
-    breach.await.expect("the breaching dial task must join");
+    timeout_wait("breaching dial task join", Duration::from_secs(60), breach)
+        .await
+        .expect("the breaching dial task must join");
 
     assert_eq!(
         outcome.verdict, None,
@@ -1269,7 +1278,9 @@ async fn path_contains_tolerates_encoding_drift_end_to_end() {
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
-    drift.await.expect("the drift task must join");
+    timeout_wait("drift task join", Duration::from_secs(60), drift)
+        .await
+        .expect("the drift task must join");
 
     assert_eq!(
         outcome.verdict,
@@ -1320,7 +1331,9 @@ async fn path_matches_and_query_subset_end_to_end() {
     let mut vars = ScenarioVars::new();
     fill_bind_vars(&common::wired_refs(&doc), &router, &mut vars);
     let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
-    arrivals.await.expect("the arrivals task must join");
+    timeout_wait("arrivals task join", Duration::from_secs(60), arrivals)
+        .await
+        .expect("the arrivals task must join");
 
     assert_eq!(
         outcome.verdict,

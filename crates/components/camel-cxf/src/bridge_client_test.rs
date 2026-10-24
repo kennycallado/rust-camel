@@ -11,6 +11,7 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use camel_component_api::test_support::timeout_wait;
 use futures::Stream;
 use tonic::{Request, Response, Status};
 
@@ -109,11 +110,15 @@ async fn near_cap_payload_decodes_end_to_end() {
 
     // Same channel-construction shape the bridge pool produces, connected to
     // the in-process mock instead of the Java bridge process.
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
-        .expect("valid endpoint uri")
-        .connect()
-        .await
-        .expect("connect to mock bridge");
+    let channel = timeout_wait(
+        "bridge connect",
+        Duration::from_secs(30),
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+            .expect("valid endpoint uri")
+            .connect(),
+    )
+    .await
+    .expect("connect to mock bridge");
     let mut client = cxf_bridge_client(channel);
 
     let resp = client

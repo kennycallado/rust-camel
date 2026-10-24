@@ -113,7 +113,7 @@ async fn tools_header_is_parsed_into_request() {
         _ => unreachable!(),
     };
     use futures::StreamExt;
-    let mut guard = sb.stream.lock().await;
+    let mut guard = sb.stream.lock().await; // allow-test-wait: stream slot on returned exchange; no holder
     let stream = guard
         .as_mut()
         .expect("stream must be present after handle_chat");

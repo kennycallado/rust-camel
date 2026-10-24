@@ -548,7 +548,7 @@ async fn global_error_handler_fallback() {
         .await;
 
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:global-dlc"))
         .await;
@@ -583,7 +583,7 @@ async fn per_route_overrides_global() {
         .await;
 
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:global-dlc"))
         .await;
@@ -641,7 +641,7 @@ async fn direct_error_bubbles_to_caller() {
         .build()
         .unwrap();
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .add_route_definition(main_route)
         .await
@@ -689,7 +689,7 @@ async fn direct_error_contained_in_subroute() {
         .build()
         .unwrap();
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .add_route_definition(main_route)
         .await
@@ -827,7 +827,7 @@ async fn circuit_breaker_fallback_gate_path_serves_body() {
     // `get_returns_none_after_expiry_peek_stale_returns_entry` pins that
     // `get` then misses while `peek_stale` still serves the entry).
     {
-        let mut ctx = h.ctx().lock().await;
+        let mut ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let repo = Arc::new(MemoryCacheRepository::new("persistent", 16));
         ctx.register_cache_repository(
             "persistent",
@@ -943,7 +943,7 @@ async fn circuit_breaker_fallback_layer_path_serves_body() {
     // as the gate test): after the 1ms TTL lapses, `peek_stale` still serves
     // the entry while a normal `get` would miss.
     {
-        let mut ctx = h.ctx().lock().await;
+        let mut ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let repo = Arc::new(MemoryCacheRepository::new("persistent", 16));
         ctx.register_cache_repository(
             "persistent",
@@ -2416,7 +2416,7 @@ async fn stop_inside_filter_preserves_exchange_mutations() {
 
     // Build a Direct producer to send the exchange
     let producer = {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();
@@ -3243,7 +3243,7 @@ async fn stop_inside_choice_when_preserves_exchange_mutations() {
 
     // Build a Direct producer to send exchanges
     let producer = {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();
@@ -3350,7 +3350,7 @@ async fn delay_step_waits_configured_duration() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let producer = {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();
@@ -3415,7 +3415,7 @@ async fn xml_body_pipeline() {
 
     // Create a producer to send an exchange with XML body
     let producer = {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();
@@ -3520,11 +3520,15 @@ async fn http_consumer_string_status_code_e2e() {
     h.start().await;
     // Wait for port to be ready (retry up to 5s to handle concurrent test load).
     for _ in 0..50 {
-        if tokio::net::TcpStream::connect("127.0.0.1:18091")
-            .await
-            .is_ok()
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::TcpStream::connect("127.0.0.1:18091"),
+        )
+        .await
         {
-            break;
+            Ok(Ok(_)) => break,
+            Ok(Err(_)) => {}
+            Err(elapsed) => panic!("TCP connect attempt timed out: {elapsed}"),
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -3564,11 +3568,15 @@ async fn http_consumer_invalid_string_status_code_fallback_e2e() {
     h.start().await;
     // Wait for port to be ready (retry up to 5s to handle concurrent test load).
     for _ in 0..50 {
-        if tokio::net::TcpStream::connect("127.0.0.1:18092")
-            .await
-            .is_ok()
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::TcpStream::connect("127.0.0.1:18092"),
+        )
+        .await
         {
-            break;
+            Ok(Ok(_)) => break,
+            Ok(Err(_)) => {}
+            Err(elapsed) => panic!("TCP connect attempt timed out: {elapsed}"),
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -4523,7 +4531,7 @@ async fn phase_3_compiled_pipeline_runs_until_recompile() {
     h.start().await;
 
     let producer = {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();

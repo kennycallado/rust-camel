@@ -2400,7 +2400,7 @@ mod tests {
         token2.cancel();
 
         if let Body::Stream(stream_body) = exchange2.input.body {
-            let mut stream_lock = stream_body.stream.lock().await;
+            let mut stream_lock = stream_body.stream.lock().await; // allow-test-wait: test-owned stream slot after delivery; no holder
             let mut stream = stream_lock.take().unwrap();
 
             // Read first chunk (size varies based on ReaderStream's buffer)

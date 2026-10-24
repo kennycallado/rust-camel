@@ -52,7 +52,7 @@ async fn mid_stream_error_propagates() {
     // The MockMode::Error emits: Ok(Delta("partial")), then Err(error).
     // The producer maps the error to CamelError.
     if let Body::Stream(ref sb) = result.input.body {
-        let mut guard = sb.stream.lock().await;
+        let mut guard = sb.stream.lock().await; // allow-test-wait: stream body mutex owned solely by test; uncontended
         if let Some(mut inner) = guard.take() {
             let mut found_error = false;
 

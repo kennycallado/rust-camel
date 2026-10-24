@@ -2331,7 +2331,7 @@ mod tests {
         let (senders, latches) = ImmediateLatches::pair();
         senders.returned_err("late boom".to_string());
 
-        let result = latches.wait(Duration::from_millis(0)).await;
+        let result = latches.wait(Duration::from_millis(0)).await; // allow-test-wait: error latch settled before wait; zero grace; deterministic
         let msg = result.expect_err("settled error must win over a zero grace");
         assert!(
             msg.contains("late boom"),

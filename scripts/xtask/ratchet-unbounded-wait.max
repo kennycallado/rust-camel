@@ -1,1 +1,2 @@
-296
+# allow-test-wait: <reason> adjudicates a site ONLY when the wait is bounded by construction (test-owned uncontended lock, test-fed channel, join whose every progress dependency is bounded or purely in-memory) — never to mask a wait that could hang; ceiling counts unadjudicated findings and may only decrease.
+0

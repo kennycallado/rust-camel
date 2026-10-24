@@ -316,7 +316,7 @@ mod tests {
             .await;
 
         assert!(harness.mock().get_endpoint("result").is_none());
-        let guard = harness.ctx().lock().await;
+        let guard = harness.ctx().lock().await; // allow-test-wait: fresh harness; no live lock holders
         let _ = &*guard;
     }
 
@@ -374,7 +374,7 @@ mod tests {
         harness.stop().await;
 
         // Harness context remains accessible after lifecycle.
-        let _guard = harness.ctx().lock().await;
+        let _guard = harness.ctx().lock().await; // allow-test-wait: ctx lock after stop; no live holders
     }
 
     // ── TST-004: Route lifecycle (start/stop/restart) ─────────────────────────
@@ -403,7 +403,7 @@ mod tests {
 
         // Restart via the underlying CamelContext to verify start-after-stop works.
         {
-            let mut ctx = harness.ctx().lock().await;
+            let mut ctx = harness.ctx().lock().await; // allow-test-wait: ctx lock after stop; no live holders
             ctx.start().await.expect("restart should succeed");
             ctx.stop().await.expect("stop after restart should succeed");
         }

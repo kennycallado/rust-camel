@@ -495,7 +495,7 @@ async fn plugin_return_path_streams_body() {
     match &output_msg.body {
         Body::Stream(stream_body) => {
             // Lock the mutex and take the stream out of the Option.
-            let mut stream_guard = stream_body.stream.lock().await;
+            let mut stream_guard = stream_body.stream.lock().await; // allow-test-wait: stream body mutex owned solely by test; uncontended
             let mut stream = stream_guard
                 .take()
                 .expect("stream should be present on first consumption");

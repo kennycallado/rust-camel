@@ -73,7 +73,7 @@ async fn opensearch_index_operation() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -137,7 +137,7 @@ async fn opensearch_search_operation() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -199,7 +199,7 @@ async fn opensearch_get_and_delete() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -270,7 +270,7 @@ async fn opensearch_bulk_operation() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -333,7 +333,7 @@ async fn opensearch_update_operation() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -431,7 +431,7 @@ async fn opensearch_multiget_operation() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -488,7 +488,7 @@ async fn opensearch_header_operation_override_delete() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -556,7 +556,7 @@ async fn opensearch_index_without_id() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -654,7 +654,7 @@ async fn opensearch_get_missing_id_goes_to_error() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -706,7 +706,7 @@ async fn opensearch_delete_missing_id_goes_to_error() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -756,7 +756,7 @@ async fn opensearch_invalid_host_goes_to_error() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -806,7 +806,7 @@ async fn opensearch_auth_username_password_in_uri() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -856,7 +856,7 @@ async fn opensearch_tls_scheme_goes_to_error_without_tls_server() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;

@@ -549,6 +549,7 @@ impl RuntimeEventJournalPort for RedbRuntimeEventJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::test_support::timeout_wait;
     use tempfile::tempdir;
 
     async fn new_journal(dir: &tempfile::TempDir) -> RedbRuntimeEventJournal {
@@ -1207,7 +1208,13 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         drop(first);
 
-        let second = opener.await.unwrap();
+        let second = timeout_wait(
+            "redb open retry task join",
+            std::time::Duration::from_secs(30),
+            opener,
+        )
+        .await
+        .unwrap();
         assert!(
             second.is_ok(),
             "second open must succeed after the lock is released, got err: {:?}",

@@ -17,6 +17,7 @@ use camel_api::Value;
 use camel_api::body::Body;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_component_api::test_support::timeout_wait;
 use camel_component_mock::MockComponent;
 use camel_component_sql::SqlComponent;
 use camel_test::CamelTestContext;
@@ -92,7 +93,7 @@ async fn producer_select() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -159,7 +160,7 @@ async fn producer_insert() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -226,7 +227,7 @@ async fn producer_update() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -293,7 +294,7 @@ async fn producer_delete() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -359,7 +360,7 @@ async fn producer_select_one() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -417,7 +418,7 @@ async fn producer_batch() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -485,7 +486,7 @@ async fn producer_noop() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -558,7 +559,7 @@ async fn consumer_polling() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -630,7 +631,7 @@ async fn consumer_on_consume() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -684,7 +685,7 @@ async fn consumer_empty_result() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -795,7 +796,7 @@ async fn consumer_empty_result_routed() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;
@@ -838,11 +839,15 @@ async fn sql_ssl_connection_roundtrip() {
     let conn_str = shared_postgres_tls().await.to_string();
 
     // Verify SSL handshake via direct PgPool (bypasses `any` driver)
-    let pg_pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&conn_str)
-        .await
-        .expect("Failed to connect with sslmode=require");
+    let pg_pool = timeout_wait(
+        "PgPool TLS connect",
+        std::time::Duration::from_secs(60),
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&conn_str),
+    )
+    .await
+    .expect("Failed to connect with sslmode=require");
 
     // Confirm TLS is active
     sqlx::query("CREATE EXTENSION IF NOT EXISTS sslinfo")
@@ -879,7 +884,7 @@ async fn sql_ssl_connection_roundtrip() {
         .build()
         .await;
     h.ctx()
-        .lock()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         .await
         .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
         .await;

@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use camel_component_api::Consumer;
 use camel_component_api::consumer::{ConsumerContext, ExchangeEnvelope};
+use camel_component_api::test_support::timeout_wait;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -291,9 +292,13 @@ async fn accept_http_mid_stream_abort_surfaces_error() {
     wait_for_bind(port, BIND_WAIT).await;
 
     // Open a raw TCP connection and send headers + partial body.
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("failed to connect to source HTTP listener");
+    let mut stream = timeout_wait(
+        "tcp connect to source HTTP listener",
+        Duration::from_secs(60),
+        TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .expect("failed to connect to source HTTP listener");
 
     use tokio::io::AsyncWriteExt;
     // Claim a large Content-Length but only send a fraction.

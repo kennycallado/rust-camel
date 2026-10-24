@@ -2,7 +2,9 @@ mod support;
 
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
+use camel_component_api::test_support::timeout_wait;
 use camel_component_api::{Body, Exchange, Message, NetworkRetryPolicy, Value};
 use camel_component_cxf::{
     BridgeSlot, CxfBridgePool, config::CxfPoolConfig, producer::CxfProducer,
@@ -49,11 +51,15 @@ async fn test_producer_with_profile_invokes_successfully() {
         reconnect: NetworkRetryPolicy::default(),
     };
     let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("pool should build"));
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
-        .expect("valid endpoint")
-        .connect()
-        .await
-        .expect("channel should connect");
+    let channel = timeout_wait(
+        "bridge connect",
+        Duration::from_secs(60),
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+            .expect("valid endpoint")
+            .connect(),
+    )
+    .await
+    .expect("channel should connect");
     prepare_ready_slot(&pool, channel).await;
 
     let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
@@ -83,7 +89,7 @@ async fn test_producer_with_profile_invokes_successfully() {
 
     let req = state
         .last_invoke
-        .lock()
+        .lock() // allow-test-wait: mock bridge state mutex; uncontended in-test
         .await
         .clone()
         .expect("mock should receive invoke");
@@ -106,11 +112,15 @@ async fn test_producer_handles_empty_security_profile() {
         reconnect: NetworkRetryPolicy::default(),
     };
     let pool = Arc::new(CxfBridgePool::from_config(pool_config).expect("pool should build"));
-    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
-        .expect("valid endpoint")
-        .connect()
-        .await
-        .expect("channel should connect");
+    let channel = timeout_wait(
+        "bridge connect",
+        Duration::from_secs(60),
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+            .expect("valid endpoint")
+            .connect(),
+    )
+    .await
+    .expect("channel should connect");
     prepare_ready_slot(&pool, channel).await;
 
     let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> =
@@ -136,7 +146,7 @@ async fn test_producer_handles_empty_security_profile() {
     assert_eq!(out.input.body, Body::Bytes(bytes::Bytes::from("<empty/>")));
     let req = state
         .last_invoke
-        .lock()
+        .lock() // allow-test-wait: mock bridge state mutex; uncontended in-test
         .await
         .clone()
         .expect("mock should receive invoke");

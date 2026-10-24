@@ -3,6 +3,7 @@
 //! Writes real YAML files to a tempdir, starts a watcher task, updates the
 //! file, and verifies that the pipeline is swapped without stopping the route.
 
+use camel_component_api::test_support::timeout_wait;
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;
@@ -129,7 +130,13 @@ async fn test_watcher_swaps_pipeline_on_file_change() {
 
     // Graceful shutdown: cancel the token instead of aborting
     shutdown.cancel();
-    watcher_handle.await.ok();
+    timeout_wait(
+        "hot-reload watcher task join",
+        Duration::from_secs(60),
+        watcher_handle,
+    )
+    .await
+    .ok();
     ctx.stop().await.unwrap();
 }
 
@@ -220,7 +227,13 @@ async fn test_watcher_removes_route_on_file_deletion() {
     );
 
     shutdown.cancel();
-    watcher_handle.await.ok();
+    timeout_wait(
+        "hot-reload watcher task join",
+        Duration::from_secs(60),
+        watcher_handle,
+    )
+    .await
+    .ok();
     ctx.stop().await.unwrap();
 }
 
@@ -317,7 +330,13 @@ async fn test_watcher_restart_preserves_non_running_route_state() {
     );
 
     shutdown.cancel();
-    watcher_handle.await.ok();
+    timeout_wait(
+        "hot-reload watcher task join",
+        Duration::from_secs(60),
+        watcher_handle,
+    )
+    .await
+    .ok();
     ctx.stop().await.unwrap();
 }
 
@@ -402,6 +421,12 @@ async fn test_restart_with_from_uri_change_processes_exchanges_via_new_endpoint(
     );
 
     shutdown.cancel();
-    watcher_handle.await.ok();
+    timeout_wait(
+        "hot-reload watcher task join",
+        Duration::from_secs(60),
+        watcher_handle,
+    )
+    .await
+    .ok();
     ctx.stop().await.unwrap();
 }

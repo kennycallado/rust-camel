@@ -100,7 +100,7 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         cancel.cancel();
 
-        let result = handle.await.unwrap();
+        let result = handle.await.unwrap(); // allow-test-wait: cancel token triggered before join
         assert!(result.is_ok());
     }
 
@@ -125,7 +125,7 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         cancel.cancel();
-        let _ = handle.await;
+        let _ = handle.await; // allow-test-wait: cancel token triggered before join
 
         assert_eq!(
             counter.load(Ordering::SeqCst),

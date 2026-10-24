@@ -1212,7 +1212,7 @@ mod tests {
         body_tx.send(vec![1]).await.unwrap();
         body_tx.send(vec![2]).await.unwrap();
         drop(body_tx);
-        handle.await.unwrap();
+        handle.await.unwrap(); // allow-test-wait: handler returns after body stream close; join asserted
         let reply = reply_rx.await.unwrap();
         assert!(matches!(reply, GrpcReply::Ok(v) if v == vec![99]));
     }
@@ -1247,7 +1247,7 @@ mod tests {
             Ok(None) => panic!("reply channel closed"),
             Err(_) => panic!("reply within 2s"),
         }
-        handle.await.unwrap();
+        handle.await.unwrap(); // allow-test-wait: handler returns after body stream close; join asserted
     }
 
     #[tokio::test]
@@ -1407,7 +1407,7 @@ mod tests {
         let fut = handler.call(req);
         let handle = tokio::spawn(fut);
 
-        let result = handle.await.unwrap();
+        let result = handle.await.unwrap(); // allow-test-wait: handler fails fast on stopped consumer; join asserted
         let err = result.unwrap_err();
         assert_eq!(err.code(), tonic::Code::Unavailable);
         assert!(err.message().contains("consumer stopped"));
@@ -1426,7 +1426,8 @@ mod tests {
         let fut = handler.call(req);
         let handle = tokio::spawn(fut);
 
-        match handle.await.unwrap() {
+        match handle.await.unwrap() // allow-test-wait: handler fails fast on stopped consumer; join asserted
+        {
             Err(err) => {
                 assert_eq!(err.code(), tonic::Code::Unavailable);
             }
@@ -1483,7 +1484,7 @@ mod tests {
             _ => panic!("expected Unary"),
         }
 
-        let result = handle.await.unwrap();
+        let result = handle.await.unwrap(); // allow-test-wait: reply channel dropped; handler returns error
         let err = result.unwrap_err();
         assert_eq!(err.code(), tonic::Code::Internal);
         assert!(err.message().contains("reply channel dropped"));
@@ -1513,7 +1514,7 @@ mod tests {
             _ => panic!("expected Unary"),
         }
 
-        let result = handle.await.unwrap().unwrap();
+        let result = handle.await.unwrap().unwrap(); // allow-test-wait: handler replies once then returns; join asserted
         assert_eq!(result.into_inner(), vec![40, 50]);
     }
 
@@ -1540,7 +1541,7 @@ mod tests {
             _ => panic!("expected Unary"),
         }
 
-        let result = handle.await.unwrap();
+        let result = handle.await.unwrap(); // allow-test-wait: handler replies once then returns; join asserted
         let err = result.unwrap_err();
         assert_eq!(err.code(), tonic::Code::NotFound);
     }
@@ -1573,7 +1574,7 @@ mod tests {
             _ => panic!("expected ServerStreaming"),
         }
 
-        let result = handle.await.unwrap().unwrap();
+        let result = handle.await.unwrap().unwrap(); // allow-test-wait: handler replies once then returns; join asserted
         let mut stream = result.into_inner();
         assert_eq!(stream.next().await.unwrap().unwrap(), vec![100]);
         assert!(stream.next().await.is_none());
@@ -1605,7 +1606,7 @@ mod tests {
             _ => panic!("expected ServerStreaming"),
         }
 
-        let result = handle.await.unwrap().unwrap();
+        let result = handle.await.unwrap().unwrap(); // allow-test-wait: handler replies once then returns; join asserted
         let mut stream = result.into_inner();
         let item = stream.next().await.unwrap();
         let err = item.unwrap_err();
@@ -2070,7 +2071,7 @@ mod tests {
 
         let result = handler.call(request).await;
         assert!(result.is_ok());
-        handle.await.unwrap();
+        handle.await.unwrap(); // allow-test-wait: reply sent before join; handler finished
     }
 
     #[tokio::test]
@@ -2112,7 +2113,7 @@ mod tests {
 
         let result = handler.call(request).await;
         assert!(result.is_ok());
-        handle.await.unwrap();
+        handle.await.unwrap(); // allow-test-wait: reply sent before join; handler finished
     }
 
     #[tokio::test]
@@ -2152,7 +2153,7 @@ mod tests {
 
         let result = handler.call(request).await;
         assert!(result.is_ok());
-        handle.await.unwrap();
+        handle.await.unwrap(); // allow-test-wait: reply sent before join; handler finished
     }
 
     #[tokio::test]
@@ -2253,7 +2254,7 @@ mod tests {
 
         let result = handler.call(request).await;
         assert!(result.is_ok());
-        handle.await.unwrap();
+        handle.await.unwrap(); // allow-test-wait: reply sent before join; handler finished
     }
 
     #[tokio::test]
@@ -2354,7 +2355,7 @@ mod tests {
         }
 
         handle.abort();
-        let _ = handle.await;
+        let _ = handle.await; // allow-test-wait: abort before join; termination guaranteed
     }
 
     /// Regression: Registry transport-mismatch — cannot mix TLS/plaintext on same listener.

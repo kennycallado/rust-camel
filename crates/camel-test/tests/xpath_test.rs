@@ -54,7 +54,7 @@ async fn xpath_filter_with_xml_body() {
         .build()
         .await;
 
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_xpath_registered(&mut guard);
     drop(guard);
 
@@ -101,7 +101,7 @@ async fn xpath_set_header_from_body() {
         .build()
         .await;
 
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_xpath_registered(&mut guard);
     drop(guard);
 
@@ -150,7 +150,7 @@ async fn xpath_set_body_from_query() {
         .build()
         .await;
 
-    let mut guard = h.ctx().lock().await;
+    let mut guard = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
     ensure_xpath_registered(&mut guard);
     drop(guard);
 

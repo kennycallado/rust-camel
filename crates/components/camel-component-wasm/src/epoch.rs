@@ -177,7 +177,7 @@ mod tests {
         let ticker = EpochTicker::start(engine, Duration::from_millis(1));
 
         tokio::time::sleep(Duration::from_millis(100)).await;
-        progress_task.await.expect("progress task should finish");
+        progress_task.await.expect("progress task should finish"); // allow-test-wait: bounded progress loop; completion asserted
         drop(ticker);
 
         assert!(counter.load(Ordering::Relaxed) >= 10);

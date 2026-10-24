@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use camel_api::Value;
 use camel_bundles::BootHandle;
+use camel_component_api::test_support::timeout_wait;
 use camel_core::CamelContext;
 
 use camel_integration_test::env_layers::ambient_std;
@@ -167,9 +168,13 @@ async fn inbound_consumer_honest_readiness() {
     // The immediate connect: no retry, no polling, no waiting of any
     // kind. A dishonest boot (returning before the bind) fails here
     // with connection refused.
-    let connected = tokio::net::TcpStream::connect(bound)
-        .await
-        .expect("connect must succeed immediately after boot_scenario returns");
+    let connected = timeout_wait(
+        "inbound connect after boot",
+        std::time::Duration::from_secs(60),
+        tokio::net::TcpStream::connect(bound),
+    )
+    .await
+    .expect("connect must succeed immediately after boot_scenario returns");
     drop(connected);
 
     let mut vars = inbound_vars(bound);
@@ -184,7 +189,7 @@ async fn inbound_consumer_honest_readiness() {
     );
 
     // Teardown: the boot drains cleanly.
-    let mut ctx = fixture.ctx.lock().await;
+    let mut ctx = fixture.ctx.lock().await; // allow-test-wait: harness ctx mutex; sole test owner, uncontended in-test
     fixture
         .boot
         .shutdown(&mut ctx)
@@ -279,7 +284,7 @@ async fn inbound_response_validated_on_wire() {
     );
 
     // Teardown: the boot drains cleanly after both variants.
-    let mut ctx = fixture.ctx.lock().await;
+    let mut ctx = fixture.ctx.lock().await; // allow-test-wait: harness ctx mutex; sole test owner, uncontended in-test
     fixture
         .boot
         .shutdown(&mut ctx)
@@ -301,9 +306,13 @@ async fn fixed_port_backcompat() {
 
     // Honest readiness at the pinned port: the connect succeeds on
     // the first attempt after the boot returns.
-    let connected = tokio::net::TcpStream::connect(("127.0.0.1", FIXED_CONSUMER_PORT))
-        .await
-        .expect("the pinned consumer port must accept immediately after boot");
+    let connected = timeout_wait(
+        "pinned port connect after boot",
+        std::time::Duration::from_secs(60),
+        tokio::net::TcpStream::connect(("127.0.0.1", FIXED_CONSUMER_PORT)),
+    )
+    .await
+    .expect("the pinned consumer port must accept immediately after boot");
     drop(connected);
 
     let mut vars = ScenarioVars::new();
@@ -315,7 +324,7 @@ async fn fixed_port_backcompat() {
     );
 
     // Teardown: the boot drains cleanly.
-    let mut ctx = fixture.ctx.lock().await;
+    let mut ctx = fixture.ctx.lock().await; // allow-test-wait: harness ctx mutex; sole test owner, uncontended in-test
     fixture
         .boot
         .shutdown(&mut ctx)

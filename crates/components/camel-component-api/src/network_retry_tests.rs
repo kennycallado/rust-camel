@@ -633,7 +633,7 @@ async fn retry_async_cancelable_returns_last_error_when_cancelled_during_sleep()
     )
     .await;
 
-    cancel_task.await.ok();
+    cancel_task.await.ok(); // allow-test-wait: cancel task exits on test-set flag
 
     assert!(
         result.is_err(),
@@ -690,7 +690,7 @@ async fn retry_async_cancelable_honors_cancel_signalled_during_op_at_next_sleep(
     )
     .await;
 
-    cancel_task.await.ok();
+    cancel_task.await.ok(); // allow-test-wait: cancel task exits on test-set flag
 
     // Op was called once and completed its 20ms sleep (cancel didn't kill it);
     // then the next sleep(60s) boundary observed cancel and aborted.
@@ -1169,7 +1169,7 @@ async fn cancelled_mid_sequence_no_error() {
     )
     .await;
 
-    cancel_task.await.ok();
+    cancel_task.await.ok(); // allow-test-wait: cancel task exits on test-set flag
 
     assert!(result.is_err());
     assert!(

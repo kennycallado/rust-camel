@@ -476,7 +476,7 @@ mod tests {
         drop(client_write);
         drop(client_read);
 
-        server_handle
+        server_handle // allow-test-wait: exit sent and stdio dropped before join
             .await
             .expect("server task panicked during shutdown");
     }

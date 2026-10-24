@@ -10,7 +10,7 @@ async fn tracer_enabled_spans_emitted() {
         .with_mock()
         .build()
         .await;
-    h.ctx().lock().await.set_tracing(true).await;
+    h.ctx().lock().await.set_tracing(true).await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .route_id("test-trace-route")

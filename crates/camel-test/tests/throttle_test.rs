@@ -42,7 +42,7 @@ async fn stop_inside_throttle_halts_route_and_preserves_mutations() {
 
     // Build a Direct producer to send and receive the result exchange
     let producer = {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();
@@ -98,7 +98,7 @@ async fn throttle_drop_stops_exchange_before_sink() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let producer = {
-        let ctx = h.ctx().lock().await;
+        let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
         let producer_ctx = ctx.producer_context();
         let registry = ctx.registry();
         let component = registry.get("direct").unwrap();

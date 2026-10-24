@@ -1155,7 +1155,7 @@ mod tests {
     use camel_bridge::process::BridgeProcessConfig;
     use camel_component_api::ExchangeEnvelope;
     use camel_component_api::test_support::{
-        PanicRuntimeObservability, RecordingRuntimeObservability,
+        PanicRuntimeObservability, RecordingRuntimeObservability, timeout_wait,
     };
     use futures::Stream;
     use std::collections::VecDeque;
@@ -2524,11 +2524,15 @@ mod tests {
             .await
             .expect("spawn recording bridge");
 
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
-            .expect("valid endpoint uri")
-            .connect()
-            .await
-            .expect("connect to mock bridge");
+        let channel = timeout_wait(
+            "bridge connect",
+            Duration::from_secs(30),
+            tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{port}"))
+                .expect("valid endpoint uri")
+                .connect(),
+        )
+        .await
+        .expect("connect to mock bridge");
 
         let pool = Arc::new(
             JmsBridgePool::from_config(JmsPoolConfig::single_broker(

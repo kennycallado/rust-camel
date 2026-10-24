@@ -117,7 +117,7 @@ async fn drive_entry_in_out(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn otel_enabled_direct_hop_completes_and_repeats() {
     let h = CamelTestContext::builder().with_direct().build().await;
-    h.ctx().lock().await.set_tracing(true).await;
+    h.ctx().lock().await.set_tracing(true).await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
 
     // echo consumes from direct:echo and stamps one header; entry hops to it
     // with a `to: direct:` step. Lower startup_order starts the consumer

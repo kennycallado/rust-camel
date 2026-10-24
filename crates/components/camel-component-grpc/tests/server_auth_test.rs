@@ -288,7 +288,7 @@ async fn grpc_named_header_credential_authenticates() {
         .expect("valid named-header credential must authenticate");
     assert_eq!(response.into_inner().message, "ok");
 
-    let subject = pipeline.await.expect("pipeline join");
+    let subject = pipeline.await.expect("pipeline join"); // allow-test-wait: join stand-in pipeline task bounded by inner 2s recv timeout
     assert_eq!(
         subject.as_deref(),
         Some("svc-grpc"),
@@ -344,7 +344,7 @@ async fn grpc_carrier_present_on_second_request_fresh_exchange() {
         assert_eq!(response.into_inner().message, "ok");
     }
 
-    let carried = pipeline.await.expect("pipeline join");
+    let carried = pipeline.await.expect("pipeline join"); // allow-test-wait: join stand-in pipeline task bounded by inner 2s recv timeout
     assert_eq!(
         carried, 2,
         "typed carrier must be present on EVERY fresh exchange, not just the first"
@@ -420,7 +420,7 @@ async fn grpc_public_no_extraction_counted_provider() {
         .expect("plan-less route is Public pass-through");
     assert_eq!(response.into_inner().message, "ok");
 
-    pipeline.await.expect("pipeline join");
+    pipeline.await.expect("pipeline join"); // allow-test-wait: join stand-in pipeline task bounded by inner 2s recv timeout
     assert_eq!(
         calls.load(Ordering::SeqCst),
         0,
@@ -479,7 +479,7 @@ async fn grpc_kernel_auth_policy_denied_regression() {
         "pipeline policy denial must surface as PERMISSION_DENIED, got: {err}"
     );
 
-    pipeline.await.expect("pipeline join");
+    pipeline.await.expect("pipeline join"); // allow-test-wait: join stand-in pipeline task bounded by inner 2s recv timeout
 }
 
 #[tokio::test]
@@ -542,7 +542,7 @@ async fn grpc_server_streaming_pipeline_denial_regression() {
         "pipeline policy denial must surface as PERMISSION_DENIED, got: {err}"
     );
 
-    pipeline.await.expect("pipeline join");
+    pipeline.await.expect("pipeline join"); // allow-test-wait: join stand-in pipeline task enclosed in 30s timeout
 }
 
 #[tokio::test]
@@ -624,7 +624,7 @@ async fn grpc_client_streaming_pipeline_denial_regression() {
         "pipeline policy denial must surface as PERMISSION_DENIED, got: {err}"
     );
 
-    pipeline.await.expect("pipeline join");
+    pipeline.await.expect("pipeline join"); // allow-test-wait: join stand-in pipeline task bounded by inner 2s recv timeout
 }
 
 #[tokio::test]
@@ -694,7 +694,7 @@ async fn grpc_bidi_pipeline_denial_regression() {
         "pipeline policy denial must surface as PERMISSION_DENIED, got: {err}"
     );
 
-    pipeline.await.expect("pipeline join");
+    pipeline.await.expect("pipeline join"); // allow-test-wait: join stand-in pipeline task bounded by inner 2s recv timeout
 }
 
 /// Recursively collect the `.rs` files under `dir`.

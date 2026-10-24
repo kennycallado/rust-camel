@@ -508,7 +508,7 @@ mod tests {
         assert!(exchange.is_ok(), "should have received an exchange");
 
         cancel2.cancel();
-        let _ = handle.await;
+        let _ = handle.await; // allow-test-wait: cancel token triggered before join
     }
 
     #[tokio::test]

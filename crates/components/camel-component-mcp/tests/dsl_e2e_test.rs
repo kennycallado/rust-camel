@@ -284,9 +284,9 @@ async fn dsl_block_runs_end_to_end() {
         other => panic!("expected text resource contents, got {other:?}"),
     }
 
-    tool_route.await.expect("tool route task must finish");
+    tool_route.await.expect("tool route task must finish"); // allow-test-wait: route task join bounded by inner 2s recv timeout
     customers_route
-        .await
+        .await // allow-test-wait: route task join bounded by inner 2s recv timeout
         .expect("resource route task must finish");
 
     tool_consumer.stop().await.expect("clean stop");
