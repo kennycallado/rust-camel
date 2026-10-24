@@ -1,0 +1,44 @@
+# Monotone ratchet ceiling for `cargo xtask lint-no-free-port` (bd rc-d70up,
+# mission 401; mirror of ratchet-test-sleep.max, bd rc-c9r6w).
+#
+# The integer below is the maximum allowed count of unadjudicated
+# free-port probe definitions and call sites — identifiers matching
+# `^(get_)?(free|find|prealloc|reserve|closed|unused|pick)_([a-z0-9_]+_)?port$`
+# — across crates/, scripts/, examples/, benchmarks/, fuzz/. These
+# helpers bind an ephemeral port, read it, and drop the listener before
+# the real consumer binds (the ADR-0070 port-toctou class).
+#
+# Legitimacy rule: every residual site needs an
+# `// allow-free-port: <reason>` marker on the line immediately above
+# it; a definition marker does NOT cover its call sites, each site is
+# adjudicated individually. Marked sites are suppressed at scan time and
+# never count toward the ceiling. The number may only DECREASE — never
+# raise it without review justification; the diff on this file is the
+# regression signal.
+#
+# To lower it: fix sites (run `cargo xtask lint-no-free-port` — over a
+# lowered ceiling it names every offender), then edit the number down
+# to the new count and drop the fixed entries below.
+#
+# Seeded 2026-10-25 (mission 401) from the T1+T2 sweep recount: camel-test
+# and camel-component-wasm are clean; the residual sites below are the
+# out-of-scope crates tracked for future missions. Ceiling 17.
+# Unadjudicated inventory at seed (2026-10-25), one entry per site —
+# - crates/camel-cli/tests/compiled_artifact_test.rs:2150
+# - crates/camel-cli/tests/compiled_artifact_test.rs:2278
+# - crates/camel-cli/tests/compiled_artifact_test.rs:2454
+# - crates/camel-cli/tests/compiled_artifact_test.rs:2575
+# - crates/camel-cli/tests/compiled_artifact_test.rs:2707
+# - crates/camel-cli/tests/compiled_artifact_test.rs:2887
+# - crates/camel-cli/tests/compiled_artifact_test.rs:2984
+# - crates/camel-cli/tests/compiled_artifact_test.rs:3051
+# - crates/camel-cli/tests/compiled_artifact_test.rs:3162
+# - crates/camel-cli/tests/compiled_artifact_test.rs:3163
+# - crates/components/camel-http/src/health_wiring_tests.rs:45
+# - crates/components/camel-http/src/health_wiring_tests.rs:57
+# - crates/components/camel-rabbitmq/tests/common/mod.rs:109
+# - crates/components/camel-rabbitmq/tests/common/mod.rs:412
+# - crates/components/camel-rabbitmq/tests/consumer_readiness.rs:29
+# - benchmarks/contenders/axum-bare/tests/integration.rs:29
+# - benchmarks/contenders/axum-bare/tests/integration.rs:135
+17

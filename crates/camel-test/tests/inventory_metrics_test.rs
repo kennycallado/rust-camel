@@ -7,10 +7,12 @@
 //! `RouteRuntimeState::state_label()` and is a closed set: `Registered`,
 //! `Starting`, `Started`, `Suspended`, `Stopping`, `Stopped`, `Failed` —
 //! so the spec's "route starts" scenario asserts `state="Started"`.
-//! Harness idioms mirror `metrics_wiring_test.rs` (pre-allocated port,
-//! `configure_context` + direct component, poll-GET against `/metrics`).
+//! Harness idioms mirror `metrics_wiring_test.rs` (staged prometheus
+//! listener, `configure_context` + direct component, poll-GET against
+//! `/metrics`).
 
-use std::net::TcpListener;
+mod support;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,16 +27,6 @@ use camel_config::config::CamelConfig;
 use camel_core::CamelContext;
 use camel_core::route::{BuilderStep, RouteDefinition};
 use tower::ServiceExt;
-
-/// Pre-allocate an ephemeral port: bind, read, drop. The prometheus service
-/// (constructed inside `configure_context`) re-binds it on `ctx.start()`.
-fn prealloc_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-    listener
-        .local_addr()
-        .expect("read pre-allocated local addr")
-        .port()
-}
 
 async fn route_started(ctx: &CamelContext, route_id: &str) -> bool {
     matches!(
@@ -68,7 +60,7 @@ async fn poll_metrics_body(port: u16, needle: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn route_starts_end_to_end() {
-    let port = prealloc_port();
+    let port = support::stage_prometheus_listener("127.0.0.1").await;
     let toml_cfg = format!(
         r#"[observability.prometheus]
 enabled = true
@@ -123,7 +115,7 @@ port = {port}
 /// to a near-zero value (< 120s determinism pin) — restart resets uptime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_scrape_shows_restart() {
-    let port = prealloc_port();
+    let port = support::stage_prometheus_listener("127.0.0.1").await;
     let toml_cfg = format!(
         r#"[observability.prometheus]
 enabled = true
@@ -287,7 +279,7 @@ async fn wait_for_started(ctx: &CamelContext, route_ids: &[&str]) {
 /// instead and never back up the channel).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn seda_backlog_visible() {
-    let port = prealloc_port();
+    let port = support::stage_prometheus_listener("127.0.0.1").await;
     let toml_cfg = format!(
         r#"[observability.prometheus]
 enabled = true
@@ -386,7 +378,7 @@ port = {port}
 /// completing the group drains it to zero.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn aggregator_buffer_visible() {
-    let port = prealloc_port();
+    let port = support::stage_prometheus_listener("127.0.0.1").await;
     let toml_cfg = format!(
         r#"[observability.prometheus]
 enabled = true
@@ -441,7 +433,7 @@ port = {port}
 /// must be positive; delivering the gap drains it to zero.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resequencer_buffer_visible() {
-    let port = prealloc_port();
+    let port = support::stage_prometheus_listener("127.0.0.1").await;
     let toml_cfg = format!(
         r#"[observability.prometheus]
 enabled = true

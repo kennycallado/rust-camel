@@ -98,11 +98,19 @@ impl Lifecycle for PrometheusService {
             ));
         }
 
-        let listener = TcpListener::bind(self.addr).await.map_err(|e| {
-            self.status.store(2, Ordering::SeqCst);
-            self.started.store(false, Ordering::SeqCst);
-            CamelError::Io(e.to_string())
-        })?;
+        let listener = match crate::staged_listener::take(self.addr) {
+            Ok(Some(listener)) => listener,
+            Ok(None) => TcpListener::bind(self.addr).await.map_err(|e| {
+                self.status.store(2, Ordering::SeqCst);
+                self.started.store(false, Ordering::SeqCst);
+                CamelError::Io(e.to_string())
+            })?,
+            Err(err) => {
+                self.status.store(2, Ordering::SeqCst);
+                self.started.store(false, Ordering::SeqCst);
+                return Err(err);
+            }
+        };
 
         let actual_port = listener.local_addr().map(|addr| addr.port()).map_err(|e| {
             self.status.store(2, Ordering::SeqCst);

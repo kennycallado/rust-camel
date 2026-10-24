@@ -339,6 +339,7 @@ async fn cxf_native_wss_signed_call_and_verified_signer() {
     h_producer.stop().await;
 
     // --- LEG B: inbound verification exports the verified signer ---
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port = reserve_local_port();
     let h_consumer = CamelTestContext::builder()
         .with_direct()
@@ -452,6 +453,7 @@ async fn start_wss_consumer(
     security: CxfSecurityFields,
     wsdl_path: &str,
 ) -> (CamelTestContext, String) {
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port = reserve_local_port();
     let h = CamelTestContext::builder()
         .with_direct()

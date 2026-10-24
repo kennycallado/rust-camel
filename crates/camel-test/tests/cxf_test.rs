@@ -347,6 +347,7 @@ fn cxf_wsdl_path_soap12() -> String {
         .to_string()
 }
 
+// allow-free-port: consumer is an external JVM bridge process; it cannot adopt a pre-bound listener (bd rc-d70up)
 fn reserve_local_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
@@ -548,6 +549,7 @@ async fn cxf_consumer_receives_request_and_returns_response() {
     install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let wsdl_path = cxf_wsdl_path();
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port = reserve_local_port();
 
     let h = CamelTestContext::builder()
@@ -628,6 +630,7 @@ async fn cxf_consumer_two_profiles_dispatch_to_own_route() {
     init_tracing();
     install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port = reserve_local_port();
 
     let h = CamelTestContext::builder()
@@ -691,6 +694,7 @@ async fn cxf_consumer_profile_without_stream_returns_503() {
     init_tracing();
     install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port = reserve_local_port();
 
     let h = CamelTestContext::builder()
@@ -930,6 +934,7 @@ async fn cxf_consumer_returns_health_check_on_get() {
     install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let wsdl_path = cxf_wsdl_path();
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port = reserve_local_port();
 
     let h = CamelTestContext::builder()
@@ -984,6 +989,7 @@ async fn cxf_consumer_handles_malformed_soap() {
     install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let wsdl_path = cxf_wsdl_path();
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port = reserve_local_port();
 
     let h = CamelTestContext::builder()
@@ -1048,6 +1054,7 @@ async fn cxf_consumer_override_applies_on_soap11() {
     install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let wsdl_path = cxf_wsdl_path();
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port = reserve_local_port();
 
     let pool = Arc::new(
@@ -1136,6 +1143,7 @@ async fn cxf_consumer_override_403_applies_to_wss_only() {
     let wsdl_path = cxf_wsdl_path();
 
     // --- Bridge A: esap, WSS with fault_status = 403 and a failing route ---
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port_esap = reserve_local_port();
     let h_esap = CamelTestContext::builder()
         .with_direct()
@@ -1160,6 +1168,7 @@ async fn cxf_consumer_override_403_applies_to_wss_only() {
 
     // --- Bridge B: cyl, WSS defaults and a success route (proves the signed path
     // verifies WSS and completes end-to-end) ---
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port_cyl = reserve_local_port();
     let h_cyl = CamelTestContext::builder()
         .with_direct()
@@ -1431,6 +1440,7 @@ async fn cxf_consumer_fault_code_and_timeout_matrix() {
     install_crypto_provider();
     let binary = require_cxf_bridge_binary();
     let wsdl_path = cxf_wsdl_path();
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port = reserve_local_port();
 
     let profiles: Vec<CxfProfileEnvVars> = [
@@ -1704,6 +1714,7 @@ async fn cxf_consumer_concurrent_requests() {
     install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let wsdl_path = cxf_wsdl_path();
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port = reserve_local_port();
 
     let h = CamelTestContext::builder()

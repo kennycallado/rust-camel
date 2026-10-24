@@ -11,6 +11,7 @@
 pub mod metrics;
 pub mod server;
 pub mod service;
+pub mod staged_listener;
 
 pub use camel_api::metrics::MetricsCollector;
 pub use metrics::PrometheusMetrics;

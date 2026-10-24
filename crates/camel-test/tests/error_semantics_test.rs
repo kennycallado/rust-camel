@@ -9,11 +9,12 @@
 //! growing while `camel_errors_total` stays flat across the open-phase
 //! sends.
 //!
-//! Harness idioms mirror `metrics_wiring_test.rs`: pre-allocated
-//! prometheus port, direct-producer drive with startup-race retries,
+//! Harness idioms mirror `metrics_wiring_test.rs`: staged
+//! prometheus listener, direct-producer drive with startup-race retries,
 //! startup-wait polling, poll-GET `/metrics`.
 
-use std::net::TcpListener;
+mod support;
+
 use std::time::Duration;
 
 use camel_api::CircuitBreakerConfig;
@@ -28,17 +29,6 @@ use tower::ServiceExt;
 
 fn test_rt() -> Arc<dyn RuntimeObservability> {
     Arc::new(NoOpComponentContext)
-}
-
-/// Pre-allocate an ephemeral port (bind/read/drop) — the prometheus service
-/// is constructed inside `configure_context`, so the port is otherwise
-/// undiscoverable.
-fn prealloc_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-    listener
-        .local_addr()
-        .expect("read pre-allocated local addr")
-        .port()
 }
 
 async fn context_from_toml(toml: &str) -> CamelContext {
@@ -157,7 +147,7 @@ fn rejection_value(body: &str, route: &str) -> Option<u64> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn open_breaker_end_to_end() {
-    let port = prealloc_port();
+    let port = support::stage_prometheus_listener("127.0.0.1").await;
     let toml_cfg = format!(
         r#"[observability.prometheus]
 enabled = true

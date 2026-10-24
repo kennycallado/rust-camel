@@ -68,6 +68,8 @@
   run: cargo xtask lint-cancel-tokens
 - name: lint-test-sleep
   run: cargo xtask lint-test-sleep
+- name: lint-no-free-port
+  run: cargo xtask lint-no-free-port
 - name: lint-unbounded-wait
   run: cargo xtask lint-unbounded-wait
 - name: lint-ignore

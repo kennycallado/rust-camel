@@ -4,6 +4,8 @@
 //! registered a TCP probe on its URI host:port, so one dead downstream
 //! service turned `/readyz` unhealthy and a Kubernetes pod left the Service.
 
+mod support;
+
 use std::time::Duration;
 
 use camel_api::{HealthSource, HealthStatus};
@@ -14,7 +16,9 @@ use camel_component_mock::MockComponent;
 use camel_core::CamelContext;
 
 /// A loopback port nothing listens on.
+// allow-free-port: intentional dead port under test; steal would flip the assertion, window adjudicated (bd rc-d70up)
 async fn closed_port() -> u16 {
+    // allow-free-port: intentional dead port under test; steal would flip the assertion, window adjudicated (bd rc-d70up)
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); // allow-unwrap
     l.local_addr().unwrap().port() // allow-unwrap
 }
@@ -41,6 +45,7 @@ async fn readiness_settles(ctx: &CamelContext, want: HealthStatus) -> HealthStat
 
 #[tokio::test(flavor = "multi_thread")]
 async fn readiness_ignores_dead_http_producer_target() {
+    // allow-free-port: intentional dead port under test; steal would flip the assertion, window adjudicated (bd rc-d70up)
     let dead = closed_port().await;
     let mut ctx = context().await;
     let route = RouteBuilder::from("direct:in")
@@ -61,8 +66,9 @@ async fn readiness_ignores_dead_http_producer_target() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn readiness_is_healthy_with_own_listener_up_and_dead_producer_target() {
+    // allow-free-port: intentional dead port under test; steal would flip the assertion, window adjudicated (bd rc-d70up)
     let dead = closed_port().await;
-    let own = closed_port().await;
+    let own = support::stage_http_listener("127.0.0.1").await;
     let mut ctx = context().await;
     let producer = RouteBuilder::from("direct:in")
         .route_id("calls-dead-service")

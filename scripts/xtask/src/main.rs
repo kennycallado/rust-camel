@@ -5,6 +5,7 @@ mod lint_component_deps;
 mod lint_context_citations;
 mod lint_gate_forwarding;
 mod lint_metric_labels;
+mod lint_no_free_port;
 mod lint_publish_registration;
 mod lint_single_source;
 mod lint_test_sleep;
@@ -129,6 +130,18 @@ enum Commands {
     /// Escape hatch: append `// allow-test-sleep:` followed by a
     /// non-empty reason to the finding line — marked sites never count.
     LintTestSleep,
+    /// Ratchet-count free-port probe `fn` definitions and call sites
+    /// (`free_port`, `find_free_port`, `prealloc_port`,
+    /// `reserve_local_port`, `closed_port`, ...) against a monotone
+    /// ceiling in `scripts/xtask/ratchet-no-free-port.max`
+    /// (bd rc-d70up, mission 401; whole-name anchored syn AST scan,
+    /// mirror of lint-test-sleep). Exits non-zero only when the
+    /// unadjudicated count exceeds the ratchet ceiling.
+    /// Escape hatch: put `// allow-free-port:` followed by a non-empty
+    /// reason on the line immediately above a definition or call site —
+    /// marked sites never count and a def marker does not cover its
+    /// call sites.
+    LintNoFreePort,
     /// Ratchet-count unbounded waits in test function bodies
     /// (`recv`/`lock`/`acquire`/`wait`/`join_next`/`connect` awaits,
     /// `blocking_recv`, spawn-task and spawned-handle awaits, and
@@ -505,6 +518,50 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-test-sleep error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintNoFreePort => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_no_free_port::run(&workspace_root) {
+                Ok(report) if report.findings.len() > report.max => {
+                    println!(
+                        "FREE-PORT RATCHET EXCEEDED ({} findings > max {}):",
+                        report.findings.len(),
+                        report.max
+                    );
+                    for (file, finding) in &report.findings {
+                        println!("  {}:{} — {}", file.display(), finding.line, finding.ident);
+                    }
+                    println!(
+                        "  fix the sites above (stage a held listener or use a bounded retry), or lower scripts/xtask/{} — never raise it without review justification. Adjudicate an individual site with a `// allow-free-port: <reason>` marker on the line immediately above it.",
+                        lint_no_free_port::RATCHET_FILE
+                    );
+                    eprintln!("\nlint-no-free-port: FAILED");
+                    std::process::exit(1);
+                }
+                Ok(report) if report.findings.len() < report.max => {
+                    println!(
+                        "lint-no-free-port: OK ({} findings < max {})",
+                        report.findings.len(),
+                        report.max
+                    );
+                    println!(
+                        "  ratchet headroom: lower scripts/xtask/{} to {}.",
+                        lint_no_free_port::RATCHET_FILE,
+                        report.findings.len()
+                    );
+                }
+                Ok(report) => {
+                    println!(
+                        "lint-no-free-port: OK ({} findings = max {})",
+                        report.findings.len(),
+                        report.max
+                    );
+                }
+                Err(e) => {
+                    eprintln!("lint-no-free-port error: {e}");
                     std::process::exit(1);
                 }
             }

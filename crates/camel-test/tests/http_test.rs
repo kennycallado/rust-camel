@@ -265,6 +265,7 @@ async fn http_health_check_with_real_listener() {
     use camel_component_http::HttpHealthCheck;
 
     // Bind a listener so the health check can connect
+    // allow-free-port: intentional dead port under test; drop(listener) is the assertion setup (bd rc-d70up)
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 

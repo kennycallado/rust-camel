@@ -134,6 +134,7 @@ async fn cxf_consumer_invalid_signer_descriptor_is_receiver_500() {
     install_crypto_provider();
     let _binary = require_cxf_bridge_binary();
     let wsdl_path = cxf_wsdl_path();
+    // allow-free-port: external JVM consumer, see reserve_local_port (bd rc-d70up)
     let port = reserve_local_port();
 
     let h = CamelTestContext::builder()

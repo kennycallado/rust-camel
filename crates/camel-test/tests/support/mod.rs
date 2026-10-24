@@ -52,6 +52,28 @@ pub async fn stage_ws_listener(host: &str) -> u16 {
     addr.port()
 }
 
+/// Same as [`stage_http_listener`] against the prometheus staged-listener
+/// map: the next `PrometheusService::start` for this exact `(ip, port)`
+/// serves the parked socket instead of binding fresh. Panics on bind or
+/// staging failure. Returns the port.
+#[allow(dead_code)] // not every test binary including `support` uses it
+pub async fn stage_prometheus_listener(host: &str) -> u16 {
+    let listener = tokio::net::TcpListener::bind(format!("{host}:0"))
+        .await
+        .unwrap_or_else(|e| panic!("stage_prometheus_listener: bind {host}:0 failed: {e}"));
+    let addr = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("stage_prometheus_listener: local_addr for {host}: {e}"));
+    camel_prometheus::staged_listener::stage_listener(listener).unwrap_or_else(|e| {
+        panic!(
+            "stage_prometheus_listener: staging {}:{} failed: {e}",
+            addr.ip(),
+            addr.port()
+        )
+    });
+    addr.port()
+}
+
 #[cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
 use camel_api::Exchange;
 

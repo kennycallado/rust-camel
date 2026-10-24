@@ -82,6 +82,7 @@ camel-dsl.workspace = true
 camel-bean.workspace = true
 camel-function.workspace = true
 camel-component-ws.workspace = true
+camel-prometheus.workspace = true
 camel-component-cron.workspace = true
 camel-component-sql.workspace = true
 camel-component-opensearch.workspace = true

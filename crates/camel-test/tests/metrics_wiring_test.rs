@@ -26,16 +26,17 @@
 //! Harness idioms mirror `otel_direct_hop_regression.rs` (route building,
 //! direct-producer drive with startup-race retries, startup-wait polling)
 //! and `camel-function/tests/protocol.rs` (poll-GET against a locally
-//! bound server). The prometheus port is pre-allocated with a
-//! bind/read/drop `std::net::TcpListener` because the service is
-//! constructed inside `configure_context`, leaving the ephemeral port
-//! undiscoverable otherwise. The error leg uses the default
+//! bound server). The prometheus port is staged with a bound
+//! `tokio::net::TcpListener` parked in the service's staged-listener map
+//! because the service is constructed inside `configure_context`, leaving
+//! the ephemeral port undiscoverable otherwise. The error leg uses the default
 //! `failIfNoConsumers=true`: the readiness-phase failure inside the traced
 //! step is recorded by the tracer adapter's `poll_ready` Err arm (rc-mn8n)
 //! — same families, same labels as the call-time path (see
 //! `add_failing_route`).
 
-use std::net::TcpListener;
+mod support;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -146,16 +147,6 @@ impl Lifecycle for RecordingLifecycle {
 
 fn test_rt() -> Arc<dyn RuntimeObservability> {
     Arc::new(NoOpComponentContext)
-}
-
-/// Pre-allocate an ephemeral port: bind, read, drop. The prometheus service
-/// (constructed inside `configure_context`) re-binds it on `ctx.start()`.
-fn prealloc_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-    listener
-        .local_addr()
-        .expect("read pre-allocated local addr")
-        .port()
 }
 
 async fn context_from_toml(toml: &str) -> CamelContext {
@@ -364,7 +355,7 @@ async fn poll_metrics_body(port: u16) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prometheus_only_emits_pipeline_and_component_metrics() {
-    let port = prealloc_port();
+    let port = support::stage_prometheus_listener("127.0.0.1").await;
     let toml_cfg = format!(
         r#"[observability.prometheus]
 enabled = true
@@ -442,7 +433,7 @@ enabled = true
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn both_registered_composes() {
-    let port = prealloc_port();
+    let port = support::stage_prometheus_listener("127.0.0.1").await;
     let toml_cfg = format!(
         r#"[observability.prometheus]
 enabled = true
