@@ -119,4 +119,16 @@ The bridge downloads on first use and caches at `~/.cache/rust-camel/jms-bridge/
 | `CAMEL_CXF_BRIDGE_RELEASE_URL` | Same override for the CXF bridge |
 | `CAMEL_BRIDGE_LOG_STDERR` | Directory path; bridge stderr is redirected per-bridge log files. Empty value uses `/tmp`. |
 
+## XML bridge: supported encodings in native
+
+The native XML bridge image registers all standard JDK charsets. The opt-in is the build-time property `quarkus.native.add-all-charsets`, declared as `export QUARKUS_NATIVE_ADD_ALL_CHARSETS="true"` in `bridges/xml/native-build-args.env`. That file is the single source of truth; Quarkus then emits `-H:+AddAllCharsets` itself. A JVM bridge runs on the full JDK runtime, which carries every standard JDK charset regardless; the registry opt-in matters only for the native image. This guarantee is native-specific.
+
+The probe observed:
+
+- XML declarations naming Xerces-mapped IANA encodings parse correctly, in the probed forms: `ISO-8859-15`, plus the aliases `LATIN-9` and `ISO_8859-15` (both alias spellings are exercised by the `charset_alias_latin9_decl_resolves` probe).
+- `xsl:output @encoding` serializes correctly for the probed charset: the ISO-8859-15 round trip with the euro sign is byte-exact (single byte `0xA4`, never the UTF-8 sequence or an entity). Because the opt-in registers every standard JDK charset with the JDK's own alias resolution, output encodings beyond the probed set are expected to work by the same mechanism — that is a property of the opt-in, not a separately measured result.
+- An encoding name outside the JDK registry surfaces as a `TRANSFORM_ERROR:` bridge error on both the input and output side.
+
+The opt-in also ships CJK and EBCDIC decoders. Measured image growth is +5.6 MiB (95028304 → 100861008 bytes). Startup is unchanged (median 60 ms → 60 ms). Do not read this section as support for arbitrary or unregistered charset names.
+
 **Reference**: [camel-bridge crate](https://github.com/kennycallado/rust-camel/blob/main/crates/services/camel-bridge/CONTEXT.md). See also [ADR-0007](../adr/0007-route-supervised-consumer-failure.md), [ADR-0012](../adr/0012-log-level-convention-handler-contract-boundaries.md), and [ADR-0051](../adr/0051-credential-redaction-at-diagnostic-boundaries.md).

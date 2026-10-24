@@ -108,4 +108,8 @@ ADR-0032 classifies endpoint configuration as trusted operator input and the Exc
 
 The Producer logs stylesheet compilation failures and transform failures at `warn!`. The route `ErrorHandler` owns the resulting error (ADR-0012 category a). The bridge client logs reseed failures at `error!` with a matching metric. That category is outside-contract and signals transient recovery, not a handler call.
 
+## Encodings
+
+The native bridge registers all standard JDK charsets via the `QUARKUS_NATIVE_ADD_ALL_CHARSETS` opt-in in `bridges/xml/native-build-args.env` (a JVM bridge runs on the full JDK runtime, which always carried them). XML declarations may name the probed forms — `ISO-8859-15` and the `LATIN-9` / `ISO_8859-15` aliases; other Xerces-mapped IANA names are expected to work by the same registry mechanism. `xsl:output @encoding` is byte-exact for the probed charset (ISO-8859-15 euro round trip). An unregistered name fails with a `TRANSFORM_ERROR:` bridge error on either side. The opt-in ships CJK and EBCDIC decoders too: measured native image growth +5.6 MiB (95028304 → 100861008 bytes), startup unchanged (median 60 ms → 60 ms). Stripping an encoding declaration is not required. Declare the actual encoding of your bytes. The full posture is in [bridge: XML encodings in native](../services/bridge.md#xml-bridge-supported-encodings-in-native).
+
 **Reference**: [camel-xslt CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-xslt/CONTEXT.md), [camel-xj CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-xj/CONTEXT.md).

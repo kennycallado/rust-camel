@@ -1127,12 +1127,20 @@ fn build_bridge_native(bridge: &str, version: Option<&str>, target: &str) -> Res
     // the env var makes SmallRye prioritize the indexed YAML form and silently
     // drop these args.
     let neutral_args = read_neutral_native_build_args(&bridge_path)?;
+    // Optional per-bridge charset opt-in (only xml declares it). linux/docker
+    // needs no propagation: build-native.sh sources the whole env file.
+    let add_all_charsets = read_add_all_charsets_flag(&bridge_path)?;
 
-    let status = Command::new(&cmd)
+    let mut command = Command::new(&cmd);
+    command
         .args(&args)
         .current_dir(&bridge_path)
         .env("GRADLE_USER_HOME", bridge_path.join(".gradle-local-cache"))
-        .env("QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS", &neutral_args)
+        .env("QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS", &neutral_args);
+    if let Some(flag) = add_all_charsets {
+        command.env("QUARKUS_NATIVE_ADD_ALL_CHARSETS", flag);
+    }
+    let status = command
         .status()
         .map_err(|e| format!("Failed to run Gradle: {e}"))?;
 
@@ -1203,6 +1211,73 @@ fn read_neutral_native_build_args(bridge_path: &Path) -> Result<String, String> 
 
     Err(format!(
         "NATIVE_BUILD_ARGS_NEUTRAL not defined in {}",
+        file.display()
+    ))
+}
+
+/// Read the optional `QUARKUS_NATIVE_ADD_ALL_CHARSETS` export from a bridge's
+/// `native-build-args.env` file.
+///
+/// The env file is shared by the jms, cxf and xml bridges, and only xml declares
+/// this line: absence is valid and yields `Ok(None)`. Malformed forms fail
+/// closed: a value other than `true`/`false`, the unexported assignment form
+/// (a shell-local that silently never reaches Gradle on linux), or the variable
+/// declared more than once (`bash` `source` keeps the last assignment, so
+/// duplicate declarations could silently diverge between platforms).
+fn read_add_all_charsets_flag(bridge_path: &Path) -> Result<Option<String>, String> {
+    const VAR: &str = "QUARKUS_NATIVE_ADD_ALL_CHARSETS=";
+
+    let file = bridge_path.join("native-build-args.env");
+    let contents = std::fs::read_to_string(&file)
+        .map_err(|e| format!("Cannot read {}: {e}", file.display()))?;
+
+    // The `export` keyword must be followed by one or more whitespace
+    // characters (spaces or tabs); `export` glued to the variable is not the
+    // exported form.
+    fn export_value(line: &str) -> Option<&str> {
+        line.strip_prefix("export").and_then(|rest| {
+            rest.starts_with([' ', '\t'])
+                .then(|| rest.trim_start_matches([' ', '\t']).strip_prefix(VAR))
+                .flatten()
+        })
+    }
+
+    let mut declaration: Option<&str> = None;
+    for line in contents.lines() {
+        let line = line.trim();
+        if export_value(line).is_none() && !line.starts_with(VAR) {
+            continue;
+        }
+        if declaration.is_some() {
+            return Err(format!(
+                "QUARKUS_NATIVE_ADD_ALL_CHARSETS declared more than once in {}; use a single declaration",
+                file.display()
+            ));
+        }
+        declaration = Some(line);
+    }
+
+    let Some(line) = declaration else {
+        return Ok(None);
+    };
+
+    if let Some(rest) = export_value(line) {
+        // Strip surrounding double quotes if present.
+        let value = rest
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(rest);
+        if value == "true" || value == "false" {
+            return Ok(Some(value.to_string()));
+        }
+        return Err(format!(
+            "QUARKUS_NATIVE_ADD_ALL_CHARSETS must be \"true\" or \"false\" (got {value:?}) in {}",
+            file.display()
+        ));
+    }
+
+    Err(format!(
+        "QUARKUS_NATIVE_ADD_ALL_CHARSETS in {} must use the exported form (`export {VAR}...`)",
         file.display()
     ))
 }
@@ -5377,6 +5452,106 @@ mod tests {
         assert_eq!(result, None);
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn bridge_env_dir(tag: &str, contents: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "xtask-add-all-charsets-{}-{tag}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("native-build-args.env"), contents).unwrap();
+        dir
+    }
+
+    #[test]
+    fn read_add_all_charsets_flag_parses_export_line() {
+        let dir = bridge_env_dir(
+            "present",
+            "NATIVE_BUILD_ARGS_NEUTRAL=\"--enable-url-protocols=http\"\n\
+             export QUARKUS_NATIVE_ADD_ALL_CHARSETS=\"true\"\n",
+        );
+        let result = read_add_all_charsets_flag(&dir);
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(result, Ok(Some("true".to_string())));
+    }
+
+    #[test]
+    fn read_add_all_charsets_flag_absent_is_none_for_other_bridges() {
+        let dir = bridge_env_dir(
+            "absent",
+            "NATIVE_BUILD_ARGS_NEUTRAL=\"--enable-url-protocols=http\"\n",
+        );
+        let result = read_add_all_charsets_flag(&dir);
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(result, Ok(None));
+    }
+
+    #[test]
+    fn read_add_all_charsets_flag_rejects_non_boolean() {
+        let dir = bridge_env_dir(
+            "bad-value",
+            "export QUARKUS_NATIVE_ADD_ALL_CHARSETS=\"banana\"\n",
+        );
+        let err = read_add_all_charsets_flag(&dir).expect_err("non-boolean must fail");
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            err.contains("QUARKUS_NATIVE_ADD_ALL_CHARSETS"),
+            "got: {err}"
+        );
+        assert!(err.contains("native-build-args.env"), "got: {err}");
+    }
+
+    #[test]
+    fn add_all_charsets_flag_accepts_arbitrary_export_whitespace() {
+        for (tag, contents) in [
+            ("tab", "export\tQUARKUS_NATIVE_ADD_ALL_CHARSETS=\"true\"\n"),
+            (
+                "spaces",
+                "export  QUARKUS_NATIVE_ADD_ALL_CHARSETS=\"true\"\n",
+            ),
+        ] {
+            let dir = bridge_env_dir(tag, contents);
+            let result = read_add_all_charsets_flag(&dir);
+            fs::remove_dir_all(&dir).unwrap();
+
+            assert_eq!(result, Ok(Some("true".to_string())), "case {tag}");
+        }
+    }
+
+    #[test]
+    fn read_add_all_charsets_flag_rejects_unexported_assignment() {
+        let dir = bridge_env_dir("unexported", "QUARKUS_NATIVE_ADD_ALL_CHARSETS=\"true\"\n");
+        let err = read_add_all_charsets_flag(&dir).expect_err("unexported form must fail");
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert!(err.contains("exported form"), "got: {err}");
+    }
+
+    #[test]
+    fn read_add_all_charsets_flag_rejects_duplicate_declarations() {
+        let dir = bridge_env_dir(
+            "duplicate",
+            "export QUARKUS_NATIVE_ADD_ALL_CHARSETS=\"true\"\n\
+             export QUARKUS_NATIVE_ADD_ALL_CHARSETS=\"false\"\n",
+        );
+        let err = read_add_all_charsets_flag(&dir).expect_err("duplicate declaration must fail");
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert!(err.contains("more than once"), "got: {err}");
+        assert!(err.contains("native-build-args.env"), "got: {err}");
+    }
+
+    #[test]
+    fn xml_bridge_env_declares_add_all_charsets() {
+        let root = workspace_root().expect("workspace root with bridges/");
+        let bridge = root.join("bridges").join("xml");
+        let result = read_add_all_charsets_flag(&bridge);
+
+        assert_eq!(result, Ok(Some("true".to_string())));
     }
 
     #[cfg(test)]

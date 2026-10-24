@@ -1,0 +1,25 @@
+{
+  "kind": "plan",
+  "change": "xml-native-charset",
+  "verdict": "BLESS",
+  "hash": "sha256:2b772c172a8730903dc29e2a6c814f09acd6a3259451e3c4cf82e0db99321de7",
+  "expert": "experts/e_opus",
+  "expert_substitution": "order named experts/e_gpt; e_gpt failed once with 'The usage limit has been reached' (quota guardrail: no retry, switch oracle once); reviewer r_gpt failed identically; e_opus used for all oracle dispatches per order's native-forensics allowance; glm-class banned by order",
+  "rounds": [
+    {"round": 1, "verdict": "BLESS-WITH-FIXES", "findings": 5},
+    {"round": 2, "verdict": "BLESS-WITH-FIXES", "findings": 1, "note": "one-line fix (step 4 'starts_with' -> 'contains'); expert pre-authorized: 'After that one-line edit the plan is blessed and no new review round is needed'; fix applied before this hash"},
+    {"round": 3, "verdict": "BLESS", "findings": 0, "note": "conditional bless per round-2 authorization"},
+    {"round": 4, "verdict": "BLESS-WITH-FIXES", "findings": 4, "kind": "amendment: fix mechanism changed to quarkus env-config after build #2 disproof", "hash": "sha256:7bffde6336c27360def448cb725c818db4f1a28b281a0505ce67315e599428fc"},
+    {"round": 5, "verdict": "BLESS-WITH-FIXES", "findings": 3, "hash": "sha256:66540bfcc7214711443692bcff3d5177873598692e526c35526f8f8358efc748"},
+    {"round": 6, "verdict": "BLESS-WITH-FIXES", "findings": 2, "hash": "sha256:94af435fd2551bf4ec4d16df1e06908d0838f13bd0bf5413a95d4020ed013219"},
+    {"round": 7, "verdict": "BLESS-WITH-FIXES", "findings": 2, "hash": "sha256:b3899838019b9be02ac4f127a9338512ba19cfb9f7e1b953ac115d4bc6ddaa1f"},
+    {"round": 8, "verdict": "BLESS", "findings": 0, "hash": "sha256:2b772c172a8730903dc29e2a6c814f09acd6a3259451e3c4cf82e0db99321de7", "note": "amendment blessed; supersedes plan hash for phase 2+"}
+  ],
+  "reviewer_loop": [
+    {"round": 1, "verdict": "REJECT", "findings": 8, "reviewer": "r_gpt->e_opus substitute"},
+    {"round": 2, "verdict": "APPROVE-WITH-FINDINGS", "findings": 6},
+    {"round": 3, "verdict": "APPROVE-WITH-FINDINGS", "findings": 2},
+    {"round": 4, "verdict": "APPROVE", "findings": 0}
+  ],
+  "date": "2026-10-23"
+}
