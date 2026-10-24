@@ -1,19 +1,14 @@
-# Partner + SQL combined chain (bd rc-dmhuo item 3): one scenario
-# document that drives a REST CRUD exchange against a harness-provisioned
-# HTTP partner (client role, same shape as partner-crud.test.yaml) and
-# asserts datasource state in the same document (same shape as the
-# scenario-sql.md worked example). REST CRUD + DB assert in one document.
+# Combine scripted HTTP partner assertions and seeded SQL state assertions
+# in one scenario. The POST and GET requests do not populate the SQL table.
 #
-# The wire half needs [components.http] allow_internal in Camel.toml; the
-# sql half needs the appdb datasource in Camel.toml and the camel-cli
+# The HTTP actions need [components.http] allow_internal in Camel.toml.
+# The SQL actions need the appdb datasource in Camel.toml and the camel-cli
 # `sql` Cargo feature for the `sql:` action.
 #
-# TODO-verify (docs-only mission rc-dmhuo; NO cargo in that lease): this
-# fixture ships unexecuted. Verify with one run:
+# Run from the example directory:
 #   cd examples/integration-testing
 #   ../../target/debug/camel test partner-sql.test.yaml
-# The grammar halves are independently pinned (partner-crud fixture;
-# sql_prepare_seeds_and_proceeds in camel-integration-test runner_test.rs).
+# Expected result: 7 passed, 0 failed.
 routeFiles: []
 scenario:
   - sql:

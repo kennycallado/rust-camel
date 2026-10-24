@@ -297,7 +297,7 @@ per-bridge gates.
 
 ### Requirement: Slim marker feature naming
 
-camel-cli's slim marker feature is `flavor-slim` (renamed from
+camel-cli's slim marker feature SHALL be `flavor-slim` (renamed from
 `slim-http`, then `slim-benchmarks`, during the feature-profile
 migrations). Neither historical name resolves: `[features]` declares no
 `slim-http` and no `slim-benchmarks` key, and `flavor-slim` carries its

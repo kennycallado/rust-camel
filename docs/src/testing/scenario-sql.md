@@ -89,6 +89,19 @@ The sql poll never settles early, even when a snapshot matches. Row sets are non
 
 An ordered `rows` assertion over a query without `ORDER BY` depends on the database's row return order. A load-time advisory warns about that combination: an `sql` target, a `rows` expectation, `unordered` false, and no `ORDER BY` in the query text (a case-insensitive search). The warning names the action index and says to declare `unordered: true` or add `ORDER BY`. The advisory only warns; it never rejects the document. The search can trip on a string literal that contains the words. A warning on a correct document is the accepted cost; a wrong rejection is not.
 
+## Console output and log assertions
+
+When the scenario harness owns the tracing subscriber, the console shows
+SQLx events at INFO, WARN, and ERROR. It omits SQLx DEBUG and TRACE events,
+including ordinary statement logs. Other targets retain TRACE through ERROR.
+The capture layer retains every level for document-level `logs:` assertions.
+`RUST_LOG` does not change this fixed policy or captured assertions.
+
+This policy controls verbosity. SQLx WARN events can still contain query
+text. See the [harness console and capture contract](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/CONTEXT.md#scenario-console-and-log-capture)
+and [ADR-0051](../adr/0051-credential-redaction-at-diagnostic-boundaries.md)
+for diagnostic redaction.
+
 ## sqlite in-memory recap
 
 A bare `sqlite::memory:` URL gives every pooled connection its own private database. An INSERT on one connection and a SELECT on another can hit different databases, and a validation can pass against state the document never seeded. The boot rejects that URL with the `sql-memory-not-shared` lint. Two forms are accepted:
@@ -137,4 +150,11 @@ scenario:
 
 An unordered variant drops `ORDER BY` from the query, declares `unordered: true`, and lists the rows in any order. A deadline variant adds `deadline: 5s`; the poll runs through the deadline and the final snapshot decides.
 
-[`examples/integration-testing/partner-sql.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/integration-testing/partner-sql.test.yaml) combines an http partner write with a sql validation in one document. The partner half has the shape of `partner-crud.test.yaml`. The sql half has the shape of the worked example above. TODO-verify: that fixture shipped with a docs-only pass (bd rc-dmhuo). It needs one `camel test` run and the `sql` Cargo feature before this chapter counts it as verified surface. The `sql:`-prepare document with a `direct:` boot route is the e2e shape of `sql_prepare_seeds_and_proceeds`, and the grammar pieces in this example are pinned by [`crates/camel-integration-test/src/runner_test.rs`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/src/runner_test.rs) (`sql_prepare_seeds_and_proceeds`, the `SQL_E2E_DATASOURCE` datasource shape), [`src/doc_parse_test.rs`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/src/doc_parse_test.rs) (`sql_target_parses`), and [`src/sql_validate_test.rs`](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/src/sql_validate_test.rs) (`ordered_rows_pass_immediately`, `unordered_rows_match_reorder`, `deadline_poll_passes_when_row_appears`).
+[`examples/integration-testing/partner-sql.test.yaml`](https://github.com/kennycallado/rust-camel/blob/main/examples/integration-testing/partner-sql.test.yaml)
+combines scripted HTTP partner assertions and seeded SQL state assertions in one scenario.
+The `sql:` action creates the table and inserts two rows. The HTTP requests do not populate the table.
+The final SQL validation checks those seeded rows. This composition follows the scenario contract in
+[ADR-0069](../adr/0069-integration-tier-testing-contract.md).
+
+Run `../../target/debug/camel test partner-sql.test.yaml` from `examples/integration-testing`
+with a CLI that includes the `sql` Cargo feature. The example returns `7 passed, 0 failed`.

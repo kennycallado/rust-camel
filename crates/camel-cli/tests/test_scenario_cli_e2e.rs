@@ -242,7 +242,7 @@ fn sql_validate_e2e_pass() {
         output.status.success(),
         "a matching sql validate must exit 0\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    for row in ["scenario[0] action", "scenario[1] validate"] {
+    for row in ["scenario[0] sql", "scenario[1] validate"] {
         assert!(
             stdout.contains(&format!("#{row}")),
             "missing PASS row {row}\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -252,6 +252,71 @@ fn sql_validate_e2e_pass() {
         stdout.contains("2 passed, 0 failed"),
         "every action must pass\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+    let combined = format!("{stdout}{stderr}");
+    for query in [
+        "CREATE TABLE seeded",
+        "INSERT INTO seeded",
+        "SELECT id, name FROM seeded",
+    ] {
+        assert!(
+            !combined.contains(query),
+            "console must omit {query}: {combined}"
+        );
+    }
+}
+
+#[cfg(feature = "integration-sql")]
+#[test]
+fn sql_debug_logs_remain_captured() {
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let doc = write_sql_validate_doc(dir.path(), "[[1, \"alice\"], [2, \"bob\"]]")
+        .expect("write validate document");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&doc)
+        .expect("open validate document");
+    writeln!(file, "logs:\n  noLevelAbove: trace").expect("append logs assertion");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_camel"))
+        .arg("test")
+        .arg(&doc)
+        .env("RUST_LOG", "off")
+        .current_dir(dir.path())
+        .output()
+        .expect("camel test must spawn");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "logs verdict must exit 1: {combined}"
+    );
+    for expected in [
+        "2 passed, 1 failed",
+        "#logs",
+        "logs.noLevelAbove",
+        "DEBUG sqlx::query",
+    ] {
+        assert!(
+            combined.contains(expected),
+            "missing {expected}: {combined}"
+        );
+    }
+    for query in [
+        "CREATE TABLE seeded",
+        "INSERT INTO seeded",
+        "SELECT id, name FROM seeded",
+    ] {
+        assert!(
+            !combined.contains(query),
+            "console must omit {query}: {combined}"
+        );
+    }
 }
 
 /// The Task 3.3 failing fixture (bd rc-25lup.2): the same document
@@ -300,10 +365,9 @@ fn sql_validate_e2e_fail_redacts() {
     // the counts, so only text literals are asserted.) The db_url
     // (sqlite:file:memdb_cli_e2e_validate?mode=memory&cache=shared) is
     // held against the WHOLE output — no subsystem may render it —
-    // while the cell literals are held against the report line only:
-    // sqlx's own DEBUG statement logs echo the doc-authored prepare
-    // statements to stdout (boot-time subsystem logging, outside the
-    // harness report whose text the redaction law governs). The guard
+    // while the cell literals are held against the report line only.
+    // The scenario console filters SQLx DEBUG statements separately
+    // from the harness report's redaction contract. The guard
     // matches the URL's distinctive `memdb_cli_e2e_validate` fragment:
     // it appears nowhere in the doc-authored SQL or expectation text,
     // so it can only surface through a db_url leak.

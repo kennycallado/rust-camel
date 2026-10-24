@@ -28,8 +28,8 @@ use crate::config::{
 };
 use crate::consumer::JmsConsumer;
 use crate::diagnostics::{
-    missing_message_selector_capability, LastBrokerFailure, MISSING_BROKER_TLS_CAPABILITY,
-    ensure_selector_capability, ensure_tls_capability, evaluate_startup_selector_gate,
+    LastBrokerFailure, MISSING_BROKER_TLS_CAPABILITY, ensure_selector_capability,
+    ensure_tls_capability, evaluate_startup_selector_gate, missing_message_selector_capability,
 };
 use crate::health::{
     BrokerHealthMemory, BrokerHealthObservation, BrokerHealthStatus, JmsHealthCheck,

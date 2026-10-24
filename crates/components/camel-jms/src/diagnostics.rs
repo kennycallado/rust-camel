@@ -89,7 +89,8 @@ pub(crate) fn ensure_selector_capability(
 ) -> Result<(), BridgeError> {
     if selector_required && !capabilities.iter().any(|c| c == "message-selector-v1") {
         return Err(BridgeError::PermanentFailure(format!(
-            "bridge {}", missing_message_selector_capability()
+            "bridge {}",
+            missing_message_selector_capability()
         )));
     }
     Ok(())

@@ -25,6 +25,7 @@ use std::time::Instant;
 
 use tracing::Level;
 use tracing_subscriber::Layer;
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::prelude::*;
 
@@ -138,22 +139,33 @@ pub fn capture_installed() -> bool {
 /// seat; losing the first-wins `try_init` leaves the foreign
 /// subscriber in place and [`capture_installed`] at `false`.
 ///
-/// The subscriber composes the capture layer WITH an `fmt` layer, so
-/// events keep reaching stdout after capture takes the seat. Honest
-/// tradeoff: this passthrough is UNFILTERED — every level prints —
-/// unlike the composition root's config-driven `EnvFilter`, because
-/// the scenario tier must not re-read ambient config (ADR-0069
-/// hermeticity); v1 accepts the verbosity delta.
+/// The subscriber combines unfiltered capture with a console formatter.
+/// Only the formatter filters events: SQLx targets print at INFO and
+/// higher, while other targets print at every level. The fixed policy
+/// does not read ambient configuration (ADR-0069 hermeticity).
 pub fn ensure_capture_subscriber() {
     if OWN_INSTALL.load(Ordering::Acquire) {
         return;
     }
-    let capture = tracing_subscriber::registry()
-        .with(CaptureLayer)
-        .with(tracing_subscriber::fmt::layer());
+    let capture = capture_subscriber(std::io::stdout);
     if capture.try_init().is_ok() {
         OWN_INSTALL.store(true, Ordering::Release);
     }
+}
+
+fn capture_subscriber<W>(writer: W) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
+    tracing_subscriber::registry().with(CaptureLayer).with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_filter(
+                Targets::new()
+                    .with_default(Level::TRACE)
+                    .with_target("sqlx", Level::INFO),
+            ),
+    )
 }
 
 /// A scoped dispatch carrying the capture layer: exercises `on_event`
@@ -241,6 +253,55 @@ mod tests {
     /// ordering installed globally.
     fn scoped_capture() -> tracing::Dispatch {
         tracing::Dispatch::new(tracing_subscriber::registry().with(CaptureLayer))
+    }
+
+    #[test]
+    fn console_filters_sqlx_without_filtering_capture() {
+        let console = tempfile::NamedTempFile::new().expect("console file");
+        let dispatch = tracing::Dispatch::new(capture_subscriber(
+            console.reopen().expect("reopen console file"),
+        ));
+        let window = open_window();
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::trace!(target: "sqlx::query", "sqlx_trace_marker");
+            tracing::debug!(target: "sqlx::query", "sqlx_debug_marker");
+            tracing::info!(target: "sqlx::query", "sqlx_info_marker");
+            tracing::warn!(target: "sqlx::query", "sqlx_warn_marker");
+            tracing::error!(target: "sqlx::query", "sqlx_error_marker");
+            tracing::trace!(target: "scenario_console_test", "other_trace_marker");
+        });
+        let events = window.close();
+        let output = std::fs::read_to_string(console.path()).expect("read console output");
+        for marker in ["sqlx_trace_marker", "sqlx_debug_marker"] {
+            assert!(
+                !output.contains(marker),
+                "console must omit {marker}: {output}"
+            );
+        }
+        for marker in [
+            "sqlx_info_marker",
+            "sqlx_warn_marker",
+            "sqlx_error_marker",
+            "other_trace_marker",
+        ] {
+            assert!(
+                output.contains(marker),
+                "console must retain {marker}: {output}"
+            );
+        }
+        for marker in [
+            "sqlx_trace_marker",
+            "sqlx_debug_marker",
+            "sqlx_info_marker",
+            "sqlx_warn_marker",
+            "sqlx_error_marker",
+            "other_trace_marker",
+        ] {
+            assert!(
+                events.iter().any(|event| event.message.contains(marker)),
+                "capture must retain {marker}: {events:?}"
+            );
+        }
     }
 
     #[test]

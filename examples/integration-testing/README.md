@@ -23,10 +23,10 @@ Files:
   one harness partner and one `bindVar` (`MOCK`) serving two route dial
   paths (`/orders`, `/billing`) on one bound authority; the multi-path
   pattern of the [Scenario documents](../../docs/src/testing/scenario-documents.md) page.
-- `partner-sql.test.yaml`: one document that combines the partner CRUD
-  chain with an `sql:` prepare and a sql `validate` (REST CRUD + DB
-  assert). TODO-verify: it shipped with a docs-only pass (bd rc-dmhuo).
-  It needs one `camel test` run and the `sql` Cargo feature.
+- `partner-sql.test.yaml`: one scenario with scripted HTTP partner assertions
+  and SQL state assertions. The `sql:` action seeds the table. The HTTP
+  requests do not populate it. Run `../../target/debug/camel test partner-sql.test.yaml`
+  from this directory with the `sql` Cargo feature. Expect `7 passed, 0 failed`.
 
 ## Build and run
 

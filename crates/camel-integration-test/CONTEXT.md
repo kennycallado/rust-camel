@@ -344,6 +344,21 @@ context preparation, with the `sql-memory-not-shared` error
 different databases and a validation could pass against state the
 document never seeded.
 
+### Scenario console and log capture
+
+`ensure_capture_subscriber` claims the global tracing subscriber before the
+scenario boot through first-wins installation. When the harness owns that
+subscriber, it sends events to an unfiltered `CaptureLayer` and a console
+formatter. The formatter applies a fixed `Targets` filter: INFO and higher
+for the `sqlx` target prefix, TRACE and higher for all other targets.
+SQLx DEBUG and TRACE events remain available to document-level `logs:`
+assertions, even though the console omits them.
+
+The harness does not read `RUST_LOG` or other ambient configuration for this
+policy, as required by ADR-0069 section 4. This filter controls console
+verbosity. It does not redact SQL statements: SQLx WARN events can still
+contain query text. ADR-0051 governs diagnostic redaction.
+
 ### Boot teardown closes the datasource pools
 
 `BootHandle::shutdown_with_deadline` ends with a deadline-wrapped

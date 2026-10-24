@@ -128,6 +128,7 @@ fn action_label(index: usize, action: &camel_integration_test::ScenarioAction) -
         A::Send { .. } => "send",
         A::Receive { .. } => "receive",
         A::Sleep { .. } => "sleep",
+        A::Sql { .. } => "sql",
         A::Validate { .. } => "validate",
         _ => "action",
     };
