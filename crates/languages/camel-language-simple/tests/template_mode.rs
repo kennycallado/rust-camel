@@ -173,3 +173,82 @@ async fn expression_does_not_coerce_operators() {
     let val = expr.evaluate(&empty_exchange()).await.unwrap();
     assert_eq!(val, Value::String("a == b".to_string()));
 }
+
+/// Literal texts that contain `$`, `{`, `}` — but no complete `${...}` slot —
+/// still compile and render verbatim (rc-84p3k).
+#[tokio::test]
+async fn template_literal_text_table_renders_verbatim() {
+    let cases = [
+        "Got $100 from ACME",
+        "braces { } stay verbatim",
+        "a lone $ sign",
+        "cost: $5 {ok}",
+        "null true == contains &&",
+    ];
+    for src in cases {
+        let lang = SimpleLanguage::new();
+        let expr = lang.create_expression(src).unwrap_or_else(|e| {
+            panic!("literal source {src:?} must compile, got: {e}");
+        });
+        let val = expr.evaluate(&empty_exchange()).await.unwrap();
+        assert_eq!(
+            val,
+            Value::String(src.to_string()),
+            "literal source {src:?} must render verbatim"
+        );
+    }
+}
+
+/// Malformed interpolations fail at creation (compile time) with a message
+/// naming the construct and its position (rc-84p3k). Offsets are byte offsets
+/// in the trimmed source.
+#[tokio::test]
+async fn template_malformed_interpolation_fails_at_creation() {
+    let cases: [(&str, &str); 7] = [
+        ("Got ${name", "byte offset 4"),
+        ("${header.h} trailing ${", "byte offset 21"),
+        ("${header.h} ${", "byte offset 12"),
+        ("${", "byte offset 0"),
+        ("${body", "byte offset 0"),
+        ("${}", "empty interpolation"),
+        ("${   }", "empty interpolation"),
+    ];
+    for (src, fragment) in cases {
+        let err = match SimpleLanguage::new().create_expression(src) {
+            Ok(_) => panic!("malformed source {src:?} must fail at creation"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("parse error"),
+            "source {src:?} must be a parse error, got: {msg}"
+        );
+        assert!(
+            msg.contains(fragment),
+            "source {src:?} message must contain {fragment:?}, got: {msg}"
+        );
+    }
+}
+
+/// Nested and unbalanced braces inside a slot fail at compile time; the
+/// message carries the offending slot source (rc-84p3k). A quoted `${` inside
+/// slot content is rejected too — the nested rule has no quote exemption
+/// (documented narrowing).
+#[tokio::test]
+async fn template_nested_or_unbalanced_braces_fail_at_creation() {
+    for src in [
+        "${${header.a}}",
+        "${body{x}",
+        "${header.a${b}",
+        "${header.a'${'b}",
+    ] {
+        let err = match SimpleLanguage::new().create_expression(src) {
+            Ok(_) => panic!("malformed source {src:?} must fail at creation"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("parse error"),
+            "source {src:?} must be a parse error, got: {err}"
+        );
+    }
+}

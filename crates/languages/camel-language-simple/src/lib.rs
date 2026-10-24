@@ -485,14 +485,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_interpolated_unclosed_brace_treated_as_literal() {
-        // An unclosed `${` has no matching `}` — the remainder is treated as
-        // plain literal text rather than causing a parse error.
+    async fn test_interpolated_unclosed_brace_is_compile_error() {
+        // An unclosed `${` is a compile-time parse error, never literal text
+        // (rc-84p3k).
         let lang = SimpleLanguage::new();
-        let expr = lang.create_expression("Got ${body").unwrap();
-        let ex = exchange_with_body("hello");
-        let val = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(val, Value::String("Got ${body".to_string()));
+        let err = match lang.create_expression("Got ${body") {
+            Ok(_) => panic!("unclosed interpolation must fail at creation (rc-84p3k)"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unclosed interpolation"),
+            "must name the construct, got: {msg}"
+        );
+        assert!(
+            msg.contains("byte offset 4"),
+            "must name the position, got: {msg}"
+        );
     }
 
     #[tokio::test]

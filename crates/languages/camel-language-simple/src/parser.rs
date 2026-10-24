@@ -118,7 +118,9 @@ pub fn parse(input: &str) -> Result<Expr, LanguageError> {
 /// `true`, `contains`, whitespace, …) stay verbatim and are never interpreted
 /// as predicate grammar. A whole `${...}` slot spanning the outer-trimmed
 /// source returns its atom unchanged (native value); a source with no slot is
-/// a raw [`Expr::StringLit`] of the trimmed text. See mission359 design §A.
+/// a raw [`Expr::StringLit`] of the trimmed text. A `${` that is never closed
+/// is always a compile-time parse error — it is never treated as literal
+/// text (rc-84p3k). See mission359 design §A.
 pub fn parse_template(input: &str) -> Result<Expr, LanguageError> {
     let src = input.trim();
     if src.is_empty() {
@@ -144,18 +146,9 @@ pub fn parse_template(input: &str) -> Result<Expr, LanguageError> {
         if rest.starts_with("${") {
             let start = i + 2;
             let Some(rel_end) = src[start..].find('}') else {
-                // Unclosed interpolation. With no completed slot and preceding
-                // text the remainder is literal; a leading token, or one after
-                // a completed slot, is a parse error.
-                if completed_slot || i == 0 {
-                    return Err(LanguageError::ParseError {
-                        expr: src.to_string(),
-                        reason: "unclosed interpolation: missing '}'".to_string(),
-                    });
-                }
-                literal.push_str(&src[i..]);
-                i = src.len();
-                continue;
+                // Unterminated `${`: always a compile-time error, never
+                // literal text (rc-84p3k).
+                return Err(unclosed_interpolation(src, i));
             };
             if !literal.is_empty() {
                 parts.push(InterpolatedPart::Literal(std::mem::take(&mut literal)));
@@ -192,6 +185,19 @@ fn whole_slot_source(src: &str) -> Option<&str> {
     (2 + close + 1 == src.len()).then(|| &rest[..close])
 }
 
+/// An unterminated `${` is a compile-time parse error in both TEMPLATE and
+/// predicate mode — never literal text (rc-84p3k). The message names the
+/// construct and the byte offset of the `${` relative to the trimmed source
+/// the parser scans. Compile-time source text only; no runtime exchange data.
+fn unclosed_interpolation(src: &str, at: usize) -> LanguageError {
+    LanguageError::ParseError {
+        expr: src.to_string(),
+        reason: format!(
+            "unclosed interpolation: '${{' at byte offset {at} (trimmed source) has no closing '}}'"
+        ),
+    }
+}
+
 fn tokenize(input: &str) -> Result<Vec<Token>, LanguageError> {
     let mut tokens = Vec::new();
     let mut i = 0usize;
@@ -214,15 +220,9 @@ fn tokenize(input: &str) -> Result<Vec<Token>, LanguageError> {
         if rest.starts_with("${") {
             let start = i + 2;
             let Some(rel_end) = input[start..].find('}') else {
-                if !text_buf.is_empty() || tokens.iter().any(|t| matches!(t, Token::Text(_))) {
-                    text_buf.push_str("${");
-                    i += 2;
-                    continue;
-                }
-                return Err(LanguageError::ParseError {
-                    expr: input.to_string(),
-                    reason: "unclosed interpolation: missing '}'".to_string(),
-                });
+                // Unterminated `${`: always a compile-time error, never
+                // literal text (rc-84p3k).
+                return Err(unclosed_interpolation(input, i));
             };
             flush_text(&mut tokens, &mut text_buf);
             let end = start + rel_end;
@@ -528,6 +528,24 @@ fn token_to_atom(token: &Token) -> Result<Expr, LanguageError> {
 }
 
 fn parse_expr_atom(s: &str) -> Result<Expr, LanguageError> {
+    // An empty (or whitespace-only) `${...}` slot is malformed: there is no
+    // expression to evaluate (rc-84p3k).
+    if s.trim().is_empty() {
+        return Err(LanguageError::ParseError {
+            expr: format!("${{{s}}}"),
+            reason: "empty interpolation: no expression between '${' and '}'".to_string(),
+        });
+    }
+
+    // A `${` inside slot content is a nested, unterminated interpolation —
+    // malformed, never part of a path key (rc-84p3k).
+    if s.contains("${") {
+        return Err(LanguageError::ParseError {
+            expr: format!("${{{s}}}"),
+            reason: "nested interpolation: '${' inside a ${...} slot".to_string(),
+        });
+    }
+
     // Bare `body` means whole body. ExchangeLookupPath::parse also handles
     // this (returns Body(vec![])), but Simple's Expr::Body variant is
     // distinct from Expr::BodyField, so we special-case it here.
@@ -872,11 +890,70 @@ mod tests {
         assert!(parse_template("${header.h} ${").is_err());
     }
 
+    /// Malformed interpolations fail at compile time in TEMPLATE mode with a
+    /// message naming the construct and the byte offset of the offending `${`
+    /// in the trimmed source (rc-84p3k).
     #[test]
-    fn parse_template_unclosed_without_slot_is_literal() {
-        assert_eq!(
-            parse_template("Got ${body").unwrap(),
-            Expr::StringLit("Got ${body".to_string())
+    fn parse_template_malformed_interpolation_table() {
+        let unclosed = [
+            ("Got ${name", 4),
+            ("${header.h} trailing ${", 21),
+            ("${header.h} ${", 12),
+            ("${", 0),
+            ("${body", 0),
+        ];
+        for (src, at) in unclosed {
+            let err = parse_template(src).expect_err(&format!(
+                "unclosed source {src:?} must fail at compile time"
+            ));
+            assert!(
+                matches!(err, LanguageError::ParseError { .. }),
+                "source {src:?}: {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unclosed interpolation"),
+                "source {src:?} message must name the construct, got: {msg}"
+            );
+            assert!(
+                msg.contains(&format!("byte offset {at}")),
+                "source {src:?} message must name the position, got: {msg}"
+            );
+        }
+        // Empty slots are malformed too.
+        for src in ["${}", "${   }"] {
+            let err = parse_template(src)
+                .expect_err(&format!("empty slot {src:?} must fail at compile time"));
+            assert!(
+                err.to_string().contains("empty interpolation"),
+                "source {src:?} must report an empty interpolation, got: {err}"
+            );
+        }
+        // Nested / unbalanced braces inside a slot fail at compile time. A
+        // quoted `${` inside slot content is rejected too: the nested-${}
+        // rule has no quote exemption (rc-84p3k; documented narrowing — such
+        // sources previously compiled to path keys containing `${`).
+        for src in [
+            "${${header.a}}",
+            "${body{x}",
+            "${header.a${b}",
+            "${header.a'${'b}",
+        ] {
+            assert!(
+                parse_template(src).is_err(),
+                "source {src:?} must fail at compile time"
+            );
+        }
+    }
+
+    /// The reported offset is relative to the trimmed source the parser scans,
+    /// not the raw argument (rc-84p3k; semantics pinned here).
+    #[test]
+    fn parse_template_unclosed_offset_is_trimmed_source() {
+        let err = parse_template("  Got ${name").unwrap_err();
+        assert!(
+            err.to_string().contains("byte offset 4"),
+            "offset must be relative to the trimmed source, got: {err}"
         );
     }
 
@@ -916,5 +993,67 @@ mod tests {
                 InterpolatedPart::Expr(Box::new(Expr::Header("b".to_string()))),
             ])
         );
+    }
+
+    /// Malformed interpolations fail at compile time in PREDICATE mode too —
+    /// the same rule as TEMPLATE mode, via the same message contract
+    /// (rc-84p3k). Offsets are byte offsets in the trimmed source.
+    #[test]
+    fn parse_predicate_malformed_interpolation_table() {
+        let unclosed = [
+            ("Got ${name", 4),
+            ("${header.h} trailing ${", 21),
+            ("${", 0),
+            ("${body", 0),
+        ];
+        for (src, at) in unclosed {
+            let err = parse(src).expect_err(&format!(
+                "unclosed source {src:?} must fail at compile time"
+            ));
+            assert!(
+                matches!(err, LanguageError::ParseError { .. }),
+                "source {src:?}: {err:?}"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unclosed interpolation")
+                    && msg.contains(&format!("byte offset {at}")),
+                "source {src:?} message must name construct and position, got: {msg}"
+            );
+        }
+        for src in ["${}", "${   }"] {
+            let err =
+                parse(src).expect_err(&format!("empty slot {src:?} must fail at compile time"));
+            assert!(
+                err.to_string().contains("empty interpolation"),
+                "source {src:?} must report an empty interpolation, got: {err}"
+            );
+        }
+        for src in ["${${header.a}}", "${body{x}", "${header.a'${'b}"] {
+            assert!(
+                parse(src).is_err(),
+                "source {src:?} must fail at compile time"
+            );
+        }
+    }
+
+    /// Legitimate literal text in PREDICATE mode still compiles: quoted
+    /// strings protect `${`, and `$`/`{`/`}` outside a slot are literal
+    /// (rc-84p3k).
+    #[test]
+    fn parse_predicate_mode_literal_table() {
+        assert_eq!(
+            parse("'Got ${name'").unwrap(),
+            Expr::StringLit("Got ${name".to_string())
+        );
+        assert_eq!(
+            parse("\"a${b\"").unwrap(),
+            Expr::EscapedString("a${b".to_string())
+        );
+        assert_eq!(
+            parse("Got $100 from ACME").unwrap(),
+            Expr::StringLit("Got $100 from ACME".to_string())
+        );
+        assert!(parse("braces { } stay").is_ok());
     }
 }

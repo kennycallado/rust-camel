@@ -62,6 +62,8 @@ A predicate must evaluate to a real boolean. Any other result is a `type mismatc
 
 In template mode a source that is exactly one `${...}` slot returns the slot's existing value. Numbers, arrays, or `null` from a header or body-field slot stay native. A whole `${body}` slot renders a JSON body as serialized text. Any other source returns a string. A source with no slot is raw text: `'abc'`, `true`, `42`, and `null` evaluate to the strings `'abc'`, `true`, `42`, and `null`. A missing slot in a mixed template renders as an empty string. A whole missing slot returns `null`.
 
+A `${` that is never closed is a compile-time parse error, never literal text: `Got ${name` fails at creation with a message naming `unclosed interpolation` and the byte offset of the `${` in the trimmed source. An empty `${}` slot and a `${` nested inside slot content are parse errors too. A lone `$`, `{`, or `}` outside a `${` stays verbatim literal text.
+
 Simple template mode is Simple's own literal-plus-`${}` grammar. It is not the [MiniJinja](minijinja.md) template engine (ADR-0047) and not route-template `{{...}}` substitution (ADR-0008).
 
 A bare top-level string value in a route file that contains `${...}` compiles to a Simple template. Only a top-level string is gated. A string nested inside an object or array literal stays literal. See [Basic steps](../yaml-dsl/step-verbs/basic.md) and [Environment variable interpolation](../configuration/env-interpolation.md).

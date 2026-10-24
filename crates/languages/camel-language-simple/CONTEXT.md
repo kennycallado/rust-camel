@@ -34,15 +34,18 @@ stays verbatim: `=`, `<`, `null`, `true`, quotes, and whitespace are not special
 `${...}` source returns the existing slot value (native number, array, or null from headers or
 body fields). A whole `${body}` slot renders a JSON body as serialized text. Any other source
 returns a string. A source with no slot is a raw string, so `'abc'`, `true`, `42`, and `null` stay
-text. Template mode is Simple's own grammar, NOT the MiniJinja template engine (ADR-0047) and NOT
-route-template `{{...}}` JSON-tree substitution (ADR-0008).
+text. A `${` that is never closed is always a compile-time parse error — never literal text. The
+error names the byte offset of the `${` in the trimmed source. An empty `${}` and a nested `${`
+inside slot content are parse errors too. Template mode is Simple's own grammar, NOT the MiniJinja
+template engine (ADR-0047) and NOT route-template `{{...}}` JSON-tree substitution (ADR-0008).
 _Avoid_: MiniJinja, Jinja, route templates, `{{...}}`
 
 **Simple predicate mode**:
 `create_predicate` source is the comparison grammar (`==`, `!=`, `>`, `contains`, `&&`, `||`).
-`SimplePredicate::matches` requires a real `Value::Bool`. Any other value (including `null`, an
-empty string, or the string `"true"`) returns `LanguageError::TypeMismatch`. There is no
-truthiness coercion.
+Quoted strings protect `${`; an unclosed `${` outside quotes is a compile-time parse error, same
+as template mode. `SimplePredicate::matches` requires a real `Value::Bool`. Any other value
+(including `null`, an empty string, or the string `"true"`) returns `LanguageError::TypeMismatch`.
+There is no truthiness coercion.
 _Avoid_: truthiness, `as_bool` coercion, non-boolean predicate
 
 ## Null and comparison semantics
