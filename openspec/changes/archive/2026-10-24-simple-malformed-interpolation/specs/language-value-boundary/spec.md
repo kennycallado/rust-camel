@@ -69,6 +69,10 @@ substitution (ADR-0008).
 - **WHEN** the expression is created
 - **THEN** creation SHALL fail with a parse error
 
+<!-- openspec-scenario-ops
+renamed: Unclosed slot after a valid slot is a parse error -> Unclosed slot is always a parse error
+-->
+
 #### Scenario: Unclosed slot is always a parse error
 
 - **GIVEN** expression sources `Got ${body`, `${header.h} ${`, and `${`
