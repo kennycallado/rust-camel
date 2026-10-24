@@ -470,6 +470,11 @@ class TlsTransportMatrixTest {
       ClientOutcome outcome = dial(server.port());
       try {
         assertFailureClassified(BrokerFailureClass.TLS_PLAINTEXT_PEER, outcome);
+        // The drained server captured the client's first byte: 0x16 is the TLS handshake record
+        // content type, proving the client spoke TLS and did not fall back to plaintext OpenWire.
+        int firstClientByte =
+            server.connection(0).firstClientByte().get(BOUND_SECONDS, TimeUnit.SECONDS);
+        assertEquals(0x16, firstClientByte);
       } finally {
         outcome.transport().stop();
       }

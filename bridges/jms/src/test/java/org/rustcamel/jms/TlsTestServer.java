@@ -35,18 +35,28 @@ import javax.net.ssl.TrustManager;
  * handshake completes, so a JMS-level client terminates on wire-format negotiation instead of
  * blocking on a peer that speaks no OpenWire.
  *
- * <p>Plain mode ({@link #startPlain()}): a non-TLS {@link ServerSocket} that answers with non-TLS
- * bytes — the plaintext peer a TLS client must classify as {@code TLS_PLAINTEXT_PEER}.
+ * <p>Plain mode ({@link #startPlain()}): a non-TLS {@link ServerSocket} that reads the client's
+ * first bytes, then answers with non-TLS bytes — the plaintext peer a TLS client must classify as
+ * {@code TLS_PLAINTEXT_PEER}. The answer drains before closing: closing with unread inbound data
+ * makes the stack send RST, and on Windows an incoming RST discards already-received bytes, so the
+ * client would see {@code SocketException} instead of the plaintext 400. The read captures byte 0
+ * in {@link Connection#firstClientByte} (0x16 = TLS handshake record) and {@code shutdownOutput()}
+ * sends a graceful FIN before the drain-and-close.
  *
  * <p>Ports are always ephemeral (bind {@code 127.0.0.1:0}); {@link #close()} closes every accepted
  * socket and the server socket. The accept thread is a daemon and needs no join.
  */
 final class TlsTestServer implements AutoCloseable {
 
-  /** Per accepted connection: the requested SNI names and the server-side handshake failure. */
+  /**
+   * Per accepted connection: the requested SNI names, the server-side handshake failure, and the
+   * first client byte captured by the plain-mode answer loop ({@code -1} when the peer closed or
+   * errored before a byte arrived).
+   */
   record Connection(
       CompletableFuture<List<String>> requestedServerNames,
-      CompletableFuture<Throwable> handshakeFailure) {}
+      CompletableFuture<Throwable> handshakeFailure,
+      CompletableFuture<Integer> firstClientByte) {}
 
   private final ServerSocket serverSocket;
   private final boolean plain;
@@ -128,23 +138,66 @@ final class TlsTestServer implements AutoCloseable {
     }
   }
 
+  /** Bounds the ClientHello read and the post-answer drain of the plain-mode answer loop. */
+  private static final int ANSWER_TIMEOUT_MS = 10_000;
+
   private void answerPlain(Socket socket) {
     accepted.add(socket);
+    Connection connection =
+        new Connection(
+            new CompletableFuture<>(), new CompletableFuture<>(), new CompletableFuture<>());
+    connections.add(connection);
     try {
+      socket.setSoTimeout(ANSWER_TIMEOUT_MS);
+      // Read the client's first bytes BEFORE answering (a TLS record header is 5 bytes). Byte 0
+      // identifies the dialect: 0x16 = TLS handshake record, proving the client did not fall back
+      // to plaintext OpenWire.
+      int first = socket.getInputStream().read();
+      connection.firstClientByte().complete(first);
+      int total = first == -1 ? 0 : 1;
+      while (total >= 1 && total < 5) {
+        int next = socket.getInputStream().read();
+        if (next == -1) {
+          break;
+        }
+        total++;
+      }
       socket
           .getOutputStream()
           .write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
       socket.getOutputStream().flush();
+      // Graceful FIN (never SO_LINGER 0): the client must be able to read the buffered 400 before
+      // the connection dies — closing with unread inbound data would send RST, and on Windows an
+      // incoming RST discards the already-buffered 400.
+      socket.shutdownOutput();
+      drainQuietly(socket);
     } catch (IOException gone) {
-      // peer already gone — teardown race, nothing to record
+      // peer already gone or reset mid-exchange — complete the capture so the assertion fails
+      // fast with a visible value instead of hanging on the future
+      connection.firstClientByte().complete(-1);
     } finally {
       closeQuietly(socket);
     }
   }
 
+  /**
+   * Reads the peer's remaining bytes until EOF, timeout, or error, so close() sends FIN not RST.
+   */
+  private static void drainQuietly(Socket socket) {
+    try {
+      while (socket.getInputStream().read() != -1) {
+        // discard — the drain is the point, not the bytes
+      }
+    } catch (IOException ignore) {
+      // the peer's FIN is the exit we want; a reset or timeout ends the drain just as well
+    }
+  }
+
   private void handleTls(SSLSocket socket) {
     accepted.add(socket);
-    Connection connection = new Connection(new CompletableFuture<>(), new CompletableFuture<>());
+    Connection connection =
+        new Connection(
+            new CompletableFuture<>(), new CompletableFuture<>(), new CompletableFuture<>());
     connections.add(connection);
     HandshakeCompletedListener capture =
         event -> {

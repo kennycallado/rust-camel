@@ -61,6 +61,12 @@ java {
 // Gradle's default 512m test-worker heap and dies with cascading OutOfMemoryError failures.
 tasks.test {
     maxHeapSize = "3g"
+    // CI logs must carry assertion messages and full exception chains for failed tests —
+    // platform-specific failures (e.g. Windows fixture races) are triaged from the log alone.
+    testLogging {
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        events("failed")
+    }
 }
 
 spotless {

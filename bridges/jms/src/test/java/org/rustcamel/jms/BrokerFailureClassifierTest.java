@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.ConnectException;
+import java.net.SocketException;
 import java.security.cert.CertPathBuilderException;
 import java.security.cert.CertPathValidatorException;
 import java.security.cert.CertificateException;
@@ -16,6 +17,7 @@ import javax.jms.JMSSecurityException;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLHandshakeException;
 import jms_bridge.HealthResponse;
+import org.apache.activemq.util.IOExceptionSupport;
 import org.junit.jupiter.api.Test;
 
 /** Cause-chain classification and health-response capability wiring. */
@@ -60,6 +62,29 @@ class BrokerFailureClassifierTest {
         BrokerFailureClass.TLS_PLAINTEXT_PEER,
         BrokerFailureClassifier.classify(
             new SSLException("Unsupported or unrecognized SSL message")));
+    SSLHandshakeException wrapped = new SSLHandshakeException("handshake failed");
+    wrapped.initCause(new SSLException("Unsupported or unrecognized SSL message"));
+    assertEquals(
+        BrokerFailureClass.TLS_PLAINTEXT_PEER,
+        BrokerFailureClassifier.classify(wrapped),
+        "the plaintext text must classify through a wrapper chain too");
+  }
+
+  @Test
+  void socketResetClassifiesOtherNotTls() {
+    // Windows RST during a plaintext-peer exchange surfaces as SocketException ("Connection
+    // reset") through JSSE, thrown as-is during the handshake. Mapping a reset to TLS would make
+    // the classifier lie about load balancers, firewalls and broker crashes — the deliberate
+    // refusal is pinned here, bare and through the ActiveMQ transport wrap.
+    assertEquals(
+        BrokerFailureClass.OTHER,
+        BrokerFailureClassifier.classify(new SocketException("Connection reset")));
+    java.io.IOException wrapped =
+        IOExceptionSupport.create(new SocketException("Connection reset"));
+    assertEquals(
+        BrokerFailureClass.OTHER,
+        BrokerFailureClassifier.classify(wrapped),
+        "a reset wrapped by the transport stays OTHER");
   }
 
   @Test

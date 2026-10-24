@@ -1,0 +1,46 @@
+name: Bridge JVM Tests
+
+# Bridge release legs only run `:test` inside the native-image build per platform, so
+# JVM-only drift on one OS (e.g. the Windows socket fixture race behind jms-bridge-v0.8.6)
+# escapes CI until a release run fails. This job runs the plain JVM suites on windows-latest
+# on every bridges/** change: minutes, no native-image, no Docker.
+on:
+  push:
+    branches: ["main"]
+    paths: ["bridges/**"]
+  pull_request:
+    branches: ["main"]
+    paths: ["bridges/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bridge-jvm-tests:
+    name: Bridge JVM Tests (${{ matrix.bridge }}, windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        bridge: [jms, xml, cxf]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-jvm-${{ matrix.bridge }}-windows-${{ hashFiles(format('bridges/{0}/build.gradle.kts', matrix.bridge), format('bridges/{0}/gradle/wrapper/gradle-wrapper.properties', matrix.bridge)) }}
+          restore-keys: |
+            gradle-jvm-${{ matrix.bridge }}-windows-
+      - name: JVM tests (bridges/${{ matrix.bridge }})
+        shell: bash
+        working-directory: bridges/${{ matrix.bridge }}
+        run: ./gradlew test
