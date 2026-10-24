@@ -34,5 +34,21 @@
 # operator-configured and trusted (same reasoning as RUSTSEC-2026-0235 above).
 # No patched ammonia version exists yet; the fix is upstream. Remove this entry
 # once an ammonia release carries the fix (bd rc-9mq7v).
-ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0235", "RUSTSEC-2026-0249", "RUSTSEC-2026-0373"]
+# RUSTSEC-2026-0387 (crypto-bigint 0.5.5, timing variability) — transitive,
+# non-applicable in rust-camel. Chain: surrealdb-core 3.2.4 -> jsonwebtoken 10.4.0
+# -> p384 -> primeorder -> elliptic-curve -> crypto-bigint 0.5.5. The advisory is
+# about variable-time scalar arithmetic leaking secret key material during P-384
+# ECDSA operations. rust-camel's own JWT path uses jsonwebtoken 11 with
+# aws_lc_rs and only RS256 (camel-auth), so it never reaches this crate. The
+# surrealdb copy exists because the component's SurrealDB client links
+# jsonwebtoken for token verification against an operator-configured, trusted
+# instance: rust-camel handles no P-384 private key, and verification uses
+# public material. The fix requires crypto-bigint >= 0.7.6, which the
+# elliptic-curve 0.13 line cannot take; cargo update cannot cross it.
+# Upgrade path was measured (2026-10-24): surrealdb 3.3.4 STILL pulls
+# crypto-bigint 0.5.5 and additionally pulls quick-xml 0.39.4
+# (RUSTSEC-2026-0194/0195), so bumping trades one advisory for three.
+# Remove this entry once surrealdb's jsonwebtoken/p384 chain reaches
+# crypto-bigint >= 0.7.6 (tracked in bd rc-83l5f / rc-h7huz).
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0235", "RUSTSEC-2026-0249", "RUSTSEC-2026-0373", "RUSTSEC-2026-0387"]
 informational_warnings = ["unmaintained"]
