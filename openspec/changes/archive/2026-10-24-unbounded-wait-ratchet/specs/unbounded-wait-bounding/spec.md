@@ -92,6 +92,10 @@ mission-394 inventory is fully adjudicated, the ratchet ceiling SHALL equal the
 unadjudicated finding count per the ratchet zero end-state requirement; the historical
 arithmetic of prior partial burns (548 − 117 = 431) is superseded.
 
+<!-- openspec-scenario-ops
+renamed: Ratchet counts only unadjudicated receives -> Ratchet counts only unadjudicated receives at the zero end state
+-->
+
 #### Scenario: Single expected receive is timeout-wrapped
 
 - **GIVEN** a test that awaits `rx.recv().await` once and asserts on the value
