@@ -68,4 +68,11 @@ jobs:
       - name: Native build (bridges/jms)
         shell: bash
         working-directory: bridges/jms
-        run: ./gradlew build -Dquarkus.native.enabled=true
+        # Mirrors `cargo xtask build-bridge-native`: the jar package must be
+        # disabled (Quarkus refuses both outputs) and the platform-neutral
+        # native-image args come from the single-source env file, never YAML.
+        run: |
+          source native-build-args.env
+          export QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS="$NATIVE_BUILD_ARGS_NEUTRAL"
+          ./gradlew build -Dquarkus.package.jar.enabled=false \
+            -Dquarkus.native.enabled=true -Pversion=dev
