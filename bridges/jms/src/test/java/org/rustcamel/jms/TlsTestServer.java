@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.util.ArrayList;
@@ -31,9 +32,11 @@ import javax.net.ssl.TrustManager;
  * the client-requested SNI names from {@link ExtendedSSLSession#getRequestedServerNames()} — that
  * cast is where requested SNI is readable, and the capture runs in the listener where the completed
  * session is available. The accept thread then drives {@link SSLSocket#startHandshake()} and
- * records any failure. With {@code closeAfterHandshake} the accepted socket closes as soon as the
- * handshake completes, so a JMS-level client terminates on wire-format negotiation instead of
- * blocking on a peer that speaks no OpenWire.
+ * records any failure. A failed handshake tears down gracefully — bounded drain, then
+ * shutdownOutput, then close (the same doctrine the plain-mode answer follows) — so the client can
+ * still read the fatal alert instead of a bare connection abort. With {@code closeAfterHandshake}
+ * the accepted socket closes as soon as the handshake completes, so a JMS-level client terminates
+ * on wire-format negotiation instead of blocking on a peer that speaks no OpenWire.
  *
  * <p>Plain mode ({@link #startPlain()}): a non-TLS {@link ServerSocket} that reads the client's
  * first bytes, then answers with non-TLS bytes — the plaintext peer a TLS client must classify as
@@ -193,6 +196,28 @@ final class TlsTestServer implements AutoCloseable {
     }
   }
 
+  /**
+   * Graceful teardown of a failed handshake: bound the drain with SO_TIMEOUT, drain the peer's
+   * remaining bytes so close() sends FIN not RST, half-close the output, then close. Never abrupt,
+   * never SO_LINGER 0. Best-effort — after a fatal handshake error the JDK has usually already
+   * closed the transport, so every step here may find the socket dead; that is fine, the point is
+   * that the fixture's own close path stays graceful on every JDK where it can still act.
+   */
+  private static void gracefulFailureClose(SSLSocket socket) {
+    try {
+      socket.setSoTimeout(ANSWER_TIMEOUT_MS);
+    } catch (SocketException ignore) {
+      // socket already dead — nothing to drain
+    }
+    drainQuietly(socket);
+    try {
+      socket.shutdownOutput();
+    } catch (IOException ignore) {
+      // best-effort half-close; close() below still ends the connection
+    }
+    closeQuietly(socket);
+  }
+
   private void handleTls(SSLSocket socket) {
     accepted.add(socket);
     Connection connection =
@@ -213,6 +238,14 @@ final class TlsTestServer implements AutoCloseable {
       socket.startHandshake();
     } catch (IOException failure) {
       connection.handshakeFailure().complete(failure);
+      // Graceful failure teardown (same doctrine as the plain-mode answer loop): the fatal alert
+      // JSSE just flushed must reach the client — an abrupt close with unread inbound data sends
+      // RST, and on Windows an incoming RST discards already-received bytes, so the client reports
+      // a bare SocketException instead of the TLS failure JSSE actually raised. Modern JDKs close
+      // the transport themselves on a fatal handshake error with a best-effort non-blocking drain;
+      // this teardown guarantees the fixture never adds its own abrupt close on top of that.
+      gracefulFailureClose(socket);
+      return;
     }
     if (closeAfterHandshake) {
       closeQuietly(socket);
