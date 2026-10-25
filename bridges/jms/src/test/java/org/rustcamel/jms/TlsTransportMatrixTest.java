@@ -423,11 +423,10 @@ class TlsTransportMatrixTest {
   @Test
   void needClientAuthWithoutClientCertFails() throws Exception {
     try (TlsTestServer server =
-            TlsTestServer.start(
+            TlsTestServer.startEngine(
                 fixture("server-ip-san.pem"),
                 fixture("server-ip-san.key"),
-                fixture("test-ca.pem"),
-                true);
+                fixture("test-ca.pem"));
         SslContextScope trust = SslContextScope.pinned(null, testCaTrust());
         TlsStateScope state = TlsStateScope.published(null)) {
       ClientOutcome outcome = dial(server.port());

@@ -44,3 +44,28 @@ jobs:
         shell: bash
         working-directory: bridges/${{ matrix.bridge }}
         run: ./gradlew test
+
+  jms-bridge-native-tests:
+    name: JMS Bridge Native Tests (windows-latest, GraalVM 25)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: graalvm/setup-graalvm@0426e2e191540e8514dff98dc52a5f5146a2a276 # v1.6.6
+        with:
+          java-version: '25'
+          distribution: 'graalvm'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Cache Gradle
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-native-windows-jms-${{ hashFiles('bridges/jms/build.gradle.kts', 'bridges/jms/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-native-windows-jms-
+      - name: Native build (bridges/jms)
+        shell: bash
+        working-directory: bridges/jms
+        run: ./gradlew build -Dquarkus.native.enabled=true
