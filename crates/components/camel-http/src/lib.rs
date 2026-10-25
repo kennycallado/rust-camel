@@ -3460,19 +3460,6 @@ pub(crate) fn lock_registry_test_mutex() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Serializes tests that mutate (or assert on) the process-global
-/// SSL_CERT_FILE/SSL_CERT_DIR CA-probe env vars (rc-3j4mq). Poison-
-/// recovering for the same reason as REGISTRY_TEST_MUTEX.
-#[cfg(test)]
-static CA_STORE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-pub(crate) fn lock_ca_store_test_mutex() -> std::sync::MutexGuard<'static, ()> {
-    CA_STORE_TEST_MUTEX
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 /// Map a pipeline error to an HTTP reply.
 ///
 /// Extracted from the inline `match` in `dispatch_handler` for unit

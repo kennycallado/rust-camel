@@ -89,34 +89,25 @@ pub fn xmlperf_evidence_run() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Serializes every test that mutates process env vars so they cannot
-    /// race inside a single `--lib` process.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use camel_component_api::test_support::EnvGuard;
 
     #[test]
     fn resolve_binary_prefers_env_override() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
         let bin_dir = tempfile::tempdir().expect("tempdir");
         let bin_path = bin_dir.path().join("xml-bridge");
         std::fs::write(&bin_path, b"stub").expect("write stub binary");
         let start_dir = tempfile::tempdir().expect("tempdir");
 
-        // SAFETY: env access is serialized by ENV_LOCK across the test process.
-        unsafe { std::env::set_var(XML_BRIDGE_BINARY_ENV, &bin_path) };
+        let env = EnvGuard::set(XML_BRIDGE_BINARY_ENV, &bin_path);
         let resolved = resolve_bridge_binary_from(start_dir.path());
-        // SAFETY: env access is serialized by ENV_LOCK across the test process.
-        unsafe { std::env::remove_var(XML_BRIDGE_BINARY_ENV) };
+        drop(env);
 
         assert_eq!(resolved.expect("env override must win"), bin_path);
     }
 
     #[test]
     fn resolve_binary_errors_when_no_binary_found() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
-        // SAFETY: env access is serialized by ENV_LOCK across the test process.
-        unsafe { std::env::remove_var(XML_BRIDGE_BINARY_ENV) };
+        let _env = EnvGuard::remove(XML_BRIDGE_BINARY_ENV);
         let start_dir = tempfile::tempdir().expect("tempdir");
 
         let resolved = resolve_bridge_binary_from(start_dir.path());
@@ -128,12 +119,9 @@ mod tests {
 
     #[test]
     fn evidence_run_flag_reads_env() {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
-        // SAFETY: env access is serialized by ENV_LOCK across the test process.
-        unsafe { std::env::set_var("XMLPERF_EVIDENCE_RUN", "1") };
+        let mut env = EnvGuard::set("XMLPERF_EVIDENCE_RUN", "1");
         assert!(xmlperf_evidence_run());
-        // SAFETY: env access is serialized by ENV_LOCK across the test process.
-        unsafe { std::env::remove_var("XMLPERF_EVIDENCE_RUN") };
+        env.and_remove("XMLPERF_EVIDENCE_RUN");
         assert!(!xmlperf_evidence_run());
     }
 }

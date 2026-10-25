@@ -1,4 +1,5 @@
 use super::*;
+use camel_component_api::test_support::EnvGuard;
 
 /// Loads a `CamelConfig` from TOML text through the real config-building
 /// path (profile handling, deserialization, placeholder resolution, validation).
@@ -135,8 +136,7 @@ secret = "hunter2-debug-secret"
 
 #[test]
 fn credential_secret_placeholder_resolves() {
-    let _guard = super::env_lock();
-    set_env("CRED_ONE", "resolved-env-secret");
+    let _env_guard = EnvGuard::set("CRED_ONE", "resolved-env-secret");
     let config = load_config(
         r#"
 [security.native]
@@ -150,13 +150,11 @@ secret = "${env:CRED_ONE}"
     .expect("env-backed secret should resolve");
     let creds = &config.security.native.expect("native").credentials;
     assert_eq!(creds[0].secret.as_deref(), Some("resolved-env-secret"));
-    unset_env("CRED_ONE");
 }
 
 #[test]
 fn credential_secret_unset_fails_closed() {
-    let _guard = super::env_lock();
-    unset_env("CRED_ONE");
+    let _env_guard = EnvGuard::remove("CRED_ONE");
     let err = load_config(
         r#"
 [security.native]

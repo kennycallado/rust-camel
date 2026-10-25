@@ -1,18 +1,13 @@
 //! Per-binary test coordination helpers for integration tests.
 //!
-//! Each tests/*.rs binary is a separate process; this module gives each
-//! one its own lock and static instance. Mirrors the lib-test
-//! ENV_OVERRIDE_LOCK discipline (crates/camel-config/src/config.rs).
+//! Each tests/*.rs binary is a separate process. Environment mutation and
+//! reads use the canonical process-wide guard from
+//! `camel_component_api::test_support`, re-exported here so every integration
+//! binary shares one lock discipline with the lib tests.
 
-static ENV_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Test-only coordination mutex acquisition. Recovery from poison is
-/// safe because every env test restores vars before assertions.
-pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_OVERRIDE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
+// Each integration binary uses a subset of these re-exports.
+#[allow(unused_imports)]
+pub use camel_component_api::test_support::{EnvGuard, env_lock};
 
 /// Install a bare registry as the process-global tracing default, once
 /// per test binary. Guards capture tests in this binary against

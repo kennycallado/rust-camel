@@ -408,80 +408,94 @@ mod tests {
 
     #[test]
     fn single_var_substitution() {
-        unsafe { env::set_var("TEST_DSL_HOST", "localhost") };
-        let result = interpolate_env("uri: ${env:TEST_DSL_HOST}/path").unwrap();
+        let result = interpolate_env_with("uri: ${env:TEST_DSL_HOST}/path", &|name| {
+            (name == "TEST_DSL_HOST").then(|| "localhost".to_string())
+        })
+        .unwrap();
         assert_eq!(result, "uri: localhost/path");
-        unsafe { env::remove_var("TEST_DSL_HOST") };
     }
 
     #[test]
     fn multiple_vars_all_set() {
-        unsafe { env::set_var("TEST_DSL_USER", "admin") };
-        unsafe { env::set_var("TEST_DSL_PASS", "secret") };
-        let result = interpolate_env("${env:TEST_DSL_USER}:${env:TEST_DSL_PASS}").unwrap();
+        let result =
+            interpolate_env_with(
+                "${env:TEST_DSL_USER}:${env:TEST_DSL_PASS}",
+                &|name| match name {
+                    "TEST_DSL_USER" => Some("admin".to_string()),
+                    "TEST_DSL_PASS" => Some("secret".to_string()),
+                    _ => None,
+                },
+            )
+            .unwrap();
         assert_eq!(result, "admin:secret");
-        unsafe { env::remove_var("TEST_DSL_USER") };
-        unsafe { env::remove_var("TEST_DSL_PASS") };
     }
 
     #[test]
     fn missing_var_returns_err_with_name() {
-        unsafe { env::remove_var("TEST_DSL_MISSING") };
-        let err = interpolate_env("uri: ${env:TEST_DSL_MISSING}").unwrap_err();
+        let err = interpolate_env_with("uri: ${env:TEST_DSL_MISSING}", &|_| None).unwrap_err();
         assert_eq!(err, "TEST_DSL_MISSING");
     }
 
     #[test]
     fn multiple_vars_first_missing_fails_fast() {
-        unsafe { env::remove_var("TEST_DSL_FIRST") };
-        unsafe { env::set_var("TEST_DSL_SECOND", "ok") };
-        let err = interpolate_env("${env:TEST_DSL_FIRST} ${env:TEST_DSL_SECOND}").unwrap_err();
+        let err = interpolate_env_with("${env:TEST_DSL_FIRST} ${env:TEST_DSL_SECOND}", &|name| {
+            (name == "TEST_DSL_SECOND").then(|| "ok".to_string())
+        })
+        .unwrap_err();
         assert_eq!(err, "TEST_DSL_FIRST");
-        unsafe { env::remove_var("TEST_DSL_SECOND") };
     }
 
     #[test]
     fn default_value_used_when_var_missing() {
-        unsafe { env::remove_var("TEST_DSL_DEFAULT_VAR") };
-        let result = interpolate_env("uri: ${env:TEST_DSL_DEFAULT_VAR:-localhost}/path").unwrap();
+        let result =
+            interpolate_env_with("uri: ${env:TEST_DSL_DEFAULT_VAR:-localhost}/path", &|_| {
+                None
+            })
+            .unwrap();
         assert_eq!(result, "uri: localhost/path");
     }
 
     #[test]
     fn default_value_not_used_when_var_set() {
-        unsafe { env::set_var("TEST_DSL_OVERRIDE", "production") };
-        let result = interpolate_env("uri: ${env:TEST_DSL_OVERRIDE:-localhost}/path").unwrap();
+        let result =
+            interpolate_env_with("uri: ${env:TEST_DSL_OVERRIDE:-localhost}/path", &|name| {
+                (name == "TEST_DSL_OVERRIDE").then(|| "production".to_string())
+            })
+            .unwrap();
         assert_eq!(result, "uri: production/path");
-        unsafe { env::remove_var("TEST_DSL_OVERRIDE") };
     }
 
     #[test]
     fn empty_default_is_valid() {
-        unsafe { env::remove_var("TEST_DSL_EMPTY_DEFAULT") };
-        let result = interpolate_env("uri: ${env:TEST_DSL_EMPTY_DEFAULT:-}/path").unwrap();
+        let result =
+            interpolate_env_with("uri: ${env:TEST_DSL_EMPTY_DEFAULT:-}/path", &|_| None).unwrap();
         assert_eq!(result, "uri: /path");
     }
 
     #[test]
     fn no_default_still_errors() {
-        unsafe { env::remove_var("TEST_DSL_NO_DEFAULT") };
-        let err = interpolate_env("uri: ${env:TEST_DSL_NO_DEFAULT}/path").unwrap_err();
+        let err =
+            interpolate_env_with("uri: ${env:TEST_DSL_NO_DEFAULT}/path", &|_| None).unwrap_err();
         assert_eq!(err, "TEST_DSL_NO_DEFAULT");
     }
 
     #[test]
     fn default_with_special_chars() {
-        unsafe { env::remove_var("TEST_DSL_SPECIAL") };
-        let result =
-            interpolate_env("uri: ${env:TEST_DSL_SPECIAL:-host.example.com:9092}/path").unwrap();
+        let result = interpolate_env_with(
+            "uri: ${env:TEST_DSL_SPECIAL:-host.example.com:9092}/path",
+            &|_| None,
+        )
+        .unwrap();
         assert_eq!(result, "uri: host.example.com:9092/path");
     }
 
     #[test]
     fn interpolates_value_with_newline_replaced() {
-        unsafe { env::set_var("TEST_DSL_INJECTION", "safe_value\ninjected_key: malicious") };
-        let result = interpolate_env("uri: ${env:TEST_DSL_INJECTION}/path").unwrap();
-        unsafe { env::remove_var("TEST_DSL_INJECTION") };
+        let result = interpolate_env_with("uri: ${env:TEST_DSL_INJECTION}/path", &|name| {
+            (name == "TEST_DSL_INJECTION")
+                .then(|| "safe_value\ninjected_key: malicious".to_string())
+        })
+        .unwrap();
         assert!(
             !result.contains('\n'),
             "interpolated value must not contain newlines"
@@ -495,7 +509,7 @@ mod tests {
 
     #[test]
     fn interpolates_value_replaces_all_control_chars() {
-        // \0 cannot be set via env::set_var (C string terminator).
+        // \0 cannot be placed in the process environment (C string terminator).
         // Test sanitize_env_value directly for all 5 chars including \0.
         let input = "a\rb\nb\0c\u{2028}d\u{2029}e";
         let sanitized = sanitize_env_value(input);
@@ -512,20 +526,21 @@ mod tests {
 
     #[test]
     fn mixed_defaults_and_non_defaults() {
-        unsafe { env::remove_var("TEST_DSL_MIX_A") };
-        unsafe { env::set_var("TEST_DSL_MIX_B", "actual") };
-        let result =
-            interpolate_env("${env:TEST_DSL_MIX_A:-fallback}:${env:TEST_DSL_MIX_B}").unwrap();
+        let result = interpolate_env_with(
+            "${env:TEST_DSL_MIX_A:-fallback}:${env:TEST_DSL_MIX_B}",
+            &|name| (name == "TEST_DSL_MIX_B").then(|| "actual".to_string()),
+        )
+        .unwrap();
         assert_eq!(result, "fallback:actual");
-        unsafe { env::remove_var("TEST_DSL_MIX_B") };
     }
 
     #[test]
     fn escape_full_form_yields_literal() {
-        unsafe { env::set_var("RUST_CAMEL_TEST_ESC_A", "real-val") };
-        let result = interpolate_env("$${env:RUST_CAMEL_TEST_ESC_A}").unwrap();
+        let result = interpolate_env_with("$${env:RUST_CAMEL_TEST_ESC_A}", &|_| {
+            Some("real-val".to_string())
+        })
+        .unwrap();
         assert_eq!(result, "${env:RUST_CAMEL_TEST_ESC_A}");
-        unsafe { env::remove_var("RUST_CAMEL_TEST_ESC_A") };
     }
 
     #[test]
@@ -539,10 +554,12 @@ mod tests {
 
     #[test]
     fn escape_then_placeholder_both_resolve() {
-        unsafe { env::set_var("RUST_CAMEL_TEST_ESC_B", "val-b") };
-        let result = interpolate_env("$${env:LIT} and ${env:RUST_CAMEL_TEST_ESC_B}").unwrap();
+        let result =
+            interpolate_env_with("$${env:LIT} and ${env:RUST_CAMEL_TEST_ESC_B}", &|name| {
+                (name == "RUST_CAMEL_TEST_ESC_B").then(|| "val-b".to_string())
+            })
+            .unwrap();
         assert_eq!(result, "${env:LIT} and val-b");
-        unsafe { env::remove_var("RUST_CAMEL_TEST_ESC_B") };
     }
 
     #[test]

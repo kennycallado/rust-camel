@@ -324,6 +324,7 @@ mod run_otel_flags_tests {
 #[cfg(test)]
 mod run_config_env_tests {
     use super::Cli;
+    use camel_component_api::test_support::EnvGuard;
     use clap::CommandFactory as _;
 
     /// rc-6gqy: `camel run` must honor CAMEL_CONFIG_FILE while keeping the
@@ -331,16 +332,12 @@ mod run_config_env_tests {
     /// test because they mutate shared process env.
     #[test]
     fn run_config_arg_honors_camel_config_file_env() {
-        // SAFETY: single-threaded interaction via this one env-touching test
-        // in this target; restored below before returning.
-        unsafe { std::env::set_var("CAMEL_CONFIG_FILE", "EnvSelected.toml") };
-
-        let parsed = Cli::command()
-            .try_get_matches_from(["camel", "run"])
-            .expect("run parses without explicit --config");
-
-        // Restore process state before asserting on captured values.
-        unsafe { std::env::remove_var("CAMEL_CONFIG_FILE") }
+        let parsed = {
+            let _env_guard = EnvGuard::set("CAMEL_CONFIG_FILE", "EnvSelected.toml");
+            Cli::command()
+                .try_get_matches_from(["camel", "run"])
+                .expect("run parses without explicit --config")
+        };
 
         let run_matches = parsed
             .subcommand_matches("run")
@@ -352,9 +349,12 @@ mod run_config_env_tests {
             "--config must pick up CAMEL_CONFIG_FILE"
         );
 
-        let defaulted_parsed = Cli::command()
-            .try_get_matches_from(["camel", "run"])
-            .expect("run parses when env unset");
+        let defaulted_parsed = {
+            let _env_guard = EnvGuard::remove("CAMEL_CONFIG_FILE");
+            Cli::command()
+                .try_get_matches_from(["camel", "run"])
+                .expect("run parses when env unset")
+        };
         let defaulted = defaulted_parsed
             .subcommand_matches("run")
             .expect("run subcommand matched");

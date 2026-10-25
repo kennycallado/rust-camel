@@ -29,6 +29,9 @@ use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
+use camel_component_api::test_support::EnvGuard;
+
+#[cfg(unix)]
 const LEAK_ROLE: &str = "leak-parent";
 #[cfg(unix)]
 const LEAK_TEST: &str = "leak_parent_then_exit";
@@ -513,9 +516,7 @@ fn outer_stderr_file_capture_unchanged() {
 fn inner_stderr_file_capture_unchanged() {
     let log_dir = std::env::var("BRIDGE_EVIDENCE_LOGDIR")
         .expect("outer process must pass BRIDGE_EVIDENCE_LOGDIR");
-    // SAFETY: process-global env mutation; this re-executed inner process is the
-    // only consumer, so no parallel test observes the change.
-    unsafe { std::env::set_var("CAMEL_BRIDGE_LOG_STDERR", &log_dir) };
+    let _env_guard = EnvGuard::set("CAMEL_BRIDGE_LOG_STDERR", &log_dir);
 
     let dir = tempfile::tempdir().expect("create evidence temp dir");
     let script = fake_bridge_script(dir.path(), false, false, true);

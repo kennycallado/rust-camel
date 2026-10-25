@@ -1,4 +1,5 @@
 use super::*;
+use camel_component_api::test_support::EnvGuard;
 use std::io::Write;
 use std::time::Duration;
 
@@ -6,8 +7,8 @@ use std::time::Duration;
 #[allow(clippy::await_holding_lock)]
 async fn test_from_file_async_completes_without_blocking_executor() {
     // Held across the `.await` because placeholder resolution inside
-    // `from_file_async` reads env vars (see ENV_OVERRIDE_LOCK).
-    let _guard = super::env_lock();
+    // `from_file_async` reads env vars.
+    let _guard = EnvGuard::acquire();
     let mut f = tempfile::NamedTempFile::new().expect("temp file");
     write!(
         f,
@@ -71,17 +72,14 @@ timeout_ms = 99
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn test_from_file_async_with_env_completes() {
-    // Serialize against env-touching tests (see ENV_OVERRIDE_LOCK). Held
-    // across the `.await` because `config::Environment::with_prefix(...)`
+    // Held across the `.await` because `config::Environment::with_prefix(...)`
     // reads env vars deep inside `from_file_async_with_env`.
-    let _guard = super::env_lock();
-
-    // SAFETY: clear potentially leaked env vars from other parallel tests;
-    // this test asserts the file-only value (1000).
-    unsafe {
-        std::env::remove_var("CAMEL_TIMEOUT_MS");
-        std::env::remove_var("CAMEL_PROFILE");
-    }
+    let mut _guard = EnvGuard::acquire();
+    // Clear potentially leaked env vars from other tests; this test asserts
+    // the file-only value (1000).
+    _guard
+        .and_remove("CAMEL_TIMEOUT_MS")
+        .and_remove("CAMEL_PROFILE");
 
     let mut f = tempfile::NamedTempFile::new().expect("temp file");
     write!(

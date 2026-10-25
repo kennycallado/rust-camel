@@ -1,0 +1,18 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "a48ad0bcd2be6d10780fe947b2666fd398e7ba6769ac4af9b901b29dc10c0b00",
+  "expert": "e_gpt",
+  "spec_bless_hash": "c02dd8c3c506d169d253ed7607e9748d4d9e4d584db4440aaae7aa44d9ef87bd",
+  "rounds": [
+    { "round": 1, "verdict": "REJECTED", "findings": 8, "sid": "ses_e8ec0ee3effevtWUwzzddUYiEX" },
+    { "round": 2, "verdict": "REJECTED", "findings": 1, "sid": "ses_e8ebb9f7fffekVgWgnM1JlRODa" },
+    { "round": 3, "verdict": "REJECTED", "findings": 2, "sid": "ses_e8eb90288ffeXCil7DcRlt9PoD" },
+    { "round": 4, "verdict": "BLESS", "findings": 0, "sid": "ses_e8eb85453ffePmB40Rjg7R47lB" }
+  ],
+  "reviewer_loop": [
+    { "verdict": "APPROVE-WITH-FINDINGS", "findings": 5, "sid": "ses_e8ec817f7ffeC1uTCTv78njONw" },
+    { "verdict": "APPROVE", "sid": "ses_e8ec266a2ffeByktMDh3NBQGAj" }
+  ],
+  "date": "2026-10-25"
+}

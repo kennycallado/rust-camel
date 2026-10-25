@@ -3,6 +3,8 @@
 
 use super::*;
 
+use camel_component_api::test_support::EnvGuard;
+
 /// The run function must emit exactly one startup note about the CWD trust
 /// model (INFO: a trust-model disclosure, not a misconfiguration warning).
 #[test]
@@ -178,58 +180,14 @@ fn broken_include_aborts_instead_of_defaults() {
     );
 }
 
-/// Restores an env var to its prior value on drop, so a panicking
-/// assertion cannot leak the test's env mutation into other tests.
-/// Shared with `commands::test::driver_tests` (lean env-hermeticity
-/// tests) via `crate::commands::run::tests`.
-pub(crate) struct EnvVarGuard {
-    key: &'static str,
-    prior: Option<String>,
-}
-
-impl EnvVarGuard {
-    pub(crate) fn unset(key: &'static str) -> Self {
-        let prior = std::env::var(key).ok();
-        // SAFETY: test-scoped; the guard restores the prior value on drop.
-        unsafe { std::env::remove_var(key) };
-        Self { key, prior }
-    }
-
-    pub(crate) fn set(key: &'static str, value: &str) -> Self {
-        let prior = std::env::var(key).ok();
-        // SAFETY: test-scoped; the guard restores the prior value on drop.
-        unsafe { std::env::set_var(key, value) };
-        Self { key, prior }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        match &self.prior {
-            Some(value) => {
-                // SAFETY: test-scoped restore of the value captured at guard creation.
-                unsafe { std::env::set_var(self.key, value) };
-            }
-            None => {
-                // SAFETY: test-scoped; the var was unset before the test.
-                unsafe { std::env::remove_var(self.key) };
-            }
-        }
-    }
-}
-
 /// Env-override activation: `camel run`'s loader must apply allowlisted
 /// `CAMEL_*` overrides on top of the loaded file, not only on route
-/// discovery. `camel-cli` has no env-lock convention (unlike camel-config's
-/// `ENV_OVERRIDE_LOCK`), so this follows the crate's existing guard-only
-/// pattern: the guard restores the prior value even on panic, and the other
-/// `run_tests` tests that assert `timeout_ms` do so on the missing-file
-/// defaults path, which never reads `CAMEL_TIMEOUT_MS`. The residual
-/// cross-test window (a concurrent config load observing this var) is
-/// accepted by the existing convention.
+/// discovery. The canonical guard restores the prior value even on panic,
+/// and the other `run_tests` tests that assert `timeout_ms` do so on the
+/// missing-file defaults path, which never reads `CAMEL_TIMEOUT_MS`.
 #[test]
 fn env_override_applies_to_loaded_config() {
-    let _guard = EnvVarGuard::set("CAMEL_TIMEOUT_MS", "12345");
+    let _guard = EnvGuard::set("CAMEL_TIMEOUT_MS", "12345");
 
     let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
     let path = dir.path().join("Camel.toml");
@@ -247,7 +205,7 @@ fn env_override_applies_to_loaded_config() {
 fn unresolved_placeholder_aborts_instead_of_defaults() {
     // Env hygiene: the referenced var must be unset for the duration of
     // the test; the guard restores any prior value on drop.
-    let _guard = EnvVarGuard::unset("RUST_CAMEL_TEST_RUN_A");
+    let _guard = EnvGuard::remove("RUST_CAMEL_TEST_RUN_A");
 
     let dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap
     let path = dir.path().join("Camel.toml");

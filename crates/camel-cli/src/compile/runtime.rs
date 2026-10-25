@@ -1653,43 +1653,10 @@ fn write_route_report(report: Option<&Path>, value: &RouteReport) -> std::io::Re
 #[cfg(test)]
 mod tests {
     use super::{ArtifactArgError, ArtifactArgs, RouteReport, TRUSTSTORE_ENV, TrailerKind};
+    use camel_component_api::test_support::EnvGuard;
 
     fn argv(args: &[&str]) -> Vec<String> {
         args.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// Serializes every env-var mutation in this module's tests so
-    /// parallel lib tests cannot observe a half-set variable.
-    static TRUSTSTORE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Restores `CAMEL_TRUSTSTORE` to its prior value on drop, so a
-    /// panicking assertion cannot leak the test's env mutation into
-    /// other tests.
-    struct TruststoreEnvRestore(Option<std::ffi::OsString>);
-
-    impl TruststoreEnvRestore {
-        fn set(value: &str) -> Self {
-            let prior = std::env::var_os(TRUSTSTORE_ENV);
-            // SAFETY: test-scoped; the guard restores the prior value on drop.
-            unsafe { std::env::set_var(TRUSTSTORE_ENV, value) };
-            Self(prior)
-        }
-    }
-
-    impl Drop for TruststoreEnvRestore {
-        fn drop(&mut self) {
-            match self.0.take() {
-                Some(prior) => {
-                    // SAFETY: test-scoped restore of the value captured
-                    // at guard creation.
-                    unsafe { std::env::set_var(TRUSTSTORE_ENV, prior) };
-                }
-                None => {
-                    // SAFETY: test-scoped; the var was unset before the test.
-                    unsafe { std::env::remove_var(TRUSTSTORE_ENV) };
-                }
-            }
-        }
     }
 
     /// The four accepted forms parse into their flags.
@@ -1795,8 +1762,7 @@ mod tests {
     /// both, the argument wins.
     #[test]
     fn artifact_args_resolve_env_truststore() {
-        let _env_lock = TRUSTSTORE_ENV_LOCK.lock().expect("env lock poisoned");
-        let _env = TruststoreEnvRestore::set("/deploy/env-truststore.keys");
+        let _env = EnvGuard::set(TRUSTSTORE_ENV, "/deploy/env-truststore.keys");
 
         // (a) No argument: the env var supplies the truststore.
         let from_env = ArtifactArgs::parse(&argv(&[])).expect("bare run parses");

@@ -1406,6 +1406,7 @@ name = "camel-bridge"
 version = "0.60.0"
 dependencies = [
  "bytes",
+ "camel-component-api",
  "dirs",
  "flate2",
  "hex",
@@ -2286,6 +2287,7 @@ dependencies = [
  "async-trait",
  "camel-api",
  "camel-bean",
+ "camel-component-api",
  "camel-component-log",
  "camel-component-timer",
  "camel-core",
@@ -2635,6 +2637,7 @@ version = "0.60.0"
 dependencies = [
  "ariadne",
  "camel-api",
+ "camel-component-api",
  "humantime",
  "jsonschema",
  "noyalib",

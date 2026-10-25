@@ -1,5 +1,5 @@
 use super::*;
-use crate::commands::run::tests::EnvVarGuard;
+use camel_component_api::test_support::EnvGuard;
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -1932,7 +1932,7 @@ async fn lean_ignores_ambient_env() {
     let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
     // The guard restores the prior value on drop, so a panicking
     // assertion cannot leak the ambient value into other tests.
-    let _env = EnvVarGuard::set("LEAN_T", "ambient");
+    let _env = EnvGuard::set("LEAN_T", "ambient");
     let doc = parse_doc_at(&doc_path);
     let defs = match runner::load_routes(&doc, &dir).await {
         Ok(defs) => defs,
@@ -2264,7 +2264,7 @@ async fn ambient_only_stays_unresolved() {
     let _guard = CleanupPaths(vec![route, doc_path.clone(), dir.clone()]);
     // The guard restores the prior value on drop, so a panicking
     // assertion cannot leak the ambient value into other tests.
-    let _env = EnvVarGuard::set("AMBIENT_ONLY", "ambient");
+    let _env = EnvGuard::set("AMBIENT_ONLY", "ambient");
     let doc = parse_doc_at(&doc_path);
     let err = match runner::load_routes(&doc, &dir).await {
         Ok(_) => panic!("ambient-only variable must stay unresolved"),

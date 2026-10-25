@@ -12,6 +12,7 @@
 use std::collections::BTreeMap;
 
 use camel_api::CamelError;
+use camel_component_api::test_support::EnvGuard;
 // Only the demand-gated sql boot-freshness module uses this helper.
 #[cfg(feature = "sql")]
 use camel_component_api::test_support::timeout_wait;
@@ -156,9 +157,9 @@ path = "policies/demo.wasm"
 #[tokio::test]
 async fn boot_hermetic_env_not_resolved_from_process() {
     // The variable exists only in the process environment; the empty
-    // layered environment must not resolve it (edition-2024 unsafe
-    // env APIs, same wrapping as the camel-config properties tests).
-    unsafe { std::env::set_var("RC_6BSF_HERMETIC", "leak") };
+    // layered environment must not resolve it. The canonical guard
+    // serializes the mutation and restores the prior state on drop.
+    let env = EnvGuard::set("RC_6BSF_HERMETIC", "leak");
     let route = r#"
 routes:
   - id: hermetic
@@ -168,7 +169,7 @@ routes:
 "#;
     let (dir, doc) = project("# minimal\n", Some(("routes.yaml", route)), DOC);
     let result = boot_scenario(&doc, dir.path(), &empty_env()).await;
-    unsafe { std::env::remove_var("RC_6BSF_HERMETIC") };
+    drop(env);
     let err = expect_boot_error(
         result,
         "the process environment must not resolve scenario placeholders",

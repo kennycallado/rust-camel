@@ -23,6 +23,7 @@ use camel_api::{CamelError, Value};
 use camel_auth::native_auth::{NativeCredential, NativeCredentialSecret, NativeCredentialStore};
 use camel_auth::{RolePolicy, StaticTokenAuthenticator, TokenAuthenticator};
 use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_component_api::test_support::EnvGuard;
 use camel_component_http::HttpComponent;
 use camel_config::CamelConfig;
 use camel_config::config::NativeAuthConfig;
@@ -100,10 +101,10 @@ fn native_store_from_config(
     NativeCredentialStore::try_new(credentials)
 }
 
-/// Build and start an HTTP route protected by a `RolePolicy` over the store
-/// synthesized from `native`. Mirrors `build_secure_route` in `http_test.rs`.
+/// Build and start an HTTP route protected by a `RolePolicy` over `store`.
+/// Mirrors `build_secure_route` in `http_test.rs`.
 async fn build_secure_route(
-    native: &NativeAuthConfig,
+    store: NativeCredentialStore,
     path: &str,
     required_roles: Vec<String>,
     sources: Vec<CredentialSource>,
@@ -116,7 +117,6 @@ async fn build_secure_route(
         .build()
         .await;
 
-    let store = native_store_from_config(native).expect("store builds from config");
     let authenticator: Arc<dyn TokenAuthenticator> = Arc::new(StaticTokenAuthenticator::new(store));
 
     // The kernel compiles plans against the provider registry (sole-provider
@@ -169,10 +169,6 @@ async fn two_principals_enforce_roles_e2e() {
     const OPS_TOKEN: &str = "ops-secret-token";
     const SVC_TOKEN: &str = "svc-plaintext-token";
 
-    // SAFETY: unique env var name, no other test reads or writes it; the store
-    // resolves it synchronously during this test before it is removed.
-    unsafe { std::env::set_var(ENV_VAR, OPS_TOKEN) };
-
     let toml_str = format!(
         r#"
 [security.native]
@@ -203,8 +199,15 @@ roles = ["service"]
         "two credentials must deserialize"
     );
 
+    // The credential store resolves `secret_env` eagerly, so the env window
+    // only needs to cover the synchronous synthesis below.
+    let store = {
+        let _env = EnvGuard::set(ENV_VAR, OPS_TOKEN);
+        native_store_from_config(native).expect("store builds from config")
+    };
+
     let (_h, port) = build_secure_route(
-        native,
+        store,
         "secure",
         vec!["admin".to_string()],
         vec![CredentialSource::AuthorizationHeader],
@@ -239,9 +242,6 @@ roles = ["service"]
         .await
         .unwrap();
     assert_eq!(resp.status(), 401, "unknown token must be unauthenticated");
-
-    // SAFETY: see set_var above; restore a clean environment.
-    unsafe { std::env::remove_var(ENV_VAR) };
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -269,8 +269,9 @@ roles = ["reader"]
         "api_key-only config must have no credentials entries"
     );
 
+    let store = native_store_from_config(native).expect("store builds from config");
     let (_h, port) = build_secure_route(
-        native,
+        store,
         "apikey",
         vec!["reader".to_string()],
         vec![CredentialSource::Header {

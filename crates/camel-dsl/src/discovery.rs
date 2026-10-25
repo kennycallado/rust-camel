@@ -906,7 +906,7 @@ fn materialize_templated_routes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
+    use camel_component_api::test_support::EnvGuard;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1004,7 +1004,7 @@ mod tests {
 
     #[test]
     fn discovers_route_with_env_var_in_uri_yaml() {
-        unsafe { env::set_var("TEST_DISC_TIMER_NAME", "my-tick") };
+        let _guard = EnvGuard::set("TEST_DISC_TIMER_NAME", "my-tick");
 
         let mut f = NamedTempFile::with_suffix(".yaml").unwrap();
         writeln!(f, "routes:").unwrap();
@@ -1017,13 +1017,11 @@ mod tests {
         let routes = discover_routes(&[pattern]).unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].from_uri(), "timer:my-tick");
-
-        unsafe { env::remove_var("TEST_DISC_TIMER_NAME") };
     }
 
     #[test]
     fn discover_fails_when_env_var_missing_yaml() {
-        unsafe { env::remove_var("TEST_DISC_MISSING_VAR") };
+        let _guard = EnvGuard::remove("TEST_DISC_MISSING_VAR");
 
         let mut f = NamedTempFile::with_suffix(".yaml").unwrap();
         writeln!(f, "routes:").unwrap();
@@ -1109,7 +1107,7 @@ mod tests {
     fn unsupported_extension_with_env_var_returns_unsupported_not_env() {
         // .xml file containing a real env var reference must fail with
         // UnsupportedExtension, NOT Env — env interpolation must not run.
-        unsafe { env::remove_var("TASK3_SHOULD_NOT_READ_ENV") };
+        let _guard = EnvGuard::remove("TASK3_SHOULD_NOT_READ_ENV");
 
         let f = NamedTempFile::with_suffix(".xml").unwrap();
         let content = "content: ${env:TASK3_SHOULD_NOT_READ_ENV}";
@@ -1135,7 +1133,7 @@ mod tests {
     fn broad_glob_json_with_missing_env_returns_gate_not_env() {
         // Broad glob matching .json with missing env var must fail with
         // JsonRequiresExplicitPattern, NOT Env — gate must fire before interpolation.
-        unsafe { env::remove_var("TASK3_SHOULD_NOT_READ_ENV") };
+        let _guard = EnvGuard::remove("TASK3_SHOULD_NOT_READ_ENV");
 
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("route.json");
@@ -1241,7 +1239,7 @@ mod tests {
         // An env var containing a raw double-quote will break JSON parsing
         // because interpolation is textual — the quote is injected verbatim
         // into the JSON string, producing invalid JSON.
-        unsafe { env::set_var("TEST_JSON_BAD_QUOTE", r#"has"quote"#) };
+        let _guard = EnvGuard::set("TEST_JSON_BAD_QUOTE", r#"has"quote"#);
 
         let mut f = NamedTempFile::with_suffix(".json").unwrap();
         write!(
@@ -1274,13 +1272,11 @@ mod tests {
             }
             other => panic!("expected DiscoveryError::Json, got: {:?}", other),
         }
-
-        unsafe { env::remove_var("TEST_JSON_BAD_QUOTE") };
     }
 
     #[test]
     fn json_env_interpolation_with_valid_value_succeeds() {
-        unsafe { env::set_var("TEST_JSON_GOOD_VAL", "tick") };
+        let _guard = EnvGuard::set("TEST_JSON_GOOD_VAL", "tick");
 
         let mut f = NamedTempFile::with_suffix(".json").unwrap();
         write!(
@@ -1301,8 +1297,6 @@ mod tests {
         let routes = discover_routes(&[pattern]).unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].from_uri(), "timer:tick");
-
-        unsafe { env::remove_var("TEST_JSON_GOOD_VAL") };
     }
 
     // ── Template-aware discovery ─────────────────────────────────────
@@ -2103,7 +2097,7 @@ routes:
 
     #[test]
     fn env_injected_entry_never_reads_process_env() {
-        unsafe { env::set_var("RC_6BSF_PROC_ONLY", "leak") };
+        let _guard = EnvGuard::set("RC_6BSF_PROC_ONLY", "leak");
 
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("proc.yaml");
@@ -2135,8 +2129,6 @@ routes:
             }
             other => panic!("expected Env error, got: {other:?}"),
         }
-
-        unsafe { env::remove_var("RC_6BSF_PROC_ONLY") };
     }
 
     #[test]

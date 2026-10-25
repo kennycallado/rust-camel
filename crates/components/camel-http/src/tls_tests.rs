@@ -5,10 +5,10 @@
 use super::*;
 use crate::HttpComponent;
 use crate::config::TlsConfig;
-use crate::lock_ca_store_test_mutex;
 use crate::tls_harness::*;
 use camel_component_api::Component;
 use camel_component_api::NoOpComponentContext;
+use camel_component_api::test_support::EnvGuard;
 
 #[test]
 fn test_webpki_fallback_config_builds_client() {
@@ -368,10 +368,10 @@ fn test_no_verify_verifier_accepts_any_certificate() {
 #[cfg(not(target_vendor = "apple"))]
 #[test]
 fn test_build_client_falls_back_on_empty_platform_ca_store() {
-    // Serialize against the primary-path test: the env window below
-    // is process-visible and would force its build through the
-    // fallback too.
-    let _ca_guard = lock_ca_store_test_mutex();
+    // The canonical env guard serializes against the primary-path
+    // test: the env window below is process-visible and would force
+    // its build through the fallback too.
+    let mut env = EnvGuard::acquire();
     // Simulate a CA-less platform (Android/Termux, rc-3j4mq):
     // openssl-probe honors SSL_CERT_FILE/SSL_CERT_DIR only when the
     // paths EXIST, so an existing-but-empty file plus an
@@ -386,39 +386,19 @@ fn test_build_client_falls_back_on_empty_platform_ca_store() {
     let empty_ca_file = empty_ca_dir.path().join("empty-ca-bundle.pem");
     std::fs::write(&empty_ca_file, b"").expect("write empty CA file"); // allow-unwrap(test)
 
-    // Safety: test-only mutation of process env vars. This test does
-    // not spawn threads that read these vars outside the guarded
-    // window below; the guard restores previous values before return.
-    let (prev_file, prev_dir) = unsafe {
-        let prev = (
-            std::env::var_os("SSL_CERT_FILE"),
-            std::env::var_os("SSL_CERT_DIR"),
-        );
-        std::env::set_var("SSL_CERT_FILE", &empty_ca_file);
-        std::env::set_var("SSL_CERT_DIR", empty_ca_dir.path());
-        prev
-    };
+    // The guard records the prior values and restores them on drop,
+    // including during unwinding.
+    env.and_set("SSL_CERT_FILE", &empty_ca_file);
+    env.and_set("SSL_CERT_DIR", empty_ca_dir.path());
 
-    let result = std::panic::catch_unwind(|| {
-        let fallbacks_before = build_client_fallback_count();
-        let _client = build_client(&HttpConfig::default(), None).expect("client must build"); // allow-unwrap(test)
-        build_client_fallback_count() - fallbacks_before
-    });
+    let fallbacks_before = build_client_fallback_count();
+    let _client = build_client(&HttpConfig::default(), None)
+        .expect("build_client must not panic on an empty CA store"); // allow-unwrap(test)
+    let fallbacks_taken = build_client_fallback_count() - fallbacks_before;
 
     // Restore FIRST so the guard holds even if assertions fail.
-    // Safety: restoring the previously-captured values.
-    unsafe {
-        match prev_file {
-            Some(v) => std::env::set_var("SSL_CERT_FILE", v),
-            None => std::env::remove_var("SSL_CERT_FILE"),
-        }
-        match prev_dir {
-            Some(v) => std::env::set_var("SSL_CERT_DIR", v),
-            None => std::env::remove_var("SSL_CERT_DIR"),
-        }
-    }
+    drop(env);
 
-    let fallbacks_taken = result.expect("build_client must not panic on an empty CA store"); // allow-unwrap(test)
     assert_eq!(
         fallbacks_taken, 1,
         "an empty platform CA store must route exactly one build through \
@@ -461,40 +441,23 @@ fn test_build_client_primary_path_when_platform_store_non_empty() {
     // (Linux — including genuinely CA-less ones). Apple ignores the
     // env vars but its verifier is infallible, so the no-fallback
     // assertion holds on every host either way (rc-97uah).
-    // Serialized against the CA-less sibling test by the CA-store
-    // mutex (its env window forces the fallback).
-    let _ca_guard = lock_ca_store_test_mutex();
+    // Serialized against the CA-less sibling test by the canonical env
+    // guard (its env window forces the fallback).
+    let mut env = EnvGuard::acquire();
     let ca_dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
     let ca_file = ca_dir.path().join("hermetic-root.pem");
     std::fs::write(&ca_file, HERMETIC_TEST_ROOT_PEM).expect("write fixture root"); // allow-unwrap(test)
 
-    // Safety: test-only mutation of process env vars, restored
+    // The guard records the prior values and restores them on drop,
     // before any assertion below.
-    let (prev_file, prev_dir) = unsafe {
-        let prev = (
-            std::env::var_os("SSL_CERT_FILE"),
-            std::env::var_os("SSL_CERT_DIR"),
-        );
-        std::env::set_var("SSL_CERT_FILE", &ca_file);
-        std::env::set_var("SSL_CERT_DIR", ca_dir.path());
-        prev
-    };
+    env.and_set("SSL_CERT_FILE", &ca_file);
+    env.and_set("SSL_CERT_DIR", ca_dir.path());
 
     let fallbacks_before = build_client_fallback_count();
     let _client = build_client(&HttpConfig::default(), None).expect("client must build"); // allow-unwrap(test)
     let fallbacks_taken = build_client_fallback_count() - fallbacks_before;
 
-    // Safety: restoring the previously-captured values.
-    unsafe {
-        match prev_file {
-            Some(v) => std::env::set_var("SSL_CERT_FILE", v),
-            None => std::env::remove_var("SSL_CERT_FILE"),
-        }
-        match prev_dir {
-            Some(v) => std::env::set_var("SSL_CERT_DIR", v),
-            None => std::env::remove_var("SSL_CERT_DIR"),
-        }
-    }
+    drop(env);
 
     assert_eq!(
         fallbacks_taken, 0,

@@ -16,6 +16,11 @@ use camel_api::{ComponentMetrics, MetricsCollector};
 
 use crate::{HealthCheckRegistry, RuntimeObservability};
 
+/// Serialized process-environment mutation guard for tests.
+pub mod env;
+
+pub use env::{EnvGuard, env_lock, env_try_lock};
+
 /// Shared HTTP/1.1 test harness (framing, recording, routing).
 pub mod http;
 

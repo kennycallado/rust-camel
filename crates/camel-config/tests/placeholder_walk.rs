@@ -2,26 +2,11 @@
 //! walk with strict/plain leaf dispatch. These cover the public walk API in
 //! isolation; the rewired load path is covered by `placeholder_e2e.rs`.
 
+use camel_component_api::test_support::EnvGuard;
 use camel_config::config::resolve_tree_placeholders;
 use toml::Value;
 
 mod common;
-
-/// Sets a uniquely-named env var and removes it on drop (panic-safe restore).
-struct EnvCleanup(&'static str);
-
-impl EnvCleanup {
-    fn set(name: &'static str, value: &str) -> Self {
-        unsafe { std::env::set_var(name, value) };
-        EnvCleanup(name)
-    }
-}
-
-impl Drop for EnvCleanup {
-    fn drop(&mut self) {
-        unsafe { std::env::remove_var(self.0) };
-    }
-}
 
 fn tree(raw: &str) -> Value {
     toml::from_str(raw).expect("test fixture must be valid TOML")
@@ -44,8 +29,7 @@ fn leaf<'a>(root: &'a Value, keys: &[&str]) -> &'a str {
 
 #[test]
 fn strict_leaf_resolves_and_fails_closed() {
-    let _guard = common::env_lock();
-    let _env = EnvCleanup::set("RUST_CAMEL_TEST_WALK_A", "tok-123");
+    let _env = EnvGuard::set("RUST_CAMEL_TEST_WALK_A", "tok-123");
     let mut cfg = tree(
         r#"[security.native]
         bearer_token = "${env:RUST_CAMEL_TEST_WALK_A}"
@@ -72,8 +56,7 @@ fn strict_leaf_resolves_and_fails_closed() {
 
 #[test]
 fn plain_leaf_uniform_fail_closed() {
-    let _guard = common::env_lock();
-    unsafe { std::env::remove_var("RUST_CAMEL_TEST_WALK_B") };
+    let _guard = EnvGuard::remove("RUST_CAMEL_TEST_WALK_B");
     let mut cfg = tree(
         r#"[observability.otel]
         endpoint = "${env:RUST_CAMEL_TEST_WALK_B}"
@@ -102,14 +85,15 @@ fn plain_leaf_passthrough_without_markers() {
 
 #[test]
 fn strict_leaf_matrix_covers_spec_scenarios() {
-    let _guard = common::env_lock();
-    unsafe { std::env::remove_var("RUST_CAMEL_TEST_MTX_A") };
-    unsafe { std::env::remove_var("RUST_CAMEL_TEST_MTX_C") };
-    let _b = EnvCleanup::set("RUST_CAMEL_TEST_MTX_B", "oidc-secret-1");
-    let _d = EnvCleanup::set("RUST_CAMEL_TEST_MTX_D", "postgres://db/main");
-    let _e = EnvCleanup::set("RUST_CAMEL_TEST_MTX_E", "extra-pass-1");
-    let _f = EnvCleanup::set("RUST_CAMEL_TEST_MTX_F", "redis://idem:6379");
-    let _g = EnvCleanup::set("RUST_CAMEL_TEST_MTX_G", "sentinel-pass-1");
+    let mut _guard = EnvGuard::acquire();
+    _guard
+        .and_remove("RUST_CAMEL_TEST_MTX_A")
+        .and_remove("RUST_CAMEL_TEST_MTX_C")
+        .and_set("RUST_CAMEL_TEST_MTX_B", "oidc-secret-1")
+        .and_set("RUST_CAMEL_TEST_MTX_D", "postgres://db/main")
+        .and_set("RUST_CAMEL_TEST_MTX_E", "extra-pass-1")
+        .and_set("RUST_CAMEL_TEST_MTX_F", "redis://idem:6379")
+        .and_set("RUST_CAMEL_TEST_MTX_G", "sentinel-pass-1");
 
     let mut cfg = tree(
         r#"
@@ -162,8 +146,7 @@ fn strict_leaf_matrix_covers_spec_scenarios() {
 
 #[test]
 fn keycloak_secret_fails_closed_when_missing() {
-    let _guard = common::env_lock();
-    unsafe { std::env::remove_var("RUST_CAMEL_TEST_KC_MISS") };
+    let _guard = EnvGuard::remove("RUST_CAMEL_TEST_KC_MISS");
     let mut cfg = tree(
         r#"[security.keycloak]
         client_secret = "${env:RUST_CAMEL_TEST_KC_MISS}"
@@ -231,9 +214,10 @@ fn standalone_dollar_converts_on_all_leaf_classes() {
 
 #[test]
 fn escaped_full_form_rejected_on_strict_leaves() {
-    let _guard = common::env_lock();
-    unsafe { std::env::remove_var("RUST_CAMEL_TEST_WALK_C") };
-    unsafe { std::env::remove_var("RUST_CAMEL_TEST_WALK_E") };
+    let mut _guard = EnvGuard::acquire();
+    _guard
+        .and_remove("RUST_CAMEL_TEST_WALK_C")
+        .and_remove("RUST_CAMEL_TEST_WALK_E");
     let mut security = tree(
         r#"[security.native]
         bearer_token = "$${env:RUST_CAMEL_TEST_WALK_C}"
@@ -261,8 +245,7 @@ fn escaped_full_form_rejected_on_strict_leaves() {
 
 #[test]
 fn escaped_full_form_literal_on_plain_leaves() {
-    let _guard = common::env_lock();
-    unsafe { std::env::remove_var("RUST_CAMEL_TEST_WALK_D") };
+    let _guard = EnvGuard::remove("RUST_CAMEL_TEST_WALK_D");
     let mut cfg = tree(r#"log_level = "$${env:RUST_CAMEL_TEST_WALK_D}""#);
     resolve_tree_placeholders(&mut cfg).expect("escaped form is legal on plain leaves");
     assert_eq!(leaf(&cfg, &["log_level"]), "${env:RUST_CAMEL_TEST_WALK_D}");
@@ -270,10 +253,11 @@ fn escaped_full_form_literal_on_plain_leaves() {
 
 #[test]
 fn repository_leaves_follow_strict_gate() {
-    let _guard = common::env_lock();
+    let mut _guard = EnvGuard::acquire();
     // (a) Both repository leaves resolve when their vars are set.
-    let _u = EnvCleanup::set("RUST_CAMEL_TEST_REPO_U", "redis://idem:6379");
-    let _p = EnvCleanup::set("RUST_CAMEL_TEST_REPO_P", "sentinel-pass-1");
+    _guard
+        .and_set("RUST_CAMEL_TEST_REPO_U", "redis://idem:6379")
+        .and_set("RUST_CAMEL_TEST_REPO_P", "sentinel-pass-1");
     let mut cfg = tree(
         r#"
         [idempotent_repo]
@@ -289,11 +273,8 @@ fn repository_leaves_follow_strict_gate() {
         leaf(&cfg, &["cache_repo", "sentinel_password"]),
         "sentinel-pass-1"
     );
-    drop(_u);
-    drop(_p);
-
     // (b) Unset var on a repository leaf fails closed naming the field.
-    unsafe { std::env::remove_var("RUST_CAMEL_TEST_REPO_P") };
+    _guard.and_remove("RUST_CAMEL_TEST_REPO_P");
     let mut cfg = tree(
         r#"[cache_repo]
         sentinel_password = "${env:RUST_CAMEL_TEST_REPO_P}"
@@ -343,8 +324,7 @@ fn repository_leaves_follow_strict_gate() {
 
 #[test]
 fn strict_dispatch_is_exhaustive_over_security_subtree() {
-    let _guard = common::env_lock();
-    unsafe { std::env::remove_var("RUST_CAMEL_TEST_GUARD_A") };
+    let _guard = EnvGuard::remove("RUST_CAMEL_TEST_GUARD_A");
     let mut cfg = tree(
         r#"[security.brand_new_section.deep]
         token = "${env:RUST_CAMEL_TEST_GUARD_A}"
@@ -395,8 +375,7 @@ fn strict_residual_rejects_malformed_dollar_forms() {
 
 #[test]
 fn valid_new_syntax_passes_strict_gate() {
-    let _guard = common::env_lock();
-    let _env = EnvCleanup::set("RUST_CAMEL_TEST_GUARD_B", "kc-secret-9");
+    let _env = EnvGuard::set("RUST_CAMEL_TEST_GUARD_B", "kc-secret-9");
     let mut cfg = tree(
         r#"[security.keycloak]
         client_secret = "${env:RUST_CAMEL_TEST_GUARD_B}"

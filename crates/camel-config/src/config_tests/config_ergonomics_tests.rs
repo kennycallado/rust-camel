@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::log_capture::capture_warns;
+use camel_component_api::test_support::EnvGuard;
 
 fn parse_table(toml_str: &str) -> toml::Value {
     toml::from_str(toml_str).expect("fixture must be valid TOML")
@@ -26,8 +27,7 @@ fn include_base_dir_maps_bare_filename_to_current_dir() {
 #[test]
 fn from_file_bare_relative_filename_resolves_includes() {
     let _cwd_guard = super::cwd_lock();
-    let _env_guard = env_lock();
-    unset_env("CAMEL_PROFILE");
+    let _env_guard = EnvGuard::remove("CAMEL_PROFILE");
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("root.toml"), "include = [\"x.toml\"]\n").unwrap();
@@ -45,8 +45,7 @@ fn from_file_bare_relative_filename_resolves_includes() {
 #[test]
 fn from_file_async_bare_relative_filename_resolves_includes() {
     let _cwd_guard = super::cwd_lock();
-    let _env_guard = env_lock();
-    unset_env("CAMEL_PROFILE");
+    let _env_guard = EnvGuard::remove("CAMEL_PROFILE");
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("root.toml"), "include = [\"x.toml\"]\n").unwrap();
@@ -129,8 +128,7 @@ fn unknown_top_level_table_lands_in_extra() {
 
 #[test]
 fn unset_camel_profile_with_profile_like_sections_warns_once() {
-    let _env_guard = env_lock();
-    unset_env("CAMEL_PROFILE");
+    let _env_guard = EnvGuard::remove("CAMEL_PROFILE");
 
     let tree = parse_table(
         r#"
@@ -159,8 +157,7 @@ log_level = "warn"
 
 #[test]
 fn no_default_section_means_no_profile_structure_no_warn() {
-    let _env_guard = env_lock();
-    unset_env("CAMEL_PROFILE");
+    let _env_guard = EnvGuard::remove("CAMEL_PROFILE");
 
     // Profile-like top-level section WITHOUT [default]: nothing can be
     // dropped (apply_profile_lenient keeps everything), so warning would
@@ -191,8 +188,7 @@ log_level = "warn"
 
 #[test]
 fn active_camel_profile_suppresses_section_warn() {
-    let _env_guard = env_lock();
-    set_env("CAMEL_PROFILE", "staging");
+    let _env_guard = EnvGuard::set("CAMEL_PROFILE", "staging");
 
     let tree = parse_table(
         r#"
@@ -208,10 +204,8 @@ log_level = "warn"
         build_from_toml_value_inner(tree, None, false, Vec::new(), &super::ambient_lookup())
     });
 
-    unset_env("CAMEL_PROFILE");
     let cfg = result.expect("staging profile must load");
     drop(cfg);
-    drop(_env_guard);
 
     assert!(
         !warns.iter().any(|w| w.contains("CAMEL_PROFILE")),
@@ -223,22 +217,15 @@ log_level = "warn"
 
 #[test]
 fn camel_profile_and_config_file_never_reported_as_ignored() {
-    let _env_guard = env_lock();
-    set_env("CAMEL_PROFILE", "qa"); // flat tree → lenient keep-as-is
-    set_env("CAMEL_CONFIG_FILE", "/nonexistent/tripwire-path.toml");
-    set_env("CAMEL_ERGONOMICS_TYPO_PROBE", "1"); // positive control
+    let mut env_guard = EnvGuard::set("CAMEL_PROFILE", "qa"); // flat tree → lenient keep-as-is
+    env_guard
+        .and_set("CAMEL_CONFIG_FILE", "/nonexistent/tripwire-path.toml")
+        .and_set("CAMEL_ERGONOMICS_TYPO_PROBE", "1"); // positive control
 
     let tree = parse_table("log_level = \"debug\"");
     let (_, warns) = capture_warns(|| {
         build_from_toml_value_inner(tree, None, true, Vec::new(), &super::ambient_lookup())
     });
-
-    // unset_env requires ENV_OVERRIDE_LOCK to be held: restore env while
-    // the guard is alive, only then release it.
-    unset_env("CAMEL_PROFILE");
-    unset_env("CAMEL_CONFIG_FILE");
-    unset_env("CAMEL_ERGONOMICS_TYPO_PROBE");
-    drop(_env_guard);
 
     assert!(
         warns

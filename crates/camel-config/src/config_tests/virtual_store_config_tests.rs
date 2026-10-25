@@ -9,6 +9,7 @@
 //! `CAMEL_*` override merge, no include expansion.
 
 use super::*;
+use camel_component_api::test_support::EnvGuard;
 
 /// Parse TOML text into the merged-tree shape the seam consumes.
 fn merged(toml_text: &str) -> toml::Value {
@@ -23,8 +24,7 @@ fn ambient(name: &str) -> Option<String> {
 
 #[test]
 fn virtual_store_env_resolves_through_injected_lookup() {
-    let _guard = super::env_lock();
-    unset_env("VS_BEARER");
+    let _env_guard = EnvGuard::remove("VS_BEARER");
     // The injected lookup is the ONLY source: the name is unset in the
     // ambient environment, so resolution proves lookup exclusivity.
     let lookup = |name: &str| match name {
@@ -54,8 +54,7 @@ bearer_token = "${env:VS_BEARER}"
 
 #[test]
 fn virtual_store_unset_env_fails_closed() {
-    let _guard = super::env_lock();
-    unset_env("VS_BEARER");
+    let _env_guard = EnvGuard::remove("VS_BEARER");
     let err = CamelConfig::from_toml_value_with_env(
         merged(
             r#"
@@ -80,9 +79,8 @@ bearer_token = "${env:VS_BEARER}"
 
 #[test]
 fn virtual_store_does_not_merge_ambient_camel_overrides() {
-    let _guard = super::env_lock();
-    set_env("CAMEL_LOG_LEVEL", "warn");
-    set_env("CAMEL_PROFILE", "prod");
+    let mut env_guard = EnvGuard::set("CAMEL_LOG_LEVEL", "warn");
+    env_guard.and_set("CAMEL_PROFILE", "prod");
     let config = CamelConfig::from_toml_value_with_env(
         // Final merged shape: a flat tree, profile selection already
         // performed at compile time.
@@ -95,8 +93,6 @@ fn virtual_store_does_not_merge_ambient_camel_overrides() {
         "ambient CAMEL_LOG_LEVEL must never override the embedded value"
     );
     assert!(!config.watch, "embedded watch flag is authoritative");
-    unset_env("CAMEL_LOG_LEVEL");
-    unset_env("CAMEL_PROFILE");
 }
 
 #[test]

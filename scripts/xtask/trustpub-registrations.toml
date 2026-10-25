@@ -19,10 +19,6 @@ name = "camel-bean-macros"
 state = "registered"
 
 [[crates]]
-name = "camel-bridge"
-state = "registered"
-
-[[crates]]
 name = "camel-endpoint-macros"
 state = "registered"
 
@@ -52,10 +48,6 @@ state = "registered"
 
 [[crates]]
 name = "camel-language-api"
-state = "registered"
-
-[[crates]]
-name = "camel-lint"
 state = "registered"
 
 [[crates]]
@@ -91,11 +83,11 @@ name = "camel-language-xpath"
 state = "registered"
 
 [[crates]]
-name = "camel-lsp"
+name = "camel-component-api"
 state = "registered"
 
 [[crates]]
-name = "camel-component-api"
+name = "camel-bridge"
 state = "registered"
 
 [[crates]]
@@ -163,6 +155,10 @@ name = "camel-component-timer"
 state = "registered"
 
 [[crates]]
+name = "camel-lint"
+state = "registered"
+
+[[crates]]
 name = "camel-master"
 state = "registered"
 
@@ -172,6 +168,10 @@ state = "registered"
 
 [[crates]]
 name = "camel-xslt"
+state = "registered"
+
+[[crates]]
+name = "camel-lsp"
 state = "registered"
 
 [[crates]]

@@ -72,6 +72,8 @@
   run: cargo xtask lint-no-free-port
 - name: lint-no-raw-http-test-server
   run: cargo xtask lint-no-raw-http-test-server
+- name: lint-no-env-mutation-unguarded
+  run: cargo xtask lint-no-env-mutation-unguarded
 - name: lint-unbounded-wait
   run: cargo xtask lint-unbounded-wait
 - name: lint-ignore

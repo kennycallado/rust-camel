@@ -1,4 +1,5 @@
 use super::*;
+use camel_component_api::test_support::EnvGuard;
 
 /// Loads a `CamelConfig` from TOML text through the real config-building
 /// path (profile handling, deserialization, placeholder resolution, validation).
@@ -9,8 +10,7 @@ fn load_config(toml_text: &str) -> Result<CamelConfig, ConfigError> {
 
 #[test]
 fn security_bearer_token_env_resolves() {
-    let _guard = super::env_lock();
-    set_env("AUTH_TOKEN", "real-secret");
+    let _env_guard = EnvGuard::set("AUTH_TOKEN", "real-secret");
     let config = load_config(
         r#"
 [security.native]
@@ -27,13 +27,11 @@ bearer_token = "${env:AUTH_TOKEN}"
             .and_then(|n| n.bearer_token.as_deref()),
         Some("real-secret")
     );
-    unset_env("AUTH_TOKEN");
 }
 
 #[test]
 fn security_unset_env_fails_closed() {
-    let _guard = super::env_lock();
-    unset_env("AUTH_TOKEN");
+    let _env_guard = EnvGuard::remove("AUTH_TOKEN");
     let err = load_config(
         r#"
 [security.native]
@@ -55,8 +53,7 @@ bearer_token = "${env:AUTH_TOKEN}"
 
 #[test]
 fn security_explicit_default_resolves() {
-    let _guard = super::env_lock();
-    unset_env("AUTH_TOKEN");
+    let _env_guard = EnvGuard::remove("AUTH_TOKEN");
     let config = load_config(
         r#"
 [security.native]
@@ -82,8 +79,7 @@ bearer_token = "${env:AUTH_TOKEN:-fallback-secret}"
 
 #[test]
 fn noncredential_security_leaf_resolves() {
-    let _guard = super::env_lock();
-    unset_env("KC_REALM");
+    let _env_guard = EnvGuard::remove("KC_REALM");
     let config = load_config(
         r#"
 [security.keycloak]
@@ -99,9 +95,8 @@ client_secret = "secret"
 
 #[test]
 fn datasource_leaves_resolve() {
-    let _guard = super::env_lock();
-    set_env("DB_URL", "postgresql://localhost:5432/db");
-    set_env("SURREAL_PASS", "s3cret");
+    let mut env_guard = EnvGuard::set("DB_URL", "postgresql://localhost:5432/db");
+    env_guard.and_set("SURREAL_PASS", "s3cret");
     let config = load_config(
         r#"
 [datasources.main]
@@ -118,17 +113,15 @@ password = "${env:SURREAL_PASS}"
         ds.extra.get("password").and_then(|v| v.as_str()),
         Some("s3cret")
     );
-    unset_env("DB_URL");
-    unset_env("SURREAL_PASS");
 }
 
 #[test]
 fn datasource_ssl_leaves_resolve() {
-    let _guard = super::env_lock();
-    set_env("SSL_MODE", "require");
-    set_env("SSL_ROOT_CERT", "/etc/certs/ca.pem");
-    set_env("SSL_CERT", "/etc/certs/client.pem");
-    set_env("SSL_KEY", "/etc/certs/client-key.pem");
+    let mut env_guard = EnvGuard::set("SSL_MODE", "require");
+    env_guard
+        .and_set("SSL_ROOT_CERT", "/etc/certs/ca.pem")
+        .and_set("SSL_CERT", "/etc/certs/client.pem")
+        .and_set("SSL_KEY", "/etc/certs/client-key.pem");
     let config = load_config(
         r#"
 [datasources.main]
@@ -145,18 +138,13 @@ ssl_key = "${env:SSL_KEY}"
     assert_eq!(ds.ssl_root_cert.as_deref(), Some("/etc/certs/ca.pem"));
     assert_eq!(ds.ssl_cert.as_deref(), Some("/etc/certs/client.pem"));
     assert_eq!(ds.ssl_key.as_deref(), Some("/etc/certs/client-key.pem"));
-    unset_env("SSL_MODE");
-    unset_env("SSL_ROOT_CERT");
-    unset_env("SSL_CERT");
-    unset_env("SSL_KEY");
 }
 
 #[test]
 fn datasource_ssl_leaf_unset_env_fails_closed() {
-    let _guard = super::env_lock();
+    let _env_guard = EnvGuard::remove("SSL_VAR");
     let marker = "${env:SSL_VAR}";
     for field in ["ssl_mode", "ssl_root_cert", "ssl_cert", "ssl_key"] {
-        unset_env("SSL_VAR");
         let err = load_config(&format!(
             r#"
 [datasources.main]
@@ -179,8 +167,7 @@ db_url = "postgres://localhost/orders"
 
 #[test]
 fn datasource_provider_leaf_resolves() {
-    let _guard = super::env_lock();
-    set_env("DS_PROVIDER", "postgres");
+    let _env_guard = EnvGuard::set("DS_PROVIDER", "postgres");
     let config = load_config(
         r#"
 [datasources.main]
@@ -191,13 +178,11 @@ provider = "${env:DS_PROVIDER}"
     .expect("datasource provider leaf should resolve");
     let ds = config.datasources.get("main").expect("main datasource");
     assert_eq!(ds.provider.as_deref(), Some("postgres"));
-    unset_env("DS_PROVIDER");
 }
 
 #[test]
 fn datasource_provider_leaf_unset_env_fails_closed() {
-    let _guard = super::env_lock();
-    unset_env("DS_PROVIDER");
+    let _env_guard = EnvGuard::remove("DS_PROVIDER");
     let err = load_config(
         r#"
 [datasources.main]
@@ -236,8 +221,7 @@ bearer_token = "${env:"
 
 #[test]
 fn wasm_limits_allow_call_schemes_resolves() {
-    let _guard = super::env_lock();
-    unset_env("WASM_SCHEMES");
+    let _env_guard = EnvGuard::remove("WASM_SCHEMES");
     let config = load_config(
         r#"
 [security.policies.wasm.corp-auth]

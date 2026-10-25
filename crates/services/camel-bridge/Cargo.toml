@@ -36,6 +36,7 @@ libc = { workspace = true }
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 rustls-pemfile = "2"
 x509-parser = "0.18"
 

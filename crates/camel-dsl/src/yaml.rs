@@ -2461,6 +2461,7 @@ pub fn extract_rest_blocks_from_file_with_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::test_support::EnvGuard;
     use std::fs::File;
 
     #[test]
@@ -5942,24 +5943,6 @@ routes:
         );
     }
 
-    /// Restore-on-drop guard for tests that mutate the process
-    /// environment: removes `var` when dropped — including on panic — so
-    /// a failing assertion cannot leak the mutation into sibling tests.
-    struct EnvGuard {
-        var: &'static str,
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            // SAFETY: `set_var`/`remove_var` at the call sites run while no
-            // other thread reads the process environment — the test harness
-            // runs each test on its own thread and nothing in this crate
-            // spawns an env-reading background thread during the guarded
-            // span.
-            unsafe { std::env::remove_var(self.var) };
-        }
-    }
-
     #[test]
     fn load_from_file_ambient_env_ignored_by_default_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -5969,8 +5952,7 @@ routes:
             "routes:\n  - id: ambient\n    from: \"direct:start\"\n    steps:\n      - set_header:\n          key: k\n          value: ${env:RC93WCT_VAR:-hello}\n",
         );
 
-        unsafe { std::env::set_var("RC93WCT_VAR", "goodbye") };
-        let _guard = EnvGuard { var: "RC93WCT_VAR" };
+        let _guard = EnvGuard::set("RC93WCT_VAR", "goodbye");
         let routes = load_from_file(&path).unwrap();
         assert_set_header_value(&routes, "hello");
     }
@@ -6035,8 +6017,7 @@ routes:
 
     #[test]
     fn discovery_and_load_from_file_agree_on_int_placeholder() {
-        unsafe { std::env::remove_var("MY_LIMIT") };
-        let _guard = EnvGuard { var: "MY_LIMIT" };
+        let _guard = EnvGuard::remove("MY_LIMIT");
         let dir = tempfile::tempdir().unwrap();
         let path = write_route_file(
             &dir,
@@ -6283,10 +6264,7 @@ routes:
             "rest:\n  - host: ${env:RC_GYKDS_VAR:-0.0.0.0}\n",
         );
 
-        unsafe { std::env::set_var("RC_GYKDS_VAR", "evil") };
-        let _guard = EnvGuard {
-            var: "RC_GYKDS_VAR",
-        };
+        let _guard = EnvGuard::set("RC_GYKDS_VAR", "evil");
         let rest = extract_rest_blocks_from_file_with_env(&path, &|_| None).unwrap();
         assert_eq!(rest[0].host, "0.0.0.0");
     }

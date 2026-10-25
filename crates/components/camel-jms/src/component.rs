@@ -2122,7 +2122,7 @@ pub fn is_bridge_transport_error(err: &CamelError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use camel_component_api::test_support::PanicRuntimeObservability;
+    use camel_component_api::test_support::{EnvGuard, PanicRuntimeObservability};
     fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
         std::sync::Arc::new(PanicRuntimeObservability)
     }
@@ -2309,17 +2309,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn concurrent_get_or_create_slot_no_deadlock() {
         use tokio::time::timeout;
 
-        // Serialize against other tests mutating CAMEL_JMS_BRIDGE_BINARY_PATH (rc-alwn).
-        let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
-
         let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
-        let _guard = env_guard(env_key);
-        // SAFETY: test-scoped env mutation.
-        unsafe { std::env::set_var(env_key, "/bin/false") };
+        let _env_guard = EnvGuard::set(env_key, "/bin/false");
 
         let pool = Arc::new(
             JmsBridgePool::from_config(JmsPoolConfig {
@@ -2359,17 +2353,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn lazy_producer_reports_degraded_when_bridge_start_fails() {
         use tower::Service;
 
-        // Serialize against other tests mutating CAMEL_JMS_BRIDGE_BINARY_PATH (rc-alwn).
-        let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
-
         let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
-        let _guard = env_guard(env_key);
-        // SAFETY: test-scoped env mutation.
-        unsafe { std::env::set_var(env_key, "/bin/false") };
+        let _env_guard = EnvGuard::set(env_key, "/bin/false");
 
         let pool = Arc::new(
             JmsBridgePool::from_config(JmsPoolConfig {
@@ -4105,13 +4093,10 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn start_bridge_process_exports_health_probe_mode() {
         // rustls 0.23 requires a process-level CryptoProvider before the
         // post-ready mTLS connect runs in `start_bridge_process`.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
-
         let dir = tempfile::tempdir().expect("stub tempdir");
         let mode_file = dir.path().join("probe-mode.txt");
         let pidfile = dir.path().join("child.pid");
@@ -4126,9 +4111,7 @@ mod tests {
         );
 
         let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
-        let _guard = env_guard(env_key);
-        // SAFETY: test-scoped env mutation.
-        unsafe { std::env::set_var(env_key, &stub) };
+        let _env_guard = EnvGuard::set(env_key, &stub);
 
         let result = JmsBridgePool::start_bridge_process(
             crate::BRIDGE_VERSION,
@@ -4197,22 +4180,17 @@ mod tests {
     /// spawn driven with an empty replacement-outcome queue.
     #[cfg(unix)]
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn pool_knobs_reach_initial_and_replacement_spawn_env() {
         // rustls 0.23 requires a process-level CryptoProvider before the
         // post-ready mTLS connect runs in `start_bridge_process`.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
-
         let dir = tempfile::tempdir().expect("stub tempdir");
         let envfile = dir.path().join("spawn-env.txt");
         let pidfile = dir.path().join("child.pid");
         let stub = pool_knob_stub(dir.path());
 
         let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
-        let _guard = env_guard(env_key);
-        // SAFETY: test-scoped env mutation.
-        unsafe { std::env::set_var(env_key, &stub) };
+        let _env_guard = EnvGuard::set(env_key, &stub);
 
         let pool = JmsBridgePool::from_config(JmsPoolConfig {
             pool_idle_timeout_ms: 60_000,
@@ -4286,21 +4264,16 @@ mod tests {
     /// (30_000 ms) must reach the initial spawn environment.
     #[cfg(unix)]
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn pool_knob_defaults_reach_initial_spawn_env() {
         // rustls 0.23 requires a process-level CryptoProvider before the
         // post-ready mTLS connect runs in `start_bridge_process`.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
-
         let dir = tempfile::tempdir().expect("stub tempdir");
         let envfile = dir.path().join("spawn-env.txt");
         let stub = pool_knob_stub(dir.path());
 
         let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
-        let _guard = env_guard(env_key);
-        // SAFETY: test-scoped env mutation.
-        unsafe { std::env::set_var(env_key, &stub) };
+        let _env_guard = EnvGuard::set(env_key, &stub);
 
         // Default `JmsPoolConfig`; only the broker map is required to drive
         // the initial launch through pool acquisition.
@@ -4464,7 +4437,7 @@ mod tests {
     // ── Task 2.4: configured liveness timeout/threshold in the real monitor ──
 
     use crate::bridge_client_test::{
-        ScriptedHealth, TestBridgeFixture, broker_transitions, connect_scripted, env_guard,
+        ScriptedHealth, TestBridgeFixture, broker_transitions, connect_scripted,
         next_refresh_attempt, probe_gate, push_replacement, ready_stub_process, refresh_attempts,
         replacement_attempts, slot_child_pid, spawn_scripted_health, spawn_selector_gate_bridge,
         stop_slot_process,

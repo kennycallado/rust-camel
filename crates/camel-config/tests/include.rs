@@ -174,7 +174,6 @@ fn include_nested_include_is_ignored() {
 
 #[test]
 fn include_env_wins_over_include_and_root() {
-    let _guard = common::env_lock();
     let dir = TempDir::new().unwrap();
     write(dir.path(), "base.toml", r#"timeout_ms = 1000"#);
     write(
@@ -182,14 +181,8 @@ fn include_env_wins_over_include_and_root() {
         "Camel.toml",
         "include = [\"base.toml\"]\ntimeout_ms = 2000\n",
     );
-    // SAFETY: test-only, single-threaded
-    unsafe {
-        std::env::set_var("CAMEL_TIMEOUT_MS", "9999");
-    }
+    let _guard = common::EnvGuard::set("CAMEL_TIMEOUT_MS", "9999");
     let cfg = CamelConfig::from_file_with_env(&path(dir.path())).unwrap();
-    unsafe {
-        std::env::remove_var("CAMEL_TIMEOUT_MS");
-    }
     assert_eq!(cfg.timeout_ms, 9999);
 }
 

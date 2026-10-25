@@ -15,6 +15,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use camel_component_api::test_support::EnvGuard;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
@@ -223,44 +224,21 @@ pub(crate) async fn spawn_tls_server(
 /// openssl-probe hosts; apple targets never consult these vars
 /// (rustls-platform-verifier's `Verifier::new` is infallible there),
 /// so the window is a no-op on apple — apple-portable forcing uses
-/// [`force_webpki_fallback`] instead. Holds the CA-store mutex for
-/// the whole window and restores the previous env even when `body`
-/// panics; assertions belong AFTER this helper returns.
+/// [`force_webpki_fallback`] instead. Holds the canonical environment
+/// lock for the whole window and restores the previous env even when
+/// `body` panics; assertions belong AFTER this helper returns.
 pub(crate) fn forced_fallback_env<R>(body: impl FnOnce() -> R) -> R {
-    let _ca_guard = crate::lock_ca_store_test_mutex();
     let empty_ca_dir = tempfile::tempdir().expect("tempdir"); // allow-unwrap(test)
     let empty_ca_file = empty_ca_dir.path().join("empty-ca-bundle.pem");
     std::fs::write(&empty_ca_file, b"").expect("write empty CA file"); // allow-unwrap(test)
 
-    // Safety: test-only mutation of process env vars. Previous values
-    // are captured and restored before the caller observes the result
-    // (and on unwind below); the mutex serializes the other
-    // env-window tests in this process.
-    let (prev_file, prev_dir) = unsafe {
-        let prev = (
-            std::env::var_os("SSL_CERT_FILE"),
-            std::env::var_os("SSL_CERT_DIR"),
-        );
-        std::env::set_var("SSL_CERT_FILE", &empty_ca_file);
-        std::env::set_var("SSL_CERT_DIR", empty_ca_dir.path());
-        prev
-    };
+    // The canonical guard serializes every Rust-side env participant and
+    // restores the previous values on drop, including during unwinding.
+    let mut env = EnvGuard::acquire();
+    env.and_set("SSL_CERT_FILE", &empty_ca_file);
+    env.and_set("SSL_CERT_DIR", empty_ca_dir.path());
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
-
-    // Safety: restoring the previously-captured values.
-    unsafe {
-        match prev_file {
-            Some(v) => std::env::set_var("SSL_CERT_FILE", v),
-            None => std::env::remove_var("SSL_CERT_FILE"),
-        }
-        match prev_dir {
-            Some(v) => std::env::set_var("SSL_CERT_DIR", v),
-            None => std::env::remove_var("SSL_CERT_DIR"),
-        }
-    }
-
-    result.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+    body()
 }
 
 /// Runs `body` with the `FORCE_WEBPKI_FALLBACK` test seam armed: on
@@ -334,12 +312,12 @@ pub(crate) fn force_webpki_fallback_rebuild_failure<R>(body: impl FnOnce() -> R)
 /// window ([`forced_fallback_env`]) happens to have emptied the
 /// process-wide native-root probe paths (SSL_CERT_FILE/
 /// SSL_CERT_DIR) at that instant. Every plain test-client build
-/// therefore serializes against the CA-store mutex, closing the
+/// therefore takes the canonical environment lock, closing the
 /// env-window race mechanically: all plain test client builds in
 /// `lib_tests.rs` and in `client_cache`'s tests are routed through this
 /// helper, so windows and plain builds can no longer overlap.
 pub(crate) fn plain_http_test_client() -> reqwest::Client {
-    let _ca_guard = crate::lock_ca_store_test_mutex();
+    let _env = EnvGuard::acquire();
     reqwest::Client::new()
 }
 

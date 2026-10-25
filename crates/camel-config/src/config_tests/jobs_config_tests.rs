@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::config::log_capture::capture_warns;
+use camel_component_api::test_support::EnvGuard;
 
 #[test]
 fn jobs_table_defaults_to_jobs() {
@@ -115,8 +116,7 @@ fn merged_profile_keeps_both_keys_dirs_wins() {
     // dir leaves BOTH keys on the merged table. resolved_dirs() honors dirs
     // per spec; the CLI warns about the ignored dir at its stderr diagnostic
     // surface (jobs_roots), not here.
-    let _env_guard = env_lock();
-    unset_env("CAMEL_PROFILE");
+    let _env_guard = EnvGuard::remove("CAMEL_PROFILE");
 
     let tree = toml::from_str(
         r#"
@@ -157,8 +157,7 @@ dir = "legacy"
 
 #[test]
 fn jobs_table_no_unselected_profile_warning() {
-    let _env_guard = env_lock();
-    unset_env("CAMEL_PROFILE");
+    let _env_guard = EnvGuard::remove("CAMEL_PROFILE");
 
     let tree = toml::from_str(
         r#"

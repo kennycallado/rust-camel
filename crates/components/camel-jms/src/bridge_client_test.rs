@@ -30,36 +30,6 @@ use crate::proto::{
 
 const NEAR_CAP_BODY_SIZE: usize = 15 * 1024 * 1024;
 
-/// Restores an environment variable to its prior value when dropped.
-///
-/// Shared by the `component.rs` and `consumer.rs` test modules so every test
-/// that mutates the process environment while holding [`crate::BRIDGE_ENV_LOCK`]
-/// uses one restore implementation.
-pub(crate) struct EnvGuard {
-    key: &'static str,
-    prev: Option<std::ffi::OsString>,
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        if let Some(v) = &self.prev {
-            // SAFETY: restoring process env in test scope.
-            unsafe { std::env::set_var(self.key, v) };
-        } else {
-            // SAFETY: restoring process env in test scope.
-            unsafe { std::env::remove_var(self.key) };
-        }
-    }
-}
-
-/// Captures an environment variable's prior value and restores it on drop.
-pub(crate) fn env_guard(key: &'static str) -> EnvGuard {
-    EnvGuard {
-        key,
-        prev: std::env::var_os(key),
-    }
-}
-
 /// The two copies of the JMS bridge wire contract. Task 3.1 keeps them
 /// byte-identical except the Java `option` lines in the bridge copy.
 const CRATE_PROTO: &str = include_str!("../proto/jms_bridge.proto");

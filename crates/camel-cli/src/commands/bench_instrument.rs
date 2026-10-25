@@ -542,6 +542,7 @@ fn format_bench_line(route_id: &str, uri: &str, id: u64, duration_ns: u64) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::test_support::EnvGuard;
     use std::fs::File;
 
     /// Test fixture: a `Log` step with the given message (any level —
@@ -588,11 +589,7 @@ mod tests {
 
     #[test]
     fn maybe_instrument_routes_noop_when_env_unset() {
-        // SAFETY: test is single-threaded, no other code reads this env var
-        // during the test.
-        unsafe {
-            std::env::remove_var("BENCH_LATENCY_FILE");
-        }
+        let _env_guard = EnvGuard::remove("BENCH_LATENCY_FILE");
         let def = camel_core::RouteDefinition::new(
             "direct:test".to_string(),
             vec![BuilderStep::To("mock:a".into())],

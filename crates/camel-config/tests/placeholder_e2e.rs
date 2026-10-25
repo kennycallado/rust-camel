@@ -5,31 +5,10 @@
 //! These tests exercise the REAL production entry (`CamelConfig::from_file`),
 //! not the walk in isolation.
 
+use camel_component_api::test_support::EnvGuard;
 use camel_config::CamelConfig;
 
 mod common;
-
-/// Sets a uniquely-named env var and removes it on drop (panic-safe restore).
-struct EnvCleanup(&'static str);
-
-impl EnvCleanup {
-    fn set(name: &'static str, value: &str) -> Self {
-        unsafe { std::env::set_var(name, value) };
-        EnvCleanup(name)
-    }
-}
-
-impl Drop for EnvCleanup {
-    fn drop(&mut self) {
-        unsafe { std::env::remove_var(self.0) };
-    }
-}
-
-/// Ensures a uniquely-named env var is ABSENT for the test body and stays
-/// absent afterwards.
-fn ensure_unset(name: &'static str) {
-    unsafe { std::env::remove_var(name) };
-}
 
 /// Writes `content` as `Camel.toml` (plus optional sibling files) into a new
 /// temp dir and returns the main file's path.
@@ -71,8 +50,7 @@ fn load_with_env(dir: &tempfile::TempDir) -> Result<CamelConfig, config::ConfigE
 /// retired hand-enumerated allowlist class).
 #[test]
 fn future_section_resolves_without_code_change() {
-    let _guard = common::env_lock();
-    let _env = EnvCleanup::set("RUST_CAMEL_TEST_FUT_A", "fut-val");
+    let _env = EnvGuard::set("RUST_CAMEL_TEST_FUT_A", "fut-val");
     let dir = write_main(
         r#"[future_section]
 value = "${env:RUST_CAMEL_TEST_FUT_A}"
@@ -96,8 +74,7 @@ value = "${env:RUST_CAMEL_TEST_FUT_A}"
 /// runs on the POST-merge builder output, not the pre-builder main-file value.
 #[test]
 fn placeholder_in_include_file_resolves() {
-    let _guard = common::env_lock();
-    ensure_unset("RUST_CAMEL_TEST_INC_A");
+    let _guard = EnvGuard::remove("RUST_CAMEL_TEST_INC_A");
     let dir = write_main(
         r#"include = ["inc.toml"]"#,
         &[(
@@ -121,8 +98,7 @@ endpoint = "${env:RUST_CAMEL_TEST_INC_A:-http://localhost:4317}"
 /// credential leaf fails closed, never installs the literal.
 #[test]
 fn security_bearer_token_e2e_never_literal() {
-    let _guard = common::env_lock();
-    ensure_unset("RUST_CAMEL_TEST_E2E_A");
+    let _guard = EnvGuard::remove("RUST_CAMEL_TEST_E2E_A");
     let dir = write_main(
         r#"[security.native]
 subject = "svc"
@@ -146,8 +122,7 @@ bearer_token = "${env:RUST_CAMEL_TEST_E2E_A}"
 /// `${env:NAME:-default}` on a plain leaf honors the default when unset.
 #[test]
 fn otel_endpoint_default_honored_e2e() {
-    let _guard = common::env_lock();
-    ensure_unset("RUST_CAMEL_TEST_E2E_B");
+    let _guard = EnvGuard::remove("RUST_CAMEL_TEST_E2E_B");
     let dir = write_main(
         r#"[observability.otel]
 endpoint = "${env:RUST_CAMEL_TEST_E2E_B:-http://localhost:4317}"
@@ -164,9 +139,8 @@ endpoint = "${env:RUST_CAMEL_TEST_E2E_B:-http://localhost:4317}"
 /// fails closed naming `security.native.credentials[1].secret`.
 #[test]
 fn nested_array_leaves_walked() {
-    let _guard = common::env_lock();
-    let _env = EnvCleanup::set("RUST_CAMEL_TEST_CRED0", "cred-0-secret");
-    ensure_unset("RUST_CAMEL_TEST_CRED1");
+    let mut _env = EnvGuard::set("RUST_CAMEL_TEST_CRED0", "cred-0-secret");
+    _env.and_remove("RUST_CAMEL_TEST_CRED1");
     let dir = write_main(
         r#"[security.native]
 subject = "svc"
@@ -240,8 +214,7 @@ url = "redis://{{MISSING_PLACEHOLDER}}"
 /// to the integer default at the deserialize boundary.
 #[test]
 fn placeholder_int_root_field_coerces_default() {
-    let _guard = common::env_lock();
-    ensure_unset("CFG_TIMEOUT_MS");
+    let _guard = EnvGuard::remove("CFG_TIMEOUT_MS");
     let dir = write_main(
         r#"timeout_ms = "${env:CFG_TIMEOUT_MS:-8000}"
 "#,
@@ -256,8 +229,7 @@ fn placeholder_int_root_field_coerces_default() {
 /// default.
 #[test]
 fn placeholder_int_root_field_coerces_env_value() {
-    let _guard = common::env_lock();
-    let _env = EnvCleanup::set("CFG_TIMEOUT_MS", "9000");
+    let _env = EnvGuard::set("CFG_TIMEOUT_MS", "9000");
     let dir = write_main(
         r#"timeout_ms = "${env:CFG_TIMEOUT_MS:-8000}"
 "#,
@@ -272,8 +244,7 @@ fn placeholder_int_root_field_coerces_env_value() {
 /// so the first-pass strict error stands.
 #[test]
 fn placeholder_int_field_leading_zero_rejected() {
-    let _guard = common::env_lock();
-    ensure_unset("CFG_T");
+    let _guard = EnvGuard::remove("CFG_T");
     let dir = write_main(
         r#"timeout_ms = "${env:CFG_T:-007}"
 "#,
@@ -292,8 +263,7 @@ fn placeholder_int_field_leading_zero_rejected() {
 /// error stands.
 #[test]
 fn placeholder_int_field_overflow_rejected() {
-    let _guard = common::env_lock();
-    ensure_unset("CFG_T");
+    let _guard = EnvGuard::remove("CFG_T");
     let dir = write_main(
         r#"timeout_ms = "${env:CFG_T:-9223372036854775808}"
 "#,
@@ -311,8 +281,7 @@ fn placeholder_int_field_overflow_rejected() {
 /// A non-numeric default is not a candidate; the error names the field.
 #[test]
 fn placeholder_int_field_notanumber_rejected() {
-    let _guard = common::env_lock();
-    ensure_unset("CFG_T");
+    let _guard = EnvGuard::remove("CFG_T");
     let dir = write_main(
         r#"timeout_ms = "${env:CFG_T:-notanumber}"
 "#,
@@ -331,8 +300,7 @@ fn placeholder_int_field_notanumber_rejected() {
 /// default stays a string.
 #[test]
 fn string_field_numeric_default_stays_string() {
-    let _guard = common::env_lock();
-    ensure_unset("CFG_LL");
+    let _guard = EnvGuard::remove("CFG_LL");
     let dir = write_main(
         r#"log_level = "${env:CFG_LL:-8080}"
 "#,
@@ -367,8 +335,7 @@ timeout_ms = "1000"
 /// naming the variable.
 #[test]
 fn unresolved_no_default_placeholder_names_variable() {
-    let _guard = common::env_lock();
-    ensure_unset("CFG_MISSING");
+    let _guard = EnvGuard::remove("CFG_MISSING");
     let dir = write_main(
         r#"timeout_ms = "${env:CFG_MISSING}"
 "#,
@@ -388,16 +355,20 @@ fn unresolved_no_default_placeholder_names_variable() {
 /// cap (not candidate count alone) declines the nine-field document.
 #[test]
 fn probe_cap_nine_config_candidates_fails() {
-    let _guard = common::env_lock();
-    ensure_unset("CFG_CAP_1");
-    ensure_unset("CFG_CAP_2");
-    ensure_unset("CFG_CAP_3");
-    ensure_unset("CFG_CAP_4");
-    ensure_unset("CFG_CAP_5");
-    ensure_unset("CFG_CAP_6");
-    ensure_unset("CFG_CAP_7");
-    ensure_unset("CFG_CAP_8");
-    ensure_unset("CFG_CAP_9");
+    let mut _guard = EnvGuard::acquire();
+    for name in [
+        "CFG_CAP_1",
+        "CFG_CAP_2",
+        "CFG_CAP_3",
+        "CFG_CAP_4",
+        "CFG_CAP_5",
+        "CFG_CAP_6",
+        "CFG_CAP_7",
+        "CFG_CAP_8",
+        "CFG_CAP_9",
+    ] {
+        _guard.and_remove(name);
+    }
     let nine = concat!(
         "timeout_ms = \"${env:CFG_CAP_1:-5000}\"\n",
         "drain_timeout_ms = \"${env:CFG_CAP_2:-10000}\"\n",
@@ -463,9 +434,8 @@ fn probe_cap_nine_config_candidates_fails() {
 /// set and probes exactly like a file-authored leaf.
 #[test]
 fn token_bearing_override_coerces() {
-    let _guard = common::env_lock();
-    ensure_unset("CFG_N");
-    let _override_var = EnvCleanup::set("CAMEL_TIMEOUT_MS", "${env:CFG_N:-8}");
+    let mut _override_var = EnvGuard::set("CAMEL_TIMEOUT_MS", "${env:CFG_N:-8}");
+    _override_var.and_remove("CFG_N");
     let dir = write_main("", &[]);
 
     let cfg = load_with_env(&dir).expect("token-bearing override must coerce");
@@ -477,8 +447,7 @@ fn token_bearing_override_coerces() {
 /// error).
 #[test]
 fn token_free_override_notanumber_rejected() {
-    let _guard = common::env_lock();
-    let _override_var = EnvCleanup::set("CAMEL_TIMEOUT_MS", "notanumber");
+    let _override_var = EnvGuard::set("CAMEL_TIMEOUT_MS", "notanumber");
     let dir = write_main("", &[]);
 
     let err = load_with_env(&dir).expect_err("token-free non-numeric override must stay rejected");
@@ -495,8 +464,7 @@ fn token_free_override_notanumber_rejected() {
 /// which the typed probe coerces to a real boolean at the boundary.
 #[test]
 fn placeholder_bool_field_default_coerces() {
-    let _guard = common::env_lock();
-    ensure_unset("CFG_WATCH");
+    let _guard = EnvGuard::remove("CFG_WATCH");
     let dir = write_main(
         r#"watch = "${env:CFG_WATCH:-true}"
 "#,
@@ -511,8 +479,7 @@ fn placeholder_bool_field_default_coerces() {
 /// not the default.
 #[test]
 fn placeholder_bool_field_resolved_env_coerces() {
-    let _guard = common::env_lock();
-    let _env = EnvCleanup::set("CFG_WATCH", "false");
+    let _env = EnvGuard::set("CFG_WATCH", "false");
     let dir = write_main(
         r#"watch = "${env:CFG_WATCH:-true}"
 "#,
@@ -544,8 +511,7 @@ watch = "true"
 /// default stays a string.
 #[test]
 fn string_field_boolean_default_stays_string() {
-    let _guard = common::env_lock();
-    ensure_unset("CFG_LL");
+    let _guard = EnvGuard::remove("CFG_LL");
     let dir = write_main(
         r#"log_level = "${env:CFG_LL:-true}"
 "#,
@@ -560,8 +526,7 @@ fn string_field_boolean_default_stays_string() {
 /// no aliases, no case folding, no match on `1`, no surrounding whitespace.
 #[test]
 fn placeholder_bool_field_out_of_set_keeps_first_pass_error() {
-    let _guard = common::env_lock();
-    ensure_unset("CFG_WATCH");
+    let _guard = EnvGuard::remove("CFG_WATCH");
     for default in ["yes", "TRUE", "1", "true "] {
         let dir = write_main(&format!("watch = \"${{env:CFG_WATCH:-{default}}}\"\n"), &[]);
         let err = load(&dir).expect_err(&format!("default {default:?} must be rejected"));
@@ -579,7 +544,7 @@ fn placeholder_bool_field_out_of_set_keeps_first_pass_error() {
 /// not candidate count alone — declines the nine-candidate document.
 #[test]
 fn probe_cap_eight_bools_one_int_nine_candidates_fails() {
-    let _guard = common::env_lock();
+    let mut _guard = EnvGuard::acquire();
     for name in [
         "CFG_CAPB1",
         "CFG_CAPB2",
@@ -591,7 +556,7 @@ fn probe_cap_eight_bools_one_int_nine_candidates_fails() {
         "CFG_CAPB8",
         "CFG_CAPB_INT",
     ] {
-        ensure_unset(name);
+        _guard.and_remove(name);
     }
     let nine = concat!(
         "watch = \"${env:CFG_CAPB1:-true}\"\n",

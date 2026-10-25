@@ -41,6 +41,7 @@ camel-platform-kubernetes = { workspace = true, optional = true }
 humantime = { workspace = true }
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 tokio.workspace = true
 tempfile = { workspace = true }
 camel-component-timer.workspace = true

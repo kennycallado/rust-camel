@@ -1,4 +1,5 @@
 use super::*;
+use camel_component_api::test_support::EnvGuard;
 
 fn write_temp_config(contents: &str) -> tempfile::NamedTempFile {
     use std::io::Write;
@@ -50,7 +51,7 @@ pool_max_idle_per_host = 99
 
 #[test]
 fn test_from_file_with_profile_merges_default_and_profile() {
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::acquire();
     let file = write_temp_config(
         r#"
 [default]
@@ -84,7 +85,7 @@ pool_max_idle_per_host = 200
 
 #[test]
 fn test_from_file_with_profile_uses_profile_when_no_default() {
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::acquire();
     let file = write_temp_config(
         r#"
 [dev]
@@ -105,7 +106,7 @@ fn redb_idempotent_config_loads_via_profile_section() {
     // active profile as [default.idempotent_repo] (mirrors [default.supervision]),
     // NOT top-level. This verifies the profile path that the flat-parsing
     // redb_idempotent_config_* tests above do not cover.
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::acquire();
     let file = write_temp_config(
         r#"
 [default]
@@ -127,7 +128,7 @@ durability = "eventual"
 
 #[test]
 fn test_from_file_with_profile_unknown_profile_returns_error() {
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::acquire();
     let file = write_temp_config(
         r#"
 [default]
@@ -142,7 +143,7 @@ watch = false
 
 #[test]
 fn test_from_file_without_profile_uses_default_section() {
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::acquire();
     let file = write_temp_config(
         r#"
 [default]
@@ -158,8 +159,7 @@ timeout_ms = 321
 
 #[test]
 fn test_from_file_with_env_overrides_timeout() {
-    // Serialize against async env-reading tests (see ENV_OVERRIDE_LOCK).
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::set("CAMEL_TIMEOUT_MS", "9999");
 
     let file = write_temp_config(
         r#"
@@ -168,25 +168,15 @@ timeout_ms = 1000
 "#,
     );
 
-    // SAFETY: tests run in controlled process; we set and immediately restore env var.
-    unsafe {
-        std::env::set_var("CAMEL_TIMEOUT_MS", "9999");
-    }
-
     let cfg = CamelConfig::from_file_with_env(file.path().to_str().unwrap())
         .expect("config should load with env override");
     assert_eq!(cfg.timeout_ms, 9999);
-
-    // SAFETY: restore process env for test isolation.
-    unsafe {
-        std::env::remove_var("CAMEL_TIMEOUT_MS");
-    }
 }
 
 #[test]
 fn env_override_allows_supervision_nested_field() {
-    // Serialize against async env-reading tests (see ENV_OVERRIDE_LOCK).
-    let _guard = super::env_lock();
+    let mut _guard = EnvGuard::set("CAMEL_SUPERVISION_INITIAL_DELAY_MS", "2000");
+    _guard.and_set("CAMEL_SUPERVISION_MAX_ATTEMPTS", "10");
 
     let file = write_temp_config(
         r#"
@@ -199,29 +189,19 @@ max_attempts = 3
 "#,
     );
 
-    // SAFETY: tests run in controlled process; we set and immediately restore env vars.
-    unsafe {
-        std::env::set_var("CAMEL_SUPERVISION_INITIAL_DELAY_MS", "2000");
-        std::env::set_var("CAMEL_SUPERVISION_MAX_ATTEMPTS", "10");
-    }
-
     let cfg = CamelConfig::from_file_with_env(file.path().to_str().unwrap())
         .expect("config should load with env override");
     let sup = cfg.supervision.expect("supervision should be present");
     assert_eq!(sup.initial_delay_ms, 2000);
     assert_eq!(sup.max_attempts, Some(10));
-
-    // SAFETY: restore process env for test isolation.
-    unsafe {
-        std::env::remove_var("CAMEL_SUPERVISION_INITIAL_DELAY_MS");
-        std::env::remove_var("CAMEL_SUPERVISION_MAX_ATTEMPTS");
-    }
 }
 
 #[test]
 fn env_override_allows_runtime_journal_nested_fields() {
-    // Serialize against async env-reading tests (see ENV_OVERRIDE_LOCK).
-    let _guard = super::env_lock();
+    let mut _guard = EnvGuard::set("CAMEL_RUNTIME_JOURNAL_PATH", "/override/journal.db");
+    _guard
+        .and_set("CAMEL_RUNTIME_JOURNAL_DURABILITY", "eventual")
+        .and_set("CAMEL_RUNTIME_JOURNAL_COMPACTION_THRESHOLD_EVENTS", "5000");
 
     let file = write_temp_config(
         r#"
@@ -235,13 +215,6 @@ compaction_threshold_events = 10000
 "#,
     );
 
-    // SAFETY: tests run in controlled process; we set and immediately restore env vars.
-    unsafe {
-        std::env::set_var("CAMEL_RUNTIME_JOURNAL_PATH", "/override/journal.db");
-        std::env::set_var("CAMEL_RUNTIME_JOURNAL_DURABILITY", "eventual");
-        std::env::set_var("CAMEL_RUNTIME_JOURNAL_COMPACTION_THRESHOLD_EVENTS", "5000");
-    }
-
     let cfg = CamelConfig::from_file_with_env(file.path().to_str().unwrap())
         .expect("config should load with env override");
     let journal = cfg
@@ -253,19 +226,12 @@ compaction_threshold_events = 10000
     );
     assert_eq!(journal.durability, super::JournalDurability::Eventual);
     assert_eq!(journal.compaction_threshold_events, 5000);
-
-    // SAFETY: restore process env for test isolation.
-    unsafe {
-        std::env::remove_var("CAMEL_RUNTIME_JOURNAL_PATH");
-        std::env::remove_var("CAMEL_RUNTIME_JOURNAL_DURABILITY");
-        std::env::remove_var("CAMEL_RUNTIME_JOURNAL_COMPACTION_THRESHOLD_EVENTS");
-    }
 }
 
 #[test]
 fn env_override_allows_idempotent_repo_nested_fields() {
-    // Serialize against async env-reading tests (see ENV_OVERRIDE_LOCK).
-    let _guard = super::env_lock();
+    let mut _guard = EnvGuard::set("CAMEL_IDEMPOTENT_REPO_PATH", "/override/idempotent.db");
+    _guard.and_set("CAMEL_IDEMPOTENT_REPO_DURABILITY", "eventual");
 
     let file = write_temp_config(
         r#"
@@ -278,12 +244,6 @@ durability = "immediate"
 "#,
     );
 
-    // SAFETY: tests run in controlled process; we set and immediately restore env vars.
-    unsafe {
-        std::env::set_var("CAMEL_IDEMPOTENT_REPO_PATH", "/override/idempotent.db");
-        std::env::set_var("CAMEL_IDEMPOTENT_REPO_DURABILITY", "eventual");
-    }
-
     let cfg = CamelConfig::from_file_with_env(file.path().to_str().unwrap())
         .expect("config should load with env override");
     let repo = cfg
@@ -291,18 +251,13 @@ durability = "immediate"
         .expect("idempotent_repo should be present");
     assert_eq!(repo.path.as_deref(), Some("/override/idempotent.db"));
     assert_eq!(repo.durability.as_deref(), Some("eventual"));
-
-    // SAFETY: restore process env for test isolation.
-    unsafe {
-        std::env::remove_var("CAMEL_IDEMPOTENT_REPO_PATH");
-        std::env::remove_var("CAMEL_IDEMPOTENT_REPO_DURABILITY");
-    }
 }
 
 #[test]
 fn env_allowlist_accepts_allowlisted_ignores_non_allowlisted() {
-    // Serialize against async env-reading tests (see ENV_OVERRIDE_LOCK).
-    let _guard = super::env_lock();
+    let mut _guard = EnvGuard::set("CAMEL_DRAIN_TIMEOUT_MS", "999");
+    // Non-allowlisted — should be silently ignored, not crash.
+    _guard.and_set("CAMEL_BEANS_FOO", "bar");
 
     let file = write_temp_config(
         r#"
@@ -311,31 +266,17 @@ drain_timeout_ms = 5000
 "#,
     );
 
-    // SAFETY: tests run in controlled process; we set and immediately restore env vars.
-    unsafe {
-        // Allowlisted — should override.
-        std::env::set_var("CAMEL_DRAIN_TIMEOUT_MS", "999");
-        // Non-allowlisted — should be silently ignored, not crash.
-        std::env::set_var("CAMEL_BEANS_FOO", "bar");
-    }
-
     let cfg = CamelConfig::from_file_with_env(file.path().to_str().unwrap())
         .expect("config should load with allowlisted env var and ignore non-allowlisted");
     // Allowlisted drain_timeout_ms should be overridden to 999.
     assert_eq!(cfg.drain_timeout_ms, 999);
     // Beans should remain at default (empty), unaffected by non-allowlisted CAMEL_BEANS_FOO.
     assert!(cfg.beans.is_empty());
-
-    // SAFETY: restore process env for test isolation.
-    unsafe {
-        std::env::remove_var("CAMEL_DRAIN_TIMEOUT_MS");
-        std::env::remove_var("CAMEL_BEANS_FOO");
-    }
 }
 
 #[test]
 fn test_from_file_resolves_placeholders_in_components_and_beans() {
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::acquire();
     let file = write_temp_config(
         r#"
 [default]
@@ -365,6 +306,41 @@ token = "${env:RUST_CAMEL_TEST_TOKEN:-abc123}"
     assert_eq!(bean.config.get("token").map(String::as_str), Some("abc123"));
 }
 
+/// An explicit profile argument is authoritative: a hostile ambient
+/// `CAMEL_PROFILE` must not override it or block placeholder resolution.
+#[test]
+fn from_file_explicit_profile_survives_hostile_ambient_profile() {
+    let _guard = EnvGuard::set("CAMEL_PROFILE", "production");
+    let file = write_temp_config(
+        r#"
+[default]
+routes = ["${env:RUST_CAMEL_TEST_ROUTE:-routes/default.yaml}"]
+
+[default.components.http]
+base_url = "${env:RUST_CAMEL_TEST_BASE_URL:-http://localhost:8080}"
+
+[default.beans.auth]
+plugin = "${env:RUST_CAMEL_TEST_PLUGIN:-test-auth}"
+
+[default.beans.auth.config]
+token = "${env:RUST_CAMEL_TEST_TOKEN:-abc123}"
+"#,
+    );
+
+    let cfg = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), Some("default"))
+        .expect("explicit profile must survive a hostile ambient CAMEL_PROFILE");
+
+    assert_eq!(cfg.routes, vec!["routes/default.yaml"]);
+    let http = cfg.components.raw.get("http").expect("http config");
+    assert_eq!(
+        http.get("base_url").and_then(|v| v.as_str()),
+        Some("http://localhost:8080")
+    );
+    let bean = cfg.beans.get("auth").expect("bean auth");
+    assert_eq!(bean.plugin, "test-auth");
+    assert_eq!(bean.config.get("token").map(String::as_str), Some("abc123"));
+}
+
 // The successor of `test_from_file_unresolved_placeholder_keeps_original_string`
 // (legacy warn-and-keep passthrough, retired) lives in
 // `tests/placeholder_e2e.rs::legacy_braces_rejected_on_load_path`: the
@@ -382,7 +358,7 @@ token = "${env:RUST_CAMEL_TEST_TOKEN:-abc123}"
 /// control arm.
 #[test]
 fn from_file_sealed_ignores_ambient_env_overrides() {
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::set("CAMEL_LOG_LEVEL", "trace");
     let file = write_temp_config(
         r#"
 [default]
@@ -391,10 +367,8 @@ log_level = "info"
     );
     let path = file.path().to_str().unwrap().to_string();
 
-    super::set_env("CAMEL_LOG_LEVEL", "trace");
     let sealed = CamelConfig::from_file_sealed(&path, "default", &|_| None);
     let unsealed = CamelConfig::from_file_with_env(&path);
-    super::unset_env("CAMEL_LOG_LEVEL");
 
     let sealed = sealed.expect("sealed load must succeed");
     assert_eq!(
@@ -413,7 +387,7 @@ log_level = "info"
 /// section 4).
 #[test]
 fn from_file_sealed_ignores_ambient_profile() {
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::set("CAMEL_PROFILE", "production");
     let file = write_temp_config(
         r#"
 [default]
@@ -425,9 +399,7 @@ timeout_ms = 9999
     );
     let path = file.path().to_str().unwrap().to_string();
 
-    super::set_env("CAMEL_PROFILE", "production");
     let sealed = CamelConfig::from_file_sealed(&path, "default", &|_| None);
-    super::unset_env("CAMEL_PROFILE");
 
     let sealed = sealed.expect("sealed load must succeed");
     assert_eq!(
@@ -445,7 +417,7 @@ timeout_ms = 9999
 
 #[test]
 fn root_known_table_beside_default_is_rejected() {
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::acquire();
     let file = write_temp_config(
         r#"
 [default]
@@ -472,7 +444,7 @@ path = "j.db"
 
 #[test]
 fn root_known_scalar_beside_default_is_rejected() {
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::acquire();
     let file = write_temp_config(
         r#"
 log_level = "DEBUG"
@@ -492,15 +464,7 @@ watch = true
 
 #[test]
 fn root_known_table_with_selected_profile_and_no_default_is_rejected() {
-    // Restores CAMEL_PROFILE even if the assertion below panics.
-    struct UnsetCamelProfile;
-    impl Drop for UnsetCamelProfile {
-        fn drop(&mut self) {
-            super::unset_env("CAMEL_PROFILE");
-        }
-    }
-
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::set("CAMEL_PROFILE", "prod");
     let file = write_temp_config(
         r#"
 [prod]
@@ -510,9 +474,6 @@ log_level = "warn"
 path = "j.db"
 "#,
     );
-
-    super::set_env("CAMEL_PROFILE", "prod");
-    let _restore = UnsetCamelProfile;
 
     let err = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
         .expect_err("root-level runtime_journal beside a selected [prod] must be rejected");
@@ -524,7 +485,7 @@ path = "j.db"
 
 #[test]
 fn nested_journal_under_default_still_loads() {
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::acquire();
     let file = write_temp_config(
         r#"
 [default]
@@ -545,7 +506,7 @@ durability = "eventual"
 
 #[test]
 fn flat_document_root_journal_still_loads() {
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::acquire();
     let file = write_temp_config(
         r#"
 [runtime_journal]
@@ -567,7 +528,7 @@ fn flat_include_beside_default_main_still_loads() {
     // not a discarded config key (it is extracted before profile selection),
     // and the flat fragment's content applies at its documented priority
     // (includes merge lowest-priority-first; the root file wins on conflicts).
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::acquire();
 
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(
@@ -606,18 +567,9 @@ fn flat_include_beside_default_main_still_loads() {
 // distance 2 of a known key are rejected instead of silently dropped.
 // ---------------------------------------------------------------------------
 
-/// Restores `CAMEL_PROFILE` to absent even if the test panics mid-assert.
-struct UnsetCamelProfileOnDrop;
-impl Drop for UnsetCamelProfileOnDrop {
-    fn drop(&mut self) {
-        super::unset_env("CAMEL_PROFILE");
-    }
-}
-
 #[test]
 fn root_routes_beside_default_survives_selection() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
+    let _guard = EnvGuard::remove("CAMEL_PROFILE");
     let file = write_temp_config(
         r#"
 routes = ["r/*.yaml"]
@@ -639,8 +591,7 @@ log_level = "info"
 
 #[test]
 fn root_routes_replaced_by_default_section_routes() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
+    let _guard = EnvGuard::remove("CAMEL_PROFILE");
     let file = write_temp_config(
         r#"
 routes = ["a/*.yaml"]
@@ -661,8 +612,7 @@ routes = ["b/*.yaml"]
 
 #[test]
 fn root_routes_replaced_by_selected_profile_routes() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
+    let _guard = EnvGuard::set("CAMEL_PROFILE", "prod");
     let file = write_temp_config(
         r#"
 routes = ["a/*.yaml"]
@@ -675,9 +625,6 @@ routes = ["c/*.yaml"]
 "#,
     );
 
-    super::set_env("CAMEL_PROFILE", "prod");
-    let _restore = UnsetCamelProfileOnDrop;
-
     let cfg = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
         .expect("root routes beside profile sections is the documented exception");
     assert_eq!(
@@ -689,8 +636,7 @@ routes = ["c/*.yaml"]
 
 #[test]
 fn root_routes_beside_selected_profile_only_survives() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
+    let _guard = EnvGuard::set("CAMEL_PROFILE", "prod");
     let file = write_temp_config(
         r#"
 routes = ["a/*.yaml"]
@@ -699,9 +645,6 @@ routes = ["a/*.yaml"]
 log_level = "warn"
 "#,
     );
-
-    super::set_env("CAMEL_PROFILE", "prod");
-    let _restore = UnsetCamelProfileOnDrop;
 
     let cfg = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
         .expect("root routes beside [prod] with no [default] is the documented exception");
@@ -715,8 +658,7 @@ log_level = "warn"
 
 #[test]
 fn root_routes_with_other_known_keys_error_names_only_those() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
+    let _guard = EnvGuard::remove("CAMEL_PROFILE");
     let file = write_temp_config(
         r#"
 routes = ["r/*.yaml"]
@@ -741,8 +683,7 @@ log_level = "info"
 
 #[test]
 fn near_miss_table_beside_selected_profile_is_rejected() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
+    let _guard = EnvGuard::set("CAMEL_PROFILE", "prod");
     let file = write_temp_config(
         r#"
 [prod]
@@ -752,9 +693,6 @@ log_level = "warn"
 sampled = false
 "#,
     );
-
-    super::set_env("CAMEL_PROFILE", "prod");
-    let _restore = UnsetCamelProfileOnDrop;
 
     let err = CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
         .expect_err("near-miss root table beside a selected profile must be rejected");
@@ -775,8 +713,7 @@ sampled = false
 fn near_miss_table_without_profile_is_rejected_not_warned() {
     use crate::config::log_capture::capture_warns;
 
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
+    let _guard = EnvGuard::remove("CAMEL_PROFILE");
     let tree: toml::Value = toml::from_str(
         r#"
 [default]
@@ -810,8 +747,7 @@ path = "j.db"
 fn far_table_beside_active_profile_stays_silent() {
     // Negative lock: plausible profile names far from any known key keep
     // unselected-profile semantics — never rejected, never near-missed.
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
+    let _guard = EnvGuard::set("CAMEL_PROFILE", "prod");
     let file = write_temp_config(
         r#"
 [default]
@@ -825,9 +761,6 @@ z = 3
 "#,
     );
 
-    super::set_env("CAMEL_PROFILE", "prod");
-    let _restore = UnsetCamelProfileOnDrop;
-
     CamelConfig::from_file_with_profile(file.path().to_str().unwrap(), None)
         .expect("[staging] beside an active [prod] stays silently unselected (load = Ok)");
 }
@@ -836,8 +769,7 @@ z = 3
 fn flat_document_near_miss_table_stays_lenient() {
     // Negative lock: the near-miss discriminator never fires on flat
     // documents — unknown root tables land in _extra per flat leniency.
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
+    let _guard = EnvGuard::remove("CAMEL_PROFILE");
     let file = write_temp_config(
         r#"
 [obsevrability]

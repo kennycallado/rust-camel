@@ -3423,40 +3423,23 @@ pub(crate) fn apply_profile_lenient(value: &mut toml::Value, profile: Option<&st
 /// reads env via `config::Environment::with_prefix("CAMEL")` after an
 /// `.await` point, so without serialization the two race and the async
 /// test flakes ~1/5 runs in workspace mode.
-#[cfg(test)]
-static ENV_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Test-only coordination mutex acquisition. Recovery from poison is safe
-/// because every env test restores vars before assertions.
+///
+/// The lock itself lives in `camel_component_api::test_support` so guarded
+/// `EnvGuard` mutations and these legacy read-lock acquisitions are mutually
+/// exclusive.
 ///
 /// `pub(crate)` so sibling lib-test modules (e.g. `properties::tests`) share
 /// this lock with the `config_tests` children — one lock serializes ALL
-/// env-touching lib tests in the crate.
+/// env-touching lib tests in the crate, including the RAII `EnvGuard`.
 #[cfg(test)]
 pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    ENV_OVERRIDE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Sets an env var for a test. Caller MUST hold [`ENV_OVERRIDE_LOCK`].
-#[cfg(test)]
-fn set_env(key: &str, value: &str) {
-    // SAFETY: serialized against every other env-touching test via ENV_OVERRIDE_LOCK.
-    unsafe { std::env::set_var(key, value) }
-}
-
-/// Removes an env var for a test. Caller MUST hold [`ENV_OVERRIDE_LOCK`].
-#[cfg(test)]
-fn unset_env(key: &str) {
-    // SAFETY: serialized against every other env-touching test via ENV_OVERRIDE_LOCK.
-    unsafe { std::env::remove_var(key) }
+    camel_component_api::test_support::env_lock()
 }
 
 /// Serializes tests that change the process working directory (include
 /// resolution tests resolve bare filenames against the cwd).
 ///
-/// Acquire BEFORE [`ENV_OVERRIDE_LOCK`]-using code paths that also chdir to
+/// Acquire BEFORE [`env_lock`]-using code paths that also chdir to
 /// keep lock ordering consistent across tests.
 #[cfg(test)]
 static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

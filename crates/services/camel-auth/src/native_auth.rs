@@ -246,7 +246,9 @@ mod tests {
     #[test]
     fn test_store_resolves_env_var() {
         let key = format!("TEST_NATIVE_AUTH_KEY_{}", std::process::id());
-        // SAFETY: test-only env mutation; no concurrent tests touch this key.
+        // env-guard-exception: camel-auth cannot depend on camel-component-api
+        // (component-api depends on camel-auth: publish cycle), so the canonical
+        // EnvGuard is unavailable in this crate's unit tests.
         unsafe { std::env::set_var(&key, "env-secret-value") };
         let store = NativeCredentialStore::try_new(vec![NativeCredential {
             secret: NativeCredentialSecret::Env { name: key.clone() },
@@ -256,7 +258,8 @@ mod tests {
         let found = store.lookup("env-secret-value");
         assert!(found.is_some());
         assert_eq!(found.unwrap().subject, "env-user");
-        // SAFETY: cleanup of test-only env var.
+        // env-guard-exception: same publish-cycle constraint; remove the
+        // test-only variable without an EnvGuard.
         unsafe { std::env::remove_var(&key) };
     }
 

@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use camel_api::component_metadata::{ComponentMetadata, ComponentMetadataCatalog};
+use camel_component_api::test_support::EnvGuard;
 use camel_lint::{DiagnosticCode, LintEngine, Severity};
 
 /// Catalog with no registered components — R-SCHEMA does not consult it.
@@ -46,9 +47,11 @@ fn rschema_ignores_ambient_process_env() {
     let control = rschema_keys(engine.lint(source));
     // Ambient run: variable poisoned to a value that would change every
     // observable (message, validation) if the engine read the environment.
-    unsafe { std::env::set_var("RC93WCT_AMBIENT", "evil-ambient-value") };
-    let with_ambient = rschema_keys(engine.lint(source));
-    unsafe { std::env::remove_var("RC93WCT_AMBIENT") };
+    // The guard restores the ambient absence on scope exit.
+    let with_ambient = {
+        let _env = EnvGuard::set("RC93WCT_AMBIENT", "evil-ambient-value");
+        rschema_keys(engine.lint(source))
+    };
 
     assert_eq!(
         control, with_ambient,

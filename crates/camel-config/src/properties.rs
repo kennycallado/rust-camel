@@ -130,6 +130,7 @@ impl PropertiesResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::test_support::EnvGuard;
 
     #[test]
     fn test_resolve_simple_placeholder() {
@@ -188,27 +189,17 @@ mod tests {
 
     #[test]
     fn test_resolve_env_placeholder() {
-        // Serialize against env-touching tests (see ENV_OVERRIDE_LOCK).
-        let _guard = crate::config::env_lock();
-        unsafe {
-            env::set_var("RUST_CAMEL_TEST_HOST", "redis.prod.example.com");
-        }
+        let _env = EnvGuard::set("RUST_CAMEL_TEST_HOST", "redis.prod.example.com");
         let resolver = PropertiesResolver::new();
         assert_eq!(
             resolver.resolve("redis://{{env:RUST_CAMEL_TEST_HOST}}:6379"),
             Ok("redis://redis.prod.example.com:6379".to_string())
         );
-        unsafe {
-            env::remove_var("RUST_CAMEL_TEST_HOST");
-        }
     }
 
     #[test]
     fn test_resolve_env_missing_without_default_returns_error() {
-        let _guard = crate::config::env_lock();
-        unsafe {
-            env::remove_var("RUST_CAMEL_TEST_DEFINITELY_MISSING");
-        }
+        let _env = EnvGuard::remove("RUST_CAMEL_TEST_DEFINITELY_MISSING");
         let resolver = PropertiesResolver::new();
         let result = resolver.resolve("{{env:RUST_CAMEL_TEST_DEFINITELY_MISSING}}");
         assert!(result.is_err());
@@ -216,10 +207,7 @@ mod tests {
 
     #[test]
     fn test_resolve_env_with_default_uses_default_when_missing() {
-        let _guard = crate::config::env_lock();
-        unsafe {
-            env::remove_var("RUST_CAMEL_TEST_MISSING_HOST");
-        }
+        let _env = EnvGuard::remove("RUST_CAMEL_TEST_MISSING_HOST");
         let resolver = PropertiesResolver::new();
         assert_eq!(
             resolver.resolve("redis://{{env:RUST_CAMEL_TEST_MISSING_HOST:localhost}}:6379"),
@@ -229,35 +217,23 @@ mod tests {
 
     #[test]
     fn test_resolve_env_with_default_uses_env_when_present() {
-        let _guard = crate::config::env_lock();
-        unsafe {
-            env::set_var("RUST_CAMEL_TEST_DB_HOST", "db.prod.example.com");
-        }
+        let _env = EnvGuard::set("RUST_CAMEL_TEST_DB_HOST", "db.prod.example.com");
         let resolver = PropertiesResolver::new();
         assert_eq!(
             resolver.resolve("{{env:RUST_CAMEL_TEST_DB_HOST:localhost}}"),
             Ok("db.prod.example.com".to_string())
         );
-        unsafe {
-            env::remove_var("RUST_CAMEL_TEST_DB_HOST");
-        }
     }
 
     #[test]
     fn test_resolve_mixed_env_and_property() {
-        let _guard = crate::config::env_lock();
-        unsafe {
-            env::set_var("RUST_CAMEL_TEST_PORT", "6380");
-        }
+        let _env = EnvGuard::set("RUST_CAMEL_TEST_PORT", "6380");
         let resolver = PropertiesResolver::new();
         resolver.set("host", "localhost");
         assert_eq!(
             resolver.resolve("redis://{{host}}:{{env:RUST_CAMEL_TEST_PORT}}"),
             Ok("redis://localhost:6380".to_string())
         );
-        unsafe {
-            env::remove_var("RUST_CAMEL_TEST_PORT");
-        }
     }
 
     #[test]
@@ -269,18 +245,12 @@ mod tests {
 
     #[test]
     fn resolves_env_var_replacing_newlines() {
-        let _guard = crate::config::env_lock();
-        unsafe {
-            env::set_var(
-                "TEST_CONFIG_INJECTION",
-                "safe_value\ninjected_key: malicious",
-            );
-        }
+        let _env = EnvGuard::set(
+            "TEST_CONFIG_INJECTION",
+            "safe_value\ninjected_key: malicious",
+        );
         let resolver = PropertiesResolver::new();
         let result = resolver.resolve("{{env:TEST_CONFIG_INJECTION}}").unwrap();
-        unsafe {
-            env::remove_var("TEST_CONFIG_INJECTION");
-        }
         assert!(
             !result.contains('\n'),
             "interpolated value must not contain newlines"
@@ -311,17 +281,11 @@ mod tests {
 
     #[test]
     fn test_resolve_env_value_with_colons() {
-        let _guard = crate::config::env_lock();
-        unsafe {
-            env::set_var("RUST_CAMEL_TEST_CONN", "user:pass@host:5432");
-        }
+        let _env = EnvGuard::set("RUST_CAMEL_TEST_CONN", "user:pass@host:5432");
         let resolver = PropertiesResolver::new();
         assert_eq!(
             resolver.resolve("{{env:RUST_CAMEL_TEST_CONN}}"),
             Ok("user:pass@host:5432".to_string())
         );
-        unsafe {
-            env::remove_var("RUST_CAMEL_TEST_CONN");
-        }
     }
 }

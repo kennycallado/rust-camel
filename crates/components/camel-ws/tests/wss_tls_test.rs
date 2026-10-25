@@ -8,41 +8,15 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
+use camel_component_api::test_support::EnvGuard;
 use camel_component_api::{Body as CamelBody, Exchange, Message as CamelMessage};
 use camel_component_ws::{WsEndpointConfig, WsProducer};
 use futures::{SinkExt, StreamExt};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
-
-/// Serializes the process-global `SSL_CERT_FILE` mutation across tests in
-/// this binary.
-static TLS_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-/// RAII guard: sets `SSL_CERT_FILE` on construction and restores the
-/// previous value on drop — even when an assertion panics mid-test.
-struct SslCertFileGuard(Option<String>);
-
-impl SslCertFileGuard {
-    fn set(path: &Path) -> Self {
-        let prev = std::env::var("SSL_CERT_FILE").ok();
-        // `set_var` is unsafe under edition 2024. Sound here because
-        // TLS_ENV_LOCK serializes every env access in this binary.
-        unsafe { std::env::set_var("SSL_CERT_FILE", path) };
-        Self(prev)
-    }
-}
-
-impl Drop for SslCertFileGuard {
-    fn drop(&mut self) {
-        match self.0.take() {
-            Some(prev) => unsafe { std::env::set_var("SSL_CERT_FILE", prev) },
-            None => unsafe { std::env::remove_var("SSL_CERT_FILE") },
-        }
-    }
-}
 
 /// Absolute path of a committed TLS test fixture (generated once with
 /// openssl at development time, see `tests/fixtures/`).
@@ -105,14 +79,12 @@ async fn spawn_tls_echo_server(bind: &str) -> (SocketAddr, JoinHandle<()>) {
 }
 
 // The `SSL_CERT_FILE` mutation must stay in effect while the producer
-// send awaits, so the lock (via the guard) is intentionally held across
-// `.await` points; TLS_ENV_LOCK serializes that window against other
-// tests in this binary.
-#[allow(clippy::await_holding_lock)]
+// send awaits, so the canonical guard is intentionally held across
+// `.await` points; its process-wide lock serializes that window against
+// other env-touching tests.
 #[tokio::test]
 async fn producer_wss_connect() {
-    let _env_lock = TLS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _env_guard = SslCertFileGuard::set(&fixture("ws-test-ca.crt"));
+    let _env_guard = EnvGuard::set("SSL_CERT_FILE", fixture("ws-test-ca.crt"));
     // tokio-tungstenite builds its native-roots config with
     // `ClientConfig::builder()`, which needs a process-level crypto
     // provider when more than one provider feature is unified in this

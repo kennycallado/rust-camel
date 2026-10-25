@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::log_capture::capture_warns;
+use camel_component_api::test_support::EnvGuard;
 
 fn write_temp_config(contents: &str) -> tempfile::NamedTempFile {
     use std::io::Write;
@@ -10,10 +11,10 @@ fn write_temp_config(contents: &str) -> tempfile::NamedTempFile {
 
 #[test]
 fn scalar_override_db_applied() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("CAMEL_CACHE_REPO_DB");
-    set_env("CAMEL_CACHE_REPO_DB", "3");
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("CAMEL_CACHE_REPO_DB");
+    _guard.and_set("CAMEL_CACHE_REPO_DB", "3");
 
     let file = write_temp_config(
         r#"
@@ -29,7 +30,7 @@ db = 0
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
-    unset_env("CAMEL_CACHE_REPO_DB");
+    _guard.and_remove("CAMEL_CACHE_REPO_DB");
 
     let cfg = loaded.expect("config should load with the db override");
     let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
@@ -39,10 +40,10 @@ db = 0
 
 #[test]
 fn empty_scalar_override_preserves_file_value() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("CAMEL_CACHE_REPO_DB");
-    set_env("CAMEL_CACHE_REPO_DB", "");
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("CAMEL_CACHE_REPO_DB");
+    _guard.and_set("CAMEL_CACHE_REPO_DB", "");
 
     let file = write_temp_config(
         r#"
@@ -58,7 +59,7 @@ db = 5
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
-    unset_env("CAMEL_CACHE_REPO_DB");
+    _guard.and_remove("CAMEL_CACHE_REPO_DB");
 
     // The empty override is skipped before type coercion, so the file
     // value stays effective and `Option<u16>` never sees "".
@@ -73,10 +74,10 @@ db = 5
 
 #[test]
 fn csv_override_builds_trimmed_node_list() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("CAMEL_CACHE_REPO_SENTINEL_NODES");
-    set_env(
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("CAMEL_CACHE_REPO_SENTINEL_NODES");
+    _guard.and_set(
         "CAMEL_CACHE_REPO_SENTINEL_NODES",
         "node-a:26379, node-b:26379",
     );
@@ -93,7 +94,7 @@ master_name = "m"
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
-    unset_env("CAMEL_CACHE_REPO_SENTINEL_NODES");
+    _guard.and_remove("CAMEL_CACHE_REPO_SENTINEL_NODES");
 
     let cfg = loaded.expect("config should load with the CSV override");
     let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
@@ -107,15 +108,15 @@ master_name = "m"
 
 #[test]
 fn csv_override_plus_master_name_validates_sentinel() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("RC_TEST_MASTER");
-    super::unset_env("CAMEL_CACHE_REPO_SENTINEL_NODES");
-    set_env(
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("RC_TEST_MASTER");
+    _guard.and_remove("CAMEL_CACHE_REPO_SENTINEL_NODES");
+    _guard.and_set(
         "CAMEL_CACHE_REPO_SENTINEL_NODES",
         "node-a:26379,node-b:26379",
     );
-    set_env("RC_TEST_MASTER", "mymaster");
+    _guard.and_set("RC_TEST_MASTER", "mymaster");
 
     let file = write_temp_config(
         r#"
@@ -129,8 +130,8 @@ master_name = "${env:RC_TEST_MASTER:-}"
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
-    unset_env("CAMEL_CACHE_REPO_SENTINEL_NODES");
-    unset_env("RC_TEST_MASTER");
+    _guard.and_remove("CAMEL_CACHE_REPO_SENTINEL_NODES");
+    _guard.and_remove("RC_TEST_MASTER");
 
     // CSV override composes with the placeholder-expanded master_name
     // into a sentinel topology that loads AND validates.
@@ -143,10 +144,10 @@ master_name = "${env:RC_TEST_MASTER:-}"
 
 #[test]
 fn bare_bytes_cache_size_override_deserializes() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("CAMEL_CACHE_REPO_CACHE_SIZE");
-    set_env("CAMEL_CACHE_REPO_CACHE_SIZE", "268435456");
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("CAMEL_CACHE_REPO_CACHE_SIZE");
+    _guard.and_set("CAMEL_CACHE_REPO_CACHE_SIZE", "268435456");
 
     let file = write_temp_config(
         r#"
@@ -160,7 +161,7 @@ path = "cache.redb"
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
-    unset_env("CAMEL_CACHE_REPO_CACHE_SIZE");
+    _guard.and_remove("CAMEL_CACHE_REPO_CACHE_SIZE");
 
     // The bare-bytes form is documented for cache_size; the override
     // must stay a JSON string so `Option<String>` deserialization
@@ -179,10 +180,10 @@ path = "cache.redb"
 
 #[test]
 fn numeric_like_key_prefix_stays_string() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("CAMEL_CACHE_REPO_KEY_PREFIX");
-    set_env("CAMEL_CACHE_REPO_KEY_PREFIX", "007");
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("CAMEL_CACHE_REPO_KEY_PREFIX");
+    _guard.and_set("CAMEL_CACHE_REPO_KEY_PREFIX", "007");
 
     let file = write_temp_config(
         r#"
@@ -197,7 +198,7 @@ master_name = "m"
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
-    unset_env("CAMEL_CACHE_REPO_KEY_PREFIX");
+    _guard.and_remove("CAMEL_CACHE_REPO_KEY_PREFIX");
 
     let cfg = loaded.expect("numeric-like key_prefix override must deserialize as a string");
     let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
@@ -211,10 +212,10 @@ master_name = "m"
 
 #[test]
 fn empty_csv_override_clears_populated_file_value() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("CAMEL_CACHE_REPO_SENTINEL_NODES");
-    set_env("CAMEL_CACHE_REPO_SENTINEL_NODES", "");
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("CAMEL_CACHE_REPO_SENTINEL_NODES");
+    _guard.and_set("CAMEL_CACHE_REPO_SENTINEL_NODES", "");
 
     let file = write_temp_config(
         r#"
@@ -229,7 +230,7 @@ url = "redis://s:6379"
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
-    unset_env("CAMEL_CACHE_REPO_SENTINEL_NODES");
+    _guard.and_remove("CAMEL_CACHE_REPO_SENTINEL_NODES");
 
     // The empty CSV override replaces the populated file list with [],
     // which the FR1 normalization then resolves to absent — the config
@@ -245,12 +246,12 @@ url = "redis://s:6379"
 
 #[test]
 fn credential_vars_stay_denied() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("CAMEL_CACHE_REPO_URL");
-    super::unset_env("CAMEL_CACHE_REPO_USERNAME");
-    set_env("CAMEL_CACHE_REPO_URL", "redis://evil:6379");
-    set_env("CAMEL_CACHE_REPO_USERNAME", "attacker");
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("CAMEL_CACHE_REPO_URL");
+    _guard.and_remove("CAMEL_CACHE_REPO_USERNAME");
+    _guard.and_set("CAMEL_CACHE_REPO_URL", "redis://evil:6379");
+    _guard.and_set("CAMEL_CACHE_REPO_USERNAME", "attacker");
 
     let file = write_temp_config(
         r#"
@@ -266,8 +267,8 @@ master_name = "m"
 
     let (loaded, warns) =
         capture_warns(|| CamelConfig::from_file_with_env(file.path().to_str().unwrap()));
-    unset_env("CAMEL_CACHE_REPO_URL");
-    unset_env("CAMEL_CACHE_REPO_USERNAME");
+    _guard.and_remove("CAMEL_CACHE_REPO_URL");
+    _guard.and_remove("CAMEL_CACHE_REPO_USERNAME");
 
     let cfg = loaded.expect("config must still load (credential vars are ignored)");
     let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
@@ -296,10 +297,10 @@ master_name = "m"
 
 #[test]
 fn unitless_numeric_stale_retention_fails_validation_with_unit_error() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("CAMEL_CACHE_REPO_STALE_RETENTION");
-    set_env("CAMEL_CACHE_REPO_STALE_RETENTION", "604800");
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("CAMEL_CACHE_REPO_STALE_RETENTION");
+    _guard.and_set("CAMEL_CACHE_REPO_STALE_RETENTION", "604800");
 
     let file = write_temp_config(
         r#"
@@ -313,7 +314,7 @@ url = "redis://s:6379"
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().expect("temp path"));
-    unset_env("CAMEL_CACHE_REPO_STALE_RETENTION");
+    _guard.and_remove("CAMEL_CACHE_REPO_STALE_RETENTION");
 
     // The unitless value must deserialize verbatim as a string (no
     // integer coercion) and then fail duration validation loudly with
@@ -337,10 +338,10 @@ url = "redis://s:6379"
 
 #[test]
 fn human_readable_duration_override_applies() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("CAMEL_CACHE_REPO_STALE_RETENTION");
-    set_env("CAMEL_CACHE_REPO_STALE_RETENTION", "7d");
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("CAMEL_CACHE_REPO_STALE_RETENTION");
+    _guard.and_set("CAMEL_CACHE_REPO_STALE_RETENTION", "7d");
 
     let file = write_temp_config(
         r#"
@@ -354,7 +355,7 @@ url = "redis://s:6379"
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().expect("temp path"));
-    unset_env("CAMEL_CACHE_REPO_STALE_RETENTION");
+    _guard.and_remove("CAMEL_CACHE_REPO_STALE_RETENTION");
 
     let cfg = loaded.expect("config should load with the 7d override");
     let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
@@ -371,11 +372,11 @@ url = "redis://s:6379"
 
 #[test]
 fn legacy_path_override_passes_through_verbatim() {
-    let _guard = super::env_lock();
+    let mut _guard = EnvGuard::acquire();
     for value in ["604800", "007"] {
-        super::unset_env("CAMEL_PROFILE");
-        super::unset_env("CAMEL_CACHE_REPO_PATH");
-        set_env("CAMEL_CACHE_REPO_PATH", value);
+        _guard.and_remove("CAMEL_PROFILE");
+        _guard.and_remove("CAMEL_CACHE_REPO_PATH");
+        _guard.and_set("CAMEL_CACHE_REPO_PATH", value);
 
         // redb topology: `path` is a legitimate field there, so the
         // load path's built-in validation accepts the overridden value.
@@ -392,7 +393,7 @@ cache_size = "256MiB"
         );
 
         let loaded = CamelConfig::from_file_with_env(file.path().to_str().expect("temp path"));
-        unset_env("CAMEL_CACHE_REPO_PATH");
+        _guard.and_remove("CAMEL_CACHE_REPO_PATH");
 
         let cfg = loaded.unwrap_or_else(|e| {
             panic!("numeric-like path override '{value}' must deserialize verbatim, got: {e}")
@@ -408,10 +409,10 @@ cache_size = "256MiB"
 
 #[test]
 fn numeric_backend_override_reaches_backend_validation() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("CAMEL_CACHE_REPO_BACKEND");
-    set_env("CAMEL_CACHE_REPO_BACKEND", "123");
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("CAMEL_CACHE_REPO_BACKEND");
+    _guard.and_set("CAMEL_CACHE_REPO_BACKEND", "123");
 
     let file = write_temp_config(
         r#"
@@ -424,7 +425,7 @@ backend = "memory"
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().expect("temp path"));
-    unset_env("CAMEL_CACHE_REPO_BACKEND");
+    _guard.and_remove("CAMEL_CACHE_REPO_BACKEND");
 
     // The numeric-looking backend name must deserialize as a string and
     // reach backend validation, not die in typed deserialization.
@@ -443,10 +444,10 @@ backend = "memory"
 
 #[test]
 fn numeric_typed_override_fields_stay_strict() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("CAMEL_CACHE_REPO_MAX_ENTRIES");
-    set_env("CAMEL_CACHE_REPO_MAX_ENTRIES", "notanumber");
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("CAMEL_CACHE_REPO_MAX_ENTRIES");
+    _guard.and_set("CAMEL_CACHE_REPO_MAX_ENTRIES", "notanumber");
 
     let file = write_temp_config(
         r#"
@@ -459,7 +460,7 @@ backend = "memory"
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().expect("temp path"));
-    unset_env("CAMEL_CACHE_REPO_MAX_ENTRIES");
+    _guard.and_remove("CAMEL_CACHE_REPO_MAX_ENTRIES");
 
     // The verbatim-passthrough hygiene applies ONLY to the String-typed
     // vars: typed overrides keep today's loud deserialization failure.
@@ -474,10 +475,10 @@ backend = "memory"
 
 #[test]
 fn legacy_empty_scalar_overrides_file_value_and_fails_validation() {
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    super::unset_env("CAMEL_CACHE_REPO_STALE_RETENTION");
-    set_env("CAMEL_CACHE_REPO_STALE_RETENTION", "");
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_remove("CAMEL_CACHE_REPO_STALE_RETENTION");
+    _guard.and_set("CAMEL_CACHE_REPO_STALE_RETENTION", "");
 
     let file = write_temp_config(
         r#"
@@ -492,7 +493,7 @@ stale_retention = "7d"
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().expect("temp path"));
-    unset_env("CAMEL_CACHE_REPO_STALE_RETENTION");
+    _guard.and_remove("CAMEL_CACHE_REPO_STALE_RETENTION");
 
     // Legacy vars are deliberately NOT empty-skip vars: the empty string
     // overrides the file value verbatim and then fails duration
@@ -617,9 +618,9 @@ fn empty_preexisting_typed_override_still_fails() {
     // CAMEL_TIMEOUT_MS is a pre-existing allowlisted var, so an empty
     // value keeps today's loud typed-deserialization failure instead of
     // being silently skipped.
-    let _guard = super::env_lock();
-    super::unset_env("CAMEL_PROFILE");
-    set_env("CAMEL_TIMEOUT_MS", "");
+    let mut _guard = EnvGuard::acquire();
+    _guard.and_remove("CAMEL_PROFILE");
+    _guard.and_set("CAMEL_TIMEOUT_MS", "");
 
     let file = write_temp_config(
         r#"
@@ -629,7 +630,7 @@ timeout_ms = 1000
     );
 
     let loaded = CamelConfig::from_file_with_env(file.path().to_str().unwrap());
-    unset_env("CAMEL_TIMEOUT_MS");
+    _guard.and_remove("CAMEL_TIMEOUT_MS");
 
     let err = loaded.expect_err("empty pre-existing typed override must still fail");
     let msg = err.to_string();
@@ -643,14 +644,15 @@ timeout_ms = 1000
 fn env_lock_recovers_after_poison() {
     // Poison the mutex by panicking while holding the guard.
     let _ = std::panic::catch_unwind(|| {
-        let _g = env_lock();
+        let _g = EnvGuard::acquire();
         panic!("poison source");
     });
     // The second acquisition must recover from the poison instead of
-    // panicking; binding the guard proves it is held.
-    let _guard = env_lock();
+    // panicking; binding the guard proves it is held, and a nonblocking
+    // second lock attempt must fail while it is alive.
+    let _guard = EnvGuard::acquire();
     assert!(
-        ENV_OVERRIDE_LOCK.try_lock().is_err(),
-        "env_lock guard must be held after poison recovery"
+        camel_component_api::test_support::env_try_lock().is_none(),
+        "env guard must be held after poison recovery"
     );
 }

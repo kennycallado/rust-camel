@@ -1249,10 +1249,7 @@ routes:
 
         #[tokio::test]
         async fn missing_secret_env_fails_closed() {
-            // SAFETY: this is the only test in the module that touches
-            // environment variables, so no concurrent test can race on
-            // AUTH_SVC_TOKEN.
-            unsafe { std::env::remove_var("AUTH_SVC_TOKEN") };
+            let _env_guard = camel_component_api::test_support::EnvGuard::remove("AUTH_SVC_TOKEN");
 
             let native = camel_config::config::NativeAuthConfig {
                 credentials: vec![native_entry("svc", Some("AUTH_SVC_TOKEN"), None, vec![])],

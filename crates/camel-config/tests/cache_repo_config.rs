@@ -1761,18 +1761,10 @@ payload_max_ttl = "999ms"
 
 #[test]
 fn payload_dir_env_placeholder_resolves() {
-    let _guard = common::env_lock();
     // cache_repo is a strict-interpolation section (STRICT_PREFIXES), so a
     // `${env:}` placeholder on payload_dir must resolve at load time and
     // leave a literal path that validate() accepts. Mirrors the placeholder
     // e2e tests: unique env var name, panic-safe cleanup.
-    struct EnvCleanup(&'static str);
-    impl Drop for EnvCleanup {
-        fn drop(&mut self) {
-            unsafe { std::env::remove_var(self.0) };
-        }
-    }
-
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("Camel.toml");
     let toml = r#"
@@ -1785,10 +1777,7 @@ payload_dir = "${env:RUST_CAMEL_TEST_CACHE_PAYLOAD_DIR}"
     std::fs::write(&config_path, toml).unwrap();
 
     let expected = dir.path().to_str().unwrap();
-    unsafe {
-        std::env::set_var("RUST_CAMEL_TEST_CACHE_PAYLOAD_DIR", expected);
-    }
-    let _env = EnvCleanup("RUST_CAMEL_TEST_CACHE_PAYLOAD_DIR");
+    let _env = common::EnvGuard::set("RUST_CAMEL_TEST_CACHE_PAYLOAD_DIR", expected);
 
     let cfg = CamelConfig::from_file(config_path.to_str().unwrap())
         .expect("config with a resolvable payload_dir placeholder must load");

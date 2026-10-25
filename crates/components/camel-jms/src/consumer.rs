@@ -1141,7 +1141,7 @@ mod tests {
     use super::*;
     use crate::BrokerType;
     use crate::bridge_client_test::{
-        TestBridgeFixture, env_guard, next_refresh_attempt, ready_stub_process, refresh_attempts,
+        TestBridgeFixture, next_refresh_attempt, ready_stub_process, refresh_attempts,
         replacement_attempts, spawn_scripted_health, stop_slot_process,
     };
     use crate::component::{BridgeSlot, ProbeOutcome, StartBridgeError};
@@ -1154,6 +1154,7 @@ mod tests {
     };
     use camel_bridge::process::BridgeProcessConfig;
     use camel_component_api::ExchangeEnvelope;
+    use camel_component_api::test_support::EnvGuard;
     use camel_component_api::test_support::{
         PanicRuntimeObservability, RecordingRuntimeObservability, timeout_wait,
     };
@@ -1710,14 +1711,9 @@ mod tests {
     // ── JMS-017: Missing bridge returns Err immediately ───────────────────────
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn missing_bridge_returns_err_within_1s() {
-        // Serialize against other tests mutating CAMEL_JMS_BRIDGE_BINARY_PATH (rc-alwn).
-        let _env_lock_guard = crate::BRIDGE_ENV_LOCK.lock().unwrap();
-
         let env_key = "CAMEL_JMS_BRIDGE_BINARY_PATH";
-        let _guard = env_guard(env_key);
-        unsafe { std::env::set_var(env_key, "/bin/false") };
+        let _env_guard = EnvGuard::set(env_key, "/bin/false");
 
         let pool = Arc::new(
             JmsBridgePool::from_config(JmsPoolConfig {

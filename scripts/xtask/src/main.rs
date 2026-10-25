@@ -5,6 +5,7 @@ mod lint_component_deps;
 mod lint_context_citations;
 mod lint_gate_forwarding;
 mod lint_metric_labels;
+mod lint_no_env_mutation_unguarded;
 mod lint_no_free_port;
 mod lint_no_raw_http_test_server;
 mod lint_publish_registration;
@@ -143,6 +144,15 @@ enum Commands {
     /// marked sites never count and a def marker does not cover its
     /// call sites.
     LintNoFreePort,
+    /// Enforce the canonical `EnvGuard` for test-scope `std::env::set_var`
+    /// / `remove_var` calls (mission 403 task 7.1). Test-scope means a
+    /// path under `tests/`, a `*_tests.rs` / `test_*.rs` file, or a source
+    /// containing `#[cfg(test)]`. Exits non-zero on any unmarked site and
+    /// on any per-file count mismatch against the seeded ledger at
+    /// `scripts/xtask/lint-no-env-mutation-unguarded.ledger`.
+    /// Escape hatch: put `// env-guard-exception: <reason>` on the nearest
+    /// line above a site; one marker authorizes exactly one site.
+    LintNoEnvMutationUnguarded,
     /// Ratchet-count raw HTTP/1.x response literals in test scope
     /// (hand-written `HTTP/1.1 200 OK` wire bytes) against a monotone
     /// ceiling in `scripts/xtask/ratchet-raw-http-test-server.max`
@@ -574,6 +584,51 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-no-free-port error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintNoEnvMutationUnguarded => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_no_env_mutation_unguarded::run(&workspace_root) {
+                Ok(report) if !report.is_ok() => {
+                    if !report.violations.is_empty() {
+                        println!(
+                            "UNGUARDED TEST-SCOPE ENV MUTATION ({} sites):",
+                            report.violations.len()
+                        );
+                        for (file, violation) in &report.violations {
+                            println!(
+                                "  {}:{} — {}",
+                                file.display(),
+                                violation.line,
+                                violation.kind.remedy()
+                            );
+                        }
+                    }
+                    if !report.mismatches.is_empty() {
+                        println!("ENV-GUARD LEDGER MISMATCH ({}):", report.mismatches.len());
+                        for mismatch in &report.mismatches {
+                            println!("  {}", mismatch.message());
+                        }
+                    }
+                    println!(
+                        "  migrate the site to camel_component_api::test_support::EnvGuard, or lower scripts/xtask/{} — never raise it without review justification. Adjudicate a genuine residual with a `// env-guard-exception: <reason>` marker on the nearest line above it.",
+                        lint_no_env_mutation_unguarded::LEDGER_FILE
+                    );
+                    eprintln!("\nlint-no-env-mutation-unguarded: FAILED");
+                    std::process::exit(1);
+                }
+                Ok(report) => {
+                    println!(
+                        "lint-no-env-mutation-unguarded: OK ({} marked sites = seeded {})",
+                        report.actual_total(),
+                        report.seeded_total()
+                    );
+                    print!("{}", report.summary());
+                }
+                Err(e) => {
+                    eprintln!("lint-no-env-mutation-unguarded error: {e}");
                     std::process::exit(1);
                 }
             }

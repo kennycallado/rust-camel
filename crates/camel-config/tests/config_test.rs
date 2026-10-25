@@ -72,7 +72,6 @@ timeout_ms = 30000
 
 #[test]
 fn test_env_var_override() {
-    let _guard = common::env_lock();
     let dir = tempdir().unwrap();
     let config_path = dir.path().join("Camel.toml");
 
@@ -83,18 +82,13 @@ timeout_ms = 5000
 "#;
     fs::write(&config_path, content).unwrap();
 
-    unsafe {
-        std::env::set_var("CAMEL_LOG_LEVEL", "DEBUG");
-        std::env::set_var("CAMEL_TIMEOUT_MS", "10000");
-    }
+    let mut _guard = common::EnvGuard::acquire();
+    _guard
+        .and_set("CAMEL_LOG_LEVEL", "DEBUG")
+        .and_set("CAMEL_TIMEOUT_MS", "10000");
 
     let config = CamelConfig::from_file_with_env(config_path.to_str().unwrap())
         .expect("Failed to load config");
-
-    unsafe {
-        std::env::remove_var("CAMEL_LOG_LEVEL");
-        std::env::remove_var("CAMEL_TIMEOUT_MS");
-    }
 
     assert_eq!(config.log_level, "DEBUG");
     assert_eq!(config.timeout_ms, 10000);

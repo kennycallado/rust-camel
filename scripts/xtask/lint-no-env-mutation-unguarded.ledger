@@ -1,0 +1,5 @@
+# Per-file residual ledger for `cargo xtask lint-no-env-mutation-unguarded`.
+# Format: <repo-relative-file> <count> <reason>
+# Counts may only decrease; an entry must be lowered in the change that
+# migrates a site.
+crates/services/camel-auth/src/native_auth.rs 2 publish-cycle: camel-component-api depends on camel-auth, so EnvGuard is unavailable in this crate

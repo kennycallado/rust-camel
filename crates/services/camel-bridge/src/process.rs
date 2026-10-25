@@ -1073,6 +1073,7 @@ impl Drop for BridgeProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_component_api::test_support::EnvGuard;
 
     #[test]
     fn broker_type_from_str_activemq() {
@@ -1328,11 +1329,7 @@ mod tests {
             return;
         }
 
-        let prior = std::env::var_os(BRIDGE_BROKER_TLS_CA_CERT_PATH);
-        // SAFETY: this body only runs in the re-executed child, where
-        // `--test-threads=1` plus an exact filter make it the only test, and
-        // the child under test is spawned after the mutation from this thread.
-        unsafe { std::env::set_var(BRIDGE_BROKER_TLS_CA_CERT_PATH, "stale-value") };
+        let _env_guard = EnvGuard::set(BRIDGE_BROKER_TLS_CA_CERT_PATH, "stale-value");
 
         let observed_dir = tempfile::tempdir().expect("observed env tempdir");
         let observed_a = observed_dir.path().join("a.env");
@@ -1393,17 +1390,6 @@ mod tests {
             .stop()
             .await
             .unwrap_or_else(|e| panic!("remove-then-inject fake bridge must stop cleanly: {e}"));
-
-        match prior {
-            Some(value) => {
-                // SAFETY: single-test child process; restores the pre-test value.
-                unsafe { std::env::set_var(BRIDGE_BROKER_TLS_CA_CERT_PATH, value) };
-            }
-            None => {
-                // SAFETY: single-test child process; restores the pre-test absence.
-                unsafe { std::env::remove_var(BRIDGE_BROKER_TLS_CA_CERT_PATH) };
-            }
-        }
     }
 
     #[test]

@@ -114,7 +114,6 @@ pub fn resolve_cxf_bridge_binary() -> Option<PathBuf> {
     if let Ok(p) = std::env::var(ENV_ALIAS) {
         let path = PathBuf::from(&p);
         if path.is_file() {
-            unsafe { std::env::set_var(ENV_CAMEL, &path) };
             return Some(path);
         }
     }
@@ -122,7 +121,6 @@ pub fn resolve_cxf_bridge_binary() -> Option<PathBuf> {
     if let Some(root) = find_workspace_root() {
         let candidate = root.join("bridges/cxf/build/native/cxf-bridge");
         if candidate.is_file() {
-            unsafe { std::env::set_var(ENV_CAMEL, &candidate) };
             return Some(candidate);
         }
     }

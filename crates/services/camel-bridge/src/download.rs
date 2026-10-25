@@ -448,18 +448,12 @@ fn bridge_dir_name(spec: &BridgeSpec) -> &str {
 mod tests {
     use super::*;
     use crate::spec::{CXF_BRIDGE, XML_BRIDGE};
+    use camel_component_api::test_support::EnvGuard;
 
     /// Remove the explicit binary override so `ensure_binary_for_spec` falls
     /// through to the cache and download logic under test.
-    ///
-    /// SAFETY: edition 2024 marks `remove_var` unsafe because concurrent env
-    /// access is racy. Every writer in this module removes the same variable
-    /// per spec (and, when needed, sets the same loopback release URL), so no
-    /// test can observe an inconsistent value. The miss-test assertions
-    /// tolerate any non-`CacheUnwritable` error, so ambient mutation cannot
-    /// flake them.
-    fn neutralize_binary_override(spec: &BridgeSpec) {
-        unsafe { std::env::remove_var(spec.env_binary_path) };
+    fn neutralize_binary_override(spec: &BridgeSpec) -> EnvGuard {
+        EnvGuard::remove(spec.env_binary_path)
     }
 
     /// True when the developer's workspace has a prebuilt shared binary for
@@ -473,13 +467,8 @@ mod tests {
     /// Point the release URL at a loopback port so a cache miss never contacts
     /// a real endpoint: `resolve_release_base_url` rejects the http override
     /// with `BridgeError::UrlNotAllowed` before any network I/O.
-    ///
-    /// The override deliberately leaks for the rest of the test process: no
-    /// other test in this binary reads the ambient release URL (they pass
-    /// overrides as parameters), and same-value writes are benign.
-    fn set_loopback_release_url(spec: &BridgeSpec) {
-        // SAFETY: see `neutralize_binary_override` — same-value writes only.
-        unsafe { std::env::set_var(spec.env_release_url, "http://127.0.0.1:9") };
+    fn set_loopback_release_url(guard: &mut EnvGuard, spec: &BridgeSpec) {
+        guard.and_set(spec.env_release_url, "http://127.0.0.1:9");
     }
 
     #[tokio::test]
@@ -487,7 +476,7 @@ mod tests {
     async fn unwritable_cache_dir_yields_cache_unwritable_before_download() {
         use std::os::unix::fs::PermissionsExt;
 
-        neutralize_binary_override(&XML_BRIDGE);
+        let mut env_guard = neutralize_binary_override(&XML_BRIDGE);
         if workspace_binary_present(&XML_BRIDGE) {
             return;
         }
@@ -508,7 +497,7 @@ mod tests {
             return;
         }
 
-        set_loopback_release_url(&XML_BRIDGE);
+        set_loopback_release_url(&mut env_guard, &XML_BRIDGE);
 
         let result = ensure_binary_for_spec(&XML_BRIDGE, "0.0.0-test", &subdir).await;
 
@@ -528,7 +517,7 @@ mod tests {
     async fn verified_cache_hit_succeeds_without_write_probe() {
         use std::os::unix::fs::PermissionsExt;
 
-        neutralize_binary_override(&XML_BRIDGE);
+        let _env_guard = neutralize_binary_override(&XML_BRIDGE);
         if workspace_binary_present(&XML_BRIDGE) {
             return;
         }
@@ -567,13 +556,13 @@ mod tests {
 
     #[tokio::test]
     async fn writable_cache_miss_does_not_report_cache_unwritable() {
-        neutralize_binary_override(&XML_BRIDGE);
+        let mut env_guard = neutralize_binary_override(&XML_BRIDGE);
         if workspace_binary_present(&XML_BRIDGE) {
             return;
         }
 
         let dir = tempfile::TempDir::new().expect("create temp dir");
-        set_loopback_release_url(&XML_BRIDGE);
+        set_loopback_release_url(&mut env_guard, &XML_BRIDGE);
 
         let err = ensure_binary_for_spec(&XML_BRIDGE, "0.0.0-test", dir.path())
             .await
@@ -657,8 +646,8 @@ mod tests {
     /// is the independent oracle for the layout itself.
     #[tokio::test]
     async fn ensure_binary_uses_workspace_layout() {
-        neutralize_binary_override(&CXF_BRIDGE);
-        set_loopback_release_url(&CXF_BRIDGE);
+        let mut env_guard = neutralize_binary_override(&CXF_BRIDGE);
+        set_loopback_release_url(&mut env_guard, &CXF_BRIDGE);
 
         let cache = tempfile::TempDir::new().expect("create temp dir");
         let target = workspace_binary_path(&CXF_BRIDGE)

@@ -1,4 +1,5 @@
 use super::*;
+use camel_component_api::test_support::EnvGuard;
 
 fn write_temp_config(contents: &str) -> tempfile::NamedTempFile {
     use std::io::Write;
@@ -146,8 +147,7 @@ fn idempotent_repo_normalize_parity() {
 
     // Pipeline: an env-expanded-empty url alongside populated sentinel
     // fields loads and validates as a sentinel topology.
-    let _guard = super::env_lock();
-    super::unset_env("RC_TEST_IDEM_URL");
+    let _env_guard = EnvGuard::remove("RC_TEST_IDEM_URL");
     let file = write_temp_config(
         r#"
 [default]
@@ -170,8 +170,7 @@ master_name = "mymaster"
 fn blank_key_prefix_selects_default() {
     // Pipeline: `${env:...:-}` expanding empty normalizes away so the
     // repository default prefix applies.
-    let _guard = super::env_lock();
-    super::unset_env("RC_TEST_PREFIX");
+    let _env_guard = EnvGuard::remove("RC_TEST_PREFIX");
     let file = write_temp_config(
         r#"
 [default]
@@ -230,8 +229,7 @@ fn invalid_key_prefix_still_rejected_by_keyspace() {
 
 #[test]
 fn sentinel_topology_selected_by_empty_expanded_url() {
-    let _guard = super::env_lock();
-    super::unset_env("RC_TEST_REDIS_URL");
+    let _env_guard = EnvGuard::remove("RC_TEST_REDIS_URL");
     let file = write_temp_config(
         r#"
 [default]
@@ -249,15 +247,14 @@ master_name = "m"
     let repo = cfg.cache_repo.as_ref().expect("cache_repo section");
     assert!(repo.url.is_none());
     assert_eq!(repo.sentinel_nodes, Some(vec!["node-a:26379".to_string()]));
-    super::unset_env("RC_TEST_REDIS_URL");
 }
 
 #[test]
 fn standalone_topology_selected_by_populated_url() {
-    let _guard = super::env_lock();
-    super::set_env("RC_TEST_REDIS_URL", "redis://host:6379");
-    super::unset_env("RC_TEST_NODES_0");
-    super::unset_env("RC_TEST_MASTER");
+    let mut env_guard = EnvGuard::set("RC_TEST_REDIS_URL", "redis://host:6379");
+    env_guard
+        .and_remove("RC_TEST_NODES_0")
+        .and_remove("RC_TEST_MASTER");
     let file = write_temp_config(
         r#"
 [default]
@@ -282,18 +279,15 @@ master_name = "${env:RC_TEST_MASTER:-}"
         repo.master_name.is_none(),
         "expanded-empty master_name must normalize to None"
     );
-    super::unset_env("RC_TEST_REDIS_URL");
-    super::unset_env("RC_TEST_NODES_0");
-    super::unset_env("RC_TEST_MASTER");
 }
 
 #[test]
 fn blank_password_placeholder_selecting_standalone_validates() {
-    let _guard = super::env_lock();
-    super::set_env("RC_TEST_REDIS_URL", "redis://host:6379");
-    super::unset_env("RC_TEST_PW");
-    super::unset_env("RC_TEST_NODES_0");
-    super::unset_env("RC_TEST_MASTER");
+    let mut env_guard = EnvGuard::set("RC_TEST_REDIS_URL", "redis://host:6379");
+    env_guard
+        .and_remove("RC_TEST_PW")
+        .and_remove("RC_TEST_NODES_0")
+        .and_remove("RC_TEST_MASTER");
     let file = write_temp_config(
         r#"
 [default]
@@ -320,10 +314,6 @@ master_name = "${env:RC_TEST_MASTER:-}"
         "expanded-empty sentinel_password must normalize to None"
     );
     assert!(cfg.validate().is_ok(), "standalone topology must validate");
-    super::unset_env("RC_TEST_REDIS_URL");
-    super::unset_env("RC_TEST_PW");
-    super::unset_env("RC_TEST_NODES_0");
-    super::unset_env("RC_TEST_MASTER");
 }
 
 #[test]
@@ -350,8 +340,7 @@ master_name = "m"
 
 #[test]
 fn both_topologies_absent_still_fails() {
-    let _guard = super::env_lock();
-    super::unset_env("RC_TEST_MISSING");
+    let _env_guard = EnvGuard::remove("RC_TEST_MISSING");
     let file = write_temp_config(
         r#"
 [default]

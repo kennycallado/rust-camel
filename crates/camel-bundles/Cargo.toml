@@ -65,6 +65,7 @@ camel-dsl = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
+camel-component-api = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 # Startup log-noise regression test captures fmt-layer output through a
 # custom MakeWriter (bd rc-k56el).

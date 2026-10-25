@@ -83,7 +83,7 @@ pub fn run(action: OpenapiAction) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::run::tests::EnvVarGuard;
+    use camel_component_api::test_support::EnvGuard;
     use std::io::Write;
 
     #[test]
@@ -274,7 +274,7 @@ rest:
 
         // The guard restores the prior value on drop, so a panicking
         // assertion cannot leak the ambient value into other tests.
-        let _env = EnvVarGuard::set("RC_GYKDS_CLI_VAR", "evil");
+        let _env = EnvGuard::set("RC_GYKDS_CLI_VAR", "evil");
 
         let doc = run_generate(&args).expect("ambient env must be ignored, default wins");
         assert_eq!(doc["servers"][0]["url"], "http://0.0.0.0:9090");

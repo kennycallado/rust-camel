@@ -1,4 +1,5 @@
 use super::*;
+use camel_component_api::test_support::EnvGuard;
 
 #[test]
 fn journal_durability_converts_to_core_type() {
@@ -72,11 +73,6 @@ fn redb_idempotent_config_durability_roundtrips_to_core() {
 fn from_env_or_default_uses_camel_config_file_env() {
     use std::io::Write;
 
-    // from_env_or_default reads the full CAMEL_* override allowlist, so
-    // this test must serialize against the other env-touching tests or
-    // a concurrent allowlist mutation leaks into its assertions.
-    let _guard = super::env_lock();
-
     let mut file = tempfile::NamedTempFile::new().unwrap();
     file.write_all(
         br#"
@@ -86,13 +82,10 @@ timeout_ms = 111
     )
     .unwrap();
 
-    unsafe {
-        std::env::set_var("CAMEL_CONFIG_FILE", file.path());
-    }
+    // from_env_or_default reads the full CAMEL_* override allowlist, so the
+    // guard serializes against the other env-touching tests.
+    let _guard = EnvGuard::set("CAMEL_CONFIG_FILE", file.path().to_owned());
     let cfg = CamelConfig::from_env_or_default().unwrap();
-    unsafe {
-        std::env::remove_var("CAMEL_CONFIG_FILE");
-    }
 
     assert!(cfg.watch);
     assert_eq!(cfg.timeout_ms, 111);
@@ -100,18 +93,14 @@ timeout_ms = 111
 
 #[test]
 fn from_env_or_default_applies_env_overrides() {
-    // Serialize against async env-reading tests (see ENV_OVERRIDE_LOCK).
-    let _guard = super::env_lock();
     use std::io::Write;
 
     let mut file = tempfile::NamedTempFile::new().unwrap();
     file.write_all(br#"timeout_ms = 222"#).unwrap();
 
-    super::set_env("CAMEL_CONFIG_FILE", file.path().to_str().unwrap());
-    super::set_env("CAMEL_TIMEOUT_MS", "12345");
+    let mut _guard = EnvGuard::set("CAMEL_CONFIG_FILE", file.path().to_owned());
+    _guard.and_set("CAMEL_TIMEOUT_MS", "12345");
     let loaded = CamelConfig::from_env_or_default();
-    super::unset_env("CAMEL_CONFIG_FILE");
-    super::unset_env("CAMEL_TIMEOUT_MS");
 
     let cfg = loaded.expect("from_env_or_default should load the fixture");
     assert_eq!(
@@ -122,7 +111,7 @@ fn from_env_or_default_applies_env_overrides() {
 
 #[test]
 fn from_file_with_profile_and_env_unknown_profile_errors() {
-    let _guard = super::env_lock();
+    let _guard = EnvGuard::acquire();
     use std::io::Write;
 
     let mut file = tempfile::NamedTempFile::new().unwrap();

@@ -23,6 +23,7 @@
 //! `UPDATE_GOLDENS=1 cargo test -p camel-config parity_`.
 
 use super::*;
+use camel_component_api::test_support::EnvGuard;
 use std::sync::{Arc, Mutex};
 
 // ── golden plumbing ──────────────────────────────────────────────────────
@@ -206,7 +207,6 @@ max_connections = 25
 /// deep-merges tables recursively and REPLACES the routes array.
 #[test]
 fn parity_profile_deep_merge_and_array_replace() {
-    let _guard = env_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     write_fixture(
         dir.path(),
@@ -230,9 +230,10 @@ max_connections = 99
 "#,
     );
 
-    set_env("CAMEL_PROFILE", "production");
-    let loaded = CamelConfig::from_file_with_profile(&config_path(dir.path()), None);
-    unset_env("CAMEL_PROFILE");
+    let loaded = {
+        let _env_guard = EnvGuard::set("CAMEL_PROFILE", "production");
+        CamelConfig::from_file_with_profile(&config_path(dir.path()), None)
+    };
     let cfg = loaded.expect("profiled config loads");
 
     lock_json_golden(
@@ -254,7 +255,6 @@ max_connections = 99
 /// strict single-profile error; the full Display string is locked.
 #[test]
 fn parity_unknown_profile_error_string_locked() {
-    let _guard = env_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     write_fixture(
         dir.path(),
@@ -266,9 +266,10 @@ watch = false
 "#,
     );
 
-    set_env("CAMEL_PROFILE", "staging");
-    let loaded = CamelConfig::from_file_with_profile(&config_path(dir.path()), None);
-    unset_env("CAMEL_PROFILE");
+    let loaded = {
+        let _env_guard = EnvGuard::set("CAMEL_PROFILE", "staging");
+        CamelConfig::from_file_with_profile(&config_path(dir.path()), None)
+    };
     let err = loaded.expect_err("unknown profile must fail");
 
     let display = err.to_string();
@@ -472,7 +473,6 @@ max_connections = 42
 /// the crate's env lock like every other env-mutating test.
 #[test]
 fn parity_env_override_set_and_unset() {
-    let _guard = env_lock();
     let dir = tempfile::tempdir().expect("temp dir");
     write_fixture(
         dir.path(),
@@ -485,9 +485,10 @@ timeout_ms = 1000
     let path = config_path(dir.path());
 
     // Arm (a): variable set.
-    set_env("PARITY_GOLDEN_VAR", "pinned");
-    let loaded = CamelConfig::from_file(&path);
-    unset_env("PARITY_GOLDEN_VAR");
+    let loaded = {
+        let _env_guard = EnvGuard::set("PARITY_GOLDEN_VAR", "pinned");
+        CamelConfig::from_file(&path)
+    };
     let pinned = loaded.expect("set-arm load");
     lock_json_golden(
         "case_07a.json",
@@ -498,8 +499,10 @@ timeout_ms = 1000
     );
 
     // Arm (b): variable unset.
-    unset_env("PARITY_GOLDEN_VAR");
-    let fallback = CamelConfig::from_file(&path).expect("unset-arm load");
+    let fallback = {
+        let _env_guard = EnvGuard::remove("PARITY_GOLDEN_VAR");
+        CamelConfig::from_file(&path).expect("unset-arm load")
+    };
     lock_json_golden(
         "case_07b.json",
         &[
