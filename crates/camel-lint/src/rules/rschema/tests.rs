@@ -3113,3 +3113,242 @@ rest:
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn clean_boolean_lexical_gate() {
+    // SYNC gate pin: mirrors camel-config env_int_probe::clean_bool and
+    // camel-dsl env_int_probe::clean_boolean — exact lowercase `true` /
+    // `false` only; no whitespace, no case folding, no yes/on/1/0.
+    let accepted = [("true", true), ("false", false)];
+    for (s, expected) in accepted {
+        assert_eq!(
+            clean_boolean(s),
+            Some(expected),
+            "`{s}` must be the clean boolean {expected}"
+        );
+    }
+    let rejected = [
+        "", "TRUE", "True", "yes", "on", "1", "0", " true", "true ", "true\n",
+    ];
+    for s in rejected {
+        assert!(
+            clean_boolean(s).is_none(),
+            "`{s:?}` must NOT be a clean boolean"
+        );
+    }
+}
+
+#[test]
+fn bool_position_true_default_accepted() {
+    // Boolean-position carve-out (typing mirror bool arm): `auto_startup`
+    // is a strict boolean in ROUTE_SCHEMA and the default `true` is a
+    // clean boolean, so the validation copy carries the BOOL — exactly as
+    // the boot loader coerces the leaf. Error gone, Info suppressed.
+    let source = "\
+id: r1
+from: direct:start
+auto_startup: ${env:AUTO_STARTUP:-true}
+steps:
+  - to: log:out
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema
+            .iter()
+            .all(|d| !slice(source, &d.span).contains("${env:AUTO_STARTUP:-true}")),
+        "carved bool leaf must emit no diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn bool_position_false_default_accepted() {
+    // Same carve-out for the false default: the parsed boot boolean is
+    // `false`, never the string "false".
+    let source = "\
+id: r1
+from: direct:start
+auto_startup: ${env:AUTO_STARTUP:-false}
+steps:
+  - to: log:out
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema
+            .iter()
+            .all(|d| !slice(source, &d.span).contains("${env:AUTO_STARTUP:-false}")),
+        "carved bool leaf must emit no diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn bool_position_non_boolean_defaults_still_error() {
+    // Non-clean boolean defaults (`yes`, `TRUE`, `1`) are not carved: the
+    // STRING copy keeps today's type Error at the bool position.
+    for (default, ph) in [
+        ("yes", "${env:AUTO_STARTUP:-yes}"),
+        ("TRUE", "${env:AUTO_STARTUP:-TRUE}"),
+        ("1", "${env:AUTO_STARTUP:-1}"),
+    ] {
+        let source =
+            format!("id: r1\nfrom: direct:start\nauto_startup: {ph}\nsteps:\n  - to: log:out\n");
+        let diags = analyze(&source);
+        let rschema = rschema_only(&diags);
+        assert!(
+            rschema
+                .iter()
+                .any(|d| d.severity == Severity::Error && slice(&source, &d.span).contains(ph)),
+            "default `{default}` must stay a type Error; got: {:?}",
+            rschema
+                .iter()
+                .map(|d| (d.severity, slice(&source, &d.span)))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn bool_position_no_default_unchanged() {
+    // A no-default whole-scalar token is not a boolean candidate; the
+    // unresolved-placeholder Error still fires at the bool position.
+    let source = "\
+id: r1
+from: direct:start
+auto_startup: ${env:AUTO_STARTUP}
+steps:
+  - to: log:out
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.iter().any(|d| d.severity == Severity::Error
+            && slice(source, &d.span).contains("${env:AUTO_STARTUP}")),
+        "no-default token must stay an Error; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn bool_position_embedded_token_no_carveout() {
+    // Embedded (non-whole-scalar) tokens are never candidates: the quoted
+    // `...x` leaf is a plain string, so the bool position keeps its Error.
+    let source = "\
+id: r1
+from: direct:start
+auto_startup: \"${env:AUTO_STARTUP:-true}x\"
+steps:
+  - to: log:out
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.iter().any(|d| d.severity == Severity::Error
+            && slice(source, &d.span).contains("${env:AUTO_STARTUP:-true}x")),
+        "embedded token must not be carved; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn bool_default_at_string_position_no_carveout() {
+    // Preservation: a clean-boolean default in a STRING position keeps
+    // the STRING copy (Condition A never fires there), so zero Errors and
+    // exactly one Info note anchored on the placeholder.
+    let source = "\
+id: ${env:MY_FLAG:-true}
+from: direct:start
+steps:
+  - to: log:out
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "bool default at a string position must not be type-flagged; got: {errors:?}"
+    );
+    let infos: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Info)
+        .collect();
+    assert_eq!(
+        infos.len(),
+        1,
+        "expected exactly one Info note for the substituted default; got: {infos:?}"
+    );
+    assert!(
+        slice(source, &infos[0].span).contains("${env:MY_FLAG:-true}"),
+        "Info span must anchor on the placeholder; sliced: {:?}",
+        slice(source, &infos[0].span)
+    );
+}
+
+#[test]
+fn mixed_int_and_bool_candidates_no_diagnostics() {
+    // Both candidate kinds in one document: the integer leaf carves to a
+    // NUMBER, the boolean leaf carves to a BOOL, and neither emits a
+    // diagnostic.
+    let source = "\
+id: r1
+from: direct:start
+steps:
+  - throttle:
+      max_requests: ${env:MY_LIMIT:-2}
+      period_secs: 1
+auto_startup: ${env:AUTO_STARTUP:-true}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.iter().all(|d| {
+            let text = slice(source, &d.span);
+            !text.contains("${env:MY_LIMIT:-2}") && !text.contains("${env:AUTO_STARTUP:-true}")
+        }),
+        "carved int and bool leaves must emit no diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+
+    // The same structure with a non-boolean default at the bool position:
+    // the int leaf carves, the bool-position Error survives.
+    let source = "\
+id: r1
+from: direct:start
+steps:
+  - throttle:
+      max_requests: ${env:MY_LIMIT:-2}
+      period_secs: 1
+auto_startup: ${env:AUTO_STARTUP:-1}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.iter().any(|d| d.severity == Severity::Error
+            && slice(source, &d.span).contains("${env:AUTO_STARTUP:-1}")),
+        "non-boolean default at the bool position must stay an Error; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}

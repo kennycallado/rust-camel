@@ -116,8 +116,9 @@ fn clean_i64(s: &str) -> Option<i64> {
 /// (byte-exact match — no trim, no case folding, no `yes`/`no`, no `1`/`0`).
 /// Returns the boolean the candidate coerces to.
 // SYNC: this rule is mirrored by camel-dsl's `clean_boolean`
-// (crates/camel-dsl/src/env_int_probe.rs); crate purity forbids the
-// dependency. Update the pair together.
+// (crates/camel-dsl/src/env_int_probe.rs) and camel-lint's rschema
+// `clean_boolean` (crates/camel-lint/src/rules/rschema.rs); crate purity
+// forbids the dependencies. Update all three together.
 fn clean_bool(s: &str) -> Option<bool> {
     match s {
         "true" => Some(true),

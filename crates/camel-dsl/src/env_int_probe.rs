@@ -71,8 +71,9 @@ pub(crate) fn clean_integer(s: &str) -> Option<serde_yml::Value> {
 /// (byte-exact match — no trim, no case folding, no `yes`/`no`, no `1`/`0`).
 /// Returns the boolean leaf the candidate is coerced to.
 // SYNC: this rule is mirrored by camel-config's `clean_bool`
-// (crates/camel-config/src/env_int_probe.rs); crate purity forbids the
-// dependency. Update the pair together.
+// (crates/camel-config/src/env_int_probe.rs) and camel-lint's rschema
+// `clean_boolean` (crates/camel-lint/src/rules/rschema.rs); crate purity
+// forbids the dependencies. Update all three together.
 fn clean_boolean(s: &str) -> Option<serde_yml::Value> {
     match s {
         "true" => Some(serde_yml::Value::Bool(true)),
