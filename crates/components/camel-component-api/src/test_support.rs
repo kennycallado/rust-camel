@@ -16,6 +16,9 @@ use camel_api::{ComponentMetrics, MetricsCollector};
 
 use crate::{HealthCheckRegistry, RuntimeObservability};
 
+/// Shared HTTP/1.1 test harness (framing, recording, routing).
+pub mod http;
+
 /// TLS test helpers: generate ephemeral CA + server certs for integration tests.
 /// Uses rcgen (pure Rust, no openssl, no Docker).
 pub mod tls {

@@ -470,60 +470,21 @@ async fn arrivals_queue_per_endpoint() {
 // Plain-string dispatch (case c: no partner involved)
 // -------------------------------------------------------------------------
 
-/// Whether the buffered bytes carry a complete HTTP/1.1 request head
-/// (the blank line after the headers).
-fn head_is_complete(bytes: &[u8]) -> bool {
-    bytes.windows(4).any(|window| window == b"\r\n\r\n")
-}
-
 /// Case (c) of the router's http dispatch: a plain-string endpoint
 /// reference with no registered partner dials its literal URI through
 /// the router's own client lane, and a receive on the same declared
-/// string returns the parked roundtrip. The far side is a raw
-/// `TcpListener` (no partner), so the only way the request line below
-/// can be recorded is a literal dial of the interpolated address.
+/// string returns the parked roundtrip. The far side is the shared
+/// harness listener with its default terminal-close behavior (no
+/// partner), so the only way the request line below can be recorded is
+/// a literal dial of the interpolated address.
 #[tokio::test]
 async fn plain_string_send_dials_literal_without_partner() {
-    use tokio::io::AsyncReadExt;
-    use tokio::io::AsyncWriteExt;
+    use camel_component_api::test_support::http::{HttpTestServer, Responder, Response};
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let server = HttpTestServer::start(Responder::Fixed(Response::ok("ok")))
         .await
-        .expect("the raw far-side listener must bind 127.0.0.1:0");
-    let port = listener
-        .local_addr()
-        .expect("the listener must report its bound address")
-        .port();
-    let served = tokio::spawn(async move {
-        let (mut stream, _) = listener
-            .accept()
-            .await
-            .expect("the literal dial must connect");
-        let mut head = Vec::new();
-        let mut chunk = [0u8; 256];
-        tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                if head_is_complete(&head) {
-                    break;
-                }
-                let read = stream
-                    .read(&mut chunk)
-                    .await
-                    .expect("the connection must be readable");
-                if read == 0 {
-                    break;
-                }
-                head.extend_from_slice(&chunk[..read]);
-            }
-        })
-        .await
-        .expect("partner must receive the complete request head within 30s");
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
-            .await
-            .expect("the response must be writable");
-        String::from_utf8_lossy(&head).into_owned()
-    });
+        .expect("the harness far-side listener must bind 127.0.0.1:0");
+    let port = server.port();
 
     let router = PartnerRouter::new(BTreeMap::new());
     let uri = format!("http://127.0.0.1:{port}/x");
@@ -547,10 +508,11 @@ async fn plain_string_send_dials_literal_without_partner() {
     assert_eq!(response.status, Some(200));
     assert_eq!(response.body, Value::String("ok".to_string()));
 
-    let recorded = served.await.expect("the far-side task must finish"); // allow-test-wait: response already received; far-side task finishing
+    let recorded = server.recorded();
+    let head = String::from_utf8_lossy(&recorded[0].wire_head);
     assert!(
-        recorded.starts_with("POST /x "),
-        "the literal dial must carry the request line, got {recorded:?}"
+        head.starts_with("POST /x "),
+        "the literal dial must carry the request line, got {head:?}"
     );
 }
 

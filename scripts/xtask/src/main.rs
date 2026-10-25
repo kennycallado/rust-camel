@@ -6,6 +6,7 @@ mod lint_context_citations;
 mod lint_gate_forwarding;
 mod lint_metric_labels;
 mod lint_no_free_port;
+mod lint_no_raw_http_test_server;
 mod lint_publish_registration;
 mod lint_single_source;
 mod lint_test_sleep;
@@ -142,6 +143,17 @@ enum Commands {
     /// marked sites never count and a def marker does not cover its
     /// call sites.
     LintNoFreePort,
+    /// Ratchet-count raw HTTP/1.x response literals in test scope
+    /// (hand-written `HTTP/1.1 200 OK` wire bytes) against a monotone
+    /// ceiling in `scripts/xtask/ratchet-raw-http-test-server.max`
+    /// (bd rc-nhoh8, mission 402). A literal is compliant only when it
+    /// carries a structurally valid `Connection: close` header; tests
+    /// should serve responses through `test_support::http` instead.
+    /// Exits non-zero only when the unadjudicated count exceeds the
+    /// ratchet ceiling; a missing ratchet file is an error (fail-closed).
+    /// Escape hatch: put `// allow-raw-http:` followed by a non-empty
+    /// reason on the line immediately above a literal.
+    LintNoRawHttpTestServer,
     /// Ratchet-count unbounded waits in test function bodies
     /// (`recv`/`lock`/`acquire`/`wait`/`join_next`/`connect` awaits,
     /// `blocking_recv`, spawn-task and spawned-handle awaits, and
@@ -562,6 +574,53 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-no-free-port error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintNoRawHttpTestServer => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_no_raw_http_test_server::run(&workspace_root) {
+                Ok(report) if report.findings.len() > report.max => {
+                    println!(
+                        "RAW-HTTP-TEST-SERVER RATCHET EXCEEDED ({} findings > max {}):",
+                        report.findings.len(),
+                        report.max
+                    );
+                    for finding in &report.findings {
+                        println!("  {}:{}", finding.file.display(), finding.line);
+                    }
+                    print_raw_http_markers(&report);
+                    println!(
+                        "  fix the sites above (serve responses through test_support::http so Connection: close is injected), or lower scripts/xtask/{} — never raise it without review justification. Adjudicate an individual site with a `// allow-raw-http: <reason>` marker on the line immediately above it.",
+                        lint_no_raw_http_test_server::RATCHET_FILE
+                    );
+                    eprintln!("\nlint-no-raw-http-test-server: FAILED");
+                    std::process::exit(1);
+                }
+                Ok(report) if report.findings.len() < report.max => {
+                    println!(
+                        "lint-no-raw-http-test-server: OK ({} findings < max {})",
+                        report.findings.len(),
+                        report.max
+                    );
+                    print_raw_http_markers(&report);
+                    println!(
+                        "  ratchet headroom: lower scripts/xtask/{} to {}.",
+                        lint_no_raw_http_test_server::RATCHET_FILE,
+                        report.findings.len()
+                    );
+                }
+                Ok(report) => {
+                    println!(
+                        "lint-no-raw-http-test-server: OK ({} findings = max {})",
+                        report.findings.len(),
+                        report.max
+                    );
+                    print_raw_http_markers(&report);
+                }
+                Err(e) => {
+                    eprintln!("lint-no-raw-http-test-server error: {e}");
                     std::process::exit(1);
                 }
             }
@@ -1619,6 +1678,18 @@ fn workspace_root() -> Result<PathBuf, String> {
     find_workspace_root_from(&start).ok_or_else(|| {
         "Cannot locate workspace root with bridges/ — are you running from the rust-camel workspace?".to_string()
     })
+}
+
+/// Render the adjudicated marker report for the raw-HTTP lint:
+/// every suppressed site's marker location and the total marker count.
+fn print_raw_http_markers(report: &lint_no_raw_http_test_server::Report) {
+    println!(
+        "  adjudicated markers: {} (allow-raw-http)",
+        report.markers.len()
+    );
+    for marker in &report.markers {
+        println!("    {}:{}", marker.file.display(), marker.line);
+    }
 }
 
 /// Same as `workspace_root()` but prints the error and exits on failure.

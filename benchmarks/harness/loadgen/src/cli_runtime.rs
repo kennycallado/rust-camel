@@ -818,6 +818,8 @@ mod tests {
                     let _ = sock.read(&mut buf).await;
                     counter.fetch_add(1, Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(500)).await; // allow-test-sleep: deterministic paused response
+
+                    // allow-raw-http: benchmark loadgen CLI test; standalone std server; no product test surface; behavior preserved (mission 402)
                     let resp = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok";
                     let _ = sock.write_all(resp).await;
                 });
@@ -883,6 +885,7 @@ mod tests {
                     let _ = sock.read(&mut buf).await;
                     counter.fetch_add(1, Ordering::SeqCst);
                     let _ = sock
+                        // allow-raw-http: benchmark loadgen CLI test; standalone std server; no product test surface; behavior preserved (mission 402)
                         .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\n")
                         .await;
                     // Body never arrives; hang until the client drops us.

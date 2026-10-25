@@ -162,9 +162,11 @@ mod tests {
     use super::*;
     use crate::config::HttpConfig;
     use crate::tls_harness::plain_http_test_client;
+    use camel_component_api::test_support::http::{
+        HttpTestServer, Responder, Response, serve_connection,
+    };
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
 
     fn addr(spec: &str) -> SocketAddr {
@@ -238,19 +240,22 @@ mod tests {
         }
     }
 
-    /// Accept-loop that records the first received connection and replies
-    /// with a fixed 200 response.
+    /// Accept-loop that records the first received connection and answers
+    /// through the shared HTTP test harness. The listener is owned by the
+    /// caller, so the harness serves the accepted stream directly instead of
+    /// binding its own socket.
     fn spawn_recorder(listener: TcpListener, hit: Arc<AtomicBool>) {
         tokio::spawn(async move {
             loop {
-                let Ok((mut conn, _)) = listener.accept().await else {
+                let Ok((conn, _)) = listener.accept().await else {
                     break;
                 };
                 hit.store(true, Ordering::Relaxed);
-                let _ = conn
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
-                    .await;
-                let _ = conn.shutdown().await;
+                tokio::spawn(serve_connection(
+                    conn,
+                    Responder::Fixed(Response::ok("ok")),
+                    HttpTestServer::builder(),
+                ));
             }
         });
     }

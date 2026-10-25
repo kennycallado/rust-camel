@@ -377,6 +377,7 @@ fn missing_required_flag_exits_nonzero() {
 
 /// Canned HTTP/1.1 200 response served by the stub servers below.
 /// Content-Length matches the body so keep-alive clients stay in sync.
+// allow-raw-http: benchmark loadgen CLI test; standalone std server; no product test surface; behavior preserved (mission 402)
 const CANNED_200: &str = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nPONG";
 
 /// Read exactly one HTTP request (request line + headers +

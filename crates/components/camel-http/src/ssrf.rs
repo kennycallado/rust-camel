@@ -495,6 +495,7 @@ mod tests {
     use crate::HttpEndpointConfig;
     use crate::{PINNED_CLIENT_MAX_ENTRIES, PINNED_CLIENT_TTL, PinnedClientCache};
     use camel_component_api::UriConfig;
+    use camel_component_api::test_support::http::{HttpTestServer, Responder, Response};
 
     /// Audit 2026-08-31, F2-5: sensitive custom headers must be stripped
     /// on cross-origin redirect replay.
@@ -917,20 +918,17 @@ mod tests {
     /// ephemeral 127.0.0.1 port and answers each with a minimal 302 redirect
     /// to `location`. Returns `(base_url, JoinHandle)`.
     async fn spawn_302_responder(location: String) -> (String, tokio::task::JoinHandle<()>) {
-        use tokio::io::AsyncWriteExt;
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let response = Response::raw(
+            format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n")
+                .into_bytes(),
+        );
+        let server = HttpTestServer::start(Responder::Fixed(response))
             .await
-            .expect("bind ephemeral 127.0.0.1 listener");
-        let port = listener.local_addr().expect("local addr").port();
-        let base_url = format!("http://localhost:{port}");
-        let response =
-            format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n");
+            .expect("start 302 harness listener");
+        let base_url = format!("http://localhost:{}", server.port());
         let handle = tokio::spawn(async move {
-            while let Ok((mut conn, _)) = listener.accept().await {
-                let _ = conn.write_all(response.as_bytes()).await;
-                let _ = conn.shutdown().await;
-            }
+            let _server = server;
+            std::future::pending::<()>().await;
         });
         (base_url, handle)
     }
@@ -939,20 +937,13 @@ mod tests {
     /// ephemeral 127.0.0.1 port and answers each with a fixed 200 OK.
     /// Returns `(base_url, JoinHandle)`.
     async fn spawn_200_responder() -> (String, tokio::task::JoinHandle<()>) {
-        use tokio::io::AsyncWriteExt;
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let server = HttpTestServer::start(Responder::Fixed(Response::ok("ok")))
             .await
-            .expect("bind ephemeral 127.0.0.1 listener");
-        let port = listener.local_addr().expect("local addr").port();
-        let base_url = format!("http://localhost:{port}");
+            .expect("start 200 harness listener");
+        let base_url = format!("http://localhost:{}", server.port());
         let handle = tokio::spawn(async move {
-            while let Ok((mut conn, _)) = listener.accept().await {
-                let _ = conn
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
-                    .await;
-                let _ = conn.shutdown().await;
-            }
+            let _server = server;
+            std::future::pending::<()>().await;
         });
         (base_url, handle)
     }
@@ -1145,50 +1136,22 @@ mod tests {
         std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
         tokio::task::JoinHandle<()>,
     ) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind ephemeral 127.0.0.1 listener");
-        let port = listener.local_addr().expect("local addr").port();
-        let base_url = format!("http://localhost:{port}");
         let captured: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let captured_for_task = std::sync::Arc::clone(&captured);
+        let captured_for_responder = std::sync::Arc::clone(&captured);
+        let server = HttpTestServer::start(Responder::route(move |request| {
+            captured_for_responder
+                .lock()
+                .expect("capture lock")
+                .extend(request.headers.iter().cloned());
+            Response::ok("ok")
+        }))
+        .await
+        .expect("start capturing harness listener");
+        let base_url = format!("http://localhost:{}", server.port());
         let handle = tokio::spawn(async move {
-            while let Ok((mut conn, _)) = listener.accept().await {
-                // Read the request head (up to the blank line) — that is
-                // all we need for header capture.
-                let mut buf: Vec<u8> = Vec::new();
-                let mut chunk = [0u8; 1024];
-                loop {
-                    match conn.read(&mut chunk).await {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            buf.extend_from_slice(&chunk[..n]);
-                            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                if let Ok(text) = std::str::from_utf8(&buf) {
-                    let mut records = captured_for_task.lock().unwrap();
-                    for line in text.split("\r\n").skip(1) {
-                        if line.is_empty() {
-                            break;
-                        }
-                        if let Some((name, value)) = line.split_once(':') {
-                            records.push((name.trim().to_string(), value.trim().to_string()));
-                        }
-                    }
-                }
-                let _ = conn
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
-                    .await;
-                let _ = conn.shutdown().await;
-            }
+            let _server = server;
+            std::future::pending::<()>().await;
         });
         (base_url, captured, handle)
     }

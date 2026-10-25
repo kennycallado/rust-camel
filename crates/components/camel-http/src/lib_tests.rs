@@ -45,6 +45,9 @@ use super::*;
 use crate::config::TlsConfig;
 use crate::rest_match::PathSegment;
 use crate::tls_harness::*;
+use camel_component_api::test_support::http::{
+    HttpTestServer, Responder, Response, ResponseHeaders, serve_connection,
+};
 use camel_component_api::{Message, NoOpComponentContext};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1031,34 +1034,18 @@ async fn test_producer_with_token_provider() {
         Arc::new(std::sync::Mutex::new(None));
     let captured_clone = Arc::clone(&captured_auth);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    let _handle = tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        if let Ok((mut stream, _)) = listener.accept().await {
-            let mut buf = vec![0u8; 8192];
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            let auth = request
-                .lines()
-                .find(|l| l.to_lowercase().starts_with("authorization:"))
-                .map(|l| {
-                    l.split(':')
-                        .nth(1)
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_default()
-                });
-            *captured_clone.lock().unwrap() = auth;
-            let body = r#"{"echo":"ok"}"#;
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(resp.as_bytes()).await;
-        }
-    });
+    let _server = HttpTestServer::start(Responder::route(move |request| {
+        let auth = request
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization")
+            .map(|(_, value)| value.clone());
+        *captured_clone.lock().unwrap() = auth;
+        Response::ok(r#"{"echo":"ok"}"#)
+    }))
+    .await
+    .expect("start token provider test server");
+    let port = _server.port();
 
     #[derive(Debug)]
     struct StaticProvider;
@@ -1088,102 +1075,64 @@ async fn test_producer_with_token_provider() {
     assert_eq!(auth.as_deref(), Some("Bearer injected-token"));
 }
 
-async fn start_test_server() -> (String, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://127.0.0.1:{}", addr.port());
-
-    let handle = tokio::spawn(async move {
-        loop {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = vec![0u8; 4096];
-                    let n = stream.read(&mut buf).await.unwrap_or(0);
-                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
-
-                    let method = request.split_whitespace().next().unwrap_or("GET");
-
-                    let body = format!(r#"{{"method":"{}","echo":"ok"}}"#, method);
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Custom: test-value\r\n\r\n{}",
-                        body.len(),
-                        body
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                });
-            }
-        }
-    });
-
-    (url, handle)
+async fn start_test_server() -> (String, HttpTestServer) {
+    let server = HttpTestServer::start(Responder::route(|request| {
+        let body = format!(r#"{{"method":"{}","echo":"ok"}}"#, request.method);
+        Response::raw(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Custom: test-value\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .into_bytes(),
+        )
+    }))
+    .await
+    .expect("start lib_tests test server");
+    let url = format!("http://127.0.0.1:{}", server.port());
+    (url, server)
 }
 
-async fn start_status_server(status: u16) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://127.0.0.1:{}", addr.port());
-
-    let handle = tokio::spawn(async move {
-        loop {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let status = status;
-                tokio::spawn(async move {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = vec![0u8; 4096];
-                    let _ = stream.read(&mut buf).await;
-
-                    let status_text = match status {
-                        404 => "Not Found",
-                        500 => "Internal Server Error",
-                        _ => "Error",
-                    };
-                    let body = "error body";
-                    let response = format!(
-                        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\n\r\n{}",
-                        status,
-                        status_text,
-                        body.len(),
-                        body
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                });
-            }
-        }
-    });
-
-    (url, handle)
+async fn start_status_server(status: u16) -> (String, HttpTestServer) {
+    let status_text = match status {
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "Error",
+    };
+    let server = HttpTestServer::start(Responder::route(move |_request| {
+        Response::with_status(status, status_text, "error body")
+    }))
+    .await
+    .expect("start lib_tests status server");
+    let url = format!("http://127.0.0.1:{}", server.port());
+    (url, server)
 }
 
 async fn start_request_capturing_server() -> (
     String,
     Arc<std::sync::Mutex<Option<String>>>,
-    tokio::task::JoinHandle<()>,
+    HttpTestServer,
 ) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let url = format!("http://127.0.0.1:{port}");
     let captured: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     let captured_clone = Arc::clone(&captured);
-    let handle = tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        if let Ok((mut stream, _)) = listener.accept().await {
-            let mut buf = vec![0u8; 16384];
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            if request.contains("\r\n\r\n") {
-                *captured_clone.lock().unwrap() = Some(request);
-            }
-            let body = r#"{"echo":"ok"}"#;
-            let resp = format!(
+    let server = HttpTestServer::start(Responder::route(move |request| {
+        let mut raw = request.wire_head.clone();
+        raw.extend_from_slice(&request.body);
+        *captured_clone.lock().unwrap() = Some(String::from_utf8_lossy(&raw).to_string());
+        let body = r#"{"echo":"ok"}"#;
+        Response::raw(
+            format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
                 body
-            );
-            let _ = stream.write_all(resp.as_bytes()).await;
-        }
-    });
-    (url, captured, handle)
+            )
+            .into_bytes(),
+        )
+    }))
+    .await
+    .expect("start lib_tests request capturing server");
+    let url = format!("http://127.0.0.1:{}", server.port());
+    (url, captured, server)
 }
 
 #[tokio::test]
@@ -1752,43 +1701,34 @@ async fn test_http_producer_response_headers_mapped() {
 // Bug fix tests: Client configuration per-endpoint
 // -----------------------------------------------------------------------
 
-async fn start_redirect_server() -> (String, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://127.0.0.1:{}", addr.port());
-
-    let handle = tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        loop {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 4096];
-                    let n = stream.read(&mut buf).await.unwrap_or(0);
-                    let request = String::from_utf8_lossy(&buf[..n]).to_string();
-
-                    // Check if this is a request to /final
-                    if request.contains("GET /final") {
-                        let body = r#"{"status":"final"}"#;
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                    } else {
-                        // Redirect to /final
-                        // Connection: close stops the client pooling the
-                        // connection the server drops right after this
-                        // response (pooled-race, rc-u3aw class).
-                        let response = "HTTP/1.1 302 Found\r\nLocation: /final\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-                        let _ = stream.write_all(response.as_bytes()).await;
-                    }
-                });
-            }
+async fn start_redirect_server() -> (String, HttpTestServer) {
+    let server = HttpTestServer::start(Responder::route(|request| {
+        // Check if this is a request to /final
+        if request.target.starts_with("/final") {
+            let body = r#"{"status":"final"}"#;
+            Response::raw(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .into_bytes(),
+            )
+        } else {
+            // Redirect to /final
+            // Connection: close stops the client pooling the
+            // connection the server drops right after this
+            // response (pooled-race, rc-u3aw class).
+            Response::raw(
+                b"HTTP/1.1 302 Found\r\nLocation: /final\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                    .to_vec(),
+            )
         }
-    });
-
-    (url, handle)
+    }))
+    .await
+    .expect("start lib_tests redirect server");
+    let url = format!("http://127.0.0.1:{}", server.port());
+    (url, server)
 }
 
 struct CapturedRequest {
@@ -1799,202 +1739,94 @@ struct CapturedRequest {
     transfer_encoding: Option<String>,
 }
 
-/// Parse a request head plus its Content-Length-driven body from a freshly
-/// accepted connection. Returns `None` if the client closes before sending
-/// a complete request head. Does NOT read until EOF/shutdown (reqwest pools
-/// keep-alive connections and never sends FIN) and does NOT rely on a
-/// single fixed-size read (a segmented small body would flake).
-async fn capture_request(stream: &mut tokio::net::TcpStream) -> Option<CapturedRequest> {
-    use tokio::io::AsyncReadExt;
-
-    // Read the request head (up to and including the terminating CRLF CRLF).
-    let mut buf: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 4096];
-    let head_end: usize;
-    loop {
-        let n = stream.read(&mut chunk).await.unwrap_or(0);
-        if n == 0 {
-            return None;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-            head_end = pos + 4;
-            break;
-        }
-    }
-
-    // Parse the request head.
-    let head = String::from_utf8_lossy(&buf[..head_end]);
-    let mut lines = head.split("\r\n");
-    let request_line = lines.next().unwrap_or("");
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
-    let path = parts.next().unwrap_or("").to_string();
-
-    let mut content_length: Option<String> = None;
-    let mut transfer_encoding: Option<String> = None;
-    for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            let name = name.trim().to_ascii_lowercase();
-            let value = value.trim().to_string();
-            if name == "content-length" {
-                content_length = Some(value);
-            } else if name == "transfer-encoding" {
-                transfer_encoding = Some(value);
-            }
-        }
-    }
-
-    // Content-Length-driven exact read. A missing header means a 0-length body.
-    let body_len: usize = content_length
-        .as_deref()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0);
-
-    let mut body: Vec<u8> = buf[head_end..].to_vec();
-    while body.len() < body_len {
-        let n = stream.read(&mut chunk).await.unwrap_or(0);
-        if n == 0 {
-            break;
-        }
-        body.extend_from_slice(&chunk[..n]);
-    }
-    body.truncate(body_len);
-
-    Some(CapturedRequest {
-        method,
-        path,
-        body,
-        content_length,
-        transfer_encoding,
-    })
+/// A capture server built on the shared HTTP harness: each request is
+/// recorded as a [`CapturedRequest`] and answered `200 OK` with no body.
+/// The harness closes the connection after the response, so every hop opens
+/// a fresh connection.
+async fn start_capture_server() -> (String, HttpTestServer, Arc<Mutex<Vec<CapturedRequest>>>) {
+    let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_responder = Arc::clone(&captured);
+    let server = HttpTestServer::start(Responder::route(move |request| {
+        let header = |name: &str| {
+            request
+                .headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        captured_for_responder
+            .lock()
+            .unwrap()
+            .push(CapturedRequest {
+                method: request.method.clone(),
+                path: request.target.clone(),
+                body: request.body.clone(),
+                content_length: header("content-length"),
+                transfer_encoding: header("transfer-encoding"),
+            });
+        // 200 OK with Content-Length: 0 and no body; the harness closes the
+        // connection after the response, so every hop is a fresh connection.
+        Response::with_status(200, "OK", Vec::new())
+    }))
+    .await
+    .expect("start lib_tests capture server");
+    let url = format!("http://127.0.0.1:{}", server.port());
+    (url, server, captured)
 }
 
-/// A raw-TCP capture server. Each connection parses the request head, then
-/// performs a Content-Length-driven exact read of the body (see
-/// [`capture_request`]). Each connection is dropped after the response so
-/// every hop opens a fresh connection.
-async fn start_capture_server() -> (
-    String,
-    tokio::task::JoinHandle<()>,
-    Arc<Mutex<Vec<CapturedRequest>>>,
-) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://127.0.0.1:{}", addr.port());
-
+/// A capture server built on the shared HTTP harness whose `/hop307` and
+/// `/hop308` paths answer with `307 Temporary Redirect` / `308 Permanent
+/// Redirect` to `/final`, and whose `/final` path answers `200 OK` with an
+/// empty body. Every hop records a `CapturedRequest`; the harness closes
+/// the connection after the response, so each hop is a fresh connection.
+async fn start_redirect_capture_server()
+-> (String, HttpTestServer, Arc<Mutex<Vec<CapturedRequest>>>) {
     let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
-    let captured_for_return = Arc::clone(&captured);
+    let captured_for_responder = Arc::clone(&captured);
 
-    let handle = tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
-        loop {
-            // Per-iteration deadline (lintwiden D4.2, idle-relay
-            // re-arm): every caller drops the returned handle, so
-            // this accept loop is a detached server for the test
-            // process's lifetime and quiet gaps between client
-            // requests are normal — a lapsed deadline re-arms (as
-            // does a transient accept error, prior behavior).
-            // Process exit reaps the task.
-            if let Ok(Ok((mut stream, _))) =
-                tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
-            {
-                let captured = Arc::clone(&captured);
-                tokio::spawn(async move {
-                    // Per-connection deadline (lintwiden D4.2): a client
-                    // that connects but never completes a request must
-                    // not pin the handler task — drop the connection.
-                    let Some(req) =
-                        tokio::time::timeout(Duration::from_secs(10), capture_request(&mut stream))
-                            .await
-                            .ok()
-                            .flatten()
-                    else {
-                        return;
-                    };
-                    captured.lock().unwrap().push(req);
+    let server = HttpTestServer::start(Responder::route(move |request| {
+        let header = |name: &str| {
+            request
+                .headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        captured_for_responder
+            .lock()
+            .unwrap()
+            .push(CapturedRequest {
+                method: request.method.clone(),
+                path: request.target.clone(),
+                body: request.body.clone(),
+                content_length: header("content-length"),
+                transfer_encoding: header("transfer-encoding"),
+            });
 
-                    // 200 OK with Content-Length: 0 and no body, then drop
-                    // the stream so the client opens a fresh connection.
-                    let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-                    let _ = stream.write_all(response.as_bytes()).await;
-                });
-            }
+        let (status, reason, location) = match request.target.as_str() {
+            "/hop307" => (307, "Temporary Redirect", Some("/final")),
+            "/hop308" => (308, "Permanent Redirect", Some("/final")),
+            "/final" => (200, "OK", None),
+            _ => (404, "Not Found", None),
+        };
+
+        match location {
+            // Connection: close stops the client pooling the
+            // connection the server drops right after this
+            // response (pooled-race, rc-u3aw class).
+            Some(loc) => Response::raw(
+                format!(
+                    "HTTP/1.1 {status} {reason}\r\nLocation: {loc}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                )
+                .into_bytes(),
+            ),
+            None => Response::with_status(status, reason, Vec::new()),
         }
-    });
-
-    (url, handle, captured_for_return)
-}
-
-/// A raw-TCP capture server whose `/hop307` and `/hop308` paths answer with
-/// `307 Temporary Redirect` / `308 Permanent Redirect` to `/final`, and
-/// whose `/final` path answers `200 OK` with an empty body. Every hop
-/// records a `CapturedRequest` (Content-Length-driven exact read) and drops
-/// the connection after responding so each hop is a fresh connection.
-async fn start_redirect_capture_server() -> (
-    String,
-    tokio::task::JoinHandle<()>,
-    Arc<Mutex<Vec<CapturedRequest>>>,
-) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://127.0.0.1:{}", addr.port());
-
-    let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
-    let captured_for_return = Arc::clone(&captured);
-
-    let handle = tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
-        loop {
-            // Per-iteration deadline (lintwiden D4.2, idle-relay
-            // re-arm): every caller drops the returned handle, so
-            // this accept loop is a detached server for the test
-            // process's lifetime and quiet gaps between client
-            // requests are normal — a lapsed deadline re-arms (as
-            // does a transient accept error, prior behavior).
-            // Process exit reaps the task.
-            if let Ok(Ok((mut stream, _))) =
-                tokio::time::timeout(Duration::from_secs(10), listener.accept()).await
-            {
-                let captured = Arc::clone(&captured);
-                tokio::spawn(async move {
-                    // Per-connection deadline (lintwiden D4.2): a client
-                    // that connects but never completes a request must
-                    // not pin the handler task — drop the connection.
-                    let Some(req) =
-                        tokio::time::timeout(Duration::from_secs(10), capture_request(&mut stream))
-                            .await
-                            .ok()
-                            .flatten()
-                    else {
-                        return;
-                    };
-                    let path = req.path.clone();
-                    captured.lock().unwrap().push(req);
-
-                    let (status_line, location) = match path.as_str() {
-                        "/hop307" => ("HTTP/1.1 307 Temporary Redirect", Some("/final")),
-                        "/hop308" => ("HTTP/1.1 308 Permanent Redirect", Some("/final")),
-                        "/final" => ("HTTP/1.1 200 OK", None),
-                        _ => ("HTTP/1.1 404 Not Found", None),
-                    };
-
-                    let response = match location {
-                        // Connection: close stops the client pooling the
-                        // connection this handler drops right after the
-                        // response (pooled-race, rc-u3aw class).
-                        Some(loc) => format!(
-                            "{status_line}\r\nLocation: {loc}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
-                        ),
-                        None => format!("{status_line}\r\nContent-Length: 0\r\n\r\n"),
-                    };
-                    let _ = stream.write_all(response.as_bytes()).await;
-                });
-            }
-        }
-    });
-
-    (url, handle, captured_for_return)
+    }))
+    .await
+    .expect("start lib_tests redirect capture server");
+    let url = format!("http://127.0.0.1:{}", server.port());
+    (url, server, captured)
 }
 
 #[tokio::test]
@@ -2505,24 +2337,13 @@ async fn test_redirect_to_private_ip_blocked_when_ssrf_guard_active() {
     use tower::ServiceExt;
 
     // Server that redirects to the AWS metadata endpoint (link-local private IP)
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://127.0.0.1:{}", addr.port());
-
-    let handle = tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        loop {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 4096];
-                    let _ = stream.read(&mut buf).await;
-                    // Always redirect to the metadata endpoint
-                    let response = "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\n\r\n";
-                    let _ = stream.write_all(response.as_bytes()).await;
-                });
-            }
-        }
-    });
+    let _server = HttpTestServer::start(Responder::Fixed(Response::raw(
+        b"HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/latest/meta-data/\r\nContent-Length: 0\r\n\r\n"
+            .to_vec(),
+    )))
+    .await
+    .expect("start metadata redirect server");
+    let url = format!("http://127.0.0.1:{}", _server.port());
 
     let ctx = test_producer_ctx();
     let component = HttpComponent::with_config(HttpConfig::default().with_follow_redirects(true));
@@ -2547,8 +2368,6 @@ async fn test_redirect_to_private_ip_blocked_when_ssrf_guard_active() {
             || err.contains("not allowed"),
         "Error should mention SSRF/IP blocking, got: {err}"
     );
-
-    handle.abort();
 }
 
 /// Integration test: exceeding maxRedirects produces a clear error.
@@ -2692,33 +2511,31 @@ fn test_authored_query_bytes_survive_resolve_url() {
 // Timeout tests (HTTP-004)
 // -----------------------------------------------------------------------
 
-async fn start_slow_server(delay_ms: u64) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("http://127.0.0.1:{}", addr.port());
-
-    let handle = tokio::spawn(async move {
-        loop {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let delay = delay_ms;
-                tokio::spawn(async move {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = vec![0u8; 4096];
-                    let _ = stream.read(&mut buf).await;
-                    // Send headers immediately (no Content-Length → chunked)
-                    let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n";
-                    let _ = stream.write_all(headers.as_bytes()).await;
-                    // Delay before sending body chunk
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                    let body = r#"{"status":"slow"}"#;
-                    let chunk = format!("{:x}\r\n{}\r\n0\r\n\r\n", body.len(), body);
-                    let _ = stream.write_all(chunk.as_bytes()).await;
-                });
-            }
-        }
-    });
-
-    (url, handle)
+async fn start_slow_server(delay_ms: u64) -> (String, HttpTestServer) {
+    let server = HttpTestServer::start(Responder::route(move |_request| {
+        // Headers (no Content-Length → chunked) flush immediately; the
+        // sender waits before the body chunk.
+        let headers = ResponseHeaders::new(
+            200,
+            "OK",
+            vec![
+                ("Content-Type".to_string(), "application/json".to_string()),
+                ("Transfer-Encoding".to_string(), "chunked".to_string()),
+            ],
+        );
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            // Delay before sending body chunk
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            let body = r#"{"status":"slow"}"#;
+            let _ = sender.send(body.as_bytes().to_vec()).await;
+        });
+        Response::staged(headers, receiver)
+    }))
+    .await
+    .expect("start lib_tests slow server");
+    let url = format!("http://127.0.0.1:{}", server.port());
+    (url, server)
 }
 
 #[tokio::test]
@@ -5437,46 +5254,31 @@ mod otel_tests {
     }
 
     /// Test server that captures and echoes back the traceparent header
-    async fn start_test_server_with_header_capture() -> (String, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let url = format!("http://127.0.0.1:{}", addr.port());
+    async fn start_test_server_with_header_capture() -> (String, HttpTestServer) {
+        let server = HttpTestServer::start(Responder::route(|request| {
+            // Extract traceparent header from request
+            let traceparent = request
+                .headers
+                .iter()
+                .find(|(name, _)| name == "traceparent")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_default();
 
-        let handle = tokio::spawn(async move {
-            loop {
-                if let Ok((mut stream, _)) = listener.accept().await {
-                    tokio::spawn(async move {
-                        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                        let mut buf = vec![0u8; 8192];
-                        let n = stream.read(&mut buf).await.unwrap_or(0);
-                        let request = String::from_utf8_lossy(&buf[..n]).to_string();
-
-                        // Extract traceparent header from request
-                        let traceparent = request
-                            .lines()
-                            .find(|line| line.to_lowercase().starts_with("traceparent:"))
-                            .map(|line| {
-                                line.split(':')
-                                    .nth(1)
-                                    .map(|s| s.trim().to_string())
-                                    .unwrap_or_default()
-                            })
-                            .unwrap_or_default();
-
-                        let body = format!(r#"{{"echo":"ok","traceparent":"{}"}}"#, traceparent);
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Received-Traceparent: {}\r\n\r\n{}",
-                            body.len(),
-                            traceparent,
-                            body
-                        );
-                        let _ = stream.write_all(response.as_bytes()).await;
-                    });
-                }
-            }
-        });
-
-        (url, handle)
+            let body = format!(r#"{{"echo":"ok","traceparent":"{}"}}"#, traceparent);
+            Response::raw(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Received-Traceparent: {}\r\n\r\n{}",
+                    body.len(),
+                    traceparent,
+                    body
+                )
+                .into_bytes(),
+            )
+        }))
+        .await
+        .expect("start lib_tests header capture server");
+        let url = format!("http://127.0.0.1:{}", server.port());
+        (url, server)
     }
 }
 
@@ -9045,40 +8847,38 @@ fn constructed_header_valid_pair_roundtrip() {
 async fn start_host_capturing_destination() -> (
     String,
     Arc<std::sync::Mutex<Option<(String, String)>>>,
-    tokio::task::JoinHandle<()>,
+    HttpTestServer,
 ) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let url = format!("http://127.0.0.1:{port}");
     let captured: Arc<std::sync::Mutex<Option<(String, String)>>> =
         Arc::new(std::sync::Mutex::new(None));
     let captured_clone = Arc::clone(&captured);
-    let handle = tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        if let Ok((mut stream, _)) = listener.accept().await {
-            let mut buf = vec![0u8; 16384];
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            if request.contains("\r\n\r\n") {
-                let request_line = request.lines().next().unwrap_or("").to_string();
-                let host_value = request
-                    .lines()
-                    .find(|l| l.to_lowercase().starts_with("host:"))
-                    .and_then(|l| l.split_once(':'))
-                    .map(|(_, v)| v.trim().to_string())
-                    .unwrap_or_default();
-                *captured_clone.lock().unwrap() = Some((host_value, request_line));
-            }
-            let body = r#"{"echo":"ok"}"#;
-            let resp = format!(
+    let server = HttpTestServer::start(Responder::route(move |request| {
+        let request_line = String::from_utf8_lossy(&request.wire_head)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let host_value = request
+            .headers
+            .iter()
+            .find(|(name, _)| name == "host")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default();
+        *captured_clone.lock().unwrap() = Some((host_value, request_line));
+        let body = r#"{"echo":"ok"}"#;
+        Response::raw(
+            format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                 body.len(),
                 body
-            );
-            let _ = stream.write_all(resp.as_bytes()).await;
-        }
-    });
-    (url, captured, handle)
+            )
+            .into_bytes(),
+        )
+    }))
+    .await
+    .expect("start lib_tests host capturing destination");
+    let url = format!("http://127.0.0.1:{}", server.port());
+    (url, captured, server)
 }
 
 /// A bridging producer must derive `Host` from the destination URL and
@@ -9456,27 +9256,17 @@ async fn error_reply_no_credential_value() {
 
 /// Local responder that accepts any number of HTTP/1.1 connections on an
 /// ephemeral 127.0.0.1 port and answers each with a fixed 200 response.
-/// Unlike [`start_host_capturing_destination`], which serves exactly one
-/// connection, this loop keeps accepting so cache-reuse tests can drive
-/// several requests through one destination. Returns
-/// `(base_url, JoinHandle)`.
-async fn spawn_multi_accept_200() -> (String, tokio::task::JoinHandle<()>) {
-    use tokio::io::AsyncWriteExt;
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+/// Unlike [`start_host_capturing_destination`], which the bridge test drives
+/// with a single request, this loop keeps accepting so cache-reuse tests can
+/// drive several requests through one destination. Returns
+/// `(base_url, server)`; the harness accept loop serves any number of
+/// connections by default.
+async fn spawn_multi_accept_200() -> (String, HttpTestServer) {
+    let server = HttpTestServer::start(Responder::Fixed(Response::ok("ok")))
         .await
-        .expect("bind ephemeral 127.0.0.1 listener");
-    let port = listener.local_addr().expect("local addr").port();
-    let base_url = format!("http://localhost:{port}");
-    let handle = tokio::spawn(async move {
-        while let Ok((mut conn, _)) = listener.accept().await {
-            let _ = conn
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
-                .await;
-            let _ = conn.shutdown().await;
-        }
-    });
-    (base_url, handle)
+        .expect("start lib_tests multi-accept server");
+    let base_url = format!("http://localhost:{}", server.port());
+    (base_url, server)
 }
 
 /// rc-0li3: local HTTPS responder — the TLS twin of
@@ -9486,8 +9276,6 @@ async fn spawn_multi_accept_200() -> (String, tokio::task::JoinHandle<()>) {
 /// (SANs: localhost, 127.0.0.1, ::1); clients run with
 /// `tls.insecure = true`.
 async fn spawn_tls_multi_accept_200() -> (String, tokio::task::JoinHandle<()>) {
-    use tokio::io::AsyncWriteExt;
-
     let (_ca_pem, cert_pem, key_pem) = camel_component_api::test_support::tls::gen_server_cert();
     let certs: Vec<_> = rustls_pemfile::certs(&mut cert_pem.as_bytes())
         .collect::<Result<_, _>>()
@@ -9515,11 +9303,13 @@ async fn spawn_tls_multi_accept_200() -> (String, tokio::task::JoinHandle<()>) {
         while let Ok((conn, _)) = listener.accept().await {
             let acceptor = acceptor.clone();
             tokio::spawn(async move {
-                if let Ok(mut tls) = acceptor.accept(conn).await {
-                    let _ = tls
-                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
-                        .await;
-                    let _ = tls.shutdown().await;
+                if let Ok(tls) = acceptor.accept(conn).await {
+                    let _ = serve_connection(
+                        tls,
+                        Responder::Fixed(Response::ok("ok")),
+                        HttpTestServer::builder(),
+                    )
+                    .await;
                 }
             });
         }

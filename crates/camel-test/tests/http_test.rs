@@ -22,6 +22,7 @@ use camel_auth::{
     TokenAuthenticator,
 };
 use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_component_api::test_support::http::{HttpTestServer, Responder, Response};
 use camel_component_api::{CamelError, Component, ComponentBundle, NoOpComponentContext};
 use camel_component_http::{HttpBundle, HttpComponent, HttpsComponent};
 use camel_dsl::{SecurityCompileContext, parse_yaml_with_threshold_and_security};
@@ -597,23 +598,13 @@ async fn http_producer_blocks_localhost_by_default() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_producer_allows_localhost_when_configured() {
     install_crypto_provider();
-    // Start a simple echo server
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let actual_port = listener.local_addr().unwrap().port();
-    let _handle = tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        if let Ok((mut stream, _)) = listener.accept().await {
-            let mut buf = vec![0u8; 4096];
-            let _ = stream.read(&mut buf).await;
-            let body = r#"{"ok":true}"#;
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(resp.as_bytes()).await;
-        }
-    });
+    let _server = HttpTestServer::start(Responder::Fixed(Response::raw(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}"
+            .to_vec(),
+    )))
+    .await
+    .expect("start http test server");
+    let actual_port = _server.port();
 
     let ctx = camel_component_api::ProducerContext::new();
     let component = HttpComponent::new();
@@ -645,23 +636,14 @@ async fn http_producer_allows_localhost_when_configured() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_custom_ok_status_code_range() {
     install_crypto_provider();
-    // Start a server that returns 204
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let actual_port = listener.local_addr().unwrap().port();
-    let _handle = tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        loop {
-            // allow-test-wait: spawned test-server accept loop; teardown-bounded by test runtime (ADR-0069 §13.2 R1)
-            if let Ok((mut stream, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = vec![0u8; 4096];
-                    let _ = stream.read(&mut buf).await;
-                    let resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
-                    let _ = stream.write_all(resp.as_bytes()).await;
-                });
-            }
-        }
-    });
+    let _server = HttpTestServer::start(Responder::Fixed(Response::with_status(
+        204,
+        "No Content",
+        "",
+    )))
+    .await
+    .expect("start http test server");
+    let actual_port = _server.port();
 
     let ctx = camel_component_api::ProducerContext::new();
     let component = HttpComponent::new();
@@ -1031,33 +1013,13 @@ async fn http_route_stop_returns_204() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_producer_bridge_endpoint_skips_auth() {
     install_crypto_provider();
-    // Capture the raw request to verify no auth header
-    let captured: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
-    let captured_clone = captured.clone();
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let actual_port = listener.local_addr().unwrap().port();
-    let _handle = tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        if let Ok((mut stream, _)) = listener.accept().await {
-            let mut buf = vec![0u8; 8192];
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            let auth = request
-                .lines()
-                .find(|l| l.to_lowercase().starts_with("authorization:"))
-                .map(|l| l.to_string());
-            *captured_clone.lock().unwrap() = auth;
-            let body = r#"{"ok":true}"#;
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(resp.as_bytes()).await;
-        }
-    });
+    let server = HttpTestServer::start(Responder::Fixed(Response::raw(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}"
+            .to_vec(),
+    )))
+    .await
+    .expect("start http test server");
+    let actual_port = server.port();
 
     let ctx = camel_component_api::ProducerContext::new();
     let component = HttpComponent::new();
@@ -1084,7 +1046,12 @@ async fn http_producer_bridge_endpoint_skips_auth() {
     assert_eq!(status, 200);
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let auth = captured.lock().unwrap().take();
+    let recorded = server.recorded();
+    let auth = recorded[0]
+        .headers
+        .iter()
+        .find(|(name, _)| name == "authorization")
+        .map(|(_, value)| value.clone());
     assert!(
         auth.is_none(),
         "bridgeEndpoint should skip auth headers, got: {auth:?}"
@@ -1098,32 +1065,13 @@ async fn http_producer_bridge_endpoint_skips_auth() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_producer_connection_close_header() {
     install_crypto_provider();
-    let captured: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
-    let captured_clone = captured.clone();
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let actual_port = listener.local_addr().unwrap().port();
-    let _handle = tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        if let Ok((mut stream, _)) = listener.accept().await {
-            let mut buf = vec![0u8; 8192];
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            let conn = request
-                .lines()
-                .find(|l| l.to_lowercase().starts_with("connection:"))
-                .map(|l| l.to_string());
-            *captured_clone.lock().unwrap() = conn;
-            let body = r#"{"ok":true}"#;
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(resp.as_bytes()).await;
-        }
-    });
+    let server = HttpTestServer::start(Responder::Fixed(Response::raw(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}"
+            .to_vec(),
+    )))
+    .await
+    .expect("start http test server");
+    let actual_port = server.port();
 
     let ctx = camel_component_api::ProducerContext::new();
     let component = HttpComponent::new();
@@ -1150,7 +1098,12 @@ async fn http_producer_connection_close_header() {
     );
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let conn = captured.lock().unwrap().take();
+    let recorded = server.recorded();
+    let conn = recorded[0]
+        .headers
+        .iter()
+        .find(|(name, _)| name == "connection")
+        .map(|(_, value)| value.clone());
     let conn_has_close = conn
         .as_ref()
         .is_some_and(|c| c.to_lowercase().contains("close"));
@@ -1167,28 +1120,13 @@ async fn http_producer_connection_close_header() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_producer_skip_request_headers() {
     install_crypto_provider();
-    let captured: std::sync::Arc<std::sync::Mutex<String>> =
-        std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let captured_clone = captured.clone();
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let actual_port = listener.local_addr().unwrap().port();
-    let _handle = tokio::spawn(async move {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        if let Ok((mut stream, _)) = listener.accept().await {
-            let mut buf = vec![0u8; 8192];
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            *captured_clone.lock().unwrap() = request;
-            let body = r#"{"ok":true}"#;
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(resp.as_bytes()).await;
-        }
-    });
+    let server = HttpTestServer::start(Responder::Fixed(Response::raw(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}"
+            .to_vec(),
+    )))
+    .await
+    .expect("start http test server");
+    let actual_port = server.port();
 
     let ctx = camel_component_api::ProducerContext::new();
     let component = HttpComponent::new();
@@ -1223,14 +1161,16 @@ async fn http_producer_skip_request_headers() {
     );
 
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let request = captured.lock().unwrap().clone();
+    let recorded = server.recorded();
+    let headers = &recorded[0].headers;
+    let has_header = |name: &str| headers.iter().any(|(key, _)| key == name);
     assert!(
-        !request.to_lowercase().contains("x-secret"),
-        "X-Secret should be skipped, request: {request}"
+        !has_header("x-secret"),
+        "X-Secret should be skipped, request headers: {headers:?}"
     );
     assert!(
-        request.to_lowercase().contains("x-visible"),
-        "X-Visible should be forwarded, request: {request}"
+        has_header("x-visible"),
+        "X-Visible should be forwarded, request headers: {headers:?}"
     );
 }
 

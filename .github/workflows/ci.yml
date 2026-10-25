@@ -330,6 +330,8 @@ jobs:
         run: cargo xtask lint-test-sleep
       - name: lint-no-free-port
         run: cargo xtask lint-no-free-port
+      - name: lint-no-raw-http-test-server
+        run: cargo xtask lint-no-raw-http-test-server
       - name: lint-unbounded-wait
         run: cargo xtask lint-unbounded-wait
       - name: lint-ignore

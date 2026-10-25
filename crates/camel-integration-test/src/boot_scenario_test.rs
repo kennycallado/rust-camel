@@ -12,6 +12,8 @@
 use std::collections::BTreeMap;
 
 use camel_api::CamelError;
+// Only the demand-gated sql boot-freshness module uses this helper.
+#[cfg(feature = "sql")]
 use camel_component_api::test_support::timeout_wait;
 
 use crate::boot_scenario::boot_scenario;

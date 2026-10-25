@@ -1,0 +1,15 @@
+{
+  "kind": "plan",
+  "change": "pooled-race-harness",
+  "verdict": "BLESS",
+  "hash": "sha256:6694e4a667c2fdf337761a406b3708b566ce194db6364fe0b46955c1d0a01625",
+  "expert": "e_gpt",
+  "rounds": 3,
+  "reviewer_loop": "r_glm APPROVE-WITH-FINDINGS x2, all findings resolved (6 + 1)",
+  "history": [
+    "round1: BLESS-WITH-FIXES (9 important: Vec<u8> not bytes, tokio-util CancellationToken, Responder::route only, http_tests module wiring, ratchet bootstrap, ssrf JoinHandle ownership, spawn_recorder bound listener, start_test_server method-dependence + start_status_server, slow-server timing contract, ExprMethodCall exclusion, baseline worktree for pre-existing failures)",
+    "round2: BLESS-WITH-FIXES (4: #[path] module wiring, no-NEWLY-added-deps acceptance, Vec::new, five-test count)",
+    "round3: BLESS"
+  ],
+  "date": "2026-10-25"
+}
