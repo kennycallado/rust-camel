@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -604,7 +605,67 @@ class BridgeHealthCacheTest {
                   closeEntered.countDown();
                   awaitIgnoringInterrupts(releaseClose, closeInterrupted);
                 });
-    BridgeHealthCache cache = cache(probe, false, clock);
+    ExecutorService closeWorker =
+        Executors.newSingleThreadExecutor(
+            runnable -> {
+              Thread thread = new Thread(runnable, "jms-health-close");
+              thread.setDaemon(true);
+              return thread;
+            });
+    // The test executor waits for this close invocation to enter probe.close() before execute()
+    // returns. BridgeHealthCache publishes closeRunner before that entry signal, so publication
+    // precedes the termination-timeout decision. The handshake is bounded; the overall
+    // close-duration assertion remains unchanged.
+    ExecutorService entryHandshakeCloseWorker =
+        new AbstractExecutorService() {
+          @Override
+          public void execute(Runnable command) {
+            closeWorker.execute(command);
+            try {
+              if (!closeEntered.await(5, TimeUnit.SECONDS)) {
+                fail("provider close did not enter within 5s");
+              }
+            } catch (InterruptedException error) {
+              Thread.currentThread().interrupt();
+              fail("interrupted while awaiting provider close entry");
+            }
+          }
+
+          @Override
+          public void shutdown() {
+            closeWorker.shutdown();
+          }
+
+          @Override
+          public List<Runnable> shutdownNow() {
+            return closeWorker.shutdownNow();
+          }
+
+          @Override
+          public boolean isShutdown() {
+            return closeWorker.isShutdown();
+          }
+
+          @Override
+          public boolean isTerminated() {
+            return closeWorker.isTerminated();
+          }
+
+          @Override
+          public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+            return closeWorker.awaitTermination(timeout, unit);
+          }
+        };
+    FakeScheduler scheduler = new FakeScheduler();
+    createdScheduler.set(scheduler);
+    BridgeHealthCache cache =
+        new BridgeHealthCache(
+            probe,
+            false,
+            clock.supplier(),
+            trackingExecutorFactory(),
+            () -> entryHandshakeCloseWorker,
+            () -> scheduler);
     try {
       tick(cache);
       assertTrue(probeEntered.await(5, TimeUnit.SECONDS), "probe did not start");
@@ -614,9 +675,14 @@ class BridgeHealthCacheTest {
       long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
 
       assertTrue(elapsedMillis <= 4_000, "close took " + elapsedMillis + " ms");
-      assertTrue(probeInterrupted.get(), "refresh worker was not interrupted");
+      // The refresh worker sets the flag in its interrupt catch block after shutdownNow(); close()
+      // does not wait for that write, so observe it with a bounded poll instead of an immediate
+      // read.
+      awaitCondition("refresh worker observed interrupt", () -> probeInterrupted.get());
       assertTrue(closeEntered.await(5, TimeUnit.SECONDS), "provider close did not run");
-      assertTrue(closeInterrupted.get(), "close worker was not interrupted");
+      // Same unsupported immediate-observation assumption: closeInterrupted is written by the close
+      // worker after it wakes from the release latch, which can lag close()'s return under load.
+      awaitCondition("close worker observed interrupt", () -> closeInterrupted.get());
 
       int probeCalls = probe.probeCalls.get();
       HealthSnapshot afterClose = cache.current();
@@ -628,6 +694,7 @@ class BridgeHealthCacheTest {
     } finally {
       releaseProbe.countDown();
       releaseClose.countDown();
+      closeWorker.shutdownNow();
     }
     awaitCondition("cache threads terminated", () -> cacheThreadCount() == 0);
   }
