@@ -117,6 +117,62 @@ async fn roundtrip_answers_and_closes() {
 }
 
 #[tokio::test]
+async fn supplied_headers_written_once_in_order() {
+    let response = Response::with_status_and_headers(
+        201,
+        "Created",
+        vec![
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("X-Trace".to_string(), "abc".to_string()),
+        ],
+        "{\"ok\":true}",
+    );
+    let server = start_fixed(response).await;
+    let raw = request_text(
+        server.local_addr(),
+        b"GET /headers HTTP/1.1\r\nHost: h\r\n\r\n",
+    )
+    .await;
+
+    let expected_head = "HTTP/1.1 201 Created\r\nContent-Length: 11\r\nContent-Type: application/json\r\nX-Trace: abc\r\nConnection: close\r\n\r\n";
+    assert!(raw.starts_with(expected_head), "encoded head: {raw}");
+    assert_eq!(
+        raw.matches("Content-Type: application/json").count(),
+        1,
+        "supplied Content-Type written once: {raw}"
+    );
+    assert_eq!(
+        raw.matches("X-Trace: abc").count(),
+        1,
+        "supplied X-Trace written once: {raw}"
+    );
+    assert_eq!(
+        raw.matches("Content-Length: 11").count(),
+        1,
+        "content length matches body byte length: {raw}"
+    );
+    assert!(raw.ends_with("{\"ok\":true}"), "body: {raw}");
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn with_status_emits_no_supplied_headers() {
+    let server = start_fixed(Response::with_status(204, "No Content", Vec::new())).await;
+    let raw = request_text(
+        server.local_addr(),
+        b"GET /plain HTTP/1.1\r\nHost: h\r\n\r\n",
+    )
+    .await;
+
+    let head = raw.split_once("\r\n\r\n").expect("head terminator").0;
+    assert_eq!(
+        head, "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close",
+        "with_status wire shape unchanged"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn post_body_drained_before_reply() {
     let server = start_fixed(Response::ok("done")).await;
     let head: &'static [u8] = b"POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\n";

@@ -103,6 +103,7 @@ enum ResponseKind {
     Standard {
         status: u16,
         reason: String,
+        headers: Vec<(String, String)>,
         body: Vec<u8>,
     },
     Raw(Vec<u8>),
@@ -121,10 +122,32 @@ impl Response {
 
     /// A `Content-Length`-framed response with an explicit status line.
     pub fn with_status(status: u16, reason: &str, body: impl Into<Vec<u8>>) -> Self {
+        Self::with_status_and_headers(status, reason, Vec::new(), body)
+    }
+
+    /// A `Content-Length`-framed response with an explicit status line and
+    /// extra response headers.
+    ///
+    /// The wire order is the status line, `Content-Length` for the body,
+    /// each supplied header in order, the harness connection header, and the
+    /// blank line. Each supplied header is written exactly once.
+    ///
+    /// The harness computes and injects the framing headers itself, so callers
+    /// must not pass `Content-Length` or `Connection` in `headers`: doing so
+    /// emits a duplicate `Content-Length`, and in keep-alive mode a duplicate
+    /// or contradictory `Connection`. Use `headers` for application headers
+    /// such as `Content-Type` or `Location` only.
+    pub fn with_status_and_headers(
+        status: u16,
+        reason: &str,
+        headers: Vec<(String, String)>,
+        body: impl Into<Vec<u8>>,
+    ) -> Self {
         Self {
             kind: ResponseKind::Standard {
                 status,
                 reason: reason.to_string(),
+                headers,
                 body: body.into(),
             },
         }
@@ -174,14 +197,14 @@ impl Response {
             ResponseKind::Standard {
                 status,
                 reason,
+                headers,
                 body,
             } => {
-                let headers = ResponseHeaders::new(
-                    *status,
-                    reason.as_str(),
-                    vec![("Content-Length".to_string(), body.len().to_string())],
-                );
-                let mut out = headers.encode(connection_header);
+                let mut encoded = Vec::with_capacity(headers.len() + 1);
+                encoded.push(("Content-Length".to_string(), body.len().to_string()));
+                encoded.extend(headers.iter().cloned());
+                let mut out = ResponseHeaders::new(*status, reason.as_str(), encoded)
+                    .encode(connection_header);
                 out.extend_from_slice(body);
                 Some(out)
             }
@@ -541,8 +564,9 @@ where
             Err(_) => return bad_request(&mut io).await,
         };
 
-        // Reject unsupported framing before reading a body that we cannot
-        // delimit.
+        // Unsupported Transfer-Encoding requests are rejected with 400 before
+        // capture; `identity` is accepted. Body framing we cannot delimit must
+        // not be drained speculatively.
         if has_unsupported_transfer_encoding(&request) {
             return bad_request(&mut io).await;
         }

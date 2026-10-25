@@ -167,20 +167,28 @@ pub struct Report {
 
 /// Read the ratchet ceiling, then scan every member root under `root`
 /// (`crates/`, `scripts/`, `examples/`, `benchmarks/`, `fuzz/`) for raw
-/// HTTP/1.x response literals in test scope. Member roots that do not
-/// exist are skipped and `target`, `.worktrees`, `node_modules`, and
+/// HTTP/1.x response literals in test scope. Every member root must exist:
+/// a missing root is an error because a partial checkout must not narrow
+/// the scan silently. `target`, `.worktrees`, `node_modules`, and
 /// `archive` directories are pruned. A read or parse failure aborts the
 /// scan with a path-qualified [`ScanError`]. A missing or malformed
 /// ratchet file is an error before any scanning (fail-closed).
 pub fn run(root: &Path) -> Result<Report, Box<dyn std::error::Error>> {
     let max = read_ratchet_max(root)?;
+    for member in MEMBER_ROOTS {
+        let member_root = root.join(member);
+        if !member_root.is_dir() {
+            return Err(format!(
+                "required member root '{member}' is missing at {}: the raw-http scan requires a full checkout",
+                member_root.display()
+            )
+            .into());
+        }
+    }
     let mut findings = Vec::new();
     let mut markers = Vec::new();
     for member in MEMBER_ROOTS {
         let member_root = root.join(member);
-        if !member_root.is_dir() {
-            continue;
-        }
         for entry in walkdir::WalkDir::new(&member_root)
             .sort_by_file_name()
             .into_iter()
@@ -267,35 +275,34 @@ fn marker_is_valid(text: &str) -> bool {
         .is_some_and(|idx| !text[idx + ALLOW_MARKER.len()..].trim().is_empty())
 }
 
-/// True when `text` begins with an HTTP/1.x status line whose status token
-/// starts with a digit or `{`.
+/// True when any line of `text` is an HTTP/1.x status line whose status token
+/// starts with a digit or `{`, and the literal is not exempted by a
+/// `Connection: close` header. One leading BOM is stripped first; line
+/// anchoring covers leading CRLF, noise lines, and other prefixes.
 fn is_raw_response_literal(text: &str) -> bool {
-    let Some(rest) = STATUS_PREFIXES
-        .iter()
-        .find_map(|prefix| text.strip_prefix(prefix))
-    else {
-        return false;
-    };
-    match rest.chars().next() {
-        Some(ch) if ch.is_ascii_digit() || ch == '{' => {}
-        _ => return false,
-    }
-    !has_connection_close_header(text)
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let has_status_line = text.lines().any(|line| {
+        STATUS_PREFIXES
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
+            .is_some_and(
+                |rest| matches!(rest.chars().next(), Some(ch) if ch.is_ascii_digit() || ch == '{'),
+            )
+    });
+    has_status_line && !has_connection_close_header(text)
 }
 
 /// True when the header block carries a `Connection: close` header line.
-/// The header block ends at the first `\r\n\r\n`; a literal without one is
-/// treated as header-block scope in full.
+/// The header block ends at the first `\r\n\r\n` measured from the literal
+/// start; a literal without one is treated as header-block scope in full.
+/// Every line is inspected because a leading break or noise line can precede
+/// the status line.
 fn has_connection_close_header(text: &str) -> bool {
     let header_block = match text.find("\r\n\r\n") {
         Some(idx) => &text[..idx],
         None => text,
     };
-    header_block
-        .split("\r\n")
-        // The first line is the status line.
-        .skip(1)
-        .any(header_line_has_close)
+    header_block.split("\r\n").any(header_line_has_close)
 }
 
 /// True when one header line names `connection` (case-insensitive) and its
@@ -574,7 +581,7 @@ impl<'ast> Visit<'ast> for RawHttpFinder<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Finding, RATCHET_FILE, ScanOutcome, run, scan_source};
+    use super::{Finding, RATCHET_FILE, ScanOutcome, is_raw_response_literal, run, scan_source};
     use std::path::Path;
 
     /// Wrap `body` in a `#[cfg(test)]` module so the fixture lives in test
@@ -589,7 +596,15 @@ mod tests {
         scanned(body).findings
     }
 
+    /// Create every member root `run()` requires.
+    fn seed_member_roots(root: &Path) {
+        for member in super::MEMBER_ROOTS {
+            std::fs::create_dir_all(root.join(member)).unwrap(); // allow-unwrap
+        }
+    }
+
     fn seed_ratchet(root: &Path, max: usize) {
+        seed_member_roots(root);
         let xtask = root.join("scripts").join("xtask");
         std::fs::create_dir_all(&xtask).unwrap(); // allow-unwrap
         std::fs::write(xtask.join(RATCHET_FILE), format!("# ratchet\n{max}\n")).unwrap(); // allow-unwrap
@@ -606,6 +621,48 @@ fn t() {
     let _ = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
 }
 "#;
+
+    #[test]
+    fn status_line_at_literal_start_fires() {
+        assert!(is_raw_response_literal(
+            // allow-raw-http: detector self-test fixture, never served
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+        ));
+    }
+
+    #[test]
+    fn status_line_after_leading_crlf_fires() {
+        // allow-raw-http: detector self-test fixture, never served
+        assert!(is_raw_response_literal("\r\nHTTP/1.1 200 OK\r\n\r\n"));
+    }
+
+    #[test]
+    fn status_line_after_leading_noise_line_fires() {
+        assert!(is_raw_response_literal(
+            // allow-raw-http: detector self-test fixture, never served
+            "garbage\r\nHTTP/1.1 404 Not Found\r\n\r\n"
+        ));
+    }
+
+    #[test]
+    fn connection_close_after_leading_crlf_is_exempt() {
+        assert!(!is_raw_response_literal(
+            "\r\nHTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
+        ));
+    }
+
+    #[test]
+    fn prose_mentioning_http_version_is_silent() {
+        assert!(!is_raw_response_literal(
+            "see the HTTP/1.1 specification for details"
+        ));
+    }
+
+    #[test]
+    fn status_line_after_leading_bom_fires() {
+        // allow-raw-http: detector self-test fixture, never served
+        assert!(is_raw_response_literal("\u{feff}HTTP/1.1 200 OK\r\n\r\n"));
+    }
 
     #[test]
     fn plain_response_literal_without_close_is_reported() {
@@ -882,6 +939,7 @@ mod tests {
     #[test]
     fn missing_ratchet_fails_closed() {
         let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_member_roots(root.path());
         write_fixture(
             root.path(),
             "crates/x/src/a.rs",
@@ -891,5 +949,41 @@ mod tests {
         let err = run(root.path()).unwrap_err(); // allow-unwrap
 
         assert!(err.to_string().contains(RATCHET_FILE), "got: {err}");
+    }
+
+    #[test]
+    fn missing_member_root_fails_closed() {
+        let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_ratchet(root.path(), 0);
+        std::fs::remove_dir(root.path().join("benchmarks")).unwrap(); // allow-unwrap
+
+        let err = run(root.path()).unwrap_err(); // allow-unwrap
+
+        let msg = err.to_string();
+        assert!(msg.contains("benchmarks"), "got: {msg}");
+        assert!(
+            msg.contains(&root.path().display().to_string()),
+            "got: {msg}"
+        );
+        assert!(msg.contains("full checkout"), "got: {msg}");
+    }
+
+    #[test]
+    fn missing_member_root_wins_over_earlier_scan_error() {
+        let root = tempfile::tempdir().unwrap(); // allow-unwrap
+        seed_ratchet(root.path(), 0);
+        write_fixture(root.path(), "crates/x/src/a.rs", "let = ;\n");
+        std::fs::remove_dir(root.path().join("fuzz")).unwrap(); // allow-unwrap
+
+        let err = run(root.path()).unwrap_err(); // allow-unwrap
+
+        let msg = err.to_string();
+        assert!(msg.contains("fuzz"), "got: {msg}");
+        assert!(
+            msg.contains(&root.path().display().to_string()),
+            "got: {msg}"
+        );
+        assert!(msg.contains("full checkout"), "got: {msg}");
+        assert!(!msg.contains("parse error"), "got: {msg}");
     }
 }

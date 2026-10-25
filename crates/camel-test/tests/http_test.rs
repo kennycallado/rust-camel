@@ -1013,9 +1013,11 @@ async fn http_route_stop_returns_204() {
 #[tokio::test(flavor = "multi_thread")]
 async fn http_producer_bridge_endpoint_skips_auth() {
     install_crypto_provider();
-    let server = HttpTestServer::start(Responder::Fixed(Response::raw(
-        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"ok\":true}"
-            .to_vec(),
+    let server = HttpTestServer::start(Responder::Fixed(Response::with_status_and_headers(
+        200,
+        "OK",
+        vec![("Content-Type".to_string(), "application/json".to_string())],
+        "{\"ok\":true}",
     )))
     .await
     .expect("start http test server");
@@ -1045,7 +1047,6 @@ async fn http_producer_bridge_endpoint_skips_auth() {
         .unwrap();
     assert_eq!(status, 200);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
     let recorded = server.recorded();
     let auth = recorded[0]
         .headers
