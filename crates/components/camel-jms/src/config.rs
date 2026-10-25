@@ -352,6 +352,126 @@ pub struct JmsEndpointConfig {
     // headers whose normalized name appears here reach the bridge; an empty
     // list forwards no user headers.
     pub jms_header_allowlist: Vec<String>,
+
+    // 409-jms-unknown-params: unrecognized query-parameter keys in source
+    // order. Values are never stored; credential-shaped keys are stored as
+    // `<redacted>`.
+    pub unknown_params: Vec<String>,
+}
+
+/// Recognized endpoint query-parameter groups. The name table below maps
+/// every accepted key literal to one variant; `from_uri` dispatches on the
+/// lookup and matches exhaustively, so a variant without a handler arm is
+/// a compile error.
+#[derive(Clone, Copy, PartialEq)]
+enum KnownParam {
+    Broker,
+    AckMode,
+    MessageSelector,
+    ConcurrentConsumers,
+    TransactionMode,
+    TimeToLive,
+    Priority,
+    PersistentDelivery,
+    MapJmsHeaders,
+    ExchangePattern,
+    HeaderAllowlist,
+}
+
+/// Single source of truth for accepted key literals. The canonical
+/// (camelCase) form comes first in each alias group.
+const KNOWN_PARAM_NAMES: &[(&str, KnownParam)] = &[
+    ("broker", KnownParam::Broker),
+    ("acknowledgementMode", KnownParam::AckMode),
+    ("acknowledgement_mode", KnownParam::AckMode),
+    ("messageSelector", KnownParam::MessageSelector),
+    ("message_selector", KnownParam::MessageSelector),
+    ("concurrentConsumers", KnownParam::ConcurrentConsumers),
+    ("concurrent_consumers", KnownParam::ConcurrentConsumers),
+    ("transactionMode", KnownParam::TransactionMode),
+    ("transaction_mode", KnownParam::TransactionMode),
+    ("timeToLive", KnownParam::TimeToLive),
+    ("time_to_live", KnownParam::TimeToLive),
+    ("priority", KnownParam::Priority),
+    ("persistentDelivery", KnownParam::PersistentDelivery),
+    ("persistent_delivery", KnownParam::PersistentDelivery),
+    ("mapJmsHeaders", KnownParam::MapJmsHeaders),
+    ("map_jms_headers", KnownParam::MapJmsHeaders),
+    ("exchangePattern", KnownParam::ExchangePattern),
+    ("exchange_pattern", KnownParam::ExchangePattern),
+    ("jmsHeaderAllowlist", KnownParam::HeaderAllowlist),
+    ("jms_header_allowlist", KnownParam::HeaderAllowlist),
+];
+
+fn known_param(k: &str) -> Option<KnownParam> {
+    KNOWN_PARAM_NAMES
+        .iter()
+        .find(|(name, _)| *name == k)
+        .map(|(_, param)| *param)
+}
+
+impl KnownParam {
+    /// Canonical (camelCase) name used in suggestions: the first table
+    /// name of this variant, derived from `KNOWN_PARAM_NAMES` so the table
+    /// stays the single naming authority. Total by construction: a variant
+    /// with no row yields `None` instead of panicking, and the
+    /// table-completeness test keeps that from happening.
+    fn canonical(self) -> Option<&'static str> {
+        KNOWN_PARAM_NAMES
+            .iter()
+            .find_map(|(name, param)| (*param == self).then_some(*name))
+    }
+}
+
+/// Normalize a parameter key for suggestion matching only: casefold, then
+/// strip `-`, `_`, and `.` (the header normalization rule). Never used to
+/// accept a key.
+fn normalize_param_key(k: &str) -> String {
+    normalize_header_name(k)
+}
+
+/// Hand-rolled two-row Levenshtein distance. Kept in-crate so the
+/// suggestion path adds no dependency.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b_chars: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b_chars.len()).collect();
+    let mut current = vec![0usize; b_chars.len() + 1];
+    for (i, a_char) in a.chars().enumerate() {
+        current[0] = i + 1;
+        for (j, b_char) in b_chars.iter().enumerate() {
+            let substitution = previous[j] + usize::from(a_char != *b_char);
+            current[j + 1] = (previous[j + 1] + 1).min(current[j] + 1).min(substitution);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[b_chars.len()]
+}
+
+/// Closest known key group for an unknown key, as its canonical camelCase
+/// name. `None` when the key exceeds 64 characters or when no canonical
+/// form is within distance 3 and within half the normalized unknown's
+/// length. Equal distances keep the first group in table order.
+pub(crate) fn suggest_known_key(unknown: &str) -> Option<&'static str> {
+    if unknown.chars().count() > 64 {
+        return None;
+    }
+    let unknown_norm = normalize_param_key(unknown);
+    let mut best: Option<(&'static str, usize)> = None;
+    for (_, param) in KNOWN_PARAM_NAMES {
+        let Some(canonical) = param.canonical() else {
+            continue;
+        };
+        let distance = edit_distance(&unknown_norm, &normalize_param_key(canonical));
+        if best.is_none_or(|(_, best_distance)| distance < best_distance) {
+            best = Some((canonical, distance));
+        }
+    }
+    let (canonical, distance) = best?;
+    if distance <= 3 && distance * 2 <= unknown_norm.chars().count() {
+        Some(canonical)
+    } else {
+        None
+    }
 }
 
 impl JmsEndpointConfig {
@@ -416,20 +536,22 @@ impl JmsEndpointConfig {
         let mut map_jms_headers = true;
         let mut exchange_pattern = ExchangePattern::default();
         let mut jms_header_allowlist: Vec<String> = Vec::new();
+        let mut unknown_params: Vec<String> = Vec::new();
 
         if let Some(q) = query {
             for kv in q.split('&') {
                 let Some((k, v)) = kv.split_once('=') else {
                     continue;
                 };
-                match k {
-                    "broker" if !v.is_empty() => {
+                match known_param(k) {
+                    Some(KnownParam::Broker) if !v.is_empty() => {
                         broker_name = Some(v.to_string());
                     }
-                    "acknowledgementMode" | "acknowledgement_mode" => {
+                    Some(KnownParam::Broker) => {}
+                    Some(KnownParam::AckMode) => {
                         acknowledgement_mode = AcknowledgementMode::from_str(v)?;
                     }
-                    "messageSelector" | "message_selector" if !v.is_empty() => {
+                    Some(KnownParam::MessageSelector) if !v.is_empty() => {
                         let decoded = percent_decode_lossy(v);
                         if decoded.trim().is_empty() {
                             return Err(camel_component_api::CamelError::ProcessorError(
@@ -438,7 +560,8 @@ impl JmsEndpointConfig {
                         }
                         message_selector = Some(decoded);
                     }
-                    "concurrentConsumers" | "concurrent_consumers" => {
+                    Some(KnownParam::MessageSelector) => {}
+                    Some(KnownParam::ConcurrentConsumers) => {
                         concurrent_consumers = v.parse::<u32>().map_err(|_| {
                             camel_component_api::CamelError::ProcessorError(format!(
                                 "invalid concurrent_consumers '{}': expected positive integer",
@@ -451,10 +574,10 @@ impl JmsEndpointConfig {
                             ));
                         }
                     }
-                    "transactionMode" | "transaction_mode" => {
+                    Some(KnownParam::TransactionMode) => {
                         transaction_mode = JmsTransactionMode::from_str(v)?;
                     }
-                    "timeToLive" | "time_to_live" => {
+                    Some(KnownParam::TimeToLive) => {
                         time_to_live = Some(v.parse::<u64>().map_err(|_| {
                             camel_component_api::CamelError::ProcessorError(format!(
                                 "invalid time_to_live '{}': expected non-negative integer (ms)",
@@ -462,7 +585,7 @@ impl JmsEndpointConfig {
                             ))
                         })?);
                     }
-                    "priority" => {
+                    Some(KnownParam::Priority) => {
                         let p = v.parse::<u8>().map_err(|_| {
                             camel_component_api::CamelError::ProcessorError(format!(
                                 "invalid priority '{}': expected integer 0-9",
@@ -477,7 +600,7 @@ impl JmsEndpointConfig {
                         }
                         priority = Some(p);
                     }
-                    "persistentDelivery" | "persistent_delivery" => {
+                    Some(KnownParam::PersistentDelivery) => {
                         persistent_delivery = v.parse::<bool>().map_err(|_| {
                             camel_component_api::CamelError::ProcessorError(format!(
                                 "invalid persistent_delivery '{}': expected true or false",
@@ -485,7 +608,7 @@ impl JmsEndpointConfig {
                             ))
                         })?;
                     }
-                    "mapJmsHeaders" | "map_jms_headers" => {
+                    Some(KnownParam::MapJmsHeaders) => {
                         map_jms_headers = v.parse::<bool>().map_err(|_| {
                             camel_component_api::CamelError::ProcessorError(format!(
                                 "invalid map_jms_headers '{}': expected true or false",
@@ -493,10 +616,10 @@ impl JmsEndpointConfig {
                             ))
                         })?;
                     }
-                    "exchangePattern" | "exchange_pattern" => {
+                    Some(KnownParam::ExchangePattern) => {
                         exchange_pattern = ExchangePattern::from_str(v)?;
                     }
-                    "jmsHeaderAllowlist" | "jms_header_allowlist" => {
+                    Some(KnownParam::HeaderAllowlist) => {
                         jms_header_allowlist = v
                             .split(',')
                             .map(str::trim)
@@ -504,7 +627,13 @@ impl JmsEndpointConfig {
                             .map(str::to_string)
                             .collect();
                     }
-                    _ => {} // ignore unknown params
+                    None => {
+                        unknown_params.push(if camel_api::redact::is_credential_shaped_key(k) {
+                            "<redacted>".to_string()
+                        } else {
+                            k.to_string()
+                        });
+                    }
                 }
             }
         }
@@ -523,6 +652,7 @@ impl JmsEndpointConfig {
             map_jms_headers,
             exchange_pattern,
             jms_header_allowlist,
+            unknown_params,
         })
     }
 }
@@ -2825,6 +2955,315 @@ insecure_skip_verify = true
                 validate_broker_tls(&bc).is_ok(),
                 "server_name {name} must be accepted"
             );
+        }
+    }
+
+    // ── 409-jms-unknown-params: collected keys and suggestions ──────────
+
+    #[test]
+    fn unknown_param_key_is_collected_without_value() {
+        let cfg = JmsEndpointConfig::from_uri("jms:queue:orders?durableSubscribtion=news").unwrap();
+        assert_eq!(cfg.unknown_params, vec!["durableSubscribtion"]);
+        assert_eq!(cfg.concurrent_consumers, 1);
+        assert!(
+            !format!("{cfg:?}").contains("news"),
+            "the unknown value must never reach Debug output"
+        );
+    }
+
+    #[test]
+    fn credential_shaped_unknown_key_is_redacted() {
+        let cfg = JmsEndpointConfig::from_uri("jms:queue:orders?user%3Asecret%40host=1").unwrap();
+        assert_eq!(cfg.unknown_params, vec!["<redacted>"]);
+        let debug = format!("{cfg:?}");
+        assert!(!debug.contains("secret"), "credential leaked: {debug}");
+        assert!(!debug.contains("@host"), "credential leaked: {debug}");
+    }
+
+    #[test]
+    fn known_alias_produces_no_unknown() {
+        let cfg = JmsEndpointConfig::from_uri("jms:queue:orders?concurrent_consumers=3").unwrap();
+        assert!(cfg.unknown_params.is_empty());
+        assert_eq!(cfg.concurrent_consumers, 3);
+
+        let cfg =
+            JmsEndpointConfig::from_uri("jms:queue:orders?broker=&message_selector=").unwrap();
+        assert!(
+            cfg.unknown_params.is_empty(),
+            "empty-value known keys stay silent: {:?}",
+            cfg.unknown_params
+        );
+    }
+
+    #[test]
+    fn several_unknowns_in_source_order() {
+        let cfg = JmsEndpointConfig::from_uri(
+            "jms:queue:orders?zeta=1&alpha=2&concurrentConsumers=2&beta=3",
+        )
+        .unwrap();
+        assert_eq!(cfg.unknown_params, vec!["zeta", "alpha", "beta"]);
+        assert_eq!(cfg.concurrent_consumers, 2);
+    }
+
+    #[test]
+    fn near_miss_suggests_canonical_key() {
+        assert_eq!(
+            suggest_known_key("concurrentConsumerss"),
+            Some("concurrentConsumers")
+        );
+        assert_eq!(
+            suggest_known_key("acknowledgement_mod"),
+            Some("acknowledgementMode")
+        );
+    }
+
+    #[test]
+    fn distant_unknown_has_no_suggestion() {
+        assert_eq!(suggest_known_key("durableSubscribtion"), None);
+        assert_eq!(suggest_known_key(&"x".repeat(65)), None);
+    }
+
+    #[test]
+    fn unicode_key_thresholds_count_characters() {
+        // 64 chars but 65 bytes: the length cap must count chars, not bytes.
+        let key = format!("é{}broker", "-".repeat(57));
+        assert_eq!(key.chars().count(), 64);
+        assert!(key.len() > 64);
+        assert_eq!(suggest_known_key(&key), Some("broker"));
+    }
+
+    /// Compile-guard for the enum/table contract: the `match` below has one
+    /// explicit arm per `KnownParam` variant, so adding a variant without
+    /// extending this test fails to compile. Every variant must then appear
+    /// in at least one `KNOWN_PARAM_NAMES` row, and `canonical()` must find
+    /// that row (it is total: a missing row yields `None`, silently disabling
+    /// suggestions for the variant, so the assertion below is the guard).
+    #[test]
+    fn known_param_variants_all_have_table_rows() {
+        let mut variants = Vec::new();
+        for variant in [
+            KnownParam::Broker,
+            KnownParam::AckMode,
+            KnownParam::MessageSelector,
+            KnownParam::ConcurrentConsumers,
+            KnownParam::TransactionMode,
+            KnownParam::TimeToLive,
+            KnownParam::Priority,
+            KnownParam::PersistentDelivery,
+            KnownParam::MapJmsHeaders,
+            KnownParam::ExchangePattern,
+            KnownParam::HeaderAllowlist,
+        ] {
+            match variant {
+                KnownParam::Broker => variants.push(KnownParam::Broker),
+                KnownParam::AckMode => variants.push(KnownParam::AckMode),
+                KnownParam::MessageSelector => variants.push(KnownParam::MessageSelector),
+                KnownParam::ConcurrentConsumers => variants.push(KnownParam::ConcurrentConsumers),
+                KnownParam::TransactionMode => variants.push(KnownParam::TransactionMode),
+                KnownParam::TimeToLive => variants.push(KnownParam::TimeToLive),
+                KnownParam::Priority => variants.push(KnownParam::Priority),
+                KnownParam::PersistentDelivery => variants.push(KnownParam::PersistentDelivery),
+                KnownParam::MapJmsHeaders => variants.push(KnownParam::MapJmsHeaders),
+                KnownParam::ExchangePattern => variants.push(KnownParam::ExchangePattern),
+                KnownParam::HeaderAllowlist => variants.push(KnownParam::HeaderAllowlist),
+            }
+        }
+
+        for variant in variants {
+            let rows = KNOWN_PARAM_NAMES
+                .iter()
+                .filter(|(_, param)| *param == variant)
+                .count();
+            assert!(
+                rows >= 1,
+                "every KnownParam variant needs at least one KNOWN_PARAM_NAMES row"
+            );
+            let first_row = KNOWN_PARAM_NAMES
+                .iter()
+                .find(|(_, param)| *param == variant)
+                .map(|(name, _)| *name);
+            assert_eq!(
+                variant.canonical(),
+                first_row,
+                "canonical() must resolve to the first table row of the variant"
+            );
+        }
+    }
+
+    /// Independent oracle: the expected literal set and every per-literal
+    /// field effect are hard-coded here, never derived from the table or
+    /// `KnownParam`. A deleted/added/mis-mapped row or a stub arm fails.
+    #[test]
+    fn known_param_names_table_is_complete() {
+        const EXPECTED: &[&str] = &[
+            "broker",
+            "acknowledgementMode",
+            "acknowledgement_mode",
+            "messageSelector",
+            "message_selector",
+            "concurrentConsumers",
+            "concurrent_consumers",
+            "transactionMode",
+            "transaction_mode",
+            "timeToLive",
+            "time_to_live",
+            "priority",
+            "persistentDelivery",
+            "persistent_delivery",
+            "mapJmsHeaders",
+            "map_jms_headers",
+            "exchangePattern",
+            "exchange_pattern",
+            "jmsHeaderAllowlist",
+            "jms_header_allowlist",
+        ];
+
+        let mut expected = EXPECTED.to_vec();
+        expected.sort_unstable();
+        let mut actual: Vec<&str> = KNOWN_PARAM_NAMES.iter().map(|(name, _)| *name).collect();
+        actual.sort_unstable();
+        assert_eq!(
+            actual, expected,
+            "KNOWN_PARAM_NAMES literals drifted from the independent oracle"
+        );
+
+        let parse = |literal: &str, sample: &str| {
+            let uri = format!("jms:queue:t?{literal}={sample}");
+            let cfg = JmsEndpointConfig::from_uri(&uri)
+                .unwrap_or_else(|e| panic!("literal {literal:?} failed to parse: {e}"));
+            assert!(
+                cfg.unknown_params.is_empty(),
+                "literal {literal:?} was collected as unknown: {:?}",
+                cfg.unknown_params
+            );
+            cfg
+        };
+
+        for literal in EXPECTED {
+            let literal = *literal;
+            match literal {
+                "broker" => {
+                    let cfg = parse(literal, "b1");
+                    assert_eq!(cfg.broker_name.as_deref(), Some("b1"), "literal {literal}");
+                }
+                "acknowledgementMode" => {
+                    let cfg = parse(literal, "Client");
+                    assert_eq!(
+                        cfg.acknowledgement_mode,
+                        AcknowledgementMode::Client,
+                        "literal {literal}"
+                    );
+                }
+                "acknowledgement_mode" => {
+                    let cfg = parse(literal, "dups_ok");
+                    assert_eq!(
+                        cfg.acknowledgement_mode,
+                        AcknowledgementMode::DupsOk,
+                        "literal {literal}"
+                    );
+                }
+                "messageSelector" => {
+                    let cfg = parse(literal, "a%20%3E%201");
+                    assert_eq!(
+                        cfg.message_selector.as_deref(),
+                        Some("a > 1"),
+                        "literal {literal}"
+                    );
+                }
+                "message_selector" => {
+                    let cfg = parse(literal, "b%20%3E%202");
+                    assert_eq!(
+                        cfg.message_selector.as_deref(),
+                        Some("b > 2"),
+                        "literal {literal}"
+                    );
+                }
+                "concurrentConsumers" => {
+                    let cfg = parse(literal, "4");
+                    assert_eq!(cfg.concurrent_consumers, 4, "literal {literal}");
+                }
+                "concurrent_consumers" => {
+                    let cfg = parse(literal, "5");
+                    assert_eq!(cfg.concurrent_consumers, 5, "literal {literal}");
+                }
+                "transactionMode" => {
+                    let cfg = parse(literal, "Session");
+                    assert_eq!(
+                        cfg.transaction_mode,
+                        JmsTransactionMode::Session,
+                        "literal {literal}"
+                    );
+                }
+                "transaction_mode" => {
+                    let cfg = parse(literal, "session");
+                    assert_eq!(
+                        cfg.transaction_mode,
+                        JmsTransactionMode::Session,
+                        "literal {literal}"
+                    );
+                }
+                "timeToLive" => {
+                    let cfg = parse(literal, "1234");
+                    assert_eq!(cfg.time_to_live, Some(1234), "literal {literal}");
+                }
+                "time_to_live" => {
+                    let cfg = parse(literal, "2345");
+                    assert_eq!(cfg.time_to_live, Some(2345), "literal {literal}");
+                }
+                "priority" => {
+                    let cfg = parse(literal, "7");
+                    assert_eq!(cfg.priority, Some(7), "literal {literal}");
+                }
+                "persistentDelivery" => {
+                    let cfg = parse(literal, "false");
+                    assert!(!cfg.persistent_delivery, "literal {literal}");
+                }
+                "persistent_delivery" => {
+                    let cfg = parse(literal, "false");
+                    assert!(!cfg.persistent_delivery, "literal {literal}");
+                }
+                "mapJmsHeaders" => {
+                    let cfg = parse(literal, "false");
+                    assert!(!cfg.map_jms_headers, "literal {literal}");
+                }
+                "map_jms_headers" => {
+                    let cfg = parse(literal, "false");
+                    assert!(!cfg.map_jms_headers, "literal {literal}");
+                }
+                "exchangePattern" => {
+                    let cfg = parse(literal, "InOut");
+                    assert_eq!(
+                        cfg.exchange_pattern,
+                        ExchangePattern::InOut,
+                        "literal {literal}"
+                    );
+                }
+                "exchange_pattern" => {
+                    let cfg = parse(literal, "in_out");
+                    assert_eq!(
+                        cfg.exchange_pattern,
+                        ExchangePattern::InOut,
+                        "literal {literal}"
+                    );
+                }
+                "jmsHeaderAllowlist" => {
+                    let cfg = parse(literal, "x,y");
+                    assert_eq!(
+                        cfg.jms_header_allowlist,
+                        vec!["x".to_string(), "y".to_string()],
+                        "literal {literal}"
+                    );
+                }
+                "jms_header_allowlist" => {
+                    let cfg = parse(literal, "p,q");
+                    assert_eq!(
+                        cfg.jms_header_allowlist,
+                        vec!["p".to_string(), "q".to_string()],
+                        "literal {literal}"
+                    );
+                }
+                other => panic!("no independent oracle for literal {other:?}"),
+            }
         }
     }
 }

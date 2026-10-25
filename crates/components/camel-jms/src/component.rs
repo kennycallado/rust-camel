@@ -1860,6 +1860,28 @@ impl Component for JmsComponent {
         ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let endpoint_config = JmsEndpointConfig::from_uri(uri)?;
+        if !endpoint_config.unknown_params.is_empty() {
+            let unknown_keys = endpoint_config.unknown_params.join(", ");
+            let suggestions = endpoint_config
+                .unknown_params
+                .iter()
+                .map(|key| {
+                    if key == "<redacted>" {
+                        return "no close match".to_string();
+                    }
+                    match crate::config::suggest_known_key(key) {
+                        Some(canonical) => format!("did you mean {canonical}"),
+                        None => "no close match".to_string(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            warn!(
+                unknown_keys = %unknown_keys,
+                suggestions = %suggestions,
+                "jms: ignoring unknown endpoint query parameters"
+            );
+        }
         let broker_name = self
             .pool
             .resolve_broker_name(endpoint_config.broker_name.as_deref())?;
@@ -2130,6 +2152,9 @@ mod tests {
     use super::*;
     use crate::config::{BrokerConfig, HealthBrokerProbeMode, JmsPoolConfig, redact_broker_url};
     use std::collections::HashMap;
+    use std::fmt::Write as _;
+    use std::sync::Mutex as StdMutex;
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     #[test]
     fn from_config_accepts_empty_brokers() {
@@ -2306,6 +2331,236 @@ mod tests {
             &camel_component_api::NoOpComponentContext,
         );
         assert!(endpoint.is_ok(), "got: {:?}", endpoint.err());
+    }
+
+    // ── 409-jms-unknown-params: one warning per endpoint ─────────────────
+
+    /// A captured production event: its level plus formatted field text.
+    #[derive(Debug)]
+    struct CapturedWarningEvent {
+        level: tracing::Level,
+        fields: String,
+    }
+
+    /// A tracing `Layer` that captures every event's level and formatted fields
+    /// into a shared buffer (mirrors the `CollectingLayer` pattern in
+    /// `consumer.rs`). Lets a test assert on ACTUAL production log events.
+    struct CapturingLayer {
+        events: Arc<StdMutex<Vec<CapturedWarningEvent>>>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CapturingLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut buf = String::new();
+            let mut visitor = CapturingVisitor { fields: &mut buf };
+            event.record(&mut visitor);
+            if let Ok(mut events) = self.events.lock() {
+                events.push(CapturedWarningEvent {
+                    level: *event.metadata().level(),
+                    fields: buf,
+                });
+            }
+        }
+    }
+
+    struct CapturingVisitor<'a> {
+        fields: &'a mut String,
+    }
+
+    impl CapturingVisitor<'_> {
+        fn record_field(&mut self, name: &str, value: &str) {
+            write!(self.fields, " {name}={value}").ok();
+        }
+    }
+
+    impl tracing::field::Visit for CapturingVisitor<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.record_field(field.name(), value);
+        }
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.record_field(field.name(), &format!("{value:?}"));
+        }
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.record_field(field.name(), &value.to_string());
+        }
+    }
+
+    /// Install a bare registry as the process-global tracing default, once per
+    /// test binary, so the callsite's cached `Interest` is resolved with a
+    /// subscriber present (mirrors `consumer.rs`).
+    fn ensure_global_tracing_default() {
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+    }
+
+    fn warning_test_component() -> JmsComponent {
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig::single_broker(
+                "tcp://localhost:61616",
+                BrokerType::ActiveMq,
+            ))
+            .unwrap(),
+        );
+        JmsComponent::with_scheme("jms", pool)
+    }
+
+    const UNKNOWN_PARAM_WARNING: &str = "ignoring unknown endpoint query parameters";
+
+    #[test]
+    fn unknown_params_emit_one_warning_with_hint() {
+        ensure_global_tracing_default();
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CapturingLayer {
+            events: Arc::clone(&events),
+        });
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let uri = "jms:queue:orders?durableSubscribtion=news&concurrentConsumerss=2";
+        warning_test_component()
+            .create_endpoint(uri, &camel_component_api::NoOpComponentContext)
+            .expect("unknown parameters must not fail endpoint creation");
+
+        let captured = events.lock().expect("events lock");
+        let warnings: Vec<&CapturedWarningEvent> = captured
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::WARN && event.fields.contains(UNKNOWN_PARAM_WARNING)
+            })
+            .collect();
+        assert_eq!(warnings.len(), 1, "exactly one warning: {captured:?}");
+        let warning = &warnings[0].fields;
+        for needle in [
+            "durableSubscribtion",
+            "concurrentConsumerss",
+            "no close match",
+            "did you mean concurrentConsumers",
+            "ignoring",
+        ] {
+            assert!(
+                warning.contains(needle),
+                "warning must contain {needle:?}: {warning}"
+            );
+        }
+        for forbidden in ["news", "=2", uri] {
+            assert!(
+                !warning.contains(forbidden),
+                "warning must not leak {forbidden:?}: {warning}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_value_never_in_warning_event() {
+        ensure_global_tracing_default();
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CapturingLayer {
+            events: Arc::clone(&events),
+        });
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        warning_test_component()
+            .create_endpoint(
+                "jms:queue:orders?mysteryBox=hunter2",
+                &camel_component_api::NoOpComponentContext,
+            )
+            .expect("unknown parameters must not fail endpoint creation");
+
+        let captured = events.lock().expect("events lock");
+        let warning = captured
+            .iter()
+            .find(|event| {
+                event.level == tracing::Level::WARN && event.fields.contains(UNKNOWN_PARAM_WARNING)
+            })
+            .expect("unknown parameter must warn");
+        assert_eq!(
+            warning.level,
+            tracing::Level::WARN,
+            "unknown parameters must warn: {captured:?}"
+        );
+        assert!(
+            warning.fields.contains("mysteryBox"),
+            "key must be named: {warning:?}"
+        );
+        assert!(
+            !warning.fields.contains("hunter2"),
+            "value leaked: {warning:?}"
+        );
+    }
+
+    #[test]
+    fn credential_shaped_key_warns_redacted() {
+        ensure_global_tracing_default();
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CapturingLayer {
+            events: Arc::clone(&events),
+        });
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        warning_test_component()
+            .create_endpoint(
+                "jms:queue:orders?user%3Asecret%40host=1",
+                &camel_component_api::NoOpComponentContext,
+            )
+            .expect("unknown parameters must not fail endpoint creation");
+
+        let captured = events.lock().expect("events lock");
+        let warnings: Vec<&CapturedWarningEvent> = captured
+            .iter()
+            .filter(|event| {
+                event.level == tracing::Level::WARN && event.fields.contains(UNKNOWN_PARAM_WARNING)
+            })
+            .collect();
+        assert_eq!(warnings.len(), 1, "exactly one warning: {captured:?}");
+        let warning = &warnings[0].fields;
+        for needle in ["<redacted>", "no close match"] {
+            assert!(
+                warning.contains(needle),
+                "warning must contain {needle:?}: {warning}"
+            );
+        }
+        assert!(
+            !warning.contains("did you mean"),
+            "a redacted key must never render a suggestion: {warning}"
+        );
+        for event in captured.iter() {
+            for forbidden in ["user%3Asecret%40host", "secret", "@host"] {
+                assert!(
+                    !event.fields.contains(forbidden),
+                    "captured event must not leak {forbidden:?}: {event:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clean_endpoint_emits_no_warning() {
+        ensure_global_tracing_default();
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CapturingLayer {
+            events: Arc::clone(&events),
+        });
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        warning_test_component()
+            .create_endpoint(
+                "jms:queue:orders?concurrent_consumers=3",
+                &camel_component_api::NoOpComponentContext,
+            )
+            .expect("known parameters must not fail endpoint creation");
+
+        let captured = events.lock().expect("events lock");
+        assert!(
+            !captured.iter().any(|event| {
+                event.level == tracing::Level::WARN && event.fields.contains(UNKNOWN_PARAM_WARNING)
+            }),
+            "no unknown-parameter warning expected: {captured:?}"
+        );
     }
 
     #[tokio::test]

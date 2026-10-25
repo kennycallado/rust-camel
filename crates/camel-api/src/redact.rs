@@ -314,6 +314,18 @@ pub fn redact_url_with_query_allowlist(raw: &str, sensitive_key_substrings: &[&s
     redact_url_with_query_allowlist_impl(raw, sensitive_key_substrings, Some(256))
 }
 
+/// Whether a raw query-parameter key is itself credential-shaped: its
+/// single-pass minimal decode (see `minimal_decode_pair`) contains `@`
+/// and also `:` or `//`. This is the exact key-position predicate
+/// `redact_url_with_query_allowlist_impl` applies (bd rc-yvjp3), exposed
+/// so parsers that retain unknown keys can suppress them instead of
+/// echoing embedded `user:secret@host` material. The predicate is
+/// heuristic, and it becomes frozen public surface once camel-api
+/// publishes externally.
+pub fn is_credential_shaped_key(raw_key: &str) -> bool {
+    is_credential_shaped(&minimal_decode_pair(raw_key))
+}
+
 /// Untruncated variant of [`redact_url_with_query_allowlist`]: identical
 /// windowed userinfo masking, per-key query redaction, and fragment
 /// suppression, but WITHOUT the 256-byte diagnostic cap. Callers that use
@@ -1422,5 +1434,21 @@ mod tests {
         assert_eq!(redact_url("a:\\user@evil"), "a:\\user@evil");
         assert!(window_has_at_sign("foo:\\\\u:p@e/"));
         assert!(!window_has_at_sign("a:\\user@evil"));
+    }
+
+    /// Key-position credential-shape predicate (bd rc-yvjp3): a raw query
+    /// key that decodes to `user:secret@host` is credential-shaped, while a
+    /// benign parameter name is not.
+    #[test]
+    fn credential_shaped_key_predicate_flags_userinfo() {
+        assert!(is_credential_shaped_key("user:secret@host"));
+        assert!(!is_credential_shaped_key("mysteryBox"));
+    }
+
+    /// The same predicate must see through a single-pass percent-encoded
+    /// credential shape.
+    #[test]
+    fn credential_shaped_key_predicate_flags_percent_encoded() {
+        assert!(is_credential_shaped_key("user%3Asecret%40host"));
     }
 }

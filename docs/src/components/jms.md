@@ -88,6 +88,8 @@ artemis:<name>       # shorthand, defaults to queue
 | `jmsHeaderAllowlist` | empty | Comma-separated allowlist of outgoing business header names |
 | `exchangePattern` | `InOnly` | `InOnly` or `InOut` (InOut is not yet implemented) |
 
+Unknown query parameters are ignored with one warning that names the key (credential-shaped keys are redacted) and the closest known key when one is near.
+
 Credentials and the broker URL are not URI parameters. They live in the `[components.jms.brokers.<name>]` table.
 
 ## Broker configuration
