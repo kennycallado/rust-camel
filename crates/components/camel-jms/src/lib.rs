@@ -39,7 +39,7 @@ pub use config::{
 pub use health::JmsHealthCheck;
 
 /// Version of the Java bridge binary this crate is compatible with.
-pub const BRIDGE_VERSION: &str = "0.8.7";
+pub const BRIDGE_VERSION: &str = "0.8.8";
 
 #[cfg(test)]
 mod bridge_client_test;
