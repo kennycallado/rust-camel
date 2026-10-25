@@ -164,6 +164,7 @@ fn helper_functions_cover_non_async_branches() {
         drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         aggregate_split: None,
         agg_service: None,
+        stop_budget: None,
         compiled: route_runtime_state::CompiledRoute {
             security_policy: None,
             security_authenticator: None,
@@ -488,6 +489,66 @@ async fn start_stop_route_happy_path_with_timer_and_mock() {
     controller.stop_route("rt-1").await.unwrap();
 
     controller.remove_route("rt-1").await.unwrap();
+}
+
+/// Regression: a budgeted stop dispatched through the trait must run the same
+/// health cleanup as `stop_route`. Before the inherent helper was renamed, a
+/// concrete `DefaultRouteController` receiver resolved to the inherent
+/// `stop_route_with_budget` and skipped `mark_route_stopped`, leaving the
+/// route's probes active after the stop.
+#[tokio::test]
+async fn budgeted_stop_deactivates_route_health() {
+    use crate::health_registry::HealthCheckRegistry;
+
+    struct AlwaysUnhealthy;
+
+    #[async_trait::async_trait]
+    impl camel_api::AsyncHealthCheck for AlwaysUnhealthy {
+        fn name(&self) -> &str {
+            "probe"
+        }
+
+        async fn check(&self) -> camel_api::health::CheckResult {
+            camel_api::health::CheckResult::unhealthy("probe", "boom")
+        }
+    }
+
+    let mut controller = build_controller_with_components();
+    let health = Arc::new(HealthCheckRegistry::new(Duration::from_secs(1)));
+    health.register_for_route("route-1", Arc::new(AlwaysUnhealthy));
+    controller.set_health_registry(Arc::clone(&health));
+
+    controller
+        .add_route(
+            RouteDefinition::new(
+                "timer:tick?period=10",
+                vec![BuilderStep::To("mock:out".into())],
+            )
+            .with_route_id("route-1"),
+        )
+        .await
+        .unwrap();
+    controller.start_route("route-1").await.unwrap();
+    assert_eq!(
+        health.check_all().await.status,
+        camel_api::HealthStatus::Unhealthy,
+        "a started route must report its registered probe"
+    );
+
+    RouteController::stop_route_with_budget(&mut controller, "route-1", Duration::from_millis(50))
+        .await
+        .unwrap();
+
+    let report = health.check_all().await;
+    assert_eq!(
+        report.status,
+        camel_api::HealthStatus::Healthy,
+        "budgeted stop must mark the route stopped"
+    );
+    assert!(
+        report.services.is_empty(),
+        "budgeted stop must deactivate the route's probes: {report:?}"
+    );
 }
 
 /// rc-082j regression: the global start-route event hook is route-scoped —
@@ -2224,6 +2285,7 @@ fn swap_pipeline_rejects_lifecycle_bearing_route() {
         drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         aggregate_split: None,
         agg_service: None,
+        stop_budget: None,
         compiled: route_runtime_state::CompiledRoute {
             security_policy: None,
             security_authenticator: None,
@@ -2282,6 +2344,7 @@ fn swap_pipeline_rejects_agg_service_route() {
         drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         aggregate_split: None,
         agg_service: Some(Arc::new(svc)),
+        stop_budget: None,
         compiled: route_runtime_state::CompiledRoute {
             security_policy: None,
             security_authenticator: None,
@@ -2326,6 +2389,7 @@ fn swap_pipeline_raw_bypasses_lifecycle_rejection() {
         drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         aggregate_split: None,
         agg_service: None,
+        stop_budget: None,
         compiled: route_runtime_state::CompiledRoute {
             security_policy: None,
             security_authenticator: None,
@@ -4447,6 +4511,7 @@ impl Consumer for GatedEmitConsumer {
                 route_id: self.target_route_id.clone(),
                 command_id: "reentrancy-emission-stop".to_string(),
                 causation_id: None,
+                stop_budget: None,
             })
             .await;
         let _ = self.emission_done_tx.send(true);

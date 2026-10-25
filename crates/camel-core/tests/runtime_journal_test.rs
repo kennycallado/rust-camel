@@ -310,6 +310,7 @@ async fn redb_journal_records_route_removed_through_full_lifecycle() {
             route_id: rid.to_string(),
             command_id: "rm-c3".to_string(),
             causation_id: Some("rm-c2".to_string()),
+            stop_budget: None,
         })
         .await
         .unwrap();
@@ -406,6 +407,7 @@ async fn redb_journal_compaction_through_bus_removes_deleted_route_events() {
             route_id: "doomed".to_string(),
             command_id: "comp-c3".to_string(),
             causation_id: Some("comp-c2".to_string()),
+            stop_budget: None,
         })
         .await
         .unwrap();
@@ -852,6 +854,7 @@ async fn legacy_journal_boots_without_suppression() {
             route_id: COLON_ROUTE.to_string(),
             command_id: "context:stop:foo:0".to_string(),
             causation_id: None,
+            stop_budget: None,
         })
         .await
         .unwrap();

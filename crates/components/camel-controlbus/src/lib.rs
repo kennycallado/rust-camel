@@ -363,6 +363,7 @@ async fn execute_runtime_action(
                     route_id: route_id.to_string(),
                     command_id: command_id(command_scope, "stop"),
                     causation_id: None,
+                    stop_budget: None,
                 })
                 .await?;
             Ok(None)

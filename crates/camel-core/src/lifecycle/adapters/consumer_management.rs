@@ -70,6 +70,17 @@ pub(crate) const CONSUMER_STARTUP_BUDGET: Duration = Duration::from_secs(90);
 /// no actor path waits for it.
 pub(crate) const CONSUMER_IMMEDIATE_GRACE: Duration = Duration::from_millis(50);
 
+/// Grace period added ONLY to the outer consumer-join timeout.
+///
+/// Applies on EVERY path that flows through `stop_route_internal` — graceful
+/// stop and registry/reload alike. The per-path settle bound is unchanged:
+/// graceful propagates the drain budget, reload bounds via the slot with
+/// `DEFAULT_SHUTDOWN_TIMEOUT`, and suspend never reaches `stop_route_internal`.
+/// The grace extends the controller's join wait so the consumer's fail-open
+/// warn and teardown complete before the task is force-aborted (bd rc-evw3z
+/// review). It does NOT extend the pipeline join or drain wait.
+pub(crate) const CONSUMER_STOP_JOIN_GRACE: Duration = Duration::from_millis(500);
+
 /// Write-once outcome latches for the Immediate consumer startup
 /// handshake (rc-slvd). The spawned consumer task sends on exactly ONE
 /// of the two channels the moment `start()` returns; the detached
@@ -388,6 +399,15 @@ async fn run_failure_watcher(inputs: ImmediateWatcherInputs, grace: Duration) {
     }
 }
 
+/// Bundle returned by [`spawn_consumer_task`].
+pub(crate) type SpawnedConsumerTask = (
+    JoinHandle<()>,
+    StartupReceiver,
+    Option<ImmediateWatcherInputs>,
+    Option<OuterWatcherInputs>,
+    watch::Sender<Option<Duration>>,
+);
+
 pub(crate) fn spawn_consumer_task(
     route_id: String,
     mut consumer: Box<dyn Consumer>,
@@ -395,14 +415,15 @@ pub(crate) fn spawn_consumer_task(
     crash_notifier: Option<mpsc::Sender<CrashNotification>>,
     runtime_for_consumer: Option<Weak<dyn RuntimeHandle>>,
     is_resume: bool,
-) -> (
-    JoinHandle<()>,
-    StartupReceiver,
-    Option<ImmediateWatcherInputs>,
-    Option<OuterWatcherInputs>,
-) {
+) -> SpawnedConsumerTask {
+    // Single slot writer: `stop_route_internal` sends the drain budget here
+    // before cancelling the consumer, so the consumer's own settle wait can
+    // fail open at the same budget the controller uses.
+    let (stop_budget_tx, stop_budget_rx) = watch::channel(None);
+
     match consumer.startup_mode() {
         ConsumerStartupMode::Immediate => {
+            let consumer_ctx = consumer_ctx.with_stop_budget_slot(stop_budget_rx);
             // Controller gets a pre-resolved receiver — never yields.
             let startup_receiver = StartupReceiver::immediate();
 
@@ -562,7 +583,7 @@ pub(crate) fn spawn_consumer_task(
                 runtime: runtime_for_watcher,
             };
 
-            (handle, startup_receiver, Some(inputs), None)
+            (handle, startup_receiver, Some(inputs), None, stop_budget_tx)
         }
         // Forward-compat: any future variant is treated as Explicit so the
         // consumer must signal readiness (or its start() error) before the
@@ -572,7 +593,9 @@ pub(crate) fn spawn_consumer_task(
         _ => {
             let (signal, receiver) = StartupSignal::pair();
             let startup_for_task = signal.clone();
-            let consumer_ctx = consumer_ctx.with_startup(signal);
+            let consumer_ctx = consumer_ctx
+                .with_stop_budget_slot(stop_budget_rx)
+                .with_startup(signal);
 
             // Outer-task watcher plumbing. Everything the detached watcher
             // needs is captured BEFORE the async move block takes ownership
@@ -709,7 +732,7 @@ pub(crate) fn spawn_consumer_task(
                 runtime: runtime_for_inputs,
                 crash_notifier: crash_notifier_for_inputs,
             };
-            (handle, receiver, None, Some(outer_inputs))
+            (handle, receiver, None, Some(outer_inputs), stop_budget_tx)
         }
     }
 }
@@ -729,6 +752,17 @@ pub(super) async fn stop_route_internal(
     }
 
     info!(route_id = %route_id, "Stopping route");
+
+    // Propagate the drain budget before cancellation so the consumer's own
+    // budgeted settle wait uses the same clock. Registry/reload callers pass
+    // DEFAULT_SHUTDOWN_TIMEOUT; graceful context stop passes the configured
+    // drain timeout.
+    let managed = routes
+        .get_mut(route_id)
+        .expect("invariant: route must exist after prior existence check"); // allow-unwrap
+    if let Some(tx) = managed.stop_budget.as_ref() {
+        let _ = tx.send(Some(shutdown_timeout));
+    }
 
     let managed = routes
         .get_mut(route_id)
@@ -759,7 +793,8 @@ pub(super) async fn stop_route_internal(
         .expect("invariant: route must exist after prior existence check"); // allow-unwrap
     let consumer_handle = managed.consumer_handle.take();
     let consumer_abort = consumer_handle.as_ref().map(|h| h.abort_handle());
-    let consumer_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let consumer_budget =
+        deadline.saturating_duration_since(tokio::time::Instant::now()) + CONSUMER_STOP_JOIN_GRACE;
     let consumer_join_result = tokio::time::timeout(consumer_budget, async {
         if let Some(h) = consumer_handle {
             let _ = h.await;
@@ -1014,6 +1049,7 @@ mod tests {
             drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             aggregate_split: None,
             agg_service: None,
+            stop_budget: None,
             compiled: route_runtime_state::CompiledRoute {
                 security_policy: None,
                 security_authenticator: None,
@@ -1078,6 +1114,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stop_route_internal_writes_configured_budget_slot() {
+        let (budget_tx, budget_rx) = watch::channel(None);
+        let cancel = CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+        let consumer_handle = tokio::spawn(async move {
+            cancel_for_task.cancelled().await;
+        });
+
+        let mut route = managed_route_with_handles(Some(consumer_handle), None, None);
+        route.consumer_cancel_token = cancel;
+        route.stop_budget = Some(budget_tx);
+
+        let mut routes = HashMap::new();
+        routes.insert("route-1".to_string(), route);
+
+        stop_route_internal(&mut routes, "route-1", Duration::from_millis(50))
+            .await
+            .expect("stop should succeed");
+
+        assert_eq!(
+            *budget_rx.borrow(),
+            Some(Duration::from_millis(50)),
+            "stop_route_internal must write the configured budget into the slot"
+        );
+    }
+
+    /// bd rc-evw3z: the consumer's own settle wait expires at the propagated
+    /// budget. The controller's outer join adds only CONSUMER_STOP_JOIN_GRACE,
+    /// so a 120 ms teardown under a 100 ms budget completes instead of being
+    /// force-aborted at exactly 100 ms.
+    #[tokio::test]
+    async fn stop_route_internal_join_grace_lets_consumer_teardown_finish() {
+        struct SlowStopConsumer {
+            stop_completed: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl Consumer for SlowStopConsumer {
+            async fn start(&mut self, ctx: ConsumerContext) -> Result<(), CamelError> {
+                ctx.cancel_token().cancelled().await;
+                Ok(())
+            }
+
+            async fn stop(&mut self) -> Result<(), CamelError> {
+                tokio::time::sleep(Duration::from_millis(120)).await; // allow-test-sleep: sleep is the behavior under test — consumer stop deliberately outlives the 100 ms budget to prove the join grace; camel-core has no tokio test-util in dev-deps so paused time is unavailable
+                self.stop_completed.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let stop_completed = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(
+            tx,
+            cancel.child_token(),
+            "consumer-join-grace-test".to_string(),
+        );
+        let (consumer_handle, _startup_rx, _watcher_inputs, _outer_inputs, _budget_tx) =
+            spawn_consumer_task(
+                "consumer-join-grace-test".to_string(),
+                Box::new(SlowStopConsumer {
+                    stop_completed: Arc::clone(&stop_completed),
+                }),
+                ctx,
+                None,
+                None,
+                false,
+            );
+
+        let mut route = managed_route_with_handles(Some(consumer_handle), None, None);
+        route.consumer_cancel_token = cancel;
+
+        let mut routes = HashMap::new();
+        routes.insert("route-join-grace".to_string(), route);
+
+        let result =
+            stop_route_internal(&mut routes, "route-join-grace", Duration::from_millis(100)).await;
+
+        assert!(result.is_ok(), "stop should succeed");
+        assert!(
+            stop_completed.load(Ordering::SeqCst),
+            "consumer stop() must finish (join grace) instead of being aborted at the budget"
+        );
+    }
+
+    #[tokio::test]
     async fn spawn_consumer_task_resume_failure_sends_crash_notification() {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(
@@ -1087,14 +1210,15 @@ mod tests {
         );
         let (crash_tx, mut crash_rx) = mpsc::channel(1);
 
-        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "route-resume".to_string(),
-            Box::new(FailingConsumer::new("resume start failed")),
-            ctx,
-            Some(crash_tx),
-            None,
-            true,
-        );
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-resume".to_string(),
+                Box::new(FailingConsumer::new("resume start failed")),
+                ctx,
+                Some(crash_tx),
+                None,
+                true,
+            );
 
         handle.await.expect("consumer task should join cleanly");
 
@@ -1115,14 +1239,15 @@ mod tests {
 
         let (consumer, stop_called) = FailingConsumer::with_stop_tracking("start failed");
 
-        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "route-h9".to_string(),
-            Box::new(consumer),
-            ctx,
-            Some(crash_tx),
-            None,
-            false,
-        );
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-h9".to_string(),
+                Box::new(consumer),
+                ctx,
+                Some(crash_tx),
+                None,
+                false,
+            );
 
         handle.await.expect("consumer task should join");
 
@@ -1173,14 +1298,15 @@ mod tests {
         let ctx = ConsumerContext::new(exchange_tx, cancel, "consumer-mgmt-test-route".to_string());
         let (crash_tx, mut crash_rx) = mpsc::channel(1);
 
-        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "route-deferred".to_string(),
-            Box::new(DeferredFailConsumer::new("broker lost")),
-            ctx,
-            Some(crash_tx),
-            None,
-            false,
-        );
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-deferred".to_string(),
+                Box::new(DeferredFailConsumer::new("broker lost")),
+                ctx,
+                Some(crash_tx),
+                None,
+                false,
+            );
 
         handle.await.expect("outer task should complete");
 
@@ -1226,14 +1352,15 @@ mod tests {
             "seda-handshake".to_string(),
         );
 
-        let (_handle, startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "seda-handshake".to_string(),
-            consumer,
-            ctx,
-            None,
-            None,
-            false,
-        );
+        let (_handle, startup_rx, _watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "seda-handshake".to_string(),
+                consumer,
+                ctx,
+                None,
+                None,
+                false,
+            );
 
         // Drive the handshake to completion. Post-fix (Explicit) the awaits
         // here are what poll the consumer task through start(); pre-fix
@@ -1272,14 +1399,15 @@ mod tests {
         // Cancel BEFORE the bg task exits — simulates graceful shutdown
         cancel.cancel();
 
-        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "route-cancel".to_string(),
-            Box::new(DeferredFailConsumer::new("shutdown error")),
-            ctx,
-            Some(crash_tx),
-            None,
-            false,
-        );
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-cancel".to_string(),
+                Box::new(DeferredFailConsumer::new("shutdown error")),
+                ctx,
+                Some(crash_tx),
+                None,
+                false,
+            );
 
         handle.await.expect("outer task should complete");
 
@@ -1314,14 +1442,15 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let ctx = ConsumerContext::new(tx, cancel.clone(), "consumer-mgmt-test-route".to_string());
 
-        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "test-route".into(),
-            Box::new(StopTrackingConsumer),
-            ctx,
-            None,
-            None,
-            false,
-        );
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "test-route".into(),
+                Box::new(StopTrackingConsumer),
+                ctx,
+                None,
+                None,
+                false,
+            );
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         cancel.cancel();
@@ -1410,6 +1539,7 @@ mod tests {
                 drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 aggregate_split: None,
                 agg_service: None,
+                stop_budget: None,
                 compiled: route_runtime_state::CompiledRoute {
                     security_policy: None,
                     security_authenticator: None,
@@ -1577,14 +1707,15 @@ mod tests {
         let (crash_tx, crash_rx) = mpsc::channel::<CrashNotification>(1);
         drop(crash_rx); // close the channel so send fails
 
-        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "route-warn".to_string(),
-            Box::new(FailingConsumer::new("start failed")),
-            ctx,
-            Some(crash_tx),
-            None,
-            false,
-        );
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-warn".to_string(),
+                Box::new(FailingConsumer::new("start failed")),
+                ctx,
+                Some(crash_tx),
+                None,
+                false,
+            );
 
         handle.await.expect("consumer task should join cleanly");
 
@@ -1660,14 +1791,15 @@ mod tests {
             "immediate-ok-test".to_string(),
         );
 
-        let (handle, _startup_rx, _watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "route-immediate".to_string(),
-            Box::new(ImmediateOkConsumer),
-            ctx,
-            None,
-            None,
-            false,
-        );
+        let (handle, _startup_rx, _watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-immediate".to_string(),
+                Box::new(ImmediateOkConsumer),
+                ctx,
+                None,
+                None,
+                false,
+            );
 
         handle.await.expect("consumer task should join cleanly");
 
@@ -1863,17 +1995,18 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, token.clone(), "route-stop-panic".to_string());
 
-        let (handle, startup_rx, _watcher_inputs, outer_inputs) = spawn_consumer_task(
-            "route-stop-panic".to_string(),
-            Box::new(ExplicitReadyConsumer {
-                stop_panics: true,
-                bg: None,
-            }),
-            ctx,
-            None,
-            Some(Arc::downgrade(&runtime)),
-            false,
-        );
+        let (handle, startup_rx, _watcher_inputs, outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-stop-panic".to_string(),
+                Box::new(ExplicitReadyConsumer {
+                    stop_panics: true,
+                    bg: None,
+                }),
+                ctx,
+                None,
+                Some(Arc::downgrade(&runtime)),
+                false,
+            );
         let startup = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
             .await
             .expect("startup receiver must resolve") // allow-unwrap: test-only
@@ -1912,17 +2045,18 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, token, "route-normal".to_string());
 
-        let (handle, startup_rx, _watcher_inputs, outer_inputs) = spawn_consumer_task(
-            "route-normal".to_string(),
-            Box::new(ExplicitReadyConsumer {
-                stop_panics: false,
-                bg: None,
-            }),
-            ctx,
-            None,
-            Some(Arc::downgrade(&runtime)),
-            false,
-        );
+        let (handle, startup_rx, _watcher_inputs, outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-normal".to_string(),
+                Box::new(ExplicitReadyConsumer {
+                    stop_panics: false,
+                    bg: None,
+                }),
+                ctx,
+                None,
+                Some(Arc::downgrade(&runtime)),
+                false,
+            );
         let startup = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
             .await
             .expect("startup receiver must resolve") // allow-unwrap: test-only
@@ -1954,17 +2088,18 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, token, "route-normal-bg".to_string());
 
-        let (handle, startup_rx, _watcher_inputs, outer_inputs) = spawn_consumer_task(
-            "route-normal-bg".to_string(),
-            Box::new(ExplicitReadyConsumer {
-                stop_panics: false,
-                bg: Some(tokio::spawn(async { Ok::<(), CamelError>(()) })),
-            }),
-            ctx,
-            None,
-            Some(Arc::downgrade(&runtime)),
-            false,
-        );
+        let (handle, startup_rx, _watcher_inputs, outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-normal-bg".to_string(),
+                Box::new(ExplicitReadyConsumer {
+                    stop_panics: false,
+                    bg: Some(tokio::spawn(async { Ok::<(), CamelError>(()) })),
+                }),
+                ctx,
+                None,
+                Some(Arc::downgrade(&runtime)),
+                false,
+            );
         let startup = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
             .await
             .expect("startup receiver must resolve") // allow-unwrap: test-only
@@ -1996,14 +2131,15 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, token.clone(), "route-cancel".to_string());
 
-        let (handle, startup_rx, _watcher_inputs, outer_inputs) = spawn_consumer_task(
-            "route-cancel".to_string(),
-            Box::new(ParkedExplicitConsumer),
-            ctx,
-            None,
-            Some(Arc::downgrade(&runtime)),
-            false,
-        );
+        let (handle, startup_rx, _watcher_inputs, outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-cancel".to_string(),
+                Box::new(ParkedExplicitConsumer),
+                ctx,
+                None,
+                Some(Arc::downgrade(&runtime)),
+                false,
+            );
         let startup = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
             .await
             .expect("startup receiver must resolve") // allow-unwrap: test-only
@@ -2039,14 +2175,15 @@ mod tests {
         let ctx = ConsumerContext::new(tx, token, "route-uncancelled-abort".to_string());
         let (crash_tx, mut crash_rx) = mpsc::channel(1);
 
-        let (handle, startup_rx, _watcher_inputs, outer_inputs) = spawn_consumer_task(
-            "route-uncancelled-abort".to_string(),
-            Box::new(ParkedExplicitConsumer),
-            ctx,
-            Some(crash_tx),
-            Some(runtime_weak),
-            false,
-        );
+        let (handle, startup_rx, _watcher_inputs, outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-uncancelled-abort".to_string(),
+                Box::new(ParkedExplicitConsumer),
+                ctx,
+                Some(crash_tx),
+                Some(runtime_weak),
+                false,
+            );
         let startup = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
             .await
             .expect("startup receiver must resolve") // allow-unwrap: test-only
@@ -2092,19 +2229,20 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, token, "route-bg-stop-panic".to_string());
 
-        let (handle, startup_rx, _watcher_inputs, outer_inputs) = spawn_consumer_task(
-            "route-bg-stop-panic".to_string(),
-            Box::new(ExplicitReadyConsumer {
-                stop_panics: true,
-                bg: Some(tokio::spawn(async {
-                    Err(CamelError::RouteError("bg died".into()))
-                })),
-            }),
-            ctx,
-            None,
-            Some(Arc::downgrade(&runtime)),
-            false,
-        );
+        let (handle, startup_rx, _watcher_inputs, outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-bg-stop-panic".to_string(),
+                Box::new(ExplicitReadyConsumer {
+                    stop_panics: true,
+                    bg: Some(tokio::spawn(async {
+                        Err(CamelError::RouteError("bg died".into()))
+                    })),
+                }),
+                ctx,
+                None,
+                Some(Arc::downgrade(&runtime)),
+                false,
+            );
         let startup = tokio::time::timeout(Duration::from_secs(2), startup_rx.await_ready())
             .await
             .expect("startup receiver must resolve") // allow-unwrap: test-only
@@ -2151,14 +2289,15 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "immediate-err".to_string());
 
-        let (handle, startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "route-immediate-err".to_string(),
-            Box::new(FailingConsumer::new("boom")),
-            ctx,
-            None,
-            Some(runtime_weak),
-            false,
-        );
+        let (handle, startup_rx, watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-immediate-err".to_string(),
+                Box::new(FailingConsumer::new("boom")),
+                ctx,
+                None,
+                Some(runtime_weak),
+                false,
+            );
 
         // Controller gets pre-resolved receiver — instant Ok.
         let result = tokio::time::timeout(Duration::from_millis(100), startup_rx.await_ready())
@@ -2218,14 +2357,15 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "immediate-ok".to_string());
 
-        let (handle, startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "route-immediate-ok".to_string(),
-            Box::new(ImmediateOkConsumer),
-            ctx,
-            None,
-            Some(runtime_weak),
-            false,
-        );
+        let (handle, startup_rx, watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-immediate-ok".to_string(),
+                Box::new(ImmediateOkConsumer),
+                ctx,
+                None,
+                Some(runtime_weak),
+                false,
+            );
 
         // Controller gets pre-resolved receiver.
         let result = tokio::time::timeout(Duration::from_millis(100), startup_rx.await_ready())
@@ -2288,14 +2428,15 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, cancel.clone(), "immediate-loop".to_string());
 
-        let (handle, _startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "route-immediate-loop".to_string(),
-            Box::new(ImmediateLoopConsumer),
-            ctx,
-            None,
-            Some(runtime_weak),
-            false,
-        );
+        let (handle, _startup_rx, watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-immediate-loop".to_string(),
+                Box::new(ImmediateLoopConsumer),
+                ctx,
+                None,
+                Some(runtime_weak),
+                false,
+            );
 
         let inputs = watcher_inputs.expect("Immediate consumer must yield watcher inputs");
 
@@ -2461,14 +2602,15 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "retry-route".to_string());
 
-        let (handle, _startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "route-retry".to_string(),
-            Box::new(FailingConsumer::new("boom")),
-            ctx,
-            None,
-            Some(runtime_weak),
-            false,
-        );
+        let (handle, _startup_rx, watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-retry".to_string(),
+                Box::new(FailingConsumer::new("boom")),
+                ctx,
+                None,
+                Some(runtime_weak),
+                false,
+            );
 
         let inputs = watcher_inputs.expect("Immediate consumer must yield watcher inputs");
         let watcher = spawn_failure_watcher(inputs);
@@ -2524,14 +2666,15 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "exhaust-route".to_string());
 
-        let (handle, _startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "route-exhaust".to_string(),
-            Box::new(FailingConsumer::new("boom")),
-            ctx,
-            None,
-            Some(runtime_weak),
-            false,
-        );
+        let (handle, _startup_rx, watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-exhaust".to_string(),
+                Box::new(FailingConsumer::new("boom")),
+                ctx,
+                None,
+                Some(runtime_weak),
+                false,
+            );
 
         let inputs = watcher_inputs.expect("Immediate consumer must yield watcher inputs");
         let watcher = spawn_failure_watcher(inputs);
@@ -2583,14 +2726,15 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "nort-route".to_string());
 
-        let (handle, _startup_rx, watcher_inputs, _outer_inputs) = spawn_consumer_task(
-            "route-no-runtime".to_string(),
-            Box::new(FailingConsumer::new("boom")),
-            ctx,
-            None,
-            Some(runtime_weak),
-            false,
-        );
+        let (handle, _startup_rx, watcher_inputs, _outer_inputs, _stop_budget_tx) =
+            spawn_consumer_task(
+                "route-no-runtime".to_string(),
+                Box::new(FailingConsumer::new("boom")),
+                ctx,
+                None,
+                Some(runtime_weak),
+                false,
+            );
 
         let mut inputs = watcher_inputs.expect("Immediate consumer must yield watcher inputs");
         inputs.runtime = None; // simulate the missing handle

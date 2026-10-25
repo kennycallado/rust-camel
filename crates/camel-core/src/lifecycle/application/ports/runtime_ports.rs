@@ -147,7 +147,11 @@ pub trait RuntimeUnitOfWorkPort: Send + Sync {
 pub trait RuntimeExecutionPort: Send + Sync {
     async fn register_route(&self, definition: RouteDefinition) -> Result<(), DomainError>;
     async fn start_route(&self, route_id: &str) -> Result<(), DomainError>;
-    async fn stop_route(&self, route_id: &str) -> Result<(), DomainError>;
+    async fn stop_route(
+        &self,
+        route_id: &str,
+        stop_budget: Option<std::time::Duration>,
+    ) -> Result<(), DomainError>;
     async fn suspend_route(&self, route_id: &str) -> Result<(), DomainError>;
     async fn resume_route(&self, route_id: &str) -> Result<(), DomainError>;
     async fn reload_route(&self, route_id: &str) -> Result<(), DomainError>;
@@ -245,7 +249,11 @@ mod tests {
         async fn start_route(&self, _: &str) -> Result<(), DomainError> {
             unimplemented!()
         }
-        async fn stop_route(&self, _: &str) -> Result<(), DomainError> {
+        async fn stop_route(
+            &self,
+            _: &str,
+            _: Option<std::time::Duration>,
+        ) -> Result<(), DomainError> {
             unimplemented!()
         }
         async fn suspend_route(&self, _: &str) -> Result<(), DomainError> {

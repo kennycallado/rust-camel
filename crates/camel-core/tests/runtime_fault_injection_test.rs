@@ -119,6 +119,7 @@ async fn controller_success_plus_projection_failure_triggers_reconciliation() {
             route_id: "fault-r1".to_string(),
             command_id: "cmd-stop".to_string(),
             causation_id: Some("cmd-start".to_string()),
+            stop_budget: None,
         })
         .await;
 }

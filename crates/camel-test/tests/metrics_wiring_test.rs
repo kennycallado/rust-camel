@@ -738,6 +738,7 @@ async fn direct_consumer_stopping_no_emit() {
                 route_id: "target5".to_string(),
                 command_id: "test:stop:target5".to_string(),
                 causation_id: None,
+                stop_budget: None,
             })
             .await
             .expect("stopping target5 succeeds");

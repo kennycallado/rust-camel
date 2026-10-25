@@ -77,23 +77,25 @@ pub async fn execute_command(
     match cmd {
         RuntimeCommand::RegisterRoute { spec, .. } => handle_register(deps, spec).await,
         RuntimeCommand::StartRoute { route_id, .. } => {
-            handle_lifecycle(deps, route_id, RouteLifecycleCommand::Start).await
+            handle_lifecycle(deps, route_id, RouteLifecycleCommand::Start, None).await
         }
-        RuntimeCommand::StopRoute { route_id, .. } => {
-            handle_lifecycle(deps, route_id, RouteLifecycleCommand::Stop).await
-        }
+        RuntimeCommand::StopRoute {
+            route_id,
+            stop_budget,
+            ..
+        } => handle_lifecycle(deps, route_id, RouteLifecycleCommand::Stop, stop_budget).await,
         RuntimeCommand::SuspendRoute { route_id, .. } => {
-            handle_lifecycle(deps, route_id, RouteLifecycleCommand::Suspend).await
+            handle_lifecycle(deps, route_id, RouteLifecycleCommand::Suspend, None).await
         }
         RuntimeCommand::ResumeRoute { route_id, .. } => {
-            handle_lifecycle(deps, route_id, RouteLifecycleCommand::Resume).await
+            handle_lifecycle(deps, route_id, RouteLifecycleCommand::Resume, None).await
         }
         RuntimeCommand::ReloadRoute { route_id, .. } => {
-            handle_lifecycle(deps, route_id, RouteLifecycleCommand::Reload).await
+            handle_lifecycle(deps, route_id, RouteLifecycleCommand::Reload, None).await
         }
         RuntimeCommand::FailRoute {
             route_id, error, ..
-        } => handle_lifecycle(deps, route_id, RouteLifecycleCommand::Fail(error)).await,
+        } => handle_lifecycle(deps, route_id, RouteLifecycleCommand::Fail(error), None).await,
         RuntimeCommand::RemoveRoute { route_id, .. } => handle_remove(deps, route_id).await,
         RuntimeCommand::ReloadTlsCerts { .. } => Err(CamelError::Config(
             "ReloadTlsCerts not handled: should be intercepted in execute()".into(),
@@ -310,6 +312,7 @@ async fn handle_lifecycle(
     deps: &CommandDeps,
     route_id: String,
     command: RouteLifecycleCommand,
+    stop_budget: Option<std::time::Duration>,
 ) -> Result<RuntimeCommandResult, CamelError> {
     let mut aggregate = deps
         .repo
@@ -359,8 +362,13 @@ async fn handle_lifecycle(
 
     // Stop/Suspend/Resume/Reload: execute runtime FIRST, then apply_command on success
     if let Some(execution) = &deps.execution {
-        if let Err(runtime_err) =
-            apply_runtime_lifecycle(execution.as_ref(), &route_id, &execution_command).await
+        if let Err(runtime_err) = apply_runtime_lifecycle(
+            execution.as_ref(),
+            &route_id,
+            &execution_command,
+            stop_budget,
+        )
+        .await
         {
             // Runtime execution failed: persist Failed state as compensation
             let fail_events = aggregate.fail(runtime_err.to_string());
@@ -515,9 +523,13 @@ async fn handle_lifecycle_start(
 
     // Phase 2: execute runtime side effect
     if let Some(execution) = &deps.execution {
-        if let Err(runtime_err) =
-            apply_runtime_lifecycle(execution.as_ref(), &route_id, &RouteLifecycleCommand::Start)
-                .await
+        if let Err(runtime_err) = apply_runtime_lifecycle(
+            execution.as_ref(),
+            &route_id,
+            &RouteLifecycleCommand::Start,
+            None,
+        )
+        .await
         {
             // Compensate: mark as Failed
             // Capture version before fail() bumps it — the stored aggregate
@@ -698,6 +710,7 @@ async fn apply_runtime_lifecycle(
     execution: &dyn RuntimeExecutionPort,
     route_id: &str,
     command: &RouteLifecycleCommand,
+    stop_budget: Option<std::time::Duration>,
 ) -> Result<(), CamelError> {
     match command {
         RouteLifecycleCommand::Start => match execution.start_route(route_id).await {
@@ -708,7 +721,10 @@ async fn apply_runtime_lifecycle(
                 ))
             }),
         },
-        RouteLifecycleCommand::Stop => execution.stop_route(route_id).await.map_err(Into::into),
+        RouteLifecycleCommand::Stop => execution
+            .stop_route(route_id, stop_budget)
+            .await
+            .map_err(Into::into),
         RouteLifecycleCommand::Suspend => match execution.suspend_route(route_id).await {
             Ok(()) => Ok(()),
             Err(suspend_error) => {
@@ -853,7 +869,10 @@ async fn remove_runtime_route_with_recovery(
     match execution.remove_route(route_id).await {
         Ok(()) => Ok(()),
         Err(remove_error) if remove_error.to_string().contains("must be stopped") => {
-            execution.stop_route(route_id).await.map_err(|stop_error| {
+            execution
+                .stop_route(route_id, None)
+                .await
+                .map_err(|stop_error| {
                 CamelError::RouteError(format!(
                     "runtime execution recovery failed for Remove on route '{route_id}': remove_error={remove_error}; stop_error={stop_error}"
                 ))

@@ -526,6 +526,14 @@ pub enum RuntimeCommand {
         route_id: String,
         command_id: String,
         causation_id: Option<String>,
+        /// Effective graceful stop budget. `None` preserves the legacy
+        /// default shutdown bound (the route registry's
+        /// `DEFAULT_SHUTDOWN_TIMEOUT`); `Some(budget)` bounds the stop with
+        /// the given budget. Future graceful-shutdown producers (CLI,
+        /// supervisor, orchestrators) MUST send `Some(budget)` explicitly —
+        /// `None` is reserved for the registry/reload semantics (legacy
+        /// default bound), not a default for graceful stops.
+        stop_budget: Option<std::time::Duration>,
     },
     SuspendRoute {
         route_id: String,
@@ -807,9 +815,26 @@ mod tests {
             route_id: "r1".into(),
             command_id: "c2".into(),
             causation_id: Some("c1".into()),
+            stop_budget: None,
         };
         assert_eq!(cmd.command_id(), "c2");
         assert_eq!(cmd.causation_id(), Some("c1"));
+    }
+
+    #[test]
+    fn stop_route_command_carries_budget() {
+        let cmd = RuntimeCommand::StopRoute {
+            route_id: "r1".into(),
+            command_id: "c2".into(),
+            causation_id: None,
+            stop_budget: Some(std::time::Duration::from_secs(10)),
+        };
+        match cmd {
+            RuntimeCommand::StopRoute { stop_budget, .. } => {
+                assert_eq!(stop_budget, Some(std::time::Duration::from_secs(10)));
+            }
+            other => panic!("expected StopRoute, got {other:?}"),
+        }
     }
 
     #[test]
@@ -997,6 +1022,7 @@ mod tests {
                 route_id: "r1".into(),
                 command_id: "c3".into(),
                 causation_id: None,
+                stop_budget: None,
             },
             RuntimeCommand::SuspendRoute {
                 route_id: "r1".into(),

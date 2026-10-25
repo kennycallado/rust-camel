@@ -200,6 +200,10 @@ pub struct ConsumerContext {
     /// camel-core runtime at consumer start (drainclaim). `None` keeps
     /// the context's sends uncounted (tests, raw fast paths).
     in_flight: Option<Arc<InFlightGauge>>,
+    /// Stop-budget slot, installed by the camel-core runtime at consumer
+    /// start. The runtime writes the effective stop budget before
+    /// cancelling; the channel value `None` means "not yet written".
+    stop_budget: Option<watch::Receiver<Option<std::time::Duration>>>,
 }
 
 impl ConsumerContext {
@@ -229,6 +233,7 @@ impl ConsumerContext {
             startup,
             inline_dispatcher: Arc::new(OnceLock::new()),
             in_flight: None,
+            stop_budget: None,
         }
     }
 
@@ -258,6 +263,28 @@ impl ConsumerContext {
     /// `None` for contexts without a gauge (tests) — callers mint none.
     pub fn in_flight_counter(&self) -> Option<Arc<InFlightGauge>> {
         self.in_flight.clone()
+    }
+
+    /// Install the stop-budget slot on this context.
+    ///
+    /// The camel-core runtime calls this at consumer start. It writes the
+    /// effective stop budget into the channel before cancelling the consumer;
+    /// the value `None` means "not yet written". Consumers that need to
+    /// bound their graceful drain read the slot once shutdown is requested.
+    pub fn with_stop_budget_slot(
+        mut self,
+        rx: watch::Receiver<Option<std::time::Duration>>,
+    ) -> Self {
+        self.stop_budget = Some(rx);
+        self
+    }
+
+    /// Returns a clone of the installed stop-budget slot, if any.
+    ///
+    /// `None` for contexts without a slot (tests, consumers that never
+    /// drain gracefully). See [`Self::with_stop_budget_slot`].
+    pub fn stop_budget_slot(&self) -> Option<watch::Receiver<Option<std::time::Duration>>> {
+        self.stop_budget.clone()
     }
 
     /// Returns a clone of the internal [`StartupSignal`] so callers (e.g.
@@ -618,6 +645,19 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         let ctx = ConsumerContext::new(tx, CancellationToken::new(), "test-route".to_string());
         assert_eq!(ctx.route_id(), "test-route");
+    }
+
+    #[test]
+    fn stop_budget_slot_roundtrip() {
+        let (tx, _rx) = mpsc::channel(1);
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "test-route".to_string());
+        assert!(ctx.stop_budget_slot().is_none(), "slot starts uninstalled");
+
+        let (_budget_tx, budget_rx) = watch::channel(None);
+        let ctx = ctx.with_stop_budget_slot(budget_rx);
+
+        let slot = ctx.stop_budget_slot().expect("slot installed");
+        assert_eq!(*slot.borrow(), None, "not-yet-written value is None");
     }
 
     #[tokio::test]

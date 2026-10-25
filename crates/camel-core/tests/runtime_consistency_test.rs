@@ -391,6 +391,7 @@ async fn supervision_respects_runtime_stopped_state_and_skips_restart() {
             route_id: "supervised-stop-r1".into(),
             command_id: "manual-stop-after-crash".into(),
             causation_id: None,
+            stop_budget: None,
         })
         .await
         .unwrap();

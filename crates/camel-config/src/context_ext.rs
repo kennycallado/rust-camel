@@ -742,6 +742,7 @@ impl CamelConfig {
         }
 
         ctx.set_shutdown_timeout(std::time::Duration::from_millis(config.timeout_ms));
+        ctx.set_drain_timeout(std::time::Duration::from_millis(config.drain_timeout_ms));
 
         let tracer_config = config.observability.tracer.clone();
 

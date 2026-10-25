@@ -69,6 +69,10 @@ pub struct CamelContext {
     platform_service: Arc<dyn PlatformService>,
     languages: SharedLanguageRegistry,
     shutdown_timeout: std::time::Duration,
+    /// Graceful drain budget propagated to each route's consumer settle wait
+    /// on context stop. Mirrors camel-config `default_drain_timeout_ms`
+    /// (10_000 ms).
+    drain_timeout: std::time::Duration,
     services: Vec<Box<dyn Lifecycle>>,
     health_registry: Arc<HealthCheckRegistry>,
     component_configs: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
@@ -110,6 +114,7 @@ pub(crate) struct FromParts {
     pub(crate) platform_service: Arc<dyn PlatformService>,
     pub(crate) languages: SharedLanguageRegistry,
     pub(crate) shutdown_timeout: std::time::Duration,
+    pub(crate) drain_timeout: std::time::Duration,
     pub(crate) services: Vec<Box<dyn Lifecycle>>,
     pub(crate) health_registry: Arc<HealthCheckRegistry>,
     pub(crate) component_configs: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
@@ -140,6 +145,7 @@ impl CamelContext {
             platform_service: parts.platform_service,
             languages: parts.languages,
             shutdown_timeout: parts.shutdown_timeout,
+            drain_timeout: parts.drain_timeout,
             services: parts.services,
             health_registry: parts.health_registry,
             component_configs: parts.component_configs,
@@ -797,6 +803,7 @@ impl CamelContext {
             &self.runtime,
             &self.route_controller,
             &mut self.services,
+            self.drain_timeout,
         )
         .await
     }
@@ -809,6 +816,19 @@ impl CamelContext {
     /// Set the graceful shutdown timeout used by [`stop()`](Self::stop).
     pub fn set_shutdown_timeout(&mut self, timeout: std::time::Duration) {
         self.shutdown_timeout = timeout;
+    }
+
+    /// Get the graceful drain budget propagated to route consumers on
+    /// [`stop()`](Self::stop). Defaults to 10 seconds, mirroring
+    /// camel-config's `default_drain_timeout_ms`.
+    pub fn drain_timeout(&self) -> std::time::Duration {
+        self.drain_timeout
+    }
+
+    /// Set the graceful drain budget propagated to route consumers on
+    /// [`stop()`](Self::stop).
+    pub fn set_drain_timeout(&mut self, timeout: std::time::Duration) {
+        self.drain_timeout = timeout;
     }
 
     /// Test-only: take the actor join handle out of the context.

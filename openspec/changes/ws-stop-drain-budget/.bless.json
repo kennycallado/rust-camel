@@ -1,0 +1,17 @@
+{
+  "kind": "pre-flight",
+  "change": "ws-stop-drain-budget",
+  "expert": "e_gpt",
+  "verdict": "ADJUST",
+  "adjustments_incorporated": [
+    "thread budget through all forwarding layers (commands.rs, apply_runtime_lifecycle, RuntimeExecutionPort, RuntimeExecutionAdapter)",
+    "fresh watch slot per consumer incarnation at start/resume",
+    "reload/registry stops write explicit Some(DEFAULT_SHUTDOWN_TIMEOUT)",
+    "publish budget synchronously before consumer_cancel_token.cancel()",
+    "snapshot slot value and drop borrow before awaiting in WsConsumer::stop",
+    "stop_budget receiver stored on WsConsumer, not shared WsAppState",
+    "real-IO echo test with small configured budget added"
+  ],
+  "hash": "spec+plan blessed via r_gpt reviewer loop (mission expert budget: one e_gpt pre-flight attempt)",
+  "note": "conductor-light spec/plan blessing replaced by e_gpt pre-flight (ADJUST, incorporated) + r_gpt plan review loop (REJECT -> join-grace reconciliation -> APPROVE) per mission order expert budget"
+}

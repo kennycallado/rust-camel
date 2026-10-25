@@ -176,6 +176,15 @@ impl RouteRegistry {
         .await
     }
 
+    /// Stop a route with an explicit graceful drain budget.
+    pub(super) async fn stop_route_with_budget(
+        &mut self,
+        route_id: &str,
+        budget: std::time::Duration,
+    ) -> Result<(), camel_api::CamelError> {
+        consumer_management::stop_route_internal(&mut self.routes, route_id, budget).await
+    }
+
     /// Check if a route is running.
     #[allow(dead_code)]
     pub(super) fn is_route_running(&self, route_id: &str) -> bool {
@@ -228,6 +237,7 @@ mod tests {
             drain_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             aggregate_split: None,
             agg_service: None,
+            stop_budget: None,
             compiled: route_runtime_state::CompiledRoute {
                 security_policy: None,
                 security_authenticator: None,
@@ -448,5 +458,55 @@ mod tests {
         reg.insert("r1".into(), example_managed());
         assert_eq!(reg.lifecycle_label("r1"), Some("Stopped"));
         assert_eq!(reg.lifecycle_label("missing"), None);
+    }
+
+    fn managed_with_budget_slot() -> (
+        ManagedRoute,
+        tokio::sync::watch::Receiver<Option<std::time::Duration>>,
+    ) {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+        let handle = tokio::spawn(async move {
+            cancel_for_task.cancelled().await;
+        });
+        let (budget_tx, budget_rx) = tokio::sync::watch::channel(None);
+
+        let mut managed = example_managed();
+        managed.consumer_handle = Some(handle);
+        managed.consumer_cancel_token = cancel;
+        managed.stop_budget = Some(budget_tx);
+        (managed, budget_rx)
+    }
+
+    #[tokio::test]
+    async fn registry_stop_writes_default_shutdown_budget() {
+        let (managed, budget_rx) = managed_with_budget_slot();
+        let mut reg = RouteRegistry::new();
+        reg.insert("r1".into(), managed);
+
+        reg.stop_route("r1").await.expect("stop should succeed");
+
+        assert_eq!(
+            *budget_rx.borrow(),
+            Some(DEFAULT_SHUTDOWN_TIMEOUT),
+            "registry stop_route must write DEFAULT_SHUTDOWN_TIMEOUT into the slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_route_with_budget_propagates_configured_budget() {
+        let (managed, budget_rx) = managed_with_budget_slot();
+        let mut reg = RouteRegistry::new();
+        reg.insert("r1".into(), managed);
+
+        reg.stop_route_with_budget("r1", std::time::Duration::from_secs(10))
+            .await
+            .expect("stop should succeed");
+
+        assert_eq!(
+            *budget_rx.borrow(),
+            Some(std::time::Duration::from_secs(10)),
+            "stop_route_with_budget must propagate the configured budget"
+        );
     }
 }

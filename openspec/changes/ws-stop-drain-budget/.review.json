@@ -1,0 +1,13 @@
+{
+  "kind": "holistic",
+  "change": "ws-stop-drain-budget",
+  "reviewer": "r_gpt",
+  "verdict": "APPROVE",
+  "history": [
+    {"stage": "holistic", "verdict": "APPROVE-WITH-FINDINGS", "findings": "2 minor: downward test elapsed bound + warn-present assertion; stop_budget None doc semantics"},
+    {"stage": "holistic-recheck", "verdict": "APPROVE", "commit": "4844a31e0"},
+    {"stage": "final-expert-pass", "reviewer": "e_glm", "verdict": "APPROVE-WITH-FINDINGS", "findings": "2 documentation-grade: grace-doc path scope; stop_budget None invariant for future graceful producers", "resolution_commit": "91bed1e9d", "park_suitability": "PARK"}
+  ],
+  "impl_hash": "91bed1e9dad0a3c74d5f9fd8b5526d691d4bc909",
+  "gates": "all green (see park report); N/A: doc-guide-test (no docs/** changed), lint-commits (conductor policy), cli-drain-scenario (needs built Java bridge)"
+}

@@ -249,6 +249,7 @@ pub(crate) async fn stop_context(
     runtime: &RuntimeBus,
     route_controller: &dyn RouteOrderingPort,
     services: &mut [Box<dyn Lifecycle>],
+    drain_budget: std::time::Duration,
 ) -> Result<(), CamelError> {
     info!("Stopping CamelContext");
 
@@ -267,6 +268,7 @@ pub(crate) async fn stop_context(
                 route_id: route_id.clone(),
                 command_id: next_context_command_id(runtime.boot_nonce(), "stop", &route_id),
                 causation_id: None,
+                stop_budget: Some(drain_budget),
             })
             .await
         {
@@ -337,6 +339,7 @@ pub(crate) async fn abort_context(
                 route_id: route_id.clone(),
                 command_id: next_context_command_id(runtime.boot_nonce(), "abort-stop", &route_id),
                 causation_id: None,
+                stop_budget: None,
             })
             .await;
     }

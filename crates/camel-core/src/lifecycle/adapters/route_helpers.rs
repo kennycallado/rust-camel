@@ -133,6 +133,10 @@ pub(super) struct ManagedRoute {
     pub(super) drain_in_flight: Arc<std::sync::atomic::AtomicU64>,
     pub(super) aggregate_split: Option<AggregateSplitInfo>,
     pub(super) agg_service: Option<Arc<AggregatorService>>,
+    /// Slot for propagating the graceful drain budget to the consumer's own
+    /// budgeted settle wait. Written once by `stop_route_internal` before the
+    /// cancel token fires; `None` when the route has no running consumer.
+    pub(super) stop_budget: Option<tokio::sync::watch::Sender<Option<std::time::Duration>>>,
     /// Compiled runtime state (security artifacts captured at add time).
     pub(super) compiled: route_runtime_state::CompiledRoute,
 }

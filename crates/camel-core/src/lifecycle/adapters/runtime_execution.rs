@@ -38,9 +38,13 @@ impl RuntimeExecutionPort for RuntimeExecutionAdapter {
             .map_err(to_domain)
     }
 
-    async fn stop_route(&self, route_id: &str) -> Result<(), DomainError> {
+    async fn stop_route(
+        &self,
+        route_id: &str,
+        stop_budget: Option<std::time::Duration>,
+    ) -> Result<(), DomainError> {
         self.controller
-            .stop_route(route_id)
+            .stop_route_with_budget(route_id, stop_budget)
             .await
             .map_err(to_domain)
     }

@@ -266,6 +266,7 @@ impl Service<Exchange> for StopRouteStep {
                     route_id: target,
                     command_id: "cohort-regression-stop-b".to_string(),
                     causation_id: None,
+                    stop_budget: None,
                 })
                 .await;
             *result_slot.lock().expect("result slot lock") = Some(result); // allow-unwrap

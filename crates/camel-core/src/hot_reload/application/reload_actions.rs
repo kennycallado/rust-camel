@@ -489,6 +489,7 @@ pub(super) async fn apply_remove(
                     route_id: route_id.clone(),
                     command_id: next_reload_command_id("remove-stop", &route_id),
                     causation_id: None,
+                    stop_budget: None,
                 })
                 .await;
             if let Err(e) = stop_result
@@ -545,6 +546,7 @@ pub(super) async fn apply_remove(
                     route_id: route_id.clone(),
                     command_id: next_reload_command_id("remove-stop", &route_id),
                     causation_id: None,
+                    stop_budget: None,
                 })
                 .await;
             if let Err(e) = stop_result
@@ -663,6 +665,7 @@ pub(super) async fn apply_restart(
                     route_id: route_id.clone(),
                     command_id: next_reload_command_id("restart-stop", &route_id),
                     causation_id: None,
+                    stop_budget: None,
                 })
                 .await;
             if let Err(e) = stop_result
@@ -769,6 +772,7 @@ pub(super) async fn apply_restart(
                     route_id: route_id.clone(),
                     command_id: next_reload_command_id("restart-stop", &route_id),
                     causation_id: None,
+                    stop_budget: None,
                 })
                 .await;
             if let Err(e) = stop_result

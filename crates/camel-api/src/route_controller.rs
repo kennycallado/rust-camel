@@ -63,6 +63,22 @@ pub trait RouteController: Send + Sync {
     /// Returns a `CamelError` if the route cannot be stopped.
     async fn stop_route(&mut self, route_id: &str) -> Result<(), CamelError>;
 
+    /// Stop a route with a graceful drain budget.
+    ///
+    /// Implementations may bound their drain phase by `budget`. The default
+    /// delegates to [`Self::stop_route`], ignoring the budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `CamelError` if the route cannot be stopped.
+    async fn stop_route_with_budget(
+        &mut self,
+        route_id: &str,
+        _budget: std::time::Duration,
+    ) -> Result<(), CamelError> {
+        self.stop_route(route_id).await
+    }
+
     /// Restart a specific route by its ID.
     ///
     /// # Errors
@@ -97,4 +113,64 @@ pub trait RouteController: Send + Sync {
     ///
     /// Returns a `CamelError` if any route cannot be stopped.
     async fn stop_all_routes(&mut self) -> Result<(), CamelError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingController {
+        stopped: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl RouteController for RecordingController {
+        async fn start_route(&mut self, _route_id: &str) -> Result<(), CamelError> {
+            unimplemented!()
+        }
+
+        async fn stop_route(&mut self, route_id: &str) -> Result<(), CamelError> {
+            self.stopped
+                .lock()
+                .expect("stopped lock poisoned")
+                .push(route_id.to_string());
+            Ok(())
+        }
+
+        async fn restart_route(&mut self, _route_id: &str) -> Result<(), CamelError> {
+            unimplemented!()
+        }
+
+        async fn suspend_route(&mut self, _route_id: &str) -> Result<(), CamelError> {
+            unimplemented!()
+        }
+
+        async fn resume_route(&mut self, _route_id: &str) -> Result<(), CamelError> {
+            unimplemented!()
+        }
+
+        async fn start_all_routes(&mut self) -> Result<(), CamelError> {
+            unimplemented!()
+        }
+
+        async fn stop_all_routes(&mut self) -> Result<(), CamelError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_route_with_budget_default_delegates() {
+        let stopped = Arc::new(Mutex::new(Vec::new()));
+        let mut controller = RecordingController {
+            stopped: stopped.clone(),
+        };
+
+        let result = controller
+            .stop_route_with_budget("r1", std::time::Duration::from_secs(10))
+            .await;
+
+        assert!(result.is_ok(), "default impl must return Ok");
+        assert_eq!(*stopped.lock().expect("stopped lock poisoned"), vec!["r1"]);
+    }
 }

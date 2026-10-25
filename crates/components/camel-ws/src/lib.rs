@@ -1568,6 +1568,11 @@ pub struct WsConsumer {
     /// Registry owning the consumer's server entries: the process global
     /// by default, an isolated instance under constructor injection.
     server_registry: Arc<ServerRegistry>,
+    /// Stop-budget slot captured from the consumer context at start
+    /// (bd rc-evw3z): the graceful drain budget the runtime writes before
+    /// cancelling. `None` when no slot was installed (suspend, direct
+    /// stops) — the settle wait then uses the fallback bound.
+    stop_budget: Option<tokio::sync::watch::Receiver<Option<std::time::Duration>>>,
 }
 
 impl WsConsumer {
@@ -1596,6 +1601,7 @@ impl WsConsumer {
             security_ctx: None,
             runtime,
             server_registry,
+            stop_budget: None,
         }
     }
 
@@ -1710,6 +1716,11 @@ impl WsConsumer {
         if let Some(counter) = ctx.in_flight_counter() {
             let _ = state.in_flight.set(counter);
         }
+
+        // bd rc-evw3z: capture the runtime-propagated stop budget next to
+        // the gauge so `stop()` can bound its settle wait by the configured
+        // drain budget instead of the fallback constant.
+        self.stop_budget = ctx.stop_budget_slot();
 
         let sender = ctx.sender();
         let route_id = ctx.route_id().to_string();
@@ -1831,11 +1842,14 @@ impl WsConsumer {
     }
 }
 
-/// Bound for the graceful-stop settle wait: hardcoded 5 s today, which is
-/// BELOW the configured drain budget (default 10 s in `camel-config`), so
-/// exchanges completing in (5 s, 10 s] lose their echo. Must follow
-/// `drain_timeout_ms` once core propagates it (bd rc-evw3z, from rc-z332y).
-const WS_STOP_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+impl WsConsumer {
+    /// Fallback bound for the graceful-stop settle wait, used only when no
+    /// drain budget was propagated through the consumer stop-budget slot
+    /// (suspend, direct stops in tests). On graceful shutdown the bound is
+    /// the configured drain budget written by the runtime before
+    /// cancellation (bd rc-evw3z).
+    const WS_STOP_SETTLE_TIMEOUT_FALLBACK: std::time::Duration = std::time::Duration::from_secs(5);
+}
 
 #[async_trait]
 impl Consumer for WsConsumer {
@@ -1900,7 +1914,14 @@ impl Consumer for WsConsumer {
         // zero and proceed instantly; on expiry the wait fails open to
         // the pre-drain teardown.
         if let Some(gauge) = self.server_state.as_ref().and_then(|s| s.in_flight.get()) {
-            let settled = tokio::time::timeout(WS_STOP_SETTLE_TIMEOUT, async {
+            // Snapshot the configured budget and drop the watch borrow
+            // before awaiting: the runtime may write the slot at any point
+            // before cancelling, and holding a `Ref` across `.await` is not
+            // `Send`. The fallback applies only when no slot was
+            // propagated (suspend, direct stops) — bd rc-evw3z.
+            let configured = self.stop_budget.as_ref().and_then(|rx| *rx.borrow());
+            let settle_bound = configured.unwrap_or(Self::WS_STOP_SETTLE_TIMEOUT_FALLBACK);
+            let settled = tokio::time::timeout(settle_bound, async {
                 while gauge.total() > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
@@ -2969,6 +2990,396 @@ mod tests {
             .await
             .expect("quiet stop must not be gated by the settle wait")
             .expect("stop must succeed");
+    }
+
+    /// bd rc-evw3z (downward direction): on graceful shutdown the settle
+    /// bound is the drain budget propagated through the stop-budget slot,
+    /// not the fallback constant. A 500 ms budget must abandon the wait
+    /// (fail-open) after ~500 ms even though the fallback would wait 5 s.
+    #[tokio::test(start_paused = true)]
+    async fn stop_settle_follows_configured_budget_downward() {
+        let reg = Arc::new(ServerRegistry::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let uri = format!("ws://127.0.0.1:{port}/budget-down");
+        let component_ctx = NoOpComponentContext;
+        let _endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
+
+        let mut consumer = WsConsumer::with_server_registry(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+            reg,
+        );
+
+        let counter = Arc::new(InFlightGauge::new());
+        let (_budget_tx, budget_rx) = tokio::sync::watch::channel(Some(Duration::from_millis(500)));
+        let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-budget-down-route".to_string(),
+        )
+        .with_in_flight_counter(Arc::clone(&counter))
+        .with_stop_budget_slot(budget_rx);
+
+        consumer.start_with_listener(ctx, listener).await.unwrap();
+
+        // Hold one acceptance-minted claim for the whole test: the settle
+        // gate can never observe quiescence, so only its bound ends it.
+        let claim = InFlightClaim::attach(&counter);
+        assert_eq!(counter.total(), 1, "one live claim gates the stop");
+
+        // Capture every event emitted by `stop` so we can prove the
+        // settle-expiry fail-open warn fires exactly once with its
+        // host/port/path context. Same capture pattern as
+        // `stop_settle_honors_budget_above_old_bound`: the OnceLock-gated
+        // global registry heals callsite-interest poisoning of the
+        // settle-expiry warn callsite (bd rc-img5).
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CollectingLayer {
+            events: Arc::clone(&events),
+        });
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let started = tokio::time::Instant::now();
+        let mut stop_handle = tokio::spawn(async move { consumer.stop().await });
+        // Let the stop task establish its settle deadline on the paused
+        // clock before advancing time.
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_millis(400)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !stop_handle.is_finished(),
+            "settle must still be waiting at 400ms (configured bound is 500ms)"
+        );
+
+        tokio::time::advance(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
+        tokio::time::timeout(Duration::from_secs(2), &mut stop_handle)
+            .await
+            .expect("stop must end once its configured 500ms settle bound expires")
+            .expect("stop task join")
+            .expect("stop must succeed (fail-open teardown)");
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "settle ended before the configured 500ms bound: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "settle used the 5s fallback instead of the configured 500ms budget: {elapsed:?}"
+        );
+        drop(guard);
+
+        let captured = events.lock().expect("capture lock");
+        let warns: Vec<&String> = captured
+            .iter()
+            .filter(|event| event.contains("in-flight exchanges still present"))
+            .collect();
+        assert_eq!(
+            warns.len(),
+            1,
+            "settle expiry must emit exactly one fail-open warn: {captured:?}"
+        );
+        let warn = warns[0];
+        assert!(
+            warn.contains("host=") && warn.contains("127.0.0.1"),
+            "fail-open warn must carry the consumer host: {warn}"
+        );
+        assert!(
+            warn.contains(&format!("port={port}")),
+            "fail-open warn must carry port {port}: {warn}"
+        );
+        assert!(
+            warn.contains("path=") && warn.contains("/budget-down"),
+            "fail-open warn must carry the consumer path: {warn}"
+        );
+        drop(claim);
+    }
+
+    /// bd rc-evw3z (upward direction): a drain budget above the old 5 s
+    /// bound must keep the settle gate open long enough for a 6 s exchange
+    /// to complete. The claim is released at 6 s on the paused clock; the
+    /// old constant would abandon it at 5 s.
+    #[tokio::test(start_paused = true)]
+    async fn stop_settle_honors_budget_above_old_bound() {
+        let reg = Arc::new(ServerRegistry::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let uri = format!("ws://127.0.0.1:{port}/budget-up");
+        let component_ctx = NoOpComponentContext;
+        let _endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
+
+        let mut consumer = WsConsumer::with_server_registry(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+            reg,
+        );
+
+        let counter = Arc::new(InFlightGauge::new());
+        let (_budget_tx, budget_rx) = tokio::sync::watch::channel(Some(Duration::from_secs(10)));
+        let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-budget-up-route".to_string(),
+        )
+        .with_in_flight_counter(Arc::clone(&counter))
+        .with_stop_budget_slot(budget_rx);
+
+        consumer.start_with_listener(ctx, listener).await.unwrap();
+
+        let claim = InFlightClaim::attach(&counter);
+        assert_eq!(counter.total(), 1, "the slow exchange holds the claim");
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            drop(claim);
+        });
+
+        // Capture every event emitted by `stop` so we can prove the
+        // settle-expiry fail-open warn is absent when the budget covers
+        // the 6s release. Same capture pattern as
+        // `ws_producer_retry_log_emits_component_ws_producer`: the
+        // OnceLock-gated global registry heals callsite-interest poisoning
+        // of the settle-expiry warn callsite (bd rc-img5).
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CollectingLayer {
+            events: Arc::clone(&events),
+        });
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let started = tokio::time::Instant::now();
+        let mut stop_handle = tokio::spawn(async move { consumer.stop().await });
+        // Let the stop task establish its settle deadline on the paused
+        // clock before advancing time.
+        tokio::task::yield_now().await;
+
+        // Advance in 100ms steps to 6.5s, recording WHEN stop completed:
+        // the old 5s fallback finishes ~5s (before the release), the
+        // configured 10s budget finishes only after the 6s release.
+        let mut completed_at: Option<Duration> = None;
+        for _ in 0..65 {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
+            if stop_handle.is_finished() && completed_at.is_none() {
+                completed_at = Some(started.elapsed());
+            }
+        }
+
+        tokio::time::timeout(Duration::from_secs(11), &mut stop_handle)
+            .await
+            .expect("stop must complete once the gauge settles")
+            .expect("stop task join")
+            .expect("stop must succeed");
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), release)
+            .await
+            .expect("release task must complete")
+            .expect("release task join");
+
+        let elapsed = completed_at.expect("stop must have completed during the 6.5s window");
+        assert!(
+            elapsed >= Duration::from_secs(6),
+            "settle used the old 5s fallback and abandoned the 6s exchange: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(11),
+            "settle exceeded the configured 10s budget: {elapsed:?}"
+        );
+        let captured = events.lock().expect("capture lock");
+        assert!(
+            !captured
+                .iter()
+                .any(|event| event.contains("in-flight exchanges still present")),
+            "settle completed within the configured budget but emitted the \
+             fail-open warn: {captured:?}"
+        );
+    }
+
+    /// bd rc-evw3z: without a propagated budget (no slot — suspend, direct
+    /// stops) the settle wait keeps the fallback 5 s bound.
+    #[tokio::test(start_paused = true)]
+    async fn stop_without_slot_uses_fallback() {
+        let reg = Arc::new(ServerRegistry::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let uri = format!("ws://127.0.0.1:{port}/budget-fallback");
+        let component_ctx = NoOpComponentContext;
+        let _endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
+
+        let mut consumer = WsConsumer::with_server_registry(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+            reg,
+        );
+
+        let counter = Arc::new(InFlightGauge::new());
+        let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-budget-fallback-route".to_string(),
+        )
+        .with_in_flight_counter(Arc::clone(&counter));
+
+        consumer.start_with_listener(ctx, listener).await.unwrap();
+
+        let claim = InFlightClaim::attach(&counter);
+        assert_eq!(counter.total(), 1, "one live claim gates the stop");
+
+        let started = tokio::time::Instant::now();
+        let mut stop_handle = tokio::spawn(async move { consumer.stop().await });
+        // Let the stop task establish its settle deadline on the paused
+        // clock before advancing time.
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(4)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !stop_handle.is_finished(),
+            "fallback settle must still be waiting at 4s"
+        );
+
+        tokio::time::advance(Duration::from_millis(1500)).await;
+        tokio::task::yield_now().await;
+        tokio::time::timeout(Duration::from_secs(2), &mut stop_handle)
+            .await
+            .expect("fallback 5s bound must expire by 5.5s")
+            .expect("stop task join")
+            .expect("stop must succeed (fail-open teardown)");
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(5),
+            "fallback settle ended before 5s: {elapsed:?}"
+        );
+        drop(claim);
+    }
+
+    /// bd rc-evw3z, real I/O: the configured budget keeps teardown gated
+    /// while an echo is in flight (the route delays it 200 ms), so the
+    /// client still receives the echo frame before stop closes.
+    #[tokio::test]
+    async fn stop_echo_delivered_under_configured_budget_real_io() {
+        let reg = Arc::new(ServerRegistry::new());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let uri = format!("ws://127.0.0.1:{port}/budget-echo");
+        let component_ctx = NoOpComponentContext;
+        let endpoint = WsComponent::new()
+            .create_endpoint(&uri, &component_ctx)
+            .unwrap();
+
+        let mut consumer = WsConsumer::with_server_registry(
+            WsEndpointConfig::from_uri(&uri).unwrap().server_config(),
+            rt(),
+            reg,
+        );
+        let producer = endpoint
+            .create_producer(rt(), &ProducerContext::default())
+            .unwrap();
+
+        let counter = Arc::new(InFlightGauge::new());
+        let (_budget_tx, budget_rx) = tokio::sync::watch::channel(Some(Duration::from_secs(1)));
+        let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "ws-budget-echo-route".to_string(),
+        )
+        .with_in_flight_counter(Arc::clone(&counter))
+        .with_stop_budget_slot(budget_rx);
+
+        consumer.start_with_listener(ctx, listener).await.unwrap();
+
+        let (received_tx, received_rx) = tokio::sync::oneshot::channel::<()>();
+        let route_task = tokio::spawn(async move {
+            match tokio::time::timeout(Duration::from_secs(2), route_rx.recv()).await {
+                Ok(Some(envelope)) => {
+                    let payload = envelope
+                        .exchange
+                        .input
+                        .body
+                        .as_text()
+                        .unwrap_or_default()
+                        .to_string();
+                    let key = envelope
+                        .exchange
+                        .input
+                        .header("CamelWsConnectionKey")
+                        .and_then(|v| v.as_str())
+                        .unwrap()
+                        .to_string();
+                    // The envelope (and its acceptance-minted claim) stays
+                    // live across the delay: stop must wait for the echo.
+                    let _ = received_tx.send(());
+                    tokio::time::sleep(Duration::from_millis(200)).await; // allow-test-sleep: the delayed echo is the behavior under test — an exchange must be in flight when stop() runs
+                    let mut response = Exchange::new(CamelMessage::new(CamelBody::Text(payload)));
+                    response
+                        .input
+                        .set_header("CamelWsConnectionKey", serde_json::Value::String(key));
+                    producer.oneshot(response).await.unwrap();
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+        });
+
+        let url = format!("ws://127.0.0.1:{port}/budget-echo");
+        let mut client = connect_until_ready(&url).await;
+        client
+            .send(ClientMessage::Text("echo-under-budget".into()))
+            .await
+            .unwrap();
+
+        received_rx
+            .await
+            .expect("route must have received the frame before the stop");
+        assert_eq!(counter.total(), 1, "the delayed echo holds the claim");
+
+        let mut consumer = consumer;
+        let stop_task = tokio::spawn(async move { consumer.stop().await });
+
+        let incoming = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match client.next().await {
+                    Some(Ok(ClientMessage::Text(txt))) => break txt.to_string(),
+                    Some(Ok(ClientMessage::Ping(_))) | Some(Ok(ClientMessage::Pong(_))) => continue,
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => panic!("ws receive failed: {e}"),
+                    None => panic!("websocket closed before the delayed echo arrived"),
+                }
+            }
+        })
+        .await
+        .expect("echo must arrive within 2s even though stop was requested");
+
+        assert_eq!(incoming, "echo-under-budget");
+        tokio::time::timeout(Duration::from_secs(2), stop_task)
+            .await
+            .expect("stop must complete within 2s")
+            .expect("stop task join")
+            .expect("stop must succeed");
+        tokio::time::timeout(Duration::from_secs(2), route_task)
+            .await
+            .expect("echo route task must complete within 2s")
+            .expect("echo route task join");
     }
 
     /// Echo a single envelope back through `producer` (test helper for the

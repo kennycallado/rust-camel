@@ -711,6 +711,7 @@ impl DefaultRouteController {
             drain_in_flight: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             aggregate_split,
             agg_service: None,
+            stop_budget: None,
             compiled: route_runtime_state::CompiledRoute {
                 security_policy,
                 security_authenticator,
@@ -1026,6 +1027,15 @@ impl DefaultRouteController {
     /// Internal stop implementation that can set custom status.
     pub(super) async fn stop_route_internal(&mut self, route_id: &str) -> Result<(), CamelError> {
         self.routes.stop_route(route_id).await
+    }
+
+    /// Internal stop with an explicit graceful drain budget.
+    pub(super) async fn stop_route_with_budget_internal(
+        &mut self,
+        route_id: &str,
+        budget: std::time::Duration,
+    ) -> Result<(), CamelError> {
+        self.routes.stop_route_with_budget(route_id, budget).await
     }
 
     pub async fn start_route_reload(&mut self, route_id: &str) -> Result<(), CamelError> {
@@ -1349,7 +1359,7 @@ impl DefaultRouteController {
         // consumer_ctx moves into the task so the failure arm can stop child
         // tasks spawned by consumer.start().
         let consumer_cancel_for_cleanup = consumer_ctx.cancel_token();
-        let (consumer_handle, startup_rx, watcher_inputs, outer_inputs) =
+        let (consumer_handle, startup_rx, watcher_inputs, outer_inputs, stop_budget_tx) =
             super::consumer_management::spawn_consumer_task(
                 route_id.to_string(),
                 consumer,
@@ -1430,6 +1440,7 @@ impl DefaultRouteController {
             managed.consumer_handle = Some(consumer_handle);
             managed.pipeline_handle = Some(pipeline_handle);
             managed.channel_sender = Some(tx_for_storage);
+            managed.stop_budget = Some(stop_budget_tx);
         }
 
         info!(route_id = %route_id, "Route started (aggregate with timeout)");

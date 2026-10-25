@@ -53,7 +53,11 @@ pub fn spawn_controller_actor(
                     }
                     let _ = reply.send(controller.start_route(&route_id).await);
                 }
-                RouteControllerCommand::StopRoute { route_id, reply } => {
+                RouteControllerCommand::StopRoute {
+                    route_id,
+                    stop_budget,
+                    reply,
+                } => {
                     // allow-unwrap: Mutex cannot be poisoned in normal operation
                     if restarting
                         .lock()
@@ -66,7 +70,11 @@ pub fn spawn_controller_actor(
                         ))));
                         continue;
                     }
-                    let _ = reply.send(controller.stop_route(&route_id).await);
+                    let stop_result = match stop_budget {
+                        Some(budget) => controller.stop_route_with_budget(&route_id, budget).await,
+                        None => controller.stop_route(&route_id).await,
+                    };
+                    let _ = reply.send(stop_result);
                 }
                 RouteControllerCommand::RestartRoute { route_id, reply } => {
                     // Reject if already restarting.
@@ -491,6 +499,27 @@ mod tests {
         spawn_controller_actor(controller)
     }
 
+    fn build_actor_with_components_and_health(
+        health: Arc<crate::health_registry::HealthCheckRegistry>,
+    ) -> (RouteControllerHandle, tokio::task::JoinHandle<()>) {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        {
+            let mut guard = registry.lock().expect("lock");
+            guard.register(std::sync::Arc::new(
+                camel_component_timer::TimerComponent::new(),
+            ));
+            guard.register(std::sync::Arc::new(
+                camel_component_mock::MockComponent::new(),
+            ));
+        }
+        let mut controller = DefaultRouteController::new(
+            Arc::clone(&registry),
+            Arc::new(camel_api::NoopPlatformService::default()),
+        );
+        controller.set_health_registry(health);
+        spawn_controller_actor(controller)
+    }
+
     fn build_empty_actor() -> (RouteControllerHandle, tokio::task::JoinHandle<()>) {
         let controller = DefaultRouteController::new(
             Arc::new(std::sync::Mutex::new(Registry::new())),
@@ -786,6 +815,65 @@ mod tests {
         join_handle.await.expect("actor join");
     }
 
+    /// Regression for the actor dispatch path: the actor holds a concrete
+    /// `DefaultRouteController`, so a bare `controller.stop_route_with_budget(..)`
+    /// resolves to an INHERENT method when one exists and silently skips the
+    /// trait override's health cleanup. This drives the budgeted stop through
+    /// the handle (actor command) — the production path — and asserts the
+    /// route's probes are deactivated.
+    #[tokio::test]
+    async fn actor_budgeted_stop_deactivates_route_health() {
+        use crate::health_registry::HealthCheckRegistry;
+        use camel_api::AsyncHealthCheck;
+
+        struct AlwaysUnhealthy;
+
+        #[async_trait::async_trait]
+        impl AsyncHealthCheck for AlwaysUnhealthy {
+            fn name(&self) -> &str {
+                "probe"
+            }
+
+            async fn check(&self) -> camel_api::health::CheckResult {
+                camel_api::health::CheckResult::unhealthy("probe", "boom")
+            }
+        }
+
+        let health = Arc::new(HealthCheckRegistry::new(Duration::from_secs(1)));
+        health.register_for_route("health-1", Arc::new(AlwaysUnhealthy));
+        let (handle, join_handle) = build_actor_with_components_and_health(Arc::clone(&health));
+
+        handle
+            .add_route(route_def("health-1", "timer:tick?period=10"))
+            .await
+            .expect("add route health-1");
+        handle.start_route("health-1").await.expect("start_route");
+        assert_eq!(
+            health.check_all().await.status,
+            camel_api::HealthStatus::Unhealthy,
+            "a started route must report its registered probe"
+        );
+
+        handle
+            .stop_route_with_budget("health-1", Some(Duration::from_millis(50)))
+            .await
+            .expect("budgeted stop through actor");
+
+        let report = health.check_all().await;
+        assert_eq!(
+            report.status,
+            camel_api::HealthStatus::Healthy,
+            "actor budgeted stop must mark the route stopped"
+        );
+        assert!(
+            report.services.is_empty(),
+            "actor budgeted stop must deactivate the route's probes: {report:?}"
+        );
+
+        handle.shutdown().await.expect("shutdown send");
+        join_handle.await.expect("actor join");
+    }
+
     #[tokio::test]
     async fn spawn_supervision_restarts_route_on_crash() {
         let (handle, join_handle) = build_actor_with_components();
@@ -916,7 +1004,9 @@ mod tests {
             .expect("stop command within 2s")
             .expect("command channel alive");
         match cmd {
-            RouteControllerCommand::StopRoute { route_id, reply } => {
+            RouteControllerCommand::StopRoute {
+                route_id, reply, ..
+            } => {
                 assert_eq!(route_id, "r-1");
                 let _ = reply.send(Ok(()));
             }

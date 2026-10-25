@@ -270,7 +270,11 @@ impl RuntimeExecutionPort for TrackingExecutionPort {
         Ok(())
     }
 
-    async fn stop_route(&self, _route_id: &str) -> Result<(), DomainError> {
+    async fn stop_route(
+        &self,
+        _route_id: &str,
+        _stop_budget: Option<std::time::Duration>,
+    ) -> Result<(), DomainError> {
         Ok(())
     }
 
@@ -317,7 +321,11 @@ impl RuntimeExecutionPort for ConfigurableExecutionPort {
         Ok(())
     }
 
-    async fn stop_route(&self, _route_id: &str) -> Result<(), DomainError> {
+    async fn stop_route(
+        &self,
+        _route_id: &str,
+        _stop_budget: Option<std::time::Duration>,
+    ) -> Result<(), DomainError> {
         let mut calls = self.stop_called.lock().expect("stop_called");
         *calls += 1;
         Ok(())
@@ -460,6 +468,7 @@ async fn fail_route_forces_unhealthy_health_entry() {
         &deps,
         "route-f".to_string(),
         RouteLifecycleCommand::Fail("boom".to_string()),
+        None,
     )
     .await
     .unwrap();
@@ -1006,7 +1015,7 @@ fn canonical_route_conversion_rejects_invalid_fallback_step_config() {
 #[tokio::test]
 async fn apply_runtime_lifecycle_start_recovery_error_path() {
     let execution = ConfigurableExecutionPort::with_start_and_resume_failure();
-    let err = apply_runtime_lifecycle(&execution, "r1", &RouteLifecycleCommand::Start)
+    let err = apply_runtime_lifecycle(&execution, "r1", &RouteLifecycleCommand::Start, None)
         .await
         .expect_err("must fail");
     assert!(
@@ -1018,12 +1027,12 @@ async fn apply_runtime_lifecycle_start_recovery_error_path() {
 #[tokio::test]
 async fn apply_runtime_lifecycle_suspend_recovery_paths() {
     let ok_after_retry = ConfigurableExecutionPort::with_suspend_failure_once();
-    apply_runtime_lifecycle(&ok_after_retry, "r1", &RouteLifecycleCommand::Suspend)
+    apply_runtime_lifecycle(&ok_after_retry, "r1", &RouteLifecycleCommand::Suspend, None)
         .await
         .expect("second suspend attempt should succeed");
 
     let fail_retry = ConfigurableExecutionPort::with_suspend_failure_once_and_retry();
-    let err = apply_runtime_lifecycle(&fail_retry, "r1", &RouteLifecycleCommand::Suspend)
+    let err = apply_runtime_lifecycle(&fail_retry, "r1", &RouteLifecycleCommand::Suspend, None)
         .await
         .expect_err("retry failure expected");
     assert!(err.to_string().contains("retry_error"));
@@ -1032,7 +1041,7 @@ async fn apply_runtime_lifecycle_suspend_recovery_paths() {
 #[tokio::test]
 async fn apply_runtime_lifecycle_resume_recovery_error_path() {
     let execution = ConfigurableExecutionPort::with_start_and_resume_failure();
-    let err = apply_runtime_lifecycle(&execution, "r1", &RouteLifecycleCommand::Resume)
+    let err = apply_runtime_lifecycle(&execution, "r1", &RouteLifecycleCommand::Resume, None)
         .await
         .expect_err("must fail");
     assert!(
@@ -1491,7 +1500,11 @@ impl RuntimeExecutionPort for Phase2aMutationExecution {
         Ok(())
     }
 
-    async fn stop_route(&self, _route_id: &str) -> Result<(), DomainError> {
+    async fn stop_route(
+        &self,
+        _route_id: &str,
+        _stop_budget: Option<std::time::Duration>,
+    ) -> Result<(), DomainError> {
         Ok(())
     }
 

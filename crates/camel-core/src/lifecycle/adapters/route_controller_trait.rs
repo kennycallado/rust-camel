@@ -739,7 +739,7 @@ impl camel_api::RouteController for DefaultRouteController {
 
         // Start consumer after pipeline task is spawned to minimize the chance of
         // fire-and-forget events being produced before the pipeline loop is active.
-        let (consumer_handle, startup_rx, watcher_inputs, outer_inputs) =
+        let (consumer_handle, startup_rx, watcher_inputs, outer_inputs, stop_budget_tx) =
             consumer_management::spawn_consumer_task(
                 route_id.to_string(),
                 consumer,
@@ -800,6 +800,7 @@ impl camel_api::RouteController for DefaultRouteController {
         managed.consumer_handle = Some(consumer_handle);
         managed.pipeline_handle = Some(pipeline_handle);
         managed.channel_sender = Some(tx_for_storage);
+        managed.stop_budget = Some(stop_budget_tx);
 
         info!(route_id = %route_id, "Route started");
         self.health_registry().mark_route_started(route_id);
@@ -808,6 +809,17 @@ impl camel_api::RouteController for DefaultRouteController {
 
     async fn stop_route(&mut self, route_id: &str) -> Result<(), CamelError> {
         self.stop_route_internal(route_id).await?;
+        self.health_registry().mark_route_stopped(route_id);
+        Ok(())
+    }
+
+    async fn stop_route_with_budget(
+        &mut self,
+        route_id: &str,
+        budget: std::time::Duration,
+    ) -> Result<(), CamelError> {
+        self.stop_route_with_budget_internal(route_id, budget)
+            .await?;
         self.health_registry().mark_route_stopped(route_id);
         Ok(())
     }
@@ -1016,7 +1028,7 @@ impl camel_api::RouteController for DefaultRouteController {
         }
 
         // Spawn consumer task
-        let (consumer_handle, startup_rx, watcher_inputs, outer_inputs) =
+        let (consumer_handle, startup_rx, watcher_inputs, outer_inputs, stop_budget_tx) =
             consumer_management::spawn_consumer_task(
                 route_id.to_string(),
                 consumer,
@@ -1059,6 +1071,7 @@ impl camel_api::RouteController for DefaultRouteController {
             .get_mut(route_id)
             .expect("invariant: route must exist after prior existence check"); // allow-unwrap
         managed.consumer_handle = Some(consumer_handle);
+        managed.stop_budget = Some(stop_budget_tx);
 
         info!(route_id = %route_id, "Route resumed");
         self.health_registry().mark_route_started(route_id);

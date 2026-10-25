@@ -1149,6 +1149,7 @@ async fn inline_stopped_consumer_keeps_no_consumer_semantics() {
             route_id: "rt-direct-gone".into(),
             command_id: "c-stop".into(),
             causation_id: None,
+            stop_budget: None,
         })
         .await
         .unwrap();

@@ -40,6 +40,7 @@ pub struct CamelContextBuilder {
     supervision_config: Option<SupervisionConfig>,
     runtime_store: Option<crate::lifecycle::adapters::InMemoryRuntimeStore>,
     shutdown_timeout: std::time::Duration,
+    drain_timeout: std::time::Duration,
     beans: Option<Arc<std::sync::Mutex<camel_bean::BeanRegistry>>>,
     function_invoker: Option<Arc<dyn FunctionInvoker>>,
     lifecycle_services: Vec<Box<dyn Lifecycle>>,
@@ -87,6 +88,7 @@ impl CamelContextBuilder {
             supervision_config: None,
             runtime_store: None,
             shutdown_timeout: std::time::Duration::from_secs(5),
+            drain_timeout: std::time::Duration::from_secs(10),
             beans: None,
             function_invoker: None,
             lifecycle_services: Vec::new(),
@@ -141,6 +143,11 @@ impl CamelContextBuilder {
 
     pub fn shutdown_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.shutdown_timeout = timeout;
+        self
+    }
+
+    pub fn drain_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.drain_timeout = timeout;
         self
     }
 
@@ -422,6 +429,7 @@ impl CamelContextBuilder {
             platform_service,
             languages,
             shutdown_timeout: self.shutdown_timeout,
+            drain_timeout: self.drain_timeout,
             services: self.lifecycle_services,
             health_registry,
             component_configs: HashMap::new(),

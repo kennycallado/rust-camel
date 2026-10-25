@@ -593,6 +593,7 @@ async fn runtime_commands_drive_real_route_controller_lifecycle() {
             route_id: "runtime-hold".into(),
             command_id: "c5".into(),
             causation_id: Some("c4".into()),
+            stop_budget: None,
         })
         .await
         .unwrap();
@@ -619,6 +620,7 @@ async fn runtime_commands_drive_real_route_controller_lifecycle() {
             route_id: "runtime-hold".into(),
             command_id: "c7".into(),
             causation_id: Some("c6".into()),
+            stop_budget: None,
         })
         .await
         .unwrap();

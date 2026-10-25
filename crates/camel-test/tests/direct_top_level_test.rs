@@ -137,6 +137,7 @@ async fn stop_route(h: &CamelTestContext, route_id: &str) {
             route_id: route_id.to_string(),
             command_id: format!("test:stop:{route_id}"),
             causation_id: None,
+            stop_budget: None,
         })
         .await
         .expect("failed to stop route");

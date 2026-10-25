@@ -547,7 +547,11 @@ mod tests {
         async fn start_route(&self, _route_id: &str) -> Result<(), DomainError> {
             Ok(())
         }
-        async fn stop_route(&self, _route_id: &str) -> Result<(), DomainError> {
+        async fn stop_route(
+            &self,
+            _route_id: &str,
+            _stop_budget: Option<std::time::Duration>,
+        ) -> Result<(), DomainError> {
             Ok(())
         }
         async fn suspend_route(&self, _route_id: &str) -> Result<(), DomainError> {

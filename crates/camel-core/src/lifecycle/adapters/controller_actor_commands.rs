@@ -25,6 +25,7 @@ pub(crate) enum RouteControllerCommand {
     },
     StopRoute {
         route_id: String,
+        stop_budget: Option<std::time::Duration>,
         reply: oneshot::Sender<Result<(), CamelError>>,
     },
     RestartRoute {
@@ -219,10 +220,20 @@ impl RouteControllerHandle {
     }
 
     pub async fn stop_route(&self, route_id: impl Into<String>) -> Result<(), CamelError> {
+        self.stop_route_with_budget(route_id, None).await
+    }
+
+    /// Stop a route, optionally propagating a graceful drain budget.
+    pub async fn stop_route_with_budget(
+        &self,
+        route_id: impl Into<String>,
+        stop_budget: Option<std::time::Duration>,
+    ) -> Result<(), CamelError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(RouteControllerCommand::StopRoute {
                 route_id: route_id.into(),
+                stop_budget,
                 reply: reply_tx,
             })
             .await

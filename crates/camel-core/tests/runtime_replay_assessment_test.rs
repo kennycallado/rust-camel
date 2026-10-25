@@ -39,6 +39,7 @@ async fn replayed_events_match_projection_terminal_state() {
             route_id: "replay-r1".into(),
             command_id: "cmd-stop".into(),
             causation_id: Some("cmd-start".into()),
+            stop_budget: None,
         })
         .await
         .unwrap();
