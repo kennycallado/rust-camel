@@ -749,12 +749,20 @@ mod tests {
         false
     }
 
+    /// Bare `kill(pid, 0)` also answers 0 for zombies. A zombie is a pending
+    /// reap, not a survivor. The Linux counterpart excludes Z/X states via
+    /// /proc. BSD-family kernels detach an exited process from its process
+    /// group at exit, so after group invalidation group-gone does not imply
+    /// reaped: tests must wait (bounded) for the reap itself; see
+    /// [`early_watchdog_death_surfaces`].
     #[cfg(not(target_os = "linux"))]
     fn pid_running(pid: u32) -> bool {
         // SAFETY: signal 0 is an existence probe.
         unsafe { libc::kill(pid as i32, 0) == 0 }
     }
 
+    /// Bare `kill(-pgid, 0)` probe. The group may read empty while
+    /// exited-but-unreaped members exist; do not treat group-gone as reaped.
     #[cfg(not(target_os = "linux"))]
     fn group_running(pgid: i32) -> bool {
         // SAFETY: signal 0 is an existence probe for the group.
@@ -916,14 +924,10 @@ mod tests {
         assert_eq!(unsafe { libc::kill(watchdog_pid as i32, libc::SIGKILL) }, 0);
 
         assert!(
-            wait_until(Duration::from_secs(2), || {
-                guard.group_pgid().is_none() && !group_running(pgid)
+            wait_until(Duration::from_secs(5), || {
+                guard.group_pgid().is_none() && !group_running(pgid) && !pid_running(bridge_pid)
             }),
-            "monitor did not clean the group within 2s"
-        );
-        assert!(
-            !pid_running(bridge_pid),
-            "bridge survived early watchdog death"
+            "early watchdog death left group {pgid} or bridge {bridge_pid} uncleaned within 5s"
         );
     }
 
@@ -1021,6 +1025,125 @@ mod tests {
                 guard.group_pgid().is_none() && !pid_running(watchdog_pid)
             }),
             "monitor did not clean the group after unpause"
+        );
+    }
+
+    /// Pins the per-platform "is this pid running?" predicate against an
+    /// unreaped zombie, then proves that reaping clears it on every platform.
+    ///
+    /// Linux answers via `/proc/<pid>/stat` (a zombie is a pending reap, not a
+    /// survivor). BSD-family kernels answer via bare `kill(pid, 0)`, which
+    /// returns 0 for a zombie: that is the trap this test pins.
+    #[test]
+    fn zombie_probe_contract() {
+        // NOTE: if an assertion below fires, the fixture child stays an
+        // unreaped zombie until this test binary exits (`std::process::Child`
+        // does not reap on drop). That is acceptable for a test fixture.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn zombie fixture");
+        let pid = child.id();
+
+        // STRICT observation: `waitid(WNOWAIT)` only succeeds once the child
+        // has exited, and it does not reap. `child_exited` is deliberately not
+        // used here because it returns `true` on any waitid error.
+        let mut probe_error: Option<io::Error> = None;
+        let observed = wait_until(Duration::from_secs(5), || {
+            if probe_error.is_some() {
+                return false;
+            }
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `info` is a valid, writable siginfo_t for our own child;
+            // WNOWAIT leaves the exit status waitable for the explicit reap
+            // below.
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if rc < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::Interrupted {
+                    return false;
+                }
+                probe_error = Some(err);
+                return false;
+            }
+            // SAFETY: waitid succeeded, so the siginfo_t was initialized.
+            unsafe { info.si_pid() == pid as libc::pid_t }
+        });
+        assert!(
+            observed,
+            "strict waitid did not observe the unreaped zombie within 5s: {probe_error:?}"
+        );
+
+        #[cfg(target_os = "linux")]
+        assert!(
+            !pid_running(pid),
+            "linux helper must treat a zombie as a pending reap, not a survivor"
+        );
+
+        #[cfg(target_os = "macos")]
+        assert!(
+            pid_running(pid),
+            "bare probe answers 0 for a zombie; tests must wait for the reap"
+        );
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            // No verified zombie predicate exists on this target; asserting
+            // either answer would pin an accident. The reap invariant below
+            // still holds everywhere.
+        }
+
+        let _status = child.wait().expect("reap zombie fixture");
+        assert!(
+            !pid_running(pid),
+            "reaped child must be gone on every platform"
+        );
+    }
+
+    /// Proves that the monitor thread, not the test, reaps BOTH children after
+    /// an early watchdog death: the "no permanent zombie" invariant.
+    #[tokio::test]
+    async fn monitor_reaps_after_early_watchdog_death() {
+        let guard = GroupGuard::establish().expect("establish guard");
+        let pgid = guard.group_pgid().expect("pgid");
+        guard.spawn_bridge(sleep_cmd(300)).expect("spawn bridge");
+        let bridge_pid = guard.bridge_pid().expect("bridge pid");
+        let watchdog_pid = guard.watchdog_pid().expect("watchdog pid");
+
+        // SAFETY: direct watchdog kill simulates early watchdog death.
+        assert_eq!(unsafe { libc::kill(watchdog_pid as i32, libc::SIGKILL) }, 0);
+
+        // `tokio::process::Child::id()` returns `None` only after an internal
+        // `try_wait` through the retained handle observed the exit
+        // (`FusedChild::Done`). This test never calls `try_wait` before the
+        // check, so only the monitor's cleanup can clear the handle state.
+        // The check itself must not do the reaping, hence `id()` and not
+        // `try_wait()`.
+        assert!(
+            wait_until(Duration::from_secs(5), || {
+                guard.group_pgid().is_none()
+                    && lock(&guard.shared.bridge)
+                        .as_ref()
+                        .and_then(tokio::process::Child::id)
+                        .is_none()
+                    && lock(&guard.shared.watchdog)
+                        .as_ref()
+                        .and_then(tokio::process::Child::id)
+                        .is_none()
+            }),
+            "monitor left an unreaped child after early watchdog death (permanent zombie): \
+             bridge {bridge_pid}, watchdog {watchdog_pid}, pgid {pgid}"
         );
     }
 }
