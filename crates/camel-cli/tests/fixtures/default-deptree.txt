@@ -618,14 +618,10 @@ digest feature "std"
 digest feature "subtle"
 digest v0.10.7
 digest v0.11.3
-directories-next feature "default"
-directories-next v2.0.0
 dirs feature "default"
 dirs v6.0.0
 dirs-sys feature "default"
 dirs-sys v0.5.0
-dirs-sys-next feature "default"
-dirs-sys-next v0.1.2
 displaydoc feature "default"
 displaydoc feature "std"
 displaydoc v0.2.7 (proc-macro)
@@ -2462,7 +2458,6 @@ wasmtime feature "addr2line"
 wasmtime feature "anyhow"
 wasmtime feature "async"
 wasmtime feature "backtrace"
-wasmtime feature "cache"
 wasmtime feature "compile-time-builtins"
 wasmtime feature "component-model"
 wasmtime feature "component-model-async"
@@ -2471,7 +2466,6 @@ wasmtime feature "coredump"
 wasmtime feature "cranelift"
 wasmtime feature "debug"
 wasmtime feature "debug-builtins"
-wasmtime feature "default"
 wasmtime feature "demangle"
 wasmtime feature "gc"
 wasmtime feature "gc-copying"
@@ -2506,8 +2500,6 @@ wasmtime-environ feature "stack-switching"
 wasmtime-environ feature "std"
 wasmtime-environ feature "threads"
 wasmtime-environ v49.0.3
-wasmtime-internal-cache feature "default"
-wasmtime-internal-cache v49.0.3
 wasmtime-internal-component-macro feature "async"
 wasmtime-internal-component-macro feature "component-model-async"
 wasmtime-internal-component-macro feature "default"
@@ -2663,8 +2655,3 @@ zopfli feature "gzip"
 zopfli feature "std"
 zopfli feature "zlib"
 zopfli v0.8.3
-zstd v0.13.3
-zstd-safe feature "std"
-zstd-safe v7.2.4
-zstd-sys feature "std"
-zstd-sys v2.0.16+zstd.1.5.7
