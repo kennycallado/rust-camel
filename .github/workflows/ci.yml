@@ -374,11 +374,13 @@ jobs:
     # full-matrix stays manual: benchmarks/bench run-all.
     name: Bench Smoke
     runs-on: ubuntu-latest
-    # 15 not 10: cold cache after a ~6-weekly rust-cache invalidation
+    # 20 not 10: cold cache after a ~6-weekly rust-cache invalidation
     # (toolchain bump) compiles the criterion targets from scratch on a
     # 4-vCPU runner, which brushes the old 10 min pin (rc-p2vm). Warm
     # runs stay ~3 min; the wider budget only absorbs cold-start noise.
-    timeout-minutes: 15
+    # +5 min also covers the new camel-language-rhai guard bench target
+    # compile (rc-m01r9).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Maximize disk space
@@ -403,6 +405,10 @@ jobs:
         run: python3 benchmarks/harness/summarize.py --check benchmarks/records
       - name: Bench smoke (quick mode)
         run: cargo bench -p camel-bench --bench pipeline --bench body_coercion -- --quick
+      - name: Rhai property-scaling guard (expected-fail)
+        env:
+          RHAI_GUARD_EXPECT_FAIL: "1"
+        run: cargo bench -p camel-language-rhai --bench property_scaling
 
   wasm-integration:
     name: WASM Integration (ubuntu-latest)

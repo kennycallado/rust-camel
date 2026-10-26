@@ -29,3 +29,7 @@ bytes = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "property_scaling"
+harness = false

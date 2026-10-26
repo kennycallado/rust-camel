@@ -46,6 +46,41 @@ measurements.
 `rust-camel-lib` crate and the shared node runtime dir (one
 `node_modules` for all node contenders).
 
+## Guards
+
+A performance regression on a hot path costs every message. These are the
+surfaces where a guard belongs:
+
+- language eval — per-eval property conversion (bd rc-m01r9 Rhai
+  `property()`)
+- exchange clone and property access
+- step dispatch
+- direct hop
+- split/aggregate, per fragment
+- body coercion
+- bridge decode
+
+Guard-first rule:
+
+- A performance bug lands a FAILING guard before its fix.
+- Only ratio and complexity guards gate PRs. Absolute-time guards never gate
+  because machines differ.
+- Envelope constants cite their bd ticket. Changing one needs owner approval.
+
+Existing guard: `cargo bench -p camel-language-rhai --bench property_scaling`
+(bd rc-m01r9), source at
+[benches/property_scaling.rs](../crates/languages/camel-language-rhai/benches/property_scaling.rs).
+It measures the W and D shapes at K=100 and K=5000 and reports their ratio R.
+Envelopes: read `R <= 2.0`, mutating `R <= 3.0`. Until the phase-2 fix lands,
+CI bench-smoke runs it with `RHAI_GUARD_EXPECT_FAIL=1`, so it passes only
+while the gate fails.
+
+Evidence caveat: `rc-0jkf2` and `rc-087hq` (both DEFERRED) must land before
+bench records are cited as release evidence.
+
+Fixtures: the rc-m01r9 guard uses synthetic properties because no external
+fixture is shared. Real-workload numbers live in bd.
+
 ## Where technical depth lives
 
 Methodology and design decisions are documented in
