@@ -7,12 +7,15 @@ TBD - created by archiving change pooled-race-harness. Update Purpose after arch
 
 The `lint-no-raw-http-test-server` xtask command SHALL scan every Cargo workspace
 member tree (`crates/`, `scripts/`, `examples/`, `benchmarks/`, `fuzz/`; excluding
-build output) for string or byte-string literals that start with an HTTP/1.x status
+build output) and SHALL fail with an error when a configured member
+root is missing, rather than silently skipping it. for string or byte-string literals that start with an HTTP/1.x status
 line and neither carry a structurally valid `Connection: close` header nor are
 supplied through the shared test harness. A status line is matched when, after the
 `HTTP/1.0 ` or `HTTP/1.1 ` prefix, the status token begins with three digits OR with
 an interpolation placeholder (`{`), covering both `HTTP/1.1 200 OK\r\n…`,
-`HTTP/1.1 {status_line}\r\n…`, and `HTTP/1.1 {} {}\r\n…` construction shapes. A
+`HTTP/1.1 {status_line}\r\n…`, and `HTTP/1.1 {} {}\r\n…` construction shapes. Matching is
+anchored at a line start (after a leading CRLF continuation or byte-order mark), so a
+status-line-shaped substring in the middle of a larger literal does not match. A
 literal is compliant only when it contains a **structurally valid** `Connection:
 close` header: a header line whose name is `connection` (case-insensitive) and whose
 value contains the `close` token, positioned before the blank line that terminates
@@ -22,7 +25,8 @@ token streams (for example `format!`), SHALL exclude literals that are direct
 arguments of `starts_with`, `ends_with`, or `contains` receiver calls, SHALL exempt
 literals passed as arguments (directly or nested in constructor/tuple/vec arguments)
 to `test_support::http` harness constructors (`HttpTestServer::start*`,
-`Response::ok`, `Response::with_status`, `Response::raw`, `Response::chunked*`,
+`Response::ok`, `Response::with_status`, `Response::with_status_and_headers`,
+`Response::raw`, `Response::chunked*`,
 `Response::staged`), and SHALL offer no file-wide
 or import-based exemptions. Findings are restricted to test scope: `tests/**`
 directories, files named `*_test.rs` or `*_tests.rs`, `#[cfg(test)]` modules, and
