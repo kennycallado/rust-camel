@@ -8,7 +8,9 @@ import java.io.ByteArrayInputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import javax.xml.XMLConstants;
 import javax.xml.transform.Source;
 import javax.xml.transform.sax.SAXSource;
@@ -43,11 +45,32 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
   private final Map<String, String> schemaHashById = new ConcurrentHashMap<>();
 
   /**
+   * Compiles currently in progress, keyed by digest, so concurrent registrations of the same schema
+   * set share one compile. A leader inserts its future before compiling and removes it afterwards;
+   * joiners await the leader's result instead of compiling a second time.
+   */
+  private final ConcurrentHashMap<String, CompletableFuture<Schema>> inFlightCompiles =
+      new ConcurrentHashMap<>();
+
+  /**
    * Real service monitor for compound registry reads and writes. This is a plain object rather than
    * the injected {@link SchemaCache}: when {@code SchemaCache} is a CDI client proxy, synchronizing
    * on it locks the proxy, not the bean, so it cannot guard the {@code schemaHashById} / cache
    * pair. {@code validateWith} captures both the digest and the compiled schema under this lock,
    * then validates outside it against an immutable {@link Schema} strong reference.
+   *
+   * <p>The lock order is {@code registryLock} → {@link SchemaCache} monitor, one direction only:
+   * the cache's {@code putAndPin}/{@code getAndPin} critical sections never acquire {@code
+   * registryLock}, and a schema compile holds neither monitor. The order is therefore acyclic and
+   * deadlock-free, and a registration no longer blocks {@code snapshotFor} for the duration of a
+   * compile.
+   *
+   * <p>Publication re-asserts the pin with {@code putAndPin} inside this monitor, together with the
+   * id-to-digest map swap. The two-level pin (the compile path already pins before waiting for this
+   * monitor, and publication pins again while holding it) makes pin and map swap atomic with
+   * respect to a racing replacement's eviction: a racing {@code unpin}/{@code remove} either runs
+   * before publication, in which case publication re-inserts the retained {@link Schema}, or runs
+   * after, in which case the map already references the digest and {@code containsValue} keeps it.
    */
   private final Object registryLock = new Object();
 
@@ -165,8 +188,10 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
   /**
    * Registers a decoded request. Empty {@code resources} keeps the legacy single-blob contract
    * keyed by {@code SHA-256(schema)}; a transmitted set is decoded, capped, validated, digest-keyed
-   * by the full schema set, and served by an in-memory resolver only. The mapping swap and cache
-   * mutation happen together under {@link #registryLock}.
+   * by the full schema set, and served by an in-memory resolver only. The compile happens outside
+   * every monitor via single-flight. The publish section holds {@link #registryLock} and re-asserts
+   * the pin with {@code putAndPin} together with the mapping swap and unreferenced eviction, so a
+   * racing replacement cannot strip the pin before this id is visible.
    */
   private void registerSchemaSet(String schemaId, RegisterSchemaRequest req) throws Exception {
     // A decoded set is any request carrying transmitted resources or aliases;
@@ -176,10 +201,13 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
     if (req.getResourcesCount() == 0 && req.getAliasesCount() == 0) {
       var schemaBytes = req.getSchema().toByteArray();
       var digest = SchemaSetCompiler.sha256Hex(schemaBytes);
+      var schema = getOrCompilePinned(digest, () -> compileLegacySchema(schemaBytes));
       synchronized (registryLock) {
-        schemaCache.getOrCompile(digest, () -> SchemaSetCompiler.compileLegacy(schemaBytes));
+        // Re-assert pin and presence atomically with the map swap: a racing
+        // replacement's evictIfUnreferenced either already ran (and this
+        // re-inserts the retained Schema) or sees the new mapping and keeps it.
+        schemaCache.putAndPin(digest, schema);
         var previous = schemaHashById.put(schemaId, digest);
-        schemaCache.pin(digest);
         evictIfUnreferenced(previous, digest);
       }
       return;
@@ -189,11 +217,83 @@ public class XsdValidatorService extends MutinyXsdValidatorGrpc.XsdValidatorImpl
     SchemaSetCompiler.preparseForDoctype(set.resources());
     var digest =
         SchemaSetCompiler.schemaSetDigest(set.rootSystemId(), set.resources(), set.aliases());
+    var schema = getOrCompilePinned(digest, () -> compileSuppliedSet(set));
     synchronized (registryLock) {
-      schemaCache.getOrCompile(digest, () -> SchemaSetCompiler.compileSupplied(set));
+      // Same two-level pin as the legacy branch: the compile path pinned for
+      // bound-eviction safety, publication re-pins atomically with the swap.
+      schemaCache.putAndPin(digest, schema);
       var previous = schemaHashById.put(schemaId, digest);
-      schemaCache.pin(digest);
       evictIfUnreferenced(previous, digest);
+    }
+  }
+
+  /** Test seam: compiles a decoded supplied set. */
+  Schema compileSuppliedSet(SchemaSetCompiler.SuppliedSet set) throws Exception {
+    return SchemaSetCompiler.compileSupplied(set);
+  }
+
+  /** Test seam: compiles a legacy single-blob schema. */
+  Schema compileLegacySchema(byte[] schemaBytes) throws Exception {
+    return SchemaSetCompiler.compileLegacy(schemaBytes);
+  }
+
+  /**
+   * Returns the compiled schema for {@code digest}, compiling it outside every monitor when absent.
+   * The cache insert and pin happen in one {@link SchemaCache} critical section ({@code
+   * putAndPin}), so a freshly compiled entry is never evictable before publication; the caller
+   * re-pins the returned {@link Schema} under {@link #registryLock} at publication. A failed
+   * compile leaves no pin, no map change, and no cache entry. Concurrent same-digest registrations
+   * compile once: the first caller becomes the leader and joiners await its future. After winning
+   * leadership the leader rechecks the cache, because a flight that completed and was removed from
+   * the map between this caller's initial miss and its {@code putIfAbsent} must not be recompiled.
+   */
+  private Schema getOrCompilePinned(String digest, SchemaCache.SchemaCompiler compiler)
+      throws Exception {
+    var cached = schemaCache.getAndPin(digest);
+    if (cached != null) {
+      return cached;
+    }
+    var flight = new CompletableFuture<Schema>();
+    var leader = inFlightCompiles.putIfAbsent(digest, flight);
+    if (leader != null) {
+      var joined = joinFlight(leader);
+      schemaCache.putAndPin(digest, joined);
+      return joined;
+    }
+    try {
+      var cachedAfterLeadership = schemaCache.getAndPin(digest);
+      if (cachedAfterLeadership != null) {
+        flight.complete(cachedAfterLeadership);
+        return cachedAfterLeadership;
+      }
+      var compiled = compiler.compile();
+      schemaCache.putAndPin(digest, compiled);
+      flight.complete(compiled);
+      return compiled;
+    } catch (Exception | Error t) {
+      flight.completeExceptionally(t);
+      throw t;
+    } finally {
+      inFlightCompiles.remove(digest, flight);
+    }
+  }
+
+  /**
+   * Waits for the leader's compile. Joiners re-pin the joined value with {@code putAndPin}, which
+   * covers the rare evicted-between-completion-and-join window by re-inserting it.
+   */
+  private static Schema joinFlight(CompletableFuture<Schema> leader) throws Exception {
+    try {
+      return leader.get();
+    } catch (ExecutionException e) {
+      var cause = e.getCause();
+      if (cause instanceof Exception ex) {
+        throw ex;
+      }
+      throw (Error) cause;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("interrupted while waiting for schema compile", e);
     }
   }
 

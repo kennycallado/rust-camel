@@ -57,6 +57,20 @@ public class SchemaCache {
     return byDigest.get(digest);
   }
 
+  /**
+   * Returns the compiled schema for {@code digest} and pins it in one critical section, or {@code
+   * null} when absent. Closes the get-then-pin window a plain {@link #get} plus {@link #pin} pair
+   * would leave open to a concurrent eviction.
+   */
+  public synchronized Schema getAndPin(String digest) {
+    var schema = byDigest.get(digest);
+    if (schema != null) {
+      pinned.add(digest);
+      unpinnedOrder.remove(digest);
+    }
+    return schema;
+  }
+
   /** Stores a compiled schema under its digest, evicting if the bound is exceeded. */
   public synchronized void put(String digest, Schema schema) {
     if (byDigest.putIfAbsent(digest, schema) != null) {
@@ -67,6 +81,21 @@ public class SchemaCache {
     if (!pinned.contains(digest)) {
       unpinnedOrder.addLast(digest);
     }
+    evictUntilBounded(digest);
+  }
+
+  /**
+   * Inserts and pins {@code digest} in one critical section, so a freshly compiled entry is never
+   * visible unpinned and no concurrent insert can evict it before its registration publishes the
+   * id-to-digest mapping. When the digest is already cached its value is refreshed (the same digest
+   * implies the same schema set) and it stays pinned.
+   */
+  public synchronized void putAndPin(String digest, Schema schema) {
+    if (byDigest.putIfAbsent(digest, schema) != null) {
+      byDigest.put(digest, schema); // existing key: refresh value only
+    }
+    pinned.add(digest);
+    unpinnedOrder.remove(digest);
     evictUntilBounded(digest);
   }
 
@@ -117,6 +146,13 @@ public class SchemaCache {
   /** Number of evictions performed since construction (test observability). */
   public synchronized long evictions() {
     return evictions;
+  }
+
+  /**
+   * Whether {@code digest} is currently pinned (test observability; mirrors {@link #evictions}).
+   */
+  synchronized boolean isPinned(String digest) {
+    return pinned.contains(digest);
   }
 
   /** Number of compiled entries (test observability). */
