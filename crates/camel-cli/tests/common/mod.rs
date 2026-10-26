@@ -16,6 +16,22 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Process-wide serialization between `fork` and any write-to-be-executed
+/// window (bd rc-vio10). Every fork site holds this lock across the fork
+/// (`spawn`/`status`/`output`); every section that writes an artifact and
+/// then chmods it holds it across write+chmod. A `fork` copies the fd
+/// table, so a child created while a write fd is open inherits it;
+/// `O_CLOEXEC` only closes it at the child's own `execve`, never before.
+/// Until then the inode is write-open system-wide, and `execve` of the
+/// same inode fails with ETXTBSY. All threads of one test process share a
+/// single fd table; sibling test binaries are separate processes with
+/// private temp dirs, so one `Mutex` per test binary is complete.
+#[allow(dead_code)] // each test binary compiles its own copy of this module
+pub fn artifact_spawn_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Capture buffer written by a reader thread and polled by the test.
 pub type SharedBuf = Arc<Mutex<String>>;
 
@@ -203,11 +219,14 @@ pub fn wait_for_marker(
 // unit gets its own copy of the module); mirror `spawn_camel_run`.
 #[allow(dead_code)]
 pub fn send_term(child: &Child) {
-    let status = Command::new("kill")
-        .arg("-TERM")
-        .arg(child.id().to_string())
-        .status()
-        .expect("failed to spawn `kill -TERM`");
+    let status = {
+        let _guard = artifact_spawn_lock().lock().expect("artifact spawn lock");
+        Command::new("kill")
+            .arg("-TERM")
+            .arg(child.id().to_string())
+            .status()
+            .expect("failed to spawn `kill -TERM`")
+    };
     assert!(
         status.success(),
         "`kill -TERM` returned non-zero: {status:?}"
@@ -222,11 +241,14 @@ pub fn send_term(child: &Child) {
 // gets its own copy of the module).
 #[allow(dead_code)]
 pub fn send_signal(child: &Child, signal: &str) {
-    let status = Command::new("kill")
-        .arg(signal)
-        .arg(child.id().to_string())
-        .status()
-        .expect("failed to spawn `kill`");
+    let status = {
+        let _guard = artifact_spawn_lock().lock().expect("artifact spawn lock");
+        Command::new("kill")
+            .arg(signal)
+            .arg(child.id().to_string())
+            .status()
+            .expect("failed to spawn `kill`")
+    };
     assert!(
         status.success(),
         "`kill {signal}` returned non-zero: {status:?}"
@@ -245,16 +267,19 @@ pub fn send_signal(child: &Child, signal: &str) {
 #[allow(dead_code)]
 pub fn spawn_camel_run(dir: &Path) -> KillOnDrop {
     let config_path = dir.join("Camel.toml");
-    let child = Command::new(env!("CARGO_BIN_EXE_camel"))
-        .arg("run")
-        .arg("--config")
-        .arg(&config_path)
-        .current_dir(dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
-        .expect("failed to spawn `camel` binary"); // allow-unwrap
+    let child = {
+        let _guard = artifact_spawn_lock().lock().expect("artifact spawn lock");
+        Command::new(env!("CARGO_BIN_EXE_camel"))
+            .arg("run")
+            .arg("--config")
+            .arg(&config_path)
+            .current_dir(dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("failed to spawn `camel` binary") // allow-unwrap
+    };
     KillOnDrop(child)
 }
 
@@ -314,13 +339,16 @@ pub fn spawn_camel_job_with_env(
     for (key, value) in envs {
         command.env(key, value);
     }
-    let child = command
-        .current_dir(dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
-        .expect("failed to spawn `camel` binary"); // allow-unwrap
+    let child = {
+        let _guard = artifact_spawn_lock().lock().expect("artifact spawn lock");
+        command
+            .current_dir(dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("failed to spawn `camel` binary") // allow-unwrap
+    };
     KillOnDrop(child)
 }
 
@@ -386,15 +414,18 @@ pub fn run_binary(
     args: &[&str],
     envs: &[(&str, &str)],
 ) -> (i32, String, String) {
-    let mut child = Command::new(program)
-        .args(args)
-        .envs(envs.iter().copied())
-        .current_dir(dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()
-        .expect("spawn child process");
+    let mut child = {
+        let _guard = artifact_spawn_lock().lock().expect("artifact spawn lock");
+        Command::new(program)
+            .args(args)
+            .envs(envs.iter().copied())
+            .current_dir(dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("spawn child process")
+    };
     let out_buf = SharedBuf::default();
     let err_buf = SharedBuf::default();
     let out_handle = thread::spawn({

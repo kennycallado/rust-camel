@@ -441,6 +441,9 @@ fn compile_full(
     for profile in profiles {
         cmd.arg("--profile").arg(profile);
     }
+    let _guard = common::artifact_spawn_lock()
+        .lock()
+        .expect("artifact spawn lock");
     cmd.output().expect("spawn `camel compile`")
 }
 
@@ -456,6 +459,9 @@ fn compile_signed(dir: &Path, doc: &str, artifact: &str, seed: &Path, require: b
     if require {
         cmd.arg("--require-signature");
     }
+    let _guard = common::artifact_spawn_lock()
+        .lock()
+        .expect("artifact spawn lock");
     cmd.output().expect("spawn `camel compile --sign`")
 }
 
@@ -690,15 +696,20 @@ fn fixture_dir() -> PathBuf {
 fn spawn_reaper(dir: &Path) {
     let dir = dir.to_string_lossy().into_owned();
     let pid = std::process::id().to_string();
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "while kill -0 {pid} 2>/dev/null; do sleep 1; done; rm -rf -- '{dir}'"
-        ))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    {
+        let _guard = common::artifact_spawn_lock()
+            .lock()
+            .expect("artifact spawn lock");
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "while kill -0 {pid} 2>/dev/null; do sleep 1; done; rm -rf -- '{dir}'"
+            ))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
 }
 
 /// Remove fixture directories left by previous test runs whose process
@@ -730,12 +741,17 @@ fn sweep_stale_fixtures_in(root: &Path) {
         if pid == std::process::id() {
             continue;
         }
-        let alive = Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let alive = {
+            let _guard = common::artifact_spawn_lock()
+                .lock()
+                .expect("artifact spawn lock");
+            Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
         if !alive {
             let _ = std::fs::remove_dir_all(entry.path());
         }
@@ -986,9 +1002,15 @@ fn deploy_flipped_copy(
     assert!(offset < bytes.len(), "flip offset inside the artifact");
     bytes[offset] ^= 0xFF;
     let path = deploy.path().join(name);
-    std::fs::write(&path, bytes).expect("write tampered copy");
-    #[cfg(unix)]
-    make_executable(&path);
+    // locked (bd rc-vio10): write fd window must not overlap any fork
+    {
+        let _guard = common::artifact_spawn_lock()
+            .lock()
+            .expect("artifact spawn lock");
+        std::fs::write(&path, bytes).expect("write tampered copy");
+        #[cfg(unix)]
+        make_executable(&path);
+    }
     std::fs::copy(sig_path_of(artifact), sig_path_of(&path)).expect("copy envelope to the copy");
     path
 }
@@ -1095,6 +1117,9 @@ fn spawn_child_output(
     envs: &[(&str, &str)],
 ) -> (i32, String, String) {
     assert_not_harness_child();
+    let _guard = common::artifact_spawn_lock()
+        .lock()
+        .expect("artifact spawn lock");
     let mut cmd = Command::new(std::env::current_exe().expect("current test exe"));
     scrub_camel_env(&mut cmd);
     cmd.env(CHILD_ENV, artifact)
@@ -1144,7 +1169,13 @@ fn spawn_child(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    KillOnDrop(cmd.spawn().expect("spawn harness child"))
+    let child = {
+        let _guard = common::artifact_spawn_lock()
+            .lock()
+            .expect("artifact spawn lock");
+        cmd.spawn().expect("spawn harness child")
+    };
+    KillOnDrop(child)
 }
 
 /// Pipe-drained capture of both child streams (see `tests/common`).
@@ -3069,14 +3100,19 @@ fn second_signal_force_exit_flow() -> Result<(), String> {
     // gap that can push the second signal past teardown under load —
     // the same discipline as
     // `run_signal_test::second_sigterm_during_teardown_force_exits`.
-    let pair = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "kill -INT {pid}; kill -TERM {pid}",
-            pid = child.id()
-        ))
-        .status()
-        .map_err(|e| format!("spawn signal pair: {e}"))?;
+    let pair = {
+        let _guard = common::artifact_spawn_lock()
+            .lock()
+            .expect("artifact spawn lock");
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "kill -INT {pid}; kill -TERM {pid}",
+                pid = child.id()
+            ))
+            .status()
+            .map_err(|e| format!("spawn signal pair: {e}"))?
+    };
     if !pair.success() {
         return Err(format!("signal pair returned non-zero: {pair:?}"));
     }
@@ -3197,7 +3233,12 @@ fn deployment_equivalence_flow() -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut run_child = KillOnDrop(cmd.spawn().map_err(|e| format!("spawn `camel run`: {e}"))?);
+    let mut run_child = {
+        let _guard = common::artifact_spawn_lock()
+            .lock()
+            .expect("artifact spawn lock");
+        KillOnDrop(cmd.spawn().map_err(|e| format!("spawn `camel run`: {e}"))?)
+    };
     let run_drained = spawn_drained(&mut run_child);
     serve_once_and_terminate(&mut run_child, &run_drained, run_port, "leg B (camel run)")?;
     Ok(())
@@ -3331,9 +3372,15 @@ fn artifact_rejects_marked_corruption() {
         let mut bytes = valid.clone();
         bytes[offset] ^= 0xFF;
         let path = deploy.path().join(format!("corrupt-{name}.bin"));
-        std::fs::write(&path, bytes).expect("write corrupt artifact");
-        #[cfg(unix)]
-        make_executable(&path);
+        // locked (bd rc-vio10): write fd window must not overlap any fork
+        {
+            let _guard = common::artifact_spawn_lock()
+                .lock()
+                .expect("artifact spawn lock");
+            std::fs::write(&path, bytes).expect("write corrupt artifact");
+            #[cfg(unix)]
+            make_executable(&path);
+        }
         let (code, stdout, stderr) = common::run_binary(deploy.path(), &path, &[], &[]);
         assert_eq!(
             code, 2,
@@ -3386,9 +3433,15 @@ fn artifact_rejects_v2_corruption_and_unknown_schemas() {
     // variant to keep the transient disk use bounded.
     let run_rejected = |name: &str, bytes: &[u8], diagnostic: &str| {
         let path = deploy.path().join(name);
-        std::fs::write(&path, bytes).expect("write rejected artifact");
-        #[cfg(unix)]
-        make_executable(&path);
+        // locked (bd rc-vio10): write fd window must not overlap any fork
+        {
+            let _guard = common::artifact_spawn_lock()
+                .lock()
+                .expect("artifact spawn lock");
+            std::fs::write(&path, bytes).expect("write rejected artifact");
+            #[cfg(unix)]
+            make_executable(&path);
+        }
         let (code, stdout, stderr) = common::run_binary(deploy.path(), &path, &[], &[]);
         assert_eq!(
             code, 2,
@@ -3503,9 +3556,15 @@ fn artifact_truncated_without_marker_keeps_clap_fallback() {
         "truncation must remove the marker"
     );
     let path = deploy.path().join("truncated.bin");
-    std::fs::write(&path, bytes).expect("write truncated artifact");
-    #[cfg(unix)]
-    make_executable(&path);
+    // locked (bd rc-vio10): write fd window must not overlap any fork
+    {
+        let _guard = common::artifact_spawn_lock()
+            .lock()
+            .expect("artifact spawn lock");
+        std::fs::write(&path, bytes).expect("write truncated artifact");
+        #[cfg(unix)]
+        make_executable(&path);
+    }
 
     // A normal CLI argument: Clap rejects the unknown flag with its own
     // `error:` fingerprint and exit 2 (the artifact argv guard would not
@@ -3532,9 +3591,15 @@ fn artifact_truncated_without_marker_keeps_clap_fallback() {
         "truncation must remove the v2 marker"
     );
     let path = deploy.path().join("truncated-v2.bin");
-    std::fs::write(&path, bytes).expect("write truncated v2 artifact");
-    #[cfg(unix)]
-    make_executable(&path);
+    // locked (bd rc-vio10): write fd window must not overlap any fork
+    {
+        let _guard = common::artifact_spawn_lock()
+            .lock()
+            .expect("artifact spawn lock");
+        std::fs::write(&path, bytes).expect("write truncated v2 artifact");
+        #[cfg(unix)]
+        make_executable(&path);
+    }
 
     let (code, stdout, stderr) = common::run_binary(deploy.path(), &path, &["--watch"], &[]);
     assert_eq!(
@@ -5963,4 +6028,174 @@ fn freshness_without_truststore_skips_the_step() {
         !all.contains("truststore"),
         "no truststore step without a truststore: {all}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// bd rc-vio10: fork inherits an in-flight writer fd (ETXTBSY regression).
+// ---------------------------------------------------------------------------
+
+/// The kernel behavior behind bd rc-vio10: while a write fd on an
+/// executable inode is open, `execve` of that same inode fails with
+/// ETXTBSY (errno 26, [`std::io::ErrorKind::ExecutableFileBusy`]).
+/// `Command::spawn` forks, and the fork copies the fd table, so the child
+/// inherits the writer fd until its own `execve`; the suite-wide
+/// [`common::artifact_spawn_lock`] prevents that inherited writer from
+/// overlapping any artifact exec. This test documents the documented
+/// error the suite lock prevents (it passes with or without the fix).
+///
+/// The body itself holds the same lock from the probe copy through the
+/// final spawn, so its own two forks cannot land inside a sibling test's
+/// write-to-be-executed window and inherit *that* writer fd (which would
+/// reintroduce the rc-vio10 race at microsecond scale). The ETXTBSY
+/// expectation is unaffected: the test's own write fd is in its own
+/// shared fd table at the child's `execve`.
+#[test]
+fn inherited_writer_fd_makes_same_inode_exec_busy() {
+    use std::io::ErrorKind;
+    let _guard = common::artifact_spawn_lock()
+        .lock()
+        .expect("artifact spawn lock");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let probe = dir.path().join("true");
+    let source = [
+        "/bin/true",
+        "/usr/bin/true",
+        "/run/current-system/sw/bin/true",
+    ]
+    .iter()
+    .map(Path::new)
+    .find(|path| path.exists())
+    .expect("ETXTBSY probe needs a `true` binary: none of the known paths exists");
+    std::fs::copy(source, &probe).expect("copy probe executable");
+    #[cfg(unix)]
+    make_executable(&probe);
+
+    let writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&probe)
+        .expect("open write fd on the probe");
+    let err = Command::new(&probe)
+        .stdin(Stdio::null())
+        .status()
+        .expect_err("exec must fail while the write fd is open");
+    assert_eq!(
+        err.kind(),
+        ErrorKind::ExecutableFileBusy,
+        "a write-open inode is busy for execve (errno 26): {err}"
+    );
+    assert_eq!(err.raw_os_error(), Some(26), "ETXTBSY: {err}");
+
+    drop(writer);
+    let status = Command::new(&probe)
+        .stdin(Stdio::null())
+        .status()
+        .expect("exec succeeds once the write fd is closed");
+    assert!(
+        status.success(),
+        "probe exits 0 after the fd closes: {status:?}"
+    );
+}
+
+/// Regression for bd rc-vio10: the artifact writer and the artifact
+/// spawner must never overlap. Pre-fix the spawner's fork inherits the
+/// writer fd and `common::run_binary` panics at `common/mod.rs:397` with
+/// ETXTBSY; post-fix the process-wide [`common::artifact_spawn_lock`]
+/// serializes the write-fd hold against the fork.
+///
+/// The writer keeps the fd open until the spawner handshakes that it is
+/// about to call `common::run_binary` (the attempt signal), then for a
+/// further 2s deadline — that window covers the fork, which happens
+/// microseconds after the attempt signal, so the pre-fix ETXTBSY is
+/// deterministic for any real scheduler. Post-fix the outcome is
+/// timing-independent: the spawner parks on the lock the writer holds and
+/// exits 0 once it is released. Both deadlines are bounded, so neither
+/// branch can deadlock (the writer never waits unconditionally for the
+/// spawner to finish). The pre-fix red window assumes the spawner's fork
+/// follows its attempt signal within the 2s deadline; std exposes no fork
+/// hook, so a >2s scheduler stall between two adjacent userspace operations
+/// is the documented residual bound (CI never executes this test against
+/// pre-fix code — the lock API reference makes that unrepresentable).
+#[test]
+fn artifact_spawn_lock_contract_writer_never_overlaps_spawn() {
+    use std::sync::mpsc;
+
+    struct DoneOnDrop(mpsc::Sender<()>);
+    impl Drop for DoneOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let probe = dir.path().join("true");
+    let source = [
+        "/bin/true",
+        "/usr/bin/true",
+        "/run/current-system/sw/bin/true",
+    ]
+    .iter()
+    .map(Path::new)
+    .find(|path| path.exists())
+    .expect("spawn-lock probe needs a `true` binary: none of the known paths exists");
+    // A fresh executable copy is itself a write-to-be-executed window.
+    {
+        let _guard = common::artifact_spawn_lock()
+            .lock()
+            .expect("artifact spawn lock");
+        std::fs::copy(source, &probe).expect("copy probe executable");
+        #[cfg(unix)]
+        make_executable(&probe);
+    }
+
+    let (opened_tx, opened_rx) = mpsc::channel::<()>();
+    let (attempt_tx, attempt_rx) = mpsc::channel::<()>();
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+
+    let writer = thread::spawn({
+        let probe = probe.clone();
+        move || {
+            let _guard = common::artifact_spawn_lock()
+                .lock()
+                .expect("artifact spawn lock");
+            let writer = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&probe)
+                .expect("open write fd on the probe");
+            opened_tx.send(()).expect("signal write fd open");
+            let attempt_deadline = Instant::now() + Duration::from_secs(5);
+            let mut attempted = false;
+            while Instant::now() < attempt_deadline {
+                if attempt_rx.try_recv().is_ok() {
+                    attempted = true;
+                    break;
+                }
+                thread::yield_now();
+            }
+            if !attempted {
+                panic!("spawner never attempted the spawn within 5s");
+            }
+            let done_deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < done_deadline {
+                if done_rx.try_recv().is_ok() {
+                    break;
+                }
+                thread::yield_now();
+            }
+            drop(writer);
+        }
+    });
+
+    let dir_path = dir.path().to_path_buf();
+    let spawner = thread::spawn(move || {
+        opened_rx.recv().expect("writer opened the fd");
+        attempt_tx.send(()).expect("signal run_binary entry");
+        let _done = DoneOnDrop(done_tx);
+        let (code, stdout, stderr) = common::run_binary(&dir_path, &probe, &[], &[]);
+        assert_eq!(
+            code, 0,
+            "probe must exit 0 once the write fd is released;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    });
+    spawner.join().expect("spawner thread");
+    writer.join().expect("writer thread");
 }
