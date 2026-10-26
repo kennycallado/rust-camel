@@ -71,7 +71,17 @@ Values cross the Rhai boundary through two conversions. The inbound conversion t
 
 ### Exchange body variants
 
-The `body` variable binds per body variant. `Text` and `Xml` bodies bind as strings. A `Json` body binds natively as the corresponding Rhai value: object, array, or scalar. An `Empty` body binds as unit `()` and stays `Empty` on write-back. A `Bytes` body binds as a Blob. A `Stream` body binds as the access-aware reference described under [Stream bodies](#stream-bodies).
+The `body` variable binds per body variant:
+
+| Body variant | Rhai binding |
+|---|---|
+| `Text` / `Xml` | string |
+| `Json` | native object, array, or scalar (`map`, `array`, `i64`, `f64`, `bool`, string, or unit), subject to the conversion refusals below |
+| `Empty` | unit `()` |
+| `Bytes` | blob |
+| `Stream` | access-aware reference described under [Stream bodies](#stream-bodies) |
+
+An `Empty` body stays `Empty` on write-back.
 
 ### Round-trip matrix
 
@@ -147,6 +157,26 @@ Object keys keep their authored insertion order. A duplicate key takes the last
 value and keeps the position of its first occurrence. Replacing the value at an
 existing key retains that key's position. `remove` shifts, so the remaining keys
 keep their relative order.
+
+### Parsing JSON bodies
+
+`parse_json` accepts only a string argument: JSON text. A non-string argument
+still resolves, then fails with a typed `type-mismatch` error that names the
+actual type. The script `let data = parse_json(body);` fails on a `Bytes` body
+with `type mismatch: expected string, actual blob at 1:12`. An object-valued
+`Json` body (for example `{"a":1}`) binds as a map and fails the same script
+with `actual map` at the same position. The error never reports
+function-not-found; on 0.60.0 the same script failed as
+`function-not-found ... at 1:12`.
+
+The sandbox has no strict UTF-8 decode for blobs. `blob.to_string()` renders
+hex, and `Blob.as_string()` is lossy (`from_utf8_lossy`): it silently replaces
+malformed UTF-8, so it must not be used for JSON input. Do not decode bytes
+inside the sandbox.
+
+To parse byte input, materialize it at the route level: convert the body to
+text before the script step, for example with a `set_body` conversion or a
+marshal step. A native `Json` body needs no parsing; bind it directly.
 
 ### Serializing
 

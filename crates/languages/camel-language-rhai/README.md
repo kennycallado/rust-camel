@@ -12,9 +12,21 @@ Scripts have access to these variables injected from the Exchange:
 
 | Variable | Type | Description |
 |----------|------|-------------|
-| `body` | String | Message body as text |
+| `body` | varies | Message body, bound by variant (see below) |
 | `headers` | Map | Message headers as a key-value map |
 | `properties` | Map | Exchange properties as a key-value map |
+
+`body` binds by variant: `Text`/`Xml` as string, `Json` as a native map, array,
+or scalar subject to the inbound conversion refusals, `Empty` as unit `()`,
+`Bytes` as a Blob, and `Stream` as an access-aware reference whose reads fail
+with a `conversion` error naming `Body::Stream`.
+
+`parse_json` accepts only a string argument (JSON text). Any other argument type
+fails with a typed `type-mismatch` error naming the actual type (for example
+`expected string, actual blob at 1:12`), never function-not-found. Do not
+stringify or decode bytes inside the sandbox: `blob.to_string()` renders hex and
+`Blob.as_string()` is lossy. Convert a byte body to text at the route level
+before the script step, or bind a native `Json` body directly.
 
 ## Read-only API (`create_expression` / `create_predicate`)
 

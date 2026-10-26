@@ -26,16 +26,22 @@ use super::{
 };
 use indexmap::IndexMap;
 use rhai::{
-    Array, Dynamic, EvalAltResult, ImmutableString, LexError, Module, NativeCallContext,
-    ParseErrorType, Position, Shared, Variant,
+    Array, Blob, Dynamic, EvalAltResult, FnPtr, ImmutableString, LexError, Module,
+    NativeCallContext, ParseErrorType, Position, Shared, Variant,
 };
 use std::sync::OnceLock;
+use std::time::Instant;
 
 /// Crate-local alias for rhai's raw result shape (the rhai alias is private).
 type RhaiResultOf<T> = Result<T, Box<EvalAltResult>>;
 
 /// Process-wide host module, built on first use.
 static HOST: OnceLock<Shared<Module>> = OnceLock::new();
+
+/// Reserved expected label for the `parse_json` exact-type guards. The lib.rs
+/// mapper partitions on this exact label (plus the actual-label allowlist) —
+/// never change its value without updating that mapper.
+pub(crate) const PARSE_JSON_GUARD_EXPECTED: &str = "parse_json string input";
 
 /// The registered comparison operators; all refuse with `type-mismatch`.
 const COMPARISON_OPS: [&str; 6] = ["==", "!=", "<", ">", "<=", ">="];
@@ -51,6 +57,18 @@ fn build_module() -> Module {
     module.set_custom_type::<JsonValue>(JSON_VALUE_TYPE_NAME);
     module.set_custom_type::<JsonNumber>(JSON_NUMBER_TYPE_NAME);
     register_parse(&mut module);
+    register_parse_guard::<Blob>(&mut module, "blob");
+    register_parse_guard::<rhai::Map>(&mut module, "map");
+    register_parse_guard::<Array>(&mut module, "array");
+    register_parse_guard::<JsonValue>(&mut module, "json value");
+    register_parse_guard::<JsonNumber>(&mut module, "json number");
+    register_parse_guard::<i64>(&mut module, "i64");
+    register_parse_guard::<f64>(&mut module, "f64");
+    register_parse_guard::<bool>(&mut module, "bool");
+    register_parse_guard::<()>(&mut module, "()");
+    register_parse_guard::<char>(&mut module, "char");
+    register_parse_guard::<FnPtr>(&mut module, "FnPtr");
+    register_parse_guard::<Instant>(&mut module, "Instant");
     register_to_json(&mut module);
     register_surface(&mut module);
     register_comparisons(&mut module);
@@ -66,6 +84,23 @@ fn register_parse(module: &mut Module) {
             let value = parse::parse(&s, &limits)
                 .map_err(|e| host_err(e, "json input", ctx.call_position()))?;
             Ok(project_dynamic(&value))
+        },
+    );
+}
+
+/// Register `parse_json` for an exact non-string type: the call RESOLVES (so
+/// rhai never reports function-not-found) and immediately fails with a typed
+/// mismatch carrying the reserved expected label and the static actual label.
+fn register_parse_guard<T: Variant + Clone>(module: &mut Module, actual: &'static str) {
+    module.set_native_fn(
+        "parse_json",
+        move |ctx: NativeCallContext, _v: &mut T| -> RhaiResultOf<Dynamic> {
+            Err(EvalAltResult::ErrorMismatchDataType(
+                PARSE_JSON_GUARD_EXPECTED.into(),
+                actual.into(),
+                ctx.call_position(),
+            )
+            .into())
         },
     );
 }
@@ -630,7 +665,7 @@ mod tests {
         JSON_NUMBER_TYPE_NAME, JSON_VALUE_TYPE_NAME, JsonHostError, JsonKind, JsonValue,
     };
     use rhai::packages::{Package, StandardPackage};
-    use rhai::{Dynamic, Engine, EvalAltResult, Scope};
+    use rhai::{Dynamic, Engine, EvalAltResult, Position, Scope};
 
     fn host_engine() -> Engine {
         let mut engine = Engine::new_raw();
@@ -683,6 +718,25 @@ mod tests {
             .eval::<String>("type_of(parse_json(\"{}\"))")
             .expect("host parse_json runs");
         assert_eq!(out, JSON_VALUE_TYPE_NAME);
+    }
+
+    #[test]
+    fn host_parse_json_guard_error_field_order() {
+        let engine = host_engine();
+        let err = engine
+            .eval::<Dynamic>("parse_json(blob(3))")
+            .expect_err("blob input must be refused by the guard");
+        match err.unwrap_inner() {
+            EvalAltResult::ErrorMismatchDataType(expected, actual, pos) => {
+                // Pin the literal contract, not the production constant: an
+                // accidental reserved-label change must fail this test.
+                assert_eq!(expected.as_str(), "parse_json string input");
+                assert_eq!(actual, "blob");
+                // `parse_json` starts at column 1 in `parse_json(blob(3))`.
+                assert_eq!(*pos, Position::new(1, 1), "call position: {pos:?}");
+            }
+            other => panic!("expected ErrorMismatchDataType, got {other:?}"),
+        }
     }
 
     #[test]

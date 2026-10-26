@@ -247,14 +247,50 @@ fn eval_error(e: &rhai::EvalAltResult, target: &str) -> LanguageError {
 /// Classification uses the innermost error (`unwrap_inner`); position is the
 /// deepest available (inner first, outer fallback).
 fn map_eval_alt(e: &rhai::EvalAltResult) -> LanguageError {
+    use rhai::EvalAltResult;
+
     let inner = e.unwrap_inner();
     let position = to_error_position(inner.position().or_else(e.position()));
+    // The `parse_json` exact-type guards resolve their call and raise a
+    // mismatch tagged with the reserved expected label. Rewrite ONLY that
+    // partition into the typed `LanguageError::TypeMismatch`; every other
+    // mismatch keeps the `EvalFailure` mapping below (bd rc-2nx48).
+    if let EvalAltResult::ErrorMismatchDataType(expected, actual, _) = inner
+        && expected.as_str() == json::host::PARSE_JSON_GUARD_EXPECTED
+        && PARSE_JSON_GUARD_ACTUALS.contains(&actual.as_str())
+    {
+        return LanguageError::TypeMismatch {
+            expected: "string".to_string(),
+            actual: actual.clone(),
+            position,
+        };
+    }
     LanguageError::EvalFailure {
         class: eval_alt_class(e),
         position,
         detail: eval_alt_detail(e),
     }
 }
+
+/// Static actual labels emitted by the `parse_json` exact-type guards.
+///
+/// Both the reserved expected label and one of these actual labels must match
+/// before [`map_eval_alt`] rewrites an `ErrorMismatchDataType`, so no other
+/// mismatch is reclassified.
+const PARSE_JSON_GUARD_ACTUALS: [&str; 12] = [
+    "blob",
+    "map",
+    "array",
+    "json value",
+    "json number",
+    "i64",
+    "f64",
+    "bool",
+    "()",
+    "char",
+    "FnPtr",
+    "Instant",
+];
 
 /// Type name of a [`Value`] for `TypeMismatch` diagnostics. Type names only —
 /// never runtime values.
@@ -1056,7 +1092,7 @@ impl Default for RhaiLanguage {
 
 #[cfg(test)]
 mod tests {
-    use camel_api::ExpressionErrorClass;
+    use camel_api::{ErrorPosition, ExpressionErrorClass};
     use camel_language_api::{
         EvalMeta, Exchange, Language, LanguageError, Message, Value, to_expression_failed,
     };
@@ -3511,6 +3547,293 @@ mod tests {
         // discards during index-chain write-back) would classify as Runtime,
         // so TypeMismatch proves the typed setter failure propagated.
         assert_class(&err, ExpressionErrorClass::TypeMismatch, "setter failure");
+    }
+
+    /// Guard over a non-string `parse_json` input: the call must resolve and
+    /// fail with a typed `string` mismatch — never `function-not-found`
+    /// (bd rc-2nx48).
+    async fn assert_parse_json_type_mismatch(script: &str, actual: &str) {
+        let ex = empty_exchange();
+        let err = eval_script(script, &ex)
+            .await
+            .expect_err("non-string parse_json input must fail");
+        match &err {
+            LanguageError::TypeMismatch {
+                expected,
+                actual: got,
+                position,
+            } => {
+                assert_eq!(expected, "string", "expected label for {script}");
+                assert_eq!(got, actual, "actual label for {script}");
+                assert!(position.is_some(), "position for {script}: {err:?}");
+            }
+            other => panic!("expected TypeMismatch for {script}, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn json_parse_json_rejects_non_string_with_typed_mismatch() {
+        let cases = [
+            ("parse_json(blob(3))", "blob"),
+            ("parse_json(#{})", "map"),
+            ("parse_json([])", "array"),
+            (r#"parse_json(parse_json("{}"))"#, "json value"),
+            (r#"parse_json(parse_json("1.5"))"#, "json number"),
+            ("parse_json(1)", "i64"),
+            ("parse_json(1.5)", "f64"),
+            ("parse_json(true)", "bool"),
+            ("parse_json(())", "()"),
+            ("parse_json('c')", "char"),
+            ("let f = || 1; parse_json(f)", "FnPtr"),
+            ("parse_json(timestamp())", "Instant"),
+        ];
+        for (script, actual) in cases {
+            assert_parse_json_type_mismatch(script, actual).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn json_parse_json_nested_guard_position_is_line_one() {
+        let ex = empty_exchange();
+        let err = eval_script(r#"parse_json(parse_json("{}"))"#, &ex)
+            .await
+            .expect_err("nested non-string input must fail");
+        match &err {
+            LanguageError::TypeMismatch {
+                expected,
+                actual,
+                position,
+            } => {
+                assert_eq!(expected, "string", "{err:?}");
+                assert_eq!(actual, "json value", "{err:?}");
+                assert_eq!(position.map(|p| p.line), Some(1), "position: {err:?}");
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn json_parse_json_guard_reports_actual_call_column() {
+        let ex = empty_exchange();
+        // `parse_json` starts at column 23 (1-based), not the 1:12 of the
+        // `let data = parse_json(body);` reproducer.
+        let script = "let x = 1; let data = parse_json(#{a:1}); data";
+        let err = eval_script(script, &ex)
+            .await
+            .expect_err("map input must fail");
+        match &err {
+            LanguageError::TypeMismatch {
+                expected,
+                actual,
+                position,
+            } => {
+                assert_eq!(expected, "string", "{err:?}");
+                assert_eq!(actual, "map", "{err:?}");
+                assert_eq!(
+                    *position,
+                    Some(ErrorPosition {
+                        line: 1,
+                        column: 23
+                    }),
+                    "position: {err:?}"
+                );
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
+    }
+
+    // ── parse_json body-binding regression (bd rc-2nx48) ──
+    //
+    // `let data = parse_json(body); data.a` binds an eager body as a native
+    // map (Json) or blob (Bytes). Before the exact-type guards the call was
+    // unresolved and reported function-not-found at 1:12; it must now report
+    // the typed `string` mismatch at the same position, through every engine
+    // and every rendering.
+
+    const PARSE_JSON_BODY_SCRIPT: &str = "let data = parse_json(body); data.a";
+    const PARSE_JSON_BODY_BYTES: &[u8] = br#"{"a":1}"#;
+
+    fn parse_json_json_body_exchange() -> Exchange {
+        let json: Value = r#"{"a":1}"#.parse().expect("json body literal");
+        Exchange::new(Message::new(Body::Json(json)))
+    }
+
+    fn parse_json_bytes_body_exchange() -> Exchange {
+        Exchange::new(Message::new(Body::Bytes(Bytes::from_static(
+            PARSE_JSON_BODY_BYTES,
+        ))))
+    }
+
+    fn assert_parse_json_body_mismatch(err: &LanguageError, actual: &str) {
+        match err {
+            LanguageError::TypeMismatch {
+                expected,
+                actual: got,
+                position,
+            } => {
+                assert_eq!(expected, "string", "expected label: {err:?}");
+                assert_eq!(got, actual, "actual label: {err:?}");
+                assert_eq!(
+                    *position,
+                    Some(ErrorPosition {
+                        line: 1,
+                        column: 12
+                    }),
+                    "position: {err:?}"
+                );
+            }
+            other => {
+                panic!("expected TypeMismatch with actual `{actual}` at 1:12, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_json_body_json_and_bytes_typed_mismatch_at_1_12() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression(PARSE_JSON_BODY_SCRIPT)
+            .expect("expression compiles");
+
+        for (ex, actual) in [
+            (parse_json_json_body_exchange(), "map"),
+            (parse_json_bytes_body_exchange(), "blob"),
+        ] {
+            let err = expr
+                .evaluate(&ex)
+                .await
+                .expect_err("non-string body must fail");
+            assert_parse_json_body_mismatch(&err, actual);
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_json_body_mismatch_on_predicate_and_mutating_engines() {
+        let lang = RhaiLanguage::new();
+
+        let pred = lang
+            .create_predicate(PARSE_JSON_BODY_SCRIPT)
+            .expect("predicate compiles");
+        for (ex, actual) in [
+            (parse_json_json_body_exchange(), "map"),
+            (parse_json_bytes_body_exchange(), "blob"),
+        ] {
+            let err = pred.matches(&ex).await.expect_err("predicate must fail");
+            assert_parse_json_body_mismatch(&err, actual);
+        }
+
+        let expr = lang
+            .create_mutating_expression(PARSE_JSON_BODY_SCRIPT)
+            .expect("mutating expression compiles");
+        for (mut ex, actual) in [
+            (parse_json_json_body_exchange(), "map"),
+            (parse_json_bytes_body_exchange(), "blob"),
+        ] {
+            let err = expr
+                .evaluate(&mut ex)
+                .await
+                .expect_err("mutating expression must fail");
+            assert_parse_json_body_mismatch(&err, actual);
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_json_body_mismatch_redacted_through_to_expression_failed() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression(PARSE_JSON_BODY_SCRIPT)
+            .expect("expression compiles");
+        let ex = parse_json_bytes_body_exchange();
+        let err = expr.evaluate(&ex).await.expect_err("bytes body must fail");
+        assert_parse_json_body_mismatch(&err, "blob");
+
+        let camel = to_expression_failed(err, &eval_meta());
+        let rendered = format!("{camel}");
+        let cause = std::error::Error::source(&camel)
+            .expect("TypeMismatch must attach a redacted cause")
+            .to_string();
+        // The immediate cause is fully pinned: it may carry the type names and
+        // nothing else, so no payload value can hide behind a fragment check.
+        assert_eq!(
+            cause, "Processor error: expected string, actual blob",
+            "cause must be exactly the redacted type-name detail"
+        );
+        let chain = format!("{rendered}\n{cause}");
+
+        // No JSON payload, structure, or blob hex fragment may leak.
+        for forbidden in [
+            r#""a""#,
+            r#"{"a":1}"#,
+            "{",
+            "}",
+            "7b",
+            "22",
+            "3a",
+            "31",
+            "7d",
+        ] {
+            assert!(
+                !chain.contains(forbidden),
+                "payload fragment {forbidden:?} leaked: {chain}"
+            );
+        }
+
+        assert!(rendered.contains("type-mismatch"), "{rendered}");
+        assert!(rendered.contains("1:12"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn parse_json_body_bytes_mutating_rollback_unchanged() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(PARSE_JSON_BODY_SCRIPT)
+            .expect("mutating expression compiles");
+        let mut ex = parse_json_bytes_body_exchange();
+        let err = expr
+            .evaluate(&mut ex)
+            .await
+            .expect_err("bytes body must fail");
+        assert_parse_json_body_mismatch(&err, "blob");
+        match &ex.input.body {
+            Body::Bytes(bytes) => assert_eq!(
+                bytes.as_ref(),
+                PARSE_JSON_BODY_BYTES,
+                "body must stay bit-identical after rollback"
+            ),
+            other => panic!("body must remain Body::Bytes, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_json_body_stream_still_conversion_error() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_expression("parse_json(body)")
+            .expect("expression compiles");
+        let (ex, _handle) = stream_exchange();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("stream body must refuse");
+        assert_stream_body_conversion(&err);
+        assert!(
+            !matches!(&err, LanguageError::TypeMismatch { .. }),
+            "stream refusal must not be reclassified: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parse_json_string_concat_both_orders_still_succeed() {
+        let ex = empty_exchange();
+        for script in [r#"parse_json("1.5") + "1""#, r#""1" + parse_json("1.5")"#] {
+            let val = eval_script(script, &ex)
+                .await
+                .unwrap_or_else(|err| panic!("{script} must evaluate: {err:?}"));
+            assert!(
+                matches!(&val, Value::String(_)),
+                "{script} must yield a string, got {val:?}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -39,6 +39,25 @@ out-of-`i64` integers are the `json number` wrapper. Objects keep insertion orde
 in an `IndexMap`. The wrapper has an `Arc` copy-on-write tree, a depth cap of
 128, and no iteration.
 
+`parse_json` accepts a string argument only. Exact-type guard overloads register
+the non-string dynamic types, so a call with any of them resolves and raises a
+data-type mismatch tagged with a reserved expected label. `map_eval_alt`
+rewrites only that partition into
+`LanguageError::TypeMismatch { expected: "string", actual, position }`; every
+other mismatch keeps its `EvalFailure` mapping. An object-valued `Json` body
+(for example `{"a":1}`) therefore reports `actual map`, and a `Bytes` body
+reports `actual blob`, at the call position, where 0.60.0 reported
+`function-not-found`. The accepted actual labels are pinned
+in `PARSE_JSON_GUARD_ACTUALS`.
+
+The body-binding matrix feeds those labels: `Text`/`Xml` bind as string, `Json`
+as a native map, array, or scalar subject to the inbound refusals, `Empty` as
+unit, `Bytes` as blob, and `Stream` as `StreamBodyRef`. The sandbox has no strict
+UTF-8 decode for blobs (`blob.to_string()` is hex, `Blob.as_string()` is lossy
+`from_utf8_lossy` and silently replaces malformed UTF-8, so it must not be used
+for JSON input). Byte input must be materialized at the route level before the
+script step.
+
 `to_json`, `to_string`, and `to_debug` emit compact JSON in stored order with raw
 UTF-8 and no `/` escape. Native `Map` keys are sorted.
 
