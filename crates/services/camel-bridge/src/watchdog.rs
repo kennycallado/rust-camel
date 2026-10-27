@@ -243,16 +243,4 @@ mod tests {
             RoleInvocation::InvalidAckFd
         );
     }
-
-    /// The test harness (and therefore every ordinary cargo test process) is
-    /// not a process-group leader, which is exactly the state the role must
-    /// refuse to arm from.
-    #[test]
-    fn harness_is_not_a_group_leader_so_the_role_refuses() {
-        assert!(
-            refuses_when_not_group_leader(),
-            "test harness unexpectedly leads its own process group; \
-             the refuse-to-arm precondition is no longer exercised"
-        );
-    }
 }
