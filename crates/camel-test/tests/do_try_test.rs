@@ -1,6 +1,6 @@
 //! Integration tests for the doTry / doCatch / doFinally EIP.
 //!
-//! These tests exercise the full pipeline: CamelContext → Consumer → DoTryService → Mock,
+//! These tests exercise the full pipeline: CamelContext → Consumer → DoTrySegment → Mock,
 //! verifying that exceptions thrown inside `doTry` are caught by `doCatch` clauses and
 //! that `doFinally` runs unconditionally.
 
@@ -256,7 +256,7 @@ async fn do_try_propagate_does_not_reach_downstream() {
 ///
 /// Verifies the full YAML→compile→runtime pipeline for `on_when`:
 ///   YAML text → RouteDslStep::DoTry → DeclarativeStep::DoTry → BuilderStep::DeclarativeDoTry
-///   → camel-core resolves the Simple predicate via language registry → DoTryService
+///   → camel-core resolves the Simple predicate via language registry → DoTrySegment
 ///   evaluates predicate at runtime to gate the catch clause.
 ///
 /// Setup (2 routes):

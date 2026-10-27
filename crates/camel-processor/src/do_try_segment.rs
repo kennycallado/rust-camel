@@ -7,6 +7,7 @@ use crate::do_try::CatchMatcher;
 use crate::do_try::chain_predicate_error;
 use crate::error_handler::record_span_error;
 use camel_api::error_handler::ExceptionDisposition;
+use camel_api::exchange::PROPERTY_EXCEPTION_HANDLED;
 use camel_api::outcome_pipeline::OutcomePipeline;
 use camel_api::pipeline_outcome::PipelineOutcome;
 use camel_api::{CamelError, Exchange, PredicateSource};
@@ -126,9 +127,13 @@ impl OutcomePipeline for DoTrySegment {
 
     fn run<'a>(
         &'a mut self,
-        exchange: Exchange,
+        mut exchange: Exchange,
     ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
         Box::pin(async move {
+            // Stale handled-marker protocol inherited from the deleted
+            // `DoTryService` (clear-on-entry; `Exchange::clear_error` does not
+            // touch HANDLED).
+            exchange.properties.remove(PROPERTY_EXCEPTION_HANDLED);
             // Pre-clone for the "no catch matched" path; `exchange` itself is
             // consumed by `try_body.run(...)` below.
             let exchange_for_unmatched = exchange.branch_clone();
@@ -235,7 +240,7 @@ impl OutcomePipeline for DoTrySegment {
                         // original try error as `Failed`. Falling through to the
                         // shared finally path would return `Completed` and
                         // swallow the error, letting the route continue past
-                        // the scope (mirrors `DoTryService`'s no-match arm).
+                        // the scope (the segment is the only doTry runtime).
                         return fail_after_finally(&mut self.finally, current_ex, err).await;
                     }
                 }
@@ -566,7 +571,7 @@ mod tests {
     #[test]
     fn catch_body_failure_returns_catch_err_and_marks_span() {
         let mut seg = catch_fails_segment();
-        let (result, _captured, span_records) = capture_debugs_with_span_records(|| {
+        let (result, captured, span_records) = capture_debugs_with_span_records(|| {
             // Declared `error` field so record_span_error's record lands.
             let span = tracing::info_span!("dotry_seg_test", error = tracing::field::Empty);
             let _guard = span.enter();
@@ -589,6 +594,16 @@ mod tests {
                 captured_field(line, "error").is_some_and(|v| v.contains("catch-fail"))
             }),
             "expected span error record carrying the catch error, span records: {span_records:?}"
+        );
+        let original = record_field(&captured, "do_try catch block failed", "original_error")
+            .unwrap_or_else(|| {
+                panic!(
+                    "envelope record missing original_error field under active span, captured: {captured:?}"
+                )
+            });
+        assert!(
+            original.contains("orig"),
+            "original_error must carry the original error under an active span, got: {original}"
         );
     }
 
@@ -678,9 +693,8 @@ mod tests {
     // ── No-catch-matched path (mission 353) ──
 
     /// doTry with no matching catch must run finally and propagate the
-    /// original try error as `Failed` — the segment counterpart of
-    /// `DoTryService::no_clause_matches_propagates_original`. Guards against
-    /// regressing back to `Completed(bugged_swallow)`.
+    /// original try error as `Failed` (the segment is the only doTry runtime).
+    /// Guards against regressing back to `Completed(bugged_swallow)`.
     #[tokio::test]
     async fn no_clause_matches_runs_finally_and_propagates_original() {
         let catch_call = Arc::new(AtomicU32::new(0));
@@ -724,5 +738,504 @@ mod tests {
             0,
             "the unmatched catch body must not run"
         );
+    }
+    // ── Ported from the deleted Tower doTry service (no coverage loss) ──
+
+    use camel_language_api::{EvalMeta, LanguageError, to_expression_failed};
+
+    fn catch_variant(names: &[&str], body: camel_api::OutcomeSegment) -> CatchClauseSegment {
+        catch_variant_with(names, body, ExceptionDisposition::Handled)
+    }
+
+    fn catch_variant_with(
+        names: &[&str],
+        body: camel_api::OutcomeSegment,
+        disposition: ExceptionDisposition,
+    ) -> CatchClauseSegment {
+        CatchClauseSegment {
+            matcher: CatchMatcher::ByVariant(names.iter().map(|n| (*n).to_string()).collect()),
+            on_when: None,
+            body,
+            disposition,
+        }
+    }
+
+    fn finally_seg(body: camel_api::OutcomeSegment) -> FinallyClauseSegment {
+        FinallyClauseSegment {
+            on_when: None,
+            body,
+        }
+    }
+
+    #[tokio::test]
+    async fn happy_path_try_succeeds_finally_runs() {
+        let finally_flag = Arc::new(AtomicU32::new(0));
+        let mut seg = DoTrySegment {
+            try_body: seg_complete(),
+            catches: vec![],
+            finally: Some(finally_seg(seg_record(finally_flag.clone()))),
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        assert!(
+            matches!(result, PipelineOutcome::Completed(_)),
+            "try success must complete, got {result:?}"
+        );
+        assert_eq!(finally_flag.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn catch_by_variant_handled_returns_ok() {
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("boom".into())),
+            catches: vec![catch_variant(&["ProcessorError"], seg_complete())],
+            finally: None,
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        assert!(
+            matches!(result, PipelineOutcome::Completed(_)),
+            "Handled must return Completed, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn catch_by_variant_propagate_runs_side_effects_and_rethrows() {
+        let side_effect = Arc::new(AtomicU32::new(0));
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("boom".into())),
+            catches: vec![catch_variant_with(
+                &["ProcessorError"],
+                seg_record(side_effect.clone()),
+                ExceptionDisposition::Propagate,
+            )],
+            finally: None,
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        assert!(
+            matches!(
+                result,
+                PipelineOutcome::Failed(CamelError::ProcessorError(_))
+            ),
+            "Propagate must rethrow the original error, got {result:?}"
+        );
+        assert_eq!(
+            side_effect.load(Ordering::SeqCst),
+            1,
+            "catch branch must have run for side-effects"
+        );
+    }
+
+    #[tokio::test]
+    async fn catch_by_predicate_matches_via_exception_kind() {
+        let predicate = FilterPredicate::new(|ex: &Exchange| {
+            ex.properties
+                .get(camel_api::exchange::PROPERTY_EXCEPTION_KIND)
+                .map(|v| matches!(v, camel_api::Value::String(s) if s == "io"))
+                .unwrap_or(false)
+        });
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::Io("disk full".into())),
+            catches: vec![CatchClauseSegment {
+                matcher: CatchMatcher::Predicate(PredicateSource::Sync(predicate)),
+                on_when: None,
+                body: seg_complete(),
+                disposition: ExceptionDisposition::Handled,
+            }],
+            finally: None,
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        assert!(
+            matches!(result, PipelineOutcome::Completed(_)),
+            "Predicate matcher must catch the error and Handled must return Completed, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_match_wins_subsequent_clauses_not_evaluated() {
+        let first_call = Arc::new(AtomicU32::new(0));
+        let second_call = Arc::new(AtomicU32::new(0));
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::Io("err".into())),
+            catches: vec![
+                catch_variant(&["Io"], seg_record(first_call.clone())),
+                catch_variant(&["*"], seg_record(second_call.clone())),
+            ],
+            finally: None,
+        };
+
+        let _ = seg.run(Exchange::default()).await;
+        assert_eq!(first_call.load(Ordering::SeqCst), 1);
+        assert_eq!(second_call.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn catch_branch_throws_new_error_wins() {
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("orig".into())),
+            catches: vec![catch_variant(
+                &["ProcessorError"],
+                seg_fail(CamelError::Io("catch-fail".into())),
+            )],
+            finally: None,
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        assert!(
+            matches!(result, PipelineOutcome::Failed(CamelError::Io(_))),
+            "catch error must win over the try error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finally_throws_with_no_previous_error_propagates_finally_error() {
+        let mut seg = DoTrySegment {
+            try_body: seg_complete(),
+            catches: vec![],
+            finally: Some(finally_seg(seg_fail(CamelError::Config("fin".into())))),
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        assert!(
+            matches!(result, PipelineOutcome::Failed(CamelError::Config(_))),
+            "finally error must propagate when no previous error exists, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finally_throws_with_previous_error_restores_previous() {
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("orig".into())),
+            catches: vec![],
+            finally: Some(finally_seg(seg_fail(CamelError::Config("fin".into())))),
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        assert!(
+            matches!(
+                result,
+                PipelineOutcome::Failed(CamelError::ProcessorError(_))
+            ),
+            "previous error must be restored when finally throws (Camel parity), got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_handled_marker_cleared_on_entry() {
+        let mut ex = Exchange::default();
+        ex.set_property(
+            camel_api::exchange::PROPERTY_EXCEPTION_HANDLED,
+            camel_api::Value::Bool(true),
+        );
+        ex.set_error(CamelError::ProcessorError("stale".into()));
+        let mut seg = DoTrySegment {
+            try_body: seg_complete(),
+            catches: vec![],
+            finally: None,
+        };
+
+        let result = seg.run(ex).await;
+        match result {
+            PipelineOutcome::Completed(ex) => assert!(
+                !ex.properties
+                    .contains_key(camel_api::exchange::PROPERTY_EXCEPTION_HANDLED),
+                "stale CamelExceptionHandled must be cleared on entry"
+            ),
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_do_try_inner_catch_does_not_leak_to_outer() {
+        let inner = DoTrySegment {
+            try_body: seg_fail(CamelError::Io("inner".into())),
+            catches: vec![catch_variant(&["Io"], seg_complete())],
+            finally: None,
+        };
+        let mut outer = DoTrySegment {
+            try_body: camel_api::OutcomeSegment::new(Box::new(inner)),
+            catches: vec![catch_variant(&["Io"], seg_complete())],
+            finally: None,
+        };
+
+        let result = outer.run(Exchange::default()).await;
+        assert!(
+            matches!(result, PipelineOutcome::Completed(_)),
+            "outer must see Completed because inner handled its own error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn catch_all_only_fires_when_no_specific_clause_matches() {
+        let processor_call = Arc::new(AtomicU32::new(0));
+        let catch_all_call = Arc::new(AtomicU32::new(0));
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::Io("err".into())),
+            catches: vec![
+                catch_variant(&["ProcessorError"], seg_record(processor_call.clone())),
+                catch_variant(&["*"], seg_record(catch_all_call.clone())),
+            ],
+            finally: None,
+        };
+
+        let _ = seg.run(Exchange::default()).await;
+        assert_eq!(
+            processor_call.load(Ordering::SeqCst),
+            0,
+            "specific ProcessorError clause must not fire on Io error"
+        );
+        assert_eq!(
+            catch_all_call.load(Ordering::SeqCst),
+            1,
+            "catch-all clause must fire when no specific clause matches"
+        );
+    }
+
+    #[tokio::test]
+    async fn catch_throws_skips_finally_and_propagates_catch_err() {
+        let finally_flag = Arc::new(AtomicU32::new(0));
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("orig".into())),
+            catches: vec![catch_variant(
+                &["ProcessorError"],
+                seg_fail(CamelError::Io("catch-fail".into())),
+            )],
+            finally: Some(finally_seg(seg_record(finally_flag.clone()))),
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        assert!(
+            matches!(result, PipelineOutcome::Failed(CamelError::Io(_))),
+            "catch_err must propagate (not original ProcessorError), got {result:?}"
+        );
+        assert_eq!(
+            finally_flag.load(Ordering::SeqCst),
+            0,
+            "compiled segment skips finally after a failed catch body (ADR-0025 invariant #4)"
+        );
+    }
+
+    #[tokio::test]
+    async fn catch_throws_and_throwing_finally_still_returns_catch_err() {
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("orig".into())),
+            catches: vec![catch_variant(
+                &["ProcessorError"],
+                seg_fail(CamelError::Io("catch-fail".into())),
+            )],
+            finally: Some(finally_seg(seg_fail(CamelError::Config("fin-fail".into())))),
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        assert!(
+            matches!(result, PipelineOutcome::Failed(CamelError::Io(_))),
+            "catch_err (Io) must be returned over finally_err (Config), got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finally_on_when_false_with_previous_error_still_propagates_original() {
+        let finally_flag = Arc::new(AtomicU32::new(0));
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("orig".into())),
+            catches: vec![],
+            finally: Some(FinallyClauseSegment {
+                on_when: Some(PredicateSource::Sync(FilterPredicate::new(|_ex| false))),
+                body: seg_record(finally_flag.clone()),
+            }),
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        assert!(
+            matches!(
+                result,
+                PipelineOutcome::Failed(CamelError::ProcessorError(_))
+            ),
+            "original error must propagate even when finally_on_when skips finally, got {result:?}"
+        );
+        assert_eq!(
+            finally_flag.load(Ordering::SeqCst),
+            0,
+            "doFinally must NOT run when on_when returns false"
+        );
+    }
+
+    #[tokio::test]
+    async fn catch_throws_under_propagate_disposition_returns_catch_err() {
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("orig".into())),
+            catches: vec![catch_variant_with(
+                &["ProcessorError"],
+                seg_fail(CamelError::Io("catch-fail".into())),
+                ExceptionDisposition::Propagate,
+            )],
+            finally: None,
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        assert!(
+            matches!(result, PipelineOutcome::Failed(CamelError::Io(_))),
+            "Propagate-disposition catch failure must surface the catch error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn catch_when_predicate_error_chains_original() {
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("boom".into())),
+            catches: vec![CatchClauseSegment {
+                matcher: CatchMatcher::Predicate(async_err_predicate(expression_failed())),
+                on_when: None,
+                body: seg_complete(),
+                disposition: ExceptionDisposition::Handled,
+            }],
+            finally: None,
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        match result {
+            PipelineOutcome::Failed(CamelError::ExpressionFailed {
+                cause: Some(cause), ..
+            }) => {
+                assert!(
+                    cause.to_string().contains("boom"),
+                    "cause must carry the original error, got: {cause}"
+                );
+            }
+            other => panic!("expected Failed(ExpressionFailed) with chained cause, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn catch_on_when_predicate_error_chains_original() {
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("boom".into())),
+            catches: vec![CatchClauseSegment {
+                matcher: CatchMatcher::ByVariant(vec!["*".into()]),
+                on_when: Some(async_err_predicate(expression_failed())),
+                body: seg_complete(),
+                disposition: ExceptionDisposition::Handled,
+            }],
+            finally: None,
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        match result {
+            PipelineOutcome::Failed(CamelError::ExpressionFailed {
+                cause: Some(cause), ..
+            }) => {
+                assert!(
+                    cause.to_string().contains("boom"),
+                    "cause must carry the original error, got: {cause}"
+                );
+            }
+            other => panic!("expected Failed(ExpressionFailed) with chained cause, got {other:?}"),
+        }
+    }
+
+    // ── Mapper-generated cause replacement (ported from do_try.rs) ──
+
+    fn caller_diagnostic_failed(cause: CamelError) -> CamelError {
+        CamelError::ExpressionFailed {
+            language: "rhai".to_string(),
+            route_id: "r1".to_string(),
+            step_id: "s1".to_string(),
+            verb: "when".to_string(),
+            class: ExpressionErrorClass::Runtime,
+            position: None,
+            conversion: None,
+            cause: Some(Box::new(cause)),
+        }
+    }
+
+    #[test]
+    fn chain_replaces_mapper_generated_cause() {
+        let meta = EvalMeta {
+            language: "xpath".into(),
+            route_id: "r1".into(),
+            step_id: "s1".into(),
+            verb: "when".into(),
+            target: None,
+        };
+        let mapper_err = to_expression_failed(
+            LanguageError::EvalFailure {
+                class: ExpressionErrorClass::Parse,
+                position: None,
+                detail: Some("body is not valid XML".into()),
+            },
+            &meta,
+        );
+
+        let result = chain_predicate_error(mapper_err, CamelError::ProcessorError("boom".into()));
+
+        match result {
+            CamelError::ExpressionFailed {
+                cause: Some(cause), ..
+            } => {
+                assert!(
+                    cause.to_string().contains("boom"),
+                    "mapper diagnostic cause must be replaced by the original, got: {cause}"
+                );
+            }
+            other => panic!("expected ExpressionFailed with chained cause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chain_preserves_caller_cause() {
+        let predicate_err =
+            caller_diagnostic_failed(CamelError::ProcessorError("caller diagnostic".into()));
+
+        let result =
+            chain_predicate_error(predicate_err, CamelError::ProcessorError("boom".into()));
+
+        match result {
+            CamelError::ExpressionFailed {
+                cause: Some(cause), ..
+            } => {
+                let rendered = cause.to_string();
+                assert!(
+                    rendered.contains("caller diagnostic"),
+                    "caller cause must pass through untouched, got: {rendered}"
+                );
+                assert!(
+                    !rendered.contains("boom"),
+                    "caller cause must not be replaced, got: {rendered}"
+                );
+            }
+            other => panic!("expected ExpressionFailed with caller cause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chain_preserves_caller_source_bearing_cause() {
+        let predicate_err = caller_diagnostic_failed(CamelError::ProcessorErrorWithSource(
+            "caller diagnostic".into(),
+            Arc::new(std::io::Error::other("caller source")),
+        ));
+
+        let result =
+            chain_predicate_error(predicate_err, CamelError::ProcessorError("boom".into()));
+
+        match result {
+            CamelError::ExpressionFailed {
+                cause: Some(cause), ..
+            } => {
+                let rendered = cause.to_string();
+                assert!(
+                    rendered.contains("caller diagnostic"),
+                    "caller cause must pass through untouched, got: {rendered}"
+                );
+                let source = std::error::Error::source(cause.as_ref())
+                    .unwrap_or_else(|| panic!("caller source must survive, cause: {cause:?}"));
+                assert!(
+                    source.to_string().contains("caller source"),
+                    "caller source must survive untouched, got: {source}"
+                );
+            }
+            other => panic!("expected ExpressionFailed with caller cause, got {other:?}"),
+        }
     }
 }

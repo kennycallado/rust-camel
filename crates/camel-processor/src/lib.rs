@@ -75,7 +75,7 @@ pub use data_format::{
     builtin_data_format_with_config,
 };
 pub use delayer::DelayerService;
-pub use do_try::{CatchClause, CatchMatcher, DoTryService};
+pub use do_try::CatchMatcher;
 pub use do_try_segment::{CatchClauseSegment, DoTrySegment, FinallyClauseSegment};
 pub use dynamic_router::DynamicRouterService;
 pub use dynamic_set_header::{DynamicSetHeader, DynamicSetHeaderIfAbsent, DynamicSetHeaderLayer};

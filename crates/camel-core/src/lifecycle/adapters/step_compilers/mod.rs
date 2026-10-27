@@ -1384,4 +1384,197 @@ mod dispatch_tests {
             "expected ToStopCompiler (N+1) to win after pass-through, got {result:?}"
         );
     }
+
+    // ── BuilderStep::DoTry → DoTrySegment ──
+
+    fn dotry_registry() -> StepCompilerRegistry {
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::core::CoreCompiler));
+        reg.register(Box::new(super::control_flow::ControlFlowCompiler));
+        reg
+    }
+
+    #[tokio::test]
+    async fn do_try_compiles_to_segment() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        use camel_api::error_handler::ExceptionDisposition;
+        use camel_api::{OpaqueProcessor, PipelineOutcome};
+        use camel_processor::CatchMatcher;
+
+        use crate::lifecycle::application::route_definition::DoTryCatchClause;
+
+        let catch_calls = Arc::new(AtomicU32::new(0));
+        let catch_calls_child = Arc::clone(&catch_calls);
+
+        let step = BuilderStep::DoTry {
+            try_steps: vec![BuilderStep::Processor(OpaqueProcessor(
+                BoxProcessor::from_fn(|_ex| {
+                    Box::pin(async move { Err(CamelError::ProcessorError("boom".into())) })
+                }),
+            ))],
+            catches: vec![DoTryCatchClause {
+                matcher: CatchMatcher::ByVariant(vec!["ProcessorError".into()]),
+                on_when: None,
+                disposition: ExceptionDisposition::Handled,
+                steps: vec![BuilderStep::Processor(OpaqueProcessor(
+                    BoxProcessor::from_fn(move |ex| {
+                        catch_calls_child.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(async move { Ok(ex) })
+                    }),
+                ))],
+            }],
+            finally: None,
+        };
+
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+        let context = ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let reg = dotry_registry();
+        let compiled = reg
+            .compile_step(step, 0, &context)
+            .expect("compilation should succeed")
+            .expect("DoTry should match");
+
+        let mut segment = match compiled {
+            CompiledStep::Segment { segment, .. } => segment,
+            other => panic!("expected CompiledStep::Segment, got {other:?}"),
+        };
+        let outcome = segment.run(camel_api::Exchange::default()).await;
+        assert!(
+            matches!(outcome, PipelineOutcome::Completed(_)),
+            "handled catch should complete, got {outcome:?}"
+        );
+        assert_eq!(
+            catch_calls.load(Ordering::SeqCst),
+            1,
+            "catch body must run once"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_inside_try_skips_remaining_try_steps() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        use camel_api::error_handler::ExceptionDisposition;
+        use camel_api::{CAMEL_STOP, OpaqueProcessor, PipelineOutcome, Value};
+        use camel_processor::CatchMatcher;
+
+        use crate::lifecycle::application::route_definition::{
+            DoTryCatchClause, DoTryFinallyClause,
+        };
+
+        let after_stop_calls = Arc::new(AtomicU32::new(0));
+        let after_stop_calls_child = Arc::clone(&after_stop_calls);
+        let catch_calls = Arc::new(AtomicU32::new(0));
+        let catch_calls_child = Arc::clone(&catch_calls);
+        let finally_calls = Arc::new(AtomicU32::new(0));
+        let finally_calls_child = Arc::clone(&finally_calls);
+
+        let step = BuilderStep::DoTry {
+            try_steps: vec![
+                BuilderStep::Processor(OpaqueProcessor(BoxProcessor::from_fn(|ex| {
+                    Box::pin(async move {
+                        let mut ex = ex;
+                        ex.set_property(CAMEL_STOP, Value::Bool(true));
+                        Ok(ex)
+                    })
+                }))),
+                BuilderStep::Processor(OpaqueProcessor(BoxProcessor::from_fn(move |ex| {
+                    after_stop_calls_child.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(ex) })
+                }))),
+            ],
+            catches: vec![DoTryCatchClause {
+                matcher: CatchMatcher::ByVariant(vec!["*".into()]),
+                on_when: None,
+                disposition: ExceptionDisposition::Handled,
+                steps: vec![BuilderStep::Processor(OpaqueProcessor(
+                    BoxProcessor::from_fn(move |ex| {
+                        catch_calls_child.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(async move { Ok(ex) })
+                    }),
+                ))],
+            }],
+            finally: Some(DoTryFinallyClause {
+                on_when: None,
+                steps: vec![BuilderStep::Processor(OpaqueProcessor(
+                    BoxProcessor::from_fn(move |ex| {
+                        finally_calls_child.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(async move { Ok(ex) })
+                    }),
+                ))],
+            }),
+        };
+
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+        let context = ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let reg = dotry_registry();
+        let compiled = reg
+            .compile_step(step, 0, &context)
+            .expect("compilation should succeed")
+            .expect("DoTry should match");
+
+        let mut segment = match compiled {
+            CompiledStep::Segment { segment, .. } => segment,
+            other => panic!("expected CompiledStep::Segment, got {other:?}"),
+        };
+        let outcome = segment.run(camel_api::Exchange::default()).await;
+        assert!(
+            matches!(outcome, PipelineOutcome::Stopped(_)),
+            "CamelStop marker inside try must propagate Stopped, got {outcome:?}"
+        );
+        assert_eq!(
+            after_stop_calls.load(Ordering::SeqCst),
+            0,
+            "remaining try steps must not run after CamelStop marker"
+        );
+        assert_eq!(
+            catch_calls.load(Ordering::SeqCst),
+            0,
+            "catch must not run when try stops"
+        );
+        assert_eq!(
+            finally_calls.load(Ordering::SeqCst),
+            0,
+            "finally must not run when try stops"
+        );
+    }
 }

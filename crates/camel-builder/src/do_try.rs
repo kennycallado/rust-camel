@@ -16,18 +16,17 @@
 use crate::RouteBuilder;
 use camel_api::error_handler::ExceptionDisposition;
 use camel_api::{BoxProcessor, CamelError, FilterPredicate, OpaqueProcessor, PredicateSource};
-use camel_core::route::BuilderStep;
-use camel_processor::{CatchClause, CatchMatcher, DoTryService};
+use camel_core::route::{BuilderStep, DoTryCatchClause, DoTryFinallyClause};
+use camel_processor::CatchMatcher;
 
 // ── doTry / doCatch / doFinally builders ────────────────────────────────────
 
 /// Builder for a `.do_try()` ... `.end_do_try()` block.
 pub struct DoTryBuilder {
     parent: RouteBuilder,
-    try_steps: Vec<BoxProcessor>,
-    catch_clauses: Vec<CatchClause>,
-    finally_steps: Vec<BoxProcessor>,
-    finally_on_when: Option<PredicateSource>,
+    try_steps: Vec<BuilderStep>,
+    catch_clauses: Vec<DoTryCatchClause>,
+    finally: Option<DoTryFinallyClause>,
     finally_set: bool,
 }
 
@@ -36,14 +35,14 @@ pub struct DoCatchBuilder {
     parent: DoTryBuilder,
     matcher: CatchMatcher,
     on_when: Option<PredicateSource>,
-    steps: Vec<BoxProcessor>,
+    steps: Vec<BuilderStep>,
     disposition: ExceptionDisposition,
 }
 
 /// Builder for a `.do_finally()` ... `.end_do_finally()` block.
 pub struct DoFinallyBuilder {
     parent: DoTryBuilder,
-    steps: Vec<BoxProcessor>,
+    steps: Vec<BuilderStep>,
     on_when: Option<PredicateSource>,
 }
 
@@ -54,8 +53,7 @@ impl RouteBuilder {
             parent: self,
             try_steps: Vec::new(),
             catch_clauses: Vec::new(),
-            finally_steps: Vec::new(),
-            finally_on_when: None,
+            finally: None,
             finally_set: false,
         }
     }
@@ -64,7 +62,8 @@ impl RouteBuilder {
 impl DoTryBuilder {
     /// Add a step to the try block.
     pub fn process(mut self, processor: BoxProcessor) -> Self {
-        self.try_steps.push(processor);
+        self.try_steps
+            .push(BuilderStep::Processor(OpaqueProcessor(processor)));
         self
     }
 
@@ -118,18 +117,12 @@ impl DoTryBuilder {
 
     /// Close the `doTry` scope and return the parent `RouteBuilder`.
     pub fn end_do_try(self) -> RouteBuilder {
-        let do_try = DoTryService {
-            try_steps: self.try_steps,
-            catch_clauses: self.catch_clauses,
-            finally_steps: self.finally_steps,
-            finally_on_when: self.finally_on_when,
-        };
         let mut parent = self.parent;
-        parent
-            .steps
-            .push(BuilderStep::Processor(OpaqueProcessor(BoxProcessor::new(
-                do_try,
-            ))));
+        parent.steps.push(BuilderStep::DoTry {
+            try_steps: self.try_steps,
+            catches: self.catch_clauses,
+            finally: self.finally,
+        });
         parent
     }
 }
@@ -137,7 +130,8 @@ impl DoTryBuilder {
 impl DoCatchBuilder {
     /// Add a step to the catch clause's sub-pipeline.
     pub fn process(mut self, processor: BoxProcessor) -> Self {
-        self.steps.push(processor);
+        self.steps
+            .push(BuilderStep::Processor(OpaqueProcessor(processor)));
         self
     }
 
@@ -192,11 +186,11 @@ impl DoCatchBuilder {
     /// Close the catch clause and return the parent `DoTryBuilder`.
     pub fn end_do_catch(self) -> DoTryBuilder {
         let mut parent = self.parent;
-        parent.catch_clauses.push(CatchClause {
+        parent.catch_clauses.push(DoTryCatchClause {
             matcher: self.matcher,
             on_when: self.on_when,
-            steps: self.steps,
             disposition: self.disposition,
+            steps: self.steps,
         });
         parent
     }
@@ -205,7 +199,8 @@ impl DoCatchBuilder {
 impl DoFinallyBuilder {
     /// Add a step to the finally block.
     pub fn process(mut self, processor: BoxProcessor) -> Self {
-        self.steps.push(processor);
+        self.steps
+            .push(BuilderStep::Processor(OpaqueProcessor(processor)));
         self
     }
 
@@ -219,8 +214,10 @@ impl DoFinallyBuilder {
     pub fn end_do_finally(self) -> DoTryBuilder {
         let mut parent = self.parent;
         parent.finally_set = true;
-        parent.finally_on_when = self.on_when;
-        parent.finally_steps = self.steps;
+        parent.finally = Some(DoTryFinallyClause {
+            on_when: self.on_when,
+            steps: self.steps,
+        });
         parent
     }
 }
@@ -231,6 +228,7 @@ mod tests {
     use camel_api::error_handler::ExceptionDisposition;
     use camel_api::{BoxProcessor, BoxProcessorExt, CamelError};
     use camel_core::route::BuilderStep;
+    use camel_processor::CatchMatcher;
 
     fn passthrough() -> BoxProcessor {
         BoxProcessor::from_fn(move |ex| Box::pin(async move { Ok(ex) }))
@@ -253,14 +251,42 @@ mod tests {
             .end_do_try();
 
         let config = route.build().unwrap();
-        assert_eq!(
-            config.steps().len(),
-            1,
-            "expected exactly one step (the DoTryService)"
-        );
+        assert_eq!(config.steps().len(), 1, "expected exactly one step");
+        let BuilderStep::DoTry {
+            try_steps,
+            catches,
+            finally,
+        } = &config.steps()[0]
+        else {
+            panic!("the single step must be a DoTry variant");
+        };
+        assert_eq!(try_steps.len(), 1, "try block must have one step");
+        assert_eq!(catches.len(), 1, "expected exactly one catch clause");
+        assert_eq!(catches[0].disposition, ExceptionDisposition::Handled);
         assert!(
-            matches!(config.steps().first(), Some(BuilderStep::Processor(_))),
-            "the single step must be a Processor variant (the DoTryService)"
+            matches!(&catches[0].matcher, CatchMatcher::ByVariant(v) if v == &["ProcessorError".to_string()]),
+            "catch matcher must be ByVariant([\"ProcessorError\"])"
+        );
+        assert_eq!(catches[0].steps.len(), 1, "catch clause must have one step");
+        let finally = finally.as_ref().expect("finally block must be present");
+        assert_eq!(finally.steps.len(), 1, "finally block must have one step");
+    }
+
+    #[test]
+    fn do_try_builder_try_steps_are_builder_steps() {
+        let route = RouteBuilder::from("direct:start")
+            .route_id("do-try-builder-steps")
+            .do_try()
+            .process(passthrough())
+            .end_do_try();
+
+        let config = route.build().unwrap();
+        let BuilderStep::DoTry { try_steps, .. } = &config.steps()[0] else {
+            panic!("the single step must be a DoTry variant");
+        };
+        assert!(
+            matches!(try_steps.first(), Some(BuilderStep::Processor(_))),
+            ".process() must store the step as BuilderStep::Processor"
         );
     }
 

@@ -170,6 +170,19 @@ fn collect_from_steps(steps: &[BuilderStep], calls: &mut Vec<(String, String)>) 
                     collect_from_steps(&finally.steps, calls);
                 }
             }
+            BuilderStep::DoTry {
+                try_steps,
+                catches,
+                finally,
+            } => {
+                collect_from_steps(try_steps, calls);
+                for clause in catches {
+                    collect_from_steps(&clause.steps, calls);
+                }
+                if let Some(finally) = finally {
+                    collect_from_steps(&finally.steps, calls);
+                }
+            }
             // Leaf variants — hold no nested step lists.
             BuilderStep::Processor(_)
             | BuilderStep::To(_)

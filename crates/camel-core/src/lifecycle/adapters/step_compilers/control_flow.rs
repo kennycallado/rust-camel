@@ -274,6 +274,56 @@ impl StepCompiler for ControlFlowCompiler {
                 }))
             }
 
+            // ── DoTry (programmatic) ──
+            BuilderStep::DoTry {
+                try_steps,
+                catches,
+                finally,
+            } => {
+                let (try_sub_segments, mut all_lifecycles) =
+                    ctx.compile_children_segments(try_steps, registry)?;
+                let try_body = compose_outcome_segment(try_sub_segments);
+
+                let mut catch_clauses = Vec::with_capacity(catches.len());
+                for c in catches {
+                    let (clause_sub_segments, lifecycles) =
+                        ctx.compile_children_segments(c.steps, registry)?;
+                    all_lifecycles.extend(lifecycles);
+                    let body = compose_outcome_segment(clause_sub_segments);
+                    catch_clauses.push(CatchClauseSegment {
+                        matcher: c.matcher,
+                        on_when: c.on_when,
+                        body,
+                        disposition: c.disposition,
+                    });
+                }
+
+                let finally = if let Some(f) = finally {
+                    let (f_sub_segments, lifecycle) =
+                        ctx.compile_children_segments(f.steps, registry)?;
+                    all_lifecycles.extend(lifecycle);
+                    let body = compose_outcome_segment(f_sub_segments);
+                    Some(FinallyClauseSegment {
+                        on_when: f.on_when,
+                        body,
+                    })
+                } else {
+                    None
+                };
+
+                let do_try_segment = DoTrySegment {
+                    try_body,
+                    catches: catch_clauses,
+                    finally,
+                };
+                Ok(CompileOutcome::Matched(CompiledStep::Segment {
+                    segment: camel_api::OutcomeSegment::new(Box::new(do_try_segment)),
+                    body_contract: None,
+                    lifecycle: pack_lifecycles(all_lifecycles),
+                    label: None,
+                }))
+            }
+
             _ => Ok(CompileOutcome::NotHandled(step)),
         }
     }

@@ -205,6 +205,20 @@ fn walk_steps<'a>(steps: &'a [BuilderStep], uris: &mut Vec<&'a str>, dynamic_dis
                 }
             }
 
+            BuilderStep::DoTry {
+                try_steps,
+                catches,
+                finally,
+            } => {
+                walk_steps(try_steps, uris, dynamic_dispatch);
+                for clause in catches {
+                    walk_steps(&clause.steps, uris, dynamic_dispatch);
+                }
+                if let Some(finally) = finally {
+                    walk_steps(&finally.steps, uris, dynamic_dispatch);
+                }
+            }
+
             // Leaf variants: hold no URI and no nested step list.
             BuilderStep::Processor(_)
             | BuilderStep::Stop

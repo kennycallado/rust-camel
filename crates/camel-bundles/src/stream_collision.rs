@@ -125,6 +125,22 @@ fn steps_contain_stream_out(steps: &[BuilderStep]) -> bool {
                     .is_some_and(|fin| steps_contain_stream_out(&fin.steps))
         }
 
+        // Programmatic doTry: the try body, every doCatch clause, and the
+        // doFinally body.
+        BuilderStep::DoTry {
+            try_steps,
+            catches,
+            finally,
+        } => {
+            steps_contain_stream_out(try_steps)
+                || catches
+                    .iter()
+                    .any(|clause| steps_contain_stream_out(&clause.steps))
+                || finally
+                    .as_ref()
+                    .is_some_and(|fin| steps_contain_stream_out(&fin.steps))
+        }
+
         // Static-URI leaves: WireTap, Enrich, and PollEnrich carry a
         // fixed endpoint URI (no nested pipeline), visited by
         // `for_each_step_uri` in camel-core's startup_validation.rs.

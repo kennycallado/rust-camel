@@ -57,6 +57,42 @@ pub struct DoTryFinallyBuilder {
     pub steps: Vec<BuilderStep>,
 }
 
+/// A single `doCatch` clause in the programmatic (builder) pipeline.
+#[derive(Clone)]
+pub struct DoTryCatchClause {
+    pub matcher: camel_processor::CatchMatcher,
+    pub on_when: Option<camel_api::PredicateSource>,
+    pub disposition: camel_api::error_handler::ExceptionDisposition,
+    pub steps: Vec<BuilderStep>,
+}
+
+impl std::fmt::Debug for DoTryCatchClause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DoTryCatchClause")
+            .field("matcher", &"<compiled>")
+            .field("on_when", &self.on_when.is_some())
+            .field("disposition", &self.disposition)
+            .field("steps", &self.steps)
+            .finish()
+    }
+}
+
+/// The `doFinally` block in the programmatic (builder) pipeline.
+#[derive(Clone)]
+pub struct DoTryFinallyClause {
+    pub on_when: Option<camel_api::PredicateSource>,
+    pub steps: Vec<BuilderStep>,
+}
+
+impl std::fmt::Debug for DoTryFinallyClause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DoTryFinallyClause")
+            .field("on_when", &self.on_when.is_some())
+            .field("steps", &self.steps)
+            .finish()
+    }
+}
+
 /// A step in an unresolved route definition.
 #[derive(Debug, Clone)]
 pub enum BuilderStep {
@@ -323,6 +359,13 @@ pub enum BuilderStep {
         catch: Vec<DoTryCatchClauseBuilder>,
         finally: Option<DoTryFinallyBuilder>,
     },
+    /// Programmatic doTry/doCatch/doFinally EIP, compiled to a `DoTrySegment`
+    /// (outcome-aware).
+    DoTry {
+        try_steps: Vec<BuilderStep>,
+        catches: Vec<DoTryCatchClause>,
+        finally: Option<DoTryFinallyClause>,
+    },
     /// Resequencer EIP: resequences exchanges by sequence number.
     /// Must be a top-level step (not nested inside structural EIPs).
     Resequence {
@@ -401,7 +444,7 @@ impl BuilderStep {
             Self::CacheClear { .. } => Some("cache-clear".into()),
             Self::CacheStats { .. } => Some("cache-stats".into()),
             Self::CachePeekStale { .. } => Some("cache-peek-stale".into()),
-            Self::DeclarativeDoTry { .. } => Some("do-try".into()),
+            Self::DeclarativeDoTry { .. } | Self::DoTry { .. } => Some("do-try".into()),
             Self::Resequence { .. } => Some("resequence".into()),
         }
     }
@@ -470,6 +513,7 @@ impl BuilderStep {
             | Self::CacheStats { .. }
             | Self::CachePeekStale { .. }
             | Self::DeclarativeDoTry { .. }
+            | Self::DoTry { .. }
             | Self::Resequence { .. } => None,
         }
     }
@@ -544,6 +588,7 @@ impl BuilderStep {
             | Self::CacheStats { .. }
             | Self::CachePeekStale { .. }
             | Self::DeclarativeDoTry { .. }
+            | Self::DoTry { .. }
             | Self::Resequence { .. } => SpanKindHint::Internal,
         }
     }
