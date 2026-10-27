@@ -1,6 +1,6 @@
 # EIP patterns
 
-rust-camel implements the Enterprise Integration Patterns catalog (Hohpe and Woolf) as Tower middleware. Every pattern is a `Service<Exchange>`. You add it to a route builder next to a source and a sink.
+rust-camel implements the Enterprise Integration Patterns catalog (Hohpe and Woolf). Patterns compile to Tower services or outcome-aware `OutcomePipeline` segments executed inside the route's Tower service. You add a pattern to a route builder next to a source and a sink.
 
 The patterns group into four families:
 

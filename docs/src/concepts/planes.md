@@ -26,7 +26,7 @@ The example shows both planes at work. The `RouteBuilder::from(...)` chain build
 
 ## Data plane: the hot path
 
-The data plane processes every Exchange. Each step in the pipeline is a Tower `Service<Exchange>`. Structural EIPs compile to `OutcomeSegment` implementations: a `Filter` and each `Choice` arm become a `CompiledStep::Segment` (ADR-0025). A `WireTap` keeps its own Tower decoration: the fork targets a secondary `BoxProcessor`. EIP composition maps cleanly to Tower's `Service` plus `Layer` pair (ADR-0001).
+The data plane processes every Exchange. Steps that compile to `CompiledStep::Process` — producer work, non-structural EIPs, and custom processors — are Tower `Service<Exchange>` implementations. Outcome-aware steps compile to `OutcomePipeline` segments: structural EIPs such as a `Filter` or each `Choice` arm, plus the cache EIP and the idempotent consumer, become `CompiledStep::Segment` (ADR-0025). Those segments run inside the route's Tower service. A `WireTap` keeps its own Tower decoration: the fork targets a secondary `BoxProcessor`. Composition is therefore compilation into process steps and segments, all executed by the route's Tower service (ADR-0001).
 
 This is the hot path. Every microsecond matters. Tower's `poll_ready` and `call` protocol gives backpressure from the first step back to the Consumer. Services are cheap to clone and compose. The data plane must stay free of locks, allocations, and blocking operations. A step that blocks starves every Exchange behind it.
 

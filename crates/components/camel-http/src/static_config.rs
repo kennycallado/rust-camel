@@ -12,6 +12,37 @@ use serde::de::{self, Deserializer, MapAccess, Visitor};
 /// Parsed from either a Camel URI (`http-static:/path?port=8080&spaFallback=true`)
 /// or a Camel.toml profile section (`[default.components.http-static]`).
 ///
+/// # Supplying the directory
+///
+/// There are three ways to supply the directory to serve:
+///
+/// 1. Path-as-dir at root: the URI path is the directory and the mount path is
+///    `/`:
+///
+///    ```text
+///    http-static:/srv/www
+///    ```
+///
+///    Result: `dir=/srv/www`, `mount_path="/"`.
+///
+/// 2. `?dir=` with an optional prefix: the URI path is the mount-path prefix
+///    and the `dir` query parameter is the directory:
+///
+///    ```text
+///    http-static:/assets?dir=/srv/www
+///    ```
+///
+///    Result: `dir=/srv/www`, `mount_path="/assets"`.
+///
+/// 3. Camel.toml default: `[default.components.http-static] dir = "..."` sets
+///    the directory, and the URI `http-static:/` keeps it (resolved through
+///    [`HttpStaticConfig::from_uri_with_defaults`]).
+///
+/// # Root rule
+///
+/// A bare `http-static:/` is an error. It needs a `dir`, supplied by the
+/// `dir` query parameter or by Camel.toml.
+///
 /// # Config Resolution
 ///
 /// Camel.toml profile defaults are applied first, then URI params override
@@ -136,14 +167,14 @@ impl UriConfig for HttpStaticConfig {
 
         // The URI path becomes the mount_path (URL prefix).
         // If a `dir` query param is present, it overrides the directory.
-        // Otherwise, the URI path itself is the directory (backward compat).
+        // Otherwise, the URI path itself is the directory (path-as-dir form).
         let (dir, mount_path) = if parts.path.is_empty() {
             return Err(CamelError::InvalidUri(
                 "http-static URI requires a path (e.g. http-static:/path or http-static:/prefix?dir=/var/www)"
                     .to_string(),
             ));
         } else if let Some(dir_param) = parts.params.get("dir") {
-            // New style: URI path = mount_path, dir param = directory
+            // dir-param form: URI path = mount_path prefix, dir param = directory
             let mount_path = normalize_mount_path(&parts.path);
             (PathBuf::from(dir_param), mount_path)
         } else if parts.path == "/" {
@@ -155,7 +186,7 @@ impl UriConfig for HttpStaticConfig {
                     .to_string(),
             ));
         } else {
-            // Old style (backward compat): URI path = directory, mount_path = "/"
+            // Path-as-dir form: URI path = directory, mounted at root (mount_path = "/")
             (PathBuf::from(&parts.path), default_mount_path())
         };
 
@@ -248,7 +279,7 @@ impl HttpStaticConfig {
         // URI path and dir param handling
         if !parts.path.is_empty() {
             if let Some(dir_param) = parts.params.get("dir") {
-                // New style: URI path = mount_path, dir param = directory
+                // dir-param form: URI path = mount_path prefix, dir param = directory
                 config.dir = PathBuf::from(dir_param);
                 config.mount_path = normalize_mount_path(&parts.path);
             } else if parts.path == "/" {
@@ -257,7 +288,7 @@ impl HttpStaticConfig {
                 // This handles routes like `http-static:/` where the TOML
                 // config provides the directory (e.g. `dir = "public"`).
             } else {
-                // Old style (backward compat): URI path = directory
+                // Path-as-dir form: URI path = directory, mounted at root
                 config.dir = PathBuf::from(&parts.path);
                 config.mount_path = default_mount_path();
             }
@@ -435,6 +466,32 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_uri_path_as_dir_form() {
+        let config = HttpStaticConfig::from_uri("http-static:/srv/www").unwrap();
+        assert_eq!(config.dir, PathBuf::from("/srv/www"));
+        assert_eq!(config.mount_path, "/");
+        assert_eq!(config.port, 8080);
+    }
+
+    #[test]
+    fn test_parse_uri_dir_param_with_prefix_form() {
+        let config = HttpStaticConfig::from_uri("http-static:/assets?dir=/srv/www").unwrap();
+        assert_eq!(config.dir, PathBuf::from("/srv/www"));
+        assert_eq!(config.mount_path, "/assets");
+    }
+
+    #[test]
+    fn test_parse_uri_root_without_dir_rejected() {
+        let result = HttpStaticConfig::from_uri("http-static:/");
+        assert!(result.is_err());
+        if let Err(CamelError::InvalidUri(msg)) = result {
+            assert!(msg.contains("requires a dir query parameter"));
+        } else {
+            panic!("Expected InvalidUri error for bare root mount");
+        }
+    }
+
+    #[test]
     fn test_parse_uri_invalid_port() {
         let result = HttpStaticConfig::from_uri("http-static:/app?port=notanumber");
         assert!(result.is_err());
@@ -592,6 +649,36 @@ mod tests {
     }
 
     #[test]
+    fn test_toml_dir_with_root_mount() {
+        let toml_defaults = HttpStaticConfig {
+            dir: PathBuf::from("/var/www"),
+            ..HttpStaticConfig::default()
+        };
+
+        let config =
+            HttpStaticConfig::from_uri_with_defaults("http-static:/", &toml_defaults).unwrap();
+
+        assert_eq!(config.dir, PathBuf::from("/var/www"));
+        assert_eq!(config.mount_path, "/");
+    }
+
+    #[test]
+    fn test_uri_with_defaults_root_without_any_dir_rejected() {
+        let toml_defaults = HttpStaticConfig {
+            dir: PathBuf::new(),
+            ..HttpStaticConfig::default()
+        };
+
+        let result = HttpStaticConfig::from_uri_with_defaults("http-static:/", &toml_defaults);
+        assert!(result.is_err());
+        if let Err(CamelError::InvalidUri(msg)) = result {
+            assert!(msg.contains("requires a directory path"));
+        } else {
+            panic!("Expected InvalidUri error for root mount without any dir");
+        }
+    }
+
+    #[test]
     fn test_uri_with_defaults_rejects_empty_dir() {
         let toml_defaults = HttpStaticConfig {
             dir: PathBuf::new(), // empty dir in TOML
@@ -630,7 +717,7 @@ mod tests {
 
     #[test]
     fn test_mount_path_from_uri_with_dir_param() {
-        // New style: URI path = mount_path, dir param = directory
+        // dir-param form: URI path = mount_path prefix, dir param = directory
         let config = HttpStaticConfig::from_uri("http-static:/assets?dir=/var/www").unwrap();
         assert_eq!(config.dir, PathBuf::from("/var/www"));
         assert_eq!(config.mount_path, "/assets");
@@ -638,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_mount_path_root_when_no_dir_param() {
-        // Old style: URI path = directory, mount_path = "/"
+        // Path-as-dir form: URI path = directory, mounted at root (mount_path = "/")
         let config = HttpStaticConfig::from_uri("http-static:/var/www").unwrap();
         assert_eq!(config.dir, PathBuf::from("/var/www"));
         assert_eq!(config.mount_path, "/");

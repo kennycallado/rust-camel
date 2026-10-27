@@ -10,8 +10,9 @@ Build integration routes in Rust or YAML using Tower-native pipelines.
 **rust-camel** connects timers, HTTP APIs, files, Kafka, Redis, SQL, and other
 systems through composable message routes. Use it when you need Apache
 [Camel](https://camel.apache.org/)-style routing and Enterprise Integration
-Patterns (EIP) without a JVM — every processor and producer is a
-`Service<Exchange>`, so EIP patterns compose as Tower middleware.
+Patterns (EIP) without a JVM. Producers and the top-level route pipeline are
+`Service<Exchange>`; patterns compose as Tower services or outcome-aware
+segments inside it.
 
 > **Status:** Pre-release. APIs may change.
 > Requires **Rust 1.89** or newer (stable).
@@ -69,8 +70,8 @@ shape of the problem.
 
 ### Why rust-camel?
 
-- **Composable by construction** — EIP patterns are Tower layers; chain them
-  the same way you chain `tower::Service`.
+- **Composable by construction** — producers and the route pipeline are Tower
+  services; patterns chain as Tower services or outcome-aware segments.
 - **Single binary, scratch containers** — ship routes as one Rust binary or a
   minimal Docker image.
 - **Declarative or code** — define routes in YAML with JSON-Schema validation
@@ -135,7 +136,7 @@ See the [CLI reference](https://kennycallado.github.io/rust-camel/docs/cli/index
 - **Component** — a connector (`timer`, `http`, `kafka`, ...) that creates
   **Endpoints** from URIs like `timer:tick?period=1000`.
 - **EIP pattern** — a routing/transformation step (filter, split, choice,
-  aggregate, ...) applied as Tower middleware on the data plane.
+  aggregate, ...) compiled into the data plane's Tower pipeline.
 
 ## Components & EIP Patterns
 
@@ -146,7 +147,7 @@ See the [CLI reference](https://kennycallado.github.io/rust-camel/docs/cli/index
 See [`crates/components/`](crates/components/) for the full set of
 implementations.
 
-**Enterprise Integration Patterns** (all chainable as Tower layers):
+**Enterprise Integration Patterns** (compiled to Tower services or outcome-aware segments, composed inside the route's Tower pipeline):
 
 | Pattern                    | Builder method                                |
 | -------------------------- | --------------------------------------------- |
@@ -409,8 +410,9 @@ Run any of them with `cargo run -p <name>`.
 
 rust-camel separates two planes:
 
-- **Data plane** — Tower-native. Every processor and producer is a
-  `Service<Exchange>`; EIP patterns compose as Tower middleware.
+- **Data plane** — Tower-native. Producers and the top-level route pipeline
+  are `Service<Exchange>`; patterns compile to Tower services or outcome-aware
+  segments inside it.
 - **Control plane** — a trait hierarchy (`Component`, `Endpoint`, `Consumer`)
   for route lifecycle, supervision, and hot-reload.
 

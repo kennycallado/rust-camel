@@ -363,14 +363,16 @@ The `http-static` scheme serves static files with optional SPA fallback, custom 
 
 ### URI Format
 
-```
-http-static:<mount-path>?dir=/path/to/files&options
-```
+You can supply the directory in three forms:
 
-**Examples:**
-- `http-static:/?dir=/var/www` — serve on root
-- `http-static:/assets?dir=/var/www/assets` — serve on `/assets` prefix
-- `http-static:/app?dir=/var/www/spa&spaFallback=true` — SPA mode
+- **Path-as-dir at root** — the URI path is the directory, mounted at `/`:
+  - `http-static:/srv/www` — `dir=/srv/www`, `mount_path="/"`
+- **`?dir=` with an optional prefix** — the URI path is the mount-path prefix, `dir` is the directory:
+  - `http-static:/assets?dir=/srv/www` — `dir=/srv/www`, `mount_path="/assets"`
+  - `http-static:/app?dir=/var/www/spa&spaFallback=true` — SPA mode on `/app`
+- **Camel.toml default** — `[default.components.http-static] dir = "..."` supplies the directory, and the URI `http-static:/` keeps it.
+
+A bare `http-static:/` is an error. It needs a `dir`, from the `dir` query parameter or from Camel.toml.
 
 ### Consumer Options
 

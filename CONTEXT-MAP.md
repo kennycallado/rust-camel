@@ -4,7 +4,7 @@
 
 - [API Contracts](./crates/camel-api/CONTEXT.md) — pure contract crate: canonical data types (Exchange, Message, Body, CamelError) and EIP/trait abstractions (Processor, BoxProcessor, PipelineOutcome, CQRS bus traits, CanonicalRouteSpec). Type-definition site; behavioral vocabulary lives in Runtime.
 - [Runtime](./crates/camel-core/CONTEXT.md) — core execution engine: Exchange lifecycle, Route management, and component/language/function/service registries
-- [Processor (EIP)](./crates/camel-processor/CONTEXT.md) — Enterprise Integration Patterns as Tower middleware: pipeline-step implementations such as Filter, Choice, Wire Tap, Load Balancer, Enrich, Aggregate, and Do Try that execute inside a Route on the data plane
+- [Processor (EIP)](./crates/camel-processor/CONTEXT.md) — Enterprise Integration Patterns as Tower-style services and outcome-aware segments: pipeline-step implementations such as Filter, Choice, Wire Tap, Load Balancer, Enrich, Aggregate, and Do Try that execute inside a Route on the data plane
 - [Builder](./crates/camel-builder/CONTEXT.md) — programmatic route authoring: the fluent Rust `RouteBuilder` API that constructs a `RouteDefinition` (and `CanonicalRouteSpec` on the canonical path) by method chaining
 - [DSL](./crates/camel-dsl/CONTEXT.md) — declarative route authoring: YAML/JSON configuration format (`RouteDslRoute` AST) that parses to the same `RouteDefinition` (ADR-0017, ADR-0026)
 - [Config](./crates/camel-config/CONTEXT.md) — platform configuration loading and resolution: `CamelConfig` deserialization, unified `${env:}` placeholder interpolation (tree walk via camel-dsl `interpolate_env`), component discovery, and hot-reload wiring

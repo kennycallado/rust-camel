@@ -32,7 +32,7 @@ The include shows both ends of a Route. `RouteBuilder::from("timer:tick?...")` i
 
 A Pipeline is the compiled assembly of Processors that processes an Exchange through a Route. Each Processor is a single processing unit. It can be an EIP pattern (filter, choice, split, setBody) or a custom step that receives and returns an Exchange.
 
-The data plane runs on Tower ([ADR-0001](../adr/0001-tower-data-plane-split-from-control-plane.md)). Every processor and producer is a `Service<Exchange>`. The Tower `Layer` trait composes these services into a chain at build time. This is the architectural advantage over Apache Camel. Middleware, backpressure, timeout, and cancellation compose through one uniform trait instead of ad-hoc hooks.
+The data plane runs on Tower ([ADR-0001](../adr/0001-tower-data-plane-split-from-control-plane.md)). Producers and the top-level route pipeline are `Service<Exchange>`. Structural and outcome-aware EIP patterns compile to `OutcomePipeline` segments (`CompiledStep::Segment`, [ADR-0025](../adr/0025-outcome-aware-structural-eips.md)) executed inside the route's Tower service; non-structural processors compile to process steps. Composition happens at route-compile time into these `CompiledStep` variants, not through Tower `Layer` chains. This is the architectural advantage over Apache Camel. Backpressure, timeout, and cancellation compose through one uniform service boundary instead of ad-hoc hooks.
 
 ## Pipeline outcome and flow control
 

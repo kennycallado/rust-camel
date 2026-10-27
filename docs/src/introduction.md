@@ -5,8 +5,10 @@ timers, HTTP APIs, files, message brokers, databases, and LLMs. You compose
 each route from Enterprise Integration Patterns.
 
 The pattern vocabulary comes from Apache Camel. The implementation does not.
-Every processor and producer is a Tower `Service<Exchange>`. A route is a
-middleware chain, so backpressure, timeouts, and cancellation are built in.
+Producers and the top-level route pipeline are Tower `Service<Exchange>`.
+Structural and outcome-aware EIPs run as segments inside that service. A route
+is a middleware chain, so backpressure, timeouts, and cancellation are built
+in.
 The compiler checks the route before it runs. See [ADR-0001](adr/0001-tower-data-plane-split-from-control-plane.md) for the data-plane
 design.
 

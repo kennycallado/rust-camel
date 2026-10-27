@@ -18,6 +18,6 @@ Use the Idempotent Consumer when a route must tolerate redelivery without repeat
 
 The redis repository registers under the name `"redis"`, so a route selects it with `repository = "redis"`. A redis repository also shares deduplication keys across processes.
 
-The Idempotent Consumer differs from the [Claim Check](claim-check.md). Both use a repository trait. The Idempotent Consumer stores only the key. The Claim Check stores the full payload. Per [ADR-0025](../adr/0025-outcome-aware-structural-eips.md), the consumer is an outcome-aware segment. Per [ADR-0001](../adr/0001-tower-data-plane-split-from-control-plane.md), it compiles into a `Service<Exchange>` step in the Tower middleware pipeline. The processor contract is documented in [camel-processor/CONTEXT.md](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-processor/CONTEXT.md).
+The Idempotent Consumer differs from the [Claim Check](claim-check.md). Both use a repository trait. The Idempotent Consumer stores only the key. The Claim Check stores the full payload. Per [ADR-0025](../adr/0025-outcome-aware-structural-eips.md), the consumer is an outcome-aware segment: it compiles into an `OutcomePipeline` segment (`CompiledStep::Segment`) executed inside the route's Tower service. The processor contract is documented in [camel-processor/CONTEXT.md](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-processor/CONTEXT.md).
 
 The example source is at [`examples/idempotent-consumer`](https://github.com/kennycallado/rust-camel/tree/main/examples/idempotent-consumer).

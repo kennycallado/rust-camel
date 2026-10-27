@@ -17,6 +17,11 @@ before the type change. `Send`/`Sync` safety is now proven by the compiler.
 The `INVARIANT` rule (no interior mutability) is not what the compiler
 proves. Types with interior mutability such as `Mutex` are still `Sync`.
 
+> Sections below this amendment are preserved as history and use the
+> pre-change name `BoxCloneService`; `BoxProcessor` is
+> `tower::util::BoxCloneSyncService` today (Send + Sync). See the Amendment
+> above for the current state.
+
 ## Context
 `SequentialPipeline` and `TracedPipeline` held `Vec<CompiledStep>` and cloned
 the entire Vec (including all boxed services) per Exchange in `call()`. Each
@@ -39,15 +44,16 @@ by reference, cloning only the single step being invoked.
 - No observable behavior change — only allocation cost reduced.
 
 ## Safety
-`CompiledStep` contains `BoxProcessor` (`BoxCloneService`) and
-`Box<dyn OutcomePipeline>`, both `Send + !Sync`. The std `Arc<T>: Send`
-bound therefore fails to hold. We work around it with a private newtype
+`CompiledStep` contains `BoxProcessor` (`BoxCloneService`), which is
+`Send + Sync`, and `Box<dyn OutcomePipeline>`, which is `Send + !Sync`. The
+std `Arc<T>: Send` bound therefore fails to hold because of the
+outcome-pipeline half. We work around it with a private newtype
 in `route_compiler.rs`:
 
 - `SharedSnapshot(Arc<[CompiledStep]>)` — adds unconditional `Send`/`Sync`
-  impls. The `!Sync` on the inner types is an artifact of Tower's
-  trait-object bounds (`Box<dyn ... + Send>` lacks `+ Sync`), NOT a sign
-  of interior mutability. Concurrent `&CompiledStep` access is sound
+  impls. The `!Sync` comes from the `Box<dyn OutcomePipeline + Send>` trait
+  object (`OutcomePipeline` has no `Sync` bound), NOT from `BoxProcessor` or
+  from interior mutability. Concurrent `&CompiledStep` access is sound
   because `run_steps` only reads shared references and `.clone()`s owned
   copies before invoking.
 

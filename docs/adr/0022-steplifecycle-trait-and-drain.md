@@ -8,7 +8,7 @@
 
 ### Separate `StepLifecycle` trait (not on `Processor`)
 
-Stateful pipeline steps (aggregators, idempotent repositories, resequencers, gap-detectors) own background work — timers, buckets, queues, timeout tasks — that outlives a single `process()` call. They need a shutdown hook. This hook is a **separate trait** (`StepLifecycle`), NOT a method on `Service<Exchange>`. Motivation: type erasure. `BoxProcessor = BoxCloneService<Exchange, Exchange, CamelError>` erases the concrete type; adding a trait method to `Service` would require a custom wrapper or vtable extension. A standalone trait collected at compile time avoids this.
+Stateful pipeline steps (aggregators, idempotent repositories, resequencers, gap-detectors) own background work — timers, buckets, queues, timeout tasks — that outlives a single `process()` call. They need a shutdown hook. This hook is a **separate trait** (`StepLifecycle`), NOT a method on `Service<Exchange>`. Motivation: type erasure. `BoxProcessor = BoxCloneSyncService<Exchange, Exchange, CamelError>` erases the concrete type; adding a trait method to `Service` would require a custom wrapper or vtable extension. A standalone trait collected at compile time avoids this.
 
 File: `crates/camel-api/src/step_lifecycle.rs:31`
 

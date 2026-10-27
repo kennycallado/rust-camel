@@ -49,3 +49,7 @@ Public contract `BoxProcessor = Service<Exchange, Response=Exchange, Error=Camel
 
 Per oracle M3 strategy: parallel construction, per-EIP switch. Build infrastructure beside current path; migrate one EIP at a time; delete `StopService`/`CamelError::Stopped` last. See `docs/superpowers/plans/2026-06-22-rc-5uv-phase-4-outcome-aware-eip.md` for task sequence.
 
+
+## Status update (2026-10-27)
+
+Nine structural EIPs originally carried dual implementations (a Tower `*Service` plus an `OutcomeSegment`). rc-ut13q (commit `7b1467aa3`, "drop the dual structural Tower services") deleted seven — Filter, Choice, Loop, Throttle, Splitter, Multicast, and LoadBalancer — because the compiler only ever drove the segments. Mission 420 (commit `6e48e00eb`) deleted `DoTryService`, which only the Rust builder `.do_try()` path used; the builder now compiles to `DoTrySegment`. `StreamingSplitterService` remains pending rc-ltbwi. The dual shape is not supported API.

@@ -6,7 +6,7 @@
 
 ## Decision
 
-Introduce `PipelineOutcome` as the return type of the **route pipeline executor** (`run_steps`), NOT as the `Response` type of every `Service<Exchange>`. The Tower data plane (`BoxProcessor = BoxCloneService<Exchange, Exchange, CamelError>`) is unchanged.
+Introduce `PipelineOutcome` as the return type of the **route pipeline executor** (`run_steps`), NOT as the `Response` type of every `Service<Exchange>`. The Tower data plane (`BoxProcessor = BoxCloneSyncService<Exchange, Exchange, CamelError>`) is unchanged.
 
 ```rust,ignore
 /// Result of executing a full route pipeline (multiple steps).
