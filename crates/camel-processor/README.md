@@ -74,7 +74,7 @@ let dynamic_delayer = DelayerService::new(
 ### With RouteBuilder (Recommended)
 
 ```rust
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 
 let route = RouteBuilder::from("timer:tick")
     .set_header("processed", Value::Bool(true))
@@ -98,7 +98,7 @@ let route = RouteBuilder::from("timer:tick")
 | `SetBody` | Replace message body |
 | `MapBody` | Transform message body |
 | `SplitSegment` | Split messages (outcome pipeline) |
-| `StreamingSplitterService` | Split lazy streams with lookahead (ZIP, future CSV/Tar) |
+| `StreamingSplitSegment` | Split lazy streams with lookahead (ZIP, future CSV/Tar), via `RouteBuilder::stream_split` |
 | `AggregatorService` | Combine messages |
 | `MulticastSegment` | Parallel routing (outcome pipeline) |
 | `WireTapService` | Side-channel routing |
@@ -243,7 +243,7 @@ The `DataFormat` trait defines serialization/deserialization for message bodies:
 ### Usage with RouteBuilder
 
 ```rust
-use camel_builder::RouteBuilder;
+use camel_builder::{RouteBuilder, StepAccumulator};
 
 let route = RouteBuilder::from("direct:in")
     .unmarshal("json")
@@ -282,22 +282,22 @@ Accepts `Body::Bytes`, `Body::Text`, or `Body::Stream` — streams are materiali
 ### Programmatic API
 
 ```rust
-use camel_processor::{StreamingSplitterService, ZipSplitConfig, zip_splitter};
-use camel_api::{AggregationStrategy, Body, Exchange, Message};
+use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_processor::{ZipSplitConfig, zip_splitter};
+use camel_api::AggregationStrategy;
 
 let config = ZipSplitConfig {
     max_entries: 100,
     max_total_decompressed_size: 50 * 1024 * 1024, // 50 MB
     ..Default::default()
 };
-let expression = zip_splitter(config);
-let sub_pipeline = my_processor;
-let mut svc = StreamingSplitterService::new(
-    expression,
-    sub_pipeline,
-    AggregationStrategy::LastWins,
-    true, // stop_on_exception
-);
+
+let route = RouteBuilder::from("timer:zip?period=1000")
+    .stream_split(zip_splitter(config))
+    .aggregation(AggregationStrategy::LastWins)
+    .to("log:entry")
+    .end_stream_split()
+    .build()?;
 ```
 
 ### Entry Headers

@@ -119,7 +119,7 @@ Status values: `stable` means normal public API, and `legacy-pending-removal` me
 | `SortExpression`, `SortKey`, `SortService` | stable | `pub use sort::{...}` | Body sort EIP. |
 | `SplitSegment` | stable | `pub use split_segment::SplitSegment` | Split EIP. |
 | `StreamCacheService` | stable | `pub use stream_cache::StreamCacheService` | Stream body materialization. |
-| `StreamingSplitSegment`, `StreamingSplitterService` | stable | `pub use streaming_split_segment::StreamingSplitSegment`; `pub use streaming_splitter::StreamingSplitterService` | Streaming Split EIP; service poll_ready migration pending. |
+| `StreamingSplitSegment` | stable | `pub use streaming_split_segment::StreamingSplitSegment` | Streaming Split EIP. |
 | `ThrottleSegment` | stable | `pub use throttler::ThrottleSegment` | Throttle EIP. |
 | `ValidateService` | stable | `pub use validate::ValidateService` | Predicate validation. |
 | `WireTapConfig`, `WireTapLayer`, `WireTapLifecycle`, `WireTapService` | stable | `pub use wire_tap::{...}` | WireTap EIP; poll_ready migrated per ADR-0019. `WireTapLifecycle` is the lifecycle handle for graceful-drain-then-abort teardown (ADR-0022). |
@@ -135,7 +135,6 @@ ADR-0019 requires processors whose errors are routable/recoverable events to avo
 | `AggregatorService` | starts the TTL sweep lazily, then returns `Ready(Ok(()))` | migrated | Readiness does not probe an endpoint. `call` owns aggregation state and also performs inline TTL eviction. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for AggregatorService`. |
 | `RecipientListService` | `Ready(Ok(()))` unconditional | migrated | Dynamic recipients resolve and check readiness in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for RecipientListService`. |
 | `WireTapService` | `Ready(Ok(()))` unconditional | migrated | Fire-and-forget tap readiness is checked inside the tap task; the main route never blocks on the tap (ADR-0019). See `fn poll_ready` in `impl Service<Exchange> for WireTapService`. |
-| `StreamingSplitterService` | delegates to sub-pipeline | pending-fix | Streaming fragment processing checks readiness in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for StreamingSplitterService`. |
 | `SecurityPolicyService` | delegates to inner service | excluded | Authz faults are outside normal EIP recovery per ADR-0010. See `fn poll_ready` in `impl Service<Exchange> for SecurityPolicyService`. |
 
 ## Language
@@ -201,7 +200,7 @@ _Avoid_: global reopen, shared latch (use per-handle latch, single-handle discip
 
 ## Aggregation contract (divergence from Apache Camel)
 
-`StreamingSplitterService` invokes the configured
+`StreamingSplitSegment` invokes the configured
 `AggregationStrategy` with a `Vec<Result<Exchange, CamelError>>` — failed
 fragments appear as `Err(e)` entries in the Vec, NOT as Exchanges with the
 exception attached. This diverges permanently from Apache Camel, where the

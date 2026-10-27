@@ -157,6 +157,7 @@ fn walk_steps<'a>(steps: &'a [BuilderStep], uris: &mut Vec<&'a str>, dynamic_dis
             BuilderStep::DeclarativeFilter { steps, .. }
             | BuilderStep::DeclarativeSplit { steps, .. }
             | BuilderStep::DeclarativeStreamSplit { steps, .. }
+            | BuilderStep::StreamSplit { steps, .. }
             | BuilderStep::Split { steps, .. }
             | BuilderStep::Filter { steps, .. }
             | BuilderStep::Multicast { steps, .. }

@@ -51,7 +51,7 @@ semantics.
 | `AggregatorService` | Aggregation buckets and timeout work are call-time state; readiness has no external endpoint to validate. | migrated |
 | `RecipientListService` | Recipients are dynamically resolved; readiness is per resolved recipient in `call()`. | migrated |
 | `WireTapService` | Fire-and-forget tap failures MUST NOT block the main pipeline. | pending-fix |
-| `StreamingSplitterService` | Streaming fragment readiness is checked per fragment in `call()`; outer readiness MUST NOT abort before stream policy runs. | pending-fix |
+| `StreamingSplitterService` | Streaming fragment readiness was checked per fragment in `call()`; outer readiness MUST NOT abort before stream policy runs. | deleted (rc-ltbwi / mission 422) — replaced by `StreamingSplitSegment`, which has no Tower readiness contract |
 
 `MulticastService`, `LoadBalancerService`, and `SplitterService` were removed: their EIPs now run as outcome-layer segments (`MulticastSegment`, `LoadBalanceSegment`, `SplitSegment`) with no Tower readiness contract.
 

@@ -25,7 +25,9 @@ The Streaming Splitter is a Message Routing pattern from Hohpe and Woolf. It spl
 
 </details>
 
-The included example builds a `Body::Stream` that holds three NDJSON chunks. A `StreamingSplitterService` reads the stream through a `StreamSplitCodec`, which resolves the format from the content type. For `application/x-ndjson`, the codec parses each line into a separate fragment exchange. The sub-pipeline logs each fragment. When the split scope closes, the aggregation strategy combines the fragment outputs into the result body.
+The included example builds a `Body::Stream` that holds three NDJSON chunks. The route calls `.stream_split(expression)` on the `RouteBuilder`, where the expression is a `StreamingSplitExpression`. The compiler turns that expression into a `StreamingSplitSegment`. The expression reads the stream through a `StreamSplitCodec`, which resolves the format from the content type. For `application/x-ndjson`, the codec parses each line into a separate fragment exchange. The sub-pipeline logs each fragment. When the split scope closes, the aggregation strategy combines the fragment outputs into the result body.
+
+Each fragment carries `CamelSplitIndex` always, and `CamelSplitComplete` as a boolean on every fragment (`true` only on the last one). `CamelSplitSize` is unknown until end-of-stream, so it is present only on the last fragment. A `Body::Stream` original body in the parent exchange is sanitized to `Body::Empty` before aggregation. Because the last fragment is only known once the source signals its end (one-entry lookahead), its completion stamps are applied at end-of-stream; the source is never polled past that point.
 
 Archive formats are not handled by the incremental codec. The `zip`, `tar`, and `tar.gz` format names route to materialized archive splitters: the [ZIP Splitter](zip-splitter.md) and the [TAR Splitter](tar-splitter.md) each parse their own archive structure, with no generic archive-splitting abstraction between them.
 

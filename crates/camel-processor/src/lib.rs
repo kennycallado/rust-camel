@@ -43,7 +43,6 @@ pub mod splitter;
 pub mod stream_cache;
 pub mod stream_codec;
 pub mod streaming_split_segment;
-pub mod streaming_splitter;
 pub mod tar_splitter;
 #[cfg(test)]
 mod test_log_capture;
@@ -111,7 +110,6 @@ pub use sort::{SortKey, SortKeySource, SortService};
 pub use split_segment::SplitSegment;
 pub use stream_cache::StreamCacheService;
 pub use streaming_split_segment::StreamingSplitSegment;
-pub use streaming_splitter::StreamingSplitterService;
 pub use throttler::ThrottleSegment;
 pub use validate::ValidateService;
 pub use wire_tap::{WireTapConfig, WireTapLayer, WireTapLifecycle, WireTapService};

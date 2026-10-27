@@ -163,6 +163,7 @@ fn count_sentinels_anywhere(steps: &[BuilderStep]) -> usize {
             BuilderStep::DeclarativeFilter { steps, .. }
             | BuilderStep::DeclarativeSplit { steps, .. }
             | BuilderStep::DeclarativeStreamSplit { steps, .. }
+            | BuilderStep::StreamSplit { steps, .. }
             | BuilderStep::Split { steps, .. }
             | BuilderStep::Filter { steps, .. }
             | BuilderStep::Multicast { steps, .. } => {

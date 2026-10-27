@@ -4,7 +4,7 @@
 //!
 //! 1. **ZipDataFormat** — marshal text into a single-entry ZIP, unmarshal back
 //! 2. **ZipSplitter** — split a multi-entry ZIP into one exchange per entry
-//! 3. **StreamingSplitterService** — process entries sequentially with aggregation
+//! 3. **Stream split route** — process entries sequentially with aggregation
 //!
 //! Flow:
 //!   timer -> marshal to ZIP -> unmarshal (single-entry roundtrip)
@@ -16,14 +16,13 @@ use camel_api::body::Body;
 use camel_api::data_format::DataFormat;
 use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::splitter::AggregationStrategy;
-use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message};
+use camel_api::{CamelError, Exchange};
 use camel_builder::StepAccumulator;
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;
 use camel_processor::data_format::ZipDataFormat;
 use camel_processor::log::LogLevel;
-use camel_processor::streaming_splitter::StreamingSplitterService;
 use camel_processor::zip_splitter::{
     CAMEL_ZIP_ENTRY_INDEX, CAMEL_ZIP_ENTRY_NAME, CAMEL_ZIP_ENTRY_PATH, CAMEL_ZIP_ENTRY_SIZE,
     ZipSplitConfig, zip_splitter,
@@ -81,7 +80,7 @@ async fn main() -> Result<(), CamelError> {
     }
 
     // =========================================================================
-    // Route 2: Multi-entry ZIP split with StreamingSplitterService
+    // Route 2: Multi-entry ZIP split in a Camel route (timer-driven)
     // =========================================================================
     let zip_data = create_multi_entry_zip();
     println!(
@@ -98,8 +97,12 @@ async fn main() -> Result<(), CamelError> {
     };
     let expression = zip_splitter(config);
 
-    let log_pipeline = BoxProcessor::from_fn(|ex: Exchange| {
-        Box::pin(async move {
+    let route2 = camel_builder::RouteBuilder::from("timer:zip-split?period=3000&repeatCount=1")
+        .route_id("zip-split-route")
+        .set_body_fn(move |_ex: &Exchange| Body::Bytes(Bytes::from(zip_data.clone())))
+        .stream_split(expression)
+        .aggregation(AggregationStrategy::LastWins)
+        .process(|ex: Exchange| async move {
             let name = ex
                 .input
                 .headers
@@ -140,22 +143,9 @@ async fn main() -> Result<(), CamelError> {
             );
             Ok(ex)
         })
-    });
-
-    let svc = StreamingSplitterService::new(
-        expression,
-        log_pipeline,
-        AggregationStrategy::LastWins,
-        true,
-    );
-
-    let input_exchange = Exchange::new(Message::new(Body::Bytes(Bytes::from(zip_data))));
-    let result = tower::ServiceExt::oneshot(svc, input_exchange).await;
-
-    match result {
-        Ok(_) => println!("\n  ZIP split completed successfully."),
-        Err(e) => println!("\n  ZIP split failed: {e}"),
-    }
+        .end_stream_split()
+        .log("ZIP split completed", LogLevel::Info)
+        .build()?;
 
     // =========================================================================
     // Route 3: ZipDataFormat in a Camel route (timer-driven)
@@ -177,6 +167,7 @@ async fn main() -> Result<(), CamelError> {
         .build()?;
     // ANCHOR_END: zip-splitter-route
 
+    ctx.add_route_definition(route2).await?;
     ctx.add_route_definition(route).await?;
     ctx.start().await?;
 

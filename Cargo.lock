@@ -11508,11 +11508,13 @@ version = "0.61.1"
 dependencies = [
  "bytes",
  "camel-api",
+ "camel-builder",
+ "camel-component-log",
+ "camel-component-timer",
+ "camel-core",
  "camel-processor",
  "futures",
  "tokio",
- "tower 0.5.3",
- "tracing",
  "tracing-subscriber",
 ]
 
@@ -14777,7 +14779,6 @@ dependencies = [
  "camel-processor",
  "serde_json",
  "tokio",
- "tower 0.5.3",
  "tracing-subscriber",
  "zip",
 ]

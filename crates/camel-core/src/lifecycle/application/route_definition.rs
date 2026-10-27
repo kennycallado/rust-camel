@@ -93,6 +93,26 @@ impl std::fmt::Debug for DoTryFinallyClause {
     }
 }
 
+/// Opaque wrapper for a programmatic streaming-split expression.
+///
+/// `camel_api::StreamingSplitExpression` is a bare `Arc<dyn Fn …>` and has no
+/// `Debug` implementation; wrapping it keeps `BuilderStep`'s derived `Debug`
+/// while rendering the closure as opaque, mirroring `OpaqueProcessor`.
+#[derive(Clone)]
+pub struct StreamSplitExpression(pub camel_api::StreamingSplitExpression);
+
+impl std::fmt::Debug for StreamSplitExpression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StreamingSplitExpression(...)")
+    }
+}
+
+impl From<camel_api::StreamingSplitExpression> for StreamSplitExpression {
+    fn from(expression: camel_api::StreamingSplitExpression) -> Self {
+        Self(expression)
+    }
+}
+
 /// A step in an unresolved route definition.
 #[derive(Debug, Clone)]
 pub enum BuilderStep {
@@ -162,6 +182,16 @@ pub enum BuilderStep {
     /// Declarative stream split using a streaming split expression, resolved at route-add time.
     DeclarativeStreamSplit {
         stream_config: camel_api::StreamSplitConfig,
+        aggregation: camel_api::splitter::AggregationStrategy,
+        stop_on_exception: bool,
+        steps: Vec<BuilderStep>,
+    },
+    /// Programmatic stream split: the caller supplies the fragment expression directly
+    /// (e.g. built from `camel_processor::stream_codec` or `zip_splitter`). The expression
+    /// encapsulates the stream configuration; the compiled segment applies the same
+    /// aggregation and stop-on-exception semantics as the declarative form.
+    StreamSplit {
+        expression: StreamSplitExpression,
         aggregation: camel_api::splitter::AggregationStrategy,
         stop_on_exception: bool,
         steps: Vec<BuilderStep>,
@@ -412,6 +442,7 @@ impl BuilderStep {
 
             Self::DeclarativeSplit { .. }
             | Self::DeclarativeStreamSplit { .. }
+            | Self::StreamSplit { .. }
             | Self::Split { .. } => Some("split".into()),
 
             Self::DeclarativeDynamicRouter { .. } | Self::DynamicRouter { .. } => {
@@ -480,6 +511,7 @@ impl BuilderStep {
             | Self::DeclarativeFunction { .. }
             | Self::DeclarativeSplit { .. }
             | Self::DeclarativeStreamSplit { .. }
+            | Self::StreamSplit { .. }
             | Self::DeclarativeDynamicRouter { .. }
             | Self::DeclarativeRoutingSlip { .. }
             | Self::Split { .. }
@@ -558,6 +590,7 @@ impl BuilderStep {
             | Self::DeclarativeFunction { .. }
             | Self::DeclarativeSplit { .. }
             | Self::DeclarativeStreamSplit { .. }
+            | Self::StreamSplit { .. }
             | Self::DeclarativeDynamicRouter { .. }
             | Self::DeclarativeRoutingSlip { .. }
             | Self::Split { .. }

@@ -1,7 +1,8 @@
 //! # streaming-split
 //!
 //! Demonstrates the Streaming Split EIP — splitting a `Body::Stream` containing
-//! NDJSON into individual exchanges via `StreamingSplitterService` + `NdjsonCodec`.
+//! NDJSON into individual exchanges through a Camel route built with
+//! `RouteBuilder::stream_split` and an NDJSON `StreamSplitCodec`.
 //!
 //! Run with:
 //!   cargo run -p streaming-split
@@ -10,14 +11,17 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use camel_api::{
-    BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message,
+    CamelError, Exchange,
     body::{Body, StreamBody, StreamMetadata},
     splitter::{AggregationStrategy, StreamSplitConfig},
 };
+use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_component_log::LogComponent;
+use camel_component_timer::TimerComponent;
+use camel_core::context::CamelContext;
+use camel_processor::LogLevel;
 use camel_processor::stream_codec::{StreamSplitInput, resolve_format, resolve_incremental_codec};
-use camel_processor::streaming_splitter::StreamingSplitterService;
 use tokio::sync::Mutex;
-use tower::Service;
 
 fn make_ndjson_stream(lines: Vec<&'static str>) -> Body {
     let chunks: Vec<Result<Bytes, CamelError>> = lines
@@ -89,45 +93,43 @@ fn make_streaming_expression() -> camel_api::StreamingSplitExpression {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let expression = make_streaming_expression();
-
-    let sub_pipeline: BoxProcessor = BoxProcessor::from_fn(|ex| async move {
-        tracing::info!("[fragment] {:?}", ex.input.body);
-        Ok(ex)
-    });
+    let mut ctx = CamelContext::builder().build().await?;
+    ctx.register_component(TimerComponent::new());
+    ctx.register_component(LogComponent::new());
 
     // ANCHOR: streaming-split-route
-    let mut splitter = StreamingSplitterService::new(
-        expression,
-        sub_pipeline,
-        AggregationStrategy::CollectAll,
-        true,
-    );
-
     let ndjson = vec![
         r#"{"user":"alice","action":"login"}"#,
         r#"{"user":"bob","action":"purchase"}"#,
         r#"{"user":"charlie","action":"logout"}"#,
     ];
-    let exchange = Exchange::new(Message::new(make_ndjson_stream(ndjson)));
+
+    let route = RouteBuilder::from("timer:stream-split?period=3000&repeatCount=1")
+        .route_id("streaming-split-route")
+        // Fresh stream per timer firing: never reuse an already-consumed body.
+        .set_body_fn(move |_ex: &Exchange| make_ndjson_stream(ndjson.clone()))
+        .stream_split(make_streaming_expression())
+        .aggregation(AggregationStrategy::CollectAll)
+        .log("Streaming split fragment", LogLevel::Info)
+        .end_stream_split()
+        .log("Aggregated result body", LogLevel::Info)
+        .build()?;
+    // ANCHOR_END: streaming-split-route
+
+    ctx.add_route_definition(route).await?;
+    ctx.start().await?;
 
     println!("Streaming Split example");
     println!("Input: Body::Stream with 3 NDJSON lines");
     println!();
-
-    let _ = splitter.poll_ready(&mut std::task::Context::from_waker(
-        &futures::task::noop_waker(),
-    ));
-    let result = splitter.call(exchange).await?;
-
-    println!();
-    println!("Aggregated result body:");
-    println!("  {:?}", result.input.body);
-    // ANCHOR_END: streaming-split-route
-
-    println!();
-    println!("Done. Each NDJSON line was split into a separate exchange,");
+    println!("Each NDJSON line was split into a separate exchange,");
     println!("processed by the sub-pipeline (log), then aggregated.");
+    println!();
+    println!("Press Ctrl+C to stop.");
 
+    tokio::signal::ctrl_c().await.ok();
+
+    ctx.stop().await?;
+    println!("Done.");
     Ok(())
 }

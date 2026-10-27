@@ -147,6 +147,7 @@ fn for_each_step_uri<F: FnMut(&str)>(step: &BuilderStep, f: &mut F) {
         | BuilderStep::Split { steps, .. }
         | BuilderStep::DeclarativeSplit { steps, .. }
         | BuilderStep::DeclarativeStreamSplit { steps, .. }
+        | BuilderStep::StreamSplit { steps, .. }
         | BuilderStep::Multicast { steps, .. }
         | BuilderStep::Throttle { steps, .. }
         | BuilderStep::LoadBalance { steps, .. }

@@ -136,6 +136,35 @@ fn take_stream(stream_body: &camel_api::StreamBody) -> Result<ByteStream, CamelE
     }
 }
 
+/// Compile the shared tail of a stream split: children sub-pipeline plus the
+/// aggregating `StreamingSplitSegment`. Both `DeclarativeStreamSplit` and
+/// `StreamSplit` resolve their expression first and delegate here so the
+/// segment-construction logic exists exactly once.
+fn compile_stream_split_segments(
+    ctx: &CompilationContext,
+    registry: &StepCompilerRegistry,
+    expression: camel_api::StreamingSplitExpression,
+    aggregation: camel_api::splitter::AggregationStrategy,
+    stop_on_exception: bool,
+    steps: Vec<BuilderStep>,
+) -> Result<CompileOutcome, CamelError> {
+    let (sub_segments, lifecycles) = ctx.compile_children_segments(steps, registry)?;
+    let body_segment = compose_outcome_segment(sub_segments);
+
+    let segment = camel_processor::StreamingSplitSegment {
+        expression,
+        body: body_segment,
+        aggregation,
+        stop_on_exception,
+    };
+    Ok(CompileOutcome::Matched(CompiledStep::Segment {
+        segment: camel_api::OutcomeSegment::new(Box::new(segment)),
+        body_contract: None,
+        lifecycle: pack_lifecycles(lifecycles),
+        label: None,
+    }))
+}
+
 pub(crate) struct SplittingCompiler;
 
 impl StepCompiler for SplittingCompiler {
@@ -240,9 +269,6 @@ impl StepCompiler for SplittingCompiler {
                 stream_config
                     .validate()
                     .map_err(|e| CamelError::Config(format!("invalid stream config: {e}")))?;
-                let (sub_segments, lifecycles) = ctx.compile_children_segments(steps, registry)?;
-                let body_segment = compose_outcome_segment(sub_segments);
-
                 let config_clone = stream_config.clone();
                 let zip_config = camel_processor::zip_splitter::ZipSplitConfig::default();
                 let tar_config = camel_processor::tar_splitter::TarSplitConfig::default();
@@ -470,19 +496,30 @@ impl StepCompiler for SplittingCompiler {
                     },
                 );
 
-                let segment = camel_processor::StreamingSplitSegment {
+                compile_stream_split_segments(
+                    ctx,
+                    registry,
                     expression,
-                    body: body_segment,
                     aggregation,
                     stop_on_exception,
-                };
-                Ok(CompileOutcome::Matched(CompiledStep::Segment {
-                    segment: camel_api::OutcomeSegment::new(Box::new(segment)),
-                    body_contract: None,
-                    lifecycle: pack_lifecycles(lifecycles),
-                    label: None,
-                }))
+                    steps,
+                )
             }
+
+            // ── StreamSplit (programmatic expression) ──
+            BuilderStep::StreamSplit {
+                expression,
+                aggregation,
+                stop_on_exception,
+                steps,
+            } => compile_stream_split_segments(
+                ctx,
+                registry,
+                expression.0,
+                aggregation,
+                stop_on_exception,
+                steps,
+            ),
 
             // ── Aggregate ──
             BuilderStep::Aggregate { config } => {
@@ -855,6 +892,326 @@ mod tests {
                     msg.contains("add an unmarshal step before split"),
                     "message: {msg}"
                 );
+            }
+            other => panic!(
+                "expected PipelineOutcome::Failed, got success={}",
+                other.is_success()
+            ),
+        }
+    }
+
+    /// A `StreamingSplitExpression` that turns each chunk of a `Body::Stream`
+    /// into one text fragment. Used by the programmatic `StreamSplit` tests.
+    fn line_stream_expression() -> camel_api::StreamingSplitExpression {
+        Arc::new(|exchange: Exchange| {
+            let (stream_body, parent) = match &exchange.input.body {
+                Body::Stream(sb) => (sb.clone(), {
+                    let mut p = exchange.branch_clone();
+                    p.input.body = Body::Empty;
+                    p
+                }),
+                _ => {
+                    return Box::pin(futures::stream::once(async move {
+                        Err(camel_api::streaming_split_type_error(&exchange.input.body))
+                    }));
+                }
+            };
+            let stream = match take_stream(&stream_body) {
+                Ok(s) => s,
+                Err(e) => return Box::pin(futures::stream::once(async move { Err(e) })),
+            };
+            Box::pin(async_stream::stream! {
+                let mut stream = stream;
+                while let Some(item) = stream.next().await {
+                    match item {
+                        Ok(bytes) => {
+                            let mut fragment = parent.branch_clone();
+                            fragment.input.body =
+                                Body::Text(String::from_utf8_lossy(&bytes).into_owned());
+                            yield Ok(fragment);
+                        }
+                        Err(e) => {
+                            yield Err(e);
+                            return;
+                        }
+                    }
+                }
+            })
+        })
+    }
+
+    /// Build an exchange whose body is a stream of one chunk per line.
+    fn stream_body_exchange(lines: &[&str]) -> Exchange {
+        let chunks: Vec<Result<Bytes, CamelError>> = lines
+            .iter()
+            .map(|line| Ok(Bytes::from(line.to_string())))
+            .collect();
+        let body = camel_api::StreamBody {
+            stream: Arc::new(tokio::sync::Mutex::new(Some(Box::pin(
+                futures::stream::iter(chunks),
+            )))),
+            metadata: camel_api::StreamMetadata::default(),
+        };
+        Exchange::new(camel_api::Message::new(Body::Stream(body)))
+    }
+
+    /// Compile a programmatic `StreamSplit` through the registry.
+    fn compile_programmatic_stream_split(
+        ctx: &CompilationContext<'_>,
+        registry: &StepCompilerRegistry,
+        expression: camel_api::StreamingSplitExpression,
+        aggregation: camel_api::splitter::AggregationStrategy,
+        stop_on_exception: bool,
+        steps: Vec<BuilderStep>,
+    ) -> camel_api::OutcomeSegment {
+        let split_step = BuilderStep::StreamSplit {
+            expression: expression.into(),
+            aggregation,
+            stop_on_exception,
+            steps,
+        };
+        match registry
+            .compile_step(split_step, 0, ctx)
+            .expect("compilation should succeed")
+            .expect("should match StreamSplit")
+        {
+            CompiledStep::Segment { segment, .. } => segment,
+            other => panic!("Expected CompiledStep::Segment, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_split_compiles_and_aggregates_fragments() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let child_counter = counter.clone();
+        let steps = vec![BuilderStep::Processor(OpaqueProcessor(
+            BoxProcessor::from_fn(move |ex: Exchange| {
+                child_counter.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(ex) })
+            }),
+        ))];
+
+        let reg = build_registry();
+        let mut segment = compile_programmatic_stream_split(
+            &ctx,
+            &reg,
+            line_stream_expression(),
+            camel_api::splitter::AggregationStrategy::CollectAll,
+            true,
+            steps,
+        );
+
+        let outcome = segment.run(stream_body_exchange(&["a", "b", "c"])).await;
+
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+        match outcome {
+            PipelineOutcome::Completed(ex) => match &ex.input.body {
+                Body::Json(Value::Array(items)) => {
+                    assert_eq!(items.len(), 3);
+                    assert_eq!(items[0], Value::String("a".into()));
+                    assert_eq!(items[1], Value::String("b".into()));
+                    assert_eq!(items[2], Value::String("c".into()));
+                }
+                other => panic!("expected Body::Json array, got {other:?}"),
+            },
+            other => panic!(
+                "expected PipelineOutcome::Completed, got success={}",
+                other.is_success()
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_split_stop_on_exception_true_halts() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let child_counter = counter.clone();
+        let steps = vec![BuilderStep::Processor(OpaqueProcessor(
+            BoxProcessor::from_fn(move |ex: Exchange| {
+                let invocation = child_counter.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if invocation == 0 {
+                        Err(CamelError::ProcessorError("boom-first".into()))
+                    } else {
+                        Ok(ex)
+                    }
+                })
+            }),
+        ))];
+
+        let reg = build_registry();
+        let mut segment = compile_programmatic_stream_split(
+            &ctx,
+            &reg,
+            line_stream_expression(),
+            camel_api::splitter::AggregationStrategy::CollectAll,
+            true,
+            steps,
+        );
+
+        let outcome = segment.run(stream_body_exchange(&["a", "b", "c"])).await;
+
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        match outcome {
+            PipelineOutcome::Failed(err) => {
+                assert!(err.to_string().contains("boom-first"), "error: {err}");
+            }
+            other => panic!(
+                "expected PipelineOutcome::Failed, got success={}",
+                other.is_success()
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_split_continue_collects_last_error() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let child_counter = counter.clone();
+        let steps = vec![BuilderStep::Processor(OpaqueProcessor(
+            BoxProcessor::from_fn(move |_ex: Exchange| {
+                let invocation = child_counter.fetch_add(1, Ordering::SeqCst);
+                Box::pin(
+                    async move { Err(CamelError::ProcessorError(format!("boom-{invocation}"))) },
+                )
+            }),
+        ))];
+
+        let reg = build_registry();
+        let mut segment = compile_programmatic_stream_split(
+            &ctx,
+            &reg,
+            line_stream_expression(),
+            camel_api::splitter::AggregationStrategy::CollectAll,
+            false,
+            steps,
+        );
+
+        let outcome = segment.run(stream_body_exchange(&["a", "b", "c"])).await;
+
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+        match outcome {
+            PipelineOutcome::Failed(err) => {
+                assert!(err.to_string().contains("boom-2"), "error: {err}");
+            }
+            other => panic!(
+                "expected PipelineOutcome::Failed, got success={}",
+                other.is_success()
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_split_non_stream_body_surfaces_expression_error() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let reg = build_registry();
+        let mut segment = compile_programmatic_stream_split(
+            &ctx,
+            &reg,
+            line_stream_expression(),
+            camel_api::splitter::AggregationStrategy::CollectAll,
+            true,
+            vec![],
+        );
+
+        let exchange = Exchange::new(camel_api::Message::new(Body::Text("x".into())));
+        let outcome = segment.run(exchange).await;
+
+        match outcome {
+            PipelineOutcome::Failed(err) => {
+                let msg = err.to_string();
+                assert!(
+                    matches!(err, CamelError::TypeConversionFailed(_)),
+                    "expected TypeConversionFailed, got: {msg}"
+                );
+                assert!(msg.contains("streaming split"), "message: {msg}");
+                assert!(msg.contains("stream"), "message: {msg}");
+                assert!(msg.contains("text"), "message: {msg}");
             }
             other => panic!(
                 "expected PipelineOutcome::Failed, got success={}",

@@ -32,7 +32,9 @@ use camel_api::{
     },
 };
 use camel_component_api::ConcurrencyModel;
-use camel_core::route::{BuilderStep, DeclarativeWhenStep, RouteDefinition, WhenStep};
+use camel_core::route::{
+    BuilderStep, DeclarativeWhenStep, RouteDefinition, StreamSplitExpression, WhenStep,
+};
 use camel_processor::{
     ConvertBodyTo, DynamicSetHeader, LogLevel, MapBody, MarshalService, SetHeader,
     StreamCacheService, UnmarshalService, builtin_data_format,
@@ -663,6 +665,27 @@ impl RouteBuilder {
         SplitBuilder {
             parent: self,
             config,
+            steps: Vec::new(),
+        }
+    }
+
+    /// Begin a streaming-split sub-pipeline. The caller supplies the fragment
+    /// expression directly (e.g. built from `camel_processor::stream_codec` or
+    /// `zip_splitter`); steps added after this call (until `.end_stream_split()`)
+    /// run once per fragment. Defaults: aggregation `LastWins`,
+    /// `stop_on_exception` true.
+    ///
+    /// Returns a `StreamSplitBuilder` — you cannot call `.build()` until
+    /// `.end_stream_split()` closes the split scope (enforced by the type system).
+    pub fn stream_split(
+        self,
+        expression: camel_api::StreamingSplitExpression,
+    ) -> StreamSplitBuilder {
+        StreamSplitBuilder {
+            parent: self,
+            expression: expression.into(),
+            aggregation: camel_api::splitter::AggregationStrategy::LastWins,
+            stop_on_exception: true,
             steps: Vec::new(),
         }
     }
@@ -1340,7 +1363,9 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::RecipientList { .. } => "recipient_list",
         BuilderStep::DeclarativeRecipientList { .. } => "declarative_recipient_list",
         BuilderStep::DeclarativeSetProperty { .. } => "set_property",
-        BuilderStep::DeclarativeStreamSplit { .. } => "stream_split",
+        BuilderStep::DeclarativeStreamSplit { .. } | BuilderStep::StreamSplit { .. } => {
+            "stream_split"
+        }
         BuilderStep::Enrich { .. } => "enrich",
         BuilderStep::PollEnrich { .. } => "poll_enrich",
         BuilderStep::Validate { .. } => "validate",
@@ -1455,6 +1480,54 @@ impl FilterInSplitBuilder {
 }
 
 impl StepAccumulator for FilterInSplitBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
+    }
+}
+
+/// Builder for the sub-pipeline within a `.stream_split()` ... `.end_stream_split()`
+/// block.
+///
+/// The caller supplies the streaming fragment expression directly; sub-steps
+/// added here run once per fragment. Calling `.end_stream_split()` packages
+/// the sub-steps into a `BuilderStep::StreamSplit` and returns the parent
+/// `RouteBuilder`.
+pub struct StreamSplitBuilder {
+    parent: RouteBuilder,
+    expression: StreamSplitExpression,
+    aggregation: camel_api::splitter::AggregationStrategy,
+    stop_on_exception: bool,
+    steps: Vec<BuilderStep>,
+}
+
+impl StreamSplitBuilder {
+    /// Set the aggregation strategy applied to fragment results.
+    pub fn aggregation(mut self, strategy: camel_api::splitter::AggregationStrategy) -> Self {
+        self.aggregation = strategy;
+        self
+    }
+
+    /// Set whether the first fragment error stops the split. Defaults to `true`.
+    pub fn stop_on_exception(mut self, stop: bool) -> Self {
+        self.stop_on_exception = stop;
+        self
+    }
+
+    /// Close the stream-split scope. Packages the accumulated sub-steps into a
+    /// `BuilderStep::StreamSplit` and returns the parent `RouteBuilder`.
+    pub fn end_stream_split(mut self) -> RouteBuilder {
+        let step = BuilderStep::StreamSplit {
+            expression: self.expression,
+            aggregation: self.aggregation,
+            stop_on_exception: self.stop_on_exception,
+            steps: self.steps,
+        };
+        self.parent.steps.push(step);
+        self.parent
+    }
+}
+
+impl StepAccumulator for StreamSplitBuilder {
     fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
         &mut self.steps
     }
@@ -4598,5 +4671,75 @@ mod tests {
         // per-clone `to` step: the clone is a deep copy, not an alias.
         assert_eq!(route_a.steps().len(), route_b.steps().len());
         assert_eq!(route_a.from_uri(), route_b.from_uri());
+    }
+
+    // ── stream_split builder tests ──────────────────────────────────────────
+
+    fn test_stream_split_expression() -> camel_api::StreamingSplitExpression {
+        camel_processor::zip_splitter::zip_splitter(
+            camel_processor::zip_splitter::ZipSplitConfig::default(),
+        )
+    }
+
+    #[test]
+    fn stream_split_builder_emits_variant_with_defaults() {
+        let definition = RouteBuilder::from("direct:start")
+            .route_id("stream-split-defaults")
+            .stream_split(test_stream_split_expression())
+            .log("fragment", LogLevel::Info)
+            .end_stream_split()
+            .build()
+            .expect("route should build");
+
+        let steps = definition.steps();
+        assert_eq!(steps.len(), 1);
+        match &steps[0] {
+            BuilderStep::StreamSplit {
+                aggregation,
+                stop_on_exception,
+                steps,
+                ..
+            } => {
+                assert!(matches!(
+                    aggregation,
+                    camel_api::splitter::AggregationStrategy::LastWins
+                ));
+                assert!(*stop_on_exception);
+                assert_eq!(steps.len(), 1);
+            }
+            other => panic!("expected StreamSplit step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_split_builder_setters_override() {
+        let definition = RouteBuilder::from("direct:start")
+            .route_id("stream-split-overrides")
+            .stream_split(test_stream_split_expression())
+            .aggregation(camel_api::splitter::AggregationStrategy::CollectAll)
+            .stop_on_exception(false)
+            .log("fragment", LogLevel::Info)
+            .end_stream_split()
+            .build()
+            .expect("route should build");
+
+        let steps = definition.steps();
+        assert_eq!(steps.len(), 1);
+        match &steps[0] {
+            BuilderStep::StreamSplit {
+                aggregation,
+                stop_on_exception,
+                steps,
+                ..
+            } => {
+                assert!(matches!(
+                    aggregation,
+                    camel_api::splitter::AggregationStrategy::CollectAll
+                ));
+                assert!(!*stop_on_exception);
+                assert_eq!(steps.len(), 1);
+            }
+            other => panic!("expected StreamSplit step, got {other:?}"),
+        }
     }
 }
