@@ -50,6 +50,7 @@ class JmsConsumerCompletionTest {
 
   private static final String DESTINATION = "queue:test";
   private static final String SUBSCRIPTION_ID = "sub-completion-test";
+  private static final long STOP_TIMEOUT_MS = 15_000L;
   private static final long AWAIT_SECONDS = 15L;
 
   @Mock JmsClientFactory factory;
@@ -102,6 +103,9 @@ class JmsConsumerCompletionTest {
       mocks.close();
     } catch (Exception ignored) {
     }
+    assertTrue(
+        consumer.awaitStopped(STOP_TIMEOUT_MS),
+        "the owner thread must release the journal before the temp-dir teardown");
   }
 
   /** Subscribes, waits for the single forwarded delivery, and returns it with its token checked. */

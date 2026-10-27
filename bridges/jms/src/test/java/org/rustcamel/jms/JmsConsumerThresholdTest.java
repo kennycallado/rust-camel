@@ -62,6 +62,7 @@ class JmsConsumerThresholdTest {
   private static final String SUBSCRIPTION_ID = "sub-threshold-test";
   private static final String MESSAGE_ID = "ID:1";
   private static final long AWAIT_SECONDS = 15L;
+  private static final long STOP_TIMEOUT_MS = 15_000L;
 
   @Mock JmsClientFactory factory;
   @Mock Connection connection;
@@ -73,6 +74,7 @@ class JmsConsumerThresholdTest {
 
   JournalService journal;
   JmsConsumer consumer;
+  JmsConsumer capped;
   TextMessage message;
 
   private AutoCloseable mocks;
@@ -111,6 +113,9 @@ class JmsConsumerThresholdTest {
 
   @AfterEach
   void tearDown() {
+    if (capped != null) {
+      capped.stop();
+    }
     if (consumer != null) {
       consumer.stop();
     }
@@ -119,6 +124,16 @@ class JmsConsumerThresholdTest {
         mocks.close();
       }
     } catch (Exception ignored) {
+    }
+    if (capped != null) {
+      assertTrue(
+          capped.awaitStopped(STOP_TIMEOUT_MS),
+          "the capped owner thread must release the journal before the temp-dir teardown");
+    }
+    if (consumer != null) {
+      assertTrue(
+          consumer.awaitStopped(STOP_TIMEOUT_MS),
+          "the owner thread must release the journal before the temp-dir teardown");
     }
   }
 
@@ -234,7 +249,7 @@ class JmsConsumerThresholdTest {
         new BridgeConfig(Map.of(BridgeConfig.MAX_DELIVERY_ATTEMPTS_ENV, "2")).maxDeliveryAttempts();
     assertEquals(2L, cap, "JMS_MAX_DELIVERY_ATTEMPTS=2 must be accepted as a valid cap");
 
-    JmsConsumer capped = new JmsConsumer();
+    capped = new JmsConsumer();
     capped.factory = factory;
     capped.configureJournal(journal, KEY, 1000L, null, cap);
     preReserve(MESSAGE_ID, 2);

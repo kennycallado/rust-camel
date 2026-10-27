@@ -1562,23 +1562,30 @@ class SoapEndpointPublisherTest {
       // Client authentication is REQUIRED: no client certificate, no completed exchange.
       // Under TLS 1.3 the client side of the handshake finishes before the server's
       // client-certificate verdict, so the rejection surfaces on the first I/O — both
-      // phases are covered here.
+      // phases are covered here. On Windows JSSE the server-side abort surfaces as a
+      // plain SocketException (connection reset/aborted), so either type is accepted;
+      // the exception message is not matched because it is OS- and locale-dependent.
       javax.net.ssl.SSLContext trustOnly =
           TestKeystoreHelper.trustOnlySslContext(material.clientCaPem());
       try (javax.net.ssl.SSLSocket socket =
           (javax.net.ssl.SSLSocket) trustOnly.getSocketFactory().createSocket("127.0.0.1", port)) {
         socket.setSoTimeout(5_000);
-        assertThrows(
-            javax.net.ssl.SSLException.class,
-            () -> {
-              socket.startHandshake();
-              socket
-                  .getOutputStream()
-                  .write("GET / HTTP/1.0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
-              socket.getOutputStream().flush();
-              int n = socket.getInputStream().read();
-              fail("client without a certificate must be rejected, read returned " + n);
-            });
+        java.io.IOException ex =
+            assertThrows(
+                java.io.IOException.class,
+                () -> {
+                  socket.startHandshake();
+                  socket
+                      .getOutputStream()
+                      .write("GET / HTTP/1.0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+                  socket.getOutputStream().flush();
+                  int n = socket.getInputStream().read();
+                  fail("client without a certificate must be rejected, read returned " + n);
+                });
+        assertTrue(
+            ex instanceof javax.net.ssl.SSLException || ex instanceof java.net.SocketException,
+            "client without a certificate must fail with SSLException or SocketException, got "
+                + ex);
       }
 
       // The same single identity accepts a CA-signed client certificate (mutual TLS).

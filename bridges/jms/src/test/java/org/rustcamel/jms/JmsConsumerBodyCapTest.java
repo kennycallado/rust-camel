@@ -49,6 +49,7 @@ class JmsConsumerBodyCapTest {
   private static final long TEST_CAP_BYTES = 1024;
   private static final String DESTINATION = "queue:test";
   private static final String SUBSCRIPTION_ID = "sub-body-cap-test";
+  private static final long STOP_TIMEOUT_MS = 15_000L;
 
   @Mock JmsClientFactory factory;
   @Mock Connection connection;
@@ -93,6 +94,9 @@ class JmsConsumerBodyCapTest {
   @AfterEach
   void tearDown() {
     consumer.stop();
+    assertTrue(
+        consumer.awaitStopped(STOP_TIMEOUT_MS),
+        "the owner thread must release the journal before the temp-dir teardown");
   }
 
   /**

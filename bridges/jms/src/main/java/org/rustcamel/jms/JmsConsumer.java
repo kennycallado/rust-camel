@@ -49,6 +49,10 @@ public class JmsConsumer {
   private volatile Session session;
   private volatile MessageConsumer consumer;
   private volatile boolean running = false;
+
+  /** Dedicated owner thread running the subscribe loop; null until the first subscribe. */
+  private volatile Thread ownerThread;
+
   private final AtomicBoolean resourcesClosed = new AtomicBoolean(false);
   private final long subscriptionGeneration = GENERATION_COUNTER.incrementAndGet();
 
@@ -295,6 +299,7 @@ public class JmsConsumer {
         new Thread(
             () -> runOwner(destination, observer, finished), "jms-consumer-" + subscriptionId);
     t.setDaemon(true);
+    ownerThread = t;
     t.start();
   }
 
@@ -754,6 +759,31 @@ public class JmsConsumer {
       stopping = true;
       settleLock.notifyAll();
     }
+  }
+
+  /**
+   * Waits, bounded, for the owner thread to close the JMS resources and release the journal.
+   *
+   * <p>Test seam: {@link #stop()} is deliberately non-blocking, so a caller that must observe the
+   * resources released (for example a Windows temp-dir teardown) can join the owner thread here.
+   * Returns immediately when no owner thread ever started.
+   *
+   * @param timeoutMs the maximum wait in milliseconds; non-positive values never block
+   * @return true when no owner thread is running or it terminated within the timeout
+   */
+  boolean awaitStopped(long timeoutMs) {
+    Thread owner = ownerThread;
+    if (owner == null) {
+      return true;
+    }
+    if (timeoutMs > 0L) {
+      try {
+        owner.join(timeoutMs);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+    return !owner.isAlive();
   }
 
   private void closeResources() {

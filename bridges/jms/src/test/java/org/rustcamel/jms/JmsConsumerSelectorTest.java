@@ -1,5 +1,6 @@
 package org.rustcamel.jms;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -12,10 +13,20 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.jms.Connection;
 import javax.jms.Destination;
 import javax.jms.InvalidSelectorException;
@@ -46,6 +57,8 @@ class JmsConsumerSelectorTest {
   private static final String SELECTOR = "priority > 5";
   private static final String INVALID_SELECTOR = "NONE SUCH >";
   private static final long AWAIT_SECONDS = 15L;
+  private static final long STOP_TIMEOUT_MS = 15_000L;
+  private static final String BROKER_KEY = "0123456789abcdef0123456789abcdef";
 
   @Mock JmsClientFactory factory;
   @Mock Connection connection;
@@ -56,6 +69,7 @@ class JmsConsumerSelectorTest {
   @TempDir Path tempDir;
 
   private AutoCloseable mocks;
+  private final List<JmsConsumer> consumers = new ArrayList<>();
 
   @BeforeEach
   void setUp() throws Exception {
@@ -72,6 +86,12 @@ class JmsConsumerSelectorTest {
     try {
       mocks.close();
     } catch (Exception ignored) {
+    }
+    for (JmsConsumer consumer : consumers) {
+      consumer.stop();
+      assertTrue(
+          consumer.awaitStopped(STOP_TIMEOUT_MS),
+          "the owner thread must release the journal before the temp-dir teardown");
     }
   }
 
@@ -173,6 +193,87 @@ class JmsConsumerSelectorTest {
     consumer.stop();
   }
 
+  /**
+   * Regression (rc-bihbp): {@code stop()} must let the owner thread close the journal channels and
+   * release the OS lock before a Windows temp-dir teardown tries to delete them. A leaked lock
+   * channel makes the journal directory undeletable there; the probe and delete below prove the
+   * release on Linux.
+   */
+  @Test
+  void stopReleasesJournalChannelsAndTempDirIsDeletable() throws Exception {
+    CountDownLatch opened = new CountDownLatch(1);
+    AtomicReference<FileChannel> captured = new AtomicReference<>();
+    JournalService journal =
+        new JournalService(
+            tempDir,
+            BridgeConfig.JOURNAL_MAX_BYTES_DEFAULT,
+            BridgeConfig.JOURNAL_RETENTION_MS_DEFAULT,
+            System::currentTimeMillis,
+            path -> {
+              FileChannel channel =
+                  FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE);
+              captured.set(channel);
+              opened.countDown();
+              return channel;
+            });
+    JmsConsumer consumer = new JmsConsumer();
+    consumers.add(consumer);
+    consumer.factory = factory;
+    consumer.configureJournal(journal, BROKER_KEY, 1000L, null);
+
+    consumer.subscribe(
+        DESTINATION,
+        SUBSCRIPTION_ID,
+        new JmsConsumerBodyCapTest.RecordingObserver(),
+        new AtomicBoolean(false));
+    assertTrue(opened.await(AWAIT_SECONDS, TimeUnit.SECONDS), "the journal channel must open");
+    FileChannel journalChannel = captured.get();
+
+    consumer.stop();
+    assertTrue(
+        consumer.awaitStopped(STOP_TIMEOUT_MS),
+        "the owner thread must terminate before the resources are probed");
+
+    assertFalse(journalChannel.isOpen(), "stop() must close the journal channel");
+
+    // A still-held process-wide FileLock keeps this acquire busy (the lock attempt is retried
+    // until the timeout, then fails with JournalPermanentException), so success proves release.
+    try (JournalService.JournalHandle probe =
+        new JournalService(
+                tempDir,
+                BridgeConfig.JOURNAL_MAX_BYTES_DEFAULT,
+                BridgeConfig.JOURNAL_RETENTION_MS_DEFAULT,
+                System::currentTimeMillis)
+            .acquire(BROKER_KEY, JournalService.destinationKey("test"), 1000L)) {
+      // Acquired: the destination lock was released.
+    }
+
+    deleteRecursively(tempDir);
+    assertFalse(Files.exists(tempDir), "the journal directory must be deletable after stop()");
+    // The extension deletes the root again at teardown, so put an empty directory back.
+    Files.createDirectories(tempDir);
+  }
+
+  /** Deletes {@code root} and everything below it. */
+  private static void deleteRecursively(Path root) throws IOException {
+    Files.walkFileTree(
+        root,
+        new SimpleFileVisitor<>() {
+          @Override
+          public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
+              throws IOException {
+            Files.delete(file);
+            return FileVisitResult.CONTINUE;
+          }
+
+          @Override
+          public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+            Files.delete(dir);
+            return FileVisitResult.CONTINUE;
+          }
+        });
+  }
+
   /** The subscribe request whose selector the bridge threads into the consumer. */
   private static SubscribeRequest subscribeRequest(String messageSelector) {
     return SubscribeRequest.newBuilder()
@@ -193,9 +294,10 @@ class JmsConsumerSelectorTest {
             BridgeConfig.JOURNAL_MAX_BYTES_DEFAULT,
             BridgeConfig.JOURNAL_RETENTION_MS_DEFAULT,
             System::currentTimeMillis),
-        "0123456789abcdef0123456789abcdef",
+        BROKER_KEY,
         1000L,
         null);
+    consumers.add(consumer);
     return consumer;
   }
 }

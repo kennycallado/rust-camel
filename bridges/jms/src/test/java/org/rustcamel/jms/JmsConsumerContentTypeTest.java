@@ -49,6 +49,7 @@ class JmsConsumerContentTypeTest {
 
   private static final String DESTINATION = "queue:test";
   private static final String SUBSCRIPTION_ID = "sub-content-type-test";
+  private static final long STOP_TIMEOUT_MS = 15_000L;
 
   @Mock JmsClientFactory factory;
   @Mock Connection connection;
@@ -93,6 +94,9 @@ class JmsConsumerContentTypeTest {
       mocks.close();
     } catch (Exception ignored) {
     }
+    assertTrue(
+        consumer.awaitStopped(STOP_TIMEOUT_MS),
+        "the owner thread must release the journal before the temp-dir teardown");
   }
 
   /** Common header/property stubbing; convertMessage touches these before the type branch. */
