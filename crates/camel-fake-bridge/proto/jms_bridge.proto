@@ -1,0 +1,94 @@
+syntax = "proto3";
+package jms_bridge;
+
+option java_package = "jms_bridge";
+option java_multiple_files = true;
+
+service BridgeService {
+  rpc Send(SendRequest) returns (SendResponse);
+  rpc Subscribe(SubscribeRequest) returns (stream JmsMessage);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Complete(CompletionRequest) returns (CompletionResponse);
+}
+
+message SendRequest {
+  string destination = 1;
+  bytes body = 2;
+  map<string, string> headers = 3;
+  string content_type = 4;
+}
+
+message SendResponse {
+  string message_id = 1;
+}
+
+message SubscribeRequest {
+  string destination = 1;
+  string subscription_id = 2;
+  string message_selector = 3;
+}
+
+message JmsMessage {
+  string message_id = 1;
+  string correlation_id = 2;
+  int64 timestamp = 3;
+  string destination = 4;
+  bytes body = 5;
+  map<string, string> headers = 6;
+  string content_type = 7;
+  string delivery_token = 8;
+  uint64 subscription_generation = 9;
+  uint32 reservation_count = 10;
+}
+
+message HealthRequest {}
+
+enum HealthStatus {
+  UNSPECIFIED = 0;
+  UP = 1;
+  STALE = 2;
+  UNKNOWN = 3;
+  SKIPPED = 4;
+  DOWN = 5;
+}
+
+enum BrokerFailureClass {
+  BROKER_FAILURE_CLASS_UNSPECIFIED = 0;
+  NETWORK = 1;
+  TLS_TRUST = 2;
+  TLS_HOSTNAME = 3;
+  TLS_CLIENT_AUTH = 4;
+  TLS_PROTOCOL = 5;
+  TLS_PLAINTEXT_PEER = 6;
+  UNSUPPORTED_TRANSPORT = 7;
+  AUTH = 8;
+  CLIENT_ID_IN_USE = 9;
+  OTHER = 10;
+}
+
+message HealthResponse {
+  bool healthy = 1;
+  bool broker_connected = 2;
+  string message = 3;
+  HealthStatus status = 4;
+  uint64 age_ms = 5;
+  repeated string capabilities = 6;
+  BrokerFailureClass failure_class = 7;
+}
+
+enum CompletionOutcome {
+  COMPLETION_OUTCOME_UNSPECIFIED = 0;
+  COMMIT = 1;
+  ROLLBACK = 2;
+}
+
+message CompletionRequest {
+  string subscription_id = 1;
+  uint64 subscription_generation = 2;
+  string delivery_token = 3;
+  CompletionOutcome outcome = 4;
+}
+
+message CompletionResponse {
+  bool accepted = 1;
+}

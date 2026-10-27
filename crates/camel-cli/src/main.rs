@@ -154,13 +154,31 @@ enum JournalAction {
     Inspect(commands::journal::JournalInspectArgs),
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // The watchdog hook MUST stay the first statement of `main`: it re-execs
+    // for the internal bridge-watchdog argv role. Anything that parses or
+    // consumes argv earlier — notably `self_detect_artifact` for a compiled
+    // artifact — would swallow the watchdog argv and the watchdog would never
+    // start. Unconditional in every flavor: camel-bridge is already in the
+    // closure via the xsd bridge (camel-component-validator). The call is a
+    // documented no-op on hosts without process groups.
+    camel_bridge::watchdog::maybe_run();
+
     // Install rustls crypto provider before any TLS operations.
     // The dep graph enables both ring and aws-lc-rs, so explicit selection
     // is required to avoid a runtime panic.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Runtime parity with the former `#[tokio::main]` default: multi-thread,
+    // all drivers enabled, default worker/stack sizing.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime"); // allow-unwrap
+    runtime.block_on(async_main());
+}
+
+async fn async_main() {
     // Self-detect a compiled artifact BEFORE Clap parses anything
     // (openspec cli-compile Task 2.3 and multidoc Task 2.3): a
     // trailer-free image returns `None` and falls through to the normal

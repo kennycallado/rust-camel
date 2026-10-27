@@ -30,6 +30,18 @@ The TLS material is generated before spawn. The child receives the cert paths th
 
 The connect step retries the TLS handshake up to ten times. Quarkus `PortAnnouncer` fires on `StartupEvent` and can precede full SSL listener readiness by a few hundred milliseconds in native images. The first attempt often fails. The retry loop absorbs that.
 
+## Containers and the TLS directory
+
+Ephemeral certificate files need a writable base directory. The crate resolves it in order:
+
+1. `$TMPDIR`, when set, non-empty, and usable.
+2. The system temporary directory, when usable.
+3. `{cache_dir}/{crate version}/tls`, created on demand.
+
+Each candidate is probed by performing the real temporary-directory creation, so there is no separate check-then-use window. Directories this crate creates get mode `0700`; pre-existing components keep their mode. If every candidate fails, the error names `XDG_CACHE_HOME` and `$TMPDIR` as remedies.
+
+With the watchdog hook installed, bridge routes start in shell-less images such as `production` (`scratch`) and `gnu` (distroless), and do not need a usable `/tmp`. The operator must provide one writable location for TLS material: a writable cache directory or a writable `$TMPDIR`. A read-only root filesystem with a non-root user works when a writable volume is mounted and `XDG_CACHE_HOME` points at it. The CI container guard exercises the default and the read-only variants.
+
 ## Process lifecycle
 
 `BridgeProcess::start_and_connect` performs the full bootstrap in one call. It validates the config, generates the TLS material, spawns the child, reads the ready line, then connects the channel. A bounded stdout drain runs in the background for the rest of the process lifetime.
@@ -42,7 +54,18 @@ Child stderr is owned by the parent by default: it is piped and drained with the
 
 ## Child process lifetime
 
-On Linux and macOS the bridge child cannot outlive the parent binary. Normal exit, panic, `SIGTERM`, `SIGINT`, and `SIGKILL` all kill the whole bridge process group: the bridge, any launcher descendants it created, and the watchdog. The mechanism is a supervisor-first POSIX-shell watchdog over a parent-liveness pipe. The parent creates the pipe and arms the watchdog before the bridge exists, and the bridge joins the watchdog's process group at exec. Any parent death closes the pipe write end, the watchdog sees EOF, and it `SIGKILL`s its own group. The watchdog ignores `SIGTERM` so a graceful teardown cannot disarm it, and the implementation uses only POSIX shell builtins, `setpgid`, `trap`, and `waitid` — it does not depend on `/proc`. The guarantee holds by design on both platforms and is verified on Linux; the macOS evidence suite has not been run.
+On Linux and macOS the bridge child cannot outlive the parent binary. Normal exit, panic, `SIGTERM`, `SIGINT`, and `SIGKILL` all kill the whole bridge process group: the bridge, any launcher descendants it created, and the watchdog. The watchdog supervises a process group over a parent-liveness pipe. The parent creates the pipe and arms the watchdog before the bridge exists, and the bridge joins the watchdog's process group at exec. Any parent death closes the pipe write end, the watchdog sees EOF, and it `SIGKILL`s its own group. The watchdog ignores `SIGTERM` so a graceful teardown cannot disarm it.
+
+With the embedder hook installed, the watchdog is the host binary re-executed in a hidden role: `argv[1]` is `__camel-bridge-watchdog`, `argv[2]` is ack fd 9, and the role writes one `0x01` acknowledgement byte. It refuses to arm unless it leads its own process group (exit 74), ignores `SIGTERM`, and `SIGKILL`s group 0 after stdin EOF. Linux execs literal `/proc/self/exe`; other Unix targets use the path captured at startup by `std::env::current_exe()`. POSIX `sh` remains only as the no-hook fallback, and no hook plus no shell fails closed naming both remedies. The guarantee holds by design on both platforms and is verified on Linux; the macOS evidence suite has not been run.
+
+The hook contract is strict. `camel_bridge::watchdog::maybe_run()` must be the first statement of a synchronous `main`, before any code consumes argv. In `camel-cli` it runs before `self_detect_artifact` and is unconditional in every flavor, slim included, because the xsd bridge (`camel-component-validator`) is an unconditional dependency. A compiled artifact would otherwise eat the watchdog argv.
+
+```rust,ignore
+fn main() {
+    camel_bridge::watchdog::maybe_run();
+    // build the async runtime and run the application
+}
+```
 
 Because the bridge runs outside the terminal's foreground process group, terminal `SIGINT`/`SIGHUP` reach the parent, not the bridge — the parent's cleanup handles them. Bridge `stdin` and `stdout` must stay piped (never a tty): a background process that reads or writes the terminal gets `SIGTTIN`/`SIGTTOU`.
 

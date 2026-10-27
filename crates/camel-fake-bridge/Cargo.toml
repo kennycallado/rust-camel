@@ -1,0 +1,23 @@
+[package]
+name = "camel-fake-bridge"
+description = "Static fake JMS bridge fixture for shell-less container smoke tests"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+tonic = { workspace = true, features = ["tls-ring"] }
+tonic-prost.workspace = true
+prost.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "macros", "signal"] }
+tokio-stream = { workspace = true, features = ["net"] }
+rustls.workspace = true
+
+[build-dependencies]
+tonic-prost-build.workspace = true
+protox.workspace = true
+
+[lints]
+workspace = true

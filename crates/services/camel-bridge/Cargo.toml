@@ -40,5 +40,9 @@ camel-component-api = { workspace = true, features = ["test-support"] }
 rustls-pemfile = "2"
 x509-parser = "0.18"
 
+[[test]]
+name = "watchdog_hook_e2e"
+harness = false
+
 [lints]
 workspace = true

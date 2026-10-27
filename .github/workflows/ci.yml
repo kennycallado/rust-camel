@@ -243,6 +243,14 @@ jobs:
           OUTPUT=$(docker run --rm camel-smoke:gnu --version)
           echo "$OUTPUT"
           echo "$OUTPUT" | grep -q "camel"
+      - name: Build fake-bridge fixture
+        run: |
+          cargo build -p camel-fake-bridge --release --target x86_64-unknown-linux-musl
+          cp target/x86_64-unknown-linux-musl/release/camel-fake-bridge context/camel-fake-bridge
+      - name: Bridge container guard
+        env:
+          FAKE_BRIDGE_BIN: context/camel-fake-bridge
+        run: bash .github/scripts/docker-bridge-guard.sh
 
   coverage:
     name: Coverage Check

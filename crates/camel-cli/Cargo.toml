@@ -51,6 +51,11 @@ tower = { workspace = true, features = ["util"] }
 camel-api.workspace = true
 camel-bean.workspace = true
 camel-bundles.workspace = true
+# Bridge watchdog hook: `main` re-execs for the internal watchdog argv role
+# before Clap/artifact detection can consume it. Non-optional because the xsd
+# bridge (camel-component-validator) is an unconditional camel-cli dependency,
+# so camel-bridge is already in every flavor's closure.
+camel-bridge.workspace = true
 camel-integration-test.workspace = true
 camel-dsl.workspace = true
 camel-core.workspace = true

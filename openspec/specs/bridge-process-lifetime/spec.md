@@ -5,7 +5,7 @@ TBD - created by archiving change bridge-child-lifetime. Update Purpose after ar
 ## Requirements
 ### Requirement: Supervisor-first process group supervision
 
-On Unix the system SHALL establish a shell watchdog as its own process-group
+On Unix the system SHALL establish a watchdog process as its own process-group
 leader BEFORE spawning the bridge, and the bridge child SHALL join that group
 via a child-side `pre_exec` `setpgid` before exec (a failed join SHALL abort
 the spawn before exec). All teardown paths SHALL signal process groups only —
@@ -36,15 +36,29 @@ liveness.
 
 ### Requirement: Parent-liveness watchdog
 
-On Unix the watchdog SHALL be a POSIX-shell process using builtins only —
-`trap "" TERM` for SIGTERM immunity, a `read` loop on the pipe, and its own
-group kill — with stdin connected to the read end of a close-on-exec pipe
-whose write end is held exclusively by the parent, and stdout/stderr NOT
-inherited from the parent. On pipe EOF the watchdog SHALL kill its own
-process group. Arming SHALL be verified by the parent (watchdog alive,
-leading its group, SIGTERM immunity established) before the bridge spawns,
-and establishment SHALL be fail-closed: inability to arm aborts `start()`
-with no bridge process existing.
+On Unix, when the host binary installed the startup hook —
+`camel_bridge::watchdog::maybe_run()` called as the first statement of a
+synchronous `main`, before any other argv consumer — the watchdog SHALL be
+the supervising executable itself, re-executed in a hidden watchdog role
+selected by the argv marker `__camel-bridge-watchdog` followed by the
+acknowledgement fd number. In that role the process SHALL refuse to arm —
+exiting non-zero before writing the acknowledgement — unless it is its own
+process-group leader, SHALL ignore `SIGTERM`, SHALL write the single
+acknowledgement byte to the inherited fd only after SIGTERM immunity is
+established, SHALL read stdin until EOF, and SHALL then kill its own process
+group. On Linux the supervising executable SHALL be re-executed via
+`/proc/self/exe`; on other Unix systems via the executable path captured at
+startup. When the hook is NOT installed, the system SHALL fall back to a
+POSIX-shell watchdog using builtins only (`trap "" TERM`, a `read` loop on
+the pipe, its own group kill). When neither the hook nor a POSIX shell is
+available, establishment SHALL fail closed with an error naming both
+remedies: installing the hook and providing a shell. In both forms the
+liveness pipe is close-on-exec with its write end held exclusively by the
+parent, stdout/stderr are NOT inherited from the parent, on pipe EOF the
+watchdog kills its own process group, and arming SHALL be verified by the
+parent (watchdog alive, leading its group, SIGTERM immunity established)
+before the bridge spawns. Establishment SHALL be fail-closed: inability to
+arm aborts `start()` with no bridge process existing.
 
 #### Scenario: Parent killed by SIGKILL
 
@@ -86,6 +100,39 @@ with no bridge process existing.
 - **WHEN** `start()` runs
 - **THEN** it returns an error and no bridge process was spawned or remains
   running
+
+#### Scenario: Start succeeds with an empty PATH and no shell
+
+- **GIVEN** a host binary that installed the hook, spawned with an empty
+  `PATH` and no shell present in the environment or image
+- **WHEN** `BridgeProcess::start` runs and the parent is stopped
+- **THEN** establishment succeeds through the self-executed watchdog, the
+  bridge becomes ready, and teardown leaves no group member running
+
+#### Scenario: No hook and no shell fails closed naming both remedies
+
+- **GIVEN** a host binary that never installed the hook, running where no
+  POSIX shell can be spawned
+- **WHEN** `BridgeProcess::start` runs
+- **THEN** it fails with an error that names both remedies — installing the
+  `maybe_run()` hook and providing a POSIX shell — and no bridge process
+  was spawned
+
+#### Scenario: Watchdog refuses to arm when it is not a group leader
+
+- **GIVEN** the watchdog role is invoked manually without becoming a process
+  group leader
+- **WHEN** the role starts
+- **THEN** it exits non-zero without writing the acknowledgement byte, and
+  the parent's arming verification fails closed
+
+#### Scenario: Hook precedes artifact self-detection
+
+- **GIVEN** a compiled artifact image whose runtime would otherwise consume
+  the process argv
+- **WHEN** the binary is re-executed with the watchdog role argv
+- **THEN** the role is handled by the hook before artifact self-detection
+  runs, and the watchdog arms normally
 
 ### Requirement: Startup-failure group cleanup
 
@@ -196,12 +243,48 @@ survivors.
 ### Requirement: Documented platform guarantees
 
 The bridge documentation SHALL state the child-lifetime guarantees per
-platform: full guarantee on Linux and macOS (POSIX shell builtins, `setpgid`,
-`trap`, and `waitid`, no `/proc` dependency), and explicit-path teardown only
-on Windows, where no process groups or watchdog exist.
+platform: full guarantee on Linux and macOS (`setpgid`, `waitid`, and the
+watchdog process — self-executed when the hook is installed, POSIX shell
+otherwise), and explicit-path teardown only on Windows, where no process
+groups or watchdog exist. The documentation SHALL state the container
+guarantee: bridges start in the `production` and `gnu` images with NO shell
+and NO `/tmp` present, provided the operator supplies a writable cache
+directory (or a writable `$TMPDIR`), and SHALL state the embedder contract
+for installing the hook.
 
 #### Scenario: Platform statement present
 
 - **WHEN** the bridge service documentation is inspected
 - **THEN** it states the Linux, macOS, and Windows child-lifetime behavior
+
+#### Scenario: Container statement present
+
+- **WHEN** the bridge service documentation is inspected
+- **THEN** it states that bridge routes start in the shell-less
+  `production`/`gnu` images without `/tmp`, and names the operator
+  requirements (writable cache dir or `$TMPDIR`, hook installation)
+
+### Requirement: TLS material directory without /tmp
+
+The TLS material generator SHALL resolve its base directory without requiring
+`/tmp`: `$TMPDIR` when set and usable, then the system temp directory when
+usable, then `{cache_dir}/{version}/tls` created with mode 0700. When no
+candidate is usable the error SHALL name the platform cache-directory
+override (`XDG_CACHE_HOME` on Linux) as the remedy. The per-spawn PEM files
+keep their unique directory, 0700/0600 permissions, and lifetime cleanup.
+
+#### Scenario: Falls through to the cache dir when TMPDIR and /tmp are unusable
+
+- **GIVEN** `$TMPDIR` unset or pointing at an unusable path and no usable
+  system temp directory
+- **WHEN** `BridgeTlsMaterial::generate()` runs
+- **THEN** the PEM files live under `{cache_dir}/{version}/tls` in a unique
+  0700 subdirectory and are removed on drop
+
+#### Scenario: Cache-dir failure names the env override
+
+- **GIVEN** no usable `$TMPDIR`, no usable system temp, and an unwritable
+  cache directory
+- **WHEN** `BridgeTlsMaterial::generate()` runs
+- **THEN** it fails with an error naming `XDG_CACHE_HOME` as the remedy
 

@@ -13,3 +13,8 @@ pub mod process;
 pub mod reconnect;
 pub mod spec;
 pub(crate) mod tls;
+/// Self-executing watchdog hook.
+///
+/// Cross-platform surface: [`watchdog::maybe_run`] is a documented no-op on
+/// non-Unix targets, where process groups and the role protocol do not exist.
+pub mod watchdog;

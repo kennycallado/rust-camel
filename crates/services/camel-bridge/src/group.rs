@@ -396,15 +396,81 @@ pub(crate) struct GroupGuard {
     _monitor: Option<std::thread::JoinHandle<()>>,
 }
 
+/// How the watchdog child is launched.
+enum WatchdogSpawn {
+    /// POSIX-shell fallback (`sh -c <armed script>`).
+    Shell(String),
+    /// Host binary re-executed in watchdog role.
+    Hook,
+}
+
+impl WatchdogSpawn {
+    /// Spawn failure, classified per launch kind.
+    ///
+    /// The shell branch names BOTH remedies when no hook is installed: the
+    /// caller has no shell watchdog and no self-exec fallback.
+    fn spawn_error(&self, err: &io::Error) -> BridgeError {
+        match self {
+            Self::Hook => supervision(format!("watchdog spawn (self-exec) failed: {err}")),
+            Self::Shell(program) => {
+                if crate::watchdog::hook_executable().is_some() {
+                    supervision(format!("watchdog spawn ({program}) failed: {err}"))
+                } else {
+                    supervision(format!(
+                        "watchdog spawn ({program}) failed: no POSIX sh available to run the \
+                         bridge watchdog and the host binary has no watchdog hook: call \
+                         camel_bridge::watchdog::maybe_run() as the first statement of main, or \
+                         provide a POSIX sh (error: {err})"
+                    ))
+                }
+            }
+        }
+    }
+}
+
 impl GroupGuard {
-    /// Establish a watchdog-guarded group using `sh` as the watchdog shell.
+    /// Establish a watchdog-guarded group.
+    ///
+    /// With the embedder hook installed ([`crate::watchdog::maybe_run`]) the
+    /// host binary itself is re-executed as the watchdog. Without the hook the
+    /// POSIX-shell fallback keeps the legacy protocol unchanged.
     pub(crate) fn establish() -> Result<Self, BridgeError> {
-        Self::establish_with_program("sh")
+        match crate::watchdog::hook_executable() {
+            Some(exe) => {
+                #[cfg(target_os = "linux")]
+                let _ = exe;
+                #[cfg(target_os = "linux")]
+                let program = std::path::PathBuf::from("/proc/self/exe");
+                #[cfg(not(target_os = "linux"))]
+                let program = exe.to_path_buf();
+                Self::establish_with_hook(&program)
+            }
+            None => Self::establish_with_program("sh"),
+        }
     }
 
-    /// Establish with an injectable watchdog program (tests inject a failing
-    /// one to prove fail-closed arming).
+    /// Establish with an injectable watchdog shell (tests inject a failing one
+    /// to prove fail-closed arming).
     pub(crate) fn establish_with_program(program: &str) -> Result<Self, BridgeError> {
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.arg("-c").arg(armed_script(ACK_FD));
+        Self::establish_spawn(cmd, WatchdogSpawn::Shell(program.to_string()))
+    }
+
+    /// Establish with the host binary re-executed in watchdog role.
+    fn establish_with_hook(program: &std::path::Path) -> Result<Self, BridgeError> {
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.arg(crate::watchdog::ROLE_MARKER)
+            .arg(ACK_FD.to_string());
+        Self::establish_spawn(cmd, WatchdogSpawn::Hook)
+    }
+
+    /// Shared arming core: pipes, process-group leadership, ack verification,
+    /// and the monitor thread. `cmd` already carries the watchdog arguments.
+    fn establish_spawn(
+        mut cmd: tokio::process::Command,
+        kind: WatchdogSpawn,
+    ) -> Result<Self, BridgeError> {
         let spawn_lock = lock(&PIPE_SPAWN_LOCK);
         let (live_read, live_write) =
             make_pipe().map_err(|err| supervision(format!("liveness pipe failed: {err}")))?;
@@ -412,12 +478,8 @@ impl GroupGuard {
             make_pipe().map_err(|err| supervision(format!("arming pipe failed: {err}")))?;
 
         let ack_raw = ack_write.as_raw_fd();
-        let script = armed_script(ACK_FD);
 
-        let mut cmd = tokio::process::Command::new(program);
-        cmd.arg("-c")
-            .arg(script)
-            .stdin(Stdio::from(File::from(live_read)))
+        cmd.stdin(Stdio::from(File::from(live_read)))
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
@@ -447,9 +509,7 @@ impl GroupGuard {
             });
         }
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|err| supervision(format!("watchdog spawn ({program}) failed: {err}")))?;
+        let mut child = cmd.spawn().map_err(|err| kind.spawn_error(&err))?;
 
         // The child owns the dup'd ack fd; closing our copy here means both an
         // EOF and a successful ack are observable without waiting out the
@@ -939,6 +999,29 @@ mod tests {
             return;
         }
         panic!("expected fail-closed Supervision error");
+    }
+
+    /// No hook installed in this test process, so a shell that cannot spawn
+    /// must fail closed and name BOTH remedies in the error.
+    #[test]
+    fn no_hook_no_shell_fails_closed_names_both_remedies() {
+        let err = match GroupGuard::establish_with_program("/nonexistent/sh") {
+            Ok(_) => panic!("expected fail-closed Supervision error"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("watchdog spawn"),
+            "error must keep the watchdog-spawn context: {message}"
+        );
+        assert!(
+            message.contains("maybe_run"),
+            "error must name the hook remedy: {message}"
+        );
+        assert!(
+            message.contains("POSIX sh"),
+            "error must name the shell remedy: {message}"
+        );
     }
 
     #[tokio::test]

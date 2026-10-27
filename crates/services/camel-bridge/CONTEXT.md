@@ -40,18 +40,24 @@ stateful resources.
 
 ## Child process lifetime
 
-`BridgeProcess` supervises its child through a supervisor-first POSIX-shell
-watchdog over a parent-liveness pipe on Linux and macOS. The watchdog is armed
+`BridgeProcess` supervises its child through a supervisor-first watchdog
+process group over a parent-liveness pipe on Linux and macOS. With the embedder
+hook installed, the watchdog is the host binary re-executed in a hidden role
+(`argv[1]` `__camel-bridge-watchdog`, ack fd 9, ack byte `0x01`); the role
+refuses to arm unless it leads its own group (exit 74), ignores `SIGTERM`, and
+`SIGKILL`s group 0 on stdin EOF. Linux sources the executable from literal
+`/proc/self/exe`; other Unix targets use the path captured at startup by
+`std::env::current_exe()`. POSIX `sh` remains only as the no-hook fallback; no
+hook plus no shell fails closed naming both remedies. The watchdog is armed
 before the bridge is spawned, and the bridge joins the watchdog's process group
 at exec. When the parent dies for any reason — normal exit, panic, `SIGTERM`,
 `SIGINT`, or `SIGKILL` — the pipe write end closes, the watchdog sees EOF, and it
 `SIGKILL`s its own group. The bridge, launcher descendants, and the watchdog all
-die together. The mechanism uses only POSIX shell builtins, `setpgid`, `trap`,
-and `waitid`, with no `/proc` dependency. This guarantee is the fix for bd
-`rc-r8od1`.
+die together. The mechanism needs no `/proc` dependency on the shell path. This
+guarantee is the fix for bd `rc-r8od1`.
 
-The watchdog is SIGTERM-immune (`trap "" TERM`), so a graceful stop cannot
-disarm the parent-death backstop. Teardown signals process groups only, never
+The watchdog ignores `SIGTERM`, so a graceful stop cannot disarm the
+parent-death backstop. Teardown signals process groups only, never
 bare PIDs. The awaited `stop()` performs the graceful bounded sequence:
 `SIGTERM` to the group, a bounded non-reaping wait, unconditional group
 `SIGKILL`, invalidation of the stored group id, then reaping of both the bridge

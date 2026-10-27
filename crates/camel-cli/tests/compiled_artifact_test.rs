@@ -1820,6 +1820,140 @@ fn trailer_free_binary_keeps_normal_cli() {
     );
 }
 
+/// Bounded read of whatever is available on `fd`, or an empty vector on
+/// timeout. Used to observe the watchdog acknowledgement pipe without parking
+/// the test if no byte ever arrives.
+#[cfg(all(
+    unix,
+    any(feature = "jms", feature = "cxf", feature = "xj", feature = "xslt")
+))]
+fn read_available_bounded(fd: std::os::fd::RawFd, timeout: Duration) -> Vec<u8> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Vec::new();
+        }
+        let millis = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: pollfd points at one valid descriptor description.
+        let rc = unsafe { libc::poll(&mut pollfd, 1, millis.max(1)) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            panic!("poll watchdog ack pipe: {err}");
+        }
+        if rc == 0 {
+            return Vec::new();
+        }
+        let mut buf = [0u8; 64];
+        // SAFETY: buf is a valid 64-byte destination.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            panic!("read watchdog ack pipe: {err}");
+        }
+        return buf[..n as usize].to_vec();
+    }
+}
+
+/// A compiled artifact's `main` must run the watchdog hook BEFORE artifact
+/// self-detection consumes argv. Re-execute the artifact in the hidden role
+/// with a real fd-9 acknowledgement pipe and an open stdin liveness pipe:
+///
+/// - hook first: exactly one `0x01` ack byte appears and the process stays
+///   alive while stdin is open;
+/// - artifact detection first: the role argv reaches Clap, no ack is written,
+///   and the assertion fails.
+///
+/// The child leads a fresh process group (the role refuses to arm otherwise),
+/// mirroring `group::establish_spawn`'s `setpgid` + `dup2` pre-exec sequence.
+#[cfg(all(
+    unix,
+    any(feature = "jms", feature = "cxf", feature = "xj", feature = "xslt")
+))]
+#[test]
+fn compiled_artifact_handles_watchdog_role_before_self_detection() {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+
+    // Mirrors `camel_bridge::watchdog::ROLE_MARKER`; kept literal so this test
+    // still compiles when the bridge dependency is disabled by features.
+    const ROLE_MARKER: &str = "__camel-bridge-watchdog";
+    const ACK_FD: i32 = 9;
+
+    let (deploy, artifact) = deploy_artifact(&fixture().route);
+    let (ack_read, ack_write) = std::io::pipe().expect("create ack pipe");
+    let ack_write_fd = ack_write.as_raw_fd();
+
+    let mut cmd = Command::new(&artifact);
+    cmd.arg(ROLE_MARKER)
+        .arg(ACK_FD.to_string())
+        .current_dir(deploy.path())
+        // Held open by the parent: the armed role blocks on stdin, not EOF.
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // SAFETY: only async-signal-safe setpgid/dup2/fcntl calls run between fork
+    // and exec, mirroring `group::establish_spawn`.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if ack_write_fd != ACK_FD && libc::dup2(ack_write_fd, ACK_FD) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::fcntl(ACK_FD, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = {
+        let _guard = common::artifact_spawn_lock()
+            .lock()
+            .expect("artifact spawn lock");
+        cmd.spawn().expect("spawn artifact in watchdog role")
+    };
+    let mut child = KillOnDrop(child);
+    // The parent must not hold a write end while observing the ack.
+    drop(ack_write);
+    let _liveness = child.0.stdin.take().expect("stdin piped");
+
+    let ack = read_available_bounded(ack_read.as_raw_fd(), Duration::from_secs(10));
+    assert_eq!(
+        ack,
+        vec![0x01],
+        "the hook must write exactly one ack byte before artifact self-detection; \
+         got {ack:?} (artifact detection consumed the role argv first)"
+    );
+    assert!(
+        child.0.try_wait().expect("poll artifact role").is_none(),
+        "the armed watchdog role must stay alive while stdin is open"
+    );
+    let extra = read_available_bounded(ack_read.as_raw_fd(), Duration::from_millis(150));
+    assert!(
+        extra.is_empty(),
+        "the hook writes exactly one ack byte, got extra {extra:?}"
+    );
+
+    let _ = child.0.kill();
+    assert!(
+        common::wait_exit_bounded(&mut child.0, Duration::from_secs(10)),
+        "artifact watchdog role did not exit after SIGKILL"
+    );
+}
+
 /// `--manifest` prints the operational manifest and exits 0 without
 /// booting the embedded route.
 #[test]
