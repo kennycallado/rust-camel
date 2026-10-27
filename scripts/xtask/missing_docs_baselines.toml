@@ -1,0 +1,35 @@
+# Baselines for `cargo xtask lint-missing-docs-ratchet` (ADR-0091 §5).
+#
+# A crate's `missing_docs` warning count may not increase above its baseline.
+# Counts may fall freely; update the baseline by hand when docs are added so
+# the ceiling keeps ratcheting down.
+#
+# Measurement: the lint runs `cargo check` with
+# `RUSTFLAGS=--warn missing_docs` injected by the command itself, so the lint
+# fires without a crate-level `#![warn(missing_docs)]` attribute. The counts
+# below are real measurements taken through that injection (dependency-aware,
+# filtered to the crate's own spans), not probe values contingent on a
+# committed attribute. Do not raise a count — add docs instead.
+#   camel-api       656
+#   camel-core      394  (raised +4 by 422 streaming-split, rc-9at09 resume)
+#   camel-builder    37
+#   camel-processor 279  (dropped -8 by 422 streaming-split)
+#   camel-dsl       809
+
+[camel-api]
+count = 656
+
+[camel-core]
+count = 394
+
+[camel-builder]
+count = 37
+
+[camel-processor]
+count = 279
+
+[camel-endpoint]
+count = 0
+
+[camel-dsl]
+count = 809

@@ -14,7 +14,7 @@ use camel_api::CamelError;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::ComponentBundle;
 use camel_component_llm::LlmBundle;
-use camel_component_llm::headers::*;
+use camel_component_llm::headers::CAMEL_LLM_TOOLS;
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::context::CamelContext;

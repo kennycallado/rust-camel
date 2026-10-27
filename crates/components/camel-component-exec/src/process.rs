@@ -83,11 +83,9 @@ pub fn kill_tree(child: &mut tokio::process::Child) {
     let Some(pid) = child.id() else { return };
     #[cfg(unix)]
     {
-        // SAFETY: sending SIGKILL to a negative pid signals the whole process group.
-        // This is a kernel syscall with no in-process memory-safety implications.
-        // pid is guaranteed non-zero (guarded above) so we cannot accidentally kill
-        // our own process group. The return value is intentionally ignored (best-effort
-        // kill — the child may already have exited).
+        // SAFETY: a negative pid signals the whole process group; pid is non-zero
+        // (guarded above), so this cannot reach our own group. The syscall has no
+        // in-process memory-safety preconditions and its result is best-effort.
         unsafe {
             libc::kill(-(pid as i32), libc::SIGKILL);
         }

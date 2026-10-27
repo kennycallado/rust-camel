@@ -50,6 +50,12 @@
       --features flavor-regular,exec --all-targets -- -D warnings
 - name: lint-unwrap
   run: cargo xtask lint-unwrap
+- name: lint-glob-imports
+  run: cargo xtask lint-glob-imports
+- name: lint-unsafe-safety
+  run: cargo xtask lint-unsafe-safety
+- name: lint-missing-docs-ratchet
+  run: cargo xtask lint-missing-docs-ratchet
 - name: lint-secrets
   run: cargo xtask lint-secrets
 - name: lint-single-source
@@ -102,6 +108,24 @@
 - name: cargo-audit
   run: cargo audit
 ```
+
+## NEW-CODE-ONLY STYLE NORMS (ADR-0091)
+
+These norms apply to new code. Existing code is grandfathered; do not retrofit in a feature PR. Full policy: `docs/adr/0091-rust-style-policy.md`.
+
+- Qualify top-level function calls with the module (`mem::transmute(x)` not `transmute(x)`).
+- Import types unqualified (`use regex::Regex; Regex::new()`); call functions via their module.
+- Locally-scoped trait imports unless the trait is used file-wide.
+- One module per `use` statement (no `use foo::{Bar, baz::Baz}` nested braces).
+- `enum` over `bool` for non-obvious API parameters.
+- Named fields over multi-field tuples.
+- Prefer `Into<T>` and `impl IntoIterator` in library APIs; `&[T]`/`&str`/`&T` over `&Vec`/`&String`/`&Box`.
+- `expect("reason")` over `unwrap()` outside tests (`lint-unwrap` enforces the ban).
+- Options structs implement `Default`; newtypes over aliases when the alias would leak invariants.
+- Pattern-match over check-then-unwrap.
+- Context strings in `assert!` when failure is not self-evident.
+- Macros: prefer functions, then `macro_rules!`, then proc-macros.
+- `#[must_use]` on public error types and pure functions where ignoring the return is a bug.
 
 ## COMMIT CONVENTION (caveman-commit, strict)
 

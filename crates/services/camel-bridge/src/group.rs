@@ -102,6 +102,8 @@ fn make_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 /// Non-reaping "has this child exited?" probe (`WNOWAIT` keeps it waitable).
 /// Returns `true` on error as well, so callers fail closed.
 fn child_exited(pid: u32) -> bool {
+    // SAFETY: siginfo_t is a plain C struct; all-zero is a valid initial value
+    // before waitid fills it.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     // SAFETY: `info` is a valid, writable siginfo_t; P_PID + our own child.
     let rc = unsafe {

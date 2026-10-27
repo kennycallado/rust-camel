@@ -1,0 +1,18 @@
+# rustfmt configuration for rust-camel.
+#
+# Per ADR-0091 §1 (rust-camel style policy). Stable knobs only; nightly-only
+# options (`format_macro_matchers`, `imports_granularity`, `group_imports`)
+# are explicitly NOT set — see ADR-0091 "Explicit exceptions".
+#
+# `max_width = 100` matches the rustfmt default; pinned explicitly so a
+# future rustfmt default change cannot drift the tree.
+#
+# `hex_literal_case = "Lower"` was originally adopted per the gap-analysis
+# ERRATA (it is silently accepted by `rustfmt --config` on stable), but
+# `cargo fmt` rejects it as unstable on the rustfmt-as-a-library path. It is
+# removed here so the tree formats cleanly through the gate that actually
+# runs in CI (`cargo fmt --check --all`). Re-evaluate when rustfmt ships it
+# as a stable knob through cargo-fmt.
+
+edition = "2024"
+max_width = 100

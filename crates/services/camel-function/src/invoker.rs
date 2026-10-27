@@ -2,7 +2,10 @@ use crate::config::FunctionConfig;
 use crate::pool::{RunnerPool, RunnerPoolKey, RunnerState};
 use crate::provider::{FunctionHealthStatus, FunctionProvider};
 use camel_api::Exchange;
-use camel_api::function::*;
+use camel_api::function::{
+    ExchangePatch, FunctionDefinition, FunctionDiff, FunctionId, FunctionInvocationError,
+    FunctionInvoker, FunctionInvokerSync, PrepareToken,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

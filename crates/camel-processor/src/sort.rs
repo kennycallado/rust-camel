@@ -16,7 +16,7 @@ pub struct SortKey(pub serde_json::Value);
 
 impl Ord for SortKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        use serde_json::Value::*;
+        use serde_json::Value::{Bool, Null, Number, String};
         match (&self.0, &other.0) {
             (Null, Null) => Ordering::Equal,
             (Null, _) => Ordering::Less,

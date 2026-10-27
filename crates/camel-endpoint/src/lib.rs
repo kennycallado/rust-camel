@@ -1,8 +1,11 @@
 //! Endpoint URI parsing and configuration for rust-camel components.
 //!
 //! Main types: `UriConfig` (trait), `UriComponents`. Main modules: `config`, `uri`.
+#![warn(missing_docs)]
 
+/// Component URI configuration trait and option metadata.
 pub mod config;
+/// Endpoint URI parsing into scheme, path, host, and query pairs.
 pub mod uri;
 
 pub use config::UriConfig;

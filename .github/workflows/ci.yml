@@ -322,6 +322,12 @@ jobs:
             --features flavor-regular,exec --all-targets -- -D warnings
       - name: lint-unwrap
         run: cargo xtask lint-unwrap
+      - name: lint-glob-imports
+        run: cargo xtask lint-glob-imports
+      - name: lint-unsafe-safety
+        run: cargo xtask lint-unsafe-safety
+      - name: lint-missing-docs-ratchet
+        run: cargo xtask lint-missing-docs-ratchet
       - name: lint-secrets
         run: cargo xtask lint-secrets
       - name: lint-single-source

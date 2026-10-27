@@ -1,6 +1,6 @@
 use super::*;
 use crate::provider::{FunctionHealthStatus, ProviderError};
-use camel_api::function::*;
+use camel_api::function::{FunctionDefinition, FunctionId};
 use std::time::Duration;
 
 pub struct ProtocolClient {

@@ -1,7 +1,7 @@
 use crate::pool::{RunnerHandle, RunnerPoolKey};
 use crate::protocol::ProtocolClient;
 use camel_api::Exchange;
-use camel_api::function::*;
+use camel_api::function::{ExchangePatch, FunctionDefinition, FunctionId};
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;

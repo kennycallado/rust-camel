@@ -87,6 +87,15 @@ enum Commands {
     /// Exits non-zero if any violations are found.
     /// Escape hatch: append `// allow-unwrap` to the line.
     LintUnwrap,
+    /// Enforce ADR-0091 §4: every `unsafe { ... }` block and `unsafe fn`
+    /// carries a `// SAFETY:` justification stating why safe Rust cannot do
+    /// the operation. Test scope is exempt. Exits non-zero on violations.
+    LintUnsafeSafety,
+    /// Enforce ADR-0091: no glob imports (`use path::*;`) outside test
+    /// scope. `use super::*`, `pub use` re-exports, and an explicit
+    /// third-party prelude allow-list remain permitted. Exits non-zero on
+    /// violations.
+    LintGlobImports,
     /// Scan source files for potential credential leakage in format macros
     /// and tracing macro structured fields.
     /// Exits non-zero if any violations are found.
@@ -197,6 +206,11 @@ enum Commands {
     /// component crate source outside `#[cfg(test)]`. Components must
     /// depend on ports (camel-component-api), not concrete adapters.
     LintComponentDeps,
+    /// Enforce the ADR-0091 §5 rustdoc ratchet: each public-API crate's
+    /// `missing_docs` warning count may not increase above its baseline in
+    /// `scripts/xtask/missing_docs_baselines.toml`. Counts may fall freely.
+    /// Exits non-zero only when a measured count exceeds its baseline.
+    LintMissingDocsRatchet,
     /// Lint bridge versions: parse the flat `bridges/versions.toml` registry,
     /// compare it with the registered `BRIDGE_VERSION` constants, and reject
     /// bridge versions in the live documentation set. With `--tag`, verify a
@@ -360,6 +374,49 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-unwrap error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintUnsafeSafety => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_unsafe_safety(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-unsafe-safety: OK (no violations)");
+                }
+                Ok(violations) => {
+                    println!("UNSAFE-SAFETY VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                        println!(
+                            "    remedy: add `// SAFETY: <why the operation is sound and why safe Rust cannot do it>` on the preceding line or as the first line inside the block (ADR-0091 §4)."
+                        );
+                    }
+                    eprintln!("\nlint-unsafe-safety: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-unsafe-safety error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintGlobImports => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_glob_imports(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-glob-imports: OK (no violations)");
+                }
+                Ok(violations) => {
+                    println!("GLOB-IMPORT VIOLATIONS ({} found):", violations.len());
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                    }
+                    eprintln!("\nlint-glob-imports: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-glob-imports error: {e}");
                     std::process::exit(1);
                 }
             }
@@ -805,6 +862,32 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-component-deps error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::LintMissingDocsRatchet => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_missing_docs_ratchet(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-missing-docs-ratchet: OK (all crates at or below baseline)");
+                }
+                Ok(violations) => {
+                    println!(
+                        "MISSING-DOCS RATCHET VIOLATIONS ({} found):",
+                        violations.len()
+                    );
+                    for v in &violations {
+                        println!(
+                            "  {}: {} missing-docs warnings, baseline {} (+{} over)",
+                            v.crate_name, v.actual, v.baseline, v.overage
+                        );
+                    }
+                    eprintln!("\nlint-missing-docs-ratchet: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-missing-docs-ratchet error: {e}");
                     std::process::exit(1);
                 }
             }
@@ -2460,6 +2543,974 @@ pub fn lint_unwrap(workspace_root: &Path) -> Result<Vec<Violation>, String> {
             .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
 
         violations.extend(lint_unwrap_src(&content, &path.to_string_lossy()));
+    }
+
+    Ok(violations)
+}
+
+/// Sites exempt from the unsafe-SAFETY rule (ADR-0091 §4).
+///
+/// Empty for v1: every `unsafe { ... }` block and `unsafe fn` must justify
+/// itself. A site is added here only when a SAFETY comment cannot be written
+/// without inventing an argument (a soundness hole must be fixed instead).
+const UNSAFE_SAFETY_ALLOWLIST: &[(&str, usize)] = &[];
+
+/// What an `unsafe` keyword introduces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnsafeKind {
+    /// `unsafe { ... }` (and `unsafe extern "C" { ... }`) block expression.
+    Block,
+    /// `unsafe fn` declaration (free function, method, or trait method).
+    Fn,
+}
+
+/// One `unsafe` keyword seen in normal code context.
+#[derive(Debug, Clone, Copy)]
+struct UnsafeSite {
+    /// Zero-based line index.
+    line: usize,
+    /// Zero-based column index within the trimmed line.
+    col: usize,
+    kind: UnsafeKind,
+    /// True when the block expression opened by this `unsafe` is still open
+    /// at the end of its line (so an interior comment is possible).
+    block_open_after_line: bool,
+}
+
+/// A `//` line comment seen in normal code context.
+#[derive(Debug, Clone)]
+struct LineComment {
+    col: usize,
+    text: String,
+    is_doc: bool,
+}
+
+/// True for an outer or inner doc-comment line (`///` or `//!`).
+fn is_doc_comment(trimmed: &str) -> bool {
+    trimmed.starts_with("///") || trimmed.starts_with("//!")
+}
+
+/// True when the comment justifies the safety of an unsafe operation.
+///
+/// Code comments use `SAFETY:` or `Safety:`; rustdoc uses a `# Safety`
+/// section (for `unsafe fn` declarations).
+fn is_safety_comment(comment: &LineComment) -> bool {
+    if comment.is_doc {
+        comment.text.contains("# Safety") || comment.text.contains("# safety")
+    } else {
+        comment.text.contains("SAFETY:") || comment.text.contains("Safety:")
+    }
+}
+
+/// True for an attribute line (outer or inner), which does not break the
+/// association between a SAFETY comment and the `unsafe` keyword below it.
+fn is_preceding_attr(trimmed: &str) -> bool {
+    trimmed.starts_with("#[") || trimmed.starts_with("#![")
+}
+
+/// True when the `unsafe` starting at `start` is the raw identifier
+/// `r#unsafe` (not the keyword).
+fn is_raw_ident(chars: &[char], start: usize) -> bool {
+    start >= 2 && chars[start - 1] == '#' && chars[start - 2].is_ascii_alphabetic()
+}
+
+/// Detect a raw-string opener at `i` (`r"..."`, `r#"..."#`, and the byte/C
+/// forms `br"..."` / `cr"..."`). Returns `(hash_count, index_after_quote)`.
+fn raw_string_opener(chars: &[char], i: usize) -> Option<(usize, usize)> {
+    let mut j = i;
+    if matches!(chars.get(j), Some(&'b' | &'c')) {
+        j += 1;
+    }
+    if chars.get(j) != Some(&'r') {
+        return None;
+    }
+    j += 1;
+    let mut hashes = 0usize;
+    while chars.get(j) == Some(&'#') {
+        hashes += 1;
+        j += 1;
+    }
+    if chars.get(j) == Some(&'"') {
+        Some((hashes, j + 1))
+    } else {
+        None
+    }
+}
+
+/// Advance past whitespace and comments (`//` to end of line, nested `/* */`)
+/// starting at `j`. Newlines are significant only as whitespace.
+fn skip_unsafe_trivia(flat: &[char], mut j: usize) -> usize {
+    loop {
+        while j < flat.len() && flat[j].is_whitespace() {
+            j += 1;
+        }
+        if j + 1 < flat.len() && flat[j] == '/' && flat[j + 1] == '/' {
+            while j < flat.len() && flat[j] != '\n' {
+                j += 1;
+            }
+            continue;
+        }
+        if j + 1 < flat.len() && flat[j] == '/' && flat[j + 1] == '*' {
+            j += 2;
+            let mut nesting = 1usize;
+            while j < flat.len() && nesting > 0 {
+                if j + 1 < flat.len() && flat[j] == '/' && flat[j + 1] == '*' {
+                    nesting += 1;
+                    j += 2;
+                } else if j + 1 < flat.len() && flat[j] == '*' && flat[j + 1] == '/' {
+                    nesting -= 1;
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            continue;
+        }
+        return j;
+    }
+}
+
+/// Classify the `unsafe` keyword whose word ends at `j`.
+///
+/// `flat` is the whole file's characters (lines joined by `\n`), so the token
+/// after `unsafe` is found even when it sits on a later line across a comment
+/// boundary (`unsafe\n{`, `unsafe\nfn`, `unsafe // note\n fn`).
+///
+/// Returns `None` for `unsafe impl` / `unsafe trait` (trait-system markers,
+/// whose contract is documented at the trait declaration) and for any form
+/// this lint does not classify.
+fn classify_unsafe(flat: &[char], mut j: usize) -> Option<UnsafeKind> {
+    loop {
+        j = skip_unsafe_trivia(flat, j);
+        match flat.get(j) {
+            Some('{') => return Some(UnsafeKind::Block),
+            Some(c) if c.is_ascii_alphabetic() || *c == '_' => {
+                let start = j;
+                while j < flat.len() && (flat[j].is_ascii_alphanumeric() || flat[j] == '_') {
+                    j += 1;
+                }
+                let word: String = flat[start..j].iter().collect();
+                match word.as_str() {
+                    "fn" => return Some(UnsafeKind::Fn),
+                    "impl" | "trait" => return None,
+                    "extern" => {
+                        // `unsafe extern "C" fn` / `unsafe extern "C" { ... }`:
+                        // skip an optional ABI string, then classify the rest.
+                        let mut k = skip_unsafe_trivia(flat, j);
+                        if flat.get(k) == Some(&'"') {
+                            k += 1;
+                            while k < flat.len() && flat[k] != '"' {
+                                if flat[k] == '\\' {
+                                    k += 1;
+                                }
+                                k += 1;
+                            }
+                            j = k + 1;
+                        }
+                    }
+                    "async" | "const" | "unsafe" | "auto" => {}
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Literal/comment-aware analysis of one trimmed source line.
+///
+/// Records the `unsafe` keywords in normal code context, the trailing `//`
+/// comment (for SAFETY association), and updates `depth` with the braces seen
+/// in normal code context. `state` persists across lines exactly like
+/// [`scan_state::scan_line`].
+///
+/// `flat` is the whole file's characters joined by `\n`; `line_offset` is the
+/// flat index where this trimmed line starts, so classification can look past
+/// the line boundary for `unsafe\n{` / `unsafe\nfn`.
+fn analyze_unsafe_line(
+    line: &str,
+    line_offset: usize,
+    flat: &[char],
+    state: &mut scan_state::ScanState,
+    depth: &mut i32,
+) -> (Vec<UnsafeSite>, Option<LineComment>) {
+    use scan_state::ScanState;
+
+    let chars: Vec<char> = line.chars().collect();
+    let mut raw: Vec<(usize, UnsafeKind, i32)> = Vec::new();
+    let mut line_comment = None;
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        match *state {
+            ScanState::Normal => match chars[i] {
+                '{' => {
+                    *depth += 1;
+                    i += 1;
+                }
+                '}' => {
+                    *depth -= 1;
+                    i += 1;
+                }
+                '/' if chars.get(i + 1) == Some(&'/') => {
+                    let text: String = chars[i + 2..].iter().collect();
+                    line_comment = Some(LineComment {
+                        col: i,
+                        text,
+                        is_doc: is_doc_comment(line.trim_start()),
+                    });
+                    *state = ScanState::LineComment;
+                    i = chars.len();
+                }
+                '/' if chars.get(i + 1) == Some(&'*') => {
+                    *state = ScanState::BlockComment;
+                    i += 2;
+                }
+                '"' => {
+                    *state = ScanState::StringLit;
+                    i += 1;
+                }
+                '\'' => {
+                    let next = chars.get(i + 1).copied();
+                    let after = chars.get(i + 2).copied();
+                    let is_lifetime = next
+                        .map(|c| c.is_ascii_alphanumeric() || c == '_')
+                        .unwrap_or(false)
+                        && !matches!(after, Some('\'') | Some('\\'));
+                    if !is_lifetime {
+                        *state = ScanState::CharLit;
+                    }
+                    i += 1;
+                }
+                c if c.is_ascii_alphabetic() || c == '_' => {
+                    if let Some((hashes, after)) = raw_string_opener(&chars, i) {
+                        *state = ScanState::RawStr(hashes);
+                        i = after;
+                        continue;
+                    }
+                    let start = i;
+                    let mut j = i + 1;
+                    while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+                        j += 1;
+                    }
+                    let word: String = chars[start..j].iter().collect();
+                    if word == "unsafe"
+                        && !is_raw_ident(&chars, start)
+                        && let Some(kind) = classify_unsafe(flat, line_offset + j)
+                    {
+                        raw.push((start, kind, *depth));
+                    }
+                    i = j;
+                }
+                _ => i += 1,
+            },
+            ScanState::StringLit => {
+                if chars[i] == '\\' {
+                    i += 2;
+                } else {
+                    if chars[i] == '"' {
+                        *state = ScanState::Normal;
+                    }
+                    i += 1;
+                }
+            }
+            ScanState::CharLit => {
+                if chars[i] == '\\' {
+                    i += 2;
+                } else {
+                    if chars[i] == '\'' {
+                        *state = ScanState::Normal;
+                    }
+                    i += 1;
+                }
+            }
+            ScanState::LineComment => i = chars.len(),
+            ScanState::BlockComment => {
+                if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                    *state = ScanState::Normal;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            ScanState::RawStr(n) => {
+                if chars[i] == '"' {
+                    let mut count = 0usize;
+                    let mut j = i + 1;
+                    while chars.get(j) == Some(&'#') {
+                        count += 1;
+                        j += 1;
+                    }
+                    if count >= n {
+                        *state = ScanState::Normal;
+                        i = j;
+                    } else {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    if *state == ScanState::LineComment {
+        *state = ScanState::Normal;
+    }
+
+    let final_depth = *depth;
+    let sites = raw
+        .into_iter()
+        .map(|(col, kind, depth_at_token)| UnsafeSite {
+            line: 0,
+            col,
+            kind,
+            block_open_after_line: kind == UnsafeKind::Block && final_depth > depth_at_token,
+        })
+        .collect();
+    (sites, line_comment)
+}
+
+/// True when another `unsafe` keyword sits between the comment at
+/// (`from_line`, `from_col`) and `target`.
+///
+/// This is what stops an outer block's SAFETY comment from covering a nested
+/// unsafe block, and an `unsafe fn`'s comment from covering blocks in its body.
+fn unsafe_token_between(
+    sites: &[UnsafeSite],
+    from_line: usize,
+    from_col: usize,
+    target: &UnsafeSite,
+) -> bool {
+    sites.iter().any(|s| {
+        let after_from = s.line > from_line || (s.line == from_line && s.col > from_col);
+        let before_target = s.line < target.line || (s.line == target.line && s.col < target.col);
+        after_from && before_target
+    })
+}
+
+/// True when the doc block immediately above `target` contains a `# Safety`
+/// section (and no other `unsafe` keyword intervenes).
+fn has_doc_safety(
+    lines: &[&str],
+    comments: &[Option<LineComment>],
+    sites: &[UnsafeSite],
+    target: &UnsafeSite,
+) -> bool {
+    let mut k = target.line;
+    let mut first_above = None;
+    while k > 0 {
+        k -= 1;
+        let trimmed = lines[k].trim();
+        if trimmed.is_empty() || is_preceding_attr(trimmed) {
+            continue;
+        }
+        first_above = Some(k);
+        break;
+    }
+    let Some(first) = first_above else {
+        return false;
+    };
+    if !comments[first].as_ref().is_some_and(|c| c.is_doc) {
+        return false;
+    }
+
+    let mut top = first;
+    while top > 0 {
+        let prev = top - 1;
+        let trimmed = lines[prev].trim();
+        if trimmed.is_empty() || is_preceding_attr(trimmed) {
+            break;
+        }
+        match &comments[prev] {
+            Some(c) if c.is_doc => top = prev,
+            _ => break,
+        }
+    }
+
+    let has_safety = (top..=first).any(|i| {
+        comments[i]
+            .as_ref()
+            .is_some_and(|c| c.is_doc && is_safety_comment(c))
+    });
+    has_safety && !unsafe_token_between(sites, first, 0, target)
+}
+
+/// True when a `// SAFETY:` comment appears in the three immediately
+/// preceding non-blank, non-attribute lines (or a `# Safety` doc block
+/// immediately above an `unsafe fn`).
+fn has_preceding_safety(
+    lines: &[&str],
+    comments: &[Option<LineComment>],
+    sites: &[UnsafeSite],
+    interior_claimed: &[bool],
+    target: &UnsafeSite,
+) -> bool {
+    if target.kind == UnsafeKind::Fn && has_doc_safety(lines, comments, sites, target) {
+        return true;
+    }
+
+    let mut checked = 0usize;
+    let mut k = target.line;
+    while k > 0 && checked < 3 {
+        k -= 1;
+        let trimmed = lines[k].trim();
+        if trimmed.is_empty() || is_preceding_attr(trimmed) {
+            continue;
+        }
+        checked += 1;
+        if let Some(comment) = comments[k].as_ref()
+            && is_safety_comment(comment)
+            // A comment that is the interior justification of an enclosing
+            // block belongs to that block; it cannot also cover a nested one.
+            && !interior_claimed[k]
+            && !unsafe_token_between(sites, k, comment.col, target)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The line of the `// SAFETY:` comment that is the first non-blank line
+/// inside a still-open `unsafe {` block, if any (rustfmt sometimes pushes the
+/// comment inside).
+fn interior_safety_line(
+    lines: &[&str],
+    comments: &[Option<LineComment>],
+    target: &UnsafeSite,
+) -> Option<usize> {
+    if !target.block_open_after_line {
+        return None;
+    }
+    let mut k = target.line + 1;
+    while k < lines.len() {
+        let trimmed = lines[k].trim();
+        if trimmed.is_empty() {
+            k += 1;
+            continue;
+        }
+        return comments[k].as_ref().and_then(|c| {
+            (!c.is_doc && (c.text.contains("SAFETY:") || c.text.contains("Safety:"))).then_some(k)
+        });
+    }
+    None
+}
+
+/// Core scanner: return every `unsafe { ... }` block and `unsafe fn` in `src`
+/// that lacks a SAFETY justification (ADR-0091 §4).
+///
+/// `unsafe impl` / `unsafe trait` are skipped (trait-system markers), as are
+/// `unsafe` keywords inside string literals, char literals, raw strings, and
+/// comments, and every site inside test scope.
+fn lint_unsafe_safety_src(src: &str, file_path: &str) -> Vec<Violation> {
+    use scan_state::{ScanState, TestScopeTracker};
+
+    let lines: Vec<&str> = src.lines().collect();
+    // Flatten the trimmed lines once so `unsafe` classification can look past
+    // a line boundary without re-lexing the rest of the file per occurrence.
+    let trimmed_lines: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
+    let mut line_offsets: Vec<usize> = Vec::with_capacity(trimmed_lines.len());
+    let mut flat: Vec<char> = Vec::new();
+    for line in &trimmed_lines {
+        line_offsets.push(flat.len());
+        flat.extend(line.chars());
+        flat.push('\n');
+    }
+
+    let mut tracker = TestScopeTracker::new();
+    let mut state = ScanState::Normal;
+    let mut depth = 0i32;
+
+    let mut sites: Vec<UnsafeSite> = Vec::new();
+    let mut comments: Vec<Option<LineComment>> = Vec::with_capacity(lines.len());
+    let mut test_scope: Vec<bool> = Vec::with_capacity(lines.len());
+
+    for (line_idx, &trimmed) in trimmed_lines.iter().enumerate() {
+        // Tracker and local lexer both start from Normal and consume the same
+        // trimmed lines, so their literal/comment states stay in lockstep.
+        let in_test = tracker.line_in_test_scope(trimmed);
+        let (mut line_sites, comment) = analyze_unsafe_line(
+            trimmed,
+            line_offsets[line_idx],
+            &flat,
+            &mut state,
+            &mut depth,
+        );
+        for site in &mut line_sites {
+            site.line = line_idx;
+        }
+        sites.append(&mut line_sites);
+        comments.push(comment);
+        test_scope.push(in_test);
+    }
+
+    // A block's interior SAFETY comment is owned by that block; record the
+    // lines so the comment cannot also justify a nested unsafe block.
+    let mut interior_claimed = vec![false; lines.len()];
+    for site in &sites {
+        if site.kind == UnsafeKind::Block
+            && let Some(line) = interior_safety_line(&lines, &comments, site)
+        {
+            interior_claimed[line] = true;
+        }
+    }
+
+    let mut violations = Vec::new();
+    for site in &sites {
+        if test_scope[site.line] {
+            continue;
+        }
+        let line_number = site.line + 1;
+        if UNSAFE_SAFETY_ALLOWLIST
+            .iter()
+            .any(|(path, line)| *path == file_path && *line == line_number)
+        {
+            continue;
+        }
+        let justified = has_preceding_safety(&lines, &comments, &sites, &interior_claimed, site)
+            || (site.kind == UnsafeKind::Block
+                && interior_safety_line(&lines, &comments, site).is_some());
+        if !justified {
+            violations.push(Violation {
+                file: file_path.to_string(),
+                line: line_number,
+                snippet: lines[site.line].trim().to_string(),
+            });
+        }
+    }
+    violations
+}
+
+/// Scan the whole workspace for `unsafe` items without a SAFETY comment.
+///
+/// Test files (`tests/`, `*_test.rs`, `tests.rs`, `build.rs`) are excluded at
+/// the file level; `#[test]`/`#[cfg(test)]` scope is excluded line by line.
+pub fn lint_unsafe_safety(workspace_root: &Path) -> Result<Vec<Violation>, String> {
+    use std::path::Component;
+    use walkdir::WalkDir;
+
+    let mut violations = Vec::new();
+
+    for entry in WalkDir::new(workspace_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if is_test_file(path) {
+            continue;
+        }
+        let rel = path.strip_prefix(workspace_root).unwrap_or(path);
+        if rel.components().any(|c| {
+            c == Component::Normal("target".as_ref())
+                || c == Component::Normal(".worktrees".as_ref())
+                || c == Component::Normal(".git".as_ref())
+        }) {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+
+        violations.extend(lint_unsafe_safety_src(&content, &path.to_string_lossy()));
+    }
+
+    Ok(violations)
+}
+
+/// Third-party glob imports approved at review (ADR-0091). Exact match
+/// against the imported path including the trailing `::*`.
+const GLOB_IMPORT_ALLOW_LIST: &[&str] =
+    &["tracing_subscriber::prelude::*", "tower_lsp::lsp_types::*"];
+
+/// True when a trimmed line begins a `use` statement (including visibility
+/// qualifiers). The path itself is validated after the statement is joined.
+fn starts_use_statement(trimmed: &str) -> bool {
+    trimmed.starts_with("use ")
+        || trimmed.starts_with("pub use ")
+        || trimmed.starts_with("pub(crate) use ")
+        || trimmed.starts_with("pub(self) use ")
+        || trimmed.starts_with("pub(super) use ")
+}
+
+/// Strip a `//` line comment from one physical line. Comments are removed
+/// BEFORE lines are joined, so a commented-out import branch cannot leak its
+/// braces, globs, or semicolon into the accumulated statement.
+fn strip_line_comment(line: &str) -> &str {
+    line.split("//").next().unwrap_or(line)
+}
+
+/// True when the accumulated statement is terminated. Callers pass text that
+/// already had line comments stripped per line, so a trailing comment cannot
+/// hide the terminator.
+fn use_statement_complete(statement: &str) -> bool {
+    statement.contains(';')
+}
+
+/// True when the statement is a `pub` re-export (ADR-0091 permits
+/// `pub use ...::*` in non-leaf modules).
+fn is_pub_use(trimmed: &str) -> bool {
+    trimmed.starts_with("pub use ") || trimmed.starts_with("pub(")
+}
+
+/// Core scanner: flag `use ...::*;` outside test scope (ADR-0091).
+///
+/// Multi-line `use` statements are accumulated until their terminating
+/// semicolon. Test-scope classification is taken from the line where the
+/// statement STARTS, so a `use` inside `#[cfg(test)] mod tests { ... }` is
+/// skipped even when it spans lines.
+///
+/// This function is extracted from [`lint_glob_imports`] for unit-testability.
+fn lint_glob_imports_src(src: &str, file_path: &str) -> Vec<Violation> {
+    use scan_state::TestScopeTracker;
+
+    let lines: Vec<&str> = src.lines().collect();
+    let mut tracker = TestScopeTracker::new();
+    let mut violations = Vec::new();
+    let mut idx = 0usize;
+
+    while idx < lines.len() {
+        let trimmed = lines[idx].trim();
+        // `in_normal_context` must be read BEFORE the tracker scans this
+        // line: it tells whether the line starts inside a string/comment,
+        // which would make a `use`-looking line fixture content, not code.
+        let normal_before = tracker.in_normal_context();
+        let in_test_scope = tracker.line_in_test_scope(trimmed);
+
+        let is_use = normal_before && !in_test_scope && starts_use_statement(trimmed);
+        if !is_use {
+            idx += 1;
+            continue;
+        }
+
+        let start_line = idx;
+        let mut statement = strip_line_comment(trimmed).trim().to_string();
+        while !use_statement_complete(&statement) && idx + 1 < lines.len() {
+            idx += 1;
+            let continuation = lines[idx].trim();
+            // Keep brace/test-scope state aligned with the file.
+            tracker.line_in_test_scope(continuation);
+            let cleaned = strip_line_comment(continuation).trim();
+            statement.push(' ');
+            statement.push_str(cleaned);
+        }
+
+        // Strip the terminator, then isolate the imported path. A `use` tree
+        // may be a plain glob (`foo::*`), a braced glob (`foo::{*}`), or a
+        // glob nested inside a braced list (`foo::{bar::*, baz}`); all carry
+        // a `*` and none has another legal use of `*` in a use tree.
+        let code = statement.trim().trim_end_matches(';').trim();
+        if let Some(use_pos) = code.find("use ") {
+            let target = code[use_pos + "use ".len()..].trim();
+            let is_allowed = target == "super::*"
+                || GLOB_IMPORT_ALLOW_LIST.contains(&target)
+                || is_pub_use(trimmed);
+            if target.contains('*') && !is_allowed {
+                violations.push(Violation {
+                    file: file_path.to_string(),
+                    line: start_line + 1,
+                    snippet: lines[start_line].to_string(),
+                });
+            }
+        }
+
+        idx += 1;
+    }
+
+    violations
+}
+
+/// Scan all workspace `*.rs` files (excluding test files) for glob imports
+/// outside test scope. Enforces ADR-0091.
+pub fn lint_glob_imports(workspace_root: &Path) -> Result<Vec<Violation>, String> {
+    use std::path::Component;
+    use walkdir::WalkDir;
+
+    let mut violations = Vec::new();
+
+    for entry in WalkDir::new(workspace_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if is_test_file(path) {
+            continue;
+        }
+        // Skip target and worktree directories. `strip_prefix` keeps the
+        // scan alive when the workspace root itself is a worktree.
+        let rel = path.strip_prefix(workspace_root).unwrap_or(path);
+        if rel.components().any(|c| {
+            c == Component::Normal("target".as_ref())
+                || c == Component::Normal(".worktrees".as_ref())
+                || c == Component::Normal(".git".as_ref())
+        }) {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+
+        violations.extend(lint_glob_imports_src(&content, &path.to_string_lossy()));
+    }
+
+    Ok(violations)
+}
+
+/// One crate's `missing_docs` ratchet entry from
+/// `scripts/xtask/missing_docs_baselines.toml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingDocsBaseline {
+    /// Workspace package name (for example `camel-api`).
+    pub crate_name: String,
+    /// Highest `missing_docs` warning count allowed (ADR-0091 §5).
+    pub count: u32,
+}
+
+/// A crate whose measured `missing_docs` warning count exceeds its baseline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingDocsViolation {
+    /// Workspace package name.
+    pub crate_name: String,
+    /// Configured ceiling.
+    pub baseline: u32,
+    /// Measured count.
+    pub actual: u32,
+    /// `actual - baseline`.
+    pub overage: u32,
+}
+
+/// Baselines file inside `scripts/xtask/`.
+pub const MISSING_DOCS_BASELINES_FILE: &str = "missing_docs_baselines.toml";
+
+#[derive(serde::Deserialize)]
+struct MissingDocsBaselinesFile {
+    #[serde(flatten)]
+    crates: std::collections::BTreeMap<String, MissingDocsBaselineEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct MissingDocsBaselineEntry {
+    count: u32,
+}
+
+/// Pure ratchet comparison: a violation exists only when `actual > baseline`.
+/// Counts below the baseline are permitted (the ratchet only forbids growth).
+pub fn check_against_baseline(
+    baseline: u32,
+    actual: u32,
+    crate_name: &str,
+) -> Option<MissingDocsViolation> {
+    (actual > baseline).then(|| MissingDocsViolation {
+        crate_name: crate_name.to_string(),
+        baseline,
+        actual,
+        overage: actual - baseline,
+    })
+}
+
+/// Parse the baselines TOML. Each `[crate-name]` table must carry `count`.
+pub fn parse_missing_docs_baselines(src: &str) -> Result<Vec<MissingDocsBaseline>, String> {
+    let file: MissingDocsBaselinesFile = toml::from_str(src).map_err(|e| e.to_string())?;
+    Ok(file
+        .crates
+        .into_iter()
+        .map(|(crate_name, entry)| MissingDocsBaseline {
+            crate_name,
+            count: entry.count,
+        })
+        .collect())
+}
+
+/// Read and parse `scripts/xtask/missing_docs_baselines.toml`. A missing file
+/// is an error: a deleted ratchet must not silently pass.
+fn read_missing_docs_baselines(workspace_root: &Path) -> Result<Vec<MissingDocsBaseline>, String> {
+    let path = workspace_root
+        .join("scripts")
+        .join("xtask")
+        .join(MISSING_DOCS_BASELINES_FILE);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    parse_missing_docs_baselines(&content).map_err(|e| format!("invalid {}: {e}", path.display()))
+}
+
+/// Count `missing_docs` compiler messages in `cargo check --message-format=json`
+/// output, restricted to diagnostics whose primary span lives under
+/// `crate_dir` (a crate's dependencies may enable the lint independently).
+/// Deduplicates by `(file, line, rendered[:80])` so one item is counted once.
+fn count_missing_docs_messages(raw: &str, crate_dir: &Path, workspace_root: &Path) -> u32 {
+    let mut seen = std::collections::BTreeSet::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(diag) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if diag.get("reason").and_then(|r| r.as_str()) != Some("compiler-message") {
+            continue;
+        }
+        let message = &diag["message"];
+        if message
+            .get("code")
+            .and_then(|c| c.get("code"))
+            .and_then(|c| c.as_str())
+            != Some("missing_docs")
+        {
+            continue;
+        }
+        let span = message
+            .get("spans")
+            .and_then(|s| s.as_array())
+            .and_then(|s| s.first());
+        let file_name = span
+            .and_then(|s| s.get("file_name"))
+            .and_then(|f| f.as_str())
+            .unwrap_or("");
+        let absolute = if Path::new(file_name).is_absolute() {
+            PathBuf::from(file_name)
+        } else {
+            workspace_root.join(file_name)
+        };
+        if !absolute.starts_with(crate_dir) {
+            continue;
+        }
+        let line_start = span
+            .and_then(|s| s.get("line_start"))
+            .and_then(|l| l.as_u64())
+            .unwrap_or(0);
+        let rendered: String = message
+            .get("rendered")
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect();
+        seen.insert((absolute, line_start, rendered));
+    }
+    seen.len() as u32
+}
+
+/// Run `cargo check -p <crate>` and count the crate's own `missing_docs`
+/// warnings. Any cargo failure (including an unknown package) is an error.
+fn count_missing_docs(
+    workspace_root: &Path,
+    crate_name: &str,
+    crate_dir: &Path,
+) -> Result<u32, String> {
+    let output = Command::new("cargo")
+        .args(["check", "-p", crate_name, "--message-format=json"])
+        .current_dir(workspace_root)
+        // Force the lint from the command line: crates that have not opted in
+        // with `#![warn(missing_docs)]` still report, so the ratchet measures
+        // what WOULD be warned (ADR-0091 §5). Ambient flags must not turn the
+        // `warn` lint into a hard error, so they are replaced, not extended.
+        .env("RUSTFLAGS", "--warn missing_docs")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .output()
+        .map_err(|e| format!("cannot run cargo check -p {crate_name}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo check -p {crate_name} failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(count_missing_docs_messages(
+        &String::from_utf8_lossy(&output.stdout),
+        crate_dir,
+        workspace_root,
+    ))
+}
+
+/// Map workspace package names to their manifest directories, so diagnostics
+/// can be attributed to the crate that owns the file.
+fn workspace_package_dirs(
+    workspace_root: &Path,
+) -> Result<std::collections::BTreeMap<String, PathBuf>, String> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(workspace_root)
+        .output()
+        .map_err(|e| format!("cannot run cargo metadata: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("cannot parse cargo metadata JSON: {e}"))?;
+    let mut packages = std::collections::BTreeMap::new();
+    for package in metadata
+        .get("packages")
+        .and_then(|p| p.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let name = package.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        let manifest = package
+            .get("manifest_path")
+            .and_then(|m| m.as_str())
+            .unwrap_or("");
+        if name.is_empty() || manifest.is_empty() {
+            continue;
+        }
+        if let Some(dir) = Path::new(manifest).parent() {
+            packages.insert(name.to_string(), dir.to_path_buf());
+        }
+    }
+    Ok(packages)
+}
+
+/// ADR-0091 §5 rustdoc ratchet: measure each baseline crate's `missing_docs`
+/// warning count and flag any crate above its baseline. Crates listed in the
+/// baselines but absent from the workspace are skipped with a notice; crates in
+/// the workspace without a baseline are reported only as an aggregate notice
+/// because the ratchet is opt-in.
+pub fn lint_missing_docs_ratchet(
+    workspace_root: &Path,
+) -> Result<Vec<MissingDocsViolation>, String> {
+    let baselines = read_missing_docs_baselines(workspace_root)?;
+    let packages = workspace_package_dirs(workspace_root)?;
+    let mut violations = Vec::new();
+
+    for baseline in &baselines {
+        let Some(crate_dir) = packages.get(&baseline.crate_name) else {
+            println!(
+                "  {}: not in workspace — skipped (crate may have been removed)",
+                baseline.crate_name
+            );
+            continue;
+        };
+        let actual = count_missing_docs(workspace_root, &baseline.crate_name, crate_dir)?;
+        match check_against_baseline(baseline.count, actual, &baseline.crate_name) {
+            Some(violation) => violations.push(violation),
+            None if actual < baseline.count => println!(
+                "  {}: {actual} missing-docs warnings, baseline {} — decreased (ok)",
+                baseline.crate_name, baseline.count
+            ),
+            None => {}
+        }
+    }
+
+    let covered: std::collections::BTreeSet<&str> =
+        baselines.iter().map(|b| b.crate_name.as_str()).collect();
+    let uncovered = packages
+        .keys()
+        .filter(|name| !covered.contains(name.as_str()))
+        .count();
+    if uncovered > 0 {
+        println!("  note: {uncovered} workspace package(s) not covered by the ratchet (opt-in)");
     }
 
     Ok(violations)
@@ -5738,6 +6789,145 @@ mod tests {
     }
 
     #[cfg(test)]
+    mod lint_unsafe_safety_tests {
+        use super::*;
+
+        const FILE: &str = "crates/demo/src/lib.rs";
+
+        fn violations(src: &str) -> Vec<Violation> {
+            lint_unsafe_safety_src(src, FILE)
+        }
+
+        #[test]
+        fn flags_unsafe_block_without_safety() {
+            let found = violations("fn f(p: *const u8) {\n    unsafe { *p }\n}\n");
+            assert_eq!(found.len(), 1, "got: {found:?}");
+            assert_eq!(found[0].line, 2);
+        }
+
+        #[test]
+        fn allows_unsafe_block_with_preceding_safety() {
+            let found = violations(
+                "fn f(p: *const u8) {\n    // SAFETY: p is valid for reads\n    unsafe { *p }\n}\n",
+            );
+            assert!(found.is_empty(), "got: {found:?}");
+        }
+
+        #[test]
+        fn allows_unsafe_block_with_interior_safety() {
+            let found = violations(
+                "fn f(p: *const u8) {\n    unsafe {\n        // SAFETY: p is valid for reads\n        *p\n    }\n}\n",
+            );
+            assert!(found.is_empty(), "got: {found:?}");
+        }
+
+        #[test]
+        fn flags_unsafe_fn_without_safety() {
+            let found = violations("unsafe fn foo() {}\n");
+            assert_eq!(found.len(), 1, "got: {found:?}");
+        }
+
+        #[test]
+        fn allows_unsafe_fn_with_doc_safety() {
+            let found = violations("/// # Safety\n/// p must be valid\nunsafe fn foo() {}\n");
+            assert!(found.is_empty(), "got: {found:?}");
+        }
+
+        #[test]
+        fn flags_nested_unsafe_inner_without_safety() {
+            let found = violations(
+                "fn f(p: *const u8) {\n    // SAFETY: outer context is sound\n    unsafe {\n        unsafe { *p }\n    }\n}\n",
+            );
+            assert_eq!(found.len(), 1, "got: {found:?}");
+            assert_eq!(found[0].line, 4, "only the inner block is flagged");
+        }
+
+        #[test]
+        fn flags_nested_unsafe_when_outer_uses_interior_safety() {
+            let found = violations(
+                "fn f(p: *const u8) {\n    unsafe {\n        // SAFETY: outer context is sound\n        let x = 1;\n        unsafe { *p }\n    }\n}\n",
+            );
+            assert_eq!(found.len(), 1, "got: {found:?}");
+            assert_eq!(
+                found[0].line, 5,
+                "the outer interior comment stays with the outer block"
+            );
+        }
+
+        #[test]
+        fn skips_unsafe_impl() {
+            let found = violations("unsafe impl Send for X {}\n");
+            assert!(found.is_empty(), "got: {found:?}");
+        }
+
+        #[test]
+        fn skips_unsafe_trait() {
+            let found = violations("unsafe trait X {}\n");
+            assert!(found.is_empty(), "got: {found:?}");
+        }
+
+        #[test]
+        fn skips_unsafe_in_string() {
+            let found = violations("fn f() {\n    let _ = \"unsafe { }\";\n}\n");
+            assert!(found.is_empty(), "got: {found:?}");
+        }
+
+        #[test]
+        fn skips_unsafe_in_test_scope() {
+            let found = violations(
+                "#[test]\nfn t() {\n    let p = std::ptr::null();\n    unsafe { *p }\n}\n",
+            );
+            assert!(found.is_empty(), "got: {found:?}");
+        }
+
+        #[test]
+        fn allows_unsafe_block_with_safety_two_lines_above() {
+            let found = violations(
+                "fn f(p: *const u8) {\n    // SAFETY: p is valid for reads\n\n    unsafe { *p }\n}\n",
+            );
+            assert!(found.is_empty(), "got: {found:?}");
+        }
+
+        #[test]
+        fn flags_unsafe_block_with_safety_four_lines_above() {
+            let found = violations(
+                "fn f(p: *const u8) {\n    // SAFETY: too far from the operation\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    unsafe { *p }\n}\n",
+            );
+            assert_eq!(found.len(), 1, "got: {found:?}");
+            assert_eq!(found[0].line, 6);
+        }
+
+        #[test]
+        fn flags_multiline_unsafe_block_without_safety() {
+            let found = violations(
+                "fn f(p: *const u8) {\n    let x = unsafe\n    {\n        *p\n    };\n}\n",
+            );
+            assert_eq!(found.len(), 1, "got: {found:?}");
+            assert_eq!(found[0].line, 2);
+        }
+
+        #[test]
+        fn flags_multiline_unsafe_fn_without_safety() {
+            let found = violations("unsafe\nfn foo() {}\n");
+            assert_eq!(found.len(), 1, "got: {found:?}");
+            assert_eq!(found[0].line, 1);
+        }
+
+        #[test]
+        fn allows_multiline_unsafe_block_with_safety() {
+            let found = violations(
+                "fn f(p: *const u8) {\n    // SAFETY: p is valid for reads\n    let x = unsafe\n    {\n        *p\n    };\n}\n",
+            );
+            assert!(found.is_empty(), "got: {found:?}");
+        }
+
+        #[test]
+        fn skips_multiline_unsafe_impl() {
+            let found = violations("unsafe\nimpl Send for X {}\n");
+            assert!(found.is_empty(), "got: {found:?}");
+        }
+    }
+
     mod lint_unwrap_tests {
         use super::*;
         use std::fs;
@@ -5963,6 +7153,138 @@ mod tests {
                 violations.is_empty(),
                 "expected no violations (raw/block-comment braces should be ignored), \
                  got: {violations:?}"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod lint_glob_imports_tests {
+        use super::*;
+        use std::fs;
+        use std::path::PathBuf;
+
+        fn tmp_workspace(files: &[(&str, &str)]) -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "xtask-glob-imports-test-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos()
+            ));
+            for (rel_path, content) in files {
+                let full = dir.join(rel_path);
+                fs::create_dir_all(full.parent().unwrap()).unwrap();
+                fs::write(&full, content).unwrap();
+            }
+            dir
+        }
+
+        #[test]
+        fn flags_simple_glob() {
+            let violations = lint_glob_imports_src("use foo::*;\n", "src/lib.rs");
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
+            assert_eq!(violations[0].line, 1);
+        }
+
+        #[test]
+        fn allows_super_glob_in_test() {
+            let src = "#[cfg(test)]\nmod tests {\n    use super::*;\n}\n";
+            let violations = lint_glob_imports_src(src, "src/lib.rs");
+            assert!(violations.is_empty(), "got: {violations:?}");
+        }
+
+        #[test]
+        fn allows_super_glob_anywhere() {
+            let violations = lint_glob_imports_src("use super::*;\n", "src/lib.rs");
+            assert!(violations.is_empty(), "got: {violations:?}");
+        }
+
+        #[test]
+        fn allows_pub_use_reexport() {
+            let violations = lint_glob_imports_src("pub use foo::*;\n", "src/lib.rs");
+            assert!(violations.is_empty(), "got: {violations:?}");
+        }
+
+        #[test]
+        fn allows_listed_prelude() {
+            let violations =
+                lint_glob_imports_src("use tracing_subscriber::prelude::*;\n", "src/lib.rs");
+            assert!(violations.is_empty(), "got: {violations:?}");
+        }
+
+        #[test]
+        fn flags_nonlisted_prelude() {
+            let violations = lint_glob_imports_src("use some_other::prelude::*;\n", "src/lib.rs");
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
+        }
+
+        #[test]
+        fn skips_test_file() {
+            let ws = tmp_workspace(&[("crates/foo/tests/integration.rs", "use foo::*;\n")]);
+            let violations = lint_glob_imports(&ws).unwrap();
+            assert!(violations.is_empty(), "got: {violations:?}");
+            fs::remove_dir_all(&ws).unwrap();
+        }
+
+        #[test]
+        fn handles_multiline_use() {
+            let src = "use foo::{\n    bar::*,\n};\n";
+            let violations = lint_glob_imports_src(src, "src/lib.rs");
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
+            assert_eq!(violations[0].line, 1);
+        }
+
+        #[test]
+        fn flags_braced_glob() {
+            let violations = lint_glob_imports_src("use foo::{*};\n", "src/lib.rs");
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
+            assert_eq!(violations[0].line, 1);
+        }
+
+        #[test]
+        fn handles_multiline_with_commented_branch() {
+            let src =
+                "use foo::{\n    // bar::*,  // commented out\n    baz::*,\n};\nlet after = 1;\n";
+            let violations = lint_glob_imports_src(src, "src/lib.rs");
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
+            assert_eq!(violations[0].line, 1);
+            // The commented branch must not consume the following statement.
+            // A second glob in the consumed statement would have produced
+            // another violation; the count above already proves it did not.
+        }
+
+        #[test]
+        fn handles_multiline_glob_inside_braces() {
+            let src = "use foo::{\n    bar::*,\n    baz,\n};\n";
+            let violations = lint_glob_imports_src(src, "src/lib.rs");
+            assert_eq!(violations.len(), 1, "got: {violations:?}");
+            assert_eq!(violations[0].line, 1);
+        }
+
+        #[test]
+        fn skips_use_with_only_specific_names() {
+            let violations = lint_glob_imports_src("use foo::{Bar, Baz};\n", "src/lib.rs");
+            assert!(violations.is_empty(), "got: {violations:?}");
+        }
+
+        #[test]
+        fn ignores_commented_out_use() {
+            let violations = lint_glob_imports_src("// use foo::*;\n", "src/lib.rs");
+            assert!(violations.is_empty(), "got: {violations:?}");
+        }
+
+        #[test]
+        fn handles_string_containing_use() {
+            let inline = "let s = \"use foo::*;\";\n";
+            assert!(
+                lint_glob_imports_src(inline, "src/lib.rs").is_empty(),
+                "inline string literal must not be scanned"
+            );
+
+            let raw = "let s = r#\"\nuse foo::*;\n\"#;\n";
+            assert!(
+                lint_glob_imports_src(raw, "src/lib.rs").is_empty(),
+                "raw string literal must not be scanned"
             );
         }
     }
@@ -8122,6 +9444,82 @@ fn b() {}
                 "expected `ignore:migration-error`, got: {violations:?}"
             );
             fs::remove_dir_all(&ws).unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    mod lint_missing_docs_ratchet_tests {
+        use super::*;
+
+        #[test]
+        fn parses_baselines_toml() {
+            let src = "[camel-api]\ncount = 3\n[camel-core]\ncount = 7\n";
+            let parsed = parse_missing_docs_baselines(src).unwrap();
+            assert_eq!(parsed.len(), 2);
+            assert_eq!(parsed[0].crate_name, "camel-api");
+            assert_eq!(parsed[0].count, 3);
+            assert_eq!(parsed[1].crate_name, "camel-core");
+            assert_eq!(parsed[1].count, 7);
+        }
+
+        #[test]
+        fn flags_overage() {
+            let violation = check_against_baseline(5, 8, "camel-api").expect("expected violation");
+            assert_eq!(violation.crate_name, "camel-api");
+            assert_eq!(violation.baseline, 5);
+            assert_eq!(violation.actual, 8);
+            assert_eq!(violation.overage, 3);
+        }
+
+        #[test]
+        fn allows_under_baseline() {
+            assert_eq!(check_against_baseline(5, 3, "camel-api"), None);
+            assert_eq!(check_against_baseline(5, 5, "camel-api"), None);
+        }
+
+        #[test]
+        fn fails_on_missing_baselines_file() {
+            let dir = tempfile::tempdir().unwrap();
+            let err = read_missing_docs_baselines(dir.path()).unwrap_err();
+            assert!(err.contains("cannot read"), "got: {err}");
+        }
+
+        #[test]
+        fn fails_on_crate_compile_error() {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+            let err =
+                count_missing_docs(dir.path(), "definitely-not-a-workspace-crate", dir.path())
+                    .unwrap_err();
+            assert!(
+                err.contains("cargo check -p definitely-not-a-workspace-crate failed"),
+                "got: {err}"
+            );
+        }
+
+        /// The ratchet must measure the lint even when the crate has NOT opted
+        /// in with `#![warn(missing_docs)]`; otherwise the ceiling is vacuous
+        /// for deferred crates (ADR-0091 §5).
+        #[test]
+        fn counts_missing_docs_without_crate_attribute() {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(
+                dir.path().join("Cargo.toml"),
+                "[package]\nname = \"fixture-no-attr\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\n",
+            )
+            .unwrap();
+            fs::create_dir_all(dir.path().join("src")).unwrap();
+            fs::write(
+                dir.path().join("src/lib.rs"),
+                "//! Fixture crate with no missing_docs attribute.\npub struct Undocumented;\n",
+            )
+            .unwrap();
+
+            let count = count_missing_docs(dir.path(), "fixture-no-attr", dir.path()).unwrap();
+            assert_eq!(
+                count, 1,
+                "missing_docs must be measured without a crate-level attribute"
+            );
         }
     }
 }

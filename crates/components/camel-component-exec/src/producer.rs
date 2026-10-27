@@ -17,7 +17,11 @@ use tower::Service;
 use crate::audit::{ExecAuditEvent, emit};
 use crate::config::{ExecGlobalConfig, ExecProfile};
 use crate::error::ExecError;
-use crate::headers::*;
+use crate::headers::{
+    CAMEL_EXEC_ARGS, CAMEL_EXEC_EXIT_ACCEPTED, CAMEL_EXEC_EXIT_CODE, CAMEL_EXEC_PROFILE,
+    CAMEL_EXEC_STDERR, CAMEL_EXEC_STDERR_TRUNCATED, CAMEL_EXEC_STDOUT_TRUNCATED,
+    CAMEL_EXEC_TIMED_OUT,
+};
 use crate::policy;
 use crate::process::{self, RawResult};
 

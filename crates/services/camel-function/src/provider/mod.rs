@@ -1,5 +1,6 @@
 use crate::pool::{RunnerHandle, RunnerPoolKey};
-use camel_api::{Exchange, function::*};
+use camel_api::Exchange;
+use camel_api::function::{ExchangePatch, FunctionDefinition, FunctionId};
 use std::time::Duration;
 
 mod sealed {

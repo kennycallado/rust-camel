@@ -338,7 +338,9 @@ impl SurrealDbEndpointConfig {
     /// Record key fields (`id`, `from`, `to`) are NOT validated as identifiers
     /// because they go through `type::record()` param binding.
     pub fn validate(&self) -> Result<(), SurrealDbError> {
-        use SurrealDbOperation::*;
+        use SurrealDbOperation::{
+            Create, Delete, Live, Patch, Query, Relate, Run, Search, Select, Update, Upsert, Vector,
+        };
         match self.operation {
             Query => {}
             Select | Create => {

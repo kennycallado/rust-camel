@@ -18,7 +18,13 @@ use crate::config::{LlmEndpointConfig, LlmOperation, default_max_header_json_byt
 use crate::cost::PricingTable;
 use crate::error::LlmError;
 use crate::error::is_retryable;
-use crate::headers::*;
+use crate::headers::{
+    CAMEL_LLM_ESTIMATED_COST_USD, CAMEL_LLM_FINISH_REASON, CAMEL_LLM_MAX_TOKENS,
+    CAMEL_LLM_MESSAGES, CAMEL_LLM_MODEL, CAMEL_LLM_PROVIDER, CAMEL_LLM_STREAM,
+    CAMEL_LLM_SYSTEM_PROMPT, CAMEL_LLM_TEMPERATURE, CAMEL_LLM_TEXT, CAMEL_LLM_TOKENS_IN,
+    CAMEL_LLM_TOKENS_OUT, CAMEL_LLM_TOOL_CALLS, CAMEL_LLM_TOOL_CHOICE, CAMEL_LLM_TOOLS,
+    CAMEL_LLM_USAGE_AVAILABLE,
+};
 use crate::producer_cache::{self as cache_mod, LeaderHandle, ProducerCache, Slot, canonical_key};
 use crate::provider::{
     ChatEvent, ChatMessage, ChatRequest, ChatRole, EmbedRequest, EmittedToolCall, FinishReason,

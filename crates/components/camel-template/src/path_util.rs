@@ -395,6 +395,8 @@ mod imp {
     struct OwnedHandleInner(HANDLE);
     impl Drop for OwnedHandleInner {
         fn drop(&mut self) {
+            // SAFETY: self.0 is an owned NT HANDLE; Drop has exclusive access,
+            // so this closes it exactly once.
             unsafe {
                 CloseHandle(self.0);
             }
@@ -447,6 +449,8 @@ mod imp {
             MaximumLength: (name_utf16.len() * 2) as u16,
             Buffer: name_utf16.as_mut_ptr(),
         };
+        // SAFETY: OBJECT_ATTRIBUTES is a plain C struct of integers and
+        // pointers; all-zero is a valid initial value before fields are set.
         let mut oa: OBJECT_ATTRIBUTES = unsafe { std::mem::zeroed() };
         oa.Length = std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32;
         oa.RootDirectory = root;
@@ -459,6 +463,8 @@ mod imp {
         // feature-gated, so we rely on `FILE_OPEN_REPARSE_POINT` + a
         // post-open directory check for non-leaf components.
         let mut handle: HANDLE = INVALID_HANDLE_VALUE;
+        // SAFETY: IO_STATUS_BLOCK is a plain C struct; all-zero is valid and
+        // NtCreateFile initializes it on success.
         let mut io_status: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
         // Positional NtCreateFile args (all flag types are `u32` aliases):
         //   filehandle, desiredaccess, objectattributes, iostatusblock,
@@ -467,6 +473,8 @@ mod imp {
         // `FILE_OPEN_REPARSE_POINT` opens the name itself without following a
         // reparse point, so a symlink/junction at this hop is exposed rather
         // than traversed; we additionally check attributes below.
+        // SAFETY: every pointer refers to a live local for the call's duration;
+        // NtCreateFile writes only through them and the handle is checked below.
         let status = unsafe {
             NtCreateFile(
                 &mut handle,
@@ -491,6 +499,8 @@ mod imp {
         // Reject a reparse point (symlink/junction) at this component even
         // though it opened: reparse attributes must be absent.
         if is_reparse(handle)? {
+            // SAFETY: `handle` was just opened and is not yet owned by a
+            // wrapper, so this closes it exactly once.
             unsafe {
                 CloseHandle(handle);
             }
@@ -502,7 +512,11 @@ mod imp {
     }
 
     fn is_reparse(handle: HANDLE) -> Result<bool, TemplateReloadError> {
+        // SAFETY: BY_HANDLE_FILE_INFORMATION is a plain C struct; all-zero is
+        // valid before the call fills it.
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: `handle` is a live handle owned by the caller; `info` is a
+        // valid out-pointer for the duration of the call.
         let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
         if ok == 0 {
             return Err(TemplateReloadError::Acquire(
@@ -513,7 +527,11 @@ mod imp {
     }
 
     fn identity_of(handle: HANDLE) -> Result<FileIdentity, TemplateReloadError> {
+        // SAFETY: BY_HANDLE_FILE_INFORMATION is a plain C struct; all-zero is
+        // valid before the call fills it.
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: `handle` is a live handle owned by the caller; `info` is a
+        // valid out-pointer for the duration of the call.
         let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
         if ok == 0 {
             return Err(TemplateReloadError::Acquire(
@@ -566,6 +584,8 @@ mod imp {
             MaximumLength: (name_utf16.len() * 2) as u16,
             Buffer: name_utf16.as_mut_ptr(),
         };
+        // SAFETY: OBJECT_ATTRIBUTES is a plain C struct of integers and
+        // pointers; all-zero is a valid initial value before fields are set.
         let mut oa: OBJECT_ATTRIBUTES = unsafe { std::mem::zeroed() };
         oa.Length = std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32;
         oa.RootDirectory = std::ptr::null_mut();
@@ -573,7 +593,11 @@ mod imp {
         oa.Attributes = OBJ_CASE_INSENSITIVE as u32;
 
         let mut handle: HANDLE = INVALID_HANDLE_VALUE;
+        // SAFETY: IO_STATUS_BLOCK is a plain C struct; all-zero is valid and
+        // NtCreateFile initializes it on success.
         let mut io_status: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
+        // SAFETY: every pointer refers to a live local for the call's duration;
+        // NtCreateFile writes only through them and the handle is checked below.
         let status = unsafe {
             NtCreateFile(
                 &mut handle,
