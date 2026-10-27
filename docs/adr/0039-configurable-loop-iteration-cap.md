@@ -10,7 +10,7 @@
 
 ## Decision
 
-Add `max_iterations: Option<usize>` to the loop DSL surface (`LoopFullConfig`). Thread it through `LoopStepDef` → `BuilderStep::DeclarativeLoop` → `LoopConfig` → `LoopService`/`LoopSegment`. When absent, default to `MAX_LOOP_ITERATIONS` (10,000).
+Add `max_iterations: Option<usize>` to the loop DSL surface (`LoopFullConfig`). Thread it through `LoopStepDef` → `BuilderStep::DeclarativeLoop` → `LoopConfig` → `LoopSegment`. When absent, default to `MAX_LOOP_ITERATIONS` (10,000).
 
 No upper ceiling — the operator makes an explicit per-Step resource decision. `max_iterations: 0` is rejected at compile time.
 

@@ -1,8 +1,9 @@
 //! Fanout drain-claim integration tests (bd rc-ulmo6, Task 2.1).
 //!
 //! Each test attaches a real [`InFlightClaim`] to a source exchange, drives a
-//! fanout service (wiretap / multicast / splitter), parks the branch copy on a
-//! release barrier so it outlives the parent claim scope, then asserts the
+//! fanout path (wiretap service / multicast segment / split segment), parks
+//! the branch copy on a release barrier so it outlives the parent claim scope,
+//! then asserts the
 //! gauge is held at 1 by the branch copy alone.
 //!
 //! On the unpatched code path fanout copies carry no claim (plain
@@ -19,10 +20,10 @@ use std::time::Duration;
 
 use camel_api::in_flight::{InFlightClaim, InFlightGauge};
 use camel_api::{
-    BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message, MulticastConfig, SplitterConfig,
-    split_body_lines,
+    AggregationStrategy, BoxProcessor, CamelError, Exchange, Message, OutcomePipeline,
+    OutcomeSegment, PipelineOutcome, SplitSource, split_body_lines,
 };
-use camel_processor::{MulticastService, SplitterService, WireTapService};
+use camel_processor::{MulticastSegment, SplitSegment, WireTapService};
 use tokio::sync::{Notify, mpsc};
 use tower::{Service, ServiceExt};
 
@@ -88,29 +89,46 @@ impl Service<Exchange> for GatedProbe {
     }
 }
 
-/// Forwarding probe: MOVES the received exchange into the channel (no clone)
-/// and completes immediately with a fresh exchange (multicast/split variant).
+/// OutcomePipeline variant of the forwarding probe: MOVES the received
+/// exchange into the channel and completes with a fresh exchange.
 #[derive(Clone)]
-struct ForwardingProbe {
+struct ForwardingOutcomeProbe {
     tx: mpsc::UnboundedSender<Exchange>,
 }
 
-impl Service<Exchange> for ForwardingProbe {
-    type Response = Exchange;
-    type Error = CamelError;
-    type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
-        Poll::Ready(Ok(()))
+impl OutcomePipeline for ForwardingOutcomeProbe {
+    fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+        Box::new(self.clone())
     }
-
-    fn call(&mut self, exchange: Exchange) -> Self::Future {
+    fn run<'a>(
+        &'a mut self,
+        exchange: Exchange,
+    ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
         let tx = self.tx.clone();
         Box::pin(async move {
-            tx.send(exchange)
-                .map_err(|_| CamelError::ProcessorError("forward channel closed".to_string()))?;
-            Ok(Exchange::new(Message::default()))
+            if tx.send(exchange).is_err() {
+                return PipelineOutcome::Failed(CamelError::ProcessorError(
+                    "forward channel closed".to_string(),
+                ));
+            }
+            PipelineOutcome::Completed(Exchange::new(Message::default()))
         })
+    }
+}
+
+/// OutcomePipeline body that completes immediately with the exchange.
+#[derive(Clone)]
+struct ImmediateBody;
+
+impl OutcomePipeline for ImmediateBody {
+    fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+        Box::new(self.clone())
+    }
+    fn run<'a>(
+        &'a mut self,
+        exchange: Exchange,
+    ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+        Box::pin(async move { PipelineOutcome::Completed(exchange) })
     }
 }
 
@@ -196,15 +214,27 @@ async fn multicast_branch_copy_outlives_parent_claim() {
 
     // Recipient A completes immediately; recipient B moves its branch copy
     // into the channel where the receiver task parks it on the barrier.
-    let immediate = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
-    let forwarding = BoxProcessor::new(ForwardingProbe { tx: fwd_tx });
-    let mut svc =
-        MulticastService::new(vec![immediate, forwarding], MulticastConfig::new()).unwrap();
+    let mut seg = MulticastSegment {
+        branches: vec![
+            OutcomeSegment::new(Box::new(ImmediateBody)),
+            OutcomeSegment::new(Box::new(ForwardingOutcomeProbe { tx: fwd_tx })),
+        ],
+        parallel: false,
+        parallel_limit: None,
+        stop_on_exception: true,
+        timeout: None,
+        aggregator: Arc::new(|exchanges: Vec<Exchange>| {
+            exchanges.into_iter().last().unwrap_or_default()
+        }),
+    };
 
     let exchange = claimed_exchange(&gauge, "main");
 
-    // Act: all recipients complete (sequential LastWins default).
-    let mut returned = svc.ready().await.unwrap().call(exchange).await.unwrap();
+    // Act: all recipients complete (sequential LastWins-equivalent aggregator).
+    let mut returned = match OutcomePipeline::run(&mut seg, exchange).await {
+        PipelineOutcome::Completed(ex) => ex,
+        other => panic!("multicast segment did not complete: {other:?}"),
+    };
     recv_bounded(&mut entry_rx, "multicast receiver entry").await;
 
     // Drop the returned aggregate exchange and the parent claim.
@@ -237,15 +267,24 @@ async fn split_branch_copy_outlives_parent_claim() {
 
     // The segment recipient moves its fragment into the channel where the
     // receiver task parks it on the barrier.
-    let segment = BoxProcessor::new(ForwardingProbe { tx: fwd_tx });
-    let mut svc = SplitterService::new(SplitterConfig::new(split_body_lines()), segment).unwrap();
+    let mut seg = SplitSegment {
+        splitter: SplitSource::Sync(split_body_lines()),
+        body: OutcomeSegment::new(Box::new(ForwardingOutcomeProbe { tx: fwd_tx })),
+        parallel: false,
+        parallel_limit: None,
+        stop_on_exception: true,
+        aggregation: AggregationStrategy::LastWins,
+    };
 
     // `split_body_lines` builds fragments through camel-api's
     // `fragment_exchange` seam (the split fix site).
     let exchange = claimed_exchange(&gauge, "only");
 
     // Act: the single fragment is processed by the segment recipient.
-    let mut returned = svc.ready().await.unwrap().call(exchange).await.unwrap();
+    let mut returned = match OutcomePipeline::run(&mut seg, exchange).await {
+        PipelineOutcome::Completed(ex) => ex,
+        other => panic!("split segment did not complete: {other:?}"),
+    };
     recv_bounded(&mut entry_rx, "split segment entry").await;
 
     // Drop the returned aggregate exchange and the parent claim.

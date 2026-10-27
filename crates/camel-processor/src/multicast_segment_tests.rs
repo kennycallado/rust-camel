@@ -1055,3 +1055,533 @@ async fn multicast_panicking_drop_payload_maps_once_without_double_panic() {
         other => panic!("expected Failed from panicking-drop payload, got {other:?}"),
     }
 }
+
+// ── Ported from the removed Tower multicast tests ──────────────────────
+
+fn last_wins_aggregator() -> Arc<dyn Fn(Vec<Exchange>) -> Exchange + Send + Sync> {
+    Arc::new(|exchanges: Vec<Exchange>| exchanges.into_iter().last().unwrap_or_default())
+}
+
+fn first_output_aggregator() -> Arc<dyn Fn(Vec<Exchange>) -> Exchange + Send + Sync> {
+    Arc::new(|exchanges: Vec<Exchange>| exchanges.into_iter().next().unwrap_or_default())
+}
+
+fn collect_all_aggregator() -> Arc<dyn Fn(Vec<Exchange>) -> Exchange + Send + Sync> {
+    Arc::new(|exchanges: Vec<Exchange>| {
+        let bodies: Vec<camel_api::Value> = exchanges
+            .iter()
+            .map(|ex| match &ex.input.body {
+                camel_api::Body::Text(s) => camel_api::Value::String(s.clone()),
+                camel_api::Body::Json(v) => v.clone(),
+                camel_api::Body::Xml(s) => camel_api::Value::String(s.clone()),
+                camel_api::Body::Bytes(b) => {
+                    camel_api::Value::String(String::from_utf8_lossy(b).into_owned())
+                }
+                camel_api::Body::Stream(s) => serde_json::json!({
+                    "_stream": {
+                        "origin": s.metadata.origin,
+                        "placeholder": true,
+                        "hint": "Materialize exchange body with .into_bytes() before multicast aggregation"
+                    }
+                }),
+                // Empty and future variants contribute no extractable value.
+                _ => camel_api::Value::Null,
+            })
+            .collect();
+        let mut out = Exchange::default();
+        out.input.body = camel_api::Body::Json(camel_api::Value::Array(bodies));
+        out
+    })
+}
+
+fn uppercase_body() -> OutcomeSegment {
+    #[derive(Clone)]
+    struct UppercaseBody;
+    impl camel_api::OutcomePipeline for UppercaseBody {
+        fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+            Box::new(UppercaseBody)
+        }
+        fn run<'a>(
+            &'a mut self,
+            mut exchange: Exchange,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>
+        {
+            Box::pin(async move {
+                if let camel_api::Body::Text(s) = &exchange.input.body {
+                    exchange.input.body = camel_api::Body::Text(s.to_uppercase());
+                }
+                PipelineOutcome::Completed(exchange)
+            })
+        }
+    }
+    OutcomeSegment::new(Box::new(UppercaseBody))
+}
+
+/// Uppercase body that increments `counter` so a test can assert that every
+/// branch ran when `stop_on_exception=false`.
+fn counting_uppercase_body(counter: Arc<AtomicUsize>) -> OutcomeSegment {
+    #[derive(Clone)]
+    struct CountingUppercase {
+        counter: Arc<AtomicUsize>,
+    }
+    impl camel_api::OutcomePipeline for CountingUppercase {
+        fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+            Box::new(self.clone())
+        }
+        fn run<'a>(
+            &'a mut self,
+            mut exchange: Exchange,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>
+        {
+            let _ = self.counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if let camel_api::Body::Text(s) = &exchange.input.body {
+                    exchange.input.body = camel_api::Body::Text(s.to_uppercase());
+                }
+                PipelineOutcome::Completed(exchange)
+            })
+        }
+    }
+    OutcomeSegment::new(Box::new(CountingUppercase { counter }))
+}
+
+#[tokio::test]
+async fn multicast_segment_sequential_last_wins() {
+    let mut seg = MulticastSegment {
+        branches: vec![uppercase_body(), uppercase_body(), uppercase_body()],
+        parallel: false,
+        parallel_limit: None,
+        stop_on_exception: true,
+        timeout: None,
+        aggregator: last_wins_aggregator(),
+    };
+
+    let ex = Exchange::new(Message::new("hello"));
+    let result = OutcomePipeline::run(&mut seg, ex).await;
+
+    match result {
+        PipelineOutcome::Completed(ex) => {
+            assert_eq!(ex.input.body.as_text(), Some("HELLO"));
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn multicast_segment_sequential_collect_all() {
+    let mut seg = MulticastSegment {
+        branches: vec![uppercase_body(), uppercase_body(), uppercase_body()],
+        parallel: false,
+        parallel_limit: None,
+        stop_on_exception: true,
+        timeout: None,
+        aggregator: collect_all_aggregator(),
+    };
+
+    let ex = Exchange::new(Message::new("hello"));
+    let result = OutcomePipeline::run(&mut seg, ex).await;
+
+    match result {
+        PipelineOutcome::Completed(ex) => match &ex.input.body {
+            camel_api::Body::Json(v) => {
+                assert_eq!(*v, serde_json::json!(["HELLO", "HELLO", "HELLO"]));
+            }
+            other => panic!("expected JSON body, got {other:?}"),
+        },
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+/// Documented divergence: the removed Tower `MulticastService` preserved the
+/// pre-fan-out original exchange for the `Original` strategy. The segment
+/// aggregator has no access to that original, so production maps `Original`
+/// to the first branch output (`camel-core` `splitting.rs`); this test locks
+/// `"HELLO"` (first branch output), not the input `"hello"`. Test-only
+/// Service behaviour creates no compatibility obligation (ADR-0090).
+#[tokio::test]
+async fn multicast_segment_sequential_original_returns_first_output() {
+    let mut seg = MulticastSegment {
+        branches: vec![uppercase_body(), uppercase_body(), uppercase_body()],
+        parallel: false,
+        parallel_limit: None,
+        stop_on_exception: true,
+        timeout: None,
+        aggregator: first_output_aggregator(),
+    };
+
+    let ex = Exchange::new(Message::new("hello"));
+    let result = OutcomePipeline::run(&mut seg, ex).await;
+
+    match result {
+        PipelineOutcome::Completed(ex) => {
+            assert_eq!(ex.input.body.as_text(), Some("HELLO"));
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn multicast_segment_sequential_custom_aggregation() {
+    let joiner: Arc<dyn Fn(Vec<Exchange>) -> Exchange + Send + Sync> =
+        Arc::new(|exchanges: Vec<Exchange>| {
+            let mut iter = exchanges.into_iter();
+            let mut acc = iter.next().unwrap_or_default();
+            for next in iter {
+                let acc_text = acc.input.body.as_text().unwrap_or("").to_string();
+                let next_text = next.input.body.as_text().unwrap_or("").to_string();
+                acc.input.body = camel_api::Body::Text(format!("{acc_text}+{next_text}"));
+            }
+            acc
+        });
+
+    let mut seg = MulticastSegment {
+        branches: vec![uppercase_body(), uppercase_body(), uppercase_body()],
+        parallel: false,
+        parallel_limit: None,
+        stop_on_exception: true,
+        timeout: None,
+        aggregator: joiner,
+    };
+
+    let ex = Exchange::new(Message::new("a"));
+    let result = OutcomePipeline::run(&mut seg, ex).await;
+
+    match result {
+        PipelineOutcome::Completed(ex) => {
+            assert_eq!(ex.input.body.as_text(), Some("A+A+A"));
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+/// Documented divergence: the removed Tower `MulticastService` returned the
+/// untouched pre-fan-out original when the fan-out was empty. The segment
+/// aggregator receives an empty output vector and cannot access that original;
+/// production maps empty fan-out to the default exchange (`camel-core`
+/// `splitting.rs`). Test-only Service behaviour creates no compatibility
+/// obligation (ADR-0090).
+#[tokio::test]
+async fn multicast_segment_empty_branches_completes() {
+    let mut seg = MulticastSegment {
+        branches: vec![],
+        parallel: false,
+        parallel_limit: None,
+        stop_on_exception: true,
+        timeout: None,
+        aggregator: Arc::new(|_exchanges: Vec<Exchange>| Exchange::new(Message::new("empty-ok"))),
+    };
+
+    let ex = Exchange::new(Message::new("hello"));
+    let result = OutcomePipeline::run(&mut seg, ex).await;
+
+    match result {
+        PipelineOutcome::Completed(ex) => {
+            assert_eq!(ex.input.body.as_text(), Some("empty-ok"));
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn multicast_segment_metadata_properties() {
+    // Recorder writes the multicast metadata into the body as JSON.
+    #[derive(Clone)]
+    struct MetadataJsonBody;
+    impl camel_api::OutcomePipeline for MetadataJsonBody {
+        fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+            Box::new(MetadataJsonBody)
+        }
+        fn run<'a>(
+            &'a mut self,
+            exchange: Exchange,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>
+        {
+            Box::pin(async move {
+                let idx = exchange.property(CAMEL_MULTICAST_INDEX).cloned();
+                let complete = exchange.property(CAMEL_MULTICAST_COMPLETE).cloned();
+                let mut out = exchange;
+                out.input.body = camel_api::Body::Json(serde_json::json!({
+                    "index": idx,
+                    "complete": complete,
+                }));
+                PipelineOutcome::Completed(out)
+            })
+        }
+    }
+
+    let mut seg = MulticastSegment {
+        branches: vec![
+            OutcomeSegment::new(Box::new(MetadataJsonBody)),
+            OutcomeSegment::new(Box::new(MetadataJsonBody)),
+            OutcomeSegment::new(Box::new(MetadataJsonBody)),
+        ],
+        parallel: false,
+        parallel_limit: None,
+        stop_on_exception: true,
+        timeout: None,
+        aggregator: collect_all_aggregator(),
+    };
+
+    let ex = Exchange::new(Message::new("x"));
+    let result = OutcomePipeline::run(&mut seg, ex).await;
+
+    let expected = serde_json::json!([
+        {"index": 0, "complete": false},
+        {"index": 1, "complete": false},
+        {"index": 2, "complete": true},
+    ]);
+    match result {
+        PipelineOutcome::Completed(ex) => match &ex.input.body {
+            camel_api::Body::Json(v) => assert_eq!(*v, expected),
+            other => panic!("expected JSON body, got {other:?}"),
+        },
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn multicast_segment_collect_all_error_propagates() {
+    // Service parity: an erroring branch propagates under
+    // stop_on_exception=true (CollectAll in the segment aggregates only
+    // Completed outputs, so the error surfaces as Failed).
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let mut seg = MulticastSegment {
+        branches: vec![
+            counting_passing_body(Arc::clone(&invocations)),
+            counting_body(Arc::clone(&invocations), 1), // fail on 2nd call
+            counting_passing_body(Arc::clone(&invocations)),
+        ],
+        parallel: false,
+        parallel_limit: None,
+        stop_on_exception: true,
+        timeout: None,
+        aggregator: collect_all_aggregator(),
+    };
+
+    let ex = Exchange::new(Message::new("hello"));
+    let result = OutcomePipeline::run(&mut seg, ex).await;
+
+    match result {
+        PipelineOutcome::Failed(err) => {
+            assert!(
+                err.to_string().contains("fail at 1"),
+                "CollectAll should propagate the branch error, got: {err}"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    // stop_on_exception=true halts before the third branch: the failing
+    // branch is index 1, so exactly index + 1 == 2 branches ran.
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        2,
+        "stop_on_exception=true must halt after the failing branch"
+    );
+}
+
+/// Replaces the deleted Tower `MulticastService` partial-success test.
+/// ADR-0058: with `stop_on_exception=false`, failed branches are ignored and
+/// the successful outputs are aggregated; the segment returns `Completed`.
+/// The zero-success witness (all branches fail => `Failed(last_error)`) lives
+/// in `multicast_all_branches_failed_no_stopped_returns_failed`.
+#[tokio::test]
+async fn multicast_segment_collect_all_stop_false_partial_success_completes() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let mut seg = MulticastSegment {
+        branches: vec![
+            counting_uppercase_body(Arc::clone(&invocations)),
+            counting_body(Arc::clone(&invocations), 1), // branch 1 fails
+            counting_uppercase_body(Arc::clone(&invocations)),
+        ],
+        parallel: false,
+        parallel_limit: None,
+        stop_on_exception: false,
+        timeout: None,
+        aggregator: collect_all_aggregator(),
+    };
+
+    let ex = Exchange::new(Message::new("hello"));
+    let result = OutcomePipeline::run(&mut seg, ex).await;
+
+    match result {
+        PipelineOutcome::Completed(ex) => match &ex.input.body {
+            camel_api::Body::Json(v) => {
+                assert_eq!(*v, serde_json::json!(["HELLO", "HELLO"]));
+            }
+            other => panic!("expected JSON body, got {other:?}"),
+        },
+        other => panic!("expected Completed, got {other:?}"),
+    }
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        3,
+        "stop_on_exception=false must run every branch"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multicast_segment_parallel_basic() {
+    let mut seg = MulticastSegment {
+        branches: vec![uppercase_body(), uppercase_body()],
+        parallel: true,
+        parallel_limit: None,
+        stop_on_exception: true,
+        timeout: None,
+        aggregator: collect_all_aggregator(),
+    };
+
+    let ex = Exchange::new(Message::new("test"));
+    let result = OutcomePipeline::run(&mut seg, ex).await;
+
+    match result {
+        PipelineOutcome::Completed(ex) => match &ex.input.body {
+            camel_api::Body::Json(v) => {
+                let arr = v.as_array().expect("expected array");
+                assert_eq!(arr.len(), 2);
+                assert!(arr.iter().all(|v| v.as_str() == Some("TEST")));
+            }
+            other => panic!("expected JSON body, got {other:?}"),
+        },
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+fn stream_body_segment(origin: Option<String>) -> OutcomeSegment {
+    use bytes::Bytes;
+    use camel_api::{StreamBody, StreamMetadata};
+    use futures::stream;
+    use tokio::sync::Mutex;
+
+    let chunks = vec![Ok(Bytes::from("test"))];
+    let stream_body = StreamBody {
+        stream: Arc::new(Mutex::new(Some(Box::pin(stream::iter(chunks))))),
+        metadata: StreamMetadata {
+            origin,
+            ..Default::default()
+        },
+    };
+    let stream_body_clone = stream_body.clone();
+
+    #[derive(Clone)]
+    struct StreamBodySegment {
+        stream_body: StreamBody,
+    }
+    impl camel_api::OutcomePipeline for StreamBodySegment {
+        fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+            Box::new(self.clone())
+        }
+        fn run<'a>(
+            &'a mut self,
+            mut exchange: Exchange,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>
+        {
+            let body = self.stream_body.clone();
+            Box::pin(async move {
+                exchange.input.body = camel_api::Body::Stream(body);
+                PipelineOutcome::Completed(exchange)
+            })
+        }
+    }
+
+    OutcomeSegment::new(Box::new(StreamBodySegment {
+        stream_body: stream_body_clone,
+    }))
+}
+
+async fn run_multicast_stream_test(origin: Option<String>) -> Exchange {
+    let mut seg = MulticastSegment {
+        branches: vec![stream_body_segment(origin)],
+        parallel: false,
+        parallel_limit: None,
+        stop_on_exception: true,
+        timeout: None,
+        aggregator: collect_all_aggregator(),
+    };
+
+    match OutcomePipeline::run(&mut seg, Exchange::new(Message::new(""))).await {
+        PipelineOutcome::Completed(ex) => ex,
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn multicast_segment_stream_bodies_creates_valid_json() {
+    let result = run_multicast_stream_test(Some("http://example.com/data".to_string())).await;
+
+    let camel_api::Body::Json(value) = &result.input.body else {
+        panic!("Expected Json body, got {:?}", result.input.body);
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(value).unwrap())
+        .expect("aggregated body must serialize");
+    let arr = parsed.as_array().expect("expected array");
+    assert_eq!(arr.len(), 1);
+    assert!(arr[0]["_stream"].is_object());
+    assert_eq!(arr[0]["_stream"]["origin"], "http://example.com/data");
+    assert_eq!(arr[0]["_stream"]["placeholder"], true);
+}
+
+#[tokio::test]
+async fn multicast_segment_stream_with_none_origin_creates_valid_json() {
+    let result = run_multicast_stream_test(None).await;
+
+    let camel_api::Body::Json(value) = &result.input.body else {
+        panic!("Expected Json body, got {:?}", result.input.body);
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(value).unwrap())
+        .expect("aggregated body must serialize");
+    let arr = parsed.as_array().expect("expected array");
+    assert_eq!(arr.len(), 1);
+    assert!(arr[0]["_stream"].is_object());
+    assert_eq!(arr[0]["_stream"]["origin"], serde_json::Value::Null);
+    assert_eq!(arr[0]["_stream"]["placeholder"], true);
+}
+
+#[tokio::test]
+async fn multicast_segment_collect_all_converts_bytes_xml_and_empty() {
+    #[derive(Clone)]
+    struct SetBody(Option<camel_api::Body>);
+    impl camel_api::OutcomePipeline for SetBody {
+        fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+            Box::new(self.clone())
+        }
+        fn run<'a>(
+            &'a mut self,
+            mut exchange: Exchange,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>
+        {
+            let body = self.0.clone();
+            Box::pin(async move {
+                exchange.input.body = body.unwrap_or(camel_api::Body::Empty);
+                PipelineOutcome::Completed(exchange)
+            })
+        }
+    }
+
+    let mut seg = MulticastSegment {
+        branches: vec![
+            OutcomeSegment::new(Box::new(SetBody(Some(camel_api::Body::Bytes(
+                vec![65, 66].into(),
+            ))))),
+            OutcomeSegment::new(Box::new(SetBody(Some(camel_api::Body::Xml(
+                "<a/>".to_string(),
+            ))))),
+            OutcomeSegment::new(Box::new(SetBody(None))),
+        ],
+        parallel: false,
+        parallel_limit: None,
+        stop_on_exception: true,
+        timeout: None,
+        aggregator: collect_all_aggregator(),
+    };
+
+    let ex = Exchange::new(Message::new("x"));
+    let result = OutcomePipeline::run(&mut seg, ex).await;
+
+    match result {
+        PipelineOutcome::Completed(ex) => match ex.input.body {
+            camel_api::Body::Json(v) => assert_eq!(v, serde_json::json!(["AB", "<a/>", null])),
+            other => panic!("expected json, got {other:?}"),
+        },
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}

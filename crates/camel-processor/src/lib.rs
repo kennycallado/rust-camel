@@ -26,7 +26,6 @@ pub mod log;
 pub mod loop_eip;
 pub mod map_body;
 pub mod marshal;
-pub mod multicast;
 pub mod multicast_segment;
 pub mod recipient_list;
 pub mod remove_header;
@@ -48,6 +47,8 @@ pub mod streaming_splitter;
 pub mod tar_splitter;
 #[cfg(test)]
 mod test_log_capture;
+#[cfg(test)]
+mod test_processor_segment;
 pub mod throttler;
 pub mod validate;
 pub mod wire_tap;
@@ -59,7 +60,7 @@ pub use cache_eip::{
     CacheInvalidateService, CacheInvalidateTarget, CachePeekStaleService, CacheService,
     CacheStatsService, PeekStaleMissPolicy,
 };
-pub use choice::{ChoiceSegment, ChoiceService, WhenClause, WhenClauseSegment};
+pub use choice::{ChoiceSegment, WhenClause, WhenClauseSegment};
 pub use circuit_breaker::{
     CircuitBreakerDecision, CircuitBreakerGate, CircuitBreakerLayer, CircuitBreakerService,
 };
@@ -87,17 +88,16 @@ pub use error_handler::{
     DefaultRouteErrorHandler, ErrorHandlerLayer, ErrorHandlerService, RouteErrorHandler,
     invoke_processor,
 };
-pub use filter::{FilterSegment, FilterService};
+pub use filter::FilterSegment;
 pub use idempotent_consumer::{IdempotentConsumerSegment, MessageIdSource};
 pub use intercept_compose::compose_divert;
 pub use json_schema_validate::JsonSchemaValidateService;
-pub use load_balancer::{LoadBalanceSegment, LoadBalancerService};
+pub use load_balancer::LoadBalanceSegment;
 pub use log::{DynamicLog, LogLevel, LogProcessor};
-pub use loop_eip::{CAMEL_LOOP_INDEX, CAMEL_LOOP_SIZE, LoopSegment, LoopService};
+pub use loop_eip::{CAMEL_LOOP_INDEX, CAMEL_LOOP_SIZE, LoopSegment};
 pub use map_body::{MapBody, MapBodyLayer};
 pub use marshal::{MarshalService, UnmarshalService};
-pub use multicast::{CAMEL_MULTICAST_COMPLETE, CAMEL_MULTICAST_INDEX, MulticastService};
-pub use multicast_segment::MulticastSegment;
+pub use multicast_segment::{CAMEL_MULTICAST_COMPLETE, CAMEL_MULTICAST_INDEX, MulticastSegment};
 pub use recipient_list::RecipientListService;
 pub use remove_header::{RemoveHeader, RemoveHeaderLayer};
 pub use routing_slip::RoutingSlipService;
@@ -109,11 +109,10 @@ pub use set_header::{SetHeader, SetHeaderIfAbsent, SetHeaderLayer};
 pub use set_property::{SetProperty, SetPropertyLayer};
 pub use sort::{SortKey, SortKeySource, SortService};
 pub use split_segment::SplitSegment;
-pub use splitter::SplitterService;
 pub use stream_cache::StreamCacheService;
 pub use streaming_split_segment::StreamingSplitSegment;
 pub use streaming_splitter::StreamingSplitterService;
-pub use throttler::{ThrottleSegment, ThrottlerService};
+pub use throttler::ThrottleSegment;
 pub use validate::ValidateService;
 pub use wire_tap::{WireTapConfig, WireTapLayer, WireTapLifecycle, WireTapService};
 

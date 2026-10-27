@@ -2,159 +2,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll};
-
-use tower::Service;
-use tower::ServiceExt;
-
-use camel_api::{BoxProcessor, CamelError, Exchange, LoadBalanceStrategy, LoadBalancerConfig};
-
-#[derive(Clone)]
-pub struct LoadBalancerService {
-    endpoints: Vec<BoxProcessor>,
-    config: LoadBalancerConfig,
-    round_robin_index: Arc<AtomicUsize>,
-    failover_index: Arc<AtomicUsize>,
-}
-
-impl LoadBalancerService {
-    pub fn new(endpoints: Vec<BoxProcessor>, config: LoadBalancerConfig) -> Self {
-        Self {
-            endpoints,
-            config,
-            round_robin_index: Arc::new(AtomicUsize::new(0)),
-            failover_index: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-}
-
-impl Service<Exchange> for LoadBalancerService {
-    type Response = Exchange;
-    type Error = CamelError;
-    type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        for endpoint in &mut self.endpoints {
-            match endpoint.poll_ready(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(())) => {}
-            }
-        }
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, exchange: Exchange) -> Self::Future {
-        let endpoints = self.endpoints.clone();
-        let config = self.config.clone();
-        let round_robin_index = self.round_robin_index.clone();
-        let failover_index = self.failover_index.clone();
-
-        Box::pin(async move {
-            if endpoints.is_empty() {
-                return Ok(exchange);
-            }
-
-            match &config.strategy {
-                LoadBalanceStrategy::Random => process_random(exchange, endpoints).await,
-                LoadBalanceStrategy::Weighted(weights) => {
-                    process_weighted(exchange, endpoints, weights).await
-                }
-                LoadBalanceStrategy::Failover => {
-                    process_failover(exchange, endpoints, failover_index).await
-                }
-                // RoundRobin and any future variant default to round-robin dispatch.
-                _ => process_round_robin(exchange, endpoints, round_robin_index).await,
-            }
-        })
-    }
-}
-
-async fn process_round_robin(
-    exchange: Exchange,
-    endpoints: Vec<BoxProcessor>,
-    index: Arc<AtomicUsize>,
-) -> Result<Exchange, CamelError> {
-    let len = endpoints.len();
-    let idx = index.fetch_add(1, Ordering::SeqCst) % len;
-    let mut endpoint = endpoints[idx].clone();
-    endpoint.ready().await?.call(exchange).await
-}
-
-async fn process_random(
-    exchange: Exchange,
-    endpoints: Vec<BoxProcessor>,
-) -> Result<Exchange, CamelError> {
-    let len = endpoints.len();
-    let idx = rand::random_range(0..len);
-    let mut endpoint = endpoints[idx].clone();
-    endpoint.ready().await?.call(exchange).await
-}
-
-async fn process_weighted(
-    exchange: Exchange,
-    endpoints: Vec<BoxProcessor>,
-    weights: &[(String, u32)],
-) -> Result<Exchange, CamelError> {
-    if endpoints.is_empty() || weights.is_empty() {
-        return Ok(exchange);
-    }
-
-    let numeric_weights: Vec<u64> = weights.iter().map(|(_, w)| *w as u64).collect();
-    let total: u64 = numeric_weights
-        .iter()
-        .try_fold(0u64, |acc, w| acc.checked_add(*w))
-        .ok_or_else(|| {
-            CamelError::ProcessorError("Weighted load balancer total weight overflow".to_string())
-        })?;
-
-    if total == 0 {
-        return Err(CamelError::ProcessorError(
-            "Weighted load balancer has zero total weight".to_string(),
-        ));
-    }
-
-    let mut r = rand::random::<u64>() % total;
-    let mut selected_idx = 0;
-    for (i, w) in numeric_weights.iter().enumerate() {
-        if r < *w {
-            selected_idx = i.min(endpoints.len() - 1);
-            break;
-        }
-        r -= w;
-    }
-
-    let mut endpoint = endpoints[selected_idx].clone();
-    endpoint.ready().await?.call(exchange).await
-}
-
-async fn process_failover(
-    exchange: Exchange,
-    endpoints: Vec<BoxProcessor>,
-    start_index: Arc<AtomicUsize>,
-) -> Result<Exchange, CamelError> {
-    let len = endpoints.len();
-    let start = start_index.load(Ordering::SeqCst);
-    let mut last_error = None;
-
-    for i in 0..len {
-        let idx = (start + i) % len;
-        let mut endpoint = endpoints[idx].clone();
-        match endpoint.ready().await?.call(exchange.branch_clone()).await {
-            Ok(ex) => {
-                start_index.store((idx + 1) % len, Ordering::SeqCst);
-                return Ok(ex);
-            }
-            Err(e) => {
-                last_error = Some(e);
-            }
-        }
-    }
-
-    Err(last_error.unwrap_or_else(|| {
-        CamelError::ProcessorError("All endpoints failed in failover".to_string())
-    }))
-}
 
 // ── LoadBalanceSegment (ADR-0025 OutcomePipeline) ────────────────────────
 
@@ -257,132 +104,8 @@ fn pick_weighted(weights: &[(String, u32)], len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::{BoxProcessorExt, Message};
+    use camel_api::{CamelError, Exchange, Message};
     use std::sync::Mutex;
-    use tower::ServiceExt;
-
-    fn counting_processor() -> (BoxProcessor, Arc<AtomicUsize>) {
-        let count = Arc::new(AtomicUsize::new(0));
-        let count_clone = count.clone();
-        let processor = BoxProcessor::from_fn(move |ex| {
-            count_clone.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async move { Ok(ex) })
-        });
-        (processor, count)
-    }
-
-    #[tokio::test]
-    async fn test_round_robin_distribution() {
-        let (p1, c1) = counting_processor();
-        let (p2, c2) = counting_processor();
-        let (p3, c3) = counting_processor();
-
-        let config = LoadBalancerConfig::round_robin();
-        let mut svc = LoadBalancerService::new(vec![p1, p2, p3], config);
-
-        for _ in 0..6 {
-            let ex = Exchange::new(Message::new("test"));
-            svc.ready().await.unwrap().call(ex).await.unwrap();
-        }
-
-        assert_eq!(c1.load(Ordering::SeqCst), 2);
-        assert_eq!(c2.load(Ordering::SeqCst), 2);
-        assert_eq!(c3.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn test_random_distribution() {
-        let (p1, c1) = counting_processor();
-        let (p2, c2) = counting_processor();
-
-        let config = LoadBalancerConfig::random();
-        let mut svc = LoadBalancerService::new(vec![p1, p2], config);
-
-        for _ in 0..100 {
-            let ex = Exchange::new(Message::new("test"));
-            svc.ready().await.unwrap().call(ex).await.unwrap();
-        }
-
-        let total = c1.load(Ordering::SeqCst) + c2.load(Ordering::SeqCst);
-        assert_eq!(total, 100);
-        assert!(c1.load(Ordering::SeqCst) > 20);
-        assert!(c2.load(Ordering::SeqCst) > 20);
-    }
-
-    #[tokio::test]
-    async fn test_failover_on_error() {
-        let failing = BoxProcessor::from_fn(|_ex| {
-            Box::pin(async { Err(CamelError::ProcessorError("fail".into())) })
-        });
-        let (success, count) = counting_processor();
-
-        let config = LoadBalancerConfig::failover();
-        let mut svc = LoadBalancerService::new(vec![failing, success], config);
-
-        let ex = Exchange::new(Message::new("test"));
-        let _result = svc.ready().await.unwrap().call(ex).await.unwrap();
-
-        assert_eq!(count.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn test_failover_preserves_original_exchange() {
-        // Capture body seen by retry endpoint to verify it's the original
-        let seen_body: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let seen_body_clone = seen_body.clone();
-
-        let failing = BoxProcessor::from_fn(|_ex| {
-            Box::pin(async { Err(CamelError::ProcessorError("fail".into())) })
-        });
-
-        let retry = BoxProcessor::from_fn(move |ex: Exchange| {
-            let seen = seen_body_clone.clone();
-            Box::pin(async move {
-                if let Some(text) = ex.input.body.as_text() {
-                    *seen.lock().unwrap() = Some(text.to_string());
-                }
-                Ok(ex)
-            })
-        });
-
-        let config = LoadBalancerConfig::failover();
-        let mut svc = LoadBalancerService::new(vec![failing, retry], config);
-
-        let ex = Exchange::new(Message::new("original body"));
-        svc.ready().await.unwrap().call(ex).await.unwrap();
-
-        assert_eq!(
-            seen_body.lock().unwrap().as_deref(),
-            Some("original body"),
-            "retry endpoint must receive the original exchange body, not a blank one"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_failover_all_fail() {
-        let failing = BoxProcessor::from_fn(|_ex| {
-            Box::pin(async { Err(CamelError::ProcessorError("fail".into())) })
-        });
-
-        let config = LoadBalancerConfig::failover();
-        let mut svc = LoadBalancerService::new(vec![failing.clone(), failing], config);
-
-        let ex = Exchange::new(Message::new("test"));
-        let result = svc.ready().await.unwrap().call(ex).await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_empty_endpoints() {
-        let config = LoadBalancerConfig::round_robin();
-        let mut svc = LoadBalancerService::new(vec![], config);
-
-        let ex = Exchange::new(Message::new("test"));
-        let result = svc.ready().await.unwrap().call(ex).await;
-
-        assert!(result.is_ok());
-    }
 
     // ── LoadBalanceSegment tests (ADR-0025 OutcomePipeline parity) ───
 
@@ -558,21 +281,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_weighted_sum_does_not_overflow_u32() {
-        let ok_processor = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
-        let endpoints = vec![ok_processor.clone(), ok_processor];
-        // u32::MAX + 1 would overflow u32 sum, but u64 sum handles it.
-        let weights = vec![("a".to_string(), u32::MAX), ("b".to_string(), 1)];
-        let result =
-            process_weighted(Exchange::new(Message::new("test")), endpoints, &weights).await;
-        assert!(
-            result.is_ok(),
-            "u32::MAX + 1 must not overflow with u64 sum: {:?}",
-            result.err()
-        );
-    }
-
     /// Test: failover exhaustion preserves the LAST destination's error,
     /// NOT a generic "all destinations exhausted" message.
     #[tokio::test]
@@ -619,5 +327,176 @@ mod tests {
                 other
             ),
         }
+    }
+
+    // ── Ported from the removed Tower load-balancer tests ──────────────
+
+    #[tokio::test]
+    async fn load_balance_round_robin_distribution_six_calls() {
+        let c1 = Arc::new(AtomicUsize::new(0));
+        let c2 = Arc::new(AtomicUsize::new(0));
+        let c3 = Arc::new(AtomicUsize::new(0));
+
+        let mut seg = LoadBalanceSegment {
+            destinations: vec![
+                camel_api::OutcomeSegment::new(Box::new(RecordingBody(c1.clone()))),
+                camel_api::OutcomeSegment::new(Box::new(RecordingBody(c2.clone()))),
+                camel_api::OutcomeSegment::new(Box::new(RecordingBody(c3.clone()))),
+            ],
+            strategy: camel_api::LoadBalanceStrategy::RoundRobin,
+            round_robin_index: Arc::new(AtomicUsize::new(0)),
+        };
+
+        for _ in 0..6 {
+            let ex = Exchange::new(Message::new("test"));
+            let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+            assert!(
+                matches!(result, camel_api::PipelineOutcome::Completed(_)),
+                "round-robin dispatch must complete; got {result:?}"
+            );
+        }
+
+        assert_eq!(c1.load(Ordering::SeqCst), 2);
+        assert_eq!(c2.load(Ordering::SeqCst), 2);
+        assert_eq!(c3.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn load_balance_random_distribution() {
+        let c1 = Arc::new(AtomicUsize::new(0));
+        let c2 = Arc::new(AtomicUsize::new(0));
+
+        let mut seg = LoadBalanceSegment {
+            destinations: vec![
+                camel_api::OutcomeSegment::new(Box::new(RecordingBody(c1.clone()))),
+                camel_api::OutcomeSegment::new(Box::new(RecordingBody(c2.clone()))),
+            ],
+            strategy: camel_api::LoadBalanceStrategy::Random,
+            round_robin_index: Arc::new(AtomicUsize::new(0)),
+        };
+
+        for _ in 0..100 {
+            let ex = Exchange::new(Message::new("test"));
+            let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+            assert!(
+                matches!(result, camel_api::PipelineOutcome::Completed(_)),
+                "random dispatch must complete; got {result:?}"
+            );
+        }
+
+        let total = c1.load(Ordering::SeqCst) + c2.load(Ordering::SeqCst);
+        assert_eq!(total, 100);
+        assert!(c1.load(Ordering::SeqCst) > 20);
+        assert!(c2.load(Ordering::SeqCst) > 20);
+    }
+
+    #[tokio::test]
+    async fn load_balance_failover_on_error() {
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let mut seg = LoadBalanceSegment {
+            destinations: vec![
+                camel_api::OutcomeSegment::new(Box::new(FailingBody)),
+                camel_api::OutcomeSegment::new(Box::new(RecordingBody(count.clone()))),
+            ],
+            strategy: camel_api::LoadBalanceStrategy::Failover,
+            round_robin_index: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let ex = Exchange::new(Message::new("test"));
+        let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+        assert!(matches!(result, camel_api::PipelineOutcome::Completed(_)));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn load_balance_failover_preserves_original_exchange() {
+        // Failure retry must receive a branch clone of the original exchange.
+        let seen_body: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_body_clone = Arc::clone(&seen_body);
+
+        struct CaptureBody(Arc<Mutex<Option<String>>>);
+        impl camel_api::OutcomePipeline for CaptureBody {
+            fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+                Box::new(CaptureBody(Arc::clone(&self.0)))
+            }
+            fn run<'a>(
+                &'a mut self,
+                ex: Exchange,
+            ) -> Pin<Box<dyn Future<Output = camel_api::PipelineOutcome> + Send + 'a>> {
+                let seen = Arc::clone(&self.0);
+                Box::pin(async move {
+                    if let Some(text) = ex.input.body.as_text() {
+                        *seen.lock().unwrap() = Some(text.to_string());
+                    }
+                    camel_api::PipelineOutcome::Completed(ex)
+                })
+            }
+        }
+
+        let mut seg = LoadBalanceSegment {
+            destinations: vec![
+                camel_api::OutcomeSegment::new(Box::new(FailingBody)),
+                camel_api::OutcomeSegment::new(Box::new(CaptureBody(seen_body_clone))),
+            ],
+            strategy: camel_api::LoadBalanceStrategy::Failover,
+            round_robin_index: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let ex = Exchange::new(Message::new("original body"));
+        let _result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+
+        assert_eq!(
+            seen_body.lock().unwrap().as_deref(),
+            Some("original body"),
+            "retry destination must receive the original exchange body, not a blank one"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_balance_empty_destinations_completes() {
+        let mut seg = LoadBalanceSegment {
+            destinations: vec![],
+            strategy: camel_api::LoadBalanceStrategy::RoundRobin,
+            round_robin_index: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let ex = Exchange::new(Message::new("test"));
+        let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+
+        match result {
+            camel_api::PipelineOutcome::Completed(ex) => {
+                assert_eq!(ex.input.body.as_text(), Some("test"));
+            }
+            other => panic!("expected Completed(original), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_balance_weighted_sum_does_not_overflow_u32() {
+        // u32::MAX + 1 overflows a u32 sum; the segment's u64 selection must
+        // not panic and must still dispatch to a destination.
+        let c1 = Arc::new(AtomicUsize::new(0));
+        let c2 = Arc::new(AtomicUsize::new(0));
+
+        let mut seg = LoadBalanceSegment {
+            destinations: vec![
+                camel_api::OutcomeSegment::new(Box::new(RecordingBody(c1.clone()))),
+                camel_api::OutcomeSegment::new(Box::new(RecordingBody(c2.clone()))),
+            ],
+            strategy: camel_api::LoadBalanceStrategy::Weighted(vec![
+                ("a".to_string(), u32::MAX),
+                ("b".to_string(), 1),
+            ]),
+            round_robin_index: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let ex = Exchange::new(Message::new("test"));
+        let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+        assert!(
+            matches!(result, camel_api::PipelineOutcome::Completed(_)),
+            "u32::MAX + 1 must not overflow with u64 sum: {result:?}"
+        );
+        assert_eq!(c1.load(Ordering::SeqCst) + c2.load(Ordering::SeqCst), 1);
     }
 }

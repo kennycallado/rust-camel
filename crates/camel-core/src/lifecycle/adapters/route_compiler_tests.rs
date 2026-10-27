@@ -900,7 +900,7 @@ async fn test_use_original_message_wholesale_exchange_replacement() {
 // ── CamelStop drop signal tests ──
 //
 // Verifies that the CamelStop property is honored at all executor boundaries:
-// - run_steps (Process mode: SamplingService, ThrottlerService)
+// - run_steps (Process mode: SamplingService, ThrottleSegment)
 // - BoxProcessorSegment (legacy Tower processor wrapped as OutcomePipeline)
 // - SequentialOutcomeSegment (defensive check after child Completed)
 

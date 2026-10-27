@@ -2035,32 +2035,88 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
+    struct CompletedBody;
+
+    impl camel_api::OutcomePipeline for CompletedBody {
+        fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+            Box::new(self.clone())
+        }
+        fn run<'a>(
+            &'a mut self,
+            exchange: Exchange,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = camel_api::PipelineOutcome> + Send + 'a>,
+        > {
+            Box::pin(async move { camel_api::PipelineOutcome::Completed(exchange) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct FailedBody;
+
+    impl camel_api::OutcomePipeline for FailedBody {
+        fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+            Box::new(self.clone())
+        }
+        fn run<'a>(
+            &'a mut self,
+            _exchange: Exchange,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = camel_api::PipelineOutcome> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                camel_api::PipelineOutcome::Failed(CamelError::ProcessorError(
+                    "should not reach".into(),
+                ))
+            })
+        }
+    }
+
+    fn filter_segment(
+        predicate: impl Fn(&Exchange) -> bool + Send + Sync + 'static,
+        body: Box<dyn camel_api::OutcomePipeline>,
+    ) -> camel_processor::FilterSegment {
+        camel_processor::FilterSegment {
+            predicate: camel_api::PredicateSource::Sync(camel_api::FilterPredicate::new(predicate)),
+            body: camel_api::OutcomeSegment::new(body),
+        }
+    }
+
     #[tokio::test]
     async fn test_filter_processor_passes() {
-        use camel_api::BoxProcessorExt;
-        use camel_processor::FilterService;
+        use camel_api::OutcomePipeline;
 
-        let sub = BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }));
-        let mut svc =
-            FilterService::new(|ex: &Exchange| ex.input.body.as_text() == Some("pass"), sub);
+        let mut seg = filter_segment(
+            |ex: &Exchange| ex.input.body.as_text() == Some("pass"),
+            Box::new(CompletedBody),
+        );
         let exchange = Exchange::new(Message::new("pass"));
-        let result = svc.ready().await.unwrap().call(exchange).await.unwrap();
-        assert_eq!(result.input.body.as_text(), Some("pass"));
+        let result = seg.run(exchange).await;
+        match result {
+            camel_api::PipelineOutcome::Completed(ex) => {
+                assert_eq!(ex.input.body.as_text(), Some("pass"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
     }
 
     #[tokio::test]
     async fn test_filter_processor_blocks() {
-        use camel_api::BoxProcessorExt;
-        use camel_processor::FilterService;
+        use camel_api::OutcomePipeline;
 
-        let sub = BoxProcessor::from_fn(|_ex| {
-            Box::pin(async move { Err(CamelError::ProcessorError("should not reach".into())) })
-        });
-        let mut svc =
-            FilterService::new(|ex: &Exchange| ex.input.body.as_text() == Some("pass"), sub);
+        let mut seg = filter_segment(
+            |ex: &Exchange| ex.input.body.as_text() == Some("pass"),
+            Box::new(FailedBody),
+        );
         let exchange = Exchange::new(Message::new("reject"));
-        let result = svc.ready().await.unwrap().call(exchange).await.unwrap();
-        assert_eq!(result.input.body.as_text(), Some("reject"));
+        let result = seg.run(exchange).await;
+        match result {
+            camel_api::PipelineOutcome::Completed(ex) => {
+                assert_eq!(ex.input.body.as_text(), Some("reject"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
     }
 
     #[tokio::test]

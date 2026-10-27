@@ -32,7 +32,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `loop_eip` | Loop | repeated routing | `src/lib.rs:25` (Count(n) clamped to config.max_iterations, default MAX_LOOP_ITERATIONS=10_000 — configurable per-step per ADR-0039) |
 | `map_body` | MapBody | transformation | `src/lib.rs:26` |
 | `marshal` | Marshal / Unmarshal | data format transformation | `src/lib.rs:27` |
-| `multicast` | Multicast | fan-out routing | `src/lib.rs:28` |
+| `multicast_segment` | MulticastSegment | fan-out routing | `src/lib.rs:29` |
 | `recipient_list` | RecipientList | dynamic recipient routing | `src/lib.rs:30` (expression capped to max_recipients, default 1_000 — Batch 1 H13). Zero-success contract: when at least one recipient is called and zero return Ok, the result is `Err(last_error)` (ADR-0058), never `Ok(original)`. |
 | `resequencer` | Resequencer (batch/stream) | stateful reorder; continuation boundary (ADR-0029) | `src/lib.rs:32` |
 | `routing_slip` | RoutingSlip | dynamic routing | `src/lib.rs:33` |
@@ -43,7 +43,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `set_header` | SetHeader | transformation | `src/lib.rs:38` |
 | `set_property` | SetProperty | transformation | `src/lib.rs:39` |
 | `sort` | Sort | body array sort (no per-call size cap — audit M8) | `src/lib.rs:40` |
-| `splitter` | Split | splitting / aggregation | `src/lib.rs:42` |
+| `splitter` | Split metadata | `CAMEL_SPLIT_*` property keys shared with `SplitSegment` | `src/lib.rs:42` |
 | `stop` | CompiledStep::Stop | control-flow Stop (ADR-0024) | `CompiledStep` variant (not a `pub mod`); ADR-0025 |
 | `stream_cache` | StreamCache | body materialization | `src/lib.rs:43` |
 | `stream_codec` | StreamSplitCodec implementations | streaming split support | `src/lib.rs:44` |
@@ -66,21 +66,21 @@ Phase 4 (ADR-0025) migrated structural EIPs from Tower services returning `Err(C
 | `LoopSegment` | `loop_eip` | Repeated routing — runs body configured number of times (or until Stop). Stop from body breaks immediately. |
 | `ThrottleSegment` | `throttler` | Rate limiting — delays body execution to enforce max throughput. Stop from body propagates. |
 | `DoTrySegment` | `do_try` | Error-handling block — runs body; on error, matches `catch` clauses. Stop from body or catch propagates. |
-| `SplitSegment` | `split_segment` | Splitting / aggregation — splits Exchange by expression, runs body per fragment, aggregates results. Stop from body returns `Stopped(fragment_ex)`, skips aggregation. `SplitterService` (Tower wrapper) delegates to this. |
+| `SplitSegment` | `split_segment` | Splitting / aggregation — splits Exchange by expression, runs body per fragment, aggregates results. Stop from body returns `Stopped(fragment_ex)`, skips aggregation. This is the only eager Split implementation. |
 | `StreamingSplitSegment` | `streaming_split_segment` | Streaming split — same semantics as `SplitSegment` but processes a lazy byte stream. Stop drops the underlying stream and returns `Stopped(fragment_ex)`. |
-| `MulticastSegment` | `multicast` | Fan-out routing — sends Exchange to multiple endpoints in parallel or sequentially. Stop from any branch propagates to outer pipeline. Partial success (stopOnException=false) aggregates successful branches only; zero-success returns Failed (ADR-0058). A parallel-mode branch panic maps to a representative `Failed(ProcessorError)` counted in the partial-success accounting (spec: segment-outcome-composition, bd rc-f88o). |
+| `MulticastSegment` | `multicast_segment` | Fan-out routing — sends Exchange to multiple endpoints in parallel or sequentially. Stop from any branch propagates to outer pipeline. Partial success (stopOnException=false) aggregates successful branches only; zero-success returns Failed (ADR-0058). A parallel-mode branch panic maps to a representative `Failed(ProcessorError)` counted in the partial-success accounting (spec: segment-outcome-composition, bd rc-f88o). |
 | `LoadBalanceSegment` | `load_balancer` | Load balancing / failover — selects one endpoint per strategy (round-robin, random, failover). Stop from selected branch propagates. |
 | `IdempotentConsumerSegment` | `idempotent_consumer` | Dedup — backed by `Arc<dyn IdempotentRepository>` (`camel-api/src/idempotent.rs:21`); computes message id via `MessageIdExpression`, checks `contains(key)`, runs body + records key on first sighting, skips body on duplicate. Stop from body propagates. |
 
 ## Public API surface (v1.0 freeze)
 
-Status values: `stable` means normal public API, `deprecated` means Rust deprecation attribute is present, and `legacy-pending-removal` means retained only for a documented migration window.
+Status values: `stable` means normal public API, and `legacy-pending-removal` means retained only for a documented migration window.
 
 | Export | Status | Source | Notes |
 |---|---|---|---|
 | `AggregatorService` | stable | `pub use aggregator::AggregatorService` | Aggregate EIP service. |
-| `ChoiceSegment`, `ChoiceService`, `WhenClause`, `WhenClauseSegment` | stable | `pub use choice::{...}` | Choice EIP. |
-| `CircuitBreakerDecision`, `CircuitBreakerGate`, `CircuitBreakerLayer`, `CircuitBreakerService` | stable | `pub use circuit_breaker::{...}` | README claims deprecation for layer/service; code has no `#[deprecated]` yet. |
+| `ChoiceSegment`, `WhenClause`, `WhenClauseSegment` | stable | `pub use choice::{...}` | Choice EIP. |
+| `CircuitBreakerDecision`, `CircuitBreakerGate`, `CircuitBreakerLayer`, `CircuitBreakerService` | stable | `pub use circuit_breaker::{...}` | Circuit Breaker gate as a Tower layer/service; both remain fully supported public API. |
 | `ClaimCheckOp`, `ClaimCheckService`, `KeyExpression` | stable | `pub use claim_check::{...}` | Claim Check EIP. |
 | `CacheService`, `CacheInvalidateService`, `CachePeekStaleService`, `CacheClearService`, `CacheStatsService`, `CacheInvalidateTarget`, `CAMEL_CACHE_INVALIDATED_COUNT` | stable | `pub use cache_eip::{...}` | Cache EIP. Outcome-aware segment for lookup, invalidation, stale-serving, clear, and stats (awaited async `stats()` on the port, bd rc-22wj). |
 | `EnrichService`, `PollEnrichService` | stable | `pub use content_enricher::{...}` | Enrich / pollEnrich. |
@@ -98,17 +98,16 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `EnrichmentStrategy`, `ThrowOnNoPoll`, `UseEnrichedBody` | stable | `pub use enrichment_strategy::{...}` | Enrichment merge strategy. |
 | `DefaultRouteErrorHandler`, `RouteErrorHandler`, `invoke_processor` | stable | `pub use error_handler::{...}` | ADR-0019 in-pipeline handler API. |
 | `ErrorHandlerLayer`, `ErrorHandlerService` | stable | `pub use error_handler::{...}`; `struct ErrorHandlerLayer`, `struct ErrorHandlerService` | Legacy Tower layer/service for in-pipeline error handling; prefer `RouteChannelService` + `DefaultRouteErrorHandler` per ADR-0019 for new code. |
-| `FilterSegment`, `FilterService` | stable | `pub use filter::{...}` | Filter EIP. |
+| `FilterSegment` | stable | `pub use filter::FilterSegment` | Filter EIP. |
 | `IdempotentConsumerSegment`, `MessageIdExpression` | stable | `pub use idempotent_consumer::{...}` | Repository-backed idempotent consumer. |
 | `compose_divert` | stable | `pub use intercept_compose::compose_divert` | Divert composition — copy stage in front of a real producer (ADR-0064). |
 | `JsonSchemaValidateService` | stable | `pub use json_schema_validate::JsonSchemaValidateService` | JSON Schema validation. |
-| `LoadBalanceSegment`, `LoadBalancerService` | stable | `pub use load_balancer::{...}` | Load balancer EIP; service poll_ready migration pending. |
+| `LoadBalanceSegment` | stable | `pub use load_balancer::LoadBalanceSegment` | Load balancer EIP. |
 | `LogLevel`, `LogProcessor` | stable | `pub use log::{...}` | Log EIP. |
-| `CAMEL_LOOP_INDEX`, `CAMEL_LOOP_SIZE`, `LoopSegment`, `LoopService` | stable | `pub use loop_eip::{...}` | Loop EIP metadata, segment, and service. |
+| `CAMEL_LOOP_INDEX`, `CAMEL_LOOP_SIZE`, `LoopSegment` | stable | `pub use loop_eip::{...}` | Loop EIP metadata and segment. |
 | `MapBody`, `MapBodyLayer` | stable | `pub use map_body::{...}` | Body mapping. |
 | `MarshalService`, `UnmarshalService` | stable | `pub use marshal::{...}` | Data format transform. |
-| `CAMEL_MULTICAST_COMPLETE`, `CAMEL_MULTICAST_INDEX`, `MulticastService` | stable | `pub use multicast::{...}` | Multicast metadata + service. |
-| `MulticastSegment` | stable | `pub use multicast_segment::MulticastSegment` | Outcome-aware multicast segment. |
+| `CAMEL_MULTICAST_COMPLETE`, `CAMEL_MULTICAST_INDEX`, `MulticastSegment` | stable | `pub use multicast_segment::{...}` | Multicast metadata and the outcome-aware multicast segment. |
 | `RecipientListService` | stable | `pub use recipient_list::RecipientListService` | Recipient list EIP. |
 | `RoutingSlipService` | stable | `pub use routing_slip::RoutingSlipService` | Routing slip EIP. |
 | `SamplingService` | stable | `pub use sampling::SamplingService` | Sampling EIP. |
@@ -118,10 +117,10 @@ Status values: `stable` means normal public API, `deprecated` means Rust depreca
 | `SetHeader`, `SetHeaderIfAbsent`, `SetHeaderLayer` | stable | `pub use set_header::{...}` | Header mutation. |
 | `SetProperty`, `SetPropertyLayer` | stable | `pub use set_property::{...}` | Property mutation. |
 | `SortExpression`, `SortKey`, `SortService` | stable | `pub use sort::{...}` | Body sort EIP. |
-| `SplitSegment`, `SplitterService` | stable | `pub use split_segment::SplitSegment`; `pub use splitter::SplitterService` | Split EIP; service poll_ready migration pending. |
+| `SplitSegment` | stable | `pub use split_segment::SplitSegment` | Split EIP. |
 | `StreamCacheService` | stable | `pub use stream_cache::StreamCacheService` | Stream body materialization. |
 | `StreamingSplitSegment`, `StreamingSplitterService` | stable | `pub use streaming_split_segment::StreamingSplitSegment`; `pub use streaming_splitter::StreamingSplitterService` | Streaming Split EIP; service poll_ready migration pending. |
-| `ThrottleSegment`, `ThrottlerService` | stable | `pub use throttler::{...}` | Throttle EIP. |
+| `ThrottleSegment` | stable | `pub use throttler::ThrottleSegment` | Throttle EIP. |
 | `ValidateService` | stable | `pub use validate::ValidateService` | Predicate validation. |
 | `WireTapConfig`, `WireTapLayer`, `WireTapLifecycle`, `WireTapService` | stable | `pub use wire_tap::{...}` | WireTap EIP; poll_ready migrated per ADR-0019. `WireTapLifecycle` is the lifecycle handle for graceful-drain-then-abort teardown (ADR-0022). |
 | `BatchPolicy`, `StreamPolicy`, `PassthroughPolicy`, `ResequencePolicy`, `ResequencerConfig`, `ResequencerService` | stable | `pub use resequencer...` | Resequencer policies, config, and service. |
@@ -132,15 +131,11 @@ ADR-0019 requires processors whose errors are routable/recoverable events to avo
 
 | Processor | poll_ready behavior | Status | Rationale / source |
 |---|---|---|---|
-| `MulticastService` | `Ready(Ok(()))` unconditional | migrated | Per-endpoint readiness happens inside fan-out logic. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for MulticastService`. |
 | `ErrorHandlerService` | preserves `Pending`, maps readiness `Err` to `Ok(())` | migrated | Deprecated compatibility shell still follows ADR-0019. See `fn poll_ready` in `impl Service<Exchange> for ErrorHandlerService`. |
 | `AggregatorService` | starts the TTL sweep lazily, then returns `Ready(Ok(()))` | migrated | Readiness does not probe an endpoint. `call` owns aggregation state and also performs inline TTL eviction. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for AggregatorService`. |
 | `RecipientListService` | `Ready(Ok(()))` unconditional | migrated | Dynamic recipients resolve and check readiness in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for RecipientListService`. |
 | `WireTapService` | `Ready(Ok(()))` unconditional | migrated | Fire-and-forget tap readiness is checked inside the tap task; the main route never blocks on the tap (ADR-0019). See `fn poll_ready` in `impl Service<Exchange> for WireTapService`. |
-| `LoadBalancerService` | polls all endpoints and returns first `Err` | pending-fix | Failover/selection must happen in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for LoadBalancerService`. |
-| `SplitterService` | delegates to sub-pipeline | pending-fix | Fragment processing checks readiness in `call()` through `process_sequential` or `process_parallel`. See `fn poll_ready` in `impl Service<Exchange> for SplitterService`. |
 | `StreamingSplitterService` | delegates to sub-pipeline | pending-fix | Streaming fragment processing checks readiness in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for StreamingSplitterService`. |
-| `FilterService` | delegates to sub-pipeline | pending-fix | Predicate evaluation and conditional dispatch happen in `call()`. See `fn poll_ready` and `fn call` in `impl Service<Exchange> for FilterService`. |
 | `SecurityPolicyService` | delegates to inner service | excluded | Authz faults are outside normal EIP recovery per ADR-0010. See `fn poll_ready` in `impl Service<Exchange> for SecurityPolicyService`. |
 
 ## Language
@@ -206,7 +201,7 @@ _Avoid_: global reopen, shared latch (use per-handle latch, single-handle discip
 
 ## Aggregation contract (divergence from Apache Camel)
 
-`SplitterService` and `StreamingSplitterService` invoke the configured
+`StreamingSplitterService` invokes the configured
 `AggregationStrategy` with a `Vec<Result<Exchange, CamelError>>` — failed
 fragments appear as `Err(e)` entries in the Vec, NOT as Exchanges with the
 exception attached. This diverges permanently from Apache Camel, where the
@@ -223,7 +218,7 @@ Per ADR-0046 §Anti-patrones, this divergence is documented here as tracked
 content (not in a gitignored spike doc). Source: spike Splitter (commit
 `8d31e74a`), divergence label D2.
 
-The split expression fails loud on a wrong-type body. `SplitterService::call`
+The split expression fails loud on a wrong-type body. `SplitSegment::run`
 propagates `CamelError::TypeConversionFailed` before fragmentation when the
 body does not match the expression's expected type. The error message names
 the expression, the received body type, and the fix: add an unmarshal step before split.

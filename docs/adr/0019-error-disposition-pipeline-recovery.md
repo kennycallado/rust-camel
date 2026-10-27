@@ -33,7 +33,7 @@ The pipeline needs to be "recovery-aware": after a step fails, the handler must 
 
 Apache Camel models error handling with an outer `ErrorHandler` wrapping the route processor. After a step throws, the handler applies `onException` policies: `handled=true` absorbs the error and breaks out of the original route (optionally routing to a sub-route); `continued=true` clears the error and resumes the original route. Redeliveries retry from the point of failure. When all retries are exhausted the exchange is sent to the Dead Letter Channel. These semantics are faithfully mirrored by `ExceptionDisposition` (`Propagate`/`Handled`/`Continued`), `retry_step`, and the DLC catch-all policy.
 
-The architectural divergence is forced by Tower. Camel's JVM runtime has no readiness concept — every call is synchronous from the error handler's perspective. Tower splits `poll_ready` (readiness) from `call` (execution), and treats a readiness `Err` as a permanently broken service. This is incompatible with Camel's model where all errors are routable, retryable events. rust-camel resolves the mismatch by having `poll_ready` return `Ready(Ok(()))` unconditionally (multicast, error handler) and routing readiness errors through the same in-pipeline `RouteErrorHandler`. The consequence is that `continued=true` is implemented inside the pipeline loop rather than by an outer layer — a structural necessity, not a stylistic choice.
+The architectural divergence is forced by Tower. Camel's JVM runtime has no readiness concept — every call is synchronous from the error handler's perspective. Tower splits `poll_ready` (readiness) from `call` (execution), and treats a readiness `Err` as a permanently broken service. This is incompatible with Camel's model where all errors are routable, retryable events. rust-camel resolves the mismatch by having `poll_ready` return `Ready(Ok(()))` unconditionally (wire tap, error handler) and routing readiness errors through the same in-pipeline `RouteErrorHandler`. The consequence is that `continued=true` is implemented inside the pipeline loop rather than by an outer layer — a structural necessity, not a stylistic choice.
 
 ### Enumeration of processors bound by the `Ready(Ok(()))` readiness contract
 
@@ -47,15 +47,18 @@ semantics.
 
 | Processor | Reason | Status |
 |---|---|---|
-| `MulticastService` | Parallel/sequential fan-out must honour `stop_on_exception`; per-endpoint readiness belongs in `call()`. | migrated |
 | `ErrorHandlerService` | Deprecated compatibility shell; retry/DLC handling happens in `call()`. | migrated |
 | `AggregatorService` | Aggregation buckets and timeout work are call-time state; readiness has no external endpoint to validate. | migrated |
 | `RecipientListService` | Recipients are dynamically resolved; readiness is per resolved recipient in `call()`. | migrated |
 | `WireTapService` | Fire-and-forget tap failures MUST NOT block the main pipeline. | pending-fix |
-| `LoadBalancerService` | Failover/selection strategies must skip broken endpoints in `call()`, not fail before selection runs. | pending-fix |
-| `SplitterService` | Fragment sub-pipeline readiness is checked per fragment in `call()`; outer readiness MUST NOT bypass split error policy. | pending-fix |
 | `StreamingSplitterService` | Streaming fragment readiness is checked per fragment in `call()`; outer readiness MUST NOT abort before stream policy runs. | pending-fix |
-| `FilterService` | Conditional sub-pipeline; predicate is evaluated in `call()`, and sub-pipeline readiness MUST be checked there so the route error handler can apply continued/handled semantics — outer readiness MUST NOT bypass the filter's conditional dispatch. | pending-fix |
+
+`MulticastService`, `LoadBalancerService`, and `SplitterService` were removed: their EIPs now run as outcome-layer segments (`MulticastSegment`, `LoadBalanceSegment`, `SplitSegment`) with no Tower readiness contract.
+
+`FilterSegment` and `ChoiceSegment` ([ADR-0025](./0025-outcome-aware-structural-eips.md))
+run at the outcome layer and have no Tower readiness contract. Conditional
+dispatch stays inside the segment's `run`, so no outer readiness check can
+bypass it.
 
 `SecurityPolicyService` is intentionally excluded. Route-level authorization is a
 pre-pipeline boundary per [ADR-0010](./0010-security-policy-pre-pipeline-authorization.md):

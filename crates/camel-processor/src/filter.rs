@@ -1,68 +1,5 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
-
-use tower::Service;
-use tower::ServiceExt;
-
-use camel_api::{BoxProcessor, CamelError, Exchange, FilterPredicate, PredicateSource};
-
-/// Tower Service implementing the Filter EIP.
-///
-/// If the predicate evaluates to `true`, the exchange is forwarded through the
-/// sub-pipeline. If `false`, the exchange is returned as-is and the
-/// sub-pipeline is skipped entirely. A failed (async) predicate evaluation
-/// propagates as `Err` — the exchange is never silently dropped.
-#[derive(Clone)]
-pub struct FilterService {
-    predicate: PredicateSource,
-    sub_pipeline: BoxProcessor,
-}
-
-impl FilterService {
-    /// Create from a closure predicate and a resolved sub-pipeline.
-    pub fn new(
-        predicate: impl Fn(&Exchange) -> bool + Send + Sync + 'static,
-        sub_pipeline: BoxProcessor,
-    ) -> Self {
-        Self {
-            predicate: PredicateSource::Sync(FilterPredicate::new(predicate)),
-            sub_pipeline,
-        }
-    }
-
-    /// Create from a fallible `PredicateSource` (used by `resolve_steps`).
-    pub fn from_predicate(predicate: PredicateSource, sub_pipeline: BoxProcessor) -> Self {
-        Self {
-            predicate,
-            sub_pipeline,
-        }
-    }
-}
-
-impl Service<Exchange> for FilterService {
-    type Response = Exchange;
-    type Error = CamelError;
-    type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.sub_pipeline.poll_ready(cx)
-    }
-
-    fn call(&mut self, exchange: Exchange) -> Self::Future {
-        // Clone-and-replace: the future owns its state so the predicate can be
-        // awaited before deciding whether to invoke the sub-pipeline.
-        let predicate = self.predicate.clone();
-        let mut sub_pipeline = self.sub_pipeline.clone();
-        Box::pin(async move {
-            match predicate.matches(&exchange).await {
-                Ok(true) => sub_pipeline.ready().await?.call(exchange).await,
-                Ok(false) => Ok(exchange),
-                Err(err) => Err(err),
-            }
-        })
-    }
-}
 
 // ── FilterSegment (ADR-0025 OutcomePipeline) ─────────────────────────────
 
@@ -74,10 +11,8 @@ impl Service<Exchange> for FilterService {
 /// as-is and the body is skipped entirely. A failed predicate evaluation
 /// yields `Failed(err)`; the exchange is never silently dropped.
 ///
-/// Unlike `FilterService` (which operates at the Tower layer and cannot
-/// preserve `Stopped(ex)` with mutations), `FilterSegment` operates at
-/// the `PipelineOutcome` layer and preserves the exchange at the Stop
-/// point including all mutations.
+/// The segment operates at the `PipelineOutcome` layer and preserves the
+/// exchange at the Stop point including all mutations.
 pub struct FilterSegment {
     pub predicate: camel_api::PredicateSource,
     pub body: camel_api::OutcomeSegment,
@@ -114,8 +49,11 @@ impl camel_api::OutcomePipeline for FilterSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::{Body, BoxProcessorExt, Message, Value};
-    use tower::ServiceExt;
+    use crate::test_processor_segment::processor_segment;
+    use camel_api::{
+        Body, BoxProcessor, BoxProcessorExt, CamelError, Exchange, FilterPredicate, Message,
+        OutcomePipeline, PipelineOutcome, PredicateSource, Value,
+    };
 
     fn passthrough() -> BoxProcessor {
         BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }))
@@ -138,70 +76,91 @@ mod tests {
         })
     }
 
-    // 1. Matching exchange is forwarded to sub_pipeline.
+    fn predicate(f: impl Fn(&Exchange) -> bool + Send + Sync + 'static) -> PredicateSource {
+        PredicateSource::Sync(FilterPredicate::new(f))
+    }
+
+    fn segment(predicate: PredicateSource, body: BoxProcessor) -> FilterSegment {
+        FilterSegment {
+            predicate,
+            body: processor_segment(body),
+        }
+    }
+
+    fn completed_exchange(outcome: PipelineOutcome) -> Exchange {
+        match outcome {
+            PipelineOutcome::Completed(ex) => ex,
+            other => panic!("expected PipelineOutcome::Completed, got {other:?}"),
+        }
+    }
+
+    // 1. Matching exchange is forwarded to body.
     #[tokio::test]
-    async fn test_filter_passes_matching_exchange() {
-        let mut svc = FilterService::new(
-            |ex: &Exchange| ex.input.header("active").is_some(),
+    async fn filter_segment_passes_matching_exchange() {
+        let mut seg = segment(
+            predicate(|ex: &Exchange| ex.input.header("active").is_some()),
             uppercase_body(),
         );
         let mut ex = Exchange::new(Message::new("hello"));
         ex.input.set_header("active", Value::Bool(true));
-        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        let result = completed_exchange(seg.run(ex).await);
         assert_eq!(result.input.body.as_text(), Some("HELLO"));
     }
 
-    // 2. Non-matching exchange is returned as-is, sub_pipeline not called.
+    // 2. Non-matching exchange is returned as-is, body not called.
     #[tokio::test]
-    async fn test_filter_blocks_non_matching_exchange() {
-        let mut svc = FilterService::new(
-            |ex: &Exchange| ex.input.header("active").is_some(),
+    async fn filter_segment_blocks_non_matching_exchange() {
+        let mut seg = segment(
+            predicate(|ex: &Exchange| ex.input.header("active").is_some()),
             uppercase_body(),
         );
         let ex = Exchange::new(Message::new("hello"));
-        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
-        // body unchanged — uppercase_body was NOT called
+        let result = completed_exchange(seg.run(ex).await);
+        // body unchanged — uppercase_body body was NOT called
         assert_eq!(result.input.body.as_text(), Some("hello"));
     }
 
-    // 3. Result is the sub_pipeline's output, not the original exchange.
+    // 3. Result is the body's output, not the original exchange.
     #[tokio::test]
-    async fn test_filter_sub_pipeline_transforms_body() {
-        let mut svc = FilterService::new(|_: &Exchange| true, uppercase_body());
+    async fn filter_segment_sub_pipeline_transforms_body() {
+        let mut seg = segment(predicate(|_: &Exchange| true), uppercase_body());
         let ex = Exchange::new(Message::new("world"));
-        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        let result = completed_exchange(seg.run(ex).await);
         assert_eq!(result.input.body.as_text(), Some("WORLD"));
     }
 
-    // 4. Sub-pipeline errors propagate.
+    // 4. Body errors surface as Failed.
     #[tokio::test]
-    async fn test_filter_sub_pipeline_error_propagates() {
-        let mut svc = FilterService::new(|_: &Exchange| true, failing());
+    async fn filter_segment_sub_pipeline_error_propagates() {
+        let mut seg = segment(predicate(|_: &Exchange| true), failing());
         let ex = Exchange::new(Message::new("x"));
-        let result = svc.ready().await.unwrap().call(ex).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("boom"));
+        match seg.run(ex).await {
+            PipelineOutcome::Failed(err) => {
+                assert!(err.to_string().contains("boom"), "unexpected error: {err}");
+            }
+            other => panic!("expected PipelineOutcome::Failed, got {other:?}"),
+        }
     }
 
-    // 5. Predicate receives the original exchange before sub_pipeline mutates it.
+    // 5. Predicate receives the original exchange before the body mutates it.
     #[tokio::test]
-    async fn test_filter_predicate_receives_original_exchange() {
-        let mut svc = FilterService::new(
-            |ex: &Exchange| ex.input.body.as_text() == Some("check"),
+    async fn filter_segment_predicate_receives_original_exchange() {
+        let mut seg = segment(
+            predicate(|ex: &Exchange| ex.input.body.as_text() == Some("check")),
             uppercase_body(),
         );
         let ex = Exchange::new(Message::new("check"));
-        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        let result = completed_exchange(seg.run(ex).await);
         assert_eq!(result.input.body.as_text(), Some("CHECK"));
     }
 
-    // 6. Cloned FilterService shares no mutable state (BoxProcessor clone is independent).
+    // 6. Cloned segment runs independently.
     #[tokio::test]
-    async fn test_filter_clone_is_independent() {
-        let svc = FilterService::new(|_: &Exchange| true, passthrough());
-        let mut clone = svc.clone();
+    async fn filter_segment_clone_is_independent() {
+        let seg = segment(predicate(|_: &Exchange| true), passthrough());
+        let mut clone = seg.clone();
         let ex = Exchange::new(Message::new("hi"));
-        let result = clone.ready().await.unwrap().call(ex).await.unwrap();
+        let result = completed_exchange(clone.run(ex).await);
         assert_eq!(result.input.body.as_text(), Some("hi"));
     }
 
@@ -210,8 +169,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use camel_api::outcome_pipeline::OutcomePipeline as _;
-    use camel_api::{ExpressionErrorClass, PipelineOutcome, PredicateSource};
+    use camel_api::ExpressionErrorClass;
 
     fn expression_failed() -> CamelError {
         CamelError::ExpressionFailed {

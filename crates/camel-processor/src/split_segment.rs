@@ -78,8 +78,8 @@ pub(crate) fn aggregate_completed(
 /// abort — child sub-pipelines may have HTTP/SQL side effects). Tasks that
 /// have not started yet are short-circuited via a pre-start gate.
 ///
-/// Unlike `SplitterService` (which operates at the Tower layer and cannot
-/// preserve `Stopped(ex)` with mutations), `SplitSegment` operates at the
+/// Unlike the removed Tower split wrapper (which could not preserve
+/// `Stopped(ex)` with mutations), `SplitSegment` operates at the
 /// `PipelineOutcome` layer and preserves the exchange including all mutations
 /// at the Stop point.
 pub struct SplitSegment {
@@ -147,9 +147,10 @@ impl camel_api::OutcomePipeline for SplitSegment {
                 return PipelineOutcome::Completed(original);
             }
 
-            // Stamp split metadata on each fragment — exact parity with
-            // `SplitterService::call`, so downstream consumers observe the
-            // same `CamelSplit*` properties on either split path.
+            // Stamp split metadata on each fragment — exact parity with the
+            // previous eager split path (removed with `SplitterService`), so
+            // downstream consumers observe the same `CamelSplit*` properties
+            // on either split path.
             let total = fragments.len();
             for (i, frag) in fragments.iter_mut().enumerate() {
                 frag.set_property(CAMEL_SPLIT_INDEX, Value::from(i as u64));
@@ -1129,6 +1130,117 @@ mod tests {
             "body segment must record zero invocations when the split expression errors"
         );
     }
+
+    #[tokio::test]
+    async fn split_segment_wrong_type_body_fails_loud() {
+        // Splitting a Text body with body_json_array must fail with the typed
+        // message, not silently pass the original body through.
+        let invocations = Arc::new(AtomicUsize::new(0));
+
+        #[derive(Clone)]
+        struct RecordingBody {
+            counter: Arc<AtomicUsize>,
+        }
+        impl camel_api::OutcomePipeline for RecordingBody {
+            fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+                Box::new(self.clone())
+            }
+            fn run<'a>(
+                &'a mut self,
+                exchange: Exchange,
+            ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { PipelineOutcome::Completed(exchange) })
+            }
+        }
+
+        let mut seg = SplitSegment {
+            splitter: SplitSource::Sync(camel_api::split_body_json_array()),
+            body: OutcomeSegment::new(Box::new(RecordingBody {
+                counter: Arc::clone(&invocations),
+            })),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let ex = Exchange::new(Message::new(Body::Text("a,b".to_string())));
+        let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+
+        match result {
+            PipelineOutcome::Failed(err) => {
+                let msg = err.to_string();
+                for needle in [
+                    "body_json_array",
+                    "text",
+                    "json (array)",
+                    "add an unmarshal step before split",
+                ] {
+                    assert!(msg.contains(needle), "message '{msg}' missing '{needle}'");
+                }
+            }
+            other => panic!("wrong body type must fail loud, got {other:?}"),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "body segment must record zero invocations when the split expression errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_segment_async_error_propagates_before_fragments() {
+        use camel_api::BoxValueFuture;
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+
+        #[derive(Clone)]
+        struct RecordingBody {
+            counter: Arc<AtomicUsize>,
+        }
+        impl camel_api::OutcomePipeline for RecordingBody {
+            fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+                Box::new(self.clone())
+            }
+            fn run<'a>(
+                &'a mut self,
+                exchange: Exchange,
+            ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { PipelineOutcome::Completed(exchange) })
+            }
+        }
+
+        let splitter = SplitSource::Async(Arc::new(|_: &Exchange| {
+            Box::pin(async { Err(CamelError::ProcessorError("split boom".into())) })
+                as BoxValueFuture
+        }));
+
+        let mut seg = SplitSegment {
+            splitter,
+            body: OutcomeSegment::new(Box::new(RecordingBody {
+                counter: Arc::clone(&invocations),
+            })),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let ex = Exchange::new(Message::new("a\nb\nc"));
+        let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+
+        assert!(
+            matches!(result, PipelineOutcome::Failed(CamelError::ProcessorError(ref e)) if e.contains("split boom")),
+            "an async split-expression failure must propagate; got {result:?}"
+        );
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "no fragment may reach the sub-pipeline when the split expression fails"
+        );
+    }
     // ── Tests 11-13: fragment metadata stamping ────────────────────────
 
     /// Helper: OutcomePipeline body that captures the split metadata
@@ -1257,5 +1369,175 @@ mod tests {
         );
 
         assert_eq!(*triples.lock().unwrap(), vec![(0, 1, true)]);
+    }
+
+    // ── Ported from the removed Tower split tests ──────────────────────
+
+    #[tokio::test]
+    async fn split_segment_empty_fragments_returns_original_unchanged() {
+        // Body::Empty → zero fragments → return original unchanged, properties intact.
+        let mut seg = SplitSegment {
+            splitter: SplitSource::Sync(camel_api::split_body_lines()),
+            body: OutcomeSegment::new(Box::new(CompletedBody)),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let mut ex = Exchange::new(Message::default()); // Body::Empty
+        ex.set_property("marker", Value::Bool(true));
+
+        let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+        match result {
+            PipelineOutcome::Completed(out) => {
+                assert!(out.input.body.is_empty());
+                assert_eq!(out.property("marker"), Some(&Value::Bool(true)));
+            }
+            other => panic!("Expected Completed(original), got {other:?}"),
+        }
+    }
+
+    /// Body that records the split metadata into the body as JSON.
+    #[derive(Clone)]
+    struct MetadataJsonBody;
+    impl camel_api::OutcomePipeline for MetadataJsonBody {
+        fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+            Box::new(MetadataJsonBody)
+        }
+        fn run<'a>(
+            &'a mut self,
+            exchange: Exchange,
+        ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+            Box::pin(async move {
+                let index = exchange
+                    .property(crate::splitter::CAMEL_SPLIT_INDEX)
+                    .cloned();
+                let size = exchange
+                    .property(crate::splitter::CAMEL_SPLIT_SIZE)
+                    .cloned();
+                let complete = exchange
+                    .property(crate::splitter::CAMEL_SPLIT_COMPLETE)
+                    .cloned();
+                let mut out = exchange;
+                out.input.body = Body::Json(serde_json::json!({
+                    "index": index,
+                    "size": size,
+                    "complete": complete,
+                }));
+                PipelineOutcome::Completed(out)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn split_segment_metadata_properties() {
+        // Uses split_body_lines + CollectAll so the metadata stamped on each
+        // fragment is observable in the aggregated JSON body.
+        let mut seg = SplitSegment {
+            splitter: SplitSource::Sync(camel_api::split_body_lines()),
+            body: OutcomeSegment::new(Box::new(MetadataJsonBody)),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            aggregation: AggregationStrategy::CollectAll,
+        };
+
+        let ex = Exchange::new(Message::new("x\ny\nz"));
+        let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+
+        let expected = serde_json::json!([
+            {"index": 0, "size": 3, "complete": false},
+            {"index": 1, "size": 3, "complete": false},
+            {"index": 2, "size": 3, "complete": true},
+        ]);
+        match result {
+            PipelineOutcome::Completed(out) => match &out.input.body {
+                Body::Json(v) => assert_eq!(*v, expected),
+                other => panic!("expected JSON body, got {other:?}"),
+            },
+            other => panic!("Expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn split_segment_json_array_body() {
+        // split(body_json_array) iterates array elements without tokenizing.
+        let mut seg = SplitSegment {
+            splitter: SplitSource::Sync(camel_api::split_body_json_array()),
+            body: OutcomeSegment::new(Box::new(CompletedBody)),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            aggregation: AggregationStrategy::CollectAll,
+        };
+
+        let msg = Message::new(Body::Json(serde_json::json!([1, 2, 3])));
+        let parent = Exchange::new(msg);
+
+        let result = camel_api::OutcomePipeline::run(&mut seg, parent).await;
+        match result {
+            PipelineOutcome::Completed(out) => match &out.input.body {
+                Body::Json(serde_json::Value::Array(arr)) => {
+                    assert_eq!(
+                        arr,
+                        &vec![
+                            serde_json::json!(1),
+                            serde_json::json!(2),
+                            serde_json::json!(3)
+                        ]
+                    );
+                }
+                other => panic!("expected JSON array body, got {other:?}"),
+            },
+            other => panic!("Expected Completed, got {other:?}"),
+        }
+    }
+
+    /// Body that replaces the body with the fragment correlation id.
+    #[derive(Clone)]
+    struct CorrelationIdBody;
+    impl camel_api::OutcomePipeline for CorrelationIdBody {
+        fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+            Box::new(CorrelationIdBody)
+        }
+        fn run<'a>(
+            &'a mut self,
+            mut exchange: Exchange,
+        ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+            Box::pin(async move {
+                exchange.input.body = Body::Text(exchange.correlation_id().to_string());
+                PipelineOutcome::Completed(exchange)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn split_segment_each_fragment_has_unique_correlation_id() {
+        let mut seg = SplitSegment {
+            splitter: SplitSource::Sync(camel_api::split_body_lines()),
+            body: OutcomeSegment::new(Box::new(CorrelationIdBody)),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            aggregation: AggregationStrategy::CollectAll,
+        };
+
+        let ex = Exchange::new(Message::new("a\nb\nc\nd"));
+        let result = camel_api::OutcomePipeline::run(&mut seg, ex).await;
+
+        let ids: Vec<String> = match result {
+            PipelineOutcome::Completed(out) => match &out.input.body {
+                Body::Json(serde_json::Value::Array(arr)) => arr
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect(),
+                other => panic!("expected JSON array of ids, got {other:?}"),
+            },
+            other => panic!("Expected Completed, got {other:?}"),
+        };
+        assert_eq!(ids.len(), 4, "should have 4 fragments");
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), 4, "fragment correlation_ids must be unique");
     }
 }

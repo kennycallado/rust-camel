@@ -14,7 +14,12 @@ use tokio::task::JoinSet;
 
 use camel_api::{Exchange, Value};
 
-use crate::multicast::{CAMEL_MULTICAST_COMPLETE, CAMEL_MULTICAST_INDEX};
+// ── Metadata property keys ─────────────────────────────────────────────
+
+/// Property key for the zero-based index of the endpoint being invoked.
+pub const CAMEL_MULTICAST_INDEX: &str = "CamelMulticastIndex";
+/// Property key indicating whether this is the last endpoint invocation.
+pub const CAMEL_MULTICAST_COMPLETE: &str = "CamelMulticastComplete";
 
 // ── MulticastSegment (ADR-0025 OutcomePipeline) ──────────────────────────
 

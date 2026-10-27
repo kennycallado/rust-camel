@@ -1,11 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll};
 
-use tower::Service;
-use tower::ServiceExt;
-
-use camel_api::{BoxProcessor, CamelError, Exchange, PredicateSource};
+use camel_api::{BoxProcessor, PredicateSource};
 
 /// A single when-clause: a fallible predicate + the sub-pipeline to execute
 /// when it matches.
@@ -20,59 +16,6 @@ impl Clone for WhenClause {
             predicate: self.predicate.clone(),
             pipeline: self.pipeline.clone(),
         }
-    }
-}
-
-/// Tower Service implementing the Choice EIP (Content-Based Router).
-///
-/// Evaluates `when` clauses in order. The first matching predicate routes the
-/// exchange through its sub-pipeline. If no predicate matches, the `otherwise`
-/// pipeline is used (if present); otherwise the exchange passes through
-/// unchanged. A failed predicate evaluation propagates as `Err` instead of
-/// falling through to `otherwise`.
-#[derive(Clone)]
-pub struct ChoiceService {
-    whens: Vec<WhenClause>,
-    otherwise: Option<BoxProcessor>,
-}
-
-impl ChoiceService {
-    /// Create a new `ChoiceService`.
-    ///
-    /// `whens` — ordered list of `(predicate, sub_pipeline)` pairs.
-    /// `otherwise` — optional fallback pipeline (executed when no `when` matches).
-    pub fn new(whens: Vec<WhenClause>, otherwise: Option<BoxProcessor>) -> Self {
-        Self { whens, otherwise }
-    }
-}
-
-impl Service<Exchange> for ChoiceService {
-    type Response = Exchange;
-    type Error = CamelError;
-    type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, exchange: Exchange) -> Self::Future {
-        // Clone-and-replace: the future owns its state so predicates can be
-        // awaited in order before routing.
-        let whens = self.whens.clone();
-        let otherwise = self.otherwise.clone();
-        Box::pin(async move {
-            let mut whens = whens;
-            for when in whens.iter_mut() {
-                if when.predicate.matches(&exchange).await? {
-                    return when.pipeline.ready().await?.call(exchange).await;
-                }
-            }
-            if let Some(mut otherwise) = otherwise {
-                otherwise.ready().await?.call(exchange).await
-            } else {
-                Ok(exchange)
-            }
-        })
     }
 }
 
@@ -101,10 +44,8 @@ impl Clone for WhenClauseSegment {
 /// returns `Completed(original_exchange)`. A failed predicate evaluation
 /// yields `Failed(err)` instead of falling through to `otherwise`.
 ///
-/// Unlike `ChoiceService` (which operates at the Tower layer and cannot
-/// preserve `Stopped(ex)` with mutations), `ChoiceSegment` operates at the
-/// `PipelineOutcome` layer and preserves the exchange at the Stop point
-/// including all mutations.
+/// The segment operates at the `PipelineOutcome` layer and preserves the
+/// exchange at the Stop point including all mutations.
 pub struct ChoiceSegment {
     pub clauses: Vec<WhenClauseSegment>,
     pub otherwise: Option<camel_api::OutcomeSegment>,
@@ -155,8 +96,11 @@ impl camel_api::OutcomePipeline for ChoiceSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::{Body, BoxProcessorExt, Message, Value};
-    use tower::ServiceExt;
+    use crate::test_processor_segment::processor_segment;
+    use camel_api::{
+        Body, BoxProcessorExt, CamelError, Exchange, FilterPredicate, Message, OutcomePipeline,
+        PipelineOutcome, Value,
+    };
 
     fn append_body(suffix: &'static str) -> BoxProcessor {
         BoxProcessor::from_fn(move |mut ex: Exchange| {
@@ -181,115 +125,119 @@ mod tests {
         }))
     }
 
-    // 1. First matching when executes its pipeline.
+    fn clause(predicate: PredicateSource, body: BoxProcessor) -> WhenClauseSegment {
+        WhenClauseSegment {
+            predicate,
+            body: processor_segment(body),
+        }
+    }
+
+    fn completed_exchange(outcome: PipelineOutcome) -> Exchange {
+        match outcome {
+            PipelineOutcome::Completed(ex) => ex,
+            other => panic!("expected PipelineOutcome::Completed, got {other:?}"),
+        }
+    }
+
+    // 1. First matching when executes its body.
     #[tokio::test]
-    async fn test_choice_first_when_matches() {
-        let whens = vec![
-            WhenClause {
-                predicate: pred_header("a"),
-                pipeline: append_body("-A"),
-            },
-            WhenClause {
-                predicate: pred_header("b"),
-                pipeline: append_body("-B"),
-            },
-        ];
-        let mut svc = ChoiceService::new(whens, None);
+    async fn choice_segment_first_when_matches() {
+        let mut seg = ChoiceSegment {
+            clauses: vec![
+                clause(pred_header("a"), append_body("-A")),
+                clause(pred_header("b"), append_body("-B")),
+            ],
+            otherwise: None,
+        };
         let mut ex = Exchange::new(Message::new("x"));
         ex.input.set_header("a", Value::Bool(true));
-        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        let result = completed_exchange(seg.run(ex).await);
         assert_eq!(result.input.body.as_text(), Some("x-A"));
     }
 
     // 2. Second when executes when first does not match.
     #[tokio::test]
-    async fn test_choice_second_when_matches() {
-        let whens = vec![
-            WhenClause {
-                predicate: pred_header("a"),
-                pipeline: append_body("-A"),
-            },
-            WhenClause {
-                predicate: pred_header("b"),
-                pipeline: append_body("-B"),
-            },
-        ];
-        let mut svc = ChoiceService::new(whens, None);
+    async fn choice_segment_second_when_matches() {
+        let mut seg = ChoiceSegment {
+            clauses: vec![
+                clause(pred_header("a"), append_body("-A")),
+                clause(pred_header("b"), append_body("-B")),
+            ],
+            otherwise: None,
+        };
         let mut ex = Exchange::new(Message::new("x"));
         ex.input.set_header("b", Value::Bool(true));
-        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        let result = completed_exchange(seg.run(ex).await);
         assert_eq!(result.input.body.as_text(), Some("x-B"));
     }
 
     // 3. Only the FIRST matching when fires (short-circuit — both a and b present).
     #[tokio::test]
-    async fn test_choice_short_circuits_at_first_match() {
-        let whens = vec![
-            WhenClause {
-                predicate: pred_header("a"),
-                pipeline: append_body("-A"),
-            },
-            WhenClause {
-                predicate: pred_header("b"),
-                pipeline: append_body("-B"),
-            },
-        ];
-        let mut svc = ChoiceService::new(whens, None);
+    async fn choice_segment_short_circuits_at_first_match() {
+        let mut seg = ChoiceSegment {
+            clauses: vec![
+                clause(pred_header("a"), append_body("-A")),
+                clause(pred_header("b"), append_body("-B")),
+            ],
+            otherwise: None,
+        };
         let mut ex = Exchange::new(Message::new("x"));
         ex.input.set_header("a", Value::Bool(true));
         ex.input.set_header("b", Value::Bool(true));
-        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        let result = completed_exchange(seg.run(ex).await);
         assert_eq!(result.input.body.as_text(), Some("x-A"));
     }
 
     // 4. Otherwise executes when no when matches.
     #[tokio::test]
-    async fn test_choice_otherwise_fires_when_no_when_matches() {
-        let whens = vec![WhenClause {
-            predicate: pred_header("a"),
-            pipeline: append_body("-A"),
-        }];
-        let mut svc = ChoiceService::new(whens, Some(append_body("-else")));
+    async fn choice_segment_otherwise_fires_when_no_when_matches() {
+        let mut seg = ChoiceSegment {
+            clauses: vec![clause(pred_header("a"), append_body("-A"))],
+            otherwise: Some(processor_segment(append_body("-else"))),
+        };
         let ex = Exchange::new(Message::new("x"));
-        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        let result = completed_exchange(seg.run(ex).await);
         assert_eq!(result.input.body.as_text(), Some("x-else"));
     }
 
     // 5. No match and no otherwise → exchange passes unchanged.
     #[tokio::test]
-    async fn test_choice_no_match_no_otherwise_passthrough() {
-        let whens = vec![WhenClause {
-            predicate: pred_header("a"),
-            pipeline: append_body("-A"),
-        }];
-        let mut svc = ChoiceService::new(whens, None);
+    async fn choice_segment_no_match_no_otherwise_passthrough() {
+        let mut seg = ChoiceSegment {
+            clauses: vec![clause(pred_header("a"), append_body("-A"))],
+            otherwise: None,
+        };
         let ex = Exchange::new(Message::new("untouched"));
-        let result = svc.ready().await.unwrap().call(ex).await.unwrap();
+        let result = completed_exchange(seg.run(ex).await);
         assert_eq!(result.input.body.as_text(), Some("untouched"));
     }
 
-    // 6. Errors in a matching when's pipeline propagate.
+    // 6. Errors in a matching when's body surface as Failed.
     #[tokio::test]
-    async fn test_choice_error_in_when_propagates() {
-        let whens = vec![WhenClause {
-            predicate: pred_header("a"),
-            pipeline: failing(),
-        }];
-        let mut svc = ChoiceService::new(whens, None);
+    async fn choice_segment_error_in_when_propagates() {
+        let mut seg = ChoiceSegment {
+            clauses: vec![clause(pred_header("a"), failing())],
+            otherwise: None,
+        };
         let mut ex = Exchange::new(Message::new("x"));
         ex.input.set_header("a", Value::Bool(true));
-        let result = svc.ready().await.unwrap().call(ex).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("boom"));
+        match seg.run(ex).await {
+            PipelineOutcome::Failed(err) => {
+                assert!(err.to_string().contains("boom"), "unexpected error: {err}");
+            }
+            other => panic!("expected PipelineOutcome::Failed, got {other:?}"),
+        }
     }
 
-    // 7. Errors in otherwise pipeline propagate.
+    // 7. Errors in otherwise surface as Failed.
     #[tokio::test]
-    async fn test_choice_error_in_otherwise_propagates() {
-        let mut svc = ChoiceService::new(vec![], Some(failing()));
+    async fn choice_segment_error_in_otherwise_propagates() {
+        let mut seg = ChoiceSegment {
+            clauses: vec![],
+            otherwise: Some(processor_segment(failing())),
+        };
         let ex = Exchange::new(Message::new("x"));
-        let result = svc.ready().await.unwrap().call(ex).await;
-        assert!(result.is_err());
+        assert!(matches!(seg.run(ex).await, PipelineOutcome::Failed(_)));
     }
 
     // ── Fallible predicate path (language-value-boundary task 1.4) ──
@@ -297,9 +245,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use camel_api::FilterPredicate;
-    use camel_api::outcome_pipeline::OutcomePipeline as _;
-    use camel_api::{ExpressionErrorClass, PipelineOutcome, PredicateSource};
+    use camel_api::ExpressionErrorClass;
 
     fn expression_failed() -> CamelError {
         CamelError::ExpressionFailed {

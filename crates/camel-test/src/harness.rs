@@ -626,43 +626,61 @@ mod tests {
 
     #[tokio::test]
     async fn tst010_multicast_delivers_to_multiple_endpoints() {
-        use camel_api::multicast::{MulticastConfig, MulticastStrategy};
-        use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, Message};
-        use camel_processor::MulticastService;
-        use std::sync::Arc;
-        use tower::ServiceExt;
+        use camel_api::{Exchange, Message, OutcomePipeline, OutcomeSegment, PipelineOutcome};
+        use camel_processor::{CAMEL_MULTICAST_INDEX, MulticastSegment};
+        use std::sync::{Arc, Mutex};
 
-        let received_a = Arc::new(std::sync::Mutex::new(Vec::<Exchange>::new()));
-        let received_b = Arc::new(std::sync::Mutex::new(Vec::<Exchange>::new()));
-
-        let endpoint_a: BoxProcessor = {
-            let r = Arc::clone(&received_a);
-            BoxProcessor::from_fn(move |ex: Exchange| {
-                let r = Arc::clone(&r);
+        struct RecordingEndpoint {
+            received: Arc<Mutex<Vec<Exchange>>>,
+        }
+        impl OutcomePipeline for RecordingEndpoint {
+            fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+                Box::new(self.clone())
+            }
+            fn run<'a>(
+                &'a mut self,
+                exchange: Exchange,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>
+            {
+                let received = Arc::clone(&self.received);
                 Box::pin(async move {
-                    r.lock().unwrap().push(ex.clone());
-                    Ok(ex)
+                    received.lock().unwrap().push(exchange.clone());
+                    PipelineOutcome::Completed(exchange)
                 })
-            })
+            }
+        }
+        impl Clone for RecordingEndpoint {
+            fn clone(&self) -> Self {
+                Self {
+                    received: Arc::clone(&self.received),
+                }
+            }
+        }
+
+        let received_a = Arc::new(Mutex::new(Vec::<Exchange>::new()));
+        let received_b = Arc::new(Mutex::new(Vec::<Exchange>::new()));
+
+        let mut seg = MulticastSegment {
+            branches: vec![
+                OutcomeSegment::new(Box::new(RecordingEndpoint {
+                    received: Arc::clone(&received_a),
+                })),
+                OutcomeSegment::new(Box::new(RecordingEndpoint {
+                    received: Arc::clone(&received_b),
+                })),
+            ],
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            timeout: None,
+            aggregator: Arc::new(|exchanges: Vec<Exchange>| {
+                exchanges.into_iter().last().unwrap_or_default()
+            }),
         };
 
-        let endpoint_b: BoxProcessor = {
-            let r = Arc::clone(&received_b);
-            BoxProcessor::from_fn(move |ex: Exchange| {
-                let r = Arc::clone(&r);
-                Box::pin(async move {
-                    r.lock().unwrap().push(ex.clone());
-                    Ok(ex)
-                })
-            })
-        };
-
-        let config = MulticastConfig::new().aggregation(MulticastStrategy::LastWins);
-
-        let svc = MulticastService::new(vec![endpoint_a, endpoint_b], config)
-            .expect("multicast service creation should succeed");
         let ex = Exchange::new(Message::new("multicast-test"));
-        let _result = svc.oneshot(ex).await.unwrap();
+        let result = OutcomePipeline::run(&mut seg, ex).await;
+        assert!(matches!(result, PipelineOutcome::Completed(_)));
 
         assert_eq!(
             received_a.lock().unwrap().len(),
@@ -673,6 +691,16 @@ mod tests {
             received_b.lock().unwrap().len(),
             1,
             "endpoint B should receive exactly one exchange"
+        );
+        assert_eq!(
+            received_a.lock().unwrap()[0].property(CAMEL_MULTICAST_INDEX),
+            Some(&camel_api::Value::from(0i64)),
+            "endpoint A must observe CamelMulticastIndex 0"
+        );
+        assert_eq!(
+            received_b.lock().unwrap()[0].property(CAMEL_MULTICAST_INDEX),
+            Some(&camel_api::Value::from(1i64)),
+            "endpoint B must observe CamelMulticastIndex 1"
         );
     }
 }

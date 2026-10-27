@@ -46,16 +46,10 @@ camel-processor = "*"
 
 ```rust
 use camel_processor::{
-    FilterService, LogProcessor, LogLevel, SetHeader, SetBody,
-    MapBody, SplitterService, MulticastService, DelayerService
+    LogProcessor, LogLevel, SetHeader, SetBody,
+    MapBody, DelayerService
 };
 use camel_api::{Exchange, Message, Body, Value, BoxProcessor, DelayConfig};
-
-// Filter exchanges
-let filter = FilterService::new(
-    |ex: &Exchange| ex.input.body.as_text().map(|t| t.len() > 5).unwrap_or(false),
-    my_processor
-);
 
 // Log messages
 let logger = LogProcessor::new(LogLevel::Info, "Processing message".to_string());
@@ -95,19 +89,18 @@ let route = RouteBuilder::from("timer:tick")
 
 ## Available Processors
 
-| Processor | Purpose |
-|-----------|---------|
-| `FilterService` | Route based on conditions |
-| `ChoiceService` | Content-based routing (when/otherwise) |
+| Processor / Segment | Purpose |
+|---------------------|---------|
+| Filter / Choice segments | Conditional and content-based routing (see `FilterSegment`, `ChoiceSegment`; configure through `RouteBuilder`) |
 | `LogProcessor` | Log exchange information |
 | `SetHeader` | Set static header values |
 | `DynamicSetHeader` | Set headers from expressions |
 | `SetBody` | Replace message body |
 | `MapBody` | Transform message body |
-| `SplitterService` | Split messages |
+| `SplitSegment` | Split messages (outcome pipeline) |
 | `StreamingSplitterService` | Split lazy streams with lookahead (ZIP, future CSV/Tar) |
 | `AggregatorService` | Combine messages |
-| `MulticastService` | Parallel routing |
+| `MulticastSegment` | Parallel routing (outcome pipeline) |
 | `WireTapService` | Side-channel routing |
 | `CircuitBreakerLayer` | Fault tolerance (circuit-breaker gate) |
 | `ErrorHandlerLayer` | Error handling (Tower layer; prefer `RouteChannelService` + `DefaultRouteErrorHandler` for new code per ADR-0019) |

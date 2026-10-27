@@ -337,10 +337,6 @@ impl ExceptionPolicyBuilder {
     }
 }
 
-// Backwards compatibility alias
-#[deprecated(since = "0.1.0", note = "Use `RedeliveryPolicy` instead")]
-pub type ExponentialBackoff = RedeliveryPolicy;
-
 #[cfg(test)]
 mod retryable_step_tests {
     use super::*;

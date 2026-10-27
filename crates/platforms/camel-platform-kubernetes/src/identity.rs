@@ -2,8 +2,7 @@
 //!
 //! Node id resolves from the first non-empty source in the chain
 //! `POD_NAME` → `HOSTNAME` → local hostname; `try_from_env()` fails with
-//! `PlatformError::Config` when all are empty. The deprecated `from_env()`
-//! keeps the legacy empty-string defaults.
+//! `PlatformError::Config` when all are empty.
 //!
 //! Additional pod fields (set via the Downward API):
 //! - `POD_NAMESPACE` — namespace of the current pod
@@ -83,20 +82,6 @@ pub struct KubernetesPlatformIdentity {
 }
 
 impl KubernetesPlatformIdentity {
-    /// Creates a new identity by reading Downward API environment variables.
-    #[deprecated(
-        since = "0.35.0",
-        note = "use try_from_env; from_env silently produces an empty node id"
-    )]
-    pub fn from_env() -> Self {
-        Self {
-            pod_name: std::env::var("POD_NAME").unwrap_or_default(),
-            namespace: std::env::var("POD_NAMESPACE").unwrap_or_default(),
-            node_name: std::env::var("POD_NODE_NAME").unwrap_or_default(),
-            service_account: std::env::var("POD_SERVICE_ACCOUNT").unwrap_or_default(),
-        }
-    }
-
     /// Creates a new identity, failing when no identity source resolves.
     ///
     /// Resolves the pod name from the first non-empty source in the order
@@ -265,16 +250,12 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
-    fn test_from_env_with_no_vars() {
-        // This test validates from_env() doesn't panic when vars are absent
-        let identity = KubernetesPlatformIdentity::from_env();
-        // We can't assert specific values due to parallel test env leakage,
-        // but we can verify it returns valid strings and doesn't panic
-        let _ = identity.pod_name();
-        let _ = identity.namespace();
-        let _ = identity.node_name();
-        let _ = identity.service_account();
+    fn test_try_from_env_does_not_panic() {
+        // Ambient-env dependent: we cannot assert concrete values because
+        // tests run in parallel and env leakage is possible. This only
+        // guards the constructor against panicking. Resolution semantics
+        // are covered by the `resolver_*` tests below.
+        let _ = KubernetesPlatformIdentity::try_from_env();
     }
 
     #[test]

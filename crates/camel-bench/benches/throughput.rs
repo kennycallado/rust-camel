@@ -1,23 +1,53 @@
-use camel_api::{BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message};
-use camel_api::{PredicateSource, SpanKindHint};
+use camel_api::{
+    BoxProcessor, Exchange, FilterPredicate, Message, OutcomePipeline, OutcomeSegment,
+    PipelineOutcome, PredicateSource, SpanKindHint,
+};
 use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
-use camel_processor::{ChoiceService, FilterService, LogLevel, LogProcessor, WhenClause};
+use camel_processor::{ChoiceSegment, FilterSegment, LogLevel, LogProcessor, WhenClauseSegment};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use tower::ServiceExt;
 
-fn noop() -> BoxProcessor {
-    BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) }))
+#[derive(Clone)]
+struct Passthrough;
+
+impl OutcomePipeline for Passthrough {
+    fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+        Box::new(self.clone())
+    }
+    fn run<'a>(
+        &'a mut self,
+        exchange: Exchange,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>> {
+        Box::pin(async move { PipelineOutcome::Completed(exchange) })
+    }
+}
+
+fn passthrough_body() -> OutcomeSegment {
+    OutcomeSegment::new(Box::new(Passthrough))
 }
 
 fn build_throughput_pipeline() -> BoxProcessor {
-    let filter = BoxProcessor::new(FilterService::new(|_: &Exchange| true, noop()));
-    let choice = BoxProcessor::new(ChoiceService::new(
-        vec![WhenClause {
+    let filter = CompiledStep::Segment {
+        segment: OutcomeSegment::new(Box::new(FilterSegment {
             predicate: PredicateSource::Sync(FilterPredicate::new(|_: &Exchange| true)),
-            pipeline: noop(),
-        }],
-        Some(noop()),
-    ));
+            body: passthrough_body(),
+        })),
+        body_contract: None,
+        lifecycle: None,
+        label: None,
+    };
+    let choice = CompiledStep::Segment {
+        segment: OutcomeSegment::new(Box::new(ChoiceSegment {
+            clauses: vec![WhenClauseSegment {
+                predicate: PredicateSource::Sync(FilterPredicate::new(|_: &Exchange| true)),
+                body: passthrough_body(),
+            }],
+            otherwise: Some(passthrough_body()),
+        })),
+        body_contract: None,
+        lifecycle: None,
+        label: None,
+    };
     let log = BoxProcessor::new(LogProcessor::new(
         LogLevel::Info,
         "throughput-log".to_string(),
@@ -25,22 +55,8 @@ fn build_throughput_pipeline() -> BoxProcessor {
 
     compose_pipeline(
         vec![
-            CompiledStep::Process {
-                kind_hint: SpanKindHint::Internal,
-                processor: filter,
-                body_contract: None,
-                lifecycle: None,
-                label: None,
-                to_uri: None,
-            },
-            CompiledStep::Process {
-                kind_hint: SpanKindHint::Internal,
-                processor: choice,
-                body_contract: None,
-                lifecycle: None,
-                label: None,
-                to_uri: None,
-            },
+            filter,
+            choice,
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
                 processor: log,

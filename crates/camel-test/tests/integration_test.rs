@@ -2497,7 +2497,7 @@ async fn multicast_sends_to_multiple_endpoints() {
 // ---------------------------------------------------------------------------
 // Test: Multicast sets metadata properties (index, complete)
 // ---------------------------------------------------------------------------
-// This test verifies that MulticastService correctly sets the CAMEL_MULTICAST_INDEX
+// This test verifies that MulticastSegment correctly sets the CAMEL_MULTICAST_INDEX
 // and CAMEL_MULTICAST_COMPLETE properties on each cloned exchange.
 
 #[tokio::test(flavor = "multi_thread")]

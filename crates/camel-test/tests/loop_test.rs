@@ -220,8 +220,7 @@ async fn loop_while_integration() {
 /// upward (halting the route) while preserving exchange mutations from the
 /// iteration where Stop fired (ADR-0025 §3 invariant).
 ///
-/// Unlike `LoopService` (Tower layer), `LoopSegment` propagates
-/// `PipelineOutcome::Stopped` so that downstream
+/// `LoopSegment` propagates `PipelineOutcome::Stopped` so that downstream
 /// steps after the loop do NOT fire — the route halts at the Stop point.
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_inside_loop_halts_route_and_preserves_iteration_mutations() {

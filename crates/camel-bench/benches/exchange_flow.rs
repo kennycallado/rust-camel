@@ -1,12 +1,29 @@
-use camel_api::{Body, BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message, Value};
-use camel_api::{PredicateSource, SpanKindHint};
+use camel_api::{
+    Body, BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message, OutcomePipeline,
+    OutcomeSegment, PipelineOutcome, PredicateSource, SpanKindHint, Value,
+};
 use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
-use camel_processor::{ChoiceService, FilterService, LogLevel, LogProcessor, WhenClause};
+use camel_processor::{ChoiceSegment, FilterSegment, LogLevel, LogProcessor, WhenClauseSegment};
 use criterion::{Criterion, criterion_group, criterion_main};
 use tower::ServiceExt;
 
-fn noop() -> BoxProcessor {
-    BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) }))
+#[derive(Clone)]
+struct Passthrough;
+
+impl OutcomePipeline for Passthrough {
+    fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+        Box::new(self.clone())
+    }
+    fn run<'a>(
+        &'a mut self,
+        exchange: Exchange,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>> {
+        Box::pin(async move { PipelineOutcome::Completed(exchange) })
+    }
+}
+
+fn passthrough_body() -> OutcomeSegment {
+    OutcomeSegment::new(Box::new(Passthrough))
 }
 
 fn header_step(key: &'static str, value: &'static str) -> BoxProcessor {
@@ -29,16 +46,29 @@ fn body_step(value: &'static str) -> BoxProcessor {
 
 fn build_exchange_flow() -> BoxProcessor {
     let step1 = header_step("step", "1");
-    let step2 = BoxProcessor::new(FilterService::new(|_: &Exchange| true, noop()));
-    let step3 = BoxProcessor::new(ChoiceService::new(
-        vec![WhenClause {
-            predicate: PredicateSource::Sync(FilterPredicate::new(|ex: &Exchange| {
-                ex.input.header("step").is_some()
-            })),
-            pipeline: noop(),
-        }],
-        Some(noop()),
-    ));
+    let step2 = CompiledStep::Segment {
+        segment: OutcomeSegment::new(Box::new(FilterSegment {
+            predicate: PredicateSource::Sync(FilterPredicate::new(|_: &Exchange| true)),
+            body: passthrough_body(),
+        })),
+        body_contract: None,
+        lifecycle: None,
+        label: None,
+    };
+    let step3 = CompiledStep::Segment {
+        segment: OutcomeSegment::new(Box::new(ChoiceSegment {
+            clauses: vec![WhenClauseSegment {
+                predicate: PredicateSource::Sync(FilterPredicate::new(|ex: &Exchange| {
+                    ex.input.header("step").is_some()
+                })),
+                body: passthrough_body(),
+            }],
+            otherwise: Some(passthrough_body()),
+        })),
+        body_contract: None,
+        lifecycle: None,
+        label: None,
+    };
     let step4 = BoxProcessor::new(LogProcessor::new(LogLevel::Info, "flow-log".to_string()));
     let step5 = body_step("final");
 
@@ -52,22 +82,8 @@ fn build_exchange_flow() -> BoxProcessor {
                 label: None,
                 to_uri: None,
             },
-            CompiledStep::Process {
-                kind_hint: SpanKindHint::Internal,
-                processor: step2,
-                body_contract: None,
-                lifecycle: None,
-                label: None,
-                to_uri: None,
-            },
-            CompiledStep::Process {
-                kind_hint: SpanKindHint::Internal,
-                processor: step3,
-                body_contract: None,
-                lifecycle: None,
-                label: None,
-                to_uri: None,
-            },
+            step2,
+            step3,
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
                 processor: step4,

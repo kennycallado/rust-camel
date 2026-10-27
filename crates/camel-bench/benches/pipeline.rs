@@ -1,81 +1,92 @@
 use camel_api::{
-    AggregationStrategy, Body, BoxProcessor, BoxProcessorExt, Exchange, FilterPredicate, Message,
-    SplitterConfig, Value, split_body,
+    AggregationStrategy, Body, BoxProcessor, Exchange, FilterPredicate, Message, OutcomePipeline,
+    OutcomeSegment, PipelineOutcome, SplitSource, Value, split_body,
 };
 use camel_api::{PredicateSource, SpanKindHint};
 use camel_core::route::{CompiledStep, PipelineRuntimeCtx, compose_pipeline};
 use camel_processor::{
-    ChoiceService, FilterService, LogLevel, LogProcessor, SplitterService, WhenClause,
+    ChoiceSegment, FilterSegment, LogLevel, LogProcessor, SplitSegment, WhenClauseSegment,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use tower::ServiceExt;
 
-fn noop() -> BoxProcessor {
-    BoxProcessor::from_fn(|ex: Exchange| Box::pin(async move { Ok(ex) }))
+#[derive(Clone)]
+struct Passthrough;
+
+impl OutcomePipeline for Passthrough {
+    fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+        Box::new(self.clone())
+    }
+    fn run<'a>(
+        &'a mut self,
+        exchange: Exchange,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>> {
+        Box::pin(async move { PipelineOutcome::Completed(exchange) })
+    }
+}
+
+fn passthrough_body() -> OutcomeSegment {
+    OutcomeSegment::new(Box::new(Passthrough))
 }
 
 fn build_pipeline() -> BoxProcessor {
-    let filter = BoxProcessor::new(FilterService::new(
-        |ex: &Exchange| ex.input.header("active").is_some(),
-        noop(),
-    ));
-
-    let choice = BoxProcessor::new(ChoiceService::new(
-        vec![WhenClause {
+    let filter = CompiledStep::Segment {
+        segment: OutcomeSegment::new(Box::new(FilterSegment {
             predicate: PredicateSource::Sync(FilterPredicate::new(|ex: &Exchange| {
-                matches!(
-                    ex.input.header("type"),
-                    Some(v) if v == &Value::String("important".to_string())
-                )
+                ex.input.header("active").is_some()
             })),
-            pipeline: noop(),
-        }],
-        Some(noop()),
-    ));
+            body: passthrough_body(),
+        })),
+        body_contract: None,
+        lifecycle: None,
+        label: None,
+    };
 
-    let splitter = BoxProcessor::new(
-        SplitterService::new(
-            SplitterConfig::new(split_body(|body: &Body| match body {
+    let choice = CompiledStep::Segment {
+        segment: OutcomeSegment::new(Box::new(ChoiceSegment {
+            clauses: vec![WhenClauseSegment {
+                predicate: PredicateSource::Sync(FilterPredicate::new(|ex: &Exchange| {
+                    matches!(
+                        ex.input.header("type"),
+                        Some(v) if v == &Value::String("important".to_string())
+                    )
+                })),
+                body: passthrough_body(),
+            }],
+            otherwise: Some(passthrough_body()),
+        })),
+        body_contract: None,
+        lifecycle: None,
+        label: None,
+    };
+
+    let splitter = CompiledStep::Segment {
+        segment: OutcomeSegment::new(Box::new(SplitSegment {
+            splitter: SplitSource::Sync(split_body(|body: &Body| match body {
                 Body::Text(text) => text
                     .split(',')
                     .map(|s| Body::Text(s.trim().to_string()))
                     .collect(),
                 _ => vec![],
-            }))
-            .aggregation(AggregationStrategy::CollectAll),
-            noop(),
-        )
-        .unwrap(),
-    );
+            })),
+            body: passthrough_body(),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            aggregation: AggregationStrategy::CollectAll,
+        })),
+        body_contract: None,
+        lifecycle: None,
+        label: None,
+    };
 
     let log = BoxProcessor::new(LogProcessor::new(LogLevel::Info, "bench-log".to_string()));
 
     compose_pipeline(
         vec![
-            CompiledStep::Process {
-                kind_hint: SpanKindHint::Internal,
-                processor: filter,
-                body_contract: None,
-                lifecycle: None,
-                label: None,
-                to_uri: None,
-            },
-            CompiledStep::Process {
-                kind_hint: SpanKindHint::Internal,
-                processor: choice,
-                body_contract: None,
-                lifecycle: None,
-                label: None,
-                to_uri: None,
-            },
-            CompiledStep::Process {
-                kind_hint: SpanKindHint::Internal,
-                processor: splitter,
-                body_contract: None,
-                lifecycle: None,
-                label: None,
-                to_uri: None,
-            },
+            filter,
+            choice,
+            splitter,
             CompiledStep::Process {
                 kind_hint: SpanKindHint::Internal,
                 processor: log,

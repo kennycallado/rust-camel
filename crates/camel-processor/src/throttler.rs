@@ -1,16 +1,9 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Mutex;
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use tower::Service;
-
 use camel_api::CAMEL_STOP;
-use camel_api::{
-    BoxProcessor, CamelError, ConfigValidationError, Exchange, ThrottleStrategy, ThrottlerConfig,
-    Value,
-};
+use camel_api::{CamelError, ConfigValidationError, ThrottleStrategy, ThrottlerConfig};
 
 pub struct RateLimiter {
     tokens: f64,
@@ -55,114 +48,10 @@ impl RateLimiter {
     }
 }
 
-#[derive(Clone)]
-pub struct ThrottlerService {
-    config: ThrottlerConfig,
-    limiter: std::sync::Arc<Mutex<RateLimiter>>,
-    next: BoxProcessor,
-}
-
-impl ThrottlerService {
-    /// Construct a throttler. **Panics** if `period` is zero or
-    /// `max_requests` is zero. Prefer `try_new` for fallible construction.
-    pub fn new(config: ThrottlerConfig, next: BoxProcessor) -> Self {
-        // Intentional panic-on-invariant contract for pre-validated
-        // configs; try_new is the fallible path (D-M8).
-        Self::try_new(config, next).expect("ThrottlerService::new invariants violated") // allow-unwrap
-    }
-
-    /// Fallible constructor. Returns `Err(CamelError::Config)` if
-    /// `config.period` is `Duration::ZERO` or `config.max_requests == 0`.
-    /// D-M8 fix: zero `max_requests` used to panic at first throttled
-    /// message via `1.0/0.0 = inf` in `Duration::from_secs_f64`. Now the
-    /// construction fails closed with a config error so the route never
-    /// starts with an unsafe throttler.
-    pub fn try_new(config: ThrottlerConfig, next: BoxProcessor) -> Result<Self, CamelError> {
-        if config.period == Duration::ZERO {
-            return Err(CamelError::Config(
-                "ThrottlerConfig.period must be > 0".to_string(),
-            ));
-        }
-        if config.max_requests == 0 {
-            return Err(CamelError::from(
-                ConfigValidationError::ThrottlerMaxRequestsZero,
-            ));
-        }
-        let limiter = RateLimiter::new(config.max_requests, config.period);
-        Ok(Self {
-            config,
-            limiter: std::sync::Arc::new(Mutex::new(limiter)),
-            next,
-        })
-    }
-}
-
-impl Service<Exchange> for ThrottlerService {
-    type Response = Exchange;
-    type Error = CamelError;
-    type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.next.poll_ready(cx)
-    }
-
-    fn call(&mut self, mut exchange: Exchange) -> Self::Future {
-        let config = self.config.clone();
-        let limiter = self.limiter.clone();
-        let mut next = self.next.clone();
-
-        Box::pin(async move {
-            let acquired = {
-                let mut limiter = limiter.lock().unwrap(); // allow-unwrap
-                limiter.try_acquire()
-            };
-
-            if acquired {
-                next.call(exchange).await
-            } else {
-                match config.strategy {
-                    ThrottleStrategy::Reject => Err(CamelError::ProcessorError(
-                        "Throttled: rate limit exceeded".to_string(),
-                    )),
-                    ThrottleStrategy::Drop => {
-                        exchange.set_property(CAMEL_STOP, Value::Bool(true));
-                        Ok(exchange)
-                    }
-                    // Delay and any future variant wait for an available token.
-                    _ => {
-                        loop {
-                            let wait_time = {
-                                let limiter = limiter.lock().unwrap(); // allow-unwrap
-                                limiter.time_until_next_token()
-                            };
-                            if wait_time > Duration::ZERO {
-                                tokio::time::sleep(wait_time).await;
-                            }
-                            let acquired = {
-                                let mut limiter = limiter.lock().unwrap(); // allow-unwrap
-                                limiter.try_acquire()
-                            };
-                            if acquired {
-                                break;
-                            }
-                            // Yield to avoid tight spinning when concurrent tasks
-                            // wake simultaneously and contend for the same token.
-                            tokio::task::yield_now().await;
-                        }
-                        next.call(exchange).await
-                    }
-                }
-            }
-        })
-    }
-}
-
 /// Outcome-aware throttle segment (ADR-0025).
 ///
 /// Wraps a `ThrottlerConfig` + shared `RateLimiter` + child sub-pipeline body.
-/// Unlike `ThrottlerService` (which operates at the Tower layer),
-/// `ThrottleSegment` correctly propagates `PipelineOutcome::Stopped` / `Failed`
-/// from the body.
+/// The segment propagates `PipelineOutcome::Stopped` / `Failed` from the body.
 pub struct ThrottleSegment {
     pub config: ThrottlerConfig,
     pub limiter: std::sync::Arc<std::sync::Mutex<RateLimiter>>,
@@ -178,7 +67,7 @@ impl ThrottleSegment {
         Self::try_new(config, body).expect("ThrottleSegment::new invariants violated") // allow-unwrap
     }
 
-    /// Fallible constructor. Same validation as `ThrottlerService::try_new`.
+    /// Fallible constructor. Validates `period` and `max_requests`.
     pub fn try_new(
         config: ThrottlerConfig,
         body: camel_api::OutcomeSegment,
@@ -271,26 +160,27 @@ impl camel_api::OutcomePipeline for ThrottleSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::{BoxProcessorExt, Message};
-    use tower::ServiceExt;
+    use crate::test_processor_segment::processor_segment;
+    use camel_api::{
+        Body, BoxProcessor, BoxProcessorExt, Exchange, Message, OutcomePipeline, PipelineOutcome,
+    };
 
     fn passthrough() -> BoxProcessor {
         BoxProcessor::from_fn(|ex| Box::pin(async move { Ok(ex) }))
     }
 
+    fn segment(config: ThrottlerConfig) -> ThrottleSegment {
+        ThrottleSegment::new(config, processor_segment(passthrough()))
+    }
+
     /// D-M8: zero `period` is rejected at construction with `Err`, not a
     /// panic. The audit reproduced the original panic; the fix returns
     /// `Err(CamelError::Config)` from `try_new` so the caller can refuse
-    /// to start the route. This test was previously called
-    /// `test_throttler_zero_period_rejected` and asserted the panic on
-    /// `new`; after the fix it asserts the Err from `try_new` (the path
-    /// operators / route constructors should use). The `new` path still
-    /// panics via `expect(..)` — that's a separate, intentional contract
-    /// for callers that have already validated the config.
+    /// to start the route.
     #[test]
-    fn test_throttler_zero_period_returns_err() {
+    fn throttle_segment_zero_period_returns_err() {
         let config = ThrottlerConfig::new(5, Duration::ZERO);
-        let err = ThrottlerService::try_new(config, passthrough())
+        let err = ThrottleSegment::try_new(config, processor_segment(passthrough()))
             .err()
             .expect("zero period must be Err from try_new, not Ok");
         let msg = err.to_string();
@@ -301,122 +191,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_throttler_allows_under_limit() {
+    async fn throttle_segment_allows_under_limit() {
         let config = ThrottlerConfig::new(5, Duration::from_secs(1));
-        let mut svc = ThrottlerService::new(config, passthrough());
+        let mut seg = segment(config);
 
         for _ in 0..5 {
             let ex = Exchange::new(Message::new("test"));
-            let result = svc.ready().await.unwrap().call(ex).await;
-            assert!(result.is_ok());
+            let outcome = seg.run(ex).await;
+            assert!(matches!(outcome, PipelineOutcome::Completed(_)));
         }
     }
 
     #[tokio::test]
-    async fn test_throttler_delay_strategy_queues_message() {
+    async fn throttle_segment_delay_strategy_queues_message() {
         let config = ThrottlerConfig::new(1, Duration::from_millis(100));
-        let mut svc = ThrottlerService::new(config, passthrough());
+        let mut seg = segment(config);
 
-        let ex1 = Exchange::new(Message::new("first"));
-        let result1 = svc.ready().await.unwrap().call(ex1).await;
-        assert!(result1.is_ok());
+        let first = seg.run(Exchange::new(Message::new("first"))).await;
+        assert!(matches!(first, PipelineOutcome::Completed(_)));
 
         let start = Instant::now();
-        let ex2 = Exchange::new(Message::new("second"));
-        let result2 = svc.ready().await.unwrap().call(ex2).await;
-        let elapsed = start.elapsed();
-        assert!(result2.is_ok());
-        assert!(elapsed >= Duration::from_millis(50));
-    }
-
-    #[tokio::test]
-    async fn test_throttler_reject_strategy_returns_error() {
-        let config =
-            ThrottlerConfig::new(1, Duration::from_secs(10)).strategy(ThrottleStrategy::Reject);
-        let mut svc = ThrottlerService::new(config, passthrough());
-
-        let ex1 = Exchange::new(Message::new("first"));
-        let _ = svc.ready().await.unwrap().call(ex1).await;
-
-        let ex2 = Exchange::new(Message::new("second"));
-        let result = svc.ready().await.unwrap().call(ex2).await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("Throttled"));
-    }
-
-    #[tokio::test]
-    async fn test_throttler_drop_strategy_sets_camel_stop() {
-        let config =
-            ThrottlerConfig::new(1, Duration::from_secs(10)).strategy(ThrottleStrategy::Drop);
-        let mut svc = ThrottlerService::new(config, passthrough());
-
-        let ex1 = Exchange::new(Message::new("first"));
-        let _ = svc.ready().await.unwrap().call(ex1).await;
-
-        let ex2 = Exchange::new(Message::new("second"));
-        let result = svc.ready().await.unwrap().call(ex2).await.unwrap();
-        assert_eq!(result.property(CAMEL_STOP), Some(&Value::Bool(true)));
-    }
-
-    #[tokio::test]
-    async fn test_throttler_token_replenishment() {
-        let config = ThrottlerConfig::new(1, Duration::from_millis(50));
-        let mut svc = ThrottlerService::new(config, passthrough());
-
-        let ex1 = Exchange::new(Message::new("first"));
-        let _ = svc.ready().await.unwrap().call(ex1).await;
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let ex2 = Exchange::new(Message::new("second"));
-        let result = svc.ready().await.unwrap().call(ex2).await;
-        assert!(result.is_ok());
+        let second = seg.run(Exchange::new(Message::new("second"))).await;
+        assert!(matches!(second, PipelineOutcome::Completed(_)));
+        assert!(start.elapsed() >= Duration::from_millis(50));
     }
 
     // ── D-M8 Batch 1: zero max_requests / zero period is Err, not panic ──
 
-    /// D-M8 (reproduced): `ThrottlerService::new` with `max_requests=0`
-    /// used to panic via `time_until_next_token → 1.0/0.0 = inf →
+    /// D-M8 (reproduced): construction with `max_requests=0` used to panic
+    /// via `time_until_next_token → 1.0/0.0 = inf →
     /// Duration::from_secs_f64(inf) panic`. The fix returns `Err`
     /// (CamelError::ConfigValidation(ThrottlerMaxRequestsZero)) instead.
     /// Caller can match the error and refuse to start the route.
     #[test]
-    fn test_throttler_zero_max_requests_returns_err() {
-        // We need a constructor that returns Result. The current API is
-        // `new(config, next)` which asserts. Wrap it: this test asserts
-        // that calling the (post-fix) `try_new` with max_requests=0
-        // returns Err. If the constructor still asserts, the test will
-        // panic (caught by `catch_unwind`) and we will see a failure
-        // distinct from "Err returned" — but the test asserts is_err.
+    fn throttle_segment_zero_max_requests_returns_err() {
         let config = ThrottlerConfig::new(0, Duration::from_secs(1));
-        // Try both names: post-fix API is `try_new`; pre-fix is `new`.
-        // The post-fix `try_new` is what we want; the pre-fix `new`
-        // panics, which is the bug.
-        let result = std::panic::catch_unwind(|| ThrottlerService::try_new(config, passthrough()));
-        match result {
-            Ok(Ok(_)) => panic!("zero max_requests must be Err, not Ok"),
-            Ok(Err(e)) => {
-                assert!(
-                    matches!(
-                        e,
-                        CamelError::ConfigValidation(
-                            camel_api::ConfigValidationError::ThrottlerMaxRequestsZero,
-                        )
-                    ),
-                    "expected ConfigValidation(ThrottlerMaxRequestsZero), got: {e}"
-                );
-            }
-            Err(_) => panic!("zero max_requests must return Err, not panic"),
-        }
+        let err = ThrottleSegment::try_new(config, processor_segment(passthrough()))
+            .err()
+            .expect("zero max_requests must be Err, not Ok");
+        assert!(
+            matches!(
+                err,
+                CamelError::ConfigValidation(
+                    camel_api::ConfigValidationError::ThrottlerMaxRequestsZero,
+                )
+            ),
+            "expected ConfigValidation(ThrottlerMaxRequestsZero), got: {err}"
+        );
     }
 
     // ── ThrottleSegment tests (ADR-0025 OutcomePipeline parity) ────────────
 
     #[tokio::test]
     async fn throttle_segment_reject_strategy_returns_failed() {
-        use camel_api::{Exchange, Message, OutcomePipeline, PipelineOutcome};
-
         #[derive(Clone)]
         struct NoopSeg;
         impl OutcomePipeline for NoopSeg {
@@ -447,16 +274,22 @@ mod tests {
         // Second call is rejected
         let ex2 = Exchange::new(Message::new("test2"));
         let outcome = seg.run(ex2).await;
+        let err = match outcome {
+            PipelineOutcome::Failed(err) => err,
+            other => panic!("Reject strategy must return Failed when tokens exhausted: {other:?}"),
+        };
         assert!(
-            matches!(outcome, PipelineOutcome::Failed(_)),
-            "Reject strategy must return Failed when tokens exhausted"
+            matches!(err, CamelError::ProcessorError(_)),
+            "throttle rejection must be ProcessorError, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("Throttled"),
+            "throttle rejection error must mention Throttled: {err}"
         );
     }
 
     #[tokio::test]
     async fn throttle_segment_drop_strategy_returns_stopped() {
-        use camel_api::{Exchange, Message, OutcomePipeline, PipelineOutcome};
-
         #[derive(Clone)]
         struct NoopSeg;
         impl OutcomePipeline for NoopSeg {
@@ -501,8 +334,6 @@ mod tests {
 
     #[tokio::test]
     async fn throttle_segment_delay_strategy_propagates_stopped_body() {
-        use camel_api::{Body, Exchange, Message, OutcomePipeline, PipelineOutcome};
-
         #[derive(Clone)]
         struct StoppingSeg;
         impl OutcomePipeline for StoppingSeg {

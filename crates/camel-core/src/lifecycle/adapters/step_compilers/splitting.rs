@@ -26,6 +26,50 @@ use crate::lifecycle::adapters::step_resolution::{compile_language_expression, e
 use crate::lifecycle::application::route_definition::BuilderStep;
 use camel_language_api::LanguageExpressionEval;
 
+/// Build the default multicast aggregator: maps the branch outputs to the
+/// exchange returned by the segment, according to the configured strategy.
+fn multicast_aggregator(
+    strategy: &MulticastStrategy,
+) -> Arc<dyn Fn(Vec<Exchange>) -> Exchange + Send + Sync> {
+    let strategy = strategy.clone();
+    Arc::new(move |outputs| match &strategy {
+        MulticastStrategy::CollectAll => {
+            let bodies: Vec<Value> = outputs
+                .iter()
+                .map(|ex| match &ex.input.body {
+                    Body::Text(s) => Value::String(s.clone()),
+                    Body::Json(v) => v.clone(),
+                    Body::Xml(s) => Value::String(s.clone()),
+                    Body::Bytes(b) => Value::String(String::from_utf8_lossy(b).into_owned()),
+                    Body::Stream(s) => serde_json::json!({
+                        "_stream": {
+                            "origin": s.metadata.origin,
+                            "placeholder": true,
+                            "hint": "Materialize exchange body with .into_bytes() before multicast aggregation"
+                        }
+                    }),
+                    // Empty and future variants contribute no extractable value.
+                    _ => Value::Null,
+                })
+                .collect();
+            let mut out = Exchange::default();
+            out.input.body = Body::Json(Value::Array(bodies));
+            out
+        }
+        // The segment aggregator has no access to the pre-fan-out original;
+        // production maps `Original` to the first branch output (ADR-0090
+        // documents the divergence from the removed Tower service).
+        MulticastStrategy::Original => outputs.into_iter().next().unwrap_or_default(),
+        MulticastStrategy::Custom(fold_fn) => {
+            let mut iter = outputs.into_iter();
+            let first = iter.next().unwrap_or_default();
+            iter.fold(first, |acc, next| fold_fn(acc, next))
+        }
+        // LastWins and any future variant return the last output.
+        _ => outputs.into_iter().last().unwrap_or_default(),
+    })
+}
+
 /// Collect a byte stream into a single `Bytes` value, enforcing a size limit.
 ///
 /// `archive_label` names the archive in the cap-violation error (e.g.
@@ -475,46 +519,7 @@ impl StepCompiler for SplittingCompiler {
                     all_lifecycles.extend(lifecycles);
                     branch_segments.push(compose_outcome_segment(sub_segments));
                 }
-                let strategy = config.aggregation.clone();
-                let aggregator: Arc<dyn Fn(Vec<Exchange>) -> Exchange + Send + Sync> = Arc::new(
-                    move |outputs| match &strategy {
-                        MulticastStrategy::CollectAll => {
-                            let bodies: Vec<Value> = outputs
-                                .iter()
-                                .map(|ex| match &ex.input.body {
-                                    Body::Text(s) => Value::String(s.clone()),
-                                    Body::Json(v) => v.clone(),
-                                    Body::Xml(s) => Value::String(s.clone()),
-                                    Body::Bytes(b) => {
-                                        Value::String(String::from_utf8_lossy(b).into_owned())
-                                    }
-                                    Body::Stream(s) => serde_json::json!({
-                                        "_stream": {
-                                            "origin": s.metadata.origin,
-                                            "placeholder": true,
-                                            "hint": "Materialize exchange body with .into_bytes() before multicast aggregation"
-                                        }
-                                    }),
-                                    // Empty and future variants contribute no extractable value.
-                                    _ => Value::Null,
-                                })
-                                .collect();
-                            let mut out = Exchange::default();
-                            out.input.body = Body::Json(Value::Array(bodies));
-                            out
-                        }
-                        MulticastStrategy::Original => {
-                            outputs.into_iter().next().unwrap_or_default()
-                        }
-                        MulticastStrategy::Custom(fold_fn) => {
-                            let mut iter = outputs.into_iter();
-                            let first = iter.next().unwrap_or_default();
-                            iter.fold(first, |acc, next| fold_fn(acc, next))
-                        }
-                        // LastWins and any future variant return the last output.
-                        _ => outputs.into_iter().last().unwrap_or_default(),
-                    },
-                );
+                let aggregator = multicast_aggregator(&config.aggregation);
                 let segment = camel_processor::MulticastSegment {
                     branches: branch_segments,
                     parallel: config.parallel,
@@ -1031,6 +1036,79 @@ mod tests {
                 "expected PipelineOutcome::Failed, got success={}",
                 other.is_success()
             ),
+        }
+    }
+
+    // ── multicast_aggregator strategy mapping ──────────────────────────
+
+    fn text_exchange(body: &str) -> Exchange {
+        Exchange::new(camel_api::Message::new(body))
+    }
+
+    #[test]
+    fn multicast_aggregator_original_returns_first_output() {
+        let aggregator = multicast_aggregator(&MulticastStrategy::Original);
+        let outputs = vec![text_exchange("first"), text_exchange("second")];
+        assert_eq!(aggregator(outputs).input.body.as_text(), Some("first"));
+    }
+
+    #[test]
+    fn multicast_aggregator_custom_folds_from_first() {
+        let fold: camel_api::MulticastAggregationFn = Arc::new(|acc, next| {
+            let joined = format!(
+                "{}+{}",
+                acc.input.body.as_text().unwrap_or_default(),
+                next.input.body.as_text().unwrap_or_default()
+            );
+            let mut out = acc;
+            out.input.body = Body::Text(joined);
+            out
+        });
+        let aggregator = multicast_aggregator(&MulticastStrategy::Custom(fold));
+        let outputs = vec![text_exchange("a"), text_exchange("b"), text_exchange("c")];
+        assert_eq!(aggregator(outputs).input.body.as_text(), Some("a+b+c"));
+    }
+
+    #[test]
+    fn multicast_aggregator_collect_all_builds_json_array_of_bodies() {
+        let aggregator = multicast_aggregator(&MulticastStrategy::CollectAll);
+        let outputs = vec![text_exchange("a"), text_exchange("b")];
+        match aggregator(outputs).input.body {
+            Body::Json(v) => assert_eq!(v, serde_json::json!(["a", "b"])),
+            other => panic!("expected JSON array body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multicast_aggregator_last_wins_returns_last_output() {
+        // Default is LastWins; exercise both the explicit and default paths.
+        for strategy in [MulticastStrategy::LastWins, MulticastStrategy::default()] {
+            let aggregator = multicast_aggregator(&strategy);
+            let outputs = vec![text_exchange("first"), text_exchange("last")];
+            assert_eq!(aggregator(outputs).input.body.as_text(), Some("last"));
+        }
+    }
+
+    #[test]
+    fn multicast_aggregator_empty_outputs_preserve_empty_input_behavior() {
+        for strategy in [
+            MulticastStrategy::Original,
+            MulticastStrategy::LastWins,
+            MulticastStrategy::default(),
+        ] {
+            let out = multicast_aggregator(&strategy)(Vec::new());
+            assert_eq!(out.input.body.as_text(), None);
+        }
+
+        let fold: camel_api::MulticastAggregationFn = Arc::new(|acc, _next| acc);
+        let out = multicast_aggregator(&MulticastStrategy::Custom(fold))(Vec::new());
+        assert_eq!(out.input.body.as_text(), None);
+
+        // CollectAll always materializes an array, even when there are no outputs.
+        let out = multicast_aggregator(&MulticastStrategy::CollectAll)(Vec::new());
+        match out.input.body {
+            Body::Json(v) => assert_eq!(v, serde_json::json!([])),
+            other => panic!("expected empty JSON array body, got {other:?}"),
         }
     }
 }

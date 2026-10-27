@@ -71,6 +71,7 @@ pub use body::{Body, BoxAsyncRead, StreamBody, StreamMetadata, body_type_name};
 pub use body_converter::{BodyType, convert as convert_body};
 pub use cache::{CacheEntry, CacheRepository, CacheStats, ContentType};
 pub use circuit_breaker::CircuitBreakerConfig;
+pub use claim_check::ClaimCheckRepository;
 pub use component_metrics::ComponentMetrics;
 pub use data_format::DataFormat;
 pub use datasource::{
@@ -91,17 +92,6 @@ pub use error_handler::{
     HEADER_REDELIVERY_MAX_COUNTER, PolicyId, RedeliveryPolicy, RetryOutcome, RetryableStep,
     StepDisposition,
 };
-pub use security_policy::{
-    AccessMode, AudienceBinding, AuthContext, AuthPrincipal, AuthorizationDecision,
-    PRINCIPAL_AUDIENCE_KEY, PRINCIPAL_CLAIMS_KEY, PRINCIPAL_ISSUER_KEY, PRINCIPAL_KEY,
-    PRINCIPAL_ROLES_KEY, PRINCIPAL_SCOPES_KEY, PRINCIPAL_SUBJECT_KEY, Principal, RouteSecurityPlan,
-    SecurityPolicy, SecurityPolicyConfig, TransportId, store_principal_properties,
-};
-pub use span_kind::SpanKindHint;
-// Backwards compatibility re-export (deprecated)
-pub use claim_check::ClaimCheckRepository;
-#[allow(deprecated)]
-pub use error_handler::ExponentialBackoff;
 pub use exchange::{
     CAMEL_STOP, Exchange, ExchangePattern, ORIGINAL_MESSAGE_EXTENSION, is_camel_stop,
 };
@@ -149,6 +139,13 @@ pub use runtime::{
     RuntimeCommandResult, RuntimeEvent, RuntimeHandle, RuntimeQuery, RuntimeQueryBus,
     RuntimeQueryResult, canonical_contract_rejection_reason, canonical_contract_supports_step,
 };
+pub use security_policy::{
+    AccessMode, AudienceBinding, AuthContext, AuthPrincipal, AuthorizationDecision,
+    PRINCIPAL_AUDIENCE_KEY, PRINCIPAL_CLAIMS_KEY, PRINCIPAL_ISSUER_KEY, PRINCIPAL_KEY,
+    PRINCIPAL_ROLES_KEY, PRINCIPAL_SCOPES_KEY, PRINCIPAL_SUBJECT_KEY, Principal, RouteSecurityPlan,
+    SecurityPolicy, SecurityPolicyConfig, TransportId, store_principal_properties,
+};
+pub use span_kind::SpanKindHint;
 pub use splitter::{
     AggregationStrategy, SplitExpression, SplitSource, SplitterConfig, StreamSplitConfig,
     StreamSplitFormat, StreamingSplitExpression, fragment_exchange, split_body,
