@@ -26,7 +26,8 @@ Exchange body as untrusted exchange data.
 |---|---|---|
 | Stylesheet | Endpoint URI, trusted | Read from disk during Endpoint creation, then compiled by the sidecar |
 | XML document | Exchange body, untrusted | Bounded and forwarded as bytes without Rust-side XML parsing |
-| Parameters and output method | Endpoint query, trusted | Forwarded as string values to the sidecar |
+| Static parameters and output method | Endpoint query, trusted | `param.<name>` values are forwarded as string values to the sidecar |
+| `paramFrom` parameters | Exchange header, untrusted | Converted per the scalar rules (string verbatim, number/bool canonical text); array and object values are rejected with a payload-free error |
 
 No Exchange field can select or replace the stylesheet.
 

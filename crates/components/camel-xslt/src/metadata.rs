@@ -37,6 +37,12 @@ pub(super) struct XsltMetadataDescriptor {
         desc = "Open namespace: param.<name>=<value> stylesheet parameters"
     )]
     pub _params: Vec<(String, String)>,
+
+    #[uri_param(
+        pattern = "paramFrom.",
+        desc = "Open namespace: paramFrom.<name>=<header-key> stylesheet parameters resolved from exchange headers"
+    )]
+    pub _param_from: Vec<(String, String)>,
 }
 
 #[cfg(test)]
@@ -56,6 +62,7 @@ mod tests {
             "maxPayloadBytes",
             "output",
             "param",
+            "paramFrom",
             "transformerCacheSize",
         ];
         expected.sort();

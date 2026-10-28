@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, watch};
 
 /// Seam for starting (or restarting) the xml-bridge process.
 ///
-/// Production uses [`RealBridgeStarter`], which resolves and spawns the real
+/// Production uses `RealBridgeStarter`, which resolves and spawns the real
 /// xml-bridge binary. Tests inject a fake so the restart/reconnect path can be
 /// exercised hermetically: `cargo test --workspace` runs without a built or
 /// downloadable xml-bridge, so the runtime must not require the real binary.
@@ -385,6 +385,7 @@ impl Component for XsltComponent {
             uri.to_string(),
             stylesheet_bytes,
             endpoint_config.params,
+            endpoint_config.param_from,
             endpoint_config.output_method,
             endpoint_config.fail_on_null_body,
             endpoint_config.max_payload_bytes,

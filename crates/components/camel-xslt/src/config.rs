@@ -56,7 +56,23 @@ pub struct XsltEndpointConfig {
     /// <xsl:param name="version"/>
     /// <output title="{$title}" version="{$version}"/>
     /// ```
+    ///
+    /// A same-name `paramFrom` header overrides a static value when present.
     pub params: Vec<(String, String)>,
+    /// Stylesheet parameters resolved from exchange headers at transform time.
+    ///
+    /// Each entry maps a stylesheet parameter name to an exchange header key,
+    /// specified in the endpoint URI as `paramFrom.<name>=<header-key>` pairs
+    /// (e.g. `xslt:/my.xslt?paramFrom.sequenceNumber=seqHeader`).
+    ///
+    /// Resolution happens per exchange: a header that is present overrides a
+    /// same-name static `param.<name>` value. An absent or `Null` header omits
+    /// the dynamic entry, and a same-name static `param.<name>`, if configured,
+    /// is then used. The parameter is omitted entirely only when neither the
+    /// header nor a same-name static param supplies a value. `Array` and
+    /// `Object` header values fail closed; `String`, `Number`, and `Bool`
+    /// values are converted to strings.
+    pub param_from: Vec<(String, String)>,
     pub output_method: Option<String>,
     /// Maximum number of compiled stylesheets to keep in the transformer cache.
     /// A value of `None` means unlimited (use bridge default), while `Some(0)`
@@ -104,6 +120,7 @@ impl XsltEndpointConfig {
         };
 
         let mut params = Vec::new();
+        let mut param_from = Vec::new();
         let mut output_method = None;
         let mut transformer_cache_size = None;
         let mut fail_on_null_body = false;
@@ -150,6 +167,21 @@ impl XsltEndpointConfig {
                     continue;
                 }
 
+                if let Some(name) = key.strip_prefix("paramFrom.") {
+                    if name.is_empty() {
+                        return Err(CamelError::EndpointCreationFailed(format!(
+                            "invalid paramFrom option: {key}"
+                        )));
+                    }
+                    if value.is_empty() {
+                        return Err(CamelError::EndpointCreationFailed(format!(
+                            "invalid paramFrom option: {key}"
+                        )));
+                    }
+                    param_from.push((name.to_string(), value.into_owned()));
+                    continue;
+                }
+
                 if let Some(param_key) = key.strip_prefix("param.")
                     && !param_key.is_empty()
                 {
@@ -161,6 +193,7 @@ impl XsltEndpointConfig {
         Ok(Self {
             stylesheet_uri: stylesheet_path,
             params,
+            param_from,
             output_method,
             transformer_cache_size,
             fail_on_null_body,
@@ -255,6 +288,54 @@ mod tests {
         assert!(
             msg.contains("maxPayloadBytes"),
             "expected maxPayloadBytes error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parses_param_from_uri() {
+        let cfg = XsltEndpointConfig::from_uri(
+            "xslt:/t.xslt?paramFrom.sequenceNumber=seqHeader&paramFrom.senderID=senderHeader",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.param_from,
+            vec![
+                ("sequenceNumber".to_string(), "seqHeader".to_string()),
+                ("senderID".to_string(), "senderHeader".to_string()),
+            ]
+        );
+        assert!(cfg.params.is_empty());
+    }
+
+    #[test]
+    fn rejects_empty_param_from_name() {
+        let err = XsltEndpointConfig::from_uri("xslt:/t.xslt?paramFrom.=h").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("paramFrom."),
+            "expected paramFrom name error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_param_from_key() {
+        let err = XsltEndpointConfig::from_uri("xslt:/t.xslt?paramFrom.seq=").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("paramFrom.seq"),
+            "expected paramFrom key error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn static_params_unchanged_alongside_param_from() {
+        let cfg =
+            XsltEndpointConfig::from_uri("xslt:/t.xslt?param.mode=debug&paramFrom.seq=seqHeader")
+                .unwrap();
+        assert_eq!(cfg.params, vec![("mode".to_string(), "debug".to_string())]);
+        assert_eq!(
+            cfg.param_from,
+            vec![("seq".to_string(), "seqHeader".to_string())]
         );
     }
 

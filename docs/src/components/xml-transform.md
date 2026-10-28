@@ -32,7 +32,7 @@ The Producer bounds the body before forwarding. When `maxPayloadBytes` is absent
 ### URI
 
 ```text
-xslt:<stylesheet>[?output=<method>][&param.<name>=<value>][&transformerCacheSize=<n>][&failOnNullBody=<true|false>][&maxPayloadBytes=<n>]
+xslt:<stylesheet>[?output=<method>][&param.<name>=<value>][&paramFrom.<name>=<header-key>][&transformerCacheSize=<n>][&failOnNullBody=<true|false>][&maxPayloadBytes=<n>]
 ```
 
 | Parameter | Required | Default | Description |
@@ -40,11 +40,40 @@ xslt:<stylesheet>[?output=<method>][&param.<name>=<value>][&transformerCacheSize
 | `stylesheet` | yes | — | Path to the XSLT file. Accepts `file://` prefix or a plain path. |
 | `output` | no | stylesheet default | Output method: `xml`, `html`, or `text`. |
 | `param.<name>` | no | — | XSLT parameter. Forwarded as a string. Becomes an `<xsl:param>` value inside the stylesheet. |
+| `paramFrom.<name>` | no | — | Resolves the stylesheet parameter `<name>` from the exchange header named `<header-key>` at transform time. Overrides a same-name `param.<name>` when the header is present. |
 | `transformerCacheSize` | no | unlimited | Maximum compiled stylesheets the bridge keeps in cache. `0` disables caching. |
 | `failOnNullBody` | no | `false` | Return an error when the body is empty. When `false`, the empty body is forwarded. |
 | `maxPayloadBytes` | no | 10 MiB | Reject Exchange bodies larger than this before sending to the bridge. `0` is rejected. |
 
 No Exchange field can select or replace the stylesheet. The stylesheet is fixed at Endpoint creation. The Exchange body is the only XML the bridge sees.
+
+### Stylesheet parameters
+
+A static parameter is fixed at Endpoint creation:
+
+```text
+xslt:/etc/transforms/order.xslt?param.locale=en
+```
+
+A `paramFrom` entry reads the parameter value from a header on each exchange:
+
+```text
+xslt:/etc/transforms/order.xslt?paramFrom.sequenceNumber=seqHeader
+```
+
+The value of the header `seqHeader` becomes the `sequenceNumber` stylesheet parameter.
+
+When both forms are configured for the same name, the header wins while it is present:
+
+```text
+xslt:/etc/transforms/order.xslt?param.sequenceNumber=0&paramFrom.sequenceNumber=seqHeader
+```
+
+With the header present, the header value is used. With the header absent, the static `0` is used.
+
+When the header is not set or is `Null`, the dynamic entry is omitted and a same-name static `param.<name>`, if configured, is used instead. Only when neither supplies a value is the parameter omitted entirely; no empty string is sent.
+
+Value rules apply per header. `String` headers are forwarded verbatim. `Number` and `Bool` headers are converted to their canonical text, for example `7` or `true`. `Array` and `Object` headers fail the exchange with an error that names the parameter and the header; the value content is not included. Parameters are resolved per exchange and never leak between exchanges.
 
 ## XJ
 
