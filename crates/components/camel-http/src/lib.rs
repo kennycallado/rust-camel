@@ -1348,8 +1348,13 @@ async fn spawn_entry(
     let bound_addr = listener
         .local_addr()
         .map_err(|e| CamelError::EndpointCreationFailed(format!("listener local_addr: {e}")))?;
+    // The graceful-shutdown trigger is a child of the server lifetime token,
+    // not a second independent root: `server_exited` is the root this server
+    // owns, and cancelling it (unexpected exit) also fires shutdown on an
+    // already-dead serve loop, which is harmless. Normal shutdown cancels
+    // only the child, so the clean-exit path still signals no route failure.
     let server_exited = tokio_util::sync::CancellationToken::new();
-    let shutdown = tokio_util::sync::CancellationToken::new();
+    let shutdown = server_exited.child_token();
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let registry = HttpRouteRegistry::new_with_server_exited(server_exited.clone());
     let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
