@@ -4,7 +4,6 @@
 Feature profiles for the camel CLI. Three flavor markers (`flavor-slim`,
 `flavor-regular`, `flavor-full`) select the build profile, bridge crates stay
 individually selectable, and release legs choose exactly one flavor marker.
-
 ## Requirements
 ### Requirement: Default feature closure is unchanged
 
@@ -50,7 +49,7 @@ camel-cli SHALL provide a `flavor-slim` feature naming the
 non-optional core plumbing (http, direct, seda, log, mock, timer, file,
 controlbus, container, validator, cron, and the DSL/config/core stack)
 and SHALL NOT link the camel-cli-controllable optional set — kafka,
-grpc, wasm, llm, mcp, mqtt, surrealdb, exec, the lsp stack (camel-lsp,
+grpc, wasm, llm, mcp, mqtt, mail, surrealdb, exec, the lsp stack (camel-lsp,
 tower-lsp), the language runtimes gated by the `lang-*` features (js,
 rhai, jsonpath, xpath), and seven of the eight bridge chains
 (camel-component-jms, camel-component-sql, camel-component-opensearch,
@@ -72,7 +71,7 @@ mission 115).
 - **GIVEN** a build configured `--no-default-features --features flavor-slim`
 - **WHEN** `cargo tree -p camel-cli --no-default-features -e no-dev`
   resolves
-- **THEN** none of camel-component-{kafka,grpc,wasm,llm,mcp,mqtt,
+- **THEN** none of camel-component-{kafka,grpc,wasm,llm,mcp,mqtt,mail,
   surrealdb,exec,jms,sql,opensearch,ws,cxf}, camel-lsp, tower-lsp,
   camel-xj, camel-xslt, or the excluded language-runtime crates (js,
   rhai, jsonpath, xpath — NOT minijinja, see the requirement text)

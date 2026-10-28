@@ -5,7 +5,6 @@ The distribution flavors of the camel CLI. Three flavors (`flavor-slim`,
 `flavor-regular`, `flavor-full`) select the shipped feature closure, and
 flavor-prefixed artifacts, Docker variants, binstall metadata, and release
 tags follow the flavor contracts.
-
 ## Requirements
 ### Requirement: Three distribution flavors with principled bodies
 
@@ -36,7 +35,7 @@ placed in no flavor. Enabling no marker SHALL report flavor `custom`.
 
 - **WHEN** `cargo build --features flavor-regular` resolves (default)
 - **THEN** the closure is slim plus otel, grpc, wasm, llm, mcp, security,
-  redis (+tls), jms, cxf, xj, xslt, opensearch, ws, lang-xpath, lang-js,
+  redis (+tls), jms, mail, cxf, xj, xslt, opensearch, ws, lang-xpath, lang-js,
   lang-minijinja, lsp, kubernetes, integration-http and integration-sql,
   and contains none of the four principled exclusions (kafka, surrealdb,
   exec, containers)
