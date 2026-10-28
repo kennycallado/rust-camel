@@ -1,0 +1,48 @@
+name: Integration Mail
+
+# Docker integration tier for the mail component (bd rc-z3cwo). The tests are
+# gated behind MAIL_ITEST=1 and skip as no-ops without it, so ordinary unit
+# runs stay Docker-free. The GreenMail and Mailpit fixtures start their own
+# containers through the docker CLI, which means no GitHub Actions services
+# block is needed (and none would work — the fixtures also need host port
+# control and per-test lifecycle).
+#
+# Deliberately NOT wired to the branch/PR events: two container pulls plus a
+# cold build is expensive, and the tier only guards the SMTP/IMAP wire
+# behaviour, which changes rarely. Nightly is enough to catch wiring rot.
+
+on:
+  schedule:
+    - cron: "30 4 * * *" # nightly 04:30 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  mail-docker-tier:
+    name: Mail Docker tier (GreenMail + Mailpit, ubuntu-latest)
+    runs-on: ubuntu-latest
+    # Two container pulls plus a cold workspace build; 30 min leaves headroom
+    # for a slow runner without hiding a genuinely hung container.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Maximize disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/google/chrome /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+          sudo apt-get clean
+          df -h /
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Mail Docker tier (GreenMail + Mailpit)
+        run: MAIL_ITEST=1 cargo test -p camel-component-mail --test greenmail_tier --test mailpit_tier
