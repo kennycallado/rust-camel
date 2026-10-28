@@ -94,6 +94,8 @@
   run: cargo xtask lint-bridge-versions
 - name: lint-gate-forwarding
   run: cargo xtask lint-gate-forwarding
+- name: lint-no-deprecated
+  run: cargo xtask lint-no-deprecated
 - name: lint-context-citations
   run: cargo xtask lint-context-citations
 - name: lint-metric-labels

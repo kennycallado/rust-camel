@@ -366,6 +366,8 @@ jobs:
         run: cargo xtask lint-metric-labels
       - name: lint-gate-forwarding
         run: cargo xtask lint-gate-forwarding
+      - name: lint-no-deprecated
+        run: cargo xtask lint-no-deprecated
       - name: schema-check
         run: cargo xtask schema --check
       - name: lint-commits

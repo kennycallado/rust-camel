@@ -5,6 +5,7 @@ mod lint_component_deps;
 mod lint_context_citations;
 mod lint_gate_forwarding;
 mod lint_metric_labels;
+mod lint_no_deprecated;
 mod lint_no_env_mutation_unguarded;
 mod lint_no_free_port;
 mod lint_no_raw_http_test_server;
@@ -198,6 +199,11 @@ enum Commands {
     /// `camel-bundles` must forward the bundle gates it names, and boot
     /// consumers must forward all of them. Exits non-zero on violations.
     LintGateForwarding,
+    /// Enforce ADR-0090: the pre-1.0 policy is delete, not hide — no
+    /// `#[deprecated]` attributes (including `#[cfg_attr(.., deprecated)]`
+    /// forms) anywhere in workspace Rust sources. Exits non-zero on
+    /// violations.
+    LintNoDeprecated,
     /// Scan component crate source for `UriOption::new` calls outside
     /// `#[cfg(test)]` modules. Enforces the single-source-of-truth
     /// invariant: metadata MUST be macro-derived, not hand-written.
@@ -823,6 +829,29 @@ fn main() {
                 Err(e) => {
                     eprintln!("lint-gate-forwarding error: {e}");
                     std::process::exit(2);
+                }
+            }
+        }
+        Commands::LintNoDeprecated => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_no_deprecated::lint_no_deprecated(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!("lint-no-deprecated: OK (no violations)");
+                }
+                Ok(violations) => {
+                    println!(
+                        "DEPRECATED-ATTRIBUTE VIOLATIONS ({} found):",
+                        violations.len()
+                    );
+                    for v in &violations {
+                        println!("  {}:{}  {}", v.file, v.line, v.snippet.trim());
+                    }
+                    eprintln!("\nlint-no-deprecated: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-no-deprecated error: {e}");
+                    std::process::exit(1);
                 }
             }
         }
