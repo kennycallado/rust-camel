@@ -1,0 +1,17 @@
+# Simple eval baseline — PRE-change (base commit be285a2d4)
+# host: ryzen
+# cpu: AMD Ryzen 5 5600G with Radeon Graphics
+# source: openspec/changes/simple-scalar-expressions/evidence/bench-baseline-base.txt
+# statistic: criterion typical estimate — slope point estimate when the
+#            measurement has a slope, mean point estimate for flat sampling.
+#            This is the middle value of the printed `time: [lo est hi]`
+#            triple, in nanoseconds — not a median or p95.
+# format: <qualified_name> <estimate_ns> <host> <cpu>
+expression_eval/header_value 154.80 ryzen AMD Ryzen 5 5600G with Radeon Graphics
+expression_eval/header_count 134.18 ryzen AMD Ryzen 5 5600G with Radeon Graphics
+expression_eval/body_value 91.818 ryzen AMD Ryzen 5 5600G with Radeon Graphics
+expression_eval/complex 273.71 ryzen AMD Ryzen 5 5600G with Radeon Graphics
+predicate_eval/header_value 154.94 ryzen AMD Ryzen 5 5600G with Radeon Graphics
+predicate_eval/header_eq 153.98 ryzen AMD Ryzen 5 5600G with Radeon Graphics
+predicate_eval/header_gt 128.23 ryzen AMD Ryzen 5 5600G with Radeon Graphics
+predicate_eval/body_contains 128.53 ryzen AMD Ryzen 5 5600G with Radeon Graphics

@@ -1,0 +1,122 @@
+    Finished `bench` profile [optimized] target(s) in 0.26s
+     Running benches/expression_eval.rs (target/release/deps/expression_eval-c81c1f4f3e11e7a7)
+Gnuplot not found, using plotters backend
+Benchmarking language_simple/expression_eval/header_value
+Benchmarking language_simple/expression_eval/header_value: Warming up for 3.0000 s
+Benchmarking language_simple/expression_eval/header_value: Collecting 100 samples in estimated 5.0000 s (48M iterations)
+Benchmarking language_simple/expression_eval/header_value: Analyzing
+language_simple/expression_eval/header_value
+                        time:   [104.15 ns 104.31 ns 104.60 ns]
+                        change: [+0.1202% +0.5206% +1.0704%] (p = 0.27 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking language_simple/expression_eval/header_count
+Benchmarking language_simple/expression_eval/header_count: Warming up for 3.0000 s
+Benchmarking language_simple/expression_eval/header_count: Collecting 100 samples in estimated 5.0003 s (50M iterations)
+Benchmarking language_simple/expression_eval/header_count: Analyzing
+language_simple/expression_eval/header_count
+                        time:   [97.955 ns 98.090 ns 98.221 ns]
+                        change: [−0.3705% −0.0545% +0.2611%] (p = 0.98 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) low mild
+Benchmarking language_simple/expression_eval/body_value
+Benchmarking language_simple/expression_eval/body_value: Warming up for 3.0000 s
+Benchmarking language_simple/expression_eval/body_value: Collecting 100 samples in estimated 5.0004 s (57M iterations)
+Benchmarking language_simple/expression_eval/body_value: Analyzing
+language_simple/expression_eval/body_value
+                        time:   [85.539 ns 85.692 ns 85.872 ns]
+                        change: [+0.3654% +0.5475% +0.7483%] (p = 0.08 > 0.05)
+                        No change in performance detected.
+Found 17 outliers among 100 measurements (17.00%)
+  17 (17.00%) high mild
+Benchmarking language_simple/expression_eval/complex
+Benchmarking language_simple/expression_eval/complex: Warming up for 3.0000 s
+Benchmarking language_simple/expression_eval/complex: Collecting 100 samples in estimated 5.0009 s (19M iterations)
+Benchmarking language_simple/expression_eval/complex: Analyzing
+language_simple/expression_eval/complex
+                        time:   [268.60 ns 268.91 ns 269.22 ns]
+                        change: [+1.6309% +1.7986% +1.9427%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking language_simple/expression_eval/compute_25
+Benchmarking language_simple/expression_eval/compute_25: Warming up for 3.0000 s
+Benchmarking language_simple/expression_eval/compute_25: Collecting 100 samples in estimated 5.0038 s (2.3M iterations)
+Benchmarking language_simple/expression_eval/compute_25: Analyzing
+language_simple/expression_eval/compute_25
+                        time:   [2.1224 µs 2.1248 µs 2.1277 µs]
+                        change: [+0.7365% +0.8159% +0.8915%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) low mild
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking language_simple/predicate_eval/header_value
+Benchmarking language_simple/predicate_eval/header_value: Warming up for 3.0000 s
+Benchmarking language_simple/predicate_eval/header_value: Collecting 100 samples in estimated 5.0004 s (36M iterations)
+Benchmarking language_simple/predicate_eval/header_value: Analyzing
+language_simple/predicate_eval/header_value
+                        time:   [140.14 ns 140.79 ns 141.49 ns]
+                        change: [−0.8506% −0.4184% −0.0196%] (p = 0.53 > 0.05)
+                        No change in performance detected.
+Benchmarking language_simple/predicate_eval/header_eq
+Benchmarking language_simple/predicate_eval/header_eq: Warming up for 3.0000 s
+Benchmarking language_simple/predicate_eval/header_eq: Collecting 100 samples in estimated 5.0006 s (36M iterations)
+Benchmarking language_simple/predicate_eval/header_eq: Analyzing
+language_simple/predicate_eval/header_eq
+                        time:   [140.97 ns 141.78 ns 142.84 ns]
+                        change: [−1.0507% −0.0773% +0.9361%] (p = 0.96 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+Benchmarking language_simple/predicate_eval/header_gt
+Benchmarking language_simple/predicate_eval/header_gt: Warming up for 3.0000 s
+Benchmarking language_simple/predicate_eval/header_gt: Collecting 100 samples in estimated 5.0006 s (39M iterations)
+Benchmarking language_simple/predicate_eval/header_gt: Analyzing
+language_simple/predicate_eval/header_gt
+                        time:   [129.72 ns 130.03 ns 130.36 ns]
+                        change: [+0.9037% +1.1745% +1.4350%] (p = 0.19 > 0.05)
+                        No change in performance detected.
+Benchmarking language_simple/predicate_eval/body_contains
+Benchmarking language_simple/predicate_eval/body_contains: Warming up for 3.0000 s
+Benchmarking language_simple/predicate_eval/body_contains: Collecting 100 samples in estimated 5.0004 s (39M iterations)
+Benchmarking language_simple/predicate_eval/body_contains: Analyzing
+language_simple/predicate_eval/body_contains
+                        time:   [129.03 ns 129.31 ns 129.64 ns]
+                        change: [−0.9986% −0.7978% −0.6077%] (p = 0.03 < 0.05)
+                        Change within noise threshold.
+Benchmarking language_simple/predicate_eval/choice
+Benchmarking language_simple/predicate_eval/choice: Warming up for 3.0000 s
+Benchmarking language_simple/predicate_eval/choice: Collecting 100 samples in estimated 5.0009 s (12M iterations)
+Benchmarking language_simple/predicate_eval/choice: Analyzing
+language_simple/predicate_eval/choice
+                        time:   [417.00 ns 417.34 ns 417.66 ns]
+                        change: [−2.8109% −2.6432% −2.4761%] (p = 0.00 < 0.05)
+                        Performance has improved.
+
+gate: predicate_eval/choice median_us=0.42 <= max_us=9.00
+gate: expression_eval/compute_25 median_us=2.12 <= max_us=250.00
+baseline: expression_eval/header_value baseline_est_ns=154.80 current_est_ns=104.31 ratio=0.674 <= 1.10 pass
+baseline: expression_eval/header_count baseline_est_ns=134.18 current_est_ns=98.09 ratio=0.731 <= 1.10 pass
+baseline: expression_eval/body_value baseline_est_ns=91.82 current_est_ns=85.69 ratio=0.933 <= 1.10 pass
+baseline: expression_eval/complex baseline_est_ns=273.71 current_est_ns=268.91 ratio=0.982 <= 1.10 pass
+baseline: expression_eval/compute_25 absent from benches/expression_eval_baseline.txt (new workload) — skipped
+baseline: predicate_eval/header_value baseline_est_ns=154.94 current_est_ns=140.79 ratio=0.909 <= 1.10 pass
+baseline: predicate_eval/header_eq baseline_est_ns=153.98 current_est_ns=141.78 ratio=0.921 <= 1.10 pass
+baseline: predicate_eval/header_gt baseline_est_ns=128.23 current_est_ns=130.03 ratio=1.014 <= 1.10 pass
+baseline: predicate_eval/body_contains baseline_est_ns=128.53 current_est_ns=129.31 ratio=1.006 <= 1.10 pass
+baseline: predicate_eval/choice absent from benches/expression_eval_baseline.txt (new workload) — skipped
+baseline: PASS (8 shared workloads <= 1.10x baseline, max_ratio=1.014)
+
+# --- post-fix: 01a75d3c8 perf(simple): avoid per-node boxing in evaluation ---
+# Full run, same host as baseline (ryzen / AMD Ryzen 5 5600G).
+# Guard statistic: criterion typical estimate (slope point estimate; mean
+# point estimate fallback for flat sampling) — the middle of the printed
+# `time: [lo est hi]` triple, matching the baseline file.
+# Gates run only on workloads measured in this process run.
+# All 8 shared workloads pass the 1.10x gate; max ratio 1.014
+# (predicate_eval/header_gt). Absolute gates: choice median 0.42 us,
+# compute_25 median 2.12 us.

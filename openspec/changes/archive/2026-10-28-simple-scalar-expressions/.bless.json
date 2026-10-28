@@ -1,0 +1,15 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "expert": "e_gpt",
+  "hash": "sha256:a86800632c4a22d8c504510f9d171c44c9299369e042c4348b297c4da52519db",
+  "date": "2026-10-28",
+  "history": [
+    {"kind": "spec", "verdict": "BLESS-WITH-FIXES", "findings": 12},
+    {"kind": "spec", "verdict": "BLESS-WITH-FIXES", "findings": 4},
+    {"kind": "spec", "verdict": "BLESS", "hash": "sha256:4635a706ef5a92595bd6c8ea974f26da2e22f1460ba67c4acfaec04d44cf0b8a"},
+    {"kind": "plan", "verdict": "BLESS-WITH-FIXES", "findings": 8},
+    {"kind": "plan", "verdict": "REJECT-residual", "findings": 1},
+    {"kind": "plan", "verdict": "BLESS", "hash": "sha256:a86800632c4a22d8c504510f9d171c44c9299369e042c4348b297c4da52519db"}
+  ]
+}

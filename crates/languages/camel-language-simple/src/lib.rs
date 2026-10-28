@@ -98,7 +98,10 @@ impl Language for SimpleLanguage {
 mod tests {
     use super::SimpleLanguage;
     use camel_language_api::Language;
-    use camel_language_api::{Exchange, LanguageError, Message, Value};
+    use camel_language_api::{
+        Exchange, Expression, ExpressionErrorClass, LanguageError, Message, Predicate, Value,
+    };
+    use std::sync::Arc;
 
     fn exchange_with_header(key: &str, val: &str) -> Exchange {
         let mut msg = Message::default();
@@ -395,7 +398,7 @@ mod tests {
                 actual,
                 position: None,
             } => {
-                assert_eq!(expected, "number");
+                assert_eq!(expected, "integer");
                 assert_eq!(actual, "string");
             }
             other => panic!("expected number/string TypeMismatch, got: {other:?}"),
@@ -667,11 +670,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_header_with_gt_in_key() {
+    async fn test_whitespace_free_gt_routes_to_comparison() {
+        // Only hyphen+letter continues a lookup key; `>` always terminates
+        // the atom, so `${header.n>1}` is a comparison even without spaces.
         let lang = SimpleLanguage::new();
         let mut msg = Message::default();
-        msg.set_header("a>b", Value::String("found".to_string()));
-        let pred = lang.create_predicate("${header.a>b} == 'found'").unwrap();
+        msg.set_header("n", Value::String("5".to_string()));
+        let pred = lang.create_predicate("${header.n>1}").unwrap();
         let ex = Exchange::new(msg);
         assert!(pred.matches(&ex).await.unwrap());
     }
@@ -886,16 +891,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_negative_float_literal() {
+    async fn test_float_literal_is_deferred_parse_error() {
+        // Floats are not part of the bounded scalar grammar; the construct
+        // error is reported at creation time.
         let lang = SimpleLanguage::new();
-        let pred = lang.create_predicate("${header.val} > -3.14").unwrap();
-        let mut msg = Message::default();
-        msg.set_header(
-            "val",
-            Value::Number(serde_json::Number::from_f64(0.0).unwrap()),
+        let err = match lang.create_predicate("${header.val} > -3.14") {
+            Ok(_) => panic!("float literal must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("floats are deferred"),
+            "unexpected error: {err}"
         );
-        let ex = Exchange::new(msg);
-        assert!(pred.matches(&ex).await.unwrap());
     }
 
     #[tokio::test]
@@ -909,6 +916,401 @@ mod tests {
         );
         let ex = Exchange::new(msg);
         assert!(pred.matches(&ex).await.unwrap());
+    }
+
+    fn balanced_sum(leaves: usize) -> String {
+        if leaves <= 1 {
+            return "1".to_string();
+        }
+        let left = balanced_sum(leaves / 2);
+        let right = balanced_sum(leaves - leaves / 2);
+        format!("({left} + {right})")
+    }
+
+    #[tokio::test]
+    async fn strict_boolean_result_stays() {
+        let lang = SimpleLanguage::new();
+        let mut msg = Message::default();
+        msg.set_header("n", Value::String("41".to_string()));
+        let ex = Exchange::new(msg);
+
+        let pred = lang.create_predicate("int(header.n) + 1").unwrap();
+        match pred.matches(&ex).await {
+            Err(LanguageError::TypeMismatch {
+                expected, actual, ..
+            }) => {
+                assert_eq!(expected, "bool");
+                assert_eq!(actual, "number");
+            }
+            other => panic!("expected TypeMismatch, got: {other:?}"),
+        }
+
+        let pred = lang
+            .create_predicate("false && header.missing > 1")
+            .unwrap();
+        assert!(!pred.matches(&Exchange::default()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn work_and_output_limits() {
+        let lang = SimpleLanguage::new();
+
+        let mut msg = Message::default();
+        msg.set_header("big", Value::String("A".repeat(2 * 1024 * 1024)));
+        let ex = Exchange::new(msg);
+        let expr = lang.create_expression("x${header.big}").unwrap();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("oversized output must fail");
+        match &err {
+            LanguageError::EvalFailure { class, detail, .. } => {
+                assert_eq!(*class, ExpressionErrorClass::Limit);
+                assert!(
+                    detail
+                        .as_deref()
+                        .is_some_and(|text| text.contains("output size limit")),
+                    "unexpected detail: {detail:?}"
+                );
+            }
+            other => panic!("expected Limit EvalFailure, got: {other:?}"),
+        }
+
+        // A near-512-node predicate source evaluates well under the 4096-unit
+        // work ceiling.
+        let src = balanced_sum(256);
+        assert!(src.len() < 16 * 1024, "fixture must fit the source limit");
+        let ast = crate::parser::parse(&src).unwrap();
+        let value = crate::evaluator::evaluate(&ast, &Exchange::default(), &None)
+            .await
+            .unwrap();
+        assert_eq!(value, Value::Number(256i64.into()));
+    }
+
+    #[tokio::test]
+    async fn payload_free_diagnostics_sentinel() {
+        const SENTINEL_LEAK: &str = "SENTINEL_LEAK";
+        let leak = format!("{SENTINEL_LEAK}{}", "A".repeat(1024 * 1024 + 1));
+
+        let mut msg = Message::default();
+        msg.set_header("leak", Value::String(leak.clone()));
+        msg.set_header("leak0", Value::String("abc".to_string()));
+        let ex = Exchange::new(msg);
+
+        let ast = crate::parser::parse("int(header.leak0)").unwrap();
+        let err = crate::evaluator::evaluate(&ast, &ex, &None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LanguageError::ConversionError { .. }));
+        assert!(
+            !err.to_string().contains(SENTINEL_LEAK),
+            "conversion diagnostic leaked: {err}"
+        );
+
+        let ast = crate::parser::parse("header.leak > 1").unwrap();
+        let err = crate::evaluator::evaluate(&ast, &ex, &None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LanguageError::TypeMismatch { .. }));
+        assert!(
+            !err.to_string().contains(SENTINEL_LEAK),
+            "type-mismatch diagnostic leaked: {err}"
+        );
+
+        let lang = SimpleLanguage::new();
+        let expr = lang.create_expression("x${header.leak}").unwrap();
+        let err = expr.evaluate(&ex).await.unwrap_err();
+        assert!(matches!(
+            err,
+            LanguageError::EvalFailure {
+                class: ExpressionErrorClass::Limit,
+                ..
+            }
+        ));
+        assert!(
+            !err.to_string().contains(SENTINEL_LEAK),
+            "limit diagnostic leaked: {err}"
+        );
+
+        struct FailingExpression;
+
+        #[async_trait::async_trait]
+        impl Expression for FailingExpression {
+            async fn evaluate(&self, _exchange: &Exchange) -> Result<Value, LanguageError> {
+                Err(LanguageError::EvalError("provider failure".to_string()))
+            }
+        }
+
+        struct FailingLanguage;
+
+        impl Language for FailingLanguage {
+            fn name(&self) -> &'static str {
+                "failing"
+            }
+
+            fn create_expression(
+                &self,
+                _script: &str,
+            ) -> Result<Box<dyn Expression>, LanguageError> {
+                Ok(Box::new(FailingExpression))
+            }
+
+            fn create_predicate(&self, _script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
+                Err(LanguageError::NotSupported {
+                    feature: "predicate".to_string(),
+                    language: "failing".to_string(),
+                })
+            }
+        }
+
+        let lang = SimpleLanguage::with_resolver(Arc::new(|name: &str| {
+            if name == "failing" {
+                Some(Arc::new(FailingLanguage) as Arc<dyn Language>)
+            } else {
+                None
+            }
+        }));
+        let expr = lang.create_expression("${failing:x}").unwrap();
+        let err = expr.evaluate(&ex).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("delegate language `failing` failed"),
+            "provider error must be wrapped payload-free, got: {err}"
+        );
+        assert!(
+            !err.to_string().contains(SENTINEL_LEAK),
+            "delegation diagnostic leaked: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delegate_provider_errors_are_payload_free() {
+        const SENTINEL: &str = "SENTINEL_LEAK";
+
+        struct CreateFails;
+        impl Language for CreateFails {
+            fn name(&self) -> &'static str {
+                "createfails"
+            }
+            fn create_expression(
+                &self,
+                _script: &str,
+            ) -> Result<Box<dyn Expression>, LanguageError> {
+                Err(LanguageError::EvalError(format!("{SENTINEL} create")))
+            }
+            fn create_predicate(&self, _script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
+                Err(LanguageError::NotSupported {
+                    feature: "predicate".to_string(),
+                    language: "createfails".to_string(),
+                })
+            }
+        }
+
+        struct EvalFails;
+
+        #[async_trait::async_trait]
+        impl Expression for EvalFails {
+            async fn evaluate(&self, _exchange: &Exchange) -> Result<Value, LanguageError> {
+                Err(LanguageError::EvalError(format!("{SENTINEL} eval")))
+            }
+        }
+
+        struct EvaluateFails;
+        impl Language for EvaluateFails {
+            fn name(&self) -> &'static str {
+                "evaluatefails"
+            }
+            fn create_expression(
+                &self,
+                _script: &str,
+            ) -> Result<Box<dyn Expression>, LanguageError> {
+                Ok(Box::new(EvalFails))
+            }
+            fn create_predicate(&self, _script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
+                Err(LanguageError::NotSupported {
+                    feature: "predicate".to_string(),
+                    language: "evaluatefails".to_string(),
+                })
+            }
+        }
+
+        let lang = SimpleLanguage::with_resolver(Arc::new(|name: &str| match name {
+            "createfails" => Some(Arc::new(CreateFails) as Arc<dyn Language>),
+            "evaluatefails" => Some(Arc::new(EvaluateFails) as Arc<dyn Language>),
+            _ => None,
+        }));
+
+        for script in ["${createfails:x}", "${evaluatefails:x}"] {
+            let expr = lang.create_expression(script).unwrap();
+            let err = expr.evaluate(&Exchange::default()).await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    LanguageError::EvalFailure {
+                        class: ExpressionErrorClass::Runtime,
+                        ..
+                    }
+                ),
+                "script {script}: {err:?}"
+            );
+            assert!(
+                err.to_string().contains("delegate language `"),
+                "script {script}: {err}"
+            );
+            assert!(
+                !err.to_string().contains(SENTINEL),
+                "script {script} leaked provider payload: {err}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn predicate_slots_use_expression_grammar() {
+        let lang = SimpleLanguage::new();
+
+        let pred = lang.create_predicate("${header.n > 1}").unwrap();
+        let mut msg = Message::default();
+        msg.set_header("n", Value::String("5".to_string()));
+        assert!(pred.matches(&Exchange::new(msg)).await.unwrap());
+        // `> 1` is false for a numeric string that does not exceed 1.
+        let mut msg = Message::default();
+        msg.set_header("n", Value::String("0".to_string()));
+        assert!(!pred.matches(&Exchange::new(msg)).await.unwrap());
+
+        // Creation succeeds; evaluation yields a number, which the strict
+        // boolean predicate boundary rejects.
+        let pred = lang.create_predicate("${int(header.n) + 1}").unwrap();
+        let mut msg = Message::default();
+        msg.set_header("n", Value::String("5".to_string()));
+        match pred.matches(&Exchange::new(msg)).await {
+            Err(LanguageError::TypeMismatch {
+                expected, actual, ..
+            }) => {
+                assert_eq!(expected, "bool");
+                assert_eq!(actual, "number");
+            }
+            other => panic!("expected strict-bool TypeMismatch, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn whole_slot_native_output_limit() {
+        let lang = SimpleLanguage::new();
+
+        let mut msg = Message::default();
+        msg.set_header("big", Value::String("A".repeat(1_048_577)));
+        let ex = Exchange::new(msg);
+        let expr = lang
+            .create_expression("${default(header.big, 'x')}")
+            .unwrap();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("native oversized string must fail");
+        assert!(
+            matches!(
+                err,
+                LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Limit,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+
+        let mut msg = Message::default();
+        msg.set_header("small", Value::String("hello".to_string()));
+        let ex = Exchange::new(msg);
+        let expr = lang
+            .create_expression("${default(header.small, 'x')}")
+            .unwrap();
+        assert_eq!(
+            expr.evaluate(&ex).await.unwrap(),
+            Value::String("hello".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn interpolation_output_limit_is_incremental() {
+        let lang = SimpleLanguage::new();
+
+        // 50 slots x 64 KiB accumulate past 1 MiB. The incremental
+        // pre-append check fails before the whole result is materialized.
+        let mut msg = Message::default();
+        msg.set_header("big", Value::String("A".repeat(64 * 1024)));
+        let ex = Exchange::new(msg);
+        let src = "${header.big}".repeat(50);
+        let expr = lang.create_expression(&src).unwrap();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("cumulative slot output must exceed the ceiling");
+        assert!(
+            matches!(
+                err,
+                LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Limit,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+
+        // Mixed literal + oversized slot still fails.
+        let mut msg = Message::default();
+        msg.set_header("big", Value::String("A".repeat(1_048_577)));
+        let ex = Exchange::new(msg);
+        let expr = lang
+            .create_expression("prefix ${header.big} suffix")
+            .unwrap();
+        let err = expr.evaluate(&ex).await.unwrap_err();
+        assert!(matches!(
+            err,
+            LanguageError::EvalFailure {
+                class: ExpressionErrorClass::Limit,
+                ..
+            }
+        ));
+
+        // Small templates still render exactly and are charged once.
+        let mut msg = Message::default();
+        msg.set_header("small", Value::String("hello".to_string()));
+        let ex = Exchange::new(msg);
+        let expr = lang.create_expression("a${header.small}b").unwrap();
+        assert_eq!(
+            expr.evaluate(&ex).await.unwrap(),
+            Value::String("ahellob".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn predicate_rejects_container_literal_syntax() {
+        let lang = SimpleLanguage::new();
+        for script in ["{}", "{'a': 1}", "[]", "[1]"] {
+            let err = match lang.create_predicate(script) {
+                Ok(_) => panic!("predicate {script:?} must be rejected"),
+                Err(err) => err,
+            };
+            assert!(
+                err.to_string()
+                    .contains("json/map construction is deferred"),
+                "script {script:?}: {err}"
+            );
+        }
+        // Quoted braces/brackets are valid string literals.
+        assert!(lang.create_predicate("'{'").is_ok());
+        assert!(lang.create_predicate("'[)'").is_ok());
+        // Template mode keeps raw text verbatim.
+        let expr = lang.create_expression("x{}y").unwrap();
+        assert_eq!(
+            expr.evaluate(&Exchange::default()).await.unwrap(),
+            Value::String("x{}y".to_string())
+        );
+        let expr = lang.create_expression("x[1]y").unwrap();
+        assert_eq!(
+            expr.evaluate(&Exchange::default()).await.unwrap(),
+            Value::String("x[1]y".to_string())
+        );
     }
 }
 
