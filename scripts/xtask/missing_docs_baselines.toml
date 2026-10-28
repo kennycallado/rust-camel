@@ -33,3 +33,7 @@ count = 0
 
 [camel-dsl]
 count = 809
+
+# New component crate, fully documented at landing (rc-q8zur).
+[camel-component-mail]
+count = 0

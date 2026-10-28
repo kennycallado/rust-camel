@@ -773,6 +773,12 @@ impl std::fmt::Debug for IdempotentRepoConfig {
 }
 
 impl IdempotentRepoConfig {
+    /// Name the repository is registered under: `name`, else the backend.
+    #[must_use]
+    pub fn registry_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.backend)
+    }
+
     /// Normalize expanded-but-empty redis topology fields to absent.
     ///
     /// Thin delegate to [`normalize_empty_topology_fields`], which owns the

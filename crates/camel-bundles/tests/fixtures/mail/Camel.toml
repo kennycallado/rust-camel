@@ -1,0 +1,12 @@
+# Fixture for the camel-bundles mail boot test: one IMAP account, the
+# default `memory` idempotent repository and no [idempotent_repo] table.
+# The reconnect table mirrors the guide snippet in docs/src/components/mail.md.
+[components.mail.accounts.main]
+username = "fixture"
+password = "fixture-only"
+
+[components.mail.reconnect]
+max_attempts = 0
+initial_delay_ms = 5000
+max_delay_ms = 60000
+multiplier = 2.0

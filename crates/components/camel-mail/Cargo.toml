@@ -1,0 +1,50 @@
+[package]
+name = "camel-component-mail"
+description = "SMTP and IMAP mail component for rust-camel"
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["camel", "smtp", "imap", "mail", "email"]
+categories = ["network-programming", "email", "asynchronous"]
+
+[features]
+default = []
+# test-only probe hooks for this crate's integration tests; never enable in production
+test-support = []
+
+[dependencies]
+camel-component-api = { workspace = true }
+camel-api           = { workspace = true }
+tokio               = { workspace = true }
+async-trait         = { workspace = true }
+tracing             = { workspace = true }
+serde               = { workspace = true }
+toml                = { workspace = true }
+thiserror           = { workspace = true }
+lettre              = { workspace = true }
+uuid                = { workspace = true }
+async-imap          = { workspace = true }
+mail-parser         = { workspace = true }
+# rustls is reached through `tokio_rustls::rustls`: the workspace entry
+# selects ring and tls12 only, so the crate adds no aws-lc-rs edge.
+tokio-rustls        = { workspace = true }
+webpki-roots        = { workspace = true }
+futures             = { workspace = true }
+tower               = { workspace = true }
+
+[dev-dependencies]
+tokio               = { workspace = true, features = ["full", "test-util"] }
+camel-component-api = { workspace = true, features = ["test-support"] }
+tempfile            = { workspace = true }
+tracing-subscriber  = { workspace = true }
+bytes               = { workspace = true }
+serde_json          = { workspace = true }
+tokio-util          = { workspace = true }
+# self dev-dependency enables the probe hooks for integration tests
+camel-component-mail = { path = ".", features = ["test-support"] }
+
+[lints]
+workspace = true

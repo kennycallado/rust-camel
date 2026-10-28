@@ -206,10 +206,7 @@ fn cache_repo_name(ccfg: &CacheRepoConfig) -> String {
 /// override when set, else the backend convention (`"redb"`/`"redis"`).
 /// Same ctor-and-registry-key contract as [`cache_repo_name`].
 fn idempotent_repo_name(icfg: &IdempotentRepoConfig) -> String {
-    match icfg.name.as_deref() {
-        Some(name) => name.to_string(),
-        None => icfg.backend.clone(),
-    }
+    icfg.registry_name().to_string()
 }
 
 /// Build the redb-backed persistent cache repository from a validated

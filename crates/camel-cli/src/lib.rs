@@ -175,6 +175,8 @@ pub fn register_builtin_components_for_lint(ctx: &mut camel_core::CamelContext) 
     register_bundle_empty!(ctx, camel_component_mqtt::MqttBundle);
     #[cfg(feature = "rabbitmq")]
     register_bundle_empty!(ctx, camel_component_rabbitmq::RabbitMqBundle);
+    #[cfg(feature = "mail")]
+    register_bundle_empty!(ctx, camel_component_mail::MailBundle);
     #[cfg(feature = "grpc")]
     register_bundle_empty!(ctx, camel_component_grpc::GrpcBundle);
     #[cfg(feature = "llm")]

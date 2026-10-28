@@ -25,12 +25,22 @@ pub(crate) fn inject_camel_tracer_off(filter_str: &str) -> String {
     }
 }
 
+/// Cap `async_imap` at `info`: it logs raw IMAP traffic, `LOGIN` with the
+/// password included, at `trace`. An explicit `async_imap` directive wins.
+pub(crate) fn inject_async_imap_cap(filter_str: &str) -> String {
+    if filter_str == "off" || filter_str.contains("async_imap") {
+        filter_str.to_string()
+    } else {
+        format!("{filter_str},async_imap=info")
+    }
+}
+
 pub(crate) fn build_env_filter(
     log_level: &str,
     rust_log: Option<&str>,
 ) -> Result<EnvFilter, CamelError> {
     if let Some(rust_log_val) = rust_log {
-        let filter_str = inject_camel_tracer_off(rust_log_val);
+        let filter_str = inject_async_imap_cap(&inject_camel_tracer_off(rust_log_val));
         return EnvFilter::try_new(&filter_str).map_err(|e| {
             CamelError::Config(format!(
                 "Invalid RUST_LOG environment variable '{}': {e}",
@@ -40,10 +50,10 @@ pub(crate) fn build_env_filter(
     }
 
     let filter_str = if is_raw_env_filter(log_level) {
-        inject_camel_tracer_off(log_level)
+        inject_async_imap_cap(&inject_camel_tracer_off(log_level))
     } else {
         match expand_bare_level(log_level) {
-            Some(expanded) => expanded.to_string(),
+            Some(expanded) => inject_async_imap_cap(expanded),
             None => {
                 return Err(CamelError::Config(format!(
                     "Unknown log level '{}' in Camel.toml. Expected: trace, debug, info, warn, error, off, or a full EnvFilter directive.",
@@ -173,6 +183,30 @@ mod tests {
             s.contains("camel_tracer=off"),
             "expected camel_tracer silenced: {s}"
         );
+    }
+
+    #[test]
+    fn build_env_filter_caps_async_imap_at_info() {
+        for (level, rust_log) in [
+            ("trace", None),
+            ("warn,camel=debug", None),
+            ("error", Some("trace")),
+        ] {
+            let f = build_env_filter(level, rust_log).unwrap();
+            let s = f.to_string().replace(' ', "");
+            assert!(
+                s.contains("async_imap=info"),
+                "{level}/{rust_log:?}: async_imap must be capped: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_env_filter_preserves_user_async_imap() {
+        let f = build_env_filter("info", Some("info,async_imap=warn")).unwrap();
+        let s = f.to_string().replace(' ', "");
+        assert!(s.contains("async_imap=warn"), "{s}");
+        assert!(!s.contains("async_imap=info"), "{s}");
     }
 
     #[test]

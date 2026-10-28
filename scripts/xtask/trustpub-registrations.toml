@@ -123,6 +123,10 @@ name = "camel-component-log"
 state = "registered"
 
 [[crates]]
+name = "camel-component-mail"
+state = "new-unpublished"
+
+[[crates]]
 name = "camel-component-mock"
 state = "registered"
 

@@ -79,6 +79,7 @@ async-broadcast feature "default"
 async-broadcast v0.7.2
 async-channel feature "default"
 async-channel feature "std"
+async-channel v1.9.0
 async-channel v2.5.0
 async-compat feature "default"
 async-compat v0.2.6
@@ -86,6 +87,9 @@ async-compression feature "default"
 async-compression feature "gzip"
 async-compression feature "tokio"
 async-compression v0.4.44
+async-imap feature "runtime-tokio"
+async-imap feature "tokio"
+async-imap v0.12.0
 async-lock feature "default"
 async-lock feature "std"
 async-lock v3.4.2
@@ -216,135 +220,137 @@ bytes v1.12.1
 calendrical_calculations feature "default"
 calendrical_calculations v0.2.4
 camel-api feature "default"
-camel-api v0.59.0
+camel-api v0.61.1
 camel-auth feature "default"
-camel-auth v0.59.0
+camel-auth v0.61.1
 camel-bean feature "default"
-camel-bean v0.59.0
+camel-bean v0.61.1
 camel-bean-macros feature "default"
-camel-bean-macros v0.59.0 (proc-macro)
+camel-bean-macros v0.61.1 (proc-macro)
 camel-bridge feature "default"
-camel-bridge v0.59.0
-camel-bundles v0.59.0
-camel-cli v0.59.0
+camel-bridge v0.61.1
+camel-bundles v0.61.1
+camel-cli v0.61.1
 camel-component-api feature "default"
-camel-component-api v0.59.0
+camel-component-api v0.61.1
 camel-component-controlbus feature "default"
-camel-component-controlbus v0.59.0
+camel-component-controlbus v0.61.1
 camel-component-cron feature "default"
-camel-component-cron v0.59.0
+camel-component-cron v0.61.1
 camel-component-cxf feature "default"
-camel-component-cxf v0.59.0
+camel-component-cxf v0.61.1
 camel-component-direct feature "default"
-camel-component-direct v0.59.0
+camel-component-direct v0.61.1
 camel-component-exec feature "default"
-camel-component-exec v0.59.0
+camel-component-exec v0.61.1
 camel-component-file feature "default"
-camel-component-file v0.59.0
+camel-component-file v0.61.1
 camel-component-grpc feature "default"
-camel-component-grpc v0.59.0
+camel-component-grpc v0.61.1
 camel-component-http feature "default"
-camel-component-http v0.59.0
+camel-component-http v0.61.1
 camel-component-jms feature "default"
-camel-component-jms v0.59.0
+camel-component-jms v0.61.1
 camel-component-keycloak feature "default"
-camel-component-keycloak v0.59.0
+camel-component-keycloak v0.61.1
 camel-component-llm feature "default"
 camel-component-llm feature "mock"
-camel-component-llm v0.59.0
+camel-component-llm v0.61.1
 camel-component-log feature "default"
-camel-component-log v0.59.0
+camel-component-log v0.61.1
+camel-component-mail feature "default"
+camel-component-mail v0.61.1
 camel-component-mcp feature "default"
-camel-component-mcp v0.59.0
+camel-component-mcp v0.61.1
 camel-component-mock feature "default"
-camel-component-mock v0.59.0
+camel-component-mock v0.61.1
 camel-component-mqtt feature "default"
 camel-component-mqtt feature "tls"
-camel-component-mqtt v0.59.0
+camel-component-mqtt v0.61.1
 camel-component-opensearch feature "default"
-camel-component-opensearch v0.59.0
+camel-component-opensearch v0.61.1
 camel-component-rabbitmq feature "default"
-camel-component-rabbitmq v0.59.0
+camel-component-rabbitmq v0.61.1
 camel-component-redis feature "default"
 camel-component-redis feature "sentinel"
-camel-component-redis v0.59.0
+camel-component-redis v0.61.1
 camel-component-seda feature "default"
-camel-component-seda v0.59.0
+camel-component-seda v0.61.1
 camel-component-sql feature "default"
 camel-component-sql feature "mysql"
 camel-component-sql feature "postgres"
 camel-component-sql feature "sqlite"
-camel-component-sql v0.59.0
+camel-component-sql v0.61.1
 camel-component-stream feature "default"
-camel-component-stream v0.59.0
+camel-component-stream v0.61.1
 camel-component-timer feature "default"
-camel-component-timer v0.59.0
+camel-component-timer v0.61.1
 camel-component-validator feature "default"
-camel-component-validator v0.59.0
+camel-component-validator v0.61.1
 camel-component-wasm feature "default"
-camel-component-wasm v0.59.0
+camel-component-wasm v0.61.1
 camel-component-ws feature "default"
-camel-component-ws v0.59.0
+camel-component-ws v0.61.1
 camel-config feature "default"
 camel-config feature "otel"
-camel-config v0.59.0
+camel-config v0.61.1
 camel-core feature "default"
 camel-core feature "export-internal-adapters"
-camel-core v0.59.0
+camel-core v0.61.1
 camel-dataformat-protobuf feature "default"
-camel-dataformat-protobuf v0.59.0
+camel-dataformat-protobuf v0.61.1
 camel-dsl feature "default"
-camel-dsl v0.59.0
+camel-dsl v0.61.1
 camel-endpoint feature "default"
-camel-endpoint v0.59.0
+camel-endpoint v0.61.1
 camel-endpoint-macros feature "default"
-camel-endpoint-macros v0.59.0 (proc-macro)
+camel-endpoint-macros v0.61.1 (proc-macro)
 camel-health feature "default"
-camel-health v0.59.0
+camel-health v0.61.1
 camel-integration-test feature "default"
-camel-integration-test v0.59.0
+camel-integration-test v0.61.1
 camel-language-api feature "default"
-camel-language-api v0.59.0
+camel-language-api v0.61.1
 camel-language-js feature "default"
-camel-language-js v0.59.0
+camel-language-js v0.61.1
 camel-language-jsonpath feature "default"
-camel-language-jsonpath v0.59.0
+camel-language-jsonpath v0.61.1
 camel-language-minijinja feature "default"
-camel-language-minijinja v0.59.0
+camel-language-minijinja v0.61.1
 camel-language-rhai feature "default"
-camel-language-rhai v0.59.0
+camel-language-rhai v0.61.1
 camel-language-simple feature "default"
-camel-language-simple v0.59.0
+camel-language-simple v0.61.1
 camel-language-xpath feature "default"
-camel-language-xpath v0.59.0
+camel-language-xpath v0.61.1
 camel-lint feature "default"
-camel-lint v0.59.0
+camel-lint v0.61.1
 camel-lsp feature "default"
-camel-lsp v0.59.0
+camel-lsp v0.61.1
 camel-master feature "default"
-camel-master v0.59.0
+camel-master v0.61.1
 camel-matchers feature "default"
-camel-matchers v0.59.0
+camel-matchers v0.61.1
 camel-otel feature "default"
-camel-otel v0.59.0
+camel-otel v0.61.1
 camel-platform-kubernetes feature "default"
-camel-platform-kubernetes v0.59.0
+camel-platform-kubernetes v0.61.1
 camel-processor feature "default"
-camel-processor v0.59.0
+camel-processor v0.61.1
 camel-prometheus feature "default"
-camel-prometheus v0.59.0
+camel-prometheus v0.61.1
 camel-proto-compiler feature "default"
-camel-proto-compiler v0.59.0
+camel-proto-compiler v0.61.1
 camel-redis-repo feature "default"
-camel-redis-repo v0.59.0
+camel-redis-repo v0.61.1
 camel-template feature "default"
-camel-template v0.59.0
+camel-template v0.61.1
 camel-wit feature "default"
-camel-wit v0.59.0
+camel-wit v0.61.1
 camel-xj feature "default"
-camel-xj v0.59.0
+camel-xj v0.61.1
 camel-xslt feature "default"
-camel-xslt v0.59.0
+camel-xslt v0.61.1
 cap-primitives feature "default"
 cap-primitives v4.0.3
 cbc feature "alloc"
@@ -426,6 +432,7 @@ compression-codecs feature "memchr"
 compression-codecs v0.4.39
 compression-core feature "default"
 compression-core v0.4.33
+concurrent-queue feature "default"
 concurrent-queue feature "std"
 concurrent-queue v2.5.0
 config feature "async"
@@ -469,14 +476,14 @@ cpufeatures feature "default"
 cpufeatures v0.2.17
 cpufeatures v0.3.1
 cranelift-assembler-x64 feature "default"
-cranelift-assembler-x64 v0.136.3
+cranelift-assembler-x64 v0.136.4
 cranelift-assembler-x64-meta feature "default"
-cranelift-assembler-x64-meta v0.136.3
+cranelift-assembler-x64-meta v0.136.4
 cranelift-bforest feature "default"
-cranelift-bforest v0.136.3
+cranelift-bforest v0.136.4
 cranelift-bitset feature "default"
 cranelift-bitset feature "enable-serde"
-cranelift-bitset v0.136.3
+cranelift-bitset v0.136.4
 cranelift-codegen feature "enable-serde"
 cranelift-codegen feature "gimli"
 cranelift-codegen feature "host-arch"
@@ -490,29 +497,29 @@ cranelift-codegen feature "sha2"
 cranelift-codegen feature "std"
 cranelift-codegen feature "timing"
 cranelift-codegen feature "unwind"
-cranelift-codegen v0.136.3
+cranelift-codegen v0.136.4
 cranelift-codegen-meta feature "default"
 cranelift-codegen-meta feature "pulley"
-cranelift-codegen-meta v0.136.3
+cranelift-codegen-meta v0.136.4
 cranelift-codegen-shared feature "default"
-cranelift-codegen-shared v0.136.3
+cranelift-codegen-shared v0.136.4
 cranelift-control feature "fuzz"
-cranelift-control v0.136.3
+cranelift-control v0.136.4
 cranelift-entity feature "default"
 cranelift-entity feature "enable-serde"
 cranelift-entity feature "serde"
 cranelift-entity feature "serde_derive"
-cranelift-entity v0.136.3
+cranelift-entity v0.136.4
 cranelift-frontend feature "default"
 cranelift-frontend feature "std"
-cranelift-frontend v0.136.3
+cranelift-frontend v0.136.4
 cranelift-isle feature "default"
-cranelift-isle v0.136.3
+cranelift-isle v0.136.4
 cranelift-native feature "default"
 cranelift-native feature "std"
-cranelift-native v0.136.3
+cranelift-native v0.136.4
 cranelift-srcgen feature "default"
-cranelift-srcgen v0.136.3
+cranelift-srcgen v0.136.4
 crc feature "default"
 crc v3.4.0
 crc-catalog feature "default"
@@ -661,6 +668,9 @@ either feature "serde"
 either feature "std"
 either feature "use_std"
 either v1.18.0
+email-encoding feature "default"
+email-encoding feature "std"
+email-encoding v0.4.2
 email_address feature "default"
 email_address feature "serde"
 email_address feature "serde_support"
@@ -687,6 +697,7 @@ errno v0.3.14
 event-listener feature "default"
 event-listener feature "parking"
 event-listener feature "std"
+event-listener v2.5.3
 event-listener v5.4.2
 event-listener-strategy feature "default"
 event-listener-strategy feature "std"
@@ -864,6 +875,8 @@ hashbrown v0.14.5
 hashbrown v0.15.5
 hashbrown v0.16.1
 hashbrown v0.17.1
+hashify feature "default"
+hashify v0.2.9 (proc-macro)
 hashlink feature "default"
 hashlink v0.10.0
 hashlink v0.11.1
@@ -960,11 +973,14 @@ ident_case feature "default"
 ident_case v1.0.1
 idna feature "alloc"
 idna feature "compiled_data"
+idna feature "default"
 idna feature "std"
 idna v1.1.0
 idna_adapter feature "compiled_data"
 idna_adapter feature "default"
 idna_adapter v1.2.2
+imap-proto feature "default"
+imap-proto v0.17.0
 include_dir feature "default"
 include_dir v0.7.4
 include_dir_macros feature "default"
@@ -1103,6 +1119,16 @@ lazy_static v1.5.0
 leb128 feature "default"
 leb128 v0.2.7
 leb128fmt v0.1.0
+lettre feature "builder"
+lettre feature "hostname"
+lettre feature "pool"
+lettre feature "ring"
+lettre feature "rustls"
+lettre feature "smtp-transport"
+lettre feature "tokio1"
+lettre feature "tokio1-rustls"
+lettre feature "webpki-roots"
+lettre v0.11.23
 libc feature "default"
 libc feature "std"
 libc v0.2.189
@@ -1151,6 +1177,8 @@ logos-derive v0.15.1 (proc-macro)
 logos-derive v0.16.1 (proc-macro)
 lsp-types feature "default"
 lsp-types v0.94.1
+mail-parser feature "default"
+mail-parser v0.11.9
 matchers feature "default"
 matchers v0.2.0
 matchit feature "default"
@@ -1458,6 +1486,8 @@ pin-project-internal feature "default"
 pin-project-internal v1.1.13 (proc-macro)
 pin-project-lite feature "default"
 pin-project-lite v0.2.17
+pin-utils feature "default"
+pin-utils v0.1.0
 pkcs1 feature "alloc"
 pkcs1 feature "pem"
 pkcs1 feature "pkcs8"
@@ -1527,7 +1557,7 @@ protox feature "default"
 protox v0.9.1
 protox-parse feature "default"
 protox-parse v0.9.0
-pulldown-cmark v0.13.4
+pulldown-cmark v0.13.5
 pulldown-cmark-to-cmark feature "default"
 pulldown-cmark-to-cmark v22.0.1
 pulley-interpreter feature "decode"
@@ -1536,9 +1566,9 @@ pulley-interpreter feature "disas"
 pulley-interpreter feature "encode"
 pulley-interpreter feature "interp"
 pulley-interpreter feature "std"
-pulley-interpreter v49.0.3
+pulley-interpreter v49.0.4
 pulley-macros feature "default"
-pulley-macros v49.0.3 (proc-macro)
+pulley-macros v49.0.4 (proc-macro)
 quick-error feature "default"
 quick-error v1.2.3
 quick-xml feature "default"
@@ -1546,6 +1576,9 @@ quick-xml v0.42.0
 quote feature "default"
 quote feature "proc-macro"
 quote v1.0.47
+quoted_printable feature "default"
+quoted_printable feature "std"
+quoted_printable v0.5.2
 rand feature "alloc"
 rand feature "default"
 rand feature "getrandom"
@@ -1797,7 +1830,7 @@ rustls-webpki feature "aws-lc-rs"
 rustls-webpki feature "default"
 rustls-webpki feature "ring"
 rustls-webpki feature "std"
-rustls-webpki v0.103.15
+rustls-webpki v0.103.16
 rustversion feature "default"
 rustversion v1.0.23 (proc-macro)
 ryu feature "default"
@@ -1819,6 +1852,8 @@ scopeguard v1.2.0
 scrypt v0.11.0
 secrecy feature "default"
 secrecy v0.10.3
+self_cell feature "default"
+self_cell v1.3.0
 semver feature "default"
 semver feature "serde"
 semver feature "std"
@@ -2029,6 +2064,8 @@ stable_deref_trait feature "alloc"
 stable_deref_trait v1.2.1
 static_assertions feature "default"
 static_assertions v1.1.0
+stop-token feature "default"
+stop-token v0.7.0
 stringprep feature "default"
 stringprep v0.1.5
 strsim feature "default"
@@ -2165,6 +2202,7 @@ tokio-rustls feature "aws-lc-rs"
 tokio-rustls feature "aws_lc_rs"
 tokio-rustls feature "default"
 tokio-rustls feature "logging"
+tokio-rustls feature "ring"
 tokio-rustls feature "tls12"
 tokio-rustls v0.26.6
 tokio-stream feature "default"
@@ -2485,7 +2523,7 @@ wasmtime feature "wasmtime-jit-icache-coherence"
 wasmtime feature "wasmtime-unwinder"
 wasmtime feature "wat"
 wasmtime feature "wit-parser"
-wasmtime v49.0.3
+wasmtime v49.0.4
 wasmtime-environ feature "anyhow"
 wasmtime-environ feature "backtrace"
 wasmtime-environ feature "compile"
@@ -2499,50 +2537,50 @@ wasmtime-environ feature "gc-null"
 wasmtime-environ feature "stack-switching"
 wasmtime-environ feature "std"
 wasmtime-environ feature "threads"
-wasmtime-environ v49.0.3
+wasmtime-environ v49.0.4
 wasmtime-internal-component-macro feature "async"
 wasmtime-internal-component-macro feature "component-model-async"
 wasmtime-internal-component-macro feature "default"
-wasmtime-internal-component-macro v49.0.3 (proc-macro)
+wasmtime-internal-component-macro v49.0.4 (proc-macro)
 wasmtime-internal-component-util feature "default"
-wasmtime-internal-component-util v49.0.3
+wasmtime-internal-component-util v49.0.4
 wasmtime-internal-core feature "anyhow"
 wasmtime-internal-core feature "backtrace"
 wasmtime-internal-core feature "default"
 wasmtime-internal-core feature "serde"
 wasmtime-internal-core feature "std"
-wasmtime-internal-core v49.0.3
+wasmtime-internal-core v49.0.4
 wasmtime-internal-cranelift feature "default"
 wasmtime-internal-cranelift feature "pulley"
-wasmtime-internal-cranelift v49.0.3
+wasmtime-internal-cranelift v49.0.4
 wasmtime-internal-fiber feature "default"
 wasmtime-internal-fiber feature "std"
-wasmtime-internal-fiber v49.0.3
+wasmtime-internal-fiber v49.0.4
 wasmtime-internal-jit-debug feature "default"
 wasmtime-internal-jit-debug feature "gdb_jit_int"
 wasmtime-internal-jit-debug feature "object"
 wasmtime-internal-jit-debug feature "perf_jitdump"
 wasmtime-internal-jit-debug feature "rustix"
 wasmtime-internal-jit-debug feature "std"
-wasmtime-internal-jit-debug v49.0.3
+wasmtime-internal-jit-debug v49.0.4
 wasmtime-internal-jit-icache-coherence feature "default"
-wasmtime-internal-jit-icache-coherence v49.0.3
+wasmtime-internal-jit-icache-coherence v49.0.4
 wasmtime-internal-unwinder feature "cranelift"
 wasmtime-internal-unwinder feature "default"
-wasmtime-internal-unwinder v49.0.3
+wasmtime-internal-unwinder v49.0.4
 wasmtime-internal-versioned-export-macros feature "default"
-wasmtime-internal-versioned-export-macros v49.0.3 (proc-macro)
+wasmtime-internal-versioned-export-macros v49.0.4 (proc-macro)
 wasmtime-internal-wit-bindgen feature "async"
 wasmtime-internal-wit-bindgen feature "component-model-async"
 wasmtime-internal-wit-bindgen feature "default"
-wasmtime-internal-wit-bindgen v49.0.3
+wasmtime-internal-wit-bindgen v49.0.4
 wasmtime-wasi feature "default"
 wasmtime-wasi feature "p1"
 wasmtime-wasi feature "p2"
 wasmtime-wasi feature "p3"
-wasmtime-wasi v49.0.3
+wasmtime-wasi v49.0.4
 wasmtime-wasi-io feature "std"
-wasmtime-wasi-io v49.0.3
+wasmtime-wasi-io v49.0.4
 wast feature "component-model"
 wast feature "wasm-module"
 wast v261.0.0
@@ -2551,14 +2589,14 @@ wat feature "component-model"
 wat feature "default"
 wat v1.261.0
 webpki-roots feature "default"
-webpki-roots v1.0.9
+webpki-roots v1.0.10
 whoami v1.6.1
 wiggle feature "wasmtime"
-wiggle v49.0.3
+wiggle v49.0.4
 wiggle-generate feature "default"
-wiggle-generate v49.0.3
+wiggle-generate v49.0.4
 wiggle-macro feature "default"
-wiggle-macro v49.0.3 (proc-macro)
+wiggle-macro v49.0.4 (proc-macro)
 winnow feature "alloc"
 winnow feature "ascii"
 winnow feature "binary"

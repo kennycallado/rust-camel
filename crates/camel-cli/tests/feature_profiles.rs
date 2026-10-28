@@ -400,6 +400,7 @@ const SURREALDB_PREFIX: &str = "camel-component-surrealdb v";
 const FUNCTION_PREFIX: &str = "camel-function v";
 const CONTAINER_PREFIX: &str = "camel-component-container v";
 const RABBITMQ_PREFIX: &str = "camel-component-rabbitmq v";
+const MAIL_PREFIX: &str = "camel-component-mail v";
 const SECURITY_PREFIX: &str = "camel-component-keycloak v";
 
 // Slim's exclusion set in the final model: the three build-fact exclusions
@@ -413,6 +414,7 @@ const SECURITY_PREFIX: &str = "camel-component-keycloak v";
 // wasm/llm/mcp/grpc) are IN slim or regular now and no longer forbidden —
 // explicitly dropped here: SQL_PREFIX and the jsonpath crate. RabbitMQ is
 // regular-only (absent from flavor-slim), so it joins the forbidden set.
+// Mail is regular-only, so it joins the forbidden set.
 const SLIM_FORBIDDEN_PREFIXES: &[&str] = &[
     KAFKA_PREFIX,
     EXEC_PREFIX,
@@ -422,6 +424,7 @@ const SLIM_FORBIDDEN_PREFIXES: &[&str] = &[
     FUNCTION_PREFIX,
     CONTAINER_PREFIX,
     RABBITMQ_PREFIX,
+    MAIL_PREFIX,
     SECURITY_PREFIX,
 ];
 
@@ -472,6 +475,7 @@ const REGULAR_REQUIRED_PREFIXES: &[&str] = &[
     "kube v",
     "wasmtime v",
     RABBITMQ_PREFIX,
+    MAIL_PREFIX,
     SECURITY_PREFIX,
     EXEC_PREFIX,
 ];
@@ -539,6 +543,29 @@ fn slim_plus_rabbitmq_resolves_rabbitmq_only() {
         &lines,
         &remaining,
         "flavor-slim,rabbitmq closure must still exclude the other slim-forbidden prefixes",
+    );
+}
+
+#[test]
+fn slim_plus_mail_resolves_mail_only() {
+    // `mail` is regular-only, so it is in SLIM_FORBIDDEN_PREFIXES and must
+    // be excepted from the absence check for this selected-feature probe.
+    let lines = tree_lines(&["--no-default-features", "--features", "flavor-slim,mail"]);
+    for prefix in [MAIL_PREFIX, "lettre v"] {
+        assert!(
+            lines.iter().any(|line| line.starts_with(prefix)),
+            "flavor-slim,mail closure must contain `{prefix}`"
+        );
+    }
+    let remaining: Vec<&str> = SLIM_FORBIDDEN_PREFIXES
+        .iter()
+        .copied()
+        .filter(|prefix| *prefix != MAIL_PREFIX)
+        .collect();
+    assert_absent(
+        &lines,
+        &remaining,
+        "flavor-slim,mail closure must still exclude the other slim-forbidden prefixes",
     );
 }
 
@@ -712,7 +739,7 @@ fn flavor_marker_table() {
         vec![
             r#"default = ["flavor-regular"]"#,
             r#"flavor-slim = ["mqtt", "mqtt-tls", "http-static", "sql", "lang-jsonpath", "lang-rhai"]"#,
-            r#"flavor-regular = ["flavor-slim", "exec", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql", "integration-redis"]"#,
+            r#"flavor-regular = ["flavor-slim", "exec", "otel", "grpc", "wasm", "llm", "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "mail", "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja", "lsp", "kubernetes", "integration-http", "integration-sql", "integration-redis"]"#,
             r#"flavor-full = ["flavor-regular", "kafka", "surrealdb", "integration-surreal", "containers"]"#,
         ],
         "the flavor marker table must be exactly the four declared lines"

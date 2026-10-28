@@ -65,6 +65,7 @@
     - [HTTP](components/http.md)
     - [gRPC](components/grpc.md)
     - [WebSocket and SOAP (CXF)](components/ws-soap.md)
+    - [Mail](components/mail.md)
   - [Messaging brokers](components/brokers.md)
     - [Kafka](components/kafka.md)
     - [JMS](components/jms.md)

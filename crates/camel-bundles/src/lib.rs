@@ -391,6 +391,25 @@ pub async fn boot(
             bundle, ctx,
         );
     }
+    // Mail resolves `idempotentRepository=<name>` from repositories handed over
+    // at boot: components cannot reach the core registry (ADR-0023).
+    #[cfg(feature = "mail")]
+    {
+        let mut names = vec!["memory".to_string()];
+        if let Some(icfg) = &config.idempotent_repo {
+            names.push(icfg.registry_name().to_string());
+        }
+        let repos: std::collections::HashMap<String, Arc<dyn camel_api::IdempotentRepository>> =
+            names
+                .into_iter()
+                .filter_map(|name| ctx.idempotent_repository(&name).map(|repo| (name, repo)))
+                .collect();
+        let bundle = bundle_from_config::<camel_component_mail::MailBundle>(config)?
+            .with_idempotent_repositories(repos);
+        <camel_component_mail::MailBundle as camel_component_api::ComponentBundle>::register_all(
+            bundle, ctx,
+        );
+    }
     register_bundle::<camel_master::MasterBundle>(ctx, config)?;
     #[cfg(feature = "opensearch")]
     register_bundle::<camel_component_opensearch::OpenSearchBundle>(ctx, config)?;
@@ -560,6 +579,51 @@ mod tests {
             ctx.registry().get("rabbitmq").is_some(),
             "scheme 'rabbitmq' must resolve after boot"
         );
+        #[cfg(feature = "mail")]
+        {
+            assert!(
+                ctx.registry().get("smtp").is_some(),
+                "scheme 'smtp' must resolve after boot"
+            );
+            assert!(
+                ctx.registry().get("smtps").is_some(),
+                "scheme 'smtps' must resolve after boot"
+            );
+            assert!(
+                ctx.registry().get("imap").is_some(),
+                "scheme 'imap' must resolve after boot"
+            );
+            assert!(
+                ctx.registry().get("imaps").is_some(),
+                "scheme 'imaps' must resolve after boot"
+            );
+        }
+    }
+
+    /// The boot block hands `memory` to the mail bundle, so an IMAP
+    /// endpoint naming it resolves; an unknown name still fails.
+    #[cfg(feature = "mail")]
+    #[tokio::test]
+    async fn boot_hands_memory_repository_to_mail() {
+        let (ctx, _handle, _config) = booted_context("mail/Camel.toml").await;
+        let imap = ctx.registry().get("imap").expect("imap scheme after boot");
+        let ok = imap.create_endpoint(
+            "imap://127.0.0.1?allowCleartext=true&idempotentRepository=memory",
+            &camel_component_api::NoOpComponentContext,
+        );
+        assert!(ok.is_ok(), "memory must resolve: {:?}", ok.err());
+        let ghost = imap.create_endpoint(
+            "imap://127.0.0.1?allowCleartext=true&idempotentRepository=ghost",
+            &camel_component_api::NoOpComponentContext,
+        );
+        let err = ghost
+            .err()
+            .expect("unknown repository must fail")
+            .to_string();
+        assert!(
+            err.contains("memory"),
+            "error lists the available names: {err}"
+        );
     }
 
     /// Slim polarity of the boot cascade: with the per-bridge features off
@@ -594,6 +658,11 @@ mod tests {
         assert!(
             ctx.registry().get("rabbitmq").is_none(),
             "scheme 'rabbitmq' must stay absent without the rabbitmq feature"
+        );
+        #[cfg(not(feature = "mail"))]
+        assert!(
+            ctx.registry().get("smtp").is_none(),
+            "scheme 'smtp' must stay absent without the mail feature"
         );
         handle
             .shutdown(&mut ctx)

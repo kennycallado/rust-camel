@@ -343,10 +343,10 @@ it, so slim ⊆ regular ⊆ full is structural (asserted by
   components (core, direct, seda, log, file, timer, http, template,
   master, cron, controlbus, mock, validator, camel test harness).
 - `flavor-regular = ["flavor-slim", "exec", "otel", "grpc", "wasm", "llm",
-  "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "cxf", "xj",
-  "xslt", "opensearch", "ws", "lang-xpath", "lang-js", "lang-minijinja",
-  "lsp", "kubernetes", "integration-http", "integration-sql",
-  "integration-redis"]`.
+  "mcp", "security", "redis", "redis-tls", "jms", "rabbitmq", "mail",
+  "cxf", "xj", "xslt", "opensearch", "ws", "lang-xpath", "lang-js",
+  "lang-minijinja", "lsp", "kubernetes", "integration-http",
+  "integration-sql", "integration-redis"]`.
 - `flavor-full = ["flavor-regular", "kafka", "surrealdb",
   "integration-surreal", "containers"]`.
 

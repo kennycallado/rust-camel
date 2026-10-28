@@ -146,6 +146,7 @@ camel-component-exec = { path = "crates/components/camel-component-exec", versio
 camel-component-cron = { path = "crates/components/camel-cron", version = "=0.61.1" }
 camel-component-surrealdb = { path = "crates/components/camel-component-surrealdb", version = "=0.61.1" }
 camel-redis-repo = { path = "crates/services/camel-redis-repo", version = "=0.61.1" }
+camel-component-mail = { path = "crates/components/camel-mail", version = "=0.61.1" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.30"
@@ -218,11 +219,25 @@ rumqttc = { version = "0.33.3", package = "rumqttc-v4-next", default-features = 
 # camel-component-rabbitmq; pre-existing workspace reachability via
 # camel-component-api/rustls defaults is tracked in bd rc-2bofp (master ruling 1).
 lapin = { version = "4.12", default-features = false, features = ["tokio", "rustls--ring", "rustls-native-certs"] }
+# SMTP client. Feature list verified against lettre 0.11.23's feature table:
+# `smtp-transport` = SMTP, `pool` = connection pool, `builder` = message
+# builder, `hostname` = local HELO name, `tokio1-rustls` = tokio executor +
+# rustls (no provider), `ring` = ring provider, `webpki-roots` = bundled roots.
+# Default features are off so no aws-lc provider is selected.
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "pool", "builder", "hostname", "tokio1-rustls", "ring", "webpki-roots"] }
+# IMAP client; logs through `log`, so the component emits its own tracing events; the duplicate thiserror 1 it pulls is accepted (rc-q8zur).
+# Verified features: async-imap 0.12.0 = default (runtime-async-std), runtime-async-std, runtime-tokio, compress; mail-parser 0.11.9 = default (none), base64_slice, full_encoding, rkyv, serde.
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+mail-parser = "0.11"
 rustls = { version = "0.23", features = ["ring"] }
 # Async rustls accept/connect plumbing for tests. `ring` keeps the crypto
 # provider aligned with the workspace `rustls` pin; do not enable the default
 # `aws_lc_rs` feature here.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# Bundled Mozilla root certificates (pure data, the crate has no features).
+# camel-component-mail reaches rustls only through `tokio-rustls` above, so it
+# adds no aws-lc-rs edge.
+webpki-roots = "1"
 # Pure-Rust PKCS12 writer for the producer-TLS integration fixtures. Produces
 # Java-compatible trusted-cert and private-key-chain entries; legacy PBES1
 # algorithms are not needed (`default-features = false`).
