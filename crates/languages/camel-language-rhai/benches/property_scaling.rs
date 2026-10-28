@@ -146,6 +146,15 @@ fn median(mut samples: Vec<u128>) -> u128 {
     samples[samples.len() / 2]
 }
 
+/// Nearest-rank p95 over an existing per-sample vector of batch nanoseconds,
+/// converted to per-eval microseconds (`evals` batch size).
+fn p95_us(samples: &mut [u128], evals: usize) -> f64 {
+    let n = samples.len();
+    let rank = (n * 95).div_ceil(100);
+    samples.sort_unstable();
+    samples[rank.clamp(1, n) - 1] as f64 / evals as f64 / 1_000.0
+}
+
 fn time_read_batch(rt: &Runtime, expr: &dyn Expression, ex: &Exchange, evals: usize) -> u128 {
     let start = Instant::now();
     rt.block_on(async {
@@ -177,6 +186,15 @@ struct Round {
     m100: u128,
     m5000: u128,
     ratio: f64,
+    p95_100_us: f64,
+    p95_5000_us: f64,
+}
+
+/// A K=1000 (print-only) or control measurement: per-eval median in ns plus
+/// the per-eval nearest-rank p95 in microseconds from the same samples.
+struct Measured {
+    median_ns: u128,
+    p95_us: f64,
 }
 
 fn measure_read_round(rt: &Runtime, lang: &RhaiLanguage, shape: Shape) -> Round {
@@ -196,12 +214,16 @@ fn measure_read_round(rt: &Runtime, lang: &RhaiLanguage, shape: Shape) -> Round 
         hi_samples.push(time_read_batch(rt, expr.as_ref(), &hi, BATCH));
     }
 
+    let p95_100_us = p95_us(&mut lo_samples, BATCH);
+    let p95_5000_us = p95_us(&mut hi_samples, BATCH);
     let m100 = median(lo_samples) / BATCH as u128;
     let m5000 = median(hi_samples) / BATCH as u128;
     Round {
         m100,
         m5000,
         ratio: m5000 as f64 / m100 as f64,
+        p95_100_us,
+        p95_5000_us,
     }
 }
 
@@ -222,35 +244,52 @@ fn measure_mutating_round(rt: &Runtime, lang: &RhaiLanguage, shape: Shape) -> Ro
         hi_samples.push(time_mutating_batch(rt, expr.as_ref(), &mut hi, BATCH));
     }
 
+    let p95_100_us = p95_us(&mut lo_samples, BATCH);
+    let p95_5000_us = p95_us(&mut hi_samples, BATCH);
     let m100 = median(lo_samples) / BATCH as u128;
     let m5000 = median(hi_samples) / BATCH as u128;
     Round {
         m100,
         m5000,
         ratio: m5000 as f64 / m100 as f64,
+        p95_100_us,
+        p95_5000_us,
     }
 }
 
-fn measure_read_at(rt: &Runtime, lang: &RhaiLanguage, script: &str, ex: &Exchange) -> u128 {
+fn measure_read_at(rt: &Runtime, lang: &RhaiLanguage, script: &str, ex: &Exchange) -> Measured {
     let expr = lang
         .create_expression(script)
         .expect("read script must compile");
     time_read_batch(rt, expr.as_ref(), ex, WARMUP_EVALS);
-    let samples = (0..SAMPLES)
+    let mut samples: Vec<u128> = (0..SAMPLES)
         .map(|_| time_read_batch(rt, expr.as_ref(), ex, BATCH))
         .collect();
-    median(samples) / BATCH as u128
+    let p95_us = p95_us(&mut samples, BATCH);
+    Measured {
+        median_ns: median(samples) / BATCH as u128,
+        p95_us,
+    }
 }
 
-fn measure_mutating_at(rt: &Runtime, lang: &RhaiLanguage, script: &str, ex: &mut Exchange) -> u128 {
+fn measure_mutating_at(
+    rt: &Runtime,
+    lang: &RhaiLanguage,
+    script: &str,
+    ex: &mut Exchange,
+) -> Measured {
     let expr = lang
         .create_mutating_expression(script)
         .expect("mutating script must compile");
     time_mutating_batch(rt, expr.as_ref(), ex, WARMUP_EVALS);
-    let samples = (0..SAMPLES)
+    let mut samples: Vec<u128> = (0..SAMPLES)
         .map(|_| time_mutating_batch(rt, expr.as_ref(), ex, BATCH))
         .collect();
-    median(samples) / BATCH as u128
+    let p95_us = p95_us(&mut samples, BATCH);
+    Measured {
+        median_ns: median(samples) / BATCH as u128,
+        p95_us,
+    }
 }
 
 struct CaseReport {
@@ -307,7 +346,7 @@ fn main() {
                 measure_mutating_at(&rt, &lang, shape.mutating_script(), &mut ex)
             }
         };
-        let ratio1000 = m1000 as f64 / best.m100 as f64;
+        let ratio1000 = m1000.median_ns as f64 / best.m100 as f64;
         let pass = best.ratio <= envelope;
 
         println!(
@@ -330,8 +369,29 @@ fn main() {
             shape.label(),
             mode.label(),
             K_PRINT_ONLY,
-            m1000,
+            m1000.median_ns,
             ratio1000
+        );
+        println!(
+            "property_scaling: {} {} {} p95_us={:.3}",
+            shape.label(),
+            K_LO,
+            mode.label(),
+            best.p95_100_us
+        );
+        println!(
+            "property_scaling: {} {} {} p95_us={:.3}",
+            shape.label(),
+            K_HI,
+            mode.label(),
+            best.p95_5000_us
+        );
+        println!(
+            "property_scaling: {} {} {} p95_us={:.3}",
+            shape.label(),
+            K_PRINT_ONLY,
+            mode.label(),
+            m1000.p95_us
         );
         println!(
             "GUARD-VERDICT {} {} R={:.2} envelope={:.1} pass={}",
@@ -350,8 +410,15 @@ fn main() {
     }
 
     let control_ex = exchange(Shape::Deep, K_PRINT_ONLY);
-    let control_ns = measure_read_at(&rt, &lang, CONTROL_SCRIPT, &control_ex);
-    println!("GUARD D read-control {} {} -", K_PRINT_ONLY, control_ns);
+    let control = measure_read_at(&rt, &lang, CONTROL_SCRIPT, &control_ex);
+    println!(
+        "GUARD D read-control {} {} -",
+        K_PRINT_ONLY, control.median_ns
+    );
+    println!(
+        "property_scaling: D {} read-control p95_us={:.3}",
+        K_PRINT_ONLY, control.p95_us
+    );
 
     let expect_fail = matches!(
         std::env::var("RHAI_GUARD_EXPECT_FAIL"),

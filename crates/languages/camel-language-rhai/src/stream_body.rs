@@ -28,7 +28,7 @@
 //! statement is optimized away. See `docs/src/languages/rhai.md`.
 
 use camel_language_api::LanguageError;
-use rhai::{Engine, EvalAltResult};
+use rhai::{EvalAltResult, FuncRegistration, Module};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -185,65 +185,90 @@ pub(crate) fn map_stream_refusal(e: &EvalAltResult, target: &str) -> Option<Lang
     mentions_marker.then(|| conversion_error(target))
 }
 
-/// Register the marker type and its refusal guards on an engine.
+/// Build the owned, unindexed module holding the marker type and its refusal
+/// guards.
 ///
+/// This is the [`Module`]-level twin of the engine registrations, so one
+/// shared instance can serve every engine via `register_global_module`.
 /// Guards are registered by-value so the engine's operand materialization is
 /// visible in `reads`; each guard then increments `hits` by its marker-
 /// operand count (unary +1; binary +1 per marker operand) and returns the
 /// sentinel. This enumerated set IS the registered guard surface: anything
 /// else fails with a structured engine error (`ErrorFunctionNotFound` /
 /// `ErrorIndexingType`) classified by the type-field rule above.
-pub(crate) fn register_stream_guards(engine: &mut Engine) {
-    engine.register_type_with_name::<StreamBodyRef>(TYPE_NAME);
+pub(crate) fn guard_module() -> Module {
+    /// Register a native function as a GLOBAL function in the module.
+    ///
+    /// A macro (rather than a generic helper) because the closure bound names
+    /// rhai's crate-private `SendSync` alias. Expands to the same registration
+    /// `Engine::register_fn` performs: global namespace, public, pure.
+    macro_rules! set_global_fn {
+        ($module:expr, $name:expr, $func:expr) => {
+            FuncRegistration::new($name)
+                .in_global_namespace()
+                .set_into_module($module, $func);
+        };
+    }
+
+    let mut module = Module::new();
+    module.set_custom_type::<StreamBodyRef>(TYPE_NAME);
 
     // Unary materializing methods: the receiver clone counts the read, the
     // guard counts the hit, the sentinel refuses.
-    engine.register_fn(
-        "to_string",
-        |m: StreamBodyRef| -> Result<rhai::Dynamic, Box<EvalAltResult>> {
-            m.hit();
-            Err(sentinel_error())
-        },
-    );
-    engine.register_fn(
-        "to_debug",
-        |m: StreamBodyRef| -> Result<rhai::Dynamic, Box<EvalAltResult>> {
-            m.hit();
-            Err(sentinel_error())
-        },
-    );
+    set_global_fn!(&mut module, "to_string", |m: StreamBodyRef| -> Result<
+        rhai::Dynamic,
+        Box<EvalAltResult>,
+    > {
+        m.hit();
+        Err(sentinel_error())
+    });
+    set_global_fn!(&mut module, "to_debug", |m: StreamBodyRef| -> Result<
+        rhai::Dynamic,
+        Box<EvalAltResult>,
+    > {
+        m.hit();
+        Err(sentinel_error())
+    });
 
-    fn register_pair_guards<T: rhai::Variant + Clone>(engine: &mut Engine, op: &str) {
-        engine.register_fn(
-            op,
-            move |a: StreamBodyRef, _b: T| -> Result<rhai::Dynamic, Box<EvalAltResult>> {
-                a.hit();
-                Err(sentinel_error())
-            },
-        );
-        engine.register_fn(
-            op,
-            move |_a: T, b: StreamBodyRef| -> Result<rhai::Dynamic, Box<EvalAltResult>> {
-                b.hit();
-                Err(sentinel_error())
-            },
-        );
+    fn register_pair_guards<T: rhai::Variant + Clone>(module: &mut Module, op: &str) {
+        set_global_fn!(module, op, move |a: StreamBodyRef,
+                                         _b: T|
+              -> Result<
+            rhai::Dynamic,
+            Box<EvalAltResult>,
+        > {
+            a.hit();
+            Err(sentinel_error())
+        });
+        set_global_fn!(module, op, move |_a: T,
+                                         b: StreamBodyRef|
+              -> Result<
+            rhai::Dynamic,
+            Box<EvalAltResult>,
+        > {
+            b.hit();
+            Err(sentinel_error())
+        });
     }
 
     const OPS: [&str; 8] = ["==", "!=", "<", ">", "+", "-", "*", "/"];
     for op in OPS {
         // (marker, marker): hit by marker-operand count (two).
-        engine.register_fn(
-            op,
-            |a: StreamBodyRef, b: StreamBodyRef| -> Result<rhai::Dynamic, Box<EvalAltResult>> {
-                a.hit();
-                b.hit();
-                Err(sentinel_error())
-            },
-        );
-        register_pair_guards::<i64>(engine, op);
-        register_pair_guards::<f64>(engine, op);
-        register_pair_guards::<String>(engine, op);
-        register_pair_guards::<bool>(engine, op);
+        set_global_fn!(&mut module, op, |a: StreamBodyRef,
+                                         b: StreamBodyRef|
+         -> Result<
+            rhai::Dynamic,
+            Box<EvalAltResult>,
+        > {
+            a.hit();
+            b.hit();
+            Err(sentinel_error())
+        });
+        register_pair_guards::<i64>(&mut module, op);
+        register_pair_guards::<f64>(&mut module, op);
+        register_pair_guards::<String>(&mut module, op);
+        register_pair_guards::<bool>(&mut module, op);
     }
+
+    module
 }

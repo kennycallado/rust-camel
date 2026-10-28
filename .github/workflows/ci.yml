@@ -423,6 +423,20 @@ jobs:
         env:
           RHAI_GUARD_EXPECT_FAIL: "1"
         run: cargo bench -p camel-language-rhai --bench property_scaling
+      # Absolute gates are runner-class smoke ceilings (shared 4-vCPU runner,
+      # ~2.5x the local 100/250 us gates). The baseline env wires the
+      # matched-p95 check: it SKIPS with a printed cpu/host mismatch reason on
+      # runners differing from the recorded provenance and enforces <=110% on
+      # provenance-matched runners. The binding acceptance is the matched
+      # same-machine pre/post evidence recorded by the mission. The baseline
+      # path is package-relative: cargo bench runs the bench binary with its
+      # cwd set to the crate root, not the workspace root.
+      - name: Rhai eval-overhead guard (absolute gates + matched p95)
+        env:
+          RHAI_EVAL_OVERHEAD_MAX_TRIVIAL_US: "250"
+          RHAI_EVAL_OVERHEAD_MAX_CHOICE_US: "500"
+          RHAI_EVAL_OVERHEAD_BASELINE: benches/eval_overhead_baseline.txt
+        run: cargo bench -p camel-language-rhai --bench eval_overhead
 
   wasm-integration:
     name: WASM Integration (ubuntu-latest)

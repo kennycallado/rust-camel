@@ -1,0 +1,25 @@
+# baseline: host=ryzen cpu=AMD Ryzen 5 5600G with Radeon Graphics date=2026-10-28 samples=400
+overhead: trivial full median_us=128.38 p95_us=160.58
+overhead: trivial construction median_us=76.38 p95_us=81.75
+overhead: trivial conversion median_us=0.13 p95_us=0.13
+overhead: trivial execution median_us=0.05 p95_us=0.05
+overhead: predicate full median_us=130.11 p95_us=143.06
+overhead: predicate construction median_us=76.66 p95_us=81.97
+overhead: predicate conversion median_us=0.13 p95_us=0.13
+overhead: predicate execution median_us=0.41 p95_us=0.43
+overhead: 20h20p full median_us=138.59 p95_us=145.56
+overhead: 20h20p construction median_us=84.12 p95_us=89.54
+overhead: 20h20p conversion median_us=2.27 p95_us=2.31
+overhead: 20h20p execution median_us=0.25 p95_us=0.27
+overhead: 50h50p full median_us=150.52 p95_us=157.01
+overhead: 50h50p construction median_us=84.14 p95_us=89.72
+overhead: 50h50p conversion median_us=6.13 p95_us=6.30
+overhead: 50h50p execution median_us=0.29 p95_us=0.31
+overhead: mutating full median_us=193.54 p95_us=201.16
+overhead: mutating construction median_us=85.77 p95_us=91.57
+overhead: mutating conversion median_us=2.25 p95_us=2.33
+overhead: mutating execution median_us=0.80 p95_us=0.83
+overhead: choice10 full median_us=146.34 p95_us=157.58
+overhead: choice10 construction median_us=84.65 p95_us=90.23
+overhead: choice10 conversion median_us=2.21 p95_us=2.27
+overhead: choice10 execution median_us=4.82 p95_us=4.94

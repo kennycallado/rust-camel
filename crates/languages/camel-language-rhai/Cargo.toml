@@ -33,3 +33,7 @@ workspace = true
 [[bench]]
 name = "property_scaling"
 harness = false
+
+[[bench]]
+name = "eval_overhead"
+harness = false

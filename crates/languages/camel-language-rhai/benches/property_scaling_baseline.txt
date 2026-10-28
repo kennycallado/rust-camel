@@ -1,0 +1,30 @@
+GUARD W read 100 201384 1.00
+GUARD W read 5000 3111964 15.45
+GUARD W read 1000 636318 3.16
+property_scaling: W 100 read p95_us=206.275
+property_scaling: W 5000 read p95_us=3187.797
+property_scaling: W 1000 read p95_us=661.772
+GUARD-VERDICT W read R=15.45 envelope=2.0 pass=false
+GUARD D read 100 173114 1.00
+GUARD D read 5000 1400190 8.09
+GUARD D read 1000 382731 2.21
+property_scaling: D 100 read p95_us=206.860
+property_scaling: D 5000 read p95_us=1443.831
+property_scaling: D 1000 read p95_us=384.135
+GUARD-VERDICT D read R=8.09 envelope=2.0 pass=false
+GUARD W mutating 100 478520 1.00
+GUARD W mutating 5000 10381551 21.70
+GUARD W mutating 1000 2193718 4.58
+property_scaling: W 100 mutating p95_us=500.239
+property_scaling: W 5000 mutating p95_us=10758.901
+property_scaling: W 1000 mutating p95_us=2263.661
+GUARD-VERDICT W mutating R=21.70 envelope=3.0 pass=false
+GUARD D mutating 100 409829 1.00
+GUARD D mutating 5000 6835955 16.68
+GUARD D mutating 1000 1585889 3.87
+property_scaling: D 100 mutating p95_us=422.688
+property_scaling: D 5000 mutating p95_us=6923.162
+property_scaling: D 1000 mutating p95_us=1608.381
+GUARD-VERDICT D mutating R=16.68 envelope=3.0 pass=false
+GUARD D read-control 1000 378361 -
+property_scaling: D 1000 read-control p95_us=379.670

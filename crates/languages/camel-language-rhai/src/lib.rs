@@ -104,6 +104,7 @@ use rhai::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tracing::debug;
 
@@ -116,6 +117,37 @@ mod transaction;
 use converter::{dynamic_to_value, json_to_dynamic};
 use stream_body::{StreamBodyRef, StreamCounters};
 use transaction::{EntryDelta, map_deltas, rhai_values_differ, value_to_body};
+
+/// Process-wide prebuilt `StandardPackage` module.
+///
+/// The standard surface is fixed for the lifetime of the process, so build and
+/// index it once, then install the same shared module into every engine.
+static STANDARD_PACKAGE: OnceLock<rhai::Shared<rhai::Module>> = OnceLock::new();
+
+/// The prebuilt `StandardPackage` module shared by all engines.
+fn standard_package_module() -> rhai::Shared<rhai::Module> {
+    STANDARD_PACKAGE
+        .get_or_init(|| StandardPackage::new().as_shared_module())
+        .clone()
+}
+
+/// Process-wide prebuilt extensions module: stream-body guards plus the pure
+/// `trim` shadow, composed once and installed into every engine.
+static EXTENSIONS: OnceLock<rhai::Shared<rhai::Module>> = OnceLock::new();
+
+/// The prebuilt guards + `trim` shadow module shared by all engines.
+fn extensions_module() -> rhai::Shared<rhai::Module> {
+    EXTENSIONS
+        .get_or_init(|| {
+            let mut module = stream_body::guard_module();
+            // Shadow second so `trim` is layered on top of the guard surface.
+            string_shadow::shadow_into(&mut module);
+            module.build_index();
+            let shared: rhai::Shared<rhai::Module> = module.into();
+            shared
+        })
+        .clone()
+}
 
 // Test-only compile counter. Per-thread (via `thread_local!`) so parallel
 // test execution does not perturb the counter that a single test observes.
@@ -477,7 +509,7 @@ impl RhaiLanguage {
     fn create_base_engine(limits: &RhaiLimitsConfig) -> Engine {
         let r = resolve_rhai_limits(limits);
         let mut engine = Engine::new_raw();
-        StandardPackage::new().register_into_engine(&mut engine);
+        engine.register_global_module(standard_package_module());
         // Shared JSON host module (task 1.5): registers `parse_json`/`to_json`
         // and the `json value`/`json number` wrapper surface. Rhai inserts
         // global-module functions at index 1, so the host module takes
@@ -499,11 +531,12 @@ impl RhaiLanguage {
         // the registered guard surface (`to_string`, `to_debug`, the binary
         // operators over marker/scalar shapes). Compile-time engines get
         // them too — registrations have no effect on parsing or folding.
-        stream_body::register_stream_guards(&mut engine);
+        //
         // Pure `trim` shadow (task 3.2): replaces the `StandardPackage`
         // in-place `trim(&mut ImmutableString)` so `trim()` returns the
         // trimmed string instead of mutating the subject and returning unit.
-        string_shadow::register(&mut engine);
+        // Both live in one process-wide module composed once.
+        engine.register_global_module(extensions_module());
         engine
     }
 

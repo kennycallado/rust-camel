@@ -19,12 +19,15 @@
 //! `remove`, `crop`, `replace`, `pad`) keep their standard behavior and are
 //! documented with their pure alternatives in `docs/src/languages/rhai.md`.
 
-use rhai::{Engine, ImmutableString};
+use rhai::{FuncRegistration, ImmutableString, Module};
 
-/// Register the pure `trim` shadow. Call after `StandardPackage` so the
-/// registration replaces the mutating one.
-pub(crate) fn register(engine: &mut Engine) {
-    engine.register_fn("trim", |s: ImmutableString| -> String {
-        s.trim().to_string()
-    });
+/// Register the pure `trim` shadow into a module. The module must be installed
+/// after `StandardPackage` so the shadow takes precedence over the mutating
+/// registration.
+pub(crate) fn shadow_into(module: &mut Module) {
+    FuncRegistration::new("trim")
+        .in_global_namespace()
+        .set_into_module(module, |s: ImmutableString| -> String {
+            s.trim().to_string()
+        });
 }
