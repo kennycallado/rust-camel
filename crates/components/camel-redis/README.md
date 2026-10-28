@@ -148,6 +148,12 @@ let route = RouteBuilder::from("redis://localhost:6379?command=BLPOP&key=jobqueu
     .build()?;
 ```
 
+Queue-mode consumers pop on a connection built with `set_response_timeout(None)`
+and `set_connection_timeout(None)`, so the driver sets no response deadline.
+The pop `timeout`, the transient retry budget, and route cancellation bound the
+pop; `connection_timeout_secs` bounds only the TCP connect. Producer endpoints
+whose command is `BLPOP` or `BRPOP` build the same deadline-free connections.
+
 #### Delivery guarantee
 
 The queue consumer gives **at-most-once** delivery. It supports `BLPOP` and

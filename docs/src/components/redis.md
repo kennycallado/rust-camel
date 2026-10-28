@@ -207,6 +207,10 @@ The Producer is a Tower `Service<Exchange>`. It composes with any pipeline step 
 
 The Consumer's mode comes from the URI command. `SUBSCRIBE` and `PSUBSCRIBE` use Pub/Sub mode. `BLPOP` and `BRPOP` use queue mode. A command that fits neither returns an error at consumer creation. The component does not silently fall back to BLPOP (REDIS-003).
 
+### Blocking pops and connection timeouts
+
+Queue-mode consumers pop on a connection built with `AsyncConnectionConfig::set_response_timeout(None)` and `set_connection_timeout(None)`. The driver sets no response deadline, so the pop `timeout`, the transient retry budget, and route cancellation are the only bounds on a blocking pop. `connection_timeout_secs` remains the TCP connect bound. Producer endpoints whose command is `BLPOP` or `BRPOP` build the same deadline-free connections and ignore the `with_response_timeout` seam. Blocking pops are never multiplexed over a short driver timeout, and the component has no polling fallback (REDIS-003).
+
 ## Security
 
 The component supports TLS through the `rediss://` URI scheme or the `ssl=true` parameter. The two are equivalent.

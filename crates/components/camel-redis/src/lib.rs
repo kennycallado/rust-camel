@@ -275,3 +275,6 @@ mod tests {
 // has been removed.
 mod pool_factory;
 pub use pool_factory::RedisPoolFactory;
+
+#[cfg(test)]
+mod blocking_pop_tests;

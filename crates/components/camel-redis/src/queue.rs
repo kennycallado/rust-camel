@@ -3,6 +3,11 @@
 //! Extracted from `consumer.rs` so the blocking-pop reconnect loop and its
 //! test doubles live apart from the pub/sub and lifecycle code. The public
 //! surface (`RedisConsumer`, `RedisConsumerMode`) stays in `consumer.rs`.
+//!
+//! Queue-mode pops run on a deadline-free connection. The blocking pop's own
+//! timeout and route cancellation are the only bounds on a `BLPOP`/`BRPOP`;
+//! redis-rs's default 500 ms response deadline would otherwise cut long pops
+//! short and force a spurious reconnect (bd rc-y0pwj).
 
 use async_trait::async_trait;
 use camel_component_api::{CamelError, NetworkRetryPolicy};
@@ -66,7 +71,11 @@ impl QueueIo for RedisQueueIo {
     async fn connect(&mut self, client: &redis::Client) -> Result<(), CamelError> {
         let conn = tokio::time::timeout(
             Duration::from_secs(self.timeout_secs),
-            client.get_multiplexed_async_connection(),
+            client.get_multiplexed_async_connection_with_config(
+                &redis::AsyncConnectionConfig::new()
+                    .set_response_timeout(None)
+                    .set_connection_timeout(None),
+            ),
         )
         .await
         .map_err(|_| {

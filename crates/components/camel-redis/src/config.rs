@@ -263,10 +263,10 @@ pub struct RedisConfig {
     /// Redis password for authentication. Default: None.
     ///
     /// An unset or blank (empty/whitespace-only) value means "no AUTH"; a
-    /// blank config value normalizes to `None` through
-    /// [`normalize_password`], so `password = "${env:REDIS_PASSWORD:-}"`
-    /// works when the variable is unset. An explicit URI `password=` and the
-    /// `with_password` builder are not normalized.
+    /// blank config value normalizes to `None`, so
+    /// `password = "${env:REDIS_PASSWORD:-}"` works when the variable is
+    /// unset. An explicit URI `password=` and the `with_password` builder are
+    /// not normalized.
     #[serde(default, deserialize_with = "deserialize_password")]
     pub password: Option<String>,
     /// Enable TLS connections. Default: false.

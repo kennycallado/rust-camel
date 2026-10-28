@@ -243,6 +243,21 @@ pub async fn dispatch_command(
     }
 }
 
+/// Driver response-deadline policy for a newly built connection.
+///
+/// Spells out the three distinct meanings that a bare `Option<Duration>`
+/// conflates: deadline-free (blocking pops must wait without any driver
+/// deadline), an explicit deadline, and the redis driver default.
+enum Deadline {
+    /// No driver response deadline at all; blocking pops rely on their own
+    /// Redis-side timeout (or wait forever when it is 0).
+    Free,
+    /// Explicit driver response deadline.
+    Fixed(Duration),
+    /// Keep the redis driver's built-in response deadline.
+    DriverDefault,
+}
+
 /// A real [`RedisCommandExecutor`] backed by a lazily-created multiplexed
 /// connection whose target is re-resolved through a [`RedisTopology`].
 ///
@@ -289,6 +304,11 @@ impl MultiplexedExecutor {
     /// awaits a Redis reply fails once `timeout` elapses. The default `None`
     /// keeps the redis driver default (500ms in 1.6.0).
     ///
+    /// A blocking endpoint command (`BLPOP`/`BRPOP`) always builds
+    /// deadline-free connections and ignores this seam value: its blocking
+    /// duration is governed by the Redis-side timeout, not by a driver
+    /// deadline.
+    ///
     /// This does not affect `connection_timeout_secs` (TCP connect only).
     /// It is distinct from camel-redis-repo's
     /// `MultiplexedRepoExecutor::with_response_timeout` test seam: that sizes
@@ -296,6 +316,39 @@ impl MultiplexedExecutor {
     pub fn with_response_timeout(mut self, timeout: Duration) -> Self {
         self.response_timeout = Some(timeout);
         self
+    }
+
+    /// Response-deadline policy for connections built by [`Self::get_conn`].
+    ///
+    /// Blocking endpoints are always [`Deadline::Free`]; otherwise the
+    /// `with_response_timeout` seam selects a fixed deadline, and its absence
+    /// leaves the driver default in place.
+    fn deadline(&self) -> Deadline {
+        match self.effective_response_timeout() {
+            Some(t) => Deadline::Fixed(t),
+            None if self.is_blocking_endpoint() => Deadline::Free,
+            None => Deadline::DriverDefault,
+        }
+    }
+
+    /// Whether this endpoint issues a blocking pop (`BLPOP`/`BRPOP`).
+    fn is_blocking_endpoint(&self) -> bool {
+        matches!(
+            self.config.command,
+            RedisCommand::Blpop | RedisCommand::Brpop
+        )
+    }
+
+    /// Effective driver response timeout for this endpoint.
+    ///
+    /// Returns `None` for a blocking endpoint (deadline-free, NOT the driver
+    /// default) and otherwise mirrors the `with_response_timeout` seam.
+    fn effective_response_timeout(&self) -> Option<Duration> {
+        if self.is_blocking_endpoint() {
+            None
+        } else {
+            self.response_timeout
+        }
     }
 
     /// Return a cached connection, or resolve and build one on first use.
@@ -333,8 +386,17 @@ impl MultiplexedExecutor {
         let timeout_secs = self.config.connection_timeout_secs;
 
         let connect = async {
-            match self.response_timeout {
-                Some(t) => {
+            match self.deadline() {
+                Deadline::Free => {
+                    client
+                        .get_multiplexed_async_connection_with_config(
+                            &AsyncConnectionConfig::new()
+                                .set_response_timeout(None)
+                                .set_connection_timeout(None),
+                        )
+                        .await
+                }
+                Deadline::Fixed(t) => {
                     client
                         .get_multiplexed_async_connection_with_config(
                             &AsyncConnectionConfig::new()
@@ -343,7 +405,7 @@ impl MultiplexedExecutor {
                         )
                         .await
                 }
-                None => client.get_multiplexed_async_connection().await,
+                Deadline::DriverDefault => client.get_multiplexed_async_connection().await,
             }
         };
 
@@ -993,5 +1055,39 @@ mod tests {
         notify.notify_one();
         let joined = tokio::time::timeout(Duration::from_secs(5), holder).await;
         assert!(joined.is_ok(), "holder must release the gate after notify");
+    }
+
+    #[test]
+    fn effective_response_timeout_blocking_endpoint_ignores_seam() {
+        let blocking_config =
+            RedisEndpointConfig::from_uri("redis://127.0.0.1:6379?command=BLPOP&key=k")
+                .expect("BLPOP endpoint URI must parse");
+        let blocking = MultiplexedExecutor::new(
+            blocking_config,
+            Arc::new(FakeTopology::addrs(vec![
+                "redis://127.0.0.1:6379".to_string(),
+            ])),
+        )
+        .with_response_timeout(Duration::from_millis(100));
+        assert_eq!(
+            blocking.effective_response_timeout(),
+            None,
+            "a blocking-pop endpoint must be deadline-free regardless of the seam"
+        );
+
+        let get_config = RedisEndpointConfig::from_uri("redis://127.0.0.1:6379?command=GET")
+            .expect("GET endpoint URI must parse");
+        let get = MultiplexedExecutor::new(
+            get_config,
+            Arc::new(FakeTopology::addrs(vec![
+                "redis://127.0.0.1:6379".to_string(),
+            ])),
+        )
+        .with_response_timeout(Duration::from_millis(100));
+        assert_eq!(
+            get.effective_response_timeout(),
+            Some(Duration::from_millis(100)),
+            "a non-blocking endpoint must keep the seam value"
+        );
     }
 }
