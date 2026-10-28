@@ -1,0 +1,11 @@
+{
+  "kind": "plan",
+  "verdict": "APPROVE",
+  "rounds": [
+    {"round": 1, "verdict": "REJECT", "reviewer": "r_gpt", "findings": ["default-cap test did not prove the default value", "declarative default test could not establish the compiled cap"]},
+    {"round": 2, "verdict": "APPROVE", "reviewer": "r_gpt", "findings": []}
+  ],
+  "reviewer": "r_gpt",
+  "expert": "none (mission order: e_gpt only on ruling; no ruling needed)",
+  "date": "2026-10-28"
+}

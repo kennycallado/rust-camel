@@ -73,6 +73,7 @@ fn build_pipeline() -> BoxProcessor {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::CollectAll,
         })),
         body_contract: None,

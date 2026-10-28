@@ -101,6 +101,13 @@ pub struct SplitSegment {
     /// `Stopped` outcomes always propagate immediately regardless of this
     /// flag (per ADR-0025 §7 — Stop is successful control flow).
     pub stop_on_exception: bool,
+    /// Maximum number of fragments the eager split may materialize.
+    ///
+    /// Defaults to `camel_api::splitter::DEFAULT_MAX_FRAGMENTS`. A split whose
+    /// materialized `len` exceeds this cap is rejected before metadata stamping
+    /// and before any fragment is processed; `0` fails closed for any
+    /// non-empty split.
+    pub max_fragments: usize,
     /// Strategy for aggregating fragment results.
     pub aggregation: AggregationStrategy,
 }
@@ -113,6 +120,7 @@ impl Clone for SplitSegment {
             parallel: self.parallel,
             parallel_limit: self.parallel_limit,
             stop_on_exception: self.stop_on_exception,
+            max_fragments: self.max_fragments,
             aggregation: self.aggregation.clone(),
         }
     }
@@ -132,6 +140,7 @@ impl camel_api::OutcomePipeline for SplitSegment {
         let parallel = self.parallel;
         let parallel_limit = self.parallel_limit;
         let stop_on_exception = self.stop_on_exception;
+        let max_fragments = self.max_fragments;
         let body = &mut self.body;
 
         Box::pin(async move {
@@ -145,6 +154,14 @@ impl camel_api::OutcomePipeline for SplitSegment {
 
             if fragments.is_empty() {
                 return PipelineOutcome::Completed(original);
+            }
+
+            if fragments.len() > max_fragments {
+                return PipelineOutcome::Failed(CamelError::ProcessorError(format!(
+                    "Splitter produced {} fragments, exceeding max_fragments {}",
+                    fragments.len(),
+                    max_fragments
+                )));
             }
 
             // Stamp split metadata on each fragment — exact parity with the
@@ -478,6 +495,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -499,6 +517,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -618,6 +637,7 @@ mod tests {
             parallel: true,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -704,6 +724,7 @@ mod tests {
             parallel: true,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -784,6 +805,7 @@ mod tests {
             parallel: true,
             parallel_limit: Some(2),
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -847,6 +869,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -912,6 +935,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: false,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -981,6 +1005,7 @@ mod tests {
             parallel: true,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -1052,6 +1077,7 @@ mod tests {
             parallel: true,
             parallel_limit: None,
             stop_on_exception: false,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -1108,6 +1134,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -1162,6 +1189,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -1225,6 +1253,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -1303,6 +1332,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -1331,6 +1361,7 @@ mod tests {
             parallel: true,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -1358,6 +1389,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -1382,6 +1414,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::LastWins,
         };
 
@@ -1440,6 +1473,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::CollectAll,
         };
 
@@ -1469,6 +1503,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::CollectAll,
         };
 
@@ -1520,6 +1555,7 @@ mod tests {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::CollectAll,
         };
 
@@ -1539,5 +1575,286 @@ mod tests {
         assert_eq!(ids.len(), 4, "should have 4 fragments");
         let unique: std::collections::HashSet<&String> = ids.iter().collect();
         assert_eq!(unique.len(), 4, "fragment correlation_ids must be unique");
+    }
+
+    // ── Fragment cap ───────────────────────────────────────────────────
+
+    /// Helper: OutcomePipeline body that counts invocations and completes.
+    #[derive(Clone)]
+    struct CountingBody {
+        counter: Arc<AtomicUsize>,
+    }
+    impl camel_api::OutcomePipeline for CountingBody {
+        fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+            Box::new(self.clone())
+        }
+        fn run<'a>(
+            &'a mut self,
+            exchange: Exchange,
+        ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+            self.counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { PipelineOutcome::Completed(exchange) })
+        }
+    }
+
+    fn counting_body(counter: &Arc<AtomicUsize>) -> OutcomeSegment {
+        OutcomeSegment::new(Box::new(CountingBody {
+            counter: Arc::clone(counter),
+        }))
+    }
+
+    #[tokio::test]
+    async fn split_rejects_above_custom_cap() {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let mut seg = SplitSegment {
+            splitter: n_fragment_splitter(5),
+            body: counting_body(&invocations),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            max_fragments: 4,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let result =
+            camel_api::OutcomePipeline::run(&mut seg, Exchange::new(Message::new("test"))).await;
+
+        match result {
+            PipelineOutcome::Failed(err) => assert!(
+                err.to_string()
+                    .contains("Splitter produced 5 fragments, exceeding max_fragments 4"),
+                "error should name the produced count and cap, got {err}"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "no fragment may run when the cap is exceeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_accepts_at_and_below_custom_cap() {
+        let below = Arc::new(AtomicUsize::new(0));
+        let mut below_seg = SplitSegment {
+            splitter: n_fragment_splitter(3),
+            body: counting_body(&below),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            max_fragments: 4,
+            aggregation: AggregationStrategy::LastWins,
+        };
+        let below_result =
+            camel_api::OutcomePipeline::run(&mut below_seg, Exchange::new(Message::new("test")))
+                .await;
+        assert!(
+            matches!(below_result, PipelineOutcome::Completed(_)),
+            "cap-1 must complete, got {below_result:?}"
+        );
+        assert_eq!(below.load(Ordering::SeqCst), 3, "cap-1 should run 3 bodies");
+
+        let at = Arc::new(AtomicUsize::new(0));
+        let mut at_seg = SplitSegment {
+            splitter: n_fragment_splitter(4),
+            body: counting_body(&at),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            max_fragments: 4,
+            aggregation: AggregationStrategy::LastWins,
+        };
+        let at_result =
+            camel_api::OutcomePipeline::run(&mut at_seg, Exchange::new(Message::new("test"))).await;
+        assert!(
+            matches!(at_result, PipelineOutcome::Completed(_)),
+            "exactly-at-cap must complete, got {at_result:?}"
+        );
+        assert_eq!(at.load(Ordering::SeqCst), 4, "cap should run 4 bodies");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn split_rejects_before_spawning_parallel() {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let mut seg = SplitSegment {
+            splitter: n_fragment_splitter(3),
+            body: counting_body(&invocations),
+            parallel: true,
+            parallel_limit: None,
+            stop_on_exception: true,
+            max_fragments: 2,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let result =
+            camel_api::OutcomePipeline::run(&mut seg, Exchange::new(Message::new("test"))).await;
+
+        match result {
+            PipelineOutcome::Failed(err) => assert!(
+                err.to_string()
+                    .contains("Splitter produced 3 fragments, exceeding max_fragments 2"),
+                "error should name the produced count and cap, got {err}"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "no parallel task may spawn when the cap is exceeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_rejects_before_processing_sequential() {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let mut seg = SplitSegment {
+            splitter: n_fragment_splitter(3),
+            body: counting_body(&invocations),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            max_fragments: 2,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let result =
+            camel_api::OutcomePipeline::run(&mut seg, Exchange::new(Message::new("test"))).await;
+
+        match result {
+            PipelineOutcome::Failed(err) => assert!(
+                err.to_string()
+                    .contains("Splitter produced 3 fragments, exceeding max_fragments 2"),
+                "error should name the produced count and cap, got {err}"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "no fragment may run when the cap is exceeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_empty_fragments_pass_through_with_cap() {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let splitter = SplitSource::Sync(
+            Arc::new(|_: &Exchange| Ok(Vec::new())) as camel_api::SplitExpression
+        );
+        let mut seg = SplitSegment {
+            splitter,
+            body: counting_body(&invocations),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            max_fragments: 4,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let result =
+            camel_api::OutcomePipeline::run(&mut seg, Exchange::new(Message::new("original")))
+                .await;
+
+        match result {
+            PipelineOutcome::Completed(out) => {
+                assert_eq!(
+                    out.input.body.as_text(),
+                    Some("original"),
+                    "empty split must pass the original exchange through"
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "an empty split must not invoke the body"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_default_cap_respected() {
+        assert_eq!(camel_api::splitter::DEFAULT_MAX_FRAGMENTS, 100_000);
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let mut seg = SplitSegment {
+            splitter: n_fragment_splitter(3),
+            body: counting_body(&invocations),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let result =
+            camel_api::OutcomePipeline::run(&mut seg, Exchange::new(Message::new("test"))).await;
+
+        assert!(
+            matches!(result, PipelineOutcome::Completed(_)),
+            "3 fragments are well below the default cap, got {result:?}"
+        );
+        assert_eq!(invocations.load(Ordering::SeqCst), 3, "all 3 bodies run");
+    }
+
+    #[tokio::test]
+    async fn split_default_cap_plus_one_rejected() {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let mut seg = SplitSegment {
+            splitter: n_fragment_splitter(100_001),
+            body: counting_body(&invocations),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let result =
+            camel_api::OutcomePipeline::run(&mut seg, Exchange::new(Message::new("test"))).await;
+
+        match result {
+            PipelineOutcome::Failed(err) => assert!(
+                err.to_string().contains("exceeding max_fragments 100000"),
+                "default cap error should name 100000, got {err}"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "no fragment may run when the default cap is exceeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_zero_cap_fails_closed_non_empty() {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let mut seg = SplitSegment {
+            splitter: n_fragment_splitter(2),
+            body: counting_body(&invocations),
+            parallel: false,
+            parallel_limit: None,
+            stop_on_exception: true,
+            max_fragments: 0,
+            aggregation: AggregationStrategy::LastWins,
+        };
+
+        let result =
+            camel_api::OutcomePipeline::run(&mut seg, Exchange::new(Message::new("test"))).await;
+
+        match result {
+            PipelineOutcome::Failed(err) => assert!(
+                err.to_string().contains("exceeding max_fragments 0"),
+                "zero cap must fail closed for non-empty splits, got {err}"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "zero cap must reject before processing"
+        );
     }
 }

@@ -198,6 +198,7 @@ impl StepCompiler for SplittingCompiler {
                     parallel: config.parallel,
                     parallel_limit: config.parallel_limit,
                     stop_on_exception: config.stop_on_exception,
+                    max_fragments: config.max_fragments,
                     aggregation: config.aggregation,
                 };
                 Ok(CompileOutcome::Matched(CompiledStep::Segment {
@@ -249,6 +250,7 @@ impl StepCompiler for SplittingCompiler {
                     parallel,
                     parallel_limit,
                     stop_on_exception,
+                    max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
                     aggregation,
                 };
                 Ok(CompileOutcome::Matched(CompiledStep::Segment {
@@ -824,6 +826,182 @@ mod tests {
             invocations.load(Ordering::SeqCst),
             0,
             "body segment must not run when the split expression fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_split_carries_custom_max_fragments() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        let split_step = BuilderStep::Split {
+            config: camel_api::SplitterConfig::new(camel_api::split_body_lines()).max_fragments(2),
+            steps: vec![BuilderStep::Processor(OpaqueProcessor(
+                BoxProcessor::from_fn(move |ex: Exchange| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(ex) })
+                }),
+            ))],
+        };
+
+        let reg = build_registry();
+        let result = reg
+            .compile_step(split_step, 0, &ctx)
+            .expect("compilation should succeed")
+            .expect("should match Split");
+
+        let mut segment = match result {
+            CompiledStep::Segment { segment, .. } => segment,
+            other => panic!("Expected CompiledStep::Segment, got {other:?}"),
+        };
+        let mut within_cap = segment.clone();
+
+        let oversized = Exchange::new(camel_api::Message::new("a\nb\nc"));
+        match segment.run(oversized).await {
+            PipelineOutcome::Failed(err) => {
+                let msg = err.to_string();
+                assert!(msg.contains("exceeding max_fragments 2"), "message: {msg}");
+            }
+            other => panic!(
+                "expected PipelineOutcome::Failed, got success={}",
+                other.is_success()
+            ),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "body segment must not run when the fragment cap is exceeded"
+        );
+
+        let at_cap = Exchange::new(camel_api::Message::new("a\nb"));
+        match within_cap.run(at_cap).await {
+            PipelineOutcome::Completed(_) => {}
+            other => panic!(
+                "expected PipelineOutcome::Completed, got success={}",
+                other.is_success()
+            ),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            2,
+            "body segment must run once per fragment at the cap"
+        );
+    }
+
+    #[tokio::test]
+    async fn declarative_split_uses_default_cap() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages = languages_with_simple();
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        let split_step = BuilderStep::DeclarativeSplit {
+            expression: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "${body}".into(),
+            },
+            aggregation: camel_api::splitter::AggregationStrategy::LastWins,
+            parallel: false,
+            parallel_limit: None,
+            trace_item_threshold: None,
+            stop_on_exception: false,
+            steps: vec![BuilderStep::Processor(OpaqueProcessor(
+                BoxProcessor::from_fn(move |ex: Exchange| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move { Ok(ex) })
+                }),
+            ))],
+        };
+
+        let reg = build_registry();
+        let result = reg
+            .compile_step(split_step, 0, &ctx)
+            .expect("compilation should succeed")
+            .expect("should match DeclarativeSplit");
+
+        let mut segment = match result {
+            CompiledStep::Segment { segment, .. } => segment,
+            other => panic!("Expected CompiledStep::Segment, got {other:?}"),
+        };
+        let mut over_cap = segment.clone();
+
+        let within_cap = Exchange::new(camel_api::Message::new("a\nb\nc"));
+        match segment.run(within_cap).await {
+            PipelineOutcome::Completed(_) => {}
+            other => panic!(
+                "expected PipelineOutcome::Completed, got success={}",
+                other.is_success()
+            ),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            3,
+            "body segment must run once per fragment below the default cap"
+        );
+
+        invocations.store(0, Ordering::SeqCst);
+        let oversized_body = (0..=100_000)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let oversized = Exchange::new(camel_api::Message::new(oversized_body));
+        match over_cap.run(oversized).await {
+            PipelineOutcome::Failed(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("exceeding max_fragments 100000"),
+                    "message: {msg}"
+                );
+            }
+            other => panic!(
+                "expected PipelineOutcome::Failed, got success={}",
+                other.is_success()
+            ),
+        }
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "body segment must not run when the default fragment cap is exceeded"
         );
     }
 

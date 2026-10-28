@@ -36,6 +36,10 @@ When the split scope closes, an aggregation strategy combines the fragment outpu
 
 The Splitter differs from Multicast in how it produces children. Multicast sends the same exchange to several endpoints. The Splitter derives one exchange per fragment from a single input. It also pairs with the Aggregator in a split-process-aggregate flow. The Splitter divides one message into many. The Aggregator collects many correlated messages back into one.
 
+### Fragment cap
+
+The eager Splitter materializes every fragment in memory before it processes the first one, so peak memory grows with the fragment count regardless of the cap. `SplitterConfig` limits how many fragments the processor will handle with `max_fragments`, which defaults to `100000`; the cap bounds processing, not peak materialization memory. When the split expression yields more fragments than the cap allows, the processor rejects the whole split with `Splitter produced N fragments, exceeding max_fragments M` before any fragment reaches the sub-pipeline. Cap enforcement rejects the entire batch before any fragment runs. The Splitter never truncates fragments to fit the cap. `max_fragments(0)` is rejected by config validation, because a zero cap would reject every non-empty body. For unbounded or large input, use the [Streaming Splitter](streaming-splitter.md), which processes one fragment at a time in constant memory.
+
 Per [ADR-0001](../adr/0001-tower-data-plane-split-from-control-plane.md), the splitter compiles into a `Service<Exchange>` step in the Tower middleware pipeline. The per-fragment sub-pipeline compiles into child steps on the same route channel. The processor contract is documented in [camel-processor/CONTEXT.md](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-processor/CONTEXT.md).
 
 Per [ADR-0025](../adr/0025-outcome-aware-structural-eips.md), the split block is an outcome-aware structural EIP. A `Stopped` outcome from the sub-pipeline returns `Stopped(fragment_ex)` and skips aggregation. The parent pipeline never sees a partial batch. The per-fragment boundary keeps the fragment mutations made before the Stop visible to the outer pipeline.

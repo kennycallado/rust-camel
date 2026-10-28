@@ -273,6 +273,7 @@ async fn split_branch_copy_outlives_parent_claim() {
         parallel: false,
         parallel_limit: None,
         stop_on_exception: true,
+        max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
         aggregation: AggregationStrategy::LastWins,
     };
 

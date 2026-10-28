@@ -278,6 +278,9 @@ impl StreamSplitConfig {
 /// Default threshold above which split fragments start new traces (0 = off).
 pub const DEFAULT_TRACE_ITEM_THRESHOLD: usize = 100;
 
+/// Default cap on the number of fragments an eager split may materialize.
+pub const DEFAULT_MAX_FRAGMENTS: usize = 100_000;
+
 /// Configuration for the Splitter EIP.
 #[derive(Clone)]
 pub struct SplitterConfig {
@@ -298,8 +301,11 @@ pub struct SplitterConfig {
     /// Maximum number of fragments materialized by `expression` (DoS cap, R3-M4).
     ///
     /// The eager splitter materializes the whole `Vec<Exchange>` before
-    /// processing; this cap rejects a split that would explode memory.
-    /// Default 100_000. For unbounded/lazy input use `StreamingSplitter`.
+    /// processing; this cap is enforced by `SplitSegment` after eager
+    /// materialization, rejecting a split that would explode memory. Default
+    /// [`DEFAULT_MAX_FRAGMENTS`]. A segment constructed directly with `0`
+    /// fails closed for any non-empty split. For unbounded/lazy input use
+    /// `StreamingSplitter`.
     pub max_fragments: usize,
     /// Threshold above which split fragments start new traces (0 = off).
     pub trace_item_threshold: usize,
@@ -328,7 +334,7 @@ impl SplitterConfig {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
-            max_fragments: 100_000,
+            max_fragments: DEFAULT_MAX_FRAGMENTS,
             trace_item_threshold: DEFAULT_TRACE_ITEM_THRESHOLD,
         }
     }

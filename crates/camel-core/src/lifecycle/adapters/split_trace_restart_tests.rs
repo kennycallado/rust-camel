@@ -118,6 +118,7 @@ async fn drive_split(
         parallel,
         parallel_limit: None,
         stop_on_exception: true,
+        max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
         aggregation: AggregationStrategy::LastWins,
     };
     let mut pipeline = compose_traced_pipeline(
@@ -330,6 +331,7 @@ async fn parallel_above_threshold_links_survive() {
         parallel: false,
         parallel_limit: None,
         stop_on_exception: true,
+        max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
         aggregation: AggregationStrategy::LastWins,
     };
     let seq_body =

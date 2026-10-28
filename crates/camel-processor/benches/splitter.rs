@@ -49,6 +49,7 @@ fn bench_splitter_fragments(c: &mut Criterion) {
             parallel: false,
             parallel_limit: None,
             stop_on_exception: true,
+            max_fragments: camel_api::splitter::DEFAULT_MAX_FRAGMENTS,
             aggregation: AggregationStrategy::CollectAll,
         };
         let body = make_lines_body(count);
