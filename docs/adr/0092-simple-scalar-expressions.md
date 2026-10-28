@@ -214,6 +214,10 @@ Each item stays out of Simple until a later decision:
   stays in rhai.
 - **JSON and map construction.** Simple is read-only and has no container
   literals; JSON work stays in rhai or a data format.
+- **Bracket and quoted key lookup.** `header["some-key"]` does not exist in
+  Simple. Hyphenated keys are addressed by the unspaced key-continuation rule
+  and the spaced-hyphen diagnostic (bd rc-e2p0n), so no grammar surface is
+  added.
 
 ## Migration guidance
 

@@ -88,7 +88,7 @@ The precedence chain, from lowest to highest:
 | unary minus | `-E` | Negates one integer operand. |
 | atom | literals, lookups, calls, delegation, `( E )` | Parentheses group and count toward the depth limit. |
 
-Lookups are `header.x`, `property.x`, `exchangeProperty.x`, `body`, `body.<path>`, and `exception.message`. Atoms also include `${language:expr}` delegation and the five calls below.
+Lookups are `header.x`, `property.x`, `exchangeProperty.x`, `body`, `body.<path>`, and `exception.message`. A lookup key may contain hyphens when each hyphen is directly followed by a letter or an underscore and the key is written without spaces (`header.some-key`), in standalone and compound positions. A hyphen followed by a digit or whitespace is the subtraction operator, so `header.n-1` is `header.n - 1`. `header.some - key` is therefore a parse error, and the message names the unspaced form. Atoms also include `${language:expr}` delegation and the five calls below.
 
 A bare identifier that names no lookup and no accepted call is a parse error. `x == 1` is therefore rejected; write `property.x == 1`. `now()` is a parse error because Simple has no clock. Inject a timestamp through the Exchange, for example by mapping the `CamelMessageTimestamp` header to the `nowMs` property, then evaluate `int(property.nowMs)`.
 

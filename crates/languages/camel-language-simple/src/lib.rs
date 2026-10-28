@@ -295,6 +295,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_hyphenated_key_is_null() {
+        let lang = SimpleLanguage::new();
+        let ex = exchange_with_body("anything");
+
+        // Missing key: whole-slot lookup is null.
+        let expr = lang.create_expression("${header.some-key}").unwrap();
+        assert_eq!(expr.evaluate(&ex).await.unwrap(), Value::Null);
+
+        // Missing key inside interpolation renders as the empty string.
+        let interp = lang.create_expression("x${header.some-key}y").unwrap();
+        assert_eq!(
+            interp.evaluate(&ex).await.unwrap(),
+            Value::String("xy".to_string())
+        );
+
+        // Present key: hyphenated lookup feeds arithmetic.
+        let expr = lang.create_expression("${header.some-key + 1}").unwrap();
+        let ex = exchange_with_header("some-key", "2");
+        assert_eq!(expr.evaluate(&ex).await.unwrap(), Value::Number(3.into()));
+    }
+
+    #[tokio::test]
+    async fn hyphenated_key_comparison_evaluates() {
+        let lang = SimpleLanguage::new();
+        let pred = lang.create_predicate("header.some-key == 'x'").unwrap();
+
+        let ex = exchange_with_header("some-key", "x");
+        assert!(pred.matches(&ex).await.unwrap());
+
+        let ex = exchange_with_header("some-key", "y");
+        assert!(!pred.matches(&ex).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn test_raw_quoted_literal_is_verbatim() {
         // Template mode has no string-literal grammar: quotes are raw text.
         let lang = SimpleLanguage::new();

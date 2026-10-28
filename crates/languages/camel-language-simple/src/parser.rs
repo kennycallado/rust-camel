@@ -171,7 +171,8 @@ pub fn parse(input: &str) -> Result<Expr, LanguageError> {
 
         let mut pos = 0;
         let mut depth = ParseDepth::default();
-        let expr = parse_or(&tokens, &mut pos, input, &mut depth)?;
+        let expr = parse_or(&tokens, &mut pos, input, &mut depth)
+            .map_err(|err| retarget_spaced_hyphen_error(err, &tokens, input))?;
         if pos != tokens.len() {
             return Err(parse_error(
                 input,
@@ -427,7 +428,8 @@ fn parse_slot_expression(
     tokens.retain(|t| !matches!(t, Token::Text(s) if s.trim().is_empty()));
     reject_deferred(input, &tokens)?;
     let mut pos = 0usize;
-    let expr = parse_or(&tokens, &mut pos, input, depth)?;
+    let expr = parse_or(&tokens, &mut pos, input, depth)
+        .map_err(|err| retarget_spaced_hyphen_error(err, &tokens, input))?;
     if pos != tokens.len() {
         return Err(parse_error(
             input,
@@ -1125,16 +1127,64 @@ fn parse_call(
 }
 
 fn parse_identifier(word: &str, input: &str) -> Result<Expr, LanguageError> {
-    let is_lookup = word == "body"
+    if is_lookup_word(word) {
+        parse_expr_atom(word)
+    } else {
+        Err(parse_error(input, "unknown identifier"))
+    }
+}
+
+/// True when `word` names a Simple lookup: `body`, `exception.message`, or a
+/// scoped path under `body.`, `header.`, `property.`, or `exchangeProperty.`.
+fn is_lookup_word(word: &str) -> bool {
+    word == "body"
         || word == "exception.message"
         || word.starts_with("body.")
         || word.starts_with("header.")
         || word.starts_with("property.")
-        || word.starts_with("exchangeProperty.");
-    if is_lookup {
-        parse_expr_atom(word)
-    } else {
-        Err(parse_error(input, "unknown identifier"))
+        || word.starts_with("exchangeProperty.")
+}
+
+/// Dotted lookup prefix of a scoped lookup path, when `word` has one.
+fn lookup_key_prefix(word: &str) -> Option<&'static str> {
+    ["body.", "header.", "property.", "exchangeProperty."]
+        .into_iter()
+        .find(|prefix| word.starts_with(prefix))
+}
+
+/// Rewrite the generic `unknown identifier` error for a spaced-hyphen key
+/// typo into a message that names the intended hyphenated key.
+///
+/// Only fires when the whole token slice is exactly `Word(left) - Word(right)`
+/// and `left` is a prefix-qualified lookup while `right` is not a lookup.
+/// Keyless lookups (`body`, `exception.message`) and longer/other expressions
+/// keep their original error. Source text only; no exchange data.
+fn retarget_spaced_hyphen_error(
+    err: LanguageError,
+    tokens: &[Token],
+    _input: &str,
+) -> LanguageError {
+    let LanguageError::ParseError { expr, reason } = &err else {
+        return err;
+    };
+    if reason != "unknown identifier" {
+        return err;
+    }
+    let [Token::Word(left), Token::Minus, Token::Word(right)] = tokens else {
+        return err;
+    };
+    let Some(prefix) = lookup_key_prefix(left) else {
+        return err;
+    };
+    if is_lookup_word(right) {
+        return err;
+    }
+    let key = &left[prefix.len()..];
+    LanguageError::ParseError {
+        expr: expr.clone(),
+        reason: format!(
+            "spaced hyphen: '{left} - {right}' parses as subtraction, and '{right}' is not a lookup; write a hyphenated key without spaces: '{prefix}{key}-{right}'"
+        ),
     }
 }
 
@@ -2001,6 +2051,73 @@ mod tests {
         );
         // A hyphen followed by a letter continues the identifier run, even
         // in an expression, so the key stays one lookup.
+        assert_eq!(
+            parse_template("${header.some-key + 1}").unwrap(),
+            Expr::BinOp {
+                left: Box::new(Expr::Header("some-key".to_string())),
+                op: Op::Add,
+                right: Box::new(Expr::IntLit(1)),
+            }
+        );
+    }
+
+    #[test]
+    fn spaced_hyphen_subtraction_targets_key_error() {
+        for src in ["header.some - key", "header.some -key"] {
+            let err = parse(src).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("spaced hyphen"), "{src}: {msg}");
+            assert!(msg.contains("header.some-key"), "{src}: {msg}");
+        }
+        for src in ["${header.some - key}", "a ${header.some - key} b"] {
+            let err = parse_template(src).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("spaced hyphen"), "{src}: {msg}");
+            assert!(msg.contains("header.some-key"), "{src}: {msg}");
+        }
+    }
+
+    #[test]
+    fn generic_unknown_identifier_preserved() {
+        for src in [
+            "key - 1",
+            "check-in",
+            "body - key",
+            "exception.message - key",
+            "header.n - max(1, x)",
+        ] {
+            let err = parse(src).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains("unknown identifier"), "{src}: {msg}");
+        }
+    }
+
+    #[test]
+    fn subtraction_and_lookup_unchanged() {
+        assert_eq!(
+            parse("header.n - 1").unwrap(),
+            Expr::BinOp {
+                left: Box::new(Expr::Header("n".to_string())),
+                op: Op::Sub,
+                right: Box::new(Expr::IntLit(1)),
+            }
+        );
+        assert_eq!(
+            parse("header.some - header.other").unwrap(),
+            Expr::BinOp {
+                left: Box::new(Expr::Header("some".to_string())),
+                op: Op::Sub,
+                right: Box::new(Expr::Header("other".to_string())),
+            }
+        );
+        assert_eq!(
+            parse("header.some-key == 'x'").unwrap(),
+            Expr::BinOp {
+                left: Box::new(Expr::Header("some-key".to_string())),
+                op: Op::Eq,
+                right: Box::new(Expr::StringLit("x".to_string())),
+            }
+        );
         assert_eq!(
             parse_template("${header.some-key + 1}").unwrap(),
             Expr::BinOp {
