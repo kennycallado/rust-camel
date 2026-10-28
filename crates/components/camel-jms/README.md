@@ -142,6 +142,15 @@ pool.shutdown().await?;        // Clean up bridge processes
 
 When using `camel-cli`, Ctrl+C handles shutdown automatically. A second Ctrl+C force-exits if shutdown hangs.
 
+### Consumer log lines
+
+The bridge sends no response and no initial metadata at attach. Because `Subscribe` is server-streaming, its response headers arrive with the first `onNext`, so the Rust subscribe future resolves at first delivery — the broker's consumer count rises first.
+
+- `JMS consumer attach requested; awaiting bridge response` — the request was sent, before the RPC is awaited. Every retry logs it again.
+- `JMS consumer attached; first delivery received` — the subscribe future resolved, which means the first message was delivered.
+
+There is no separate attach acknowledgement in the protocol.
+
 ## Environment Variables
 
 | Variable | Description |

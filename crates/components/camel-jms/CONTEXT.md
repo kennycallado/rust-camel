@@ -35,6 +35,18 @@ stands. On a task failure, sibling consumers get a bounded three-second drain
 before the component aborts them. The Consumer does not restart itself. Route
 supervision owns restart.
 
+### Consumer attach observability
+
+The bridge writes no response message and no initial metadata at attach. The
+`Subscribe` RPC is server-streaming, so its response headers arrive with the
+first `onNext`. The Rust subscribe future resolves only at first delivery, and
+the broker-side consumer count rises before that. The consumer logs
+`JMS consumer attach requested; awaiting bridge response` (with `broker`,
+`destination`, and `consumer_idx`) before it awaits the RPC, once per retry
+attempt, and `JMS consumer attached; first delivery received` when the future
+resolves. There is no attach acknowledgement in the protocol: the second line
+means first delivery, not merely attach.
+
 ## Settlement and attempt journal
 
 The bridge session runs with `CLIENT_ACKNOWLEDGE` and holds one unacknowledged

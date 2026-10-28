@@ -183,6 +183,14 @@ The body is typed from the JMS `content_type`. `text/*` becomes `Body::Text`. `a
 
 The `concurrentConsumers` parameter spawns N parallel consumer tasks on the same destination. Each task subscribes independently and submits Exchanges into the shared route pipeline. `messageSelector` filters messages at the broker with a provider-specific SQL-like (JMS selector) expression: the broker applies the selector during delivery and withholds non-matching messages before they reach the route. rust-camel does not parse or validate the expression beyond requiring a non-blank value — an empty option (`messageSelector=` or `message_selector=`) means no selector, an absent option means no selector, and a whitespace-only value is a URI validation error. A selector requires jms bridge >= `camel_jms::BRIDGE_VERSION` advertising `message-selector-v1`; with an older bridge the slot parks at startup with `bridge <version> lacks message-selector-v1; use a jms bridge >= camel_jms::BRIDGE_VERSION`. JVM and Rust unit tests prove plumbing only; selector semantics are verified by the CI-owned live-broker suite (`jms_consumer_selector_filters_activemq_queue` and `jms_consumer_selector_filters_activemq_topic`).
 
+### Consumer attach observability
+
+The bridge sends no response message and no initial metadata when it attaches a subscription. The `Subscribe` call is a server-streaming RPC, so the response headers reach the Rust client only with the first `onNext`. The Rust subscribe future therefore resolves at first delivery, not at attach. The broker-side consumer count can rise well before any Rust success line appears.
+
+Two INFO lines mark the boundary, each with `broker`, `destination`, and `consumer_idx`. `JMS consumer attach requested; awaiting bridge response` is emitted after the subscribe request is built and before the RPC is awaited; every retry attempt logs it again. `JMS consumer attached; first delivery received` is emitted when the subscribe future resolves.
+
+There is no separate attach acknowledgement in the protocol. The success line means the first message was delivered, not merely that the consumer attached.
+
 ## Producer
 
 `activemq:queue:orders` sends the Exchange body to a destination. The content type is inferred from the body. `Body::Text` sends `text/plain`. `Body::Json` sends `application/json`. `Body::Xml` sends `text/xml`. An explicit `Content-Type` header wins over inference.

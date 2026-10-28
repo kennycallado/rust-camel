@@ -546,6 +546,12 @@ async fn consumer_loop(
         // terminal `Complete` can name the exact subscription it settles.
         let subscription_id = Uuid::new_v4().to_string();
         let mut client = bridge_service_client(channel);
+        info!(
+            broker = %broker_name,
+            destination = %destination,
+            consumer_idx = idx,
+            "JMS consumer attach requested; awaiting bridge response"
+        );
         // The subscribe RPC is raced against cancellation so a requested
         // shutdown is never blocked behind an unresponsive bridge (task 4.5).
         let mut stream = match tokio::select! {
@@ -580,7 +586,7 @@ async fn consumer_loop(
                     broker = %broker_name,
                     destination = %destination,
                     consumer_idx = idx,
-                    "JMS consumer subscribed successfully"
+                    "JMS consumer attached; first delivery received"
                 );
                 resp.into_inner()
             }
@@ -4846,6 +4852,160 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         Ok(port)
+    }
+
+    /// Mock bridge that mimics the Java bridge's lazy response headers: the
+    /// `subscribe` handler does not return its `Response` (and therefore sends
+    /// no headers) until `release` fires, then the stream yields exactly one
+    /// delivery and ends. A client-side `subscribe` future resolves only when
+    /// that first delivery lets the response through.
+    #[derive(Clone)]
+    struct LazyHeadersBridge {
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl BridgeService for LazyHeadersBridge {
+        async fn send(
+            &self,
+            _request: Request<SendRequest>,
+        ) -> Result<Response<SendResponse>, Status> {
+            Err(Status::unimplemented("send not exercised here"))
+        }
+
+        type SubscribeStream = Pin<Box<dyn Stream<Item = Result<JmsMessage, Status>> + Send>>;
+
+        async fn subscribe(
+            &self,
+            _request: Request<SubscribeRequest>,
+        ) -> Result<Response<Self::SubscribeStream>, Status> {
+            self.release.notified().await;
+            let stream = futures::stream::once(async move {
+                Ok::<JmsMessage, Status>(delivered_message("tok-attach", 1))
+            });
+            Ok(Response::new(Box::pin(stream)))
+        }
+
+        async fn health(
+            &self,
+            _request: Request<HealthRequest>,
+        ) -> Result<Response<HealthResponse>, Status> {
+            Ok(Response::new(HealthResponse {
+                healthy: true,
+                broker_connected: true,
+                message: "ok".to_string(),
+                status: 0,
+                age_ms: 0,
+                ..Default::default()
+            }))
+        }
+
+        async fn complete(
+            &self,
+            _request: Request<CompletionRequest>,
+        ) -> Result<Response<CompletionResponse>, Status> {
+            Ok(Response::new(CompletionResponse { accepted: true }))
+        }
+    }
+
+    async fn spawn_lazy_headers_bridge(release: Arc<tokio::sync::Notify>) -> std::io::Result<u16> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(BridgeServiceServer::new(LazyHeadersBridge { release }))
+                .serve_with_incoming(incoming)
+                .await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Ok(port)
+    }
+
+    async fn wait_for_captured_event(events: &Arc<Mutex<Vec<String>>>, needle: &str) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let found = events
+                    .lock()
+                    .expect("events lock")
+                    .iter()
+                    .any(|event| event.contains(needle));
+                if found {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("event captured within 5s");
+    }
+
+    /// The Java bridge sends its subscribe response headers lazily, so the
+    /// client-side `subscribe` future resolves only at first delivery. The
+    /// attach request must still be observable before that point.
+    #[tokio::test]
+    async fn attach_request_logged_before_first_delivery_response() {
+        ensure_global_tracing_default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CapturingLayer {
+            events: Arc::clone(&events),
+        });
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let release = Arc::new(tokio::sync::Notify::new());
+        let port = spawn_lazy_headers_bridge(Arc::clone(&release))
+            .await
+            .expect("spawn lazy-headers bridge");
+        let pool = pool_with_mock_channel(port).await;
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "jms-attach-log".to_string(),
+        );
+        let cancel = CancellationToken::new();
+        let handle = spawn_jms_loop(&pool, &ctx, cancel.clone(), reconnect_after(1), rt());
+
+        wait_for_captured_event(&events, "attach requested").await;
+        let before_delivery = events.lock().expect("events lock").clone();
+        assert!(
+            !before_delivery
+                .iter()
+                .any(|event| event.contains("first delivery received")),
+            "the attach request must be logged before the bridge answers: {before_delivery:?}"
+        );
+
+        release.notify_one();
+        wait_for_captured_event(&events, "first delivery received").await;
+
+        let captured = events.lock().expect("events lock").clone();
+        let attach_idx = captured
+            .iter()
+            .position(|event| event.contains("attach requested"))
+            .expect("attach request captured");
+        let delivery_idx = captured
+            .iter()
+            .position(|event| event.contains("first delivery received"))
+            .expect("first delivery captured");
+        assert!(
+            attach_idx < delivery_idx,
+            "attach request must precede the first delivery log: {captured:?}"
+        );
+        let attach_event = &captured[attach_idx];
+        assert!(
+            attach_event.contains("destination=queue:test")
+                && attach_event.contains("consumer_idx=0"),
+            "the attach request must carry the consumer identity fields: {attach_event}"
+        );
+
+        cancel.cancel();
+        let inner = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("cancellation must complete within 5s")
+            .expect("consumer task must not panic");
+        assert!(inner.is_ok(), "requested cancellation is normal: {inner:?}");
     }
 
     /// Phase 4 interphase Finding 1 regression: a slot that becomes terminal
