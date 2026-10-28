@@ -920,6 +920,14 @@ struct ServerHandle {
     // to hot-swap certs without restarting the server.
     tls_config: Option<axum_server::tls_rustls::RustlsConfig>,
     tls_source: Option<ServerTlsSource>,
+    /// Fires the listener's graceful shutdown: axum stops accepting and waits
+    /// for every in-flight response to finish writing before the serve loop
+    /// returns.
+    shutdown: tokio_util::sync::CancellationToken,
+    /// Turns true once this server's serve loop fully returned. A waiter also
+    /// unblocks if the task died (sender dropped), so settle waits can never
+    /// hang on a dead server.
+    server_done: tokio::sync::watch::Receiver<bool>,
 }
 
 /// Internal registry state: live server entries plus pre-bound listeners
@@ -1222,6 +1230,63 @@ impl ServerRegistry {
         );
     }
 
+    /// Deliver in-flight listener responses before process exit (bd rc-0g9ju).
+    ///
+    /// The route-level drain releases when the pipeline produces the reply
+    /// OBJECT; the response's socket write completes under each listener's
+    /// graceful shutdown. Cancels every live listener's shutdown token, then
+    /// waits — bounded by `budget` — for each serve loop to finish. A graceful
+    /// return, an error exit, and task death all settle the waiter, so the
+    /// bound is a failure guard, not the completion signal. Returns how many
+    /// listeners settled within budget; a timeout is logged (redacted host)
+    /// and never fatal — teardown stays non-blocking by contract.
+    pub async fn settle_all(&'static self, budget: std::time::Duration) -> usize {
+        let entries: Vec<_> = {
+            // Poison-recovering acquire (settle is a best-effort teardown
+            // wait; a poisoned registry still yields readable entries).
+            let guard = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard
+                .entries
+                .iter()
+                .filter_map(|((host, port), cell)| {
+                    cell.get().map(|handle| {
+                        (
+                            handle.shutdown.clone(),
+                            handle.server_done.clone(),
+                            host.clone(),
+                            *port,
+                        )
+                    })
+                })
+                .collect()
+        };
+        for (shutdown, _, _, _) in &entries {
+            shutdown.cancel();
+        }
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut settled = 0;
+        for (_, mut done, host, port) in entries {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, done.wait_for(|sent| *sent)).await {
+                Ok(Ok(_)) => settled += 1,
+                // Sender dropped: the serve task died. Treat it as settled so
+                // the wait cannot hang on a dead server.
+                Ok(Err(_)) => settled += 1,
+                Err(_) => {
+                    tracing::warn!(
+                        host = %camel_api::redact::redact_host(&host),
+                        port = port,
+                        "listener settle timed out — in-flight responses may be truncated"
+                    );
+                }
+            }
+        }
+        settled
+    }
+
     /// Reset the global registry — **test-only**.
     ///
     /// Clears all registered server handles so that tests can start from a clean
@@ -1284,6 +1349,8 @@ async fn spawn_entry(
         .local_addr()
         .map_err(|e| CamelError::EndpointCreationFailed(format!("listener local_addr: {e}")))?;
     let server_exited = tokio_util::sync::CancellationToken::new();
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (done_tx, done_rx) = tokio::sync::watch::channel(false);
     let registry = HttpRouteRegistry::new_with_server_exited(server_exited.clone());
     let inflight = Arc::new(tokio::sync::Semaphore::new(max_inflight_requests));
     // Constructed once in the TLS branch so they can be retained
@@ -1317,6 +1384,8 @@ async fn spawn_entry(
             Arc::clone(&inflight),
             Arc::clone(&rt),
             rid.clone(),
+            shutdown.clone(),
+            done_tx,
         ))
     } else {
         tls_rustls_cfg = None;
@@ -1329,6 +1398,8 @@ async fn spawn_entry(
             Arc::clone(&inflight),
             Arc::clone(&rt),
             rid.clone(),
+            shutdown.clone(),
+            done_tx,
         ))
     };
     let addr_for_monitor = format!("{host_owned}:{port}");
@@ -1353,6 +1424,8 @@ async fn spawn_entry(
         server_abort,
         tls_config: tls_rustls_cfg,
         tls_source,
+        shutdown,
+        server_done: done_rx,
     };
     // Register reload handler (exactly-once: inside OnceCell init closure).
     // Note: HTTP servers are process-lifetime (no release/eviction path),
@@ -1399,6 +1472,7 @@ pub(crate) struct AppState {
 /// protected by the byte cap in `dispatch_handler`.
 const CONSUMER_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+#[allow(clippy::too_many_arguments)]
 async fn run_axum_server(
     listener: tokio::net::TcpListener,
     registry: HttpRouteRegistry,
@@ -1407,6 +1481,8 @@ async fn run_axum_server(
     inflight: Arc<tokio::sync::Semaphore>,
     runtime: Arc<dyn RuntimeObservability>,
     route_id: String,
+    shutdown: tokio_util::sync::CancellationToken,
+    done: tokio::sync::watch::Sender<bool>,
 ) {
     let state = AppState {
         registry,
@@ -1422,13 +1498,17 @@ async fn run_axum_server(
             CONSUMER_REQUEST_TIMEOUT,
         ));
 
-    axum::serve(listener, app).await.unwrap_or_else(|e| {
-        runtime
-            .metrics()
-            .increment_errors(&route_id, "e:http:accept");
-        // log-policy: outside-contract
-        tracing::error!(error = %e, "Axum server error");
-    });
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .await
+        .unwrap_or_else(|e| {
+            runtime
+                .metrics()
+                .increment_errors(&route_id, "e:http:accept");
+            // log-policy: outside-contract
+            tracing::error!(error = %e, "Axum server error");
+        });
+    let _ = done.send(true);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1441,6 +1521,8 @@ async fn run_axum_server_tls(
     inflight: Arc<tokio::sync::Semaphore>,
     runtime: Arc<dyn RuntimeObservability>,
     route_id: String,
+    shutdown: tokio_util::sync::CancellationToken,
+    done: tokio::sync::watch::Sender<bool>,
 ) {
     let state = AppState {
         registry,
@@ -1472,6 +1554,13 @@ async fn run_axum_server_tls(
         }
     };
 
+    let axum_handle = axum_server::Handle::new();
+    let server = server.handle(axum_handle.clone());
+    tokio::spawn(async move {
+        shutdown.cancelled().await;
+        axum_handle.graceful_shutdown(None);
+    });
+
     server
         .serve(app.into_make_service())
         .await
@@ -1482,6 +1571,7 @@ async fn run_axum_server_tls(
             // log-policy: outside-contract
             tracing::error!(error = %e, "Axum TLS server error");
         });
+    let _ = done.send(true);
 }
 
 /// Monitors the shared Axum server task of one (host, port).

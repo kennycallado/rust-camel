@@ -2800,6 +2800,10 @@ fn sealed_proto_artifact_boots_without_writable_temp() {
 const DRAIN_TEST: &str = "route_server_drains_inflight_request";
 
 /// The exact test named by the harness-child spawn of
+/// [`drain_backpressure_flow`] (same re-entry mechanism as [`SERVE_TEST`]).
+const DRAIN_BP_TEST: &str = "route_server_drains_backpressured_client";
+
+/// The exact test named by the harness-child spawn of
 /// [`ws_drain_flow`] (same re-entry mechanism as [`SERVE_TEST`]).
 const WS_DRAIN_TEST: &str = "route_server_drains_inflight_ws_exchange";
 
@@ -2940,6 +2944,242 @@ fn drain_inflight_flow() -> Result<(), String> {
 fn route_server_drains_inflight_request() {
     child_guard();
     with_bind_race_retry(drain_inflight_flow);
+}
+
+/// The backpressure listener document: the same shape as [`slow_rest_doc`]
+/// (`log: "slow-enter"`, `delay`, then the body), but the delay step is
+/// followed by a `body_len`-byte literal body instead of `slow-pong`.
+/// The body must exceed the 4 MB Linux `tcp_wmem` maximum: kernel socket
+/// buffers cannot absorb it, so the server's write provably stalls while
+/// the client holds with only the headers consumed — the exchange stays
+/// in flight until the client resumes reading during the drain.
+fn backpressure_rest_doc(port: u16, delay_ms: u64, body_len: usize) -> String {
+    let body: String = std::iter::repeat_n('x', body_len).collect();
+    format!(
+        "\
+routes:
+  - id: backpressure-route
+    from: direct:slow
+    steps:
+      - log: \"slow-enter\"
+      - delay: {delay_ms}
+      - set_body: \"{body}\"
+rest:
+  - host: 127.0.0.1
+    port: {port}
+    path: /api
+    operations:
+      - method: GET
+        path: /slow
+        to: direct:slow
+"
+    )
+}
+
+/// The maximum send-buffer ceiling `net.ipv4.tcp_wmem` grants on this
+/// host (its third value), or `Err` when the file is missing/unreadable
+/// (the artifact battery is Linux-targeted, so this is always present
+/// where the battery runs).
+fn tcp_wmem_max() -> Result<u64, String> {
+    let raw = std::fs::read_to_string("/proc/sys/net/ipv4/tcp_wmem")
+        .map_err(|e| format!("read /proc/sys/net/ipv4/tcp_wmem: {e}"))?;
+    raw.split_whitespace()
+        .last()
+        .and_then(|v| v.parse::<u64>().ok())
+        .ok_or_else(|| format!("unparseable tcp_wmem: {raw:?}"))
+}
+
+/// One full backpressure drain flow: fresh port → 8 MiB body doc (200 ms
+/// delay) → compile → deploy → spawn with `--report` → boot → a client
+/// thread sends the GET, reads ONLY the response head, and hands the
+/// stalled stream back → SIGTERM lands on the stalled write → the body
+/// is read to EOF after the signal → the full 8 MiB arrives inside the
+/// drain → exit 0 → the exact completed report. `Err` carries the
+/// failure text; the [`BIND_RACE_MARK`] signature inside it makes the
+/// caller retry the whole flow once (see [`with_bind_race_retry`]).
+fn drain_backpressure_flow() -> Result<(), String> {
+    use std::io::{Read, Write};
+
+    const BODY_LEN: usize = 8 * 1024 * 1024;
+    // MACHINE-CHECKED stall bound: server sndbuf ceiling (tcp_wmem max,
+    // a sysctl — never assume 4 MiB) + pinned client rcvbuf (1 MiB,
+    // kernel-doubled 2 MiB) + 1 MiB slack must stay BELOW the body, or
+    // the whole response could buffer kernel-side and the flow would
+    // pass even without the drain fix. On stock Linux (tcp_wmem max
+    // 4 MiB) the bound is 4+2+1=7 MiB < 8 MiB; anything wider fails
+    // LOUDLY here instead of silently weakening the regression.
+    let wmem_max = tcp_wmem_max()?;
+    let snd_rcv_bound = wmem_max as usize + 2 * 1024 * 1024;
+    if snd_rcv_bound + 1024 * 1024 >= BODY_LEN {
+        return Err(format!(
+            "unsupported kernel for the backpressure bound: tcp_wmem max \
+             {wmem_max} + 2 MiB pinned rcvbuf + 1 MiB slack >= the 8 MiB body"
+        ));
+    }
+    // allow-free-port: ADR-0070 SUBPROCESS EXCEPTION — the spawned artifact cannot receive a staged listener; the window is closed by the BIND_RACE_MARK retry convention (free_port doc, this file).
+    let port = free_port();
+    // The body rides the DEFAULT 128 KiB stream-cache threshold (no
+    // override): keep this test on the stock serving configuration so
+    // the only variable under test is the drain-delivery leg.
+    let (deploy, artifact) =
+        compile_and_deploy_listener(&backpressure_rest_doc(port, 200, BODY_LEN))?;
+    let mut child = spawn_child(
+        DRAIN_BP_TEST,
+        deploy.path(),
+        &artifact,
+        &["--report", "drain-bp.json"],
+        &[],
+    );
+    let drained = spawn_drained(&mut child);
+    if !wait_for_marker(&drained, "context started", Duration::from_secs(60)) {
+        let captured = drained.captured();
+        return Err(format!("artifact never booted:\n{captured}"));
+    }
+    // The client reads the response HEAD only, then returns the stream
+    // without touching the body. SO_RCVBUF is pinned at 1 MiB (the
+    // kernel doubles it to 2 MiB) so the stall is provable by kernel
+    // arithmetic on any Linux: server send buffer (tcp_wmem max 4 MiB)
+    // + pinned receive buffer 2 MiB = 6 MiB < the 8 MiB body, so the
+    // write cannot complete while the client holds, and the pre-fix
+    // truncation watermark is bit-stable (measured 6,221,177 bytes).
+    // The window stays large enough for hyper's post-graceful resume —
+    // do NOT shrink it (a 16 KB pin was measured to defeat the resume
+    // entirely). The 30 s read timeout is a failure guard, not the
+    // stall mechanism.
+    let (tx, rx) = std::sync::mpsc::channel::<Option<(u16, TcpStream)>>();
+    thread::spawn(move || {
+        let result = 'head: {
+            let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+                break 'head None;
+            };
+            let sock = socket2::SockRef::from(&stream);
+            if sock.set_recv_buffer_size(1_048_576).is_err() {
+                break 'head None;
+            }
+            if stream
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .is_err()
+            {
+                break 'head None;
+            }
+            if stream
+                .set_read_timeout(Some(Duration::from_secs(30)))
+                .is_err()
+            {
+                break 'head None;
+            }
+            let request = format!(
+                "GET /api/slow HTTP/1.1\r\n\
+                 Host: 127.0.0.1:{port}\r\n\
+                 Connection: close\r\n\
+                 \r\n"
+            );
+            if stream.write_all(request.as_bytes()).is_err() {
+                break 'head None;
+            }
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                match stream.read(&mut byte) {
+                    Ok(0) | Err(_) => break 'head None,
+                    Ok(_) => head.push(byte[0]),
+                }
+            }
+            let head = String::from_utf8_lossy(&head);
+            let Some(status) = head
+                .split_whitespace()
+                .nth(1)
+                .and_then(|code| code.parse::<u16>().ok())
+            else {
+                break 'head None;
+            };
+            Some((status, stream))
+        };
+        let _ = tx.send(result);
+    });
+    // The probe returns the moment the response HEAD is out: the server
+    // write is now provably in flight and stalls against the kernel
+    // buffer ceiling (4 MiB tcp_wmem max < 8 MiB body). SIGTERM lands on
+    // the STALLED WRITE — the exact delivery leg this regression pins
+    // (drain-completes-before-the-socket-write) — while the route itself
+    // has long completed.
+    let (status, mut stream) = match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return Err("client never saw the response headers".to_string()),
+        Err(e) => return Err(format!("response headers never arrived within 20s: {e}")),
+    };
+    if status != 200 {
+        return Err(format!(
+            "the backpressured exchange must answer 200, got {status}"
+        ));
+    }
+    // SIGTERM lands on the STALLED WRITE (the probe holds the stream;
+    // the kernel buffers filled well below the 8 MiB body).
+    send_signal(&child.0, "-TERM");
+    // Sanity, not timing: the route must have run (the observed head is
+    // this route's reply, not some other status page).
+    if !wait_for_marker_tight(&mut child, &drained, "slow-enter", Duration::from_secs(1)) {
+        let captured = drained.captured();
+        return Err(format!(
+            "request never reached the delayed step (missing `slow-enter`):\n{captured}"
+        ));
+    }
+    // The body read starts only AFTER SIGTERM: every byte read here is
+    // delivered by the drain, which is the behavior under test.
+    let mut body = Vec::new();
+    if let Err(e) = stream.read_to_end(&mut body) {
+        return Err(format!(
+            "the in-flight body must finish inside the drain, read failed after {} bytes: {e}",
+            body.len()
+        ));
+    }
+    if body.len() != BODY_LEN {
+        return Err(format!(
+            "the full 8 MiB body must be delivered during the drain, got {} bytes:\n{}",
+            body.len(),
+            drained.captured()
+        ));
+    }
+    let code = wait_exit_code(&mut child, Duration::from_secs(30));
+    if code != 0 {
+        return Err(format!(
+            "the drained shutdown must exit 0, got {code}:\n{}",
+            drained.captured()
+        ));
+    }
+    let report = std::fs::read_to_string(deploy.path().join("drain-bp.json"))
+        .map_err(|e| format!("route report must be written: {e}"))?;
+    if report.trim() != COMPLETED_ROUTE_REPORT {
+        return Err(format!(
+            "report must be exactly {COMPLETED_ROUTE_REPORT}, got {report}"
+        ));
+    }
+    Ok(())
+}
+
+/// The serving artifact with an 8 MiB route body and a backpressured
+/// client: the client reads ONLY the response head and holds, with its
+/// receive buffer pinned at 1 MiB (kernel-doubled 2 MiB) — the flow
+/// machine-checks the stall bound against the host's actual
+/// `tcp_wmem` ceiling (sndbuf max + 2 MiB rcvbuf + 1 MiB slack must be
+/// below the 8 MiB body, else the flow fails loudly naming the
+/// unsupported kernel), so the server's write provably stalls until the
+/// client drains. SIGTERM lands on the STALLED WRITE: the exact
+/// drain-completes-before-the-socket-write leg that dropped in-flight
+/// responses at exit (bd rc-0g9ju). Before the graceful-listener fix
+/// the flow truncates at a bit-stable watermark (measured 6,221,177
+/// bytes, 3/3 runs); after it the client drains the socket and the FULL
+/// 8 MiB arrives inside the drain, then exit 0 and the exact completed
+/// report. The wait is the drain itself — the 30 s read timeout is a
+/// failure guard only (openspec r5routesrv, cli-compile "First signal
+/// drains gracefully and exits 0").
+#[test]
+fn route_server_drains_backpressured_client() {
+    child_guard();
+    with_bind_race_retry(drain_backpressure_flow);
 }
 
 /// The slow WebSocket listener document: the same step chain as

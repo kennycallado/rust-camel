@@ -125,6 +125,7 @@ tikv-jemalloc-ctl = { version = "0.7", optional = true, default-features = false
 [dev-dependencies]
 testcontainers.workspace = true
 testcontainers-modules.workspace = true
+socket2 = "0.6"
 redis = { workspace = true, features = ["tokio-comp", "aio"] }
 # camel-auth is test-only here (run_tests.rs / test/scenario.rs mod
 # tests exercise the shared security builder's provider registry).

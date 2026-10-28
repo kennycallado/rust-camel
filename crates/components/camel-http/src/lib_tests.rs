@@ -3663,6 +3663,8 @@ async fn test_dispatch_handler_returns_404_for_unknown_path() {
         Arc::new(tokio::sync::Semaphore::new(1024)),
         test_rt(),
         "test-route".into(),
+        tokio_util::sync::CancellationToken::new(),
+        tokio::sync::watch::channel(false).0,
     ));
 
     // Wait for server to start
@@ -7632,6 +7634,8 @@ async fn spawn_test_server() -> (u16, HttpRouteRegistry) {
         Arc::new(tokio::sync::Semaphore::new(1024)),
         test_rt(),
         "test-route".into(),
+        tokio_util::sync::CancellationToken::new(),
+        tokio::sync::watch::channel(false).0,
     ));
     // Give the server a moment to start accepting.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;

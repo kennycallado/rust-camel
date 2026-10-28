@@ -723,6 +723,16 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
     // exit code.
     let _ = boot_handle.shutdown(&mut ctx).await;
 
+    // Mission 430 (bd rc-0g9ju): the route drain releases when the pipeline
+    // produces the reply object; the response's socket write completes under
+    // the shared listeners' graceful shutdown. Bounded by the same drain
+    // budget — an ordered completion wait, not a sleep.
+    let _ = camel_component_http::ServerRegistry::global()
+        .settle_all(std::time::Duration::from_millis(
+            camel_config.drain_timeout_ms,
+        ))
+        .await;
+
     force_exit.abort();
 
     tracing::info!("camel-cli: stopped");
