@@ -15,6 +15,10 @@ use crate::pubsub::{PubSubIo, RedisPubSubIo, pubsub_session};
 use crate::queue::{
     QueueConsumerParams, QueueIo, QueuePopCommand, RedisQueueIo, queue_command_name, queue_session,
 };
+use crate::streams::{
+    DeliveryOutcome, RedisStreamIo, StreamConsumerParams, StreamEntry, StreamIo,
+    build_exchange_from_stream_entry, stream_session,
+};
 use crate::topology::RedisTopology;
 
 /// Mode of operation for the Redis consumer.
@@ -35,6 +39,11 @@ pub enum RedisConsumerMode {
         timeout: u64,
         /// Blocking pop command to use (left or right)
         pop_command: QueuePopCommand,
+    },
+    /// Consumer-group mode using `XREADGROUP` reads.
+    Streams {
+        /// Stream key, group, consumer, and read bounds.
+        params: crate::streams::StreamConsumerParams,
     },
 }
 
@@ -59,6 +68,7 @@ impl RedisConsumer {
     /// - SUBSCRIBE → PubSub with channels
     /// - PSUBSCRIBE → PubSub with patterns
     /// - BLPOP/BRPOP → Queue mode
+    /// - XREADGROUP → Streams mode (consumer group)
     ///
     /// Returns an error for commands that are not valid consumer commands
     /// (REDIS-003: no silent fallback to BLPOP).
@@ -86,6 +96,52 @@ impl RedisConsumer {
                     key,
                     timeout: config.timeout,
                     pop_command,
+                }
+            }
+            RedisCommand::Xreadgroup => {
+                // All three coordinates are required: a missing or empty value
+                // fails closed at construction instead of reaching Redis with
+                // an empty group/consumer name.
+                let key = config
+                    .key
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        CamelError::InvalidUri("XREADGROUP requires key=<stream>".to_string())
+                    })?;
+                let group = config
+                    .group
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        CamelError::InvalidUri("XREADGROUP requires group=<name>".to_string())
+                    })?;
+                let consumer = config
+                    .consumer
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        CamelError::InvalidUri("XREADGROUP requires consumer=<name>".to_string())
+                    })?;
+                // URI parsing rejects COUNT=0, but a programmatic config can
+                // bypass it. Fail closed here too rather than silently
+                // dropping the count.
+                let count = match config.count {
+                    Some(0) => {
+                        return Err(CamelError::InvalidUri(
+                            "XREADGROUP requires a positive count".to_string(),
+                        ));
+                    }
+                    count => count,
+                };
+                RedisConsumerMode::Streams {
+                    params: StreamConsumerParams {
+                        key,
+                        group,
+                        consumer,
+                        count,
+                        block_ms: config.block_ms,
+                    },
                 }
             }
             other => {
@@ -190,6 +246,14 @@ impl Consumer for RedisConsumer {
                     timeout,
                     pop_command,
                 },
+                ctx,
+                cancel_token,
+                runtime,
+                topology,
+            )),
+            RedisConsumerMode::Streams { params } => tokio::spawn(run_stream_consumer(
+                config,
+                params,
                 ctx,
                 cancel_token,
                 runtime,
@@ -465,6 +529,132 @@ async fn run_queue_consumer(
                             .increment_errors(&route_id_err, "e:redis:message-non-transient");
                         // log-policy: system-broken
                         error!(command = %queue_cmd, error = %e, "Non-transient error");
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Runs a Streams consumer loop using `XREADGROUP`.
+///
+/// Drives the [`stream_session`] failover core: the session resolves the
+/// master, connects once, and performs consumer-group reads on that single
+/// connection, delivering every entry through the wrapper and acknowledging
+/// only the entries the pipeline accepted. On a transient error the session
+/// re-resolves the master and reconnects (enabling sentinel failover); on
+/// budget exhaustion it returns `Err` so Route supervision fires (ADR-0007).
+async fn run_stream_consumer(
+    config: RedisEndpointConfig,
+    params: StreamConsumerParams,
+    ctx: ConsumerContext,
+    cancel_token: CancellationToken,
+    runtime: Arc<dyn RuntimeObservability>,
+    topology: Arc<dyn RedisTopology>,
+) -> Result<(), CamelError> {
+    info!(
+        endpoint = %redact_url(&config.safe_endpoint()),
+        key = %params.key,
+        group = %params.group,
+        consumer = %params.consumer,
+        "Stream consumer connecting"
+    );
+
+    let mut io: Box<dyn StreamIo> = Box::new(RedisStreamIo::new(config.connection_timeout_secs));
+
+    info!("Stream consumer started, waiting for entries");
+
+    let route_id = ctx.route_id().to_string();
+    let route_id_err = route_id.clone();
+    let runtime_err = Arc::clone(&runtime);
+    // Readiness fires only after the first successful connect: before the
+    // server accepted the group read there is nothing to be ready for.
+    // Same clone-per-closure pattern as the delivery closure below.
+    let ready_ctx = ctx.clone();
+    let on_ready = Some(Box::new(move || ready_ctx.mark_ready()) as Box<dyn FnOnce() + Send>);
+    // Pre-ready failure surfacing: when the session returns Err before the
+    // first connect, the runtime's startup await must see the Redis cause
+    // instead of a dropped startup signal. First transition wins, so this is
+    // a no-op once ready already fired (ADR-0007: surfacing only).
+    let failed_ctx = ctx.clone();
+    // Per-entry delivery: build the Exchange and hand it to the pipeline,
+    // waiting for the result so an unaccepted entry is never acknowledged.
+    let key = params.key.clone();
+    let group = params.group.clone();
+    let consumer = params.consumer.clone();
+    let deliver = move |entry: StreamEntry| {
+        let ctx = ctx.clone();
+        let runtime = Arc::clone(&runtime);
+        let route_id = route_id.clone();
+        let exchange = build_exchange_from_stream_entry(&key, &group, &consumer, &entry);
+        async move {
+            match ctx.send_and_wait(exchange).await {
+                Ok(_) => DeliveryOutcome::Completed,
+                Err(CamelError::ChannelClosed) => {
+                    // b-prime: the dequeue succeeded but the handoff target is
+                    // gone (mirrors `b-prime:redis:blpop-channel-closed`).
+                    runtime
+                        .metrics()
+                        .increment_errors(&route_id, "b-prime:redis:xreadgroup-channel-closed");
+                    DeliveryOutcome::ChannelGone
+                }
+                Err(e) => {
+                    // log-policy: outside-contract — the route's error handler
+                    // owns this signal; warn only, no error metric.
+                    warn!(
+                        "Pipeline failed for stream entry; entry left unacked: {}",
+                        e
+                    );
+                    DeliveryOutcome::Failed
+                }
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = cancel_token.cancelled() => {
+            info!("Stream consumer received shutdown signal");
+        }
+        result = stream_session(
+            &*topology,
+            &mut *io,
+            &params,
+            &config.reconnect,
+            &cancel_token,
+            on_ready,
+            deliver,
+        ) => {
+            match result {
+                Ok(()) => {
+                    // Cancellation observed inside the session.
+                    info!("Stream consumer received shutdown signal");
+                }
+                Err(e) => {
+                    // Surface the cause through the startup handshake before
+                    // anything else can observe the dropped signal (no-op if
+                    // readiness already fired).
+                    failed_ctx.mark_failed(e.to_string());
+                    if is_transient_redis_error(&e) {
+                        // Budget exhaustion — the task ends, supervision fires (ADR-0007).
+                        runtime_err
+                            .metrics()
+                            .increment_errors(&route_id_err, "e:redis:message-transient-budget");
+                        // log-policy: system-broken
+                        error!(
+                            error = %e,
+                            "Stream consumer terminated after transient-error budget exhausted"
+                        );
+                    } else {
+                        // Non-transient error — the route terminates and
+                        // supervision restarts it (ADR-0007).
+                        runtime_err
+                            .metrics()
+                            .increment_errors(&route_id_err, "e:redis:message-non-transient");
+                        // log-policy: system-broken
+                        error!(error = %e, "Non-transient error");
                     }
                     return Err(e);
                 }

@@ -16,6 +16,10 @@ fn create_test_config(command: RedisCommand) -> RedisEndpointConfig {
         channels: vec!["test".to_string()],
         key: Some("test-queue".to_string()),
         timeout: 1,
+        group: None,
+        consumer: None,
+        count: None,
+        block_ms: 10000,
         username: None,
         password: None,
         db: 0,
@@ -548,5 +552,110 @@ async fn pubsub_pre_ready_session_err_marks_startup_failed() {
     assert!(
         msg.contains("refused") || msg.contains("connection"),
         "startup failure must carry the Redis cause, got: {msg}"
+    );
+}
+
+// Task 3.1: XREADGROUP resolves to Streams mode carrying every endpoint
+// stream parameter.
+#[test]
+fn consumer_new_xreadgroup_resolves_streams_mode() {
+    let config = RedisEndpointConfig::from_uri(
+        "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c",
+    )
+    .expect("valid XREADGROUP uri");
+    let consumer = RedisConsumer::new(config, test_rt()).expect("XREADGROUP should be valid");
+
+    match consumer.mode {
+        RedisConsumerMode::Streams { params } => {
+            assert_eq!(params.key, "s1");
+            assert_eq!(params.group, "g");
+            assert_eq!(params.consumer, "c");
+            assert!(params.count.is_none());
+            assert_eq!(params.block_ms, 10000);
+        }
+        other => panic!("expected Streams mode, got {other:?}"),
+    }
+}
+
+/// Every required XREADGROUP coordinate must fail closed, both when absent
+/// and when present but empty.
+fn assert_xreadgroup_field_fails_closed(uri: &str, field: &str) {
+    let config = RedisEndpointConfig::from_uri(uri).expect("uri must parse");
+    let err = match RedisConsumer::new(config, test_rt()) {
+        Err(e) => e,
+        Ok(_) => panic!("XREADGROUP without a valid {field} must fail closed"),
+    };
+    assert!(
+        err.to_string().contains(field),
+        "error must name {field}: {err}"
+    );
+}
+
+#[test]
+fn consumer_new_xreadgroup_missing_key_fails_closed() {
+    assert_xreadgroup_field_fails_closed(
+        "redis://127.0.0.1:6379?command=XREADGROUP&group=g&consumer=c",
+        "key",
+    );
+}
+
+#[test]
+fn consumer_new_xreadgroup_empty_key_fails_closed() {
+    assert_xreadgroup_field_fails_closed(
+        "redis://127.0.0.1:6379?command=XREADGROUP&key=&group=g&consumer=c",
+        "key",
+    );
+}
+
+#[test]
+fn consumer_new_xreadgroup_missing_group_fails_closed() {
+    assert_xreadgroup_field_fails_closed(
+        "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&consumer=c",
+        "group",
+    );
+}
+
+#[test]
+fn consumer_new_xreadgroup_empty_group_fails_closed() {
+    assert_xreadgroup_field_fails_closed(
+        "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=&consumer=c",
+        "group",
+    );
+}
+
+#[test]
+fn consumer_new_xreadgroup_missing_consumer_fails_closed() {
+    assert_xreadgroup_field_fails_closed(
+        "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g",
+        "consumer",
+    );
+}
+
+#[test]
+fn consumer_new_xreadgroup_empty_consumer_fails_closed() {
+    assert_xreadgroup_field_fails_closed(
+        "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=",
+        "consumer",
+    );
+}
+
+// URI parsing rejects COUNT=0, but a programmatically constructed config can
+// bypass it. The constructor must fail closed rather than silently dropping
+// the count.
+#[test]
+fn consumer_new_xreadgroup_zero_count_fails_closed() {
+    let mut config = RedisEndpointConfig::from_uri(
+        "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c",
+    )
+    .expect("valid XREADGROUP uri");
+    config.count = Some(0);
+
+    let err = match RedisConsumer::new(config, test_rt()) {
+        Err(e) => e,
+        Ok(_) => panic!("XREADGROUP with COUNT=0 must fail closed"),
+    };
+    assert!(
+        err.to_string().contains("count"),
+        "error must name count: {err}"
     );
 }

@@ -38,6 +38,7 @@ pub(crate) mod queue;
 pub(crate) mod retry;
 pub mod sentinel_component;
 pub mod sentinel_config;
+pub(crate) mod streams;
 pub mod topology;
 mod transport_error;
 
@@ -278,3 +279,7 @@ pub use pool_factory::RedisPoolFactory;
 
 #[cfg(test)]
 mod blocking_pop_tests;
+
+#[cfg(test)]
+#[path = "stream_fake_tests.rs"]
+mod stream_fake_tests;

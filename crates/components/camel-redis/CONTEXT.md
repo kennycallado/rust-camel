@@ -177,13 +177,26 @@ reconnect-budget metrics `e:redis:message-transient-budget` and
 Outcome-gated delivery (for example an `LMOVE` reliable-queue mode that returns
 an item to the list on failure) is not implemented and is out of scope.
 
+### Streams consumer delivery guarantee (XREADGROUP)
+
+The Streams consumer runs a single-connection `XREADGROUP` session against a
+consumer group; `StreamIo` joins `QueueIo` and `PubSubIo` as the injectable
+transport seam. Delivery waits on `send_and_wait` and issues a per-entry `XACK`
+only after the pipeline accepts the exchange. The connection is deadline-free
+(`set_response_timeout(None)`, `set_connection_timeout(None)`), so the `BLOCK`
+timeout owns the wait, as in queue mode (bd rc-y0pwj). A closed pipeline
+channel emits `b-prime:redis:xreadgroup-channel-closed` and ends the session
+with `ChannelClosed`, letting supervision restart the Route (ADR-0007).
+Pending-entry recovery is not implemented in this slice: reads use `>` and
+never replay, and `XPENDING`/`XAUTOCLAIM` are deferred.
+
 ### Test seams
 
 - **Producer**: `RedisTopology` + `RedisCommandExecutor` (fake executor) drive
   `MultiplexedExecutor` without a live Redis.
-- **Consumers / health**: `QueueIo`, `PubSubIo`, and `HealthProbe` traits
-  abstract the transport so `run_queue_consumer`, `run_pubsub_consumer`, and
-  `RedisHealthCheck` are testable against fake I/O.
+- **Consumers / health**: `QueueIo`, `PubSubIo`, `StreamIo`, and `HealthProbe`
+  traits abstract the transport so `run_queue_consumer`, `run_pubsub_consumer`,
+  the stream session, and `RedisHealthCheck` are testable against fake I/O.
 
 ## Scope boundary
 

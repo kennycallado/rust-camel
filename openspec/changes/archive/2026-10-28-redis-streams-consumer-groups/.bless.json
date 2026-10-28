@@ -1,0 +1,9 @@
+{
+  "change": "redis-streams-consumer-groups",
+  "kind": "plan",
+  "verdict": "APPROVE",
+  "reviewer": "r_gpt",
+  "rounds": 3,
+  "notes": "Mission order 431: expert plan-bless removed (no expert available; r_gpt reviewer = blessing gate). Round 1 REJECT: 8 important findings (empty-key validation, warn on Failed, RESP nesting, ScriptedAction withhold/close, transient-ack no-replay, session termination, readiness AtomicUsize+gated connect, route-id mismatch) — all fixed. Round 2 REJECT: RESP fixture bytes missing pair headers — fixed with exact bytes. Round 3 APPROVE. Supersedes spec bless hash (includes tasks.md).",
+  "date": "2026-10-28"
+}

@@ -231,6 +231,11 @@ pub async fn dispatch_command(
         | RedisCommand::Geosearch
         | RedisCommand::Geohash => commands::geo::dispatch(cmd, conn, exchange).await,
 
+        // Stream commands are consumer-only; the producer path rejects them.
+        RedisCommand::Xreadgroup => Err(CamelError::InvalidUri(
+            "XREADGROUP is a consumer-only command".into(),
+        )),
+
         // Pub/Sub commands
         RedisCommand::Publish | RedisCommand::Subscribe | RedisCommand::Psubscribe => {
             commands::pubsub::dispatch(cmd, conn, exchange).await

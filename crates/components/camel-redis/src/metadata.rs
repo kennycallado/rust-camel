@@ -27,6 +27,18 @@ pub(super) struct RedisMetadataDescriptor {
     #[uri_param(name = "timeout", default = "1")]
     pub _timeout: u64,
 
+    #[uri_param(name = "group")]
+    pub _group: Option<String>,
+
+    #[uri_param(name = "consumer")]
+    pub _consumer: Option<String>,
+
+    #[uri_param(name = "count")]
+    pub _count: Option<u64>,
+
+    #[uri_param(name = "block", default = "10000")]
+    pub _block: u64,
+
     #[uri_param(name = "password", secret)]
     pub _password: String,
 
@@ -49,7 +61,8 @@ mod tests {
         names.sort();
 
         let mut expected = vec![
-            "command", "channels", "key", "timeout", "password", "db", "ssl",
+            "command", "channels", "key", "timeout", "password", "db", "ssl", "group", "consumer",
+            "count", "block",
         ];
         expected.sort();
 

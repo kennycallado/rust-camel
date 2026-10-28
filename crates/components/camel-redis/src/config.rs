@@ -113,6 +113,9 @@ pub enum RedisCommand {
     Geosearch,
     Geohash,
 
+    // Stream operations
+    Xreadgroup,
+
     // Pub/Sub operations
     Publish,
     Subscribe,
@@ -231,6 +234,9 @@ impl FromStr for RedisCommand {
             "GEODIST" => Ok(RedisCommand::Geodist),
             "GEOSEARCH" => Ok(RedisCommand::Geosearch),
             "GEOHASH" => Ok(RedisCommand::Geohash),
+
+            // Stream operations
+            "XREADGROUP" => Ok(RedisCommand::Xreadgroup),
 
             // Pub/Sub operations
             "PUBLISH" => Ok(RedisCommand::Publish),
@@ -542,6 +548,10 @@ impl ClusterConfig {
 /// - `channels` - Channels for pub/sub operations (default: empty)
 /// - `key` - Key for operations that require it (default: None)
 /// - `timeout` - Timeout in seconds for blocking operations (default: 1)
+/// - `group` - Consumer group name for XREADGROUP (default: None)
+/// - `consumer` - Consumer name for XREADGROUP (default: None)
+/// - `count` - Optional COUNT for XREADGROUP (default: None)
+/// - `block` - BLOCK milliseconds for XREADGROUP (default: 10000)
 /// - `username` - Redis ACL username for data-node authentication (default: None)
 /// - `password` - Redis password for authentication (default: None)
 /// - `db` - Redis database number, 0-16383 (default: 0)
@@ -567,6 +577,19 @@ pub struct RedisEndpointConfig {
 
     /// Timeout in seconds for blocking operations. Default: 1.
     pub timeout: u64,
+
+    /// Consumer group name for XREADGROUP. Default: None.
+    pub group: Option<String>,
+
+    /// Consumer name for XREADGROUP. Default: None.
+    pub consumer: Option<String>,
+
+    /// Optional COUNT for XREADGROUP. Default: None.
+    pub count: Option<u64>,
+
+    /// BLOCK milliseconds for XREADGROUP. Default: 10000; `0` blocks
+    /// indefinitely.
+    pub block_ms: u64,
 
     /// Redis ACL username (Redis 6+) for authenticating to data nodes.
     /// Default: None.
@@ -612,6 +635,10 @@ impl std::fmt::Debug for RedisEndpointConfig {
             .field("channels", &self.channels)
             .field("key", &self.key)
             .field("timeout", &self.timeout)
+            .field("group", &self.group)
+            .field("consumer", &self.consumer)
+            .field("count", &self.count)
+            .field("block_ms", &self.block_ms)
             .field("username", &redacted_opt(&self.username))
             .field("password", &redacted_opt(&self.password))
             .field("db", &self.db)
@@ -675,6 +702,41 @@ impl RedisEndpointConfig {
                 None => 1,
             };
 
+            // Parse XREADGROUP group and consumer.
+            let group = parts.params.get("group").cloned();
+            let consumer = parts.params.get("consumer").cloned();
+
+            // Parse COUNT (optional, positive).
+            let count = match parts.params.get("count") {
+                Some(s) => {
+                    let n = s.parse::<u64>().map_err(|_| {
+                        CamelError::InvalidUri(format!(
+                            "invalid count '{}': expected positive integer",
+                            s
+                        ))
+                    })?;
+                    if n == 0 {
+                        return Err(CamelError::InvalidUri(format!(
+                            "invalid count '{}': expected positive integer",
+                            s
+                        )));
+                    }
+                    Some(n)
+                }
+                None => None,
+            };
+
+            // Parse BLOCK milliseconds (default 10000; 0 blocks indefinitely).
+            let block_ms = match parts.params.get("block") {
+                Some(s) => s.parse::<u64>().map_err(|_| {
+                    CamelError::InvalidUri(format!(
+                        "invalid block '{}': expected non-negative integer",
+                        s
+                    ))
+                })?,
+                None => 10000,
+            };
+
             // Parse password
             let password = parts.params.get("password").cloned();
 
@@ -688,6 +750,10 @@ impl RedisEndpointConfig {
                 channels,
                 key,
                 timeout,
+                group,
+                consumer,
+                count,
+                block_ms,
                 username: None,
                 password,
                 db,
@@ -793,6 +859,42 @@ impl RedisEndpointConfig {
             None => 1,
         };
 
+        // Parse XREADGROUP group and consumer. An empty string stays `Some("")`
+        // so consumer construction can fail closed on it.
+        let group = parts.params.get("group").cloned();
+        let consumer = parts.params.get("consumer").cloned();
+
+        // Parse COUNT (optional, positive).
+        let count = match parts.params.get("count") {
+            Some(s) => {
+                let n = s.parse::<u64>().map_err(|_| {
+                    CamelError::InvalidUri(format!(
+                        "invalid count '{}': expected positive integer",
+                        s
+                    ))
+                })?;
+                if n == 0 {
+                    return Err(CamelError::InvalidUri(format!(
+                        "invalid count '{}': expected positive integer",
+                        s
+                    )));
+                }
+                Some(n)
+            }
+            None => None,
+        };
+
+        // Parse BLOCK milliseconds (default 10000; 0 blocks indefinitely).
+        let block_ms = match parts.params.get("block") {
+            Some(s) => s.parse::<u64>().map_err(|_| {
+                CamelError::InvalidUri(format!(
+                    "invalid block '{}': expected non-negative integer",
+                    s
+                ))
+            })?,
+            None => 10000,
+        };
+
         // Parse password: userinfo (from redis_url) takes precedence over query param
         let password = password_from_userinfo.or_else(|| parts.params.get("password").cloned());
 
@@ -840,6 +942,10 @@ impl RedisEndpointConfig {
             channels,
             key,
             timeout,
+            group,
+            consumer,
+            count,
+            block_ms,
             username: None,
             password,
             db,
@@ -1318,6 +1424,54 @@ mod tests {
     }
 
     #[test]
+    fn xreadgroup_uri_parses_stream_fields() {
+        let c = RedisEndpointConfig::from_uri(
+            "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c&count=10&block=5000",
+        )
+        .unwrap();
+        assert_eq!(c.command, RedisCommand::Xreadgroup);
+        assert_eq!(c.group.as_deref(), Some("g"));
+        assert_eq!(c.consumer.as_deref(), Some("c"));
+        assert_eq!(c.count, Some(10));
+        assert_eq!(c.block_ms, 5000);
+        assert_eq!(c.key.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn xreadgroup_defaults_block_10000_no_count() {
+        let c = RedisEndpointConfig::from_uri(
+            "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c",
+        )
+        .unwrap();
+        assert!(c.count.is_none());
+        assert_eq!(c.block_ms, 10000);
+    }
+
+    #[test]
+    fn xreadgroup_invalid_count_fails() {
+        for count in ["0", "abc"] {
+            let uri = format!(
+                "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c&count={count}"
+            );
+            let err = RedisEndpointConfig::from_uri(&uri).unwrap_err();
+            assert!(
+                err.to_string().contains("count"),
+                "error should mention count: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn xreadgroup_invalid_block_fails() {
+        let uri = "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c&block=abc";
+        let err = RedisEndpointConfig::from_uri(uri).unwrap_err();
+        assert!(
+            err.to_string().contains("block"),
+            "error should mention block: {err}"
+        );
+    }
+
+    #[test]
     fn test_config_auth_db() {
         let c =
             RedisEndpointConfig::from_uri("redis://localhost:6379?password=secret&db=2").unwrap();
@@ -1352,6 +1506,10 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: Some("pass@word".to_string()),
             db: 0,
@@ -1383,6 +1541,10 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: Some("pass:word".to_string()),
             db: 0,
@@ -1409,6 +1571,10 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: Some("pass/word".to_string()),
             db: 0,
@@ -1456,6 +1622,10 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: None,
             db: 0,
@@ -1482,6 +1652,10 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: None,
             db: 0,
@@ -1508,6 +1682,10 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: Some("secret".to_string()),
             db: 0,
@@ -1535,6 +1713,10 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: Some("secret".to_string()),
             db: 0,
@@ -1562,6 +1744,10 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: Some("supersecret".to_string()),
             db: 2,
@@ -1595,6 +1781,10 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: None,
             db: 0,
@@ -1613,6 +1803,10 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: None,
             db: 0,
@@ -1906,6 +2100,10 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: None,
             db: 0,
@@ -1931,6 +2129,10 @@ mod tests {
             channels: vec![],
             key: None,
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: None,
             db: 0,
@@ -2384,6 +2586,10 @@ mod tests {
             channels: vec![],
             key: Some("mykey".to_string()),
             timeout: 1,
+            group: None,
+            consumer: None,
+            count: None,
+            block_ms: 10000,
             username: None,
             password: Some("secret123".to_string()),
             db: 0,
