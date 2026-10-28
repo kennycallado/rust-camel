@@ -33,11 +33,13 @@ pub fn lint_component_deps(workspace_root: &Path) -> Result<Vec<Violation>, Stri
 
     let mut violations = Vec::new();
 
-    for entry in walkdir::WalkDir::new(&components_dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        &components_dir,
+        walkdir::WalkDir::new(&components_dir)
+            .follow_links(false)
+            .into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
 
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {

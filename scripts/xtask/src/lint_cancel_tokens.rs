@@ -79,12 +79,15 @@ fn read_ratchet_max(workspace_root: &Path) -> Result<usize, String> {
 pub fn lint_cancel_tokens(workspace_root: &Path) -> Result<CancelTokensReport, String> {
     let max = read_ratchet_max(workspace_root)?;
 
+    let components_dir = workspace_root.join("crates").join("components");
     let mut sites = Vec::new();
-    for entry in WalkDir::new(workspace_root.join("crates").join("components"))
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        &components_dir,
+        WalkDir::new(&components_dir)
+            .follow_links(false)
+            .into_iter(),
+    ) {
+        let entry = entry?;
         collect_sites_from_path(entry.path(), &mut sites);
     }
     sites.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
@@ -651,5 +654,23 @@ mod tests {
             vec![1, 8]
         );
         fs::remove_dir_all(&ws).unwrap();
+    }
+
+    /// A workspace with a valid ratchet file but no `crates/components`
+    /// subtree must fail the walk, not scan clean (this lint has no
+    /// `exists()` guard).
+    #[test]
+    fn missing_scan_root_is_error() {
+        let dir = tempfile::tempdir().expect("temporary dir");
+        let xtask = dir.path().join("scripts").join("xtask");
+        fs::create_dir_all(&xtask).expect("create ratchet dir");
+        fs::write(xtask.join(RATCHET_FILE), "0\n").expect("write ratchet");
+
+        let err = lint_cancel_tokens(dir.path())
+            .expect_err("missing crates/components must fail the walk, not scan clean");
+        assert!(
+            err.contains("cannot walk"),
+            "error must name the walk failure: {err}"
+        );
     }
 }

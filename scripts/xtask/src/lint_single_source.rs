@@ -28,11 +28,13 @@ pub fn lint_single_source(workspace_root: &Path) -> Result<Vec<Violation>, Strin
 
     let mut violations = Vec::new();
 
-    for entry in walkdir::WalkDir::new(&components_dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        &components_dir,
+        walkdir::WalkDir::new(&components_dir)
+            .follow_links(false)
+            .into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
 
         // Only .rs files

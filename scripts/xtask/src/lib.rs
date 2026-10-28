@@ -7,3 +7,4 @@
 
 pub mod archive;
 pub mod bridge_versions;
+pub mod walk;

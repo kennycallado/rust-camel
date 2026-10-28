@@ -400,12 +400,14 @@ pub fn lint_metric_labels_src(src: &str, file_path: &str) -> Result<Vec<Violatio
 pub fn lint_metric_labels(workspace_root: &Path) -> Result<Vec<Violation>, String> {
     let crates_dir = workspace_root.join("crates");
     let mut violations = Vec::new();
-    for entry in WalkDir::new(&crates_dir)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| !is_excluded_dir(e, workspace_root))
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        &crates_dir,
+        WalkDir::new(&crates_dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !is_excluded_dir(e, workspace_root)),
+    ) {
+        let entry = entry?;
         let path = entry.path();
         if !path.is_file() {
             continue;

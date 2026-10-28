@@ -930,12 +930,14 @@ pub fn lint_context_citations(workspace_root: &Path) -> Result<Vec<Violation>, S
         if !dir.exists() {
             continue;
         }
-        for entry in WalkDir::new(&dir)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| !is_excluded_dir(e, workspace_root))
-            .filter_map(|e| e.ok())
-        {
+        for entry in crate::walk::propagate_walk_errors(
+            &dir,
+            WalkDir::new(&dir)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| !is_excluded_dir(e, workspace_root)),
+        ) {
+            let entry = entry?;
             let path = entry.path();
             if !path.is_file() {
                 continue;

@@ -15,6 +15,8 @@ mod lint_test_sleep;
 mod lint_unbounded_wait;
 mod mutants;
 mod scan_state;
+// Shared fail-closed walk helper, consumed by the lint modules via `crate::walk`.
+mod walk;
 
 use xtask::archive;
 use xtask::bridge_versions;
