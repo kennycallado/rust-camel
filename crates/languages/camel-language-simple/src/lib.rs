@@ -130,6 +130,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bool_literal_template_predicate() {
+        let lang = SimpleLanguage::new();
+        let pred = lang.create_predicate("${false}").unwrap();
+        let ex = exchange_with_body("anything");
+        assert!(!pred.matches(&ex).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn test_body_contains() {
         let lang = SimpleLanguage::new();
         let pred = lang.create_predicate("${body} contains 'hello'").unwrap();

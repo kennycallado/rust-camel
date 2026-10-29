@@ -298,7 +298,7 @@ pub trait StepAccumulator: Sized {
     ///
     /// # Example
     /// ```ignore
-    /// route.validate("${body.size()} > 0").to("direct:out")
+    /// route.validate("${body} != null").to("direct:out")
     /// ```
     fn validate(mut self, expression: impl Into<String>) -> Self {
         let source = expression.into();
@@ -3484,13 +3484,13 @@ mod tests {
     fn test_validate_creates_validate_step_with_expression() {
         let route = RouteBuilder::from("direct:in")
             .route_id("validate-prefix-test")
-            .validate("${body.size()} > 0")
+            .validate("${body} != null")
             .build()
             .unwrap();
 
         assert!(matches!(
             &route.steps()[0],
-            BuilderStep::Validate { predicate } if predicate.language == "simple" && predicate.source == "${body.size()} > 0"
+            BuilderStep::Validate { predicate } if predicate.language == "simple" && predicate.source == "${body} != null"
         ));
     }
 

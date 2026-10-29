@@ -1159,7 +1159,7 @@ async fn cxf_consumer_override_403_applies_to_wss_only() {
     // esap's route always fails (validate false) once WSS verification passes, so a
     // signed request proves the Receiver path is a route error, not a WSS fault.
     let yaml_esap = format!(
-        "routes:\n  - id: esap-consumer\n    from: \"cxf://http://127.0.0.1:{port_esap}/cxf/esap?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile=esap\"\n    steps:\n      - to: \"mock:esap-hit\"\n      - validate: \"${{body.size()}} > 100000000\"\n"
+        "routes:\n  - id: esap-consumer\n    from: \"cxf://http://127.0.0.1:{port_esap}/cxf/esap?wsdl={wsdl_path}&service={{http://example.com/hello}}HelloService&port={{http://example.com/hello}}HelloPort&profile=esap\"\n    steps:\n      - to: \"mock:esap-hit\"\n      - validate: \"${{false}}\"\n"
     );
     for route in parse_yaml(&yaml_esap).unwrap() {
         h_esap.add_route(route).await.unwrap();
