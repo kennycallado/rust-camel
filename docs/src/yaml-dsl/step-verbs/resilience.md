@@ -11,7 +11,8 @@ Protected block with catch and finally clauses.
 | `catch` | list | no | Catch clauses |
 | `finally` | object | no | Finally clause |
 
-Each `catch` entry accepts `exception` (list of error kinds), `when` and
+Each `catch` entry accepts `exception` (list of error kinds, taken from the
+[error model table](../../concepts/error-handling.md#error-model)), `when` and
 `on_when` predicates, `disposition` (defaults to `handled`), and `steps`. The
 `finally` object carries an optional `on_when` and a required `steps` list.
 

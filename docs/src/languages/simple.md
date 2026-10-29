@@ -50,7 +50,7 @@ A lightweight expression and predicate language for header, body, property, and 
 
 Simple parses its source once into an AST and reuses it for each Exchange. You build predicates and expressions up front with `create_predicate` and `create_expression`, then move them into route closures. Predicates return a boolean for filter and choice steps. Expressions return a `Value` for enrichment and transformation. The included example constructs four predicates and one expression before the route.
 
-The language evaluates `${header.x}`, `${body}`, and `${exchangeProperty.y}` against the Exchange. Missing headers, properties, and exception messages evaluate to `Value::Null`. Simple also supports language delegation through `${lang:expr}`, which resolves the target language at evaluation time.
+The language evaluates `${header.x}`, `${body}`, and `${exchangeProperty.y}` against the Exchange. Missing headers, properties, and exception lookups evaluate to `Value::Null`. Simple also supports language delegation through `${lang:expr}`, which resolves the target language at evaluation time.
 
 ## Expression and predicate modes
 
@@ -88,7 +88,9 @@ The precedence chain, from lowest to highest:
 | unary minus | `-E` | Negates one integer operand. |
 | atom | literals, lookups, calls, delegation, `( E )` | Parentheses group and count toward the depth limit. |
 
-Lookups are `header.x`, `property.x`, `exchangeProperty.x`, `body`, `body.<path>`, and `exception.message`. A lookup key may contain hyphens when each hyphen is directly followed by a letter or an underscore and the key is written without spaces (`header.some-key`), in standalone and compound positions. A hyphen followed by a digit or whitespace is the subtraction operator, so `header.n-1` is `header.n - 1`. `header.some - key` is therefore a parse error, and the message names the unspaced form. Atoms also include `${language:expr}` delegation and the five calls below.
+Lookups are `header.x`, `property.x`, `exchangeProperty.x`, `body`, `body.<path>`, `exception`, and `exception.message`. A lookup key may contain hyphens when each hyphen is directly followed by a letter or an underscore and the key is written without spaces (`header.some-key`), in standalone and compound positions. A hyphen followed by a digit or whitespace is the subtraction operator, so `header.n-1` is `header.n - 1`. `header.some - key` is therefore a parse error, and the message names the unspaced form. Atoms also include `${language:expr}` delegation and the five calls below.
+
+`exception` renders `<variant_name>: <Display>`, for example `HttpOperationFailed: HTTP GET http://svc/api failed: 500 Internal Server Error`; `exception.message` renders the error's `Display` text alone. Both are `Value::Null` when the exchange carries no error, and the rendering never includes the HTTP response body or other payload data beyond the message.
 
 A bare identifier that names no lookup and no accepted call is a parse error. `x == 1` is therefore rejected; write `property.x == 1`. `now()` is a parse error because Simple has no clock. Inject a timestamp through the Exchange, for example by mapping the `CamelMessageTimestamp` header to the `nowMs` property, then evaluate `int(property.nowMs)`.
 
@@ -124,7 +126,7 @@ Arithmetic uses i64 checked operations. Overflow or underflow fails with `EvalFa
 
 ### Null, missing, and comparison rules
 
-- A missing header, property, exception message, or JSON body field is `Value::Null`.
+- A missing header, property, exception lookup, or JSON body field is `Value::Null`.
 - `null == null` is true. An unset null value does not equal the empty string.
 - Values of incompatible types compare unequal with no error. `!=` is the exact complement of `==`.
 - A numeric string coerces to an exact integer for comparison with a number; the comparison never rounds through f64.

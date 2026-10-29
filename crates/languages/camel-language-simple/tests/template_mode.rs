@@ -252,3 +252,42 @@ async fn template_nested_or_unbalanced_braces_fail_at_creation() {
         );
     }
 }
+
+/// Catch bodies are rendered through the public template seam
+/// (`create_expression` -> `parse_template`), not the internal AST. This pins
+/// both `exception` lookups and the Display-only rendering (no response body).
+#[tokio::test]
+async fn exception_lookups_in_catch_context() {
+    use camel_api::CamelError;
+
+    let mut ex = Exchange::default();
+    ex.set_error(CamelError::HttpOperationFailed {
+        method: "GET".to_string(),
+        url: "http://svc/api".to_string(),
+        status_code: 500,
+        status_text: "Internal Server Error".to_string(),
+        response_body: Some("SECRET-PAYLOAD-BODY".to_string()),
+    });
+
+    let expr = SimpleLanguage::new()
+        .create_expression("kind=${exception} msg=${exception.message}")
+        .expect("template source must compile");
+    let val = expr.evaluate(&ex).await.expect("template must evaluate");
+    let rendered = match val {
+        Value::String(s) => s,
+        other => panic!("expected Value::String, got {other:?}"),
+    };
+    assert_eq!(
+        rendered,
+        "kind=HttpOperationFailed: HTTP GET http://svc/api failed: 500 Internal Server Error \
+         msg=HTTP GET http://svc/api failed: 500 Internal Server Error"
+    );
+    assert!(
+        !rendered.contains("SECRET-PAYLOAD-BODY"),
+        "exception must not leak the HTTP response body"
+    );
+    assert!(
+        !rendered.contains("response_body"),
+        "exception must render Display, never Debug"
+    );
+}

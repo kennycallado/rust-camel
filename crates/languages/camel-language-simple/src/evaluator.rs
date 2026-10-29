@@ -183,6 +183,10 @@ fn eval_leaf(expr: &Expr, exchange: &Exchange) -> Option<Value> {
             Some(err) => Value::String(err.to_string()),
             None => Value::Null,
         },
+        Expr::Exception => match &exchange.error {
+            Some(err) => Value::String(format!("{}: {}", err.variant_name(), err)),
+            None => Value::Null,
+        },
         Expr::StringLit(s) => Value::String(s.clone()),
         Expr::EscapedString(s) => Value::String(s.clone()),
         Expr::IntLit(value) => Value::Number((*value).into()),
@@ -374,6 +378,11 @@ where
 
             Expr::ExceptionMessage => match &ctx.exchange.error {
                 Some(err) => Ok(Value::String(err.to_string())),
+                None => Ok(Value::Null),
+            },
+
+            Expr::Exception => match &ctx.exchange.error {
+                Some(err) => Ok(Value::String(format!("{}: {}", err.variant_name(), err))),
                 None => Ok(Value::Null),
             },
 
@@ -1027,6 +1036,78 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result, Value::String("Error: ".to_string()));
+    }
+
+    #[tokio::test]
+    async fn evaluate_exception_with_error() {
+        let mut ex = Exchange::default();
+        ex.set_error(CamelError::HttpOperationFailed {
+            method: "GET".to_string(),
+            url: "http://svc/api".to_string(),
+            status_code: 500,
+            status_text: "Internal Server Error".to_string(),
+            response_body: Some("SECRET-PAYLOAD-BODY".to_string()),
+        });
+        let result = evaluate(&Expr::Exception, &ex, &None).await.unwrap();
+        let rendered = match &result {
+            Value::String(s) => s.clone(),
+            other => panic!("expected Value::String, got {other:?}"),
+        };
+        assert_eq!(
+            rendered,
+            "HttpOperationFailed: HTTP GET http://svc/api failed: 500 Internal Server Error"
+        );
+        assert!(
+            !rendered.contains("SECRET-PAYLOAD-BODY"),
+            "exception must not leak the HTTP response body"
+        );
+        assert!(
+            !rendered.contains("response_body"),
+            "exception must render Display, never Debug"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_exception_without_error() {
+        let ex = Exchange::default();
+        let result = evaluate(&Expr::Exception, &ex, &None).await.unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn evaluate_exception_interpolation() {
+        let mut ex = Exchange::default();
+        ex.set_error(CamelError::ProcessorError("boom".to_string()));
+        let result = evaluate(
+            &Expr::Interpolated(vec![
+                InterpolatedPart::Literal("caught: ".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::Exception)),
+            ]),
+            &ex,
+            &None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            Value::String("caught: ProcessorError: Processor error: boom".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_exception_interpolation_no_error() {
+        let ex = Exchange::default();
+        let result = evaluate(
+            &Expr::Interpolated(vec![
+                InterpolatedPart::Literal("caught: ".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::Exception)),
+            ]),
+            &ex,
+            &None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, Value::String("caught: ".to_string()));
     }
 
     fn ex_with_headers(pairs: &[(&str, Value)]) -> Exchange {

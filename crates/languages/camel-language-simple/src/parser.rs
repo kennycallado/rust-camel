@@ -44,6 +44,8 @@ pub enum Expr {
     BodyField(Vec<PathSegment>),
     ExchangeProperty(String),
     ExceptionMessage,
+    /// The whole error as `<variant_name>: <Display>`; `Null` when no error.
+    Exception,
     LanguageDelegate {
         language: String,
         expression: String,
@@ -1134,10 +1136,12 @@ fn parse_identifier(word: &str, input: &str) -> Result<Expr, LanguageError> {
     }
 }
 
-/// True when `word` names a Simple lookup: `body`, `exception.message`, or a
-/// scoped path under `body.`, `header.`, `property.`, or `exchangeProperty.`.
+/// True when `word` names a Simple lookup: `body`, `exception`,
+/// `exception.message`, or a scoped path under `body.`, `header.`,
+/// `property.`, or `exchangeProperty.`.
 fn is_lookup_word(word: &str) -> bool {
     word == "body"
+        || word == "exception"
         || word == "exception.message"
         || word.starts_with("body.")
         || word.starts_with("header.")
@@ -1157,8 +1161,8 @@ fn lookup_key_prefix(word: &str) -> Option<&'static str> {
 ///
 /// Only fires when the whole token slice is exactly `Word(left) - Word(right)`
 /// and `left` is a prefix-qualified lookup while `right` is not a lookup.
-/// Keyless lookups (`body`, `exception.message`) and longer/other expressions
-/// keep their original error. Source text only; no exchange data.
+/// Keyless lookups (`body`, `exception`, `exception.message`) and longer/other
+/// expressions keep their original error. Source text only; no exchange data.
 fn retarget_spaced_hyphen_error(
     err: LanguageError,
     tokens: &[Token],
@@ -1236,6 +1240,10 @@ fn parse_expr_atom(s: &str) -> Result<Expr, LanguageError> {
     // distinct from Expr::BodyField, so we special-case it here.
     if s == "body" {
         return Ok(Expr::Body);
+    }
+
+    if s == "exception" {
+        return Ok(Expr::Exception);
     }
 
     if s == "exception.message" {
@@ -1498,6 +1506,23 @@ mod tests {
             Expr::Interpolated(vec![
                 InterpolatedPart::Literal("Error: ".to_string()),
                 InterpolatedPart::Expr(Box::new(Expr::ExceptionMessage)),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_exception_bare() {
+        assert_eq!(parse("${exception}").unwrap(), Expr::Exception);
+    }
+
+    #[test]
+    fn parse_exception_in_interpolation() {
+        let result = parse("Error: ${exception}").unwrap();
+        assert_eq!(
+            result,
+            Expr::Interpolated(vec![
+                InterpolatedPart::Literal("Error: ".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::Exception)),
             ])
         );
     }
