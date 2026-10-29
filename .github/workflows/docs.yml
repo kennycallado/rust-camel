@@ -48,6 +48,8 @@ jobs:
             -p camel-builder \
             -p camel-dsl \
             -p camel-endpoint \
+            -p camel-component-validator \
+            -p camel-xslt \
             --no-deps
       - name: Test Rustdoc examples
         run: |

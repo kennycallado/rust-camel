@@ -167,7 +167,7 @@ impl ValidatorConfig {
     /// the [`MAX_SCHEMA_ALIASES`] cap.
     ///
     /// [`ValidatorConfig::from_uri`] already enforces the cap at parse time
-    /// (via [`schema_alias_cap_violation`]); this is the config-level defense
+    /// (via `schema_alias_cap_violation`); this is the config-level defense
     /// for a programmatically constructed [`ValidatorConfig`], whose fields are
     /// public and can be set to any length. It is called by
     /// `CompiledValidator::compile` before any schema-type dispatch or
