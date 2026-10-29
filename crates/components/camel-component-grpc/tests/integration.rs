@@ -216,6 +216,57 @@ async fn grpc_producer_roundtrip_json() {
 }
 
 #[tokio::test]
+async fn grpc_producer_ignores_http_framing_headers() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let incoming = TcpListenerStream::new(listener);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(GreeterServer::new(GreeterImpl))
+            .serve_with_incoming(incoming)
+            .await
+            .expect("serve");
+    });
+
+    let proto_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/helloworld.proto");
+    let mut producer = GrpcProducer::new(
+        format!("http://127.0.0.1:{}", addr.port()),
+        proto_path,
+        "helloworld.Greeter".to_string(),
+        "SayHello".to_string(),
+        GrpcMode::Unary,
+        None,
+        &default_grpc_config(),
+        test_rt(),
+        "grpc-framing-headers-test",
+    )
+    .expect("producer");
+
+    // Regression for the camel-astro report: the HTTP consumer forwards these
+    // headers; leaking Content-Length makes the h2 stream fail with a protocol
+    // error (rc-5ygse). Custom headers must still be accepted.
+    let mut msg = Message::new(Body::Json(serde_json::json!({"name": "World"})));
+    msg.set_header("Content-Length", "42");
+    msg.set_header("Content-Type", "application/json");
+    msg.set_header("Host", "api.example.com");
+    msg.set_header("Connection", "keep-alive");
+    msg.set_header("x-request-id", "abc");
+    let exchange = Exchange::new(msg);
+
+    let out = producer
+        .ready()
+        .await
+        .expect("poll_ready")
+        .call(exchange)
+        .await
+        .expect("framing headers must not break the gRPC stream");
+    match out.input.body {
+        Body::Json(v) => assert_eq!(v["message"], "Hello World"),
+        other => panic!("expected json body, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn grpc_consumer_roundtrip_json() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

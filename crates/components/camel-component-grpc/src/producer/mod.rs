@@ -388,6 +388,13 @@ impl GrpcProducer {
                     if let Some((key, value)) = pair.split_once('=') {
                         let key = key.trim();
                         let value = value.trim();
+                        if Self::is_reserved_metadata_header(key) {
+                            debug!(
+                                key = %key,
+                                "config metadata dropped: reserved HTTP/gRPC header"
+                            );
+                            continue;
+                        }
                         if let Ok(name) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
                             && let Ok(meta_val) = MetadataValue::try_from(value)
                         {
@@ -449,6 +456,13 @@ impl GrpcProducer {
                     if let Some((key, value)) = pair.split_once('=') {
                         let key = key.trim();
                         let value = value.trim();
+                        if Self::is_reserved_metadata_header(key) {
+                            debug!(
+                                key = %key,
+                                "config metadata dropped: reserved HTTP/gRPC header"
+                            );
+                            continue;
+                        }
                         if let Ok(name) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
                             && let Ok(meta_val) = MetadataValue::try_from(value)
                         {
@@ -528,6 +542,13 @@ impl GrpcProducer {
                     if let Some((key, value)) = pair.split_once('=') {
                         let key = key.trim();
                         let value = value.trim();
+                        if Self::is_reserved_metadata_header(key) {
+                            debug!(
+                                key = %key,
+                                "config metadata dropped: reserved HTTP/gRPC header"
+                            );
+                            continue;
+                        }
                         if let Ok(name) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
                             && let Ok(meta_val) = MetadataValue::try_from(value)
                         {
@@ -599,6 +620,13 @@ impl GrpcProducer {
                     if let Some((key, value)) = pair.split_once('=') {
                         let key = key.trim();
                         let value = value.trim();
+                        if Self::is_reserved_metadata_header(key) {
+                            debug!(
+                                key = %key,
+                                "config metadata dropped: reserved HTTP/gRPC header"
+                            );
+                            continue;
+                        }
                         if let Ok(name) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
                             && let Ok(meta_val) = MetadataValue::try_from(value)
                         {

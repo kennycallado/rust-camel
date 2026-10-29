@@ -105,6 +105,10 @@ routes:
   - id: api-to-grpc
     from: "http://0.0.0.0:8080/api/hello"
     steps:
+      # The HTTP consumer hands the route a streaming body. Materialize it,
+      # then retype it as JSON: the gRPC producer accepts Json or Text only.
+      - stream_cache: true
+      - convert_body_to: json
       - to: "grpc://127.0.0.1:50051/helloworld.Greeter/SayHello?protoFile=helloworld.proto&transport=plaintext"
 ```
 
@@ -112,5 +116,7 @@ The JSON body is validated against the method's proto message: wrong types and u
 clear 400 from the HTTP consumer, with no separate JSON Schema. Custom exchange headers become gRPC
 metadata. HTTP framing and connection headers (`Content-Length`, `Content-Type`, `Host`, `Connection`,
 `Transfer-Encoding`, `TE`, `Trailer`, `Upgrade`, `Keep-Alive`, `Proxy-*`) and gRPC-reserved `grpc-*`
-names do not; the transport owns them. Add `remove_header` only for application headers you do not want
-forwarded.
+names do not; the transport owns them (the same filter applies to `metadata=` pairs). Add `remove_header`
+only for application headers you do not want forwarded. Browser `Authorization` and `Cookie` headers are
+still forwarded unless you remove them. The reply's `Content-Type` comes from the inbound request; set
+`Content-Type` exactly if a route overrides it.
