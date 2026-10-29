@@ -4,6 +4,7 @@ use crate::producer::XsltProducer;
 use camel_component_api::{
     BoxProcessor, CamelError, Consumer, Endpoint, ProducerContext, RuntimeObservability,
 };
+use camel_language_api::Expression;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -13,6 +14,7 @@ pub struct XsltEndpoint {
     compiled: Arc<OnceCell<StylesheetId>>,
     params: Vec<(String, String)>,
     param_from: Vec<(String, String)>,
+    param_expr: Vec<(String, Arc<dyn Expression>)>,
     output_method: Option<String>,
     fail_on_null_body: bool,
     max_payload_bytes: Option<usize>,
@@ -27,6 +29,7 @@ impl XsltEndpoint {
         stylesheet_bytes: Vec<u8>,
         params: Vec<(String, String)>,
         param_from: Vec<(String, String)>,
+        param_expr: Vec<(String, Arc<dyn Expression>)>,
         output_method: Option<String>,
         fail_on_null_body: bool,
         max_payload_bytes: Option<usize>,
@@ -39,6 +42,7 @@ impl XsltEndpoint {
             compiled: Arc::new(OnceCell::new()),
             params,
             param_from,
+            param_expr,
             output_method,
             fail_on_null_body,
             max_payload_bytes,
@@ -76,6 +80,7 @@ impl Endpoint for XsltEndpoint {
             Arc::clone(&self.compiled),
             self.params.clone(),
             self.param_from.clone(),
+            self.param_expr.clone(),
             self.output_method.clone(),
             self.fail_on_null_body,
             self.max_payload_bytes,

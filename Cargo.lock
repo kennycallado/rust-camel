@@ -3072,6 +3072,7 @@ dependencies = [
  "camel-api",
  "camel-bridge",
  "camel-component-api",
+ "camel-language-api",
  "dashmap 6.2.1",
  "prost",
  "protox",

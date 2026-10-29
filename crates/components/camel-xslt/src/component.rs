@@ -378,6 +378,27 @@ impl Component for XsltComponent {
             .read_stylesheet(&endpoint_config.stylesheet_uri)
             .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;
 
+        let mut param_expr: Vec<(String, Arc<dyn camel_language_api::Expression>)> =
+            Vec::with_capacity(endpoint_config.param_expr.len());
+        for (name, source) in &endpoint_config.param_expr {
+            let Some(language) = ctx.resolve_language(&source.language) else {
+                return Err(CamelError::EndpointCreationFailed(format!(
+                    "paramExpr.{name}: unknown language '{}'",
+                    source.language
+                )));
+            };
+            let compiled = language
+                .create_expression(&source.expression)
+                .map_err(|err| {
+                    CamelError::EndpointCreationFailed(format!(
+                        "paramExpr.{name}: failed to compile '{}' expression{}",
+                        source.language,
+                        crate::producer::language_error_tail(&err)
+                    ))
+                })?;
+            param_expr.push((name.clone(), Arc::from(compiled)));
+        }
+
         let health_check = crate::health::XsltHealthCheck::new(Arc::clone(self.runtime.state_rx()));
         ctx.register_current_route_health_check(Arc::new(health_check));
 
@@ -386,6 +407,7 @@ impl Component for XsltComponent {
             stylesheet_bytes,
             endpoint_config.params,
             endpoint_config.param_from,
+            param_expr,
             endpoint_config.output_method,
             endpoint_config.fail_on_null_body,
             endpoint_config.max_payload_bytes,
@@ -397,8 +419,160 @@ impl Component for XsltComponent {
 
 #[cfg(test)]
 mod tests {
-    use camel_component_api::NetworkRetryPolicy;
+    use super::XsltComponent;
+    use crate::config::XsltComponentConfig;
+    use camel_api::{AsyncHealthCheck, Exchange, MetricsCollector, PlatformService, Value};
+    use camel_component_api::{Component, ComponentContext, NetworkRetryPolicy};
+    use camel_language_api::{Expression, Language, LanguageError, Predicate};
+    use std::sync::Arc;
     use std::time::Duration;
+
+    struct FakeLanguage;
+
+    impl Language for FakeLanguage {
+        fn name(&self) -> &'static str {
+            "test-lang"
+        }
+
+        fn create_expression(&self, script: &str) -> Result<Box<dyn Expression>, LanguageError> {
+            if script == "boom" {
+                return Err(LanguageError::ParseError {
+                    expr: "SECRET-EXPR".to_string(),
+                    reason: "bad syntax".to_string(),
+                });
+            }
+            Ok(Box::new(FakeExpression {
+                script: script.to_string(),
+            }))
+        }
+
+        fn create_predicate(&self, _script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
+            Err(LanguageError::NotSupported {
+                feature: "predicates".to_string(),
+                language: "test-lang".to_string(),
+            })
+        }
+    }
+
+    struct FakeExpression {
+        script: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Expression for FakeExpression {
+        async fn evaluate(&self, _exchange: &Exchange) -> Result<Value, LanguageError> {
+            Ok(Value::String(self.script.clone()))
+        }
+    }
+
+    struct FakeContext;
+
+    impl ComponentContext for FakeContext {
+        fn resolve_component(&self, _scheme: &str) -> Option<Arc<dyn Component>> {
+            None
+        }
+
+        fn resolve_language(&self, name: &str) -> Option<Arc<dyn Language>> {
+            if name == "test-lang" {
+                Some(Arc::new(FakeLanguage))
+            } else {
+                None
+            }
+        }
+
+        fn metrics(&self) -> Arc<dyn MetricsCollector> {
+            Arc::new(camel_api::NoOpMetrics)
+        }
+
+        fn platform_service(&self) -> Arc<dyn PlatformService> {
+            Arc::new(camel_api::NoopPlatformService::default())
+        }
+
+        fn register_route_health_check(&self, _route_id: &str, _check: Arc<dyn AsyncHealthCheck>) {}
+
+        fn unregister_route_health_check(&self, _route_id: &str) {}
+    }
+
+    fn write_test_stylesheet() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("create temp stylesheet");
+        std::fs::write(file.path(), b"<xsl:stylesheet version=\"1.0\"/>")
+            .expect("write temp stylesheet");
+        file
+    }
+
+    #[test]
+    fn param_expr_compiles_at_endpoint_creation() {
+        let stylesheet = write_test_stylesheet();
+        let uri = format!(
+            "xslt:{}?paramExpr.seq=test-lang:${{header.seq}}",
+            stylesheet.path().display()
+        );
+        let component = XsltComponent::new(XsltComponentConfig::default());
+
+        let endpoint = component
+            .create_endpoint(&uri, &FakeContext)
+            .expect("known language should compile at endpoint creation");
+
+        assert!(
+            endpoint.uri().contains("paramExpr.seq=test-lang"),
+            "endpoint must retain the original URI, got: {}",
+            endpoint.uri()
+        );
+    }
+
+    #[test]
+    fn param_expr_unknown_language_fails_creation() {
+        let stylesheet = write_test_stylesheet();
+        let uri = format!(
+            "xslt:{}?paramExpr.p=nosuch:literal",
+            stylesheet.path().display()
+        );
+        let component = XsltComponent::new(XsltComponentConfig::default());
+
+        let err = match component.create_endpoint(&uri, &FakeContext) {
+            Ok(_) => panic!("unknown paramExpr language must fail endpoint creation"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+
+        assert!(message.contains("paramExpr.p"), "got: {message}");
+        assert!(message.contains("nosuch"), "got: {message}");
+    }
+
+    #[test]
+    fn param_expr_compile_error_fails_creation() {
+        let stylesheet = write_test_stylesheet();
+        let uri = format!(
+            "xslt:{}?paramExpr.p=test-lang:boom",
+            stylesheet.path().display()
+        );
+        let component = XsltComponent::new(XsltComponentConfig::default());
+
+        let err = match component.create_endpoint(&uri, &FakeContext) {
+            Ok(_) => panic!("failing paramExpr compilation must fail endpoint creation"),
+            Err(err) => err,
+        };
+        let message = err.to_string();
+
+        assert!(message.contains("paramExpr.p"), "got: {message}");
+        assert!(message.contains("test-lang"), "got: {message}");
+        assert!(
+            !message.contains("SECRET-EXPR"),
+            "parse expression source leaked: {message}"
+        );
+        assert!(
+            !message.contains("bad syntax"),
+            "parse reason leaked: {message}"
+        );
+        assert!(
+            !message.contains("boom"),
+            "raw expression source leaked: {message}"
+        );
+        assert!(
+            message.contains("details withheld"),
+            "expected redacted detail marker: {message}"
+        );
+    }
 
     /// Regression: max_attempts=N → exactly N invocations (caught OpenSearch off-by-one 1f5c4c2a).
     /// Replicates the exact retry loop from `transform_with_retry` (component.rs:129-157):

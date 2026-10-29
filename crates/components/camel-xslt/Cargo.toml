@@ -18,6 +18,7 @@ readme = "README.md"
 [dependencies]
 camel-api = { workspace = true }
 camel-component-api = { workspace = true }
+camel-language-api = { workspace = true }
 camel-bridge = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }

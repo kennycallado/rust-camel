@@ -36,6 +36,19 @@ impl Default for XsltComponentConfig {
     }
 }
 
+/// One `paramExpr.<name>` endpoint option: an explicit language name plus
+/// the expression source evaluated against each exchange.
+///
+/// The endpoint URI encodes an entry as `paramExpr.<name>=<language>:<expression>`,
+/// for example `xslt:/my.xslt?paramExpr.seq=simple:${header.seq}`. Everything
+/// after the first colon is the verbatim expression source, so expressions may
+/// themselves contain colons.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamExprSource {
+    pub language: String,
+    pub expression: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct XsltEndpointConfig {
     pub stylesheet_uri: String,
@@ -73,6 +86,16 @@ pub struct XsltEndpointConfig {
     /// `Object` header values fail closed; `String`, `Number`, and `Bool`
     /// values are converted to strings.
     pub param_from: Vec<(String, String)>,
+    /// Stylesheet parameters resolved from expressions evaluated per exchange.
+    ///
+    /// Each entry maps a stylesheet parameter name to an explicit language plus
+    /// expression source, specified in the endpoint URI as
+    /// `paramExpr.<name>=<language>:<expression>` (e.g.
+    /// `xslt:/my.xslt?paramExpr.seq=simple:${header.seq}`). The value is split
+    /// on the first colon: the part before it is the language name registered
+    /// with the language registry, and the remainder is the verbatim expression
+    /// source. Both parts must be non-empty.
+    pub param_expr: Vec<(String, ParamExprSource)>,
     pub output_method: Option<String>,
     /// Maximum number of compiled stylesheets to keep in the transformer cache.
     /// A value of `None` means unlimited (use bridge default), while `Some(0)`
@@ -121,6 +144,7 @@ impl XsltEndpointConfig {
 
         let mut params = Vec::new();
         let mut param_from = Vec::new();
+        let mut param_expr = Vec::new();
         let mut output_method = None;
         let mut transformer_cache_size = None;
         let mut fail_on_null_body = false;
@@ -182,6 +206,35 @@ impl XsltEndpointConfig {
                     continue;
                 }
 
+                // Grouped with the other dynamic-parameter namespaces for
+                // readability; `paramExpr.` does not overlap `param.` because
+                // `strip_prefix` requires the dot to follow immediately.
+                if let Some(name) = key.strip_prefix("paramExpr.") {
+                    if name.is_empty() {
+                        return Err(CamelError::EndpointCreationFailed(format!(
+                            "invalid paramExpr option: {key}"
+                        )));
+                    }
+                    let Some((language, expression)) = value.split_once(':') else {
+                        return Err(CamelError::EndpointCreationFailed(format!(
+                            "invalid paramExpr option: {key}"
+                        )));
+                    };
+                    if language.is_empty() || expression.is_empty() {
+                        return Err(CamelError::EndpointCreationFailed(format!(
+                            "invalid paramExpr option: {key}"
+                        )));
+                    }
+                    param_expr.push((
+                        name.to_string(),
+                        ParamExprSource {
+                            language: language.to_string(),
+                            expression: expression.to_owned(),
+                        },
+                    ));
+                    continue;
+                }
+
                 if let Some(param_key) = key.strip_prefix("param.")
                     && !param_key.is_empty()
                 {
@@ -194,6 +247,7 @@ impl XsltEndpointConfig {
             stylesheet_uri: stylesheet_path,
             params,
             param_from,
+            param_expr,
             output_method,
             transformer_cache_size,
             fail_on_null_body,
@@ -337,6 +391,87 @@ mod tests {
             cfg.param_from,
             vec![("seq".to_string(), "seqHeader".to_string())]
         );
+    }
+
+    #[test]
+    fn parses_param_expr_uri() {
+        let cfg = XsltEndpointConfig::from_uri("xslt:/t.xslt?paramExpr.seq=simple:${header.seq}")
+            .unwrap();
+        assert_eq!(cfg.param_expr.len(), 1);
+        let (name, source) = &cfg.param_expr[0];
+        assert_eq!(name, "seq");
+        assert_eq!(source.language, "simple");
+        assert_eq!(source.expression, "${header.seq}");
+        assert!(cfg.params.is_empty());
+        assert!(cfg.param_from.is_empty());
+    }
+
+    #[test]
+    fn param_expr_keeps_colons_in_expression() {
+        let cfg = XsltEndpointConfig::from_uri("xslt:/t.xslt?paramExpr.x=simple:a:b:c").unwrap();
+        assert_eq!(cfg.param_expr.len(), 1);
+        let (name, source) = &cfg.param_expr[0];
+        assert_eq!(name, "x");
+        assert_eq!(source.language, "simple");
+        assert_eq!(source.expression, "a:b:c");
+    }
+
+    #[test]
+    fn rejects_empty_param_expr_name() {
+        let err = XsltEndpointConfig::from_uri("xslt:/t.xslt?paramExpr.=simple:x").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("paramExpr."),
+            "expected paramExpr name error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_param_expr_language() {
+        let err = XsltEndpointConfig::from_uri("xslt:/t.xslt?paramExpr.x=:expr").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("paramExpr.x"),
+            "expected paramExpr language error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_param_expr_expression() {
+        let err = XsltEndpointConfig::from_uri("xslt:/t.xslt?paramExpr.x=simple:").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("paramExpr.x"),
+            "expected paramExpr expression error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_param_expr_without_separator() {
+        let err = XsltEndpointConfig::from_uri("xslt:/t.xslt?paramExpr.x=simpleexpr").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("paramExpr.x"),
+            "expected paramExpr separator error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn static_param_from_and_param_expr_coexist() {
+        let cfg = XsltEndpointConfig::from_uri(
+            "xslt:/t.xslt?param.mode=debug&paramFrom.seq=seqHeader&paramExpr.count=simple:1",
+        )
+        .unwrap();
+        assert_eq!(cfg.params, vec![("mode".to_string(), "debug".to_string())]);
+        assert_eq!(
+            cfg.param_from,
+            vec![("seq".to_string(), "seqHeader".to_string())]
+        );
+        assert_eq!(cfg.param_expr.len(), 1);
+        let (name, source) = &cfg.param_expr[0];
+        assert_eq!(name, "count");
+        assert_eq!(source.language, "simple");
+        assert_eq!(source.expression, "1");
     }
 
     #[test]

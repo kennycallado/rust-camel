@@ -2,6 +2,7 @@ use crate::client::{BridgeState, StylesheetId, XsltBridgeClient};
 use crate::component::XsltBridgeRuntime;
 use camel_api::body::DEFAULT_MATERIALIZE_LIMIT;
 use camel_component_api::{Body, CamelError, Exchange};
+use camel_language_api::Expression;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -10,27 +11,85 @@ use tokio::sync::OnceCell;
 use tower::Service;
 use tracing::{debug, warn};
 
+/// Safe diagnostic tail for a language error.
+///
+/// Only trusted metadata is rendered: the typed class and the contractually
+/// redacted detail. The raw `Display` of the error is never used because
+/// variants such as `EvalError` and `ParseError` can embed exchange or
+/// expression text.
+pub(crate) fn language_error_tail(err: &camel_language_api::LanguageError) -> String {
+    let class_suffix = err
+        .class()
+        .map(|class| format!(" [{class}]"))
+        .unwrap_or_default();
+    let detail = err
+        .redacted_detail()
+        .unwrap_or_else(|| "details withheld".to_string());
+    format!("{class_suffix}: {detail}")
+}
+
 /// Resolve the XSLT parameters for a single exchange.
 ///
-/// Starts from the endpoint's static parameters and appends one entry per
-/// `paramFrom.<name>=<header-key>` mapping. Dynamic entries are appended after
-/// the statics and the bridge client collects the Vec into a `HashMap` where
-/// later entries win, so a present header overrides a static parameter with the
-/// same name. Missing or JSON-null headers are skipped, leaving the static
-/// value (if any) in place.
+/// Parameters are resolved in three layers, then collected by the bridge client
+/// into a `HashMap` where later entries win:
 ///
-/// Only scalar headers (string, number, boolean) can be mapped. Array and
-/// object headers fail closed: the returned error names the parameter, the
-/// header key, and the JSON type, but never the header content.
-pub(crate) fn resolve_params(
+/// 1. Static `param.<name>=<value>` entries, always present.
+/// 2. `paramExpr.<name>=<language>:<expression>` entries, evaluated per
+///    exchange and appended after the statics.
+/// 3. `paramFrom.<name>=<header-key>` entries, appended last.
+///
+/// Because the bridge map is later-wins, the effective precedence for a given
+/// name is `header > paramExpr > static`. A missing or JSON-null value in a
+/// higher layer contributes no entry, so resolution falls through to the layer
+/// below. Concretely:
+///
+/// | static | paramExpr   | header    | result   |
+/// |--------|-------------|-----------|----------|
+/// | `x`    | absent      | absent    | `x`      |
+/// | `x`    | `42`        | absent    | `42`     |
+/// | `x`    | `42`        | `9`       | `9`      |
+/// | `x`    | `null`      | absent    | `x`      |
+/// | `x`    | `42`        | `null`    | `42`     |
+/// | absent | `42`        | absent    | `42`     |
+///
+/// Only scalar values (string, number, boolean) can be mapped from either
+/// source. Array and object values fail closed: the returned error names the
+/// parameter (and, for `paramFrom`, the header key) and the JSON type, but never
+/// the value content. An expression evaluation error aborts resolution with a
+/// `ProcessorError` that names the parameter and the language error's redacted
+/// classification, but never the raw language error text or exchange content.
+pub(crate) async fn resolve_params(
     statics: &[(String, String)],
+    param_expr: &[(String, Arc<dyn Expression>)],
     param_from: &[(String, String)],
-    headers: &std::collections::HashMap<String, camel_api::value::Value>,
+    exchange: &Exchange,
 ) -> Result<Vec<(String, String)>, CamelError> {
     let mut resolved = statics.to_vec();
 
+    for (name, expression) in param_expr {
+        let value = expression.evaluate(exchange).await.map_err(|lang_err| {
+            CamelError::ProcessorError(format!(
+                "XSLT parameter '{name}' from expression failed{}",
+                language_error_tail(&lang_err)
+            ))
+        })?;
+        match value {
+            camel_api::value::Value::Null => {}
+            camel_api::value::Value::String(s) => resolved.push((name.clone(), s)),
+            camel_api::value::Value::Number(n) => resolved.push((name.clone(), n.to_string())),
+            camel_api::value::Value::Bool(b) => resolved.push((name.clone(), b.to_string())),
+            other @ (camel_api::value::Value::Array(_) | camel_api::value::Value::Object(_)) => {
+                return Err(CamelError::ProcessorError(format!(
+                    "XSLT parameter '{name}' from expression has unsupported type '{}': only \
+                     string, number, and boolean values are supported",
+                    camel_api::value::value_type_name(&other)
+                )));
+            }
+        }
+    }
+
     for (name, header_key) in param_from {
-        let Some(value) = headers.get(header_key) else {
+        let Some(value) = exchange.input.headers.get(header_key) else {
             continue;
         };
         match value {
@@ -81,6 +140,8 @@ pub struct XsltProducer {
     compiled: Arc<OnceCell<StylesheetId>>,
     params: Vec<(String, String)>,
     param_from: Vec<(String, String)>,
+    // Compiled once at endpoint creation, evaluated per exchange in `call`.
+    param_expr: Vec<(String, Arc<dyn Expression>)>,
     output_method: Option<String>,
     fail_on_null_body: bool,
     max_payload_bytes: Option<usize>,
@@ -95,6 +156,7 @@ impl XsltProducer {
         compiled: Arc<OnceCell<StylesheetId>>,
         params: Vec<(String, String)>,
         param_from: Vec<(String, String)>,
+        param_expr: Vec<(String, Arc<dyn Expression>)>,
         output_method: Option<String>,
         fail_on_null_body: bool,
         max_payload_bytes: Option<usize>,
@@ -106,6 +168,7 @@ impl XsltProducer {
             compiled,
             params,
             param_from,
+            param_expr,
             output_method,
             fail_on_null_body,
             max_payload_bytes,
@@ -175,6 +238,7 @@ impl Service<Exchange> for XsltProducer {
         let stylesheet_bytes = self.stylesheet_bytes.clone();
         let compiled = Arc::clone(&self.compiled);
         let statics = self.params.clone();
+        let param_expr = self.param_expr.clone();
         let param_from = self.param_from.clone();
         let output_method = self.output_method.clone();
         let fail_on_null_body = self.fail_on_null_body;
@@ -186,7 +250,7 @@ impl Service<Exchange> for XsltProducer {
             // Per-exchange resolution happens before the stylesheet init and
             // before the body is taken so a rejected header leaves the
             // exchange untouched.
-            let params = match resolve_params(&statics, &param_from, &exchange.input.headers) {
+            let params = match resolve_params(&statics, &param_expr, &param_from, &exchange).await {
                 Ok(params) => params,
                 Err(err) => {
                     // log-policy: handler-owned
@@ -329,8 +393,75 @@ mod tests {
         }
     }
 
+    /// Scriptable value emitted by [`TestExpression`].
+    enum TestOutput {
+        /// Emit the given value unchanged.
+        Emit(Value),
+        /// Fail evaluation with a free-form `EvalError` carrying a sentinel.
+        Fail,
+        /// Fail evaluation with a contractually redacted `EvalFailure` detail.
+        RedactedFail,
+        /// Await the shared barrier, then echo the named exchange header.
+        BarrierEchoHeader {
+            key: &'static str,
+            barrier: Arc<tokio::sync::Barrier>,
+        },
+    }
+
+    /// `Expression` fake that drives `paramExpr` resolution without a language
+    /// runtime.
+    struct TestExpression(TestOutput);
+
+    #[async_trait::async_trait]
+    impl Expression for TestExpression {
+        async fn evaluate(
+            &self,
+            exchange: &Exchange,
+        ) -> Result<Value, camel_language_api::LanguageError> {
+            match &self.0 {
+                TestOutput::Emit(value) => Ok(value.clone()),
+                TestOutput::Fail => Err(camel_language_api::LanguageError::EvalError(
+                    "SECRET-SENTINEL exchange-body-text".to_string(),
+                )),
+                TestOutput::RedactedFail => Err(camel_language_api::LanguageError::EvalFailure {
+                    class: camel_api::ExpressionErrorClass::Runtime,
+                    position: None,
+                    detail: Some("redacted-ok".to_string()),
+                }),
+                TestOutput::BarrierEchoHeader { key, barrier } => {
+                    barrier.wait().await;
+                    Ok(exchange
+                        .input
+                        .headers
+                        .get(*key)
+                        .cloned()
+                        .unwrap_or(Value::Null))
+                }
+            }
+        }
+    }
+
+    fn test_expr(output: TestOutput) -> Arc<dyn Expression> {
+        Arc::new(TestExpression(output))
+    }
+
+    fn param_expr_set(pairs: Vec<(&str, TestOutput)>) -> Vec<(String, Arc<dyn Expression>)> {
+        pairs
+            .into_iter()
+            .map(|(name, output)| (name.to_string(), test_expr(output)))
+            .collect()
+    }
+
     fn make_recording_producer(
         statics: Vec<(String, String)>,
+        param_from: Vec<(String, String)>,
+    ) -> (XsltProducer, CaptureLog) {
+        make_recording_producer_with_expr(statics, Vec::new(), param_from)
+    }
+
+    fn make_recording_producer_with_expr(
+        statics: Vec<(String, String)>,
+        param_expr: Vec<(String, Arc<dyn Expression>)>,
         param_from: Vec<(String, String)>,
     ) -> (XsltProducer, CaptureLog) {
         let channel = tonic::transport::Channel::from_static("http://[::]:0").connect_lazy();
@@ -356,6 +487,7 @@ mod tests {
             compiled,
             statics,
             param_from,
+            param_expr,
             None,
             false,
             None,
@@ -427,6 +559,7 @@ mod tests {
             Arc::new(OnceCell::new()),
             vec![],
             vec![],
+            vec![],
             None,
             false,
             max_payload_bytes,
@@ -486,6 +619,7 @@ mod tests {
             compiled,
             vec![],
             vec![],
+            vec![],
             None,
             false,
             Some(100),
@@ -524,6 +658,7 @@ mod tests {
         let mut producer = XsltProducer::new(
             vec![],
             compiled,
+            vec![],
             vec![],
             vec![],
             None,
@@ -796,6 +931,330 @@ mod tests {
         assert_eq!(
             log[0],
             HashMap::from([("mode".to_string(), "debug".to_string())])
+        );
+    }
+
+    #[tokio::test]
+    async fn param_expr_value_reaches_transform() {
+        let (mut producer, captures) = make_recording_producer_with_expr(
+            vec![],
+            param_expr_set(vec![(
+                "sequenceNumber",
+                TestOutput::Emit(Value::String("42".into())),
+            )]),
+            vec![],
+        );
+
+        call_producer(&mut producer, exchange_without_header())
+            .await
+            .expect("transform should succeed");
+
+        let log = capture_snapshot(&captures);
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].get("sequenceNumber").map(String::as_str), Some("42"));
+    }
+
+    #[tokio::test]
+    async fn param_expr_overrides_static_param() {
+        let (mut producer, captures) = make_recording_producer_with_expr(
+            vec![("sequenceNumber".to_string(), "static".to_string())],
+            param_expr_set(vec![(
+                "sequenceNumber",
+                TestOutput::Emit(Value::String("42".into())),
+            )]),
+            vec![],
+        );
+
+        call_producer(&mut producer, exchange_without_header())
+            .await
+            .expect("transform should succeed");
+
+        let log = capture_snapshot(&captures);
+        assert_eq!(
+            log[0],
+            HashMap::from([("sequenceNumber".to_string(), "42".to_string())])
+        );
+    }
+
+    #[tokio::test]
+    async fn header_overrides_param_expr() {
+        let (mut producer, captures) = make_recording_producer_with_expr(
+            vec![("sequenceNumber".to_string(), "static".to_string())],
+            param_expr_set(vec![(
+                "sequenceNumber",
+                TestOutput::Emit(Value::String("42".into())),
+            )]),
+            param_set(&[("sequenceNumber", "seqHeader")]),
+        );
+
+        call_producer(
+            &mut producer,
+            exchange_with_header("seqHeader", Value::String("9".into())),
+        )
+        .await
+        .expect("transform should succeed");
+
+        let log = capture_snapshot(&captures);
+        assert_eq!(
+            log[0],
+            HashMap::from([("sequenceNumber".to_string(), "9".to_string())])
+        );
+    }
+
+    #[tokio::test]
+    async fn null_param_expr_falls_back_to_static() {
+        let (mut producer, captures) = make_recording_producer_with_expr(
+            vec![("sequenceNumber".to_string(), "static".to_string())],
+            param_expr_set(vec![("sequenceNumber", TestOutput::Emit(Value::Null))]),
+            vec![],
+        );
+
+        call_producer(&mut producer, exchange_without_header())
+            .await
+            .expect("transform should succeed");
+
+        let log = capture_snapshot(&captures);
+        assert_eq!(
+            log[0],
+            HashMap::from([("sequenceNumber".to_string(), "static".to_string())])
+        );
+    }
+
+    #[tokio::test]
+    async fn null_header_falls_back_to_param_expr() {
+        let (mut producer, captures) = make_recording_producer_with_expr(
+            vec![],
+            param_expr_set(vec![(
+                "sequenceNumber",
+                TestOutput::Emit(Value::String("42".into())),
+            )]),
+            param_set(&[("sequenceNumber", "seqHeader")]),
+        );
+
+        call_producer(
+            &mut producer,
+            exchange_with_header("seqHeader", Value::Null),
+        )
+        .await
+        .expect("transform should succeed");
+
+        let log = capture_snapshot(&captures);
+        assert_eq!(
+            log[0],
+            HashMap::from([("sequenceNumber".to_string(), "42".to_string())])
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_header_still_uses_param_expr() {
+        let (mut producer, captures) = make_recording_producer_with_expr(
+            vec![],
+            param_expr_set(vec![(
+                "sequenceNumber",
+                TestOutput::Emit(Value::String("42".into())),
+            )]),
+            param_set(&[("sequenceNumber", "seqHeader")]),
+        );
+
+        call_producer(&mut producer, exchange_without_header())
+            .await
+            .expect("transform should succeed");
+
+        let log = capture_snapshot(&captures);
+        assert_eq!(
+            log[0],
+            HashMap::from([("sequenceNumber".to_string(), "42".to_string())])
+        );
+    }
+
+    #[tokio::test]
+    async fn number_and_bool_param_expr_convert() {
+        let (mut producer, captures) = make_recording_producer_with_expr(
+            vec![],
+            param_expr_set(vec![
+                ("n", TestOutput::Emit(Value::from(7u64))),
+                ("b", TestOutput::Emit(Value::Bool(true))),
+            ]),
+            vec![],
+        );
+
+        call_producer(&mut producer, exchange_without_header())
+            .await
+            .expect("transform should succeed");
+
+        let log = capture_snapshot(&captures);
+        assert_eq!(log[0].get("n").map(String::as_str), Some("7"));
+        assert_eq!(log[0].get("b").map(String::as_str), Some("true"));
+    }
+
+    #[tokio::test]
+    async fn complex_param_expr_fails_closed_without_payload() {
+        let array: Value = "[\"sentinel\"]"
+            .parse()
+            .expect("literal must be valid JSON array");
+        let (mut producer, captures) = make_recording_producer_with_expr(
+            vec![],
+            param_expr_set(vec![("p", TestOutput::Emit(array))]),
+            vec![],
+        );
+
+        let err = call_producer(&mut producer, exchange_without_header())
+            .await
+            .expect_err("array expression result must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("'p'"), "error must name the param: {msg}");
+        assert!(msg.contains("array"), "error must name the type: {msg}");
+        assert!(
+            !msg.contains("sentinel"),
+            "error leaked expression value: {msg}"
+        );
+
+        let object: Value = "{\"k\":\"sentinel\"}"
+            .parse()
+            .expect("literal must be valid JSON object");
+        let (mut producer, captures_object) = make_recording_producer_with_expr(
+            vec![],
+            param_expr_set(vec![("p", TestOutput::Emit(object))]),
+            vec![],
+        );
+
+        let err = call_producer(&mut producer, exchange_without_header())
+            .await
+            .expect_err("object expression result must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("'p'"), "error must name the param: {msg}");
+        assert!(msg.contains("object"), "error must name the type: {msg}");
+        assert!(
+            !msg.contains("sentinel"),
+            "error leaked expression value: {msg}"
+        );
+
+        assert!(
+            capture_snapshot(&captures).is_empty(),
+            "no transform may run when param resolution fails"
+        );
+        assert!(
+            capture_snapshot(&captures_object).is_empty(),
+            "no transform may run when param resolution fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn param_expr_evaluation_error_propagates() {
+        let (mut producer, captures) = make_recording_producer_with_expr(
+            vec![],
+            param_expr_set(vec![("sequenceNumber", TestOutput::Fail)]),
+            vec![],
+        );
+
+        let err = call_producer(&mut producer, exchange_without_header())
+            .await
+            .expect_err("evaluation failure must abort the call");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'sequenceNumber'"),
+            "error must name the param: {msg}"
+        );
+        assert!(
+            msg.contains("details withheld"),
+            "error must use a redacted detail marker: {msg}"
+        );
+        assert!(
+            !msg.contains("SECRET-SENTINEL"),
+            "error leaked free-form language payload: {msg}"
+        );
+        assert!(
+            !msg.contains("scripted evaluation failure"),
+            "error leaked raw language display text: {msg}"
+        );
+
+        assert!(
+            capture_snapshot(&captures).is_empty(),
+            "no transform may run when evaluation fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn param_expr_eval_failure_surfaces_redacted_detail() {
+        let (mut producer, captures) = make_recording_producer_with_expr(
+            vec![],
+            param_expr_set(vec![("p", TestOutput::RedactedFail)]),
+            vec![],
+        );
+
+        let err = call_producer(&mut producer, exchange_without_header())
+            .await
+            .expect_err("evaluation failure must abort the call");
+        let msg = err.to_string();
+        assert!(msg.contains("'p'"), "error must name the param: {msg}");
+        assert!(
+            msg.contains("redacted-ok"),
+            "contractually redacted detail must be surfaced: {msg}"
+        );
+        assert!(
+            msg.contains("[runtime]"),
+            "typed class must be surfaced: {msg}"
+        );
+
+        assert!(
+            capture_snapshot(&captures).is_empty(),
+            "no transform may run when evaluation fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_exchanges_keep_distinct_param_values() {
+        // Both producer clones share the same expression `Arc`, so they share
+        // this barrier. Each evaluation parks inside `evaluate` until the other
+        // arrives, forcing genuine overlap at the suspension point.
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let (producer, captures) = make_recording_producer_with_expr(
+            vec![],
+            param_expr_set(vec![(
+                "v",
+                TestOutput::BarrierEchoHeader {
+                    key: "exprIn",
+                    barrier: Arc::clone(&barrier),
+                },
+            )]),
+            vec![],
+        );
+
+        let mut first = producer.clone();
+        let mut second = producer.clone();
+        let (first_result, second_result) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::join!(
+                    call_producer(
+                        &mut first,
+                        exchange_with_header("exprIn", Value::String("A".into())),
+                    ),
+                    call_producer(
+                        &mut second,
+                        exchange_with_header("exprIn", Value::String("B".into())),
+                    ),
+                )
+            })
+            .await
+            .expect("concurrent evaluation must finish within 5s");
+        first_result.expect("first concurrent transform should succeed");
+        second_result.expect("second concurrent transform should succeed");
+
+        let log = capture_snapshot(&captures);
+        assert_eq!(log.len(), 2, "expected one transform per exchange: {log:?}");
+        let values: Vec<&str> = log
+            .iter()
+            .filter_map(|params| params.get("v").map(String::as_str))
+            .collect();
+        assert_eq!(
+            values.iter().filter(|value| **value == "A").count(),
+            1,
+            "exactly one call must carry A: {log:?}"
+        );
+        assert_eq!(
+            values.iter().filter(|value| **value == "B").count(),
+            1,
+            "exactly one call must carry B: {log:?}"
         );
     }
 }

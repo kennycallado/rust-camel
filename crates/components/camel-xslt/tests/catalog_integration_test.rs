@@ -9,8 +9,8 @@ fn xslt_component_metadata_non_empty_via_override() {
 
     assert_eq!(
         meta.uri_options.len(),
-        6,
-        "xslt Component metadata must have exactly 6 uri_options"
+        7,
+        "xslt Component metadata must have exactly 7 uri_options"
     );
 
     let param_option = meta

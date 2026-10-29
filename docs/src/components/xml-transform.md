@@ -32,7 +32,7 @@ The Producer bounds the body before forwarding. When `maxPayloadBytes` is absent
 ### URI
 
 ```text
-xslt:<stylesheet>[?output=<method>][&param.<name>=<value>][&paramFrom.<name>=<header-key>][&transformerCacheSize=<n>][&failOnNullBody=<true|false>][&maxPayloadBytes=<n>]
+xslt:<stylesheet>[?output=<method>][&param.<name>=<value>][&paramFrom.<name>=<header-key>][&paramExpr.<name>=<language>:<expression>][&transformerCacheSize=<n>][&failOnNullBody=<true|false>][&maxPayloadBytes=<n>]
 ```
 
 | Parameter | Required | Default | Description |
@@ -41,6 +41,7 @@ xslt:<stylesheet>[?output=<method>][&param.<name>=<value>][&paramFrom.<name>=<he
 | `output` | no | stylesheet default | Output method: `xml`, `html`, or `text`. |
 | `param.<name>` | no | — | XSLT parameter. Forwarded as a string. Becomes an `<xsl:param>` value inside the stylesheet. |
 | `paramFrom.<name>` | no | — | Resolves the stylesheet parameter `<name>` from the exchange header named `<header-key>` at transform time. Overrides a same-name `param.<name>` when the header is present. |
+| `paramExpr.<name>` | no | — | Evaluates `<language>:<expression>` on each exchange and forwards the result as the stylesheet parameter `<name>`. The language name is required. The value splits at the first colon, so the expression may contain colons. |
 | `transformerCacheSize` | no | unlimited | Maximum compiled stylesheets the bridge keeps in cache. `0` disables caching. |
 | `failOnNullBody` | no | `false` | Return an error when the body is empty. When `false`, the empty body is forwarded. |
 | `maxPayloadBytes` | no | 10 MiB | Reject Exchange bodies larger than this before sending to the bridge. `0` is rejected. |
@@ -63,7 +64,23 @@ xslt:/etc/transforms/order.xslt?paramFrom.sequenceNumber=seqHeader
 
 The value of the header `seqHeader` becomes the `sequenceNumber` stylesheet parameter.
 
-When both forms are configured for the same name, the header wins while it is present:
+An expression parameter evaluates a registered language expression on each exchange:
+
+```text
+xslt:/etc/transforms/order.xslt?paramExpr.sequenceNumber=simple:${header.seq}
+```
+
+The language name before the first colon is required. `simple` is a registered language name. Everything after the first colon is the expression source, so the expression may contain colons.
+
+When more than one form is configured for the same name, the highest layer with a non-null value wins:
+
+| Layer (highest wins) | Source | Null/absent behavior |
+| --- | --- | --- |
+| 1 | `paramFrom` header present (non-null) | — |
+| 2 | `paramExpr` evaluates non-null | Null/evaluation-omitted ⇒ falls to layer 3 |
+| 3 | static `param` | — |
+
+For example:
 
 ```text
 xslt:/etc/transforms/order.xslt?param.sequenceNumber=0&paramFrom.sequenceNumber=seqHeader
@@ -71,9 +88,11 @@ xslt:/etc/transforms/order.xslt?param.sequenceNumber=0&paramFrom.sequenceNumber=
 
 With the header present, the header value is used. With the header absent, the static `0` is used.
 
-When the header is not set or is `Null`, the dynamic entry is omitted and a same-name static `param.<name>`, if configured, is used instead. Only when neither supplies a value is the parameter omitted entirely; no empty string is sent.
+When a higher layer has no value, resolution falls through to the next layer. An absent or `Null` `paramFrom` header falls through to a same-name `paramExpr` or static `param`. A `Null` or omitted expression result falls through to a same-name static `param`. Only when no layer supplies a value is the parameter omitted entirely; no empty string is sent.
 
-Value rules apply per header. `String` headers are forwarded verbatim. `Number` and `Bool` headers are converted to their canonical text, for example `7` or `true`. `Array` and `Object` headers fail the exchange with an error that names the parameter and the header; the value content is not included. Parameters are resolved per exchange and never leak between exchanges.
+Header values follow scalar rules. `String` headers are forwarded verbatim. `Number` and `Bool` headers are converted to their canonical text, for example `7` or `true`. `Array` and `Object` headers fail the exchange with an error that names the parameter and the header; the value content is not included. Expression results follow the same scalar rules: string, number, and boolean values are forwarded; arrays, maps, and other unsupported types fail closed with a payload-free error that names the parameter. An expression evaluation error propagates as a transform error.
+
+An unknown language name or an expression compile error fails Endpoint creation. The error names the parameter and the language. Parameters are resolved per exchange and never leak between exchanges.
 
 ## XJ
 

@@ -43,6 +43,12 @@ pub(super) struct XsltMetadataDescriptor {
         desc = "Open namespace: paramFrom.<name>=<header-key> stylesheet parameters resolved from exchange headers"
     )]
     pub _param_from: Vec<(String, String)>,
+
+    #[uri_param(
+        pattern = "paramExpr.",
+        desc = "Open namespace: paramExpr.<name>=<language>:<expression> stylesheet parameters resolved per exchange"
+    )]
+    pub _param_expr: Vec<(String, String)>,
 }
 
 #[cfg(test)]
@@ -63,6 +69,7 @@ mod tests {
             "output",
             "param",
             "paramFrom",
+            "paramExpr",
             "transformerCacheSize",
         ];
         expected.sort();
@@ -92,6 +99,28 @@ mod tests {
             param.kind,
             OptionKind::String,
             "param option kind must be String"
+        );
+    }
+
+    #[test]
+    fn xslt_metadata_param_expr_option_has_prefix_pattern() {
+        let meta: ComponentMetadata = XsltMetadataDescriptor::metadata();
+        let param_expr = meta
+            .uri_options
+            .iter()
+            .find(|o| o.name == "paramExpr")
+            .expect("paramExpr option must exist");
+        assert_eq!(
+            param_expr.pattern,
+            Some(UriOptionMatch::Prefix {
+                separator: "paramExpr.".to_string()
+            }),
+            "paramExpr option must have Prefix pattern with separator 'paramExpr.'"
+        );
+        assert_eq!(
+            param_expr.kind,
+            OptionKind::String,
+            "paramExpr option kind must be String"
         );
     }
 
