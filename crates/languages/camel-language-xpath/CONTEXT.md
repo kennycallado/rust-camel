@@ -40,6 +40,15 @@ XML or XPath libraries.
   security posture above.
 - Evaluation has no wall-clock timeout. The query is trusted operator
   configuration, while the untrusted XML input has a byte bound.
+- Non-finite XPath numbers (`+Inf`, `-Inf`, `NaN`) fail the step with a typed
+  refusal of class `arithmetic` instead of producing Null. Nodeset subtree
+  shape remains tracked in rc-oz4f7.
+- Finite integral results in `[-2^63, 2^63)` project to JSON `i64` form, and
+  those in `[2^63, 2^64)` to `u64` form. Fractional results and integral
+  results outside those intervals stay in float form. The projection is
+  exactness-checked, not a lossy cast.
+- Predicates accept only XPath boolean results. There is no truthiness
+  coercion from nodesets, strings, or numbers.
 
 ## API evolution
 

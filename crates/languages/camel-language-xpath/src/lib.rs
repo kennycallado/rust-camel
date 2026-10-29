@@ -120,6 +120,61 @@ fn compile_xpath(query: &str) -> Result<sxd_xpath::XPath, LanguageError> {
         })
 }
 
+/// Project an XPath number into its JSON representation.
+///
+/// XPath numbers are IEEE-754 doubles. Non-finite results (`+Inf`, `-Inf`,
+/// `NaN`) are refused with an [`ExpressionErrorClass::Arithmetic`] failure
+/// because JSON has no representation for them. Finite integral values are
+/// projected to the narrowest exact JSON integer form:
+///
+/// - `[-2^63, 2^63)` → `i64`. Exact because every integral `f64` strictly
+///   below `2^63` is at most `2^63 - 1024`.
+/// - `[2^63, 2^64)` → `u64`. Exact because every integral `f64` below `2^64`
+///   is at most `2^64 - 2048`.
+/// - Everything else → `f64` float form. Fractional values and integral
+///   values outside the two half-open intervals above stay floats.
+///
+/// The `n >= 2^63` guard on the `u64` branch is mandatory: without it a large
+/// negative integral (for example `-2^64`) would enter the branch and `as u64`
+/// would saturate to `0`, which is lossy.
+///
+/// `-0.0` projects to the integer `0` because JSON has no negative-zero
+/// integer form.
+///
+/// The float arm's `Number::from_f64` cannot return `None` for finite input;
+/// for totality its `None` case maps to the same non-finite refusal instead of
+/// panicking.
+fn number_to_json(n: f64) -> Result<JsonValue, LanguageError> {
+    let non_finite_error = |value: f64| {
+        let label = if value.is_nan() {
+            "NaN"
+        } else if value.is_sign_negative() {
+            "-Inf"
+        } else {
+            "+Inf"
+        };
+        LanguageError::EvalFailure {
+            class: ExpressionErrorClass::Arithmetic,
+            position: None,
+            detail: Some(format!("xpath number result is not finite: {label}")),
+        }
+    };
+    if !n.is_finite() {
+        return Err(non_finite_error(n));
+    }
+    if n.fract() == 0.0 && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&n)
+    {
+        return Ok(JsonValue::Number(serde_json::Number::from(n as i64)));
+    }
+    if n.fract() == 0.0 && (9_223_372_036_854_775_808.0..18_446_744_073_709_551_616.0).contains(&n)
+    {
+        return Ok(JsonValue::Number(serde_json::Number::from(n as u64)));
+    }
+    serde_json::Number::from_f64(n)
+        .map(JsonValue::Number)
+        .ok_or_else(|| non_finite_error(n))
+}
+
 fn run_query(
     xpath: &sxd_xpath::XPath,
     xml: &str,
@@ -177,9 +232,7 @@ fn run_query(
             }
         }
         SxdValue::Boolean(b) => JsonValue::Bool(b),
-        SxdValue::Number(n) => serde_json::Number::from_f64(n)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
+        SxdValue::Number(n) => number_to_json(n)?,
         SxdValue::String(s) => JsonValue::String(s),
     })
 }
@@ -267,7 +320,20 @@ impl Language for XPathLanguage {
 }
 
 #[cfg(test)]
+mod conformance_tests;
+
+#[cfg(test)]
+mod number_boundary_tests;
+
+#[cfg(test)]
+mod property_tests;
+
+#[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
 mod tests {
+    use super::test_support::{eval_meta, mapped_class_and_cause};
     use super::*;
     use camel_api::{CamelError, ExpressionErrorClass};
     use camel_language_api::Message;
@@ -293,33 +359,6 @@ mod tests {
 
     async fn empty_exchange() -> Exchange {
         Exchange::new(Message::default())
-    }
-
-    fn eval_meta() -> camel_language_api::EvalMeta {
-        camel_language_api::EvalMeta {
-            language: "xpath".to_string(),
-            route_id: "r1".to_string(),
-            step_id: "s1".to_string(),
-            verb: "set_body".to_string(),
-            target: None,
-        }
-    }
-
-    /// Map a language error through the production carrier and return its
-    /// class, the rendered cause, and the mapped error.
-    fn mapped_class_and_cause(err: LanguageError) -> (ExpressionErrorClass, String, CamelError) {
-        let mapped = camel_language_api::to_expression_failed(err, &eval_meta());
-        let (class, cause) = match &mapped {
-            CamelError::ExpressionFailed { class, cause, .. } => (
-                *class,
-                cause
-                    .as_ref()
-                    .expect("expected a redacted cause")
-                    .to_string(),
-            ),
-            other => panic!("expected ExpressionFailed, got {other:?}"),
-        };
-        (class, cause, mapped)
     }
 
     /// Render every link of the error chain starting at `err`.
@@ -392,18 +431,6 @@ mod tests {
         let ex = exchange_with_xml("<root><item>a</item><item>b</item><item>c</item></root>").await;
         let result = expr.evaluate(&ex).await.unwrap();
         assert_eq!(result, JsonValue::String("b".to_string()));
-    }
-
-    #[tokio::test]
-    async fn expression_count_function() {
-        let lang = XPathLanguage::new();
-        let expr = lang.create_expression("count(/root/item)").unwrap();
-        let ex = exchange_with_xml("<root><item>a</item><item>b</item></root>").await;
-        let result = expr.evaluate(&ex).await.unwrap();
-        assert_eq!(
-            result,
-            JsonValue::Number(serde_json::Number::from_f64(2.0).unwrap())
-        );
     }
 
     #[tokio::test]
