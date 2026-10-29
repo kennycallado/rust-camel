@@ -96,8 +96,9 @@ async fn run_finally_body(
 /// Surface `failure` after running finally.
 ///
 /// Used for a failed catch predicate (the predicate error surfaced as the
-/// main failure), the no-catch-matched path, and the Propagate / fail-closed
-/// path (the original try error).
+/// main failure), the no-catch-matched path, the Propagate / fail-closed
+/// path (the original try error), and the catch-body-failure path (the catch
+/// error is the surfaced failure).
 /// `failure` becomes the main failure (Camel parity: a throwing finally body
 /// restores it; Stop in finally still stops the outer route; a failed finally
 /// `on_when` predicate supersedes it).
@@ -182,6 +183,11 @@ impl OutcomePipeline for DoTrySegment {
                                 }
                             }
                         }
+                        // Pre-clone for the catch-body-failure path:
+                        // `PipelineOutcome::Failed` drops the exchange, so the
+                        // finally body still needs a pre-catch snapshot (same
+                        // pattern as `exchange_for_unmatched` above).
+                        let catch_input_ex = current_ex.branch_clone();
                         match catch.body.run(current_ex).await {
                             // Stop in catch: skip finally AND outer route halts.
                             PipelineOutcome::Stopped(stopped_ex) => {
@@ -208,12 +214,13 @@ impl OutcomePipeline for DoTrySegment {
                                     }
                                 }
                             }
-                            // Catch-body Failed: surface THAT error to outer
-                            // route. Per ADR-0025 invariant #4 ("doTry is a
-                            // local error-handler island"), a failing catch
-                            // body propagates as Failed — it does NOT re-enter
-                            // the catch chain (no recursive catch-of-catch in
-                            // Camel). Skip remaining catches and finally.
+                            // Catch-body Failed: Java try/catch/finally
+                            // parity (JLS §14.20.2) — the finally body runs
+                            // exactly once even when the catch body fails,
+                            // and the catch error remains the surfaced
+                            // failure. No catch-of-catch: the doTry island
+                            // invariant (ADR-0025 #4) is unchanged, so the
+                            // catch chain is NOT re-entered.
                             PipelineOutcome::Failed(catch_err) => {
                                 // Sealed failure envelope: the catch error
                                 // stays the main error (returned below);
@@ -227,7 +234,12 @@ impl OutcomePipeline for DoTrySegment {
                                     "do_try catch block failed; catch error supersedes original"
                                 );
                                 record_span_error(&catch_err);
-                                return PipelineOutcome::Failed(catch_err);
+                                return fail_after_finally(
+                                    &mut self.finally,
+                                    catch_input_ex,
+                                    catch_err,
+                                )
+                                .await;
                             }
                         }
                     }
@@ -246,7 +258,8 @@ impl OutcomePipeline for DoTrySegment {
                 }
             };
             // 3. Run finally if present (skip if try/catch returned Stopped —
-            // already returned above; skip if catch-body Failed — also returned).
+            // already returned above; catch-body failures flow through
+            // `fail_after_finally` and return there).
             match run_finally_body(&mut self.finally, returned_ex).await {
                 Ok(ex) => PipelineOutcome::Completed(ex),
                 Err(FinallyOutcome::Stopped(e)) => PipelineOutcome::Stopped(*e),
@@ -367,6 +380,71 @@ mod tests {
 
     fn seg_record(counter: Arc<AtomicU32>) -> camel_api::OutcomeSegment {
         camel_api::OutcomeSegment::new(Box::new(RecordCall { counter }))
+    }
+
+    struct CountThenFail {
+        counter: Arc<AtomicU32>,
+        err: CamelError,
+    }
+
+    impl OutcomePipeline for CountThenFail {
+        fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+            Box::new(CountThenFail {
+                counter: Arc::clone(&self.counter),
+                err: self.err.clone(),
+            })
+        }
+        fn run<'a>(
+            &'a mut self,
+            _exchange: Exchange,
+        ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+            let c = Arc::clone(&self.counter);
+            let e = self.err.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                PipelineOutcome::Failed(e)
+            })
+        }
+    }
+
+    fn seg_count_then_fail(counter: Arc<AtomicU32>, err: CamelError) -> camel_api::OutcomeSegment {
+        camel_api::OutcomeSegment::new(Box::new(CountThenFail { counter, err }))
+    }
+
+    struct CountThenStop {
+        counter: Arc<AtomicU32>,
+        mutator: Arc<dyn Fn(&mut Exchange) + Send + Sync>,
+    }
+
+    impl OutcomePipeline for CountThenStop {
+        fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+            Box::new(CountThenStop {
+                counter: Arc::clone(&self.counter),
+                mutator: Arc::clone(&self.mutator),
+            })
+        }
+        fn run<'a>(
+            &'a mut self,
+            mut exchange: Exchange,
+        ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+            let c = Arc::clone(&self.counter);
+            let m = Arc::clone(&self.mutator);
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                m(&mut exchange);
+                PipelineOutcome::Stopped(exchange)
+            })
+        }
+    }
+
+    fn seg_count_then_stop(
+        counter: Arc<AtomicU32>,
+        mutator: impl Fn(&mut Exchange) + Send + Sync + 'static,
+    ) -> camel_api::OutcomeSegment {
+        camel_api::OutcomeSegment::new(Box::new(CountThenStop {
+            counter,
+            mutator: Arc::new(mutator),
+        }))
     }
 
     // ── 5 New tests for DoTrySegment (ADR-0025) ──
@@ -993,8 +1071,12 @@ mod tests {
         );
     }
 
+    /// Java try/catch/finally parity (JLS §14.20.2): a failing catch body
+    /// does not skip finally, and the catch error remains the surfaced
+    /// failure. This rebuilds the catch-and-finally coverage lost with the
+    /// deleted builder-only `DoTryService`.
     #[tokio::test]
-    async fn catch_throws_skips_finally_and_propagates_catch_err() {
+    async fn catch_body_failure_runs_finally_once_then_returns_catch_err() {
         let finally_flag = Arc::new(AtomicU32::new(0));
         let mut seg = DoTrySegment {
             try_body: seg_fail(CamelError::ProcessorError("orig".into())),
@@ -1012,26 +1094,79 @@ mod tests {
         );
         assert_eq!(
             finally_flag.load(Ordering::SeqCst),
-            0,
-            "compiled segment skips finally after a failed catch body (ADR-0025 invariant #4)"
+            1,
+            "finally must run exactly once even when the catch body fails (Java try/catch/finally parity)"
         );
     }
 
+    /// Real exercise of the finally/catch parity rule: the finally body runs
+    /// (and throws) even when the catch body fails, and the catch error still
+    /// wins over the finally error (Camel parity: a throwing finally restores
+    /// the previous error). Before the catch-body-failure path ran finally,
+    /// this test passed vacuously.
     #[tokio::test]
     async fn catch_throws_and_throwing_finally_still_returns_catch_err() {
+        let finally_flag = Arc::new(AtomicU32::new(0));
         let mut seg = DoTrySegment {
             try_body: seg_fail(CamelError::ProcessorError("orig".into())),
             catches: vec![catch_variant(
                 &["ProcessorError"],
                 seg_fail(CamelError::Io("catch-fail".into())),
             )],
-            finally: Some(finally_seg(seg_fail(CamelError::Config("fin-fail".into())))),
+            finally: Some(finally_seg(seg_count_then_fail(
+                finally_flag.clone(),
+                CamelError::Config("fin-fail".into()),
+            ))),
         };
 
         let result = seg.run(Exchange::default()).await;
         assert!(
             matches!(result, PipelineOutcome::Failed(CamelError::Io(_))),
             "catch_err (Io) must be returned over finally_err (Config), got {result:?}"
+        );
+        assert_eq!(
+            finally_flag.load(Ordering::SeqCst),
+            1,
+            "finally must run exactly once even when its own body fails"
+        );
+    }
+
+    /// Stop in finally takes precedence over the pending catch failure: the
+    /// outer route stops with the finally exchange (mutation preserved), and
+    /// the finally body still ran exactly once. Pins the `Stopped` arm of
+    /// `fail_after_finally` on the catch-body-failure path.
+    #[tokio::test]
+    async fn catch_body_failure_then_finally_stops_stops_outer_route() {
+        let finally_flag = Arc::new(AtomicU32::new(0));
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("orig".into())),
+            catches: vec![catch_variant(
+                &["ProcessorError"],
+                seg_fail(CamelError::Io("catch-fail".into())),
+            )],
+            finally: Some(finally_seg(seg_count_then_stop(
+                finally_flag.clone(),
+                |ex| {
+                    ex.set_property("finally_stopped_marker", camel_api::Value::Bool(true));
+                },
+            ))),
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        match result {
+            PipelineOutcome::Stopped(ex) => {
+                assert_eq!(
+                    ex.properties.get("finally_stopped_marker"),
+                    Some(&camel_api::Value::Bool(true)),
+                    "finally exchange mutation must be preserved in Stopped"
+                );
+            }
+            other => panic!("expected Stopped, got {other:?}"),
+        }
+        assert_eq!(
+            finally_flag.load(Ordering::SeqCst),
+            1,
+            "finally must run exactly once before the outer route stops"
         );
     }
 

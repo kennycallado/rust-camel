@@ -53,3 +53,13 @@ Per oracle M3 strategy: parallel construction, per-EIP switch. Build infrastruct
 ## Status update (2026-10-27)
 
 Nine structural EIPs originally carried dual implementations (a Tower `*Service` plus an `OutcomeSegment`). rc-ut13q (commit `7b1467aa3`, "drop the dual structural Tower services") deleted seven — Filter, Choice, Loop, Throttle, Splitter, Multicast, and LoadBalancer — because the compiler only ever drove the segments. Mission 420 (commit `6e48e00eb`) deleted `DoTryService`, which only the Rust builder `.do_try()` path used; the builder now compiles to `DoTrySegment`. `StreamingSplitterService` was deleted by rc-ltbwi (mission 422) once the builder gained `BuilderStep::StreamSplit`. The dual shape is not supported API.
+
+## Status update (2026-10-29)
+
+Invariant #4 makes doTry a local error-handler island. It does not decide the finally block's fate. The pre-fix `DoTrySegment` read it as license to skip `doFinally` when a catch body failed. That reading was wrong.
+
+The fix restores Java try/catch/finally parity (JLS §14.20.2). The finally body runs exactly once even when the catch body fails. The catch error stays the surfaced failure. A throwing finally body restores the previous catch error under the existing `fail_after_finally` parity rule. Stop in finally still stops the outer route.
+
+The island property is unchanged. The catch chain is not re-entered. The outer handler sees only the unhandled failure.
+
+Traceability: corrected under bd rc-h3i8d. The declarative runtime is `DoTrySegment` since the `DoTryService` deletion (see the 2026-10-27 update).
