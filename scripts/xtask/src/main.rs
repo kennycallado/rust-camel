@@ -1635,11 +1635,15 @@ fn package_release(
             std::fs::File::create(&archive_path).map_err(|e| format!("Cannot create zip: {e}"))?;
         let mut zip_writer = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
-        for entry in walkdir::WalkDir::new(build_dir.join(&dist_name))
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
+        let dist_root = build_dir.join(&dist_name);
+        for entry in crate::walk::propagate_walk_errors(
+            &dist_root,
+            walkdir::WalkDir::new(&dist_root).into_iter(),
+        ) {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
             let rel = entry
                 .path()
                 .strip_prefix(&build_dir)
@@ -2538,11 +2542,11 @@ pub fn lint_unwrap(workspace_root: &Path) -> Result<Vec<Violation>, String> {
 
     let mut violations = Vec::new();
 
-    for entry in WalkDir::new(workspace_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        workspace_root,
+        WalkDir::new(workspace_root).follow_links(false).into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
 
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
@@ -3123,11 +3127,11 @@ pub fn lint_unsafe_safety(workspace_root: &Path) -> Result<Vec<Violation>, Strin
 
     let mut violations = Vec::new();
 
-    for entry in WalkDir::new(workspace_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        workspace_root,
+        WalkDir::new(workspace_root).follow_links(false).into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
 
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
@@ -3264,11 +3268,11 @@ pub fn lint_glob_imports(workspace_root: &Path) -> Result<Vec<Violation>, String
 
     let mut violations = Vec::new();
 
-    for entry in WalkDir::new(workspace_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        workspace_root,
+        WalkDir::new(workspace_root).follow_links(false).into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
 
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
@@ -3661,11 +3665,11 @@ pub fn lint_non_exhaustive(workspace_root: &Path) -> Result<Vec<Violation>, Stri
             continue;
         }
 
-        for entry in WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
+        for entry in crate::walk::propagate_walk_errors(
+            root,
+            WalkDir::new(root).follow_links(false).into_iter(),
+        ) {
+            let entry = entry?;
             let path = entry.path();
 
             if path.extension().and_then(|e| e.to_str()) != Some("rs") {
@@ -3828,11 +3832,11 @@ pub fn lint_ignore(workspace_root: &Path) -> Result<Vec<Violation>, String> {
         }
     }
 
-    for entry in WalkDir::new(workspace_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        workspace_root,
+        WalkDir::new(workspace_root).follow_links(false).into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
 
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
@@ -4236,11 +4240,11 @@ fn count_inline_escapes(workspace_root: &Path) -> Result<Vec<(String, usize)>, S
     use walkdir::WalkDir;
     let escape_re = regex::Regex::new(r"//\s*allow-log-levels").expect("valid regex"); // allow-unwrap
     let mut locations = Vec::new();
-    for entry in WalkDir::new(workspace_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        workspace_root,
+        WalkDir::new(workspace_root).follow_links(false).into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
@@ -4412,11 +4416,11 @@ pub fn lint_log_levels(workspace_root: &Path) -> Result<Vec<Violation>, String> 
 
     let mut violations = Vec::new();
 
-    for entry in WalkDir::new(workspace_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        workspace_root,
+        WalkDir::new(workspace_root).follow_links(false).into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
 
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
@@ -4740,11 +4744,11 @@ pub fn lint_log_redaction(workspace_root: &Path) -> Result<Vec<Violation>, Strin
         .collect();
 
     let mut violations = Vec::new();
-    for entry in WalkDir::new(workspace_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        workspace_root,
+        WalkDir::new(workspace_root).follow_links(false).into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
@@ -5019,11 +5023,11 @@ pub fn lint_secrets(workspace_root: &Path) -> Result<Vec<SecretViolation>, Strin
 
     let mut violations = Vec::new();
 
-    for entry in WalkDir::new(workspace_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        workspace_root,
+        WalkDir::new(workspace_root).follow_links(false).into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
 
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
@@ -5637,11 +5641,11 @@ pub fn lint_credential_derives(workspace_root: &Path) -> Result<Vec<SecretViolat
 
     let mut violations = Vec::new();
 
-    for entry in WalkDir::new(workspace_root)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        workspace_root,
+        WalkDir::new(workspace_root).follow_links(false).into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
 
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
@@ -5728,10 +5732,11 @@ fn discover_publishable_crates(workspace_root: &Path) -> Result<Vec<WorkspaceCra
     let mut crates: Vec<WorkspaceCrate> = Vec::new();
 
     let crates_dir = workspace_root.join("crates");
-    for entry in walkdir::WalkDir::new(&crates_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        &crates_dir,
+        walkdir::WalkDir::new(&crates_dir).into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
         if path.file_name() != Some(std::ffi::OsStr::new("Cargo.toml")) {
             continue;
@@ -6192,10 +6197,11 @@ fn lint_publish_cycles(workspace_root: &Path) -> Result<(), String> {
     }
 
     let crates_dir = workspace_root.join("crates");
-    for entry in walkdir::WalkDir::new(&crates_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in crate::walk::propagate_walk_errors(
+        &crates_dir,
+        walkdir::WalkDir::new(&crates_dir).into_iter(),
+    ) {
+        let entry = entry?;
         let path = entry.path();
         if path.file_name() != Some(std::ffi::OsStr::new("Cargo.toml")) {
             continue;
@@ -9570,19 +9576,23 @@ mod artifact_hash {
         if !change_dir.is_dir() {
             return Err(format!("change dir '{}' not found", change_dir.display()));
         }
-        let mut files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(change_dir)
-            .sort_by_file_name()
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .map(|e| e.into_path())
-            .filter(|p| {
-                !matches!(
-                    p.file_name().and_then(|n| n.to_str()),
-                    Some(".bless.json") | Some(".review.json")
-                )
-            })
-            .collect();
+        let mut files: Vec<std::path::PathBuf> = crate::walk::propagate_walk_errors(
+            change_dir,
+            walkdir::WalkDir::new(change_dir)
+                .sort_by_file_name()
+                .into_iter(),
+        )
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+        .filter(|p| {
+            !matches!(
+                p.file_name().and_then(|n| n.to_str()),
+                Some(".bless.json") | Some(".review.json")
+            )
+        })
+        .collect();
         files.sort();
 
         let mut hasher = Sha256::new();
@@ -9636,6 +9646,42 @@ mod artifact_hash {
             let h1 = compute(d).unwrap(); // allow-unwrap
             std::fs::write(dir.path().join("spec.md"), "hello EVIL").unwrap(); // allow-unwrap
             assert_ne!(h1, compute(d).unwrap()); // allow-unwrap
+        }
+
+        /// Readability is probed directly instead of trusting a `USER` identity
+        /// check: if the mode change does not make the directory unreadable
+        /// (root, or a mode-insensitive filesystem), the test skips.
+        #[cfg(unix)]
+        #[test]
+        fn unreadable_subdir_is_err() {
+            use std::os::unix::fs::PermissionsExt;
+
+            let dir = tempfile::tempdir().unwrap(); // allow-unwrap
+            std::fs::write(dir.path().join("proposal.md"), "hello").unwrap(); // allow-unwrap
+            let locked = dir.path().join("locked");
+            std::fs::create_dir(&locked).unwrap(); // allow-unwrap
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap(); // allow-unwrap
+
+            if std::fs::read_dir(&locked).is_ok() {
+                std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap(); // allow-unwrap
+                eprintln!("skipped: directory still readable (root or mode-insensitive fs)");
+                return;
+            }
+
+            let d = dir.path().to_str().unwrap(); // allow-unwrap
+            let result = compute(d);
+
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap(); // allow-unwrap
+
+            let err = result.expect_err("unreadable subdir must fail the hash walk");
+            assert!(
+                err.contains("cannot walk"),
+                "error must name the walk failure: {err}"
+            );
+            assert!(
+                err.contains("locked"),
+                "error must name the unreadable directory: {err}"
+            );
         }
     }
 }
@@ -10191,5 +10237,134 @@ mod lint_log_redaction_tests {
             "fn f(url: &str) { tracing::debug!(location = ?url.clone(), \"hit\"); }",
         )]);
         assert_eq!(vs.len(), 1, "{vs:?}");
+    }
+}
+
+/// Regression tests for mission 440: walk IO errors must fail the lint instead
+/// of being silently dropped, and the error must name the affected path.
+#[cfg(test)]
+mod walk_fail_closed_tests {
+    use super::*;
+
+    #[test]
+    fn missing_root_is_err_naming_path() {
+        let dir = tempfile::tempdir().expect("temporary dir");
+        let root = dir.path().join("nonexistent-root-440");
+        let root_display = root.display().to_string();
+        let err = lint_unwrap(&root).expect_err("missing root must fail the lint");
+
+        assert!(
+            err.contains("cannot walk"),
+            "error must name the walk failure: {err}"
+        );
+        assert!(
+            err.contains(&root_display),
+            "error must name the affected path: {err}"
+        );
+    }
+
+    #[test]
+    fn missing_root_propagates_across_workspace_lints() {
+        macro_rules! assert_missing_root_errs {
+            ($root:expr; $($lint:path),+ $(,)?) => {{
+                let root_display = $root.display().to_string();
+                $(
+                    let err = $lint(&$root)
+                        .expect_err(concat!(stringify!($lint), " must fail on missing root"));
+                    assert!(
+                        err.contains("cannot walk"),
+                        concat!(stringify!($lint), " error must name the walk failure: {}"),
+                        err
+                    );
+                    assert!(
+                        err.contains(&root_display),
+                        concat!(stringify!($lint), " error must name the affected path: {}"),
+                        err
+                    );
+                )+
+            }};
+        }
+
+        let dir = tempfile::tempdir().expect("temporary dir");
+        let root = dir.path().join("nonexistent-root-440");
+        assert_missing_root_errs!(
+            root;
+            lint_glob_imports,
+            lint_unsafe_safety,
+            lint_secrets,
+            lint_log_levels,
+            lint_log_redaction,
+            lint_credential_derives,
+        );
+    }
+
+    /// Readability is probed directly instead of trusting a `USER` identity
+    /// check: if the mode change does not make the directory unreadable (root,
+    /// or a mode-insensitive filesystem), the test skips.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_subdir_is_err_naming_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temporary dir");
+        let root = dir.path();
+        let src = root.join("src");
+        let locked = src.join("locked");
+        std::fs::create_dir_all(&locked).expect("create src/locked");
+        std::fs::write(src.join("a.rs"), "fn a() {}\n").expect("write src/a.rs");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("make locked unreadable");
+
+        if std::fs::read_dir(&locked).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+                .expect("restore locked permissions");
+            eprintln!("skipped: directory still readable (root or mode-insensitive fs)");
+            return;
+        }
+
+        let result = lint_unwrap(root);
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+            .expect("restore locked permissions");
+
+        let err = result.expect_err("unreadable subdir must fail the lint");
+        assert!(
+            err.contains("cannot walk"),
+            "error must name the walk failure: {err}"
+        );
+        assert!(
+            err.contains("locked"),
+            "error must name the unreadable directory: {err}"
+        );
+    }
+
+    #[test]
+    fn discover_publishable_crates_missing_crates_dir_is_err() {
+        let dir = tempfile::tempdir().expect("temporary dir");
+        let crates_dir = dir.path().join("crates");
+        let crates_display = crates_dir.display().to_string();
+        let err = discover_publishable_crates(dir.path())
+            .expect_err("missing crates/ must fail crate discovery");
+
+        assert!(
+            err.contains("cannot walk"),
+            "error must name the walk failure: {err}"
+        );
+        assert!(
+            err.contains(&crates_display),
+            "error must name the missing crates directory: {err}"
+        );
+    }
+
+    #[test]
+    fn lint_non_exhaustive_missing_root_stays_permissive() {
+        let dir = tempfile::tempdir().expect("temporary dir");
+        let violations =
+            lint_non_exhaustive(dir.path()).expect("missing contract roots must stay permissive");
+
+        assert!(
+            violations.is_empty(),
+            "missing contract roots must not report violations: {violations:?}"
+        );
     }
 }
