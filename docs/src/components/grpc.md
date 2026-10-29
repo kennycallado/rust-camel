@@ -94,3 +94,23 @@ Transport setup also fails closed (ADR-0033). Every Endpoint declares `transport
 Routes that send streaming responses use `GrpcStreamObserver`. The observer exposes three methods: `on_next`, `on_error`, and `on_completed`. The route calls these methods to push response messages onto the gRPC stream.
 
 **Reference**: [gRPC crate CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-component-grpc/CONTEXT.md). Example source: [`examples/grpc-example`](https://github.com/kennycallado/rust-camel/tree/main/examples/grpc-example).
+
+## HTTP to gRPC
+
+The Producer accepts an Exchange from any consumer, so an HTTP/JSON endpoint can feed a gRPC service on the
+same route:
+
+```yaml
+routes:
+  - id: api-to-grpc
+    from: "http://0.0.0.0:8080/api/hello"
+    steps:
+      - to: "grpc://127.0.0.1:50051/helloworld.Greeter/SayHello?protoFile=helloworld.proto&transport=plaintext"
+```
+
+The JSON body is validated against the method's proto message: wrong types and unknown fields return a
+clear 400 from the HTTP consumer, with no separate JSON Schema. Custom exchange headers become gRPC
+metadata. HTTP framing and connection headers (`Content-Length`, `Content-Type`, `Host`, `Connection`,
+`Transfer-Encoding`, `TE`, `Trailer`, `Upgrade`, `Keep-Alive`, `Proxy-*`) and gRPC-reserved `grpc-*`
+names do not; the transport owns them. Add `remove_header` only for application headers you do not want
+forwarded.
