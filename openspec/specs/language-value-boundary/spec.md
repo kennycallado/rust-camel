@@ -1661,7 +1661,8 @@ a comparison SHALL NOT chain (at most one comparison per level). Sum
 operators are `+` and `-` (left-associative); the product operator is `*`;
 unary minus negates its operand; parentheses group sub-expressions. Atoms
 are the existing literals, lookups (`header.x`, `property.x`,
-`exchangeProperty.x`, `body`, `body.<path>`, `exception.message`),
+`exchangeProperty.x`, `body`, `body.<path>`, `exception`,
+`exception.message`),
 `${language:expr}` delegation, and calls to exactly `int`, `string`,
 `default`, `min`, `max`. A bare identifier that names no lookup and no
 accepted call SHALL be a parse error; in particular `now()` SHALL be a parse
@@ -1723,6 +1724,17 @@ construction SHALL be parse errors.
 - **WHEN** the predicates `9223372036854775807 + 1` and
   `-9223372036854775808 - 1` evaluate
 - **THEN** both SHALL fail with `EvalFailure(Arithmetic)`
+
+#### Scenario: Exception atom renders kind-prefixed message
+
+- **GIVEN** an expression `${exception}` and the exchange carries an
+  `HttpOperationFailed` error whose Display text is
+  `HTTP GET http://svc/api failed: 500 Internal Server Error`
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be the string
+  `HttpOperationFailed: HTTP GET http://svc/api failed: 500 Internal Server Error`
+- **AND** the result SHALL NOT contain the error's response body payload or any
+  Debug formatting
 
 ### Requirement: Simple integer coercion and arithmetic semantics
 
@@ -1908,7 +1920,7 @@ values.
 ### Requirement: Template slots parse bounded expressions and unknown languages fail at evaluation
 
 A `${...}` slot SHALL parse with the atom grammar (`body`, `header.`,
-`body.<path>`, `exchangeProperty.`, `exception.message`, `${language:expr}`
+`body.<path>`, `exchangeProperty.`, `exception`, `exception.message`, `${language:expr}`
 delegation) AND with the bounded scalar expression grammar (`int`,
 `string`, `default`, `min`, `max`, arithmetic, comparisons, logical
 operators, parentheses). Slots SHALL NOT nest. A slot that names nothing
@@ -1951,4 +1963,10 @@ stay unchanged.
 - **GIVEN** the source `${int(header.n) * 2}` with header `n` = `"21"`
 - **WHEN** the source is evaluated as a whole-slot expression
 - **THEN** the result SHALL be the number 42, not the string `"42"`
+
+#### Scenario: Exception slot without an error is null
+
+- **GIVEN** an expression `${exception}` and the exchange carries no error
+- **WHEN** the expression is evaluated
+- **THEN** the result SHALL be `Value::Null`
 
