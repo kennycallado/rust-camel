@@ -32,6 +32,8 @@ REST operation:
 
 Operations bind in one of two modes. The default `json` mode accepts JSON-essence media types for `consumes` and `produces`: bare `application/json`, parameterized forms such as `application/json; charset=utf-8`, and `+json` suffixes such as `application/problem+json`. It unmarshals requests, marshals responses, and validates declared schemas automatically. Any other media type in `json` mode fails route load. The `raw` mode accepts any RFC 9110 type/subtype media type, leaves the request as `Body::Stream` with no automatic unmarshal or marshal, and sends the trimmed `produces` value as the response Content-Type. `request_schema` and `response.schema` are rejected in `raw` mode. The default success status is injected in both modes; a `raw` POST returns `201` with the declared `produces` type.
 
+Declared `format` constraints in `request_schema` are enforced: a body that violates `format: email` is rejected. The schema's `$schema` key selects draft semantics; a schema without `$schema` is treated as draft 2020-12. Format enforcement for `request_schema` is always on; there is no per-operation opt-out. Payloads that passed validation before format enforcement may now be rejected; the `[components.validator] validate-formats = false` opt-out restores the previous accept behavior for validator endpoints.
+
 ### Media negotiation gate
 Lowering injects a media negotiation gate as the first step of every lowered REST route. The gate enforces the declared `consumes` and `produces`:
 

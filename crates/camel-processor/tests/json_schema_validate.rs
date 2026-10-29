@@ -90,3 +90,86 @@ async fn can_be_chained_behind_inner_processor() {
     let final_ex = inner.oneshot(validated).await.unwrap();
     assert!(matches!(final_ex.input.body, Body::Json(_)));
 }
+
+fn email_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "email": { "type": "string", "format": "email" }
+        }
+    })
+}
+
+#[tokio::test]
+async fn format_email_rejects_malformed_value() {
+    let svc = JsonSchemaValidateService::new(IdentityProcessor, &email_schema()).unwrap();
+    let ex = Exchange::new(Message::new(Body::Json(json!({
+        "email": "not-an-email"
+    }))));
+    let err = svc.oneshot(ex).await.unwrap_err();
+    assert!(matches!(err, CamelError::ValidationError(_)));
+}
+
+#[tokio::test]
+async fn format_email_accepts_valid_value() {
+    let svc = JsonSchemaValidateService::new(IdentityProcessor, &email_schema()).unwrap();
+    let ex = Exchange::new(Message::new(Body::Json(json!({
+        "email": "user@example.com"
+    }))));
+    let out = svc.oneshot(ex).await.unwrap();
+    assert!(matches!(out.input.body, Body::Json(_)));
+}
+
+#[tokio::test]
+async fn pattern_enforcement_unchanged() {
+    let pat = json!({ "type": "string", "pattern": "^[a-z]+$" });
+    let svc = JsonSchemaValidateService::new(IdentityProcessor, &pat).unwrap();
+
+    let ex = Exchange::new(Message::new(Body::Json(json!("ABC"))));
+    let err = svc.clone().oneshot(ex).await.unwrap_err();
+    assert!(matches!(err, CamelError::ValidationError(_)));
+
+    let ex = Exchange::new(Message::new(Body::Json(json!("abc"))));
+    assert!(svc.oneshot(ex).await.is_ok());
+}
+
+#[tokio::test]
+async fn unknown_format_is_annotation() {
+    let s = json!({ "type": "string", "format": "unknown-format-x" });
+    let svc = JsonSchemaValidateService::new(IdentityProcessor, &s).unwrap();
+    let ex = Exchange::new(Message::new(Body::Json(json!("anything"))));
+    assert!(svc.oneshot(ex).await.is_ok());
+}
+
+#[tokio::test]
+async fn draft07_schema_enforces_format() {
+    let s = json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {
+            "email": { "type": "string", "format": "email" }
+        }
+    });
+    let svc = JsonSchemaValidateService::new(IdentityProcessor, &s).unwrap();
+    let ex = Exchange::new(Message::new(Body::Json(json!({
+        "email": "not-an-email"
+    }))));
+    let err = svc.oneshot(ex).await.unwrap_err();
+    assert!(matches!(err, CamelError::ValidationError(_)));
+}
+
+#[tokio::test]
+async fn schema_without_dollar_schema_enforces_format_2020_12() {
+    let s = json!({
+        "type": "object",
+        "properties": {
+            "email": { "type": "string", "format": "email" }
+        }
+    });
+    let svc = JsonSchemaValidateService::new(IdentityProcessor, &s).unwrap();
+    let ex = Exchange::new(Message::new(Body::Json(json!({
+        "email": "not-an-email"
+    }))));
+    let err = svc.oneshot(ex).await.unwrap_err();
+    assert!(matches!(err, CamelError::ValidationError(_)));
+}

@@ -30,6 +30,24 @@ pub(crate) fn approx_body_byte_len(body: &Body) -> Option<usize> {
     }
 }
 
+/// Compile a JSON Schema with `format` keyword validation controlled by
+/// `validate_formats`.
+///
+/// Format validation is enabled by default for every draft, while the schema's
+/// `$schema` key keeps selecting draft semantics (draft 2020-12 when absent).
+///
+/// Twin of the helper in `crates/camel-processor/src/json_schema_validate.rs`:
+/// no common crate exists that both consumers could share without a new
+/// dependency edge.
+fn compile_json_schema(
+    schema: &serde_json::Value,
+    validate_formats: bool,
+) -> Result<jsonschema::Validator, jsonschema::ValidationError<'static>> {
+    jsonschema::options()
+        .should_validate_formats(validate_formats)
+        .build(schema)
+}
+
 pub(crate) enum CompiledValidator {
     Xml {
         /// Discovered schema set (root bytes, transitive imports/includes, and
@@ -85,12 +103,18 @@ impl CompiledValidator {
                 })?;
                 let content = resolver.resolve(path_str)?;
                 match config.schema_type {
-                    SchemaType::Json => {
-                        Self::compile_json(&content, path, config.max_payload_bytes)
-                    }
-                    SchemaType::Yaml => {
-                        Self::compile_yaml_schema(&content, path, config.max_payload_bytes)
-                    }
+                    SchemaType::Json => Self::compile_json(
+                        &content,
+                        path,
+                        config.max_payload_bytes,
+                        config.validate_formats,
+                    ),
+                    SchemaType::Yaml => Self::compile_yaml_schema(
+                        &content,
+                        path,
+                        config.max_payload_bytes,
+                        config.validate_formats,
+                    ),
                     _ => unreachable!("outer arm restricts this branch to JSON and YAML"),
                 }
             }
@@ -126,6 +150,7 @@ impl CompiledValidator {
         content: &[u8],
         path: &Path,
         max_payload_bytes: Option<usize>,
+        validate_formats: bool,
     ) -> Result<Self, CamelError> {
         let schema_value: serde_json::Value = serde_json::from_slice(content).map_err(|e| {
             CamelError::EndpointCreationFailed(format!(
@@ -134,7 +159,7 @@ impl CompiledValidator {
             ))
         })?;
 
-        let validator = jsonschema::validator_for(&schema_value).map_err(|e| {
+        let validator = compile_json_schema(&schema_value, validate_formats).map_err(|e| {
             CamelError::EndpointCreationFailed(format!(
                 "failed to compile JSON schema '{}': {e}",
                 path.display()
@@ -151,6 +176,7 @@ impl CompiledValidator {
         content: &[u8],
         path: &Path,
         max_payload_bytes: Option<usize>,
+        validate_formats: bool,
     ) -> Result<Self, CamelError> {
         let yaml_str = std::str::from_utf8(content).map_err(|e| {
             CamelError::EndpointCreationFailed(format!(
@@ -173,7 +199,7 @@ impl CompiledValidator {
             ))
         })?;
 
-        let validator = jsonschema::validator_for(&schema_value).map_err(|e| {
+        let validator = compile_json_schema(&schema_value, validate_formats).map_err(|e| {
             CamelError::EndpointCreationFailed(format!(
                 "failed to compile YAML schema '{}': {e}",
                 path.display()
@@ -313,7 +339,9 @@ impl CompiledValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DEFAULT_SCHEMA_CACHE_MAX_ENTRIES, SchemaType, ValidatorConfig};
+    use crate::config::{
+        DEFAULT_SCHEMA_CACHE_MAX_ENTRIES, DEFAULT_VALIDATE_FORMATS, SchemaType, ValidatorConfig,
+    };
     use async_trait::async_trait;
 
     #[derive(Debug, Clone)]
@@ -357,6 +385,7 @@ mod tests {
             fail_on_null_body: true,
             header_name: None,
             fail_on_null_header: true,
+            validate_formats: DEFAULT_VALIDATE_FORMATS,
             schema_aliases: BTreeMap::new(),
         };
 
@@ -377,6 +406,67 @@ mod tests {
             .expect_err("expected validate to fail due to registration error");
         assert!(matches!(err, CamelError::Config(_)));
         assert!(err.to_string().contains("COMPILATION_FAILED"));
+    }
+
+    fn write_temp_schema(suffix: &str, content: &str) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut file = tempfile::Builder::new().suffix(suffix).tempfile().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file
+    }
+
+    fn compile_temp_schema(path: &std::path::Path, validate_formats: bool) -> CompiledValidator {
+        let mut cfg = ValidatorConfig::from_uri(&format!("validator:{}", path.display())).unwrap();
+        cfg.validate_formats = validate_formats;
+        let bridge = Arc::new(MockBridge { register_err: None });
+        CompiledValidator::compile(&cfg, bridge).expect("compile should succeed")
+    }
+
+    const JSON_EMAIL_SCHEMA: &str = r#"{"type":"object","properties":{"email":{"type":"string","format":"email"}},"required":["email"]}"#;
+    const YAML_EMAIL_SCHEMA: &str = "type: object\nproperties:\n  email:\n    type: string\n    format: email\nrequired:\n  - email\n";
+
+    #[tokio::test]
+    async fn json_format_email_rejected_by_default() {
+        let schema = write_temp_schema(".json", JSON_EMAIL_SCHEMA);
+        let compiled = compile_temp_schema(schema.path(), DEFAULT_VALIDATE_FORMATS);
+        let body = Body::Text("{\"email\":\"not-an-email\"}".into());
+        assert!(compiled.validate(&body).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn json_format_email_accepted_when_opted_out() {
+        let schema = write_temp_schema(".json", JSON_EMAIL_SCHEMA);
+        let compiled = compile_temp_schema(schema.path(), false);
+        let body = Body::Text("{\"email\":\"not-an-email\"}".into());
+        assert!(compiled.validate(&body).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn yaml_format_enforced_by_default() {
+        let schema = write_temp_schema(".yaml", YAML_EMAIL_SCHEMA);
+        let compiled = compile_temp_schema(schema.path(), DEFAULT_VALIDATE_FORMATS);
+        let body = Body::Text("email: not-an-email".into());
+        assert!(compiled.validate(&body).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn yaml_format_opt_out_accepts() {
+        let schema = write_temp_schema(".yaml", YAML_EMAIL_SCHEMA);
+        let compiled = compile_temp_schema(schema.path(), false);
+        let body = Body::Text("email: not-an-email".into());
+        assert!(compiled.validate(&body).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn json_unknown_format_is_annotation() {
+        let schema = write_temp_schema(".json", r#"{"type":"string","format":"unknown-format-x"}"#);
+        let compiled = compile_temp_schema(schema.path(), DEFAULT_VALIDATE_FORMATS);
+        assert!(
+            compiled
+                .validate(&Body::Text("\"anything\"".into()))
+                .await
+                .is_ok()
+        );
     }
 
     #[test]

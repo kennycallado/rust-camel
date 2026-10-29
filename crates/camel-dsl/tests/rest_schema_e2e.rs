@@ -25,6 +25,17 @@ use camel_core::route::BuilderStep;
 use camel_dsl::yaml::parse_yaml;
 use tower::ServiceExt;
 
+/// Schema requiring an `email` (string) field with `format: email`.
+fn email_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "email": { "type": "string", "format": "email" }
+        },
+        "required": ["email"]
+    })
+}
+
 /// Schema requiring a `name` (string) field. A `age` field is optional.
 fn user_schema() -> serde_json::Value {
     serde_json::json!({
@@ -63,7 +74,13 @@ rest:
 /// the second; the default-status SetHeaderIfAbsent is appended as the LAST
 /// step (spec §6.2/§7.1/§9 if-absent semantics).
 fn compiled_unmarshal_processor() -> camel_api::BoxProcessor {
-    let routes = parse_yaml(REST_YAML).expect("REST YAML must parse + compile");
+    compiled_unmarshal_processor_from(REST_YAML)
+}
+
+/// Route-agnostic variant of [`compiled_unmarshal_processor`] for the
+/// format-specific YAML blocks below.
+fn compiled_unmarshal_processor_from(yaml: &str) -> camel_api::BoxProcessor {
+    let routes = parse_yaml(yaml).expect("REST YAML must parse + compile");
     // Two routes? No — just one operation (POST), so one route.
     assert_eq!(routes.len(), 1, "expected exactly one route from POST");
     let steps = routes[0].steps();
@@ -78,6 +95,93 @@ fn compiled_unmarshal_processor() -> camel_api::BoxProcessor {
         BuilderStep::Processor(op) => op.0.clone(),
         other => panic!("expected BuilderStep::Processor for unmarshal, got: {other:?}"),
     }
+}
+
+const FORMAT_REST_YAML: &str = r#"
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /api/subscribers
+    operations:
+      - method: POST
+        operation_id: createSubscriber
+        consumes: application/json
+        produces: application/json
+        success_status: 201
+        to: direct:createSubscriber
+        request_schema:
+          type: object
+          properties:
+            email: { type: string, format: email }
+          required: [email]
+"#;
+
+#[tokio::test]
+async fn rest_request_schema_format_email_rejects_malformed() {
+    let processor = compiled_unmarshal_processor_from(FORMAT_REST_YAML);
+    let ex = Exchange::new(Message::new(Body::Text(
+        r#"{"email": "not-an-email"}"#.to_string(),
+    )));
+    let err = processor
+        .oneshot(ex)
+        .await
+        .expect_err("malformed email must surface as Err, not Ok");
+    assert!(
+        matches!(err, CamelError::ValidationError(_)),
+        "expected CamelError::ValidationError, got: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn rest_request_schema_format_email_accepts_valid() {
+    // Sanity: the YAML block and the helper describe the same contract.
+    assert_eq!(email_schema()["properties"]["email"]["format"], "email");
+    let processor = compiled_unmarshal_processor_from(FORMAT_REST_YAML);
+    let ex = Exchange::new(Message::new(Body::Text(
+        r#"{"email": "user@example.com"}"#.to_string(),
+    )));
+    let out = processor
+        .oneshot(ex)
+        .await
+        .expect("valid email must pass format validation");
+    assert!(
+        matches!(out.input.body, Body::Json(_)),
+        "expected Body::Json after valid unmarshal+validate, got: {:?}",
+        out.input.body
+    );
+}
+
+const FORMAT_OPTOUT_REST_YAML: &str = r#"
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /api/subscribers
+    operations:
+      - method: POST
+        operation_id: createSubscriber
+        to: direct:createSubscriber
+        validate_formats: false
+        request_schema:
+          type: object
+          properties:
+            email: { type: string, format: email }
+          required: [email]
+"#;
+
+#[test]
+fn rest_operation_rejects_format_optout_key() {
+    // Pins the spec scenario: there is no per-operation format opt-out.
+    // `RouteDslRestOperation` is `#[serde(deny_unknown_fields)]`, so the
+    // invented key fails at route load and the error names it.
+    let err = match parse_yaml(FORMAT_OPTOUT_REST_YAML) {
+        Ok(_) => panic!("per-operation validate_formats must be rejected at route load"),
+        Err(err) => err,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("validate_formats"),
+        "load error should name the rejected key, got: {msg}"
+    );
 }
 
 #[tokio::test]

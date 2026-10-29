@@ -315,9 +315,6 @@ pub async fn boot(
     ctx.register_component(camel_component_seda::SedaComponent::new());
     ctx.register_component(camel_component_mock::MockComponent::new());
     ctx.register_component(camel_component_controlbus::ControlBusComponent::new());
-    let validator_component = camel_component_validator::ValidatorComponent::new();
-    let validator_backend = validator_component.xsd_bridge_backend();
-    ctx.register_component(validator_component);
 
     #[cfg(feature = "xslt")]
     let xslt_runtime = {
@@ -335,14 +332,6 @@ pub async fn boot(
         runtime
     };
 
-    ctx.add_lifecycle(BridgeCleanup {
-        #[cfg(feature = "xslt")]
-        xslt: xslt_runtime,
-        #[cfg(feature = "xj")]
-        xj: xj_runtime,
-        validator: validator_backend,
-    });
-
     // Register HTTP, File, Template (always-on in the cascade). Container
     // registers under the `containers` gate (infrastructure-daemon client;
     // one feature with camel-function, function⇒container per ADR-0005).
@@ -358,6 +347,20 @@ pub async fn boot(
     register_bundle::<camel_component_container::ContainerBundle>(ctx, config)?;
     // External template renderer (ADR-0047 Stage 2): always-on built-in.
     register_bundle::<camel_template::TemplateBundle>(ctx, config)?;
+    // Schema validator: carries the `[components.validator]` format opt-out.
+    let validator_backend = register_bundle_with(
+        ctx,
+        config,
+        |b: &camel_component_validator::ValidatorBundle| b.xsd_bridge_backend(),
+    )?;
+
+    ctx.add_lifecycle(BridgeCleanup {
+        #[cfg(feature = "xslt")]
+        xslt: xslt_runtime,
+        #[cfg(feature = "xj")]
+        xj: xj_runtime,
+        validator: validator_backend,
+    });
 
     // Register optional/feature-gated bundles
     #[cfg(feature = "jms")]

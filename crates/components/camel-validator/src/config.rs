@@ -21,6 +21,8 @@ pub const DEFAULT_SCHEMA_CACHE_MAX_ENTRIES: usize = 256;
 pub const DEFAULT_FAIL_ON_NULL_BODY: bool = true;
 /// Default for `fail_on_null_header`.
 pub const DEFAULT_FAIL_ON_NULL_HEADER: bool = true;
+/// Default for `validate_formats`.
+pub const DEFAULT_VALIDATE_FORMATS: bool = true;
 
 #[derive(Debug, Clone)]
 pub struct ValidatorConfig {
@@ -41,6 +43,9 @@ pub struct ValidatorConfig {
     /// When `true` (default) and `header_name` is set, reject exchanges where
     /// the header is missing. When `false`, missing headers pass through.
     pub fail_on_null_header: bool,
+    /// `true` (default) enforces `format` keywords on JSON/YAML schemas;
+    /// `false` restores annotation-only behavior.
+    pub validate_formats: bool,
     /// Operator-supplied absolute-URI -> root-relative virtual path aliases,
     /// parsed from the single `schemaAliases` query parameter (a
     /// percent-encoded JSON object of string keys to string values). Empty
@@ -110,6 +115,7 @@ impl ValidatorConfig {
         let mut fail_on_null_body: bool = DEFAULT_FAIL_ON_NULL_BODY;
         let mut header_name: Option<String> = None;
         let mut fail_on_null_header: bool = DEFAULT_FAIL_ON_NULL_HEADER;
+        let validate_formats: bool = DEFAULT_VALIDATE_FORMATS;
         let mut schema_aliases: BTreeMap<String, String> = BTreeMap::new();
         let mut schema_aliases_seen = false;
 
@@ -159,6 +165,7 @@ impl ValidatorConfig {
             fail_on_null_body,
             header_name,
             fail_on_null_header,
+            validate_formats,
             schema_aliases,
         })
     }
@@ -372,6 +379,12 @@ mod tests {
     fn test_fail_on_null_body_default_true() {
         let cfg = ValidatorConfig::from_uri("validator:schemas/order.xsd").unwrap();
         assert!(cfg.fail_on_null_body);
+    }
+
+    #[test]
+    fn validate_formats_default_true() {
+        let cfg = ValidatorConfig::from_uri("validator:/x.json?type=json").unwrap();
+        assert!(cfg.validate_formats);
     }
 
     #[test]

@@ -20,14 +20,30 @@ use crate::metadata::ValidatorMetadataDescriptor;
 pub struct ValidatorComponent {
     xsd_bridge: Arc<dyn XsdBridge>,
     xsd_backend: Option<Arc<XsdBridgeBackend>>,
+    validate_formats: bool,
 }
 
 impl ValidatorComponent {
     pub fn new() -> Self {
-        let xsd_backend = Arc::new(XsdBridgeBackend::new());
+        Self::with_validate_formats(crate::config::DEFAULT_VALIDATE_FORMATS)
+    }
+
+    /// Build a component that carries `validate_formats` into every endpoint
+    /// config it creates.
+    pub fn with_validate_formats(validate_formats: bool) -> Self {
+        Self::with_validate_formats_and_backend(validate_formats, Arc::new(XsdBridgeBackend::new()))
+    }
+
+    /// Build a component around an existing XSD bridge backend, preserving the
+    /// boot-time handle used for teardown.
+    pub(crate) fn with_validate_formats_and_backend(
+        validate_formats: bool,
+        xsd_backend: Arc<XsdBridgeBackend>,
+    ) -> Self {
         Self {
             xsd_bridge: Arc::clone(&xsd_backend) as Arc<dyn XsdBridge>,
             xsd_backend: Some(xsd_backend),
+            validate_formats,
         }
     }
 
@@ -40,6 +56,7 @@ impl ValidatorComponent {
         Self {
             xsd_bridge,
             xsd_backend: None,
+            validate_formats: crate::config::DEFAULT_VALIDATE_FORMATS,
         }
     }
 }
@@ -64,7 +81,8 @@ impl Component for ValidatorComponent {
         uri: &str,
         _ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
-        let config = ValidatorConfig::from_uri(uri)?;
+        let mut config = ValidatorConfig::from_uri(uri)?;
+        config.validate_formats = self.validate_formats;
         let xsd_bridge = Arc::clone(&self.xsd_bridge);
         let compiled = CompiledValidator::compile(&config, xsd_bridge)?;
         Ok(Box::new(ValidatorEndpoint {
@@ -645,6 +663,7 @@ mod tests {
             fail_on_null_body: true,
             header_name: None,
             fail_on_null_header: true,
+            validate_formats: crate::config::DEFAULT_VALIDATE_FORMATS,
             schema_aliases: aliases,
         };
         let backend = Arc::new(MockXsdBridge {

@@ -39,11 +39,27 @@ where
     }
 }
 
+/// Compile a JSON Schema with `format` keyword validation forced on.
+///
+/// Format validation is enabled for every draft, while the schema's `$schema`
+/// key keeps selecting draft semantics (draft 2020-12 when absent).
+///
+/// `crates/components/camel-validator/src/compiled.rs` carries the twin
+/// helper: no common crate exists that both consumers could share without a
+/// new dependency edge.
+fn compile_json_schema(
+    schema: &serde_json::Value,
+) -> Result<jsonschema::Validator, jsonschema::ValidationError<'static>> {
+    jsonschema::options()
+        .should_validate_formats(true)
+        .build(schema)
+}
+
 impl<P> JsonSchemaValidateService<P> {
     /// Compile a JSON Schema and wrap the given inner service. Returns
     /// `CamelError::RouteError` if the schema is not a valid JSON Schema.
     pub fn new(inner: P, schema: &serde_json::Value) -> Result<Self, CamelError> {
-        let validator = jsonschema::validator_for(schema)
+        let validator = compile_json_schema(schema)
             .map_err(|e| CamelError::RouteError(format!("invalid JSON schema: {e}")))?;
         Ok(Self { inner, validator })
     }

@@ -5,6 +5,7 @@
 //! JSON Schema and YAML validation run natively in Rust.
 //! XSD validation is executed through the xml-bridge backend.
 
+pub mod bundle;
 pub mod compiled;
 pub mod component;
 pub mod config;
@@ -14,6 +15,7 @@ pub mod resolver;
 pub mod schema_set;
 pub mod xsd_bridge;
 
+pub use bundle::ValidatorBundle;
 pub use component::ValidatorComponent;
 pub use config::{SchemaType, ValidatorConfig};
 pub use resolver::{FilesystemResolver, ResourceResolver};

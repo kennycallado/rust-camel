@@ -51,6 +51,19 @@ XSD discovery follows only the reachable `xs:import` and `xs:include` edges with
 
 Rust reads the confined schema files and transmits the schema set in memory. The Java bridge resolves only from the transmitted in-memory set. Its supplied-key resolver never fetches: no network and no filesystem access occur.
 
+### Format validation
+
+JSON and YAML schemas enforce `format` keywords by default, including `email`, `uri`, and `date-time`. The schema's `$schema` key selects draft semantics; a schema without `$schema` is treated as draft 2020-12. Unknown formats are annotations and never produce errors.
+
+To restore annotation-only behavior, set the opt-out in `Camel.toml`:
+
+```toml
+[components.validator]
+validate-formats = false
+```
+
+Payloads that passed validation before format enforcement may now be rejected. Setting `validate-formats = false` restores the previous accept behavior.
+
 ## Behavior
 
 JSON and YAML schemas compile when the endpoint is created. A malformed schema fails endpoint creation. The compiled validator stays cached for the lifetime of the endpoint. XSD schemas defer registration to the first validation call. This lets the bridge start in an async context without blocking endpoint creation.

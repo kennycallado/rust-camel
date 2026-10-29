@@ -2277,6 +2277,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
+ "toml",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

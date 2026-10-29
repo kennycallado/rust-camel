@@ -1,0 +1,10 @@
+{
+  "kind": "plan",
+  "change": "jsonschema-format-enforcement",
+  "verdict": "BLESS",
+  "hash": "sha256:f44e9c85f12bd296ba817f452eee5d4202ec4045eb09c3fbf7f8a5b163802938",
+  "expert": "none — expert blessing pass skipped per mission order 450 ('e_gpt only for a genuine ruling') and PATTERN-V2 MODEL/EXPERT AVAILABILITY 2026-10-27 ('An expert pass is optional'). Reviewer loop: r_gpt round 1 APPROVE-WITH-FINDINGS (2 important: bundle→endpoint seam test gap; REST no-opt-out pin) — both fixed in tasks.md; r_gpt round 2 APPROVE, no findings. Master review happens at park verification per fleet lifecycle.",
+  "date": "2026-10-29",
+  "mission": 450,
+  "bd": "rc-giuvl"
+}
