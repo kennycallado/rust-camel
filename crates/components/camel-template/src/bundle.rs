@@ -18,6 +18,7 @@ use camel_language_api::MinijinjaLimitsConfig;
 use serde::Deserialize;
 
 use crate::component::TemplateComponent;
+use crate::config::AutoescapeMode;
 use crate::config::ExternalTemplateLimitsConfig;
 
 /// Operator-facing `[components.template]` block: two independent limit layers.
@@ -39,6 +40,11 @@ pub struct TemplateBundleConfig {
     /// Render limits applied per render inside the MiniJinja environment.
     #[serde(default)]
     pub render_limits: MinijinjaLimitsConfig,
+
+    /// Default autoescape mode applied when an entry template has no top-level
+    /// `{% autoescape %}` statement. Parsed in [`TemplateBundle::from_toml`].
+    #[serde(default)]
+    pub default_autoescape: Option<toml::Value>,
 }
 
 /// Bundle that registers the `template:` scheme from the `[template]` config
@@ -48,6 +54,8 @@ pub struct TemplateBundleConfig {
 /// — always-on (no feature gate), like the other built-in transform components.
 pub struct TemplateBundle {
     config: TemplateBundleConfig,
+    /// Parsed form of [`TemplateBundleConfig::default_autoescape`].
+    default_autoescape: Option<AutoescapeMode>,
 }
 
 impl ComponentBundle for TemplateBundle {
@@ -59,11 +67,23 @@ impl ComponentBundle for TemplateBundle {
         let config: TemplateBundleConfig = value
             .try_into()
             .map_err(|e: toml::de::Error| CamelError::Config(e.to_string()))?;
-        Ok(Self { config })
+        let default_autoescape = config
+            .default_autoescape
+            .as_ref()
+            .map(crate::config::autoescape_mode_from_toml)
+            .transpose()
+            .map_err(CamelError::Config)?;
+        Ok(Self {
+            config,
+            default_autoescape,
+        })
     }
 
     fn register_all(self, ctx: &mut dyn ComponentRegistrar) {
-        let component = TemplateComponent::new(self.config.limits, self.config.render_limits);
+        let mut component = TemplateComponent::new(self.config.limits, self.config.render_limits);
+        if let Some(mode) = self.default_autoescape {
+            component = component.with_default_autoescape(mode);
+        }
         ctx.register_component_dyn(Arc::new(component));
     }
 }
@@ -112,6 +132,71 @@ render-limits.fuel = 1234
         let value: toml::Value = toml::from_str(raw).unwrap();
         let result = TemplateBundle::from_toml(value);
         assert!(result.is_err(), "deny_unknown_fields must reject `bogus`");
+    }
+
+    #[test]
+    fn from_toml_accepts_each_mode() {
+        for mode in ["html", "json", "none"] {
+            let raw = format!("default-autoescape = \"{mode}\"\n");
+            let value: toml::Value = toml::from_str(&raw).unwrap();
+            let bundle = TemplateBundle::from_toml(value);
+            assert!(bundle.is_ok(), "`{mode}` must be accepted");
+        }
+    }
+
+    #[test]
+    fn from_toml_rejects_unknown_default_autoescape() {
+        let raw = "default-autoescape = \"yaml\"\n";
+        let value: toml::Value = toml::from_str(raw).unwrap();
+        let err = TemplateBundle::from_toml(value)
+            .err()
+            .expect("`yaml` must be rejected");
+        let message = err.to_string();
+        for needle in [
+            "default-autoescape",
+            "\"html\"",
+            "\"json\"",
+            "\"none\"",
+            "yaml",
+        ] {
+            assert!(
+                message.contains(needle),
+                "error must contain {needle:?}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_toml_rejects_uppercase_default_autoescape() {
+        let raw = "default-autoescape = \"HTML\"\n";
+        let value: toml::Value = toml::from_str(raw).unwrap();
+        let err = TemplateBundle::from_toml(value)
+            .err()
+            .expect("uppercase must be rejected");
+        assert!(
+            err.to_string().contains("default-autoescape"),
+            "error must name the key: {err}"
+        );
+    }
+
+    #[test]
+    fn from_toml_rejects_non_string_default_autoescape() {
+        let raw = "default-autoescape = 1\n";
+        let value: toml::Value = toml::from_str(raw).unwrap();
+        let err = TemplateBundle::from_toml(value)
+            .err()
+            .expect("non-string must be rejected");
+        assert!(
+            err.to_string().contains("default-autoescape"),
+            "error must name the key: {err}"
+        );
+    }
+
+    #[test]
+    fn from_toml_absent_default_still_ok() {
+        let value = toml::Value::Table(toml::map::Map::new());
+        let bundle = TemplateBundle::from_toml(value);
+        assert!(bundle.is_ok(), "absent key must load");
     }
 
     #[test]

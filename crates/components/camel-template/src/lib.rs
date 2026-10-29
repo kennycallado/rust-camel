@@ -34,5 +34,5 @@ pub mod error;
 pub use bundle::{TemplateBundle, TemplateBundleConfig};
 #[cfg(feature = "default")]
 pub use component::TemplateComponent;
-pub use config::{ExternalTemplateLimitsConfig, ResolvedExternalTemplateLimits};
+pub use config::{AutoescapeMode, ExternalTemplateLimitsConfig, ResolvedExternalTemplateLimits};
 pub use error::TemplateReloadError;

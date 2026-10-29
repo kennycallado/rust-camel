@@ -20,6 +20,7 @@ use camel_api::Value;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_direct::DirectComponent;
 use camel_core::CamelContext;
+use camel_template::config::autoescape_mode_from_toml;
 use camel_template::{TemplateBundleConfig, TemplateComponent};
 
 mod common;
@@ -189,4 +190,81 @@ max-template-size = 4
         detail.contains("max_template_size") || detail.contains("max-template-size"),
         "expected max-template-size failure in start error chain, got: {detail}"
     );
+}
+
+/// Parse a `[components.template]` document and build the configured
+/// component exactly as `TemplateBundle::register_all` would. The inner table
+/// is deserialized into `TemplateBundleConfig` because the top-level document
+/// (with the `components` wrapper) does not fit its `deny_unknown_fields`.
+fn configured_component(toml_doc: &str) -> TemplateComponent {
+    let doc: toml::Value = toml::from_str(toml_doc).expect("config TOML");
+    let table = doc
+        .get("components")
+        .and_then(|v| v.get("template"))
+        .expect("components.template sub-table")
+        .clone();
+    let cfg: TemplateBundleConfig = table.try_into().expect("bundle config must deserialize");
+    let mode = cfg
+        .default_autoescape
+        .as_ref()
+        .map(autoescape_mode_from_toml)
+        .transpose()
+        .expect("valid default-autoescape")
+        .expect("test config sets default-autoescape");
+    TemplateComponent::new(cfg.limits, cfg.render_limits).with_default_autoescape(mode)
+}
+
+/// `default-autoescape = "html"` reaches the compile path through the
+/// component → endpoint → lifecycle chain: a block-less `.txt` entry (the
+/// name-based MiniJinja callback cannot escape a `.txt` name) renders an
+/// HTML-escaped header payload.
+#[tokio::test(flavor = "multi_thread")]
+async fn render_with_default_html_config_escapes_payload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let entry = dir.path().join("page.txt");
+    // No `{% autoescape %}` statement: only the configured default can make
+    // this compile.
+    std::fs::write(&entry, "Hi {{ headers.title }}").expect("write page");
+    let uri = format!("template:file://{}", entry.display());
+
+    let component = configured_component(
+        r#"
+[components.template]
+default-autoescape = "html"
+"#,
+    );
+
+    let mut ctx = CamelContext::builder()
+        .build()
+        .await
+        .expect("context build");
+    ctx.register_component(DirectComponent::new());
+    ctx.register_component(component);
+    let route = RouteBuilder::from("direct:in")
+        .route_id("t-default-html")
+        .to(uri)
+        .build()
+        .expect("route build");
+    ctx.add_route_definition(route)
+        .await
+        .expect("add_route_definition");
+
+    // The startup compile must accept the block-less entry because the
+    // configured HTML default wraps it.
+    ctx.start()
+        .await
+        .expect("context must start with the configured default");
+
+    let out = common::send_title(&ctx, "<b>").await;
+    let body = common::body_text(&out);
+    assert!(
+        body.contains("&lt;b&gt;"),
+        "configured default must HTML-escape the payload, got: {body:?}"
+    );
+    assert!(
+        !body.contains("<b>"),
+        "raw payload must not survive the configured HTML wrap, got: {body:?}"
+    );
+
+    let _ = ctx.stop().await;
 }

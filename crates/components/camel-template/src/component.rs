@@ -14,6 +14,7 @@ use camel_api::CamelError;
 use camel_component_api::{Component, ComponentContext, Endpoint};
 use camel_language_api::MinijinjaLimitsConfig;
 
+use crate::config::AutoescapeMode;
 use crate::config::ExternalTemplateLimitsConfig;
 use crate::endpoint::TemplateEndpoint;
 use crate::uri;
@@ -28,6 +29,7 @@ use crate::uri;
 pub struct TemplateComponent {
     limits: ExternalTemplateLimitsConfig,
     render_limits: MinijinjaLimitsConfig,
+    default_autoescape: Option<AutoescapeMode>,
 }
 
 impl TemplateComponent {
@@ -36,7 +38,20 @@ impl TemplateComponent {
         Self {
             limits,
             render_limits,
+            default_autoescape: None,
         }
+    }
+
+    /// Set the configured entry default applied when a template has no
+    /// top-level `{% autoescape %}` statement.
+    ///
+    /// Precedence is: an explicit top-level `{% autoescape %}` block wins, then
+    /// this configured default applies, and if neither is present compilation
+    /// is rejected.
+    #[must_use]
+    pub fn with_default_autoescape(mut self, mode: AutoescapeMode) -> Self {
+        self.default_autoescape = Some(mode);
+        self
     }
 }
 
@@ -66,6 +81,7 @@ impl Component for TemplateComponent {
             limits,
             self.render_limits.clone(),
             route_id,
+            self.default_autoescape,
         )))
     }
 }

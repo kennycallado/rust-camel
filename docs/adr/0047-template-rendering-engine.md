@@ -91,6 +91,8 @@ This keeps the generic `language/source` DSL unchanged while preventing an HTML
 default from corrupting JSON, URL, prompt, or plain-text output. It also avoids
 extension-based inference: inline templates have no trustworthy filename.
 
+Amendment 2026-10-29 (rc-6mwze): for the external template: component, an operator-configured [components.template] default-autoescape counts as the explicit selection of the output context; it is valid for the external component only, an explicit template block still wins, and the absent key keeps the mandatory-explicit rule. Inline language: minijinja is unchanged.
+
 ### Security model
 
 - Template source comes from route configuration only. Message headers cannot

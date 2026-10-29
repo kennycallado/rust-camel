@@ -19,6 +19,7 @@ use camel_language_api::MinijinjaLimitsConfig;
 use camel_language_minijinja::{LimitedWriter, ResolvedLimits, validate_autoescape_wrapper};
 
 use crate::closure::ClosureSnapshot;
+use crate::config::AutoescapeMode;
 use crate::error::TemplateReloadError;
 
 /// A compiled template set: an owned `minijinja::Environment<'static>` plus the
@@ -70,11 +71,20 @@ impl TemplateSet {
     ///
     /// Enforces, in order:
     /// 1. The entry is present in the snapshot and valid UTF-8.
-    /// 2. ADR-0047 top-level `{% autoescape %}` wrapper on the entry source
-    ///    ([`validate_autoescape_wrapper`]).
-    /// 3. MiniJinja parse/compile of every closure entry via
+    /// 2. Pre-scan the entry source ([`contains_autoescape_statement`]). An
+    ///    explicit `{% autoescape %}`/`{% endautoescape %}` statement routes
+    ///    to [`validate_autoescape_wrapper`] exactly as before: pass means the
+    ///    explicit block wins (compiled as-is), any failure is a `Compile`
+    ///    error.
+    /// 3. True absence falls back to `default_autoescape`: `Some(mode)` wraps
+    ///    the entry source in `{% autoescape "<mode>" %}` …
+    ///    `{% endautoescape %}` (no added whitespace); `None` keeps today's
+    ///    rejection from [`validate_autoescape_wrapper`].
+    /// 4. MiniJinja parse/compile of every closure entry via
     ///    `add_template_owned`, under strict-undefined + configured
-    ///    fuel/recursion bounds.
+    ///    fuel/recursion bounds. Only the entry may be compiled from the
+    ///    wrapped source; non-entry members always register their raw snapshot
+    ///    source so include targets keep their own escaping semantics.
     ///
     /// All failures map to [`TemplateReloadError::Compile`]. The entry name
     /// registered into the `Environment` equals `entry`, so a later
@@ -85,6 +95,7 @@ impl TemplateSet {
         snapshot: &ClosureSnapshot,
         entry: &str,
         render_limits: MinijinjaLimitsConfig,
+        default_autoescape: Option<AutoescapeMode>,
     ) -> Result<Self, TemplateReloadError> {
         let limits = ResolvedLimits::from_config(&render_limits);
         // The entry must be present in the closure and valid UTF-8.
@@ -95,9 +106,27 @@ impl TemplateSet {
             TemplateReloadError::Compile(format!("entry {entry:?} is not utf-8: {e}"))
         })?;
 
-        // ADR-0047 §S7 — top-level `{% autoescape %}` wrapper on the entry.
-        validate_autoescape_wrapper(entry_source)
-            .map_err(|e| TemplateReloadError::Compile(format!("autoescape wrapper: {e}")))?;
+        // ADR-0047 §S7 + rc-6mwze Decision 2 — precedence is explicit
+        // statement > configured default > reject. The config only fills TRUE
+        // absence: any detected statement (even one the validator will reject)
+        // goes through the validator unchanged, so a configured default can
+        // never repair an invalid explicit mode or a partial block. The
+        // validator therefore has exactly one call site, in the fallback arm.
+        let entry_compiled_source = match default_autoescape {
+            // The injected block is byte-for-byte what the operator would have
+            // written; no whitespace is added around the entry source.
+            Some(mode) if !contains_autoescape_statement(entry_source) => format!(
+                "{{% autoescape \"{}\" %}}{}{{% endautoescape %}}",
+                mode.as_str(),
+                entry_source
+            ),
+            _ => {
+                validate_autoescape_wrapper(entry_source).map_err(|e| {
+                    TemplateReloadError::Compile(format!("autoescape wrapper: {e}"))
+                })?;
+                entry_source.to_string()
+            }
+        };
 
         let mut env = minijinja::Environment::new();
         env.set_undefined_behavior(minijinja::UndefinedBehavior::Strict);
@@ -107,10 +136,16 @@ impl TemplateSet {
         // Register every closure member under its snapshot name so the entry can
         // resolve `include`/`extends`/`import`/`from` targets. The entry name in
         // the Environment equals `entry`, matching the lookup in `render_entry`.
+        // Only the entry uses `entry_compiled_source`; every other member
+        // registers its raw snapshot source.
         for (name, file) in snapshot.entries() {
-            let source = std::str::from_utf8(&file.bytes).map_err(|e| {
-                TemplateReloadError::Compile(format!("template {name:?} is not utf-8: {e}"))
-            })?;
+            let source = if name == entry {
+                entry_compiled_source.as_str()
+            } else {
+                std::str::from_utf8(&file.bytes).map_err(|e| {
+                    TemplateReloadError::Compile(format!("template {name:?} is not utf-8: {e}"))
+                })?
+            };
             env.add_template_owned(name.clone(), source.to_string())
                 .map_err(|e| TemplateReloadError::Compile(format!("compile {name:?}: {e}")))?;
         }
@@ -168,9 +203,40 @@ impl TemplateSet {
     }
 }
 
+/// Scan `source` for a MiniJinja statement block whose tag content starts with
+/// `autoescape` or `endautoescape` after stripping whitespace-control markers.
+///
+/// Whitespace-control markers (`-` and `+`) are stripped from both ends of the
+/// block's content before matching, so `{%- autoescape "html" -%}` and
+/// `{%+ endautoescape +%}` are detected. The scan intentionally MAY over-count
+/// (for example, an `autoescape` mention inside a `{% comment %}` block counts
+/// as present). Over-counting is safe: it only skips the configured default and
+/// falls through to [`validate_autoescape_wrapper`], which stays fail-closed.
+/// The scan must never under-count a real statement block.
+fn contains_autoescape_statement(source: &str) -> bool {
+    let mut rest = source;
+    while let Some(open) = rest.find("{%") {
+        let after_open = &rest[open + 2..];
+        let Some(close) = after_open.find("%}") else {
+            return false;
+        };
+        let body = &after_open[..close];
+        // Whitespace-control markers sit directly against `{%` and `%}`.
+        let body = body.trim_start_matches(['-', '+']);
+        let body = body.trim_end_matches(['-', '+']);
+        let body = body.trim_start();
+        if body.starts_with("autoescape") || body.starts_with("endautoescape") {
+            return true;
+        }
+        rest = &after_open[close + 2..];
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AutoescapeMode;
     use camel_language_api::MinijinjaLimitsConfig;
     use std::collections::BTreeMap;
 
@@ -199,7 +265,7 @@ mod tests {
             "page.html",
             r#"{% autoescape "none" %}Hi {{name}}{% endautoescape %}"#,
         );
-        let set = TemplateSet::compile(&snap, "page.html", MinijinjaLimitsConfig::default())
+        let set = TemplateSet::compile(&snap, "page.html", MinijinjaLimitsConfig::default(), None)
             .expect("compile");
         let rendered = set
             .render_entry(ctx_name("k"), ResolvedLimits::default())
@@ -216,7 +282,7 @@ mod tests {
             "page.html",
             r#"{% autoescape "none" %}{{nope}}{% endautoescape %}"#,
         );
-        let set = TemplateSet::compile(&snap, "page.html", MinijinjaLimitsConfig::default())
+        let set = TemplateSet::compile(&snap, "page.html", MinijinjaLimitsConfig::default(), None)
             .expect("compile");
         let result = set
             .render_entry(ctx_empty(), ResolvedLimits::default())
@@ -231,10 +297,178 @@ mod tests {
     fn template_set_compile_requires_autoescape() {
         // No top-level `{% autoescape %}` block — compile must reject.
         let snap = snapshot("page.html", "Hi {{name}}");
-        let result = TemplateSet::compile(&snap, "page.html", MinijinjaLimitsConfig::default());
+        let result =
+            TemplateSet::compile(&snap, "page.html", MinijinjaLimitsConfig::default(), None);
         assert!(
             matches!(result, Err(TemplateReloadError::Compile(_))),
             "missing top-level autoescape wrapper must surface as Compile, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_html_escapes_lt_payload() {
+        // `.txt` is deliberate: MiniJinja's name-based default callback only
+        // escapes `.html`, so escaped output here proves the configured
+        // `html` default actually wrapped the entry.
+        let snap = snapshot("page.txt", "Hi {{ name }}");
+        let set = TemplateSet::compile(
+            &snap,
+            "page.txt",
+            MinijinjaLimitsConfig::default(),
+            Some(AutoescapeMode::Html),
+        )
+        .expect("compile");
+        let rendered = set
+            .render_entry(ctx_name("<b>"), ResolvedLimits::default())
+            .await
+            .expect("render");
+        assert!(
+            rendered.contains("&lt;b&gt;"),
+            "configured html default must escape the payload, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("<b>"),
+            "raw payload must not survive html escaping, got: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_none_keeps_payload_verbatim() {
+        // `.html` is deliberate: the name-based callback alone would escape,
+        // so verbatim output proves the `none` wrapper overrode it.
+        let snap = snapshot("page.html", "Hi {{ name }}");
+        let set = TemplateSet::compile(
+            &snap,
+            "page.html",
+            MinijinjaLimitsConfig::default(),
+            Some(AutoescapeMode::None),
+        )
+        .expect("compile");
+        let rendered = set
+            .render_entry(ctx_name("<b>"), ResolvedLimits::default())
+            .await
+            .expect("render");
+        assert_eq!(rendered, "Hi <b>");
+    }
+
+    #[tokio::test]
+    async fn explicit_json_block_overrides_html_config() {
+        let snap = snapshot(
+            "page.html",
+            r#"{% autoescape "json" %}{{ name }}{% endautoescape %}"#,
+        );
+        let set = TemplateSet::compile(
+            &snap,
+            "page.html",
+            MinijinjaLimitsConfig::default(),
+            Some(AutoescapeMode::Html),
+        )
+        .expect("compile");
+        let rendered = set
+            .render_entry(ctx_name("<b>"), ResolvedLimits::default())
+            .await
+            .expect("render");
+        assert_eq!(
+            rendered, "\"<b>\"",
+            "explicit json block must win over the html config (json output \
+             is a quoted literal), got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("&lt;"),
+            "html config must not be applied when an explicit block wins, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn invalid_explicit_mode_still_rejects_with_config() {
+        let snap = snapshot(
+            "page.html",
+            r#"{% autoescape "htm" %}{{ name }}{% endautoescape %}"#,
+        );
+        let result = TemplateSet::compile(
+            &snap,
+            "page.html",
+            MinijinjaLimitsConfig::default(),
+            Some(AutoescapeMode::Html),
+        );
+        assert!(
+            matches!(result, Err(TemplateReloadError::Compile(_))),
+            "the config must not repair an invalid explicit mode, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn whitespace_control_invalid_mode_still_rejects_with_config() {
+        let snap = snapshot(
+            "page.html",
+            r#"{%- autoescape "htm" -%}{{ name }}{%- endautoescape -%}"#,
+        );
+        let result = TemplateSet::compile(
+            &snap,
+            "page.html",
+            MinijinjaLimitsConfig::default(),
+            Some(AutoescapeMode::Html),
+        );
+        assert!(
+            matches!(result, Err(TemplateReloadError::Compile(_))),
+            "the pre-scan must catch whitespace-control statement forms, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn stray_endautoescape_still_rejects_with_config() {
+        let snap = snapshot("page.html", "{% endautoescape %}Hi");
+        let result = TemplateSet::compile(
+            &snap,
+            "page.html",
+            MinijinjaLimitsConfig::default(),
+            Some(AutoescapeMode::Html),
+        );
+        assert!(
+            matches!(result, Err(TemplateReloadError::Compile(_))),
+            "a stray endautoescape must reject even with a configured default, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn include_target_keeps_own_escape_block() {
+        let snap = ClosureSnapshot::from_entries(vec![
+            ("page.html", br#"{% include "partial.txt" %}"#),
+            (
+                "partial.txt",
+                br#"{% autoescape "html" %}<b>{{ name }}</b>{% endautoescape %}"#,
+            ),
+        ]);
+        let set = TemplateSet::compile(
+            &snap,
+            "page.html",
+            MinijinjaLimitsConfig::default(),
+            Some(AutoescapeMode::None),
+        )
+        .expect("compile");
+        let rendered = set
+            .render_entry(ctx_name("<b>"), ResolvedLimits::default())
+            .await
+            .expect("render");
+        assert!(
+            rendered.contains("&lt;b&gt;"),
+            "escaping must come from the include target's own block, not the \
+             entry's configured default, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn wrapped_parse_failure_still_fails_set() {
+        let snap = snapshot("page.html", "{% for x in items %}no end");
+        let result = TemplateSet::compile(
+            &snap,
+            "page.html",
+            MinijinjaLimitsConfig::default(),
+            Some(AutoescapeMode::Html),
+        );
+        assert!(
+            matches!(result, Err(TemplateReloadError::Compile(_))),
+            "a parse failure of the wrapped source must fail the whole set, got: {result:?}"
         );
     }
 
@@ -259,7 +493,8 @@ mod tests {
             "broken.html",
             r#"{% autoescape "none" %}{% for x in items %}{{x}}{% endautoescape %}"#,
         );
-        let result = TemplateSet::compile(&snap, "broken.html", MinijinjaLimitsConfig::default());
+        let result =
+            TemplateSet::compile(&snap, "broken.html", MinijinjaLimitsConfig::default(), None);
         assert!(
             matches!(result, Err(TemplateReloadError::Compile(_))),
             "parse error must surface as TemplateReloadError::Compile (control-plane), \
@@ -289,7 +524,7 @@ mod tests {
                 br#"{% autoescape "none" %}inner{% endautoescape %}"#,
             ),
         ]);
-        let set = TemplateSet::compile(&snap, "page.html", MinijinjaLimitsConfig::default())
+        let set = TemplateSet::compile(&snap, "page.html", MinijinjaLimitsConfig::default(), None)
             .expect("compile must succeed — entry + include are both valid templates");
         let rendered = set
             .render_entry(ctx_empty(), ResolvedLimits::default())
@@ -336,7 +571,7 @@ mod tests {
             max_recursion_depth: Some(8),
             ..MinijinjaLimitsConfig::default()
         };
-        let set = TemplateSet::compile(&snap, "bomb.html", limits)
+        let set = TemplateSet::compile(&snap, "bomb.html", limits, None)
             .expect("compile must succeed — a self-include is syntactically valid");
 
         let result = set
@@ -386,7 +621,8 @@ mod tests {
         invalid.extend_from_slice(&[0xFF, 0xFE]);
         invalid.extend_from_slice(br#"{% endautoescape %}"#);
         let snap = ClosureSnapshot::from_single_entry("bad.html", invalid);
-        let result = TemplateSet::compile(&snap, "bad.html", MinijinjaLimitsConfig::default());
+        let result =
+            TemplateSet::compile(&snap, "bad.html", MinijinjaLimitsConfig::default(), None);
         assert!(
             matches!(result, Err(TemplateReloadError::Compile(_))),
             "non-UTF-8 source must be rejected at COMPILE (control-plane → \

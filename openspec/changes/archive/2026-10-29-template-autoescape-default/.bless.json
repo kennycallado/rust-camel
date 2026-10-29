@@ -1,0 +1,60 @@
+{
+  "kind": "plan",
+  "change": "template-autoescape-default",
+  "mission": "448",
+  "bd": "rc-6mwze",
+  "verdict": "APPROVE",
+  "spec_bless": {
+    "final_hash": "sha256:cec5a6f42f96c5fa8638e92000536bc4825fa16a4cc80d7cd885c998bb7e2eb6",
+    "history": [
+      {
+        "round": 1,
+        "expert": "e_opus",
+        "hash": "sha256:59b6dd0d13a1ab62bde719ac79ac73010ef5c65861f9bc606acba1abbdcb9f70",
+        "verdict": "APPROVE-WITH-FIXES",
+        "findings_fixed": [1, 2, 3, 4, 5, 6]
+      },
+      {
+        "round": 2,
+        "expert": "e_opus",
+        "hash": "sha256:0ec99ab807e49064669a298da299638e2792414076bda8199008f6591049087a",
+        "verdict": "APPROVE-WITH-FIXES",
+        "findings_fixed": ["N1 json-escape wording", "N2 whitespace-control pre-scan", "N3 partial.txt scenario"],
+        "note": "Reviewer pre-authorized planning once N1/N2 corrected."
+      }
+    ]
+  },
+  "plan_review": {
+    "reviewer_history": [
+      {
+        "round": 1,
+        "reviewer": "r_glm",
+        "verdict": "APPROVE-WITH-FINDINGS",
+        "findings_fixed": [1, 2, 3, 4, 5]
+      },
+      {
+        "round": 2,
+        "reviewer": "r_glm",
+        "verdict": "APPROVE-WITH-FINDINGS",
+        "note": "All five round-1 fixes RESOLVED; two residual minor wording nits explicitly authorized as apply-time edits, no re-review required."
+      }
+    ]
+  },
+  "plan_bless": {
+    "expert": "e_opus",
+    "hash_at_bless": "sha256:161d868d440220459de82bf8d2c26ca2593e3eaa06699a03b1610fc280033500",
+    "verdict": "APPROVE-WITH-FIXES",
+    "final_hash": "sha256:a42f7653bab97c8261750a9fa288441e11c50bca415dde74dc93b6d20d604d87",
+    "findings_applied_after_verdict": [
+      "F1 package name camel-component-template -> camel-template (11 sites; mission acceptance text itself carried the wrong name)",
+      "F2 html-default unit + e2e tests use page.txt entry names (name-based callback would mask a missing wrap)",
+      "F3 include test names ClosureSnapshot::from_entries",
+      "F4 StartupBuildHandle field + forced struct-literal updates named",
+      "F5 no pub use for autoescape_mode_from_toml (reachable via pub mod config)"
+    ],
+    "note": "Expert: 'the plan is approved once Findings 1 and 2 are applied. Findings 3-5 are minor clarifications and can be fixed during implementation. No re-review is needed.' All five applied."
+  },
+  "expert_deviation_note": "Mission named e_gpt (rulings) and r_gpt (reviews); both returned 'usage limit reached' on repeated dispatches this session. e_opus served blessing gates; r_glm served plan reviews. Mission's 'e_opus has no quota' note was stale in this session.",
+  "validated": true,
+  "date": "2026-10-29"
+}

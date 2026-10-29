@@ -17,7 +17,7 @@ use camel_component_api::template_reload::{
 use camel_language_api::MinijinjaLimitsConfig;
 
 use crate::closure;
-use crate::config::ResolvedExternalTemplateLimits;
+use crate::config::{AutoescapeMode, ResolvedExternalTemplateLimits};
 use crate::error::TemplateReloadError;
 use crate::path_util;
 use crate::reload::ReloadHandler;
@@ -45,6 +45,9 @@ pub(crate) struct StartupBuildHandle {
     pub(crate) limits: ResolvedExternalTemplateLimits,
     /// Owning route id (used for log labels and metrics).
     pub(crate) route_id: String,
+    /// Configured entry default applied when the entry has no top-level
+    /// `{% autoescape %}` statement. `None` keeps the mandatory explicit block.
+    pub(crate) default_autoescape: Option<AutoescapeMode>,
     /// Reload handler installed after a successful build. None until
     /// Task 4.4's `start()` runs.
     // Phase-4 lifecycle seam: filled in 4.4, read in 5.3.
@@ -110,8 +113,13 @@ impl StepLifecycle for StartupBuildHandle {
             .map_err(CamelError::from)?;
 
         // Compile once, under the configured render limits.
-        let set = TemplateSet::compile(&snapshot, &entry_str, self.render_limits.clone())
-            .map_err(CamelError::from)?;
+        let set = TemplateSet::compile(
+            &snapshot,
+            &entry_str,
+            self.render_limits.clone(),
+            self.default_autoescape,
+        )
+        .map_err(CamelError::from)?;
 
         // Seed the shared cell with the compiled set. The empty seed is
         // never observed by a request: `start_route` (Task 3.3) awaits
@@ -129,6 +137,7 @@ impl StepLifecycle for StartupBuildHandle {
             generation: Mutex::new(0),
             root: Arc::clone(&root),
             route_id: self.route_id.clone(),
+            default_autoescape: self.default_autoescape,
         });
         *self.handler.lock().expect("handler cell poisoned") = Some(Arc::clone(&handler)); // allow-unwrap
 
@@ -206,6 +215,7 @@ mod tests {
             render_limits: MinijinjaLimitsConfig::default(),
             limits: default_limits(),
             route_id: "test-route".to_string(),
+            default_autoescape: None,
             handler: Mutex::new(None),
             guard: Mutex::new(None),
         };
@@ -236,6 +246,7 @@ mod tests {
             render_limits: MinijinjaLimitsConfig::default(),
             limits: default_limits(),
             route_id: "test-route".to_string(),
+            default_autoescape: None,
             handler: Mutex::new(None),
             guard: Mutex::new(None),
         };
@@ -278,6 +289,7 @@ mod tests {
             render_limits: MinijinjaLimitsConfig::default(),
             limits: default_limits(),
             route_id: route.to_string(),
+            default_autoescape: None,
             handler: Mutex::new(None),
             guard: Mutex::new(None),
         };

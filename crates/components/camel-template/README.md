@@ -123,6 +123,9 @@ Template (`email.html.tmpl`):
 ### Configuration via Camel.toml
 
 ```toml
+[components.template]
+default-autoescape = "html"
+
 [components.template.limits]
 max-total-source-bytes = 33554432
 max-include-count = 128
@@ -134,6 +137,8 @@ max-context-size = 65536
 max-output-size = 1048576
 fuel = 100000
 ```
+
+`default-autoescape` is an optional operator default for the entry template. Precedence is: a valid explicit top-level `{% autoescape %}` block in the entry, then the configured default, then rejection at compile time. The default applies only when the entry contains no `{% autoescape %}` or `{% endautoescape %}` statement at all, so an invalid, partial, duplicate, or malformed explicit statement still rejects. The injected block wraps the entry only; include targets keep their own escaping semantics. The key is absent by default, and absence always requires the explicit block — the framework never applies an implicit HTML default. Only the exact lowercase values `"html"`, `"json"`, and `"none"` are accepted; any other value fails config load and names the key with the allowed values. Inline `language: minijinja` templates are unchanged and keep their mandatory explicit block.
 
 ## Error Behavior
 

@@ -44,7 +44,32 @@ The Producer replaces `exchange.input.body` with the rendered output as `Body::T
 
 The rendering context exposes three top-level keys: `body`, `headers`, and `exchangeProperty`. `Body::Text` and `Body::Bytes` (lossy UTF-8) are accepted. `Body::Json` exposes its fields as `{{ body.field }}`. `Body::Stream` is rejected with a guidance error pointing to `stream_cache` upstream. `Body::Empty` renders to an empty string without tripping strict-undefined.
 
-Every template must declare a top-level `{% autoescape %}` block selecting `html`, `json`, or `none`. The component enforces the explicit declaration at compile time. There is no global default; per-render output context is an operator decision, not a framework assumption.
+Every template must select `html`, `json`, or `none` through a top-level `{% autoescape %}` block or through the component-wide `default-autoescape` configuration described below. The component enforces the selection at compile time. There is no global default; per-render output context is an operator decision, not a framework assumption.
+
+### Default autoescape
+
+The external component accepts an optional operator default under `[components.template]`:
+
+```toml
+[components.template]
+default-autoescape = "html"
+```
+
+| Value | Meaning |
+| --- | --- |
+| `html` | Escape output for an HTML text or attribute context. |
+| `json` | Escape output for a JSON string context. |
+| `none` | Do not escape. This is an explicit operator opt-out, not an implicit fallback. |
+
+Only the exact lowercase strings are accepted. Any other string, or a non-string value, fails config load and names `components.template.default-autoescape` together with the allowed values.
+
+Precedence is: a valid explicit top-level `{% autoescape %}` block in the entry, then the configured default, then rejection at compile time.
+
+The default applies only when the entry contains no `{% autoescape %}` or `{% endautoescape %}` statement at all. An entry with an invalid mode, a partial block, a duplicate block, or malformed syntax still rejects at compile time. The configuration never repairs an explicit statement.
+
+The injected block wraps the entry only. Include, import, and extends targets keep their own escaping semantics; the environment-wide auto-escape callback is never changed.
+
+The key is absent by default, and absence always requires the explicit block. The framework never applies an implicit HTML default. Inline `language: minijinja` templates are not affected: they keep the mandatory explicit block required by ADR-0047.
 
 ## Limits
 

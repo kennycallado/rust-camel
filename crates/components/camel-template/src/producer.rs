@@ -175,7 +175,7 @@ mod tests {
     /// compiled to the entry name `entry_name`.
     fn make_templates(entry_name: &str, source: &str) -> SharedTemplates {
         let snap = ClosureSnapshot::from_single_entry(entry_name, source.as_bytes().to_vec());
-        let set = TemplateSet::compile(&snap, entry_name, MinijinjaLimitsConfig::default())
+        let set = TemplateSet::compile(&snap, entry_name, MinijinjaLimitsConfig::default(), None)
             .expect("compile");
         Arc::new(ArcSwap::from_pointee(set))
     }

@@ -42,7 +42,8 @@ use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::template_reload::TemplateReloadRegistry;
 use camel_component_direct::DirectComponent;
 use camel_core::CamelContext;
-use camel_template::TemplateComponent;
+use camel_template::config::autoescape_mode_from_toml;
+use camel_template::{TemplateBundleConfig, TemplateComponent};
 
 mod common;
 
@@ -322,6 +323,88 @@ async fn reload_multi_producer_all_or_nothing() {
         common::body_text(&out),
         "B2:A2:Hi",
         "both producers retain their prior sets after a failed reload (AC10)"
+    );
+
+    let _ = ctx.stop().await;
+}
+
+/// `default-autoescape = "html"` reaches BOTH the startup compile and the
+/// `ReloadHandler` build path. A block-less `.txt` entry (the name-based
+/// MiniJinja callback cannot escape a `.txt` name) starts, then an on-disk
+/// edit that stays block-less reloads and renders escaped output.
+#[tokio::test(flavor = "multi_thread")]
+async fn reload_compiles_blockless_entry_with_default_html() {
+    let route_id = "t-reload-default-html";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let entry = dir.path().join("page.txt");
+    // No autoescape statement — only the configured default can compile it.
+    std::fs::write(&entry, "v1 {{ headers.title }}").expect("write v1");
+    let uri = format!("template:file://{}", entry.display());
+
+    // Build the configured component inline, mirroring
+    // `start_two_template_route` but replacing `TemplateComponent::default()`.
+    let doc: toml::Value = toml::from_str(
+        r#"
+[components.template]
+default-autoescape = "html"
+"#,
+    )
+    .expect("config TOML");
+    let table = doc
+        .get("components")
+        .and_then(|v| v.get("template"))
+        .expect("components.template sub-table")
+        .clone();
+    let cfg: TemplateBundleConfig = table.try_into().expect("bundle config must deserialize");
+    let mode = cfg
+        .default_autoescape
+        .as_ref()
+        .map(autoescape_mode_from_toml)
+        .transpose()
+        .expect("valid default-autoescape")
+        .expect("test config sets default-autoescape");
+    let component =
+        TemplateComponent::new(cfg.limits, cfg.render_limits).with_default_autoescape(mode);
+
+    let mut ctx = CamelContext::builder()
+        .build()
+        .await
+        .expect("context build");
+    ctx.register_component(DirectComponent::new());
+    ctx.register_component(component);
+    let route = RouteBuilder::from("direct:in")
+        .route_id(route_id)
+        .to(uri)
+        .build()
+        .expect("route build");
+    ctx.add_route_definition(route)
+        .await
+        .expect("add_route_definition");
+
+    // Startup compile accepts the block-less entry via the configured default.
+    ctx.start()
+        .await
+        .expect("context must start with the configured default");
+
+    let out = common::send_title(&ctx, "<b>").await;
+    let startup_body = common::body_text(&out);
+    assert!(
+        startup_body.contains("v1 &lt;b&gt;"),
+        "startup render must HTML-escape the payload, got: {startup_body:?}"
+    );
+
+    // Edit the source while keeping it block-less; the reload build must also
+    // apply the configured default.
+    std::fs::write(&entry, "v2 {{ headers.title }}").expect("overwrite v2");
+    reload(route_id)
+        .await
+        .expect("reload must compile a block-less entry under the configured default");
+
+    let out = common::send_title(&ctx, "<b>").await;
+    let reload_body = common::body_text(&out);
+    assert!(
+        reload_body.contains("v2 &lt;b&gt;"),
+        "reload render must HTML-escape the payload, got: {reload_body:?}"
     );
 
     let _ = ctx.stop().await;

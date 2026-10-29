@@ -25,7 +25,7 @@ use camel_component_api::template_reload::{TemplateReloadStaged, TemplateReloadT
 use camel_language_api::MinijinjaLimitsConfig;
 
 use crate::closure;
-use crate::config::ResolvedExternalTemplateLimits;
+use crate::config::{AutoescapeMode, ResolvedExternalTemplateLimits};
 use crate::error::TemplateReloadError;
 use crate::path_util::OwnedHandle;
 use crate::template_set::{SharedTemplates, TemplateSet};
@@ -60,6 +60,9 @@ pub(crate) struct ReloadHandler {
     pub(crate) root: Arc<OwnedHandle>,
     /// Owning route id (used for log labels and metrics).
     pub(crate) route_id: String,
+    /// Configured entry default applied when the entry has no top-level
+    /// `{% autoescape %}` statement. `None` keeps the mandatory explicit block.
+    pub(crate) default_autoescape: Option<AutoescapeMode>,
 }
 
 impl std::fmt::Debug for ReloadHandler {
@@ -125,6 +128,7 @@ impl ReloadHandler {
         let entry = self.entry_abs_path.clone();
         let limits = self.limits;
         let render_limits = self.render_limits.clone();
+        let default_autoescape = self.default_autoescape;
 
         let join =
             tokio::task::spawn_blocking(move || -> Result<TemplateSet, TemplateReloadError> {
@@ -140,7 +144,7 @@ impl ReloadHandler {
                     })?
                     .to_string_lossy()
                     .into_owned();
-                TemplateSet::compile(&snapshot, &entry_str, render_limits)
+                TemplateSet::compile(&snapshot, &entry_str, render_limits, default_autoescape)
             });
 
         // Any failure — acquire/compile OR a join error — returns WITHOUT
@@ -278,8 +282,13 @@ mod tests {
             .expect("entry file name")
             .to_string_lossy()
             .into_owned();
-        let set = TemplateSet::compile(&snapshot, &entry_str, MinijinjaLimitsConfig::default())
-            .expect("seed compile");
+        let set = TemplateSet::compile(
+            &snapshot,
+            &entry_str,
+            MinijinjaLimitsConfig::default(),
+            None,
+        )
+        .expect("seed compile");
         let shared: SharedTemplates = Arc::new(ArcSwap::from_pointee(set));
 
         let handler = Arc::new(ReloadHandler {
@@ -290,6 +299,7 @@ mod tests {
             generation: Mutex::new(0),
             root: Arc::clone(&root),
             route_id: "test-reload".to_string(),
+            default_autoescape: None,
         });
         (dir, handler, shared, entry)
     }

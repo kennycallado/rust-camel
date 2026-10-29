@@ -24,7 +24,7 @@ use camel_component_api::{Consumer, Endpoint, ProducerContext, RuntimeObservabil
 use camel_language_api::MinijinjaLimitsConfig;
 use camel_language_minijinja::ResolvedLimits;
 
-use crate::config::ResolvedExternalTemplateLimits;
+use crate::config::{AutoescapeMode, ResolvedExternalTemplateLimits};
 use crate::lifecycle::StartupBuildHandle;
 use crate::producer::TemplateProducer;
 use crate::template_set::{SharedTemplates, TemplateSet};
@@ -37,6 +37,9 @@ pub(crate) struct TemplateEndpoint {
     limits: ResolvedExternalTemplateLimits,
     render_limits: MinijinjaLimitsConfig,
     route_id: String,
+    /// Configured entry default for templates without a top-level
+    /// `{% autoescape %}` statement. `None` keeps the mandatory explicit block.
+    default_autoescape: Option<AutoescapeMode>,
     shared: SharedTemplates,
 }
 
@@ -51,6 +54,7 @@ impl TemplateEndpoint {
         limits: ResolvedExternalTemplateLimits,
         render_limits: MinijinjaLimitsConfig,
         route_id: String,
+        default_autoescape: Option<AutoescapeMode>,
     ) -> Self {
         Self {
             uri,
@@ -58,6 +62,7 @@ impl TemplateEndpoint {
             limits,
             render_limits,
             route_id,
+            default_autoescape,
             shared: Arc::new(ArcSwap::from_pointee(TemplateSet::empty())),
         }
     }
@@ -102,6 +107,7 @@ impl Endpoint for TemplateEndpoint {
             render_limits: self.render_limits.clone(),
             limits: self.limits,
             route_id: self.route_id.clone(),
+            default_autoescape: self.default_autoescape,
             handler: Mutex::new(None),
             guard: Mutex::new(None),
         }))
@@ -131,6 +137,7 @@ mod tests {
             },
             MinijinjaLimitsConfig::default(),
             "test-route".to_string(),
+            None,
         )
     }
 
