@@ -327,8 +327,36 @@ impl GrpcProducer {
         MetadataValue::try_from(s).ok()
     }
 
+    /// Headers that must never cross into gRPC metadata. Forwarding an
+    /// inbound HTTP `Content-Length` makes the h2 frame length disagree with
+    /// the gRPC message (http -> grpc routes failed with an h2 protocol
+    /// error, rc-5ygse); the rest are HTTP/2 connection-specific headers or
+    /// gRPC-reserved names that the transport owns.
+    fn is_reserved_metadata_header(name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "content-length"
+                | "content-type"
+                | "host"
+                | "connection"
+                | "keep-alive"
+                | "proxy-connection"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "transfer-encoding"
+                | "te"
+                | "trailer"
+                | "upgrade"
+        ) || lower.starts_with("proxy-")
+            || lower.starts_with("grpc-")
+    }
+
     fn inject_headers<T>(exchange: &Exchange, request: &mut Request<T>) {
         for (k, v) in &exchange.input.headers {
+            if Self::is_reserved_metadata_header(k) {
+                continue;
+            }
             if let Some(meta) = Self::header_to_metadata(v)
                 && let Ok(name) = tonic::metadata::MetadataKey::from_bytes(k.as_bytes())
             {
@@ -814,6 +842,52 @@ mod tests {
         let meta = request.metadata();
         assert_eq!(meta.get("x-custom").unwrap().to_str().unwrap(), "val1");
         assert_eq!(meta.get("x-number").unwrap().to_str().unwrap(), "123");
+    }
+
+    #[test]
+    fn test_inject_headers_skips_http_framing_headers() {
+        let exchange = exchange_with_headers(&[
+            (
+                "Content-Length",
+                serde_json::Value::String("42".to_string()),
+            ),
+            (
+                "Content-Type",
+                serde_json::Value::String("application/json".to_string()),
+            ),
+            (
+                "Host",
+                serde_json::Value::String("api.example.com".to_string()),
+            ),
+            (
+                "Connection",
+                serde_json::Value::String("keep-alive".to_string()),
+            ),
+            (
+                "Transfer-Encoding",
+                serde_json::Value::String("chunked".to_string()),
+            ),
+            ("grpc-timeout", serde_json::Value::String("1S".to_string())),
+            ("x-request-id", serde_json::Value::String("abc".to_string())),
+        ]);
+        let mut request = Request::new(());
+        GrpcProducer::inject_headers(&exchange, &mut request);
+
+        let meta = request.metadata();
+        for reserved in [
+            "content-length",
+            "content-type",
+            "host",
+            "connection",
+            "transfer-encoding",
+            "grpc-timeout",
+        ] {
+            assert!(
+                meta.get(reserved).is_none(),
+                "{reserved} must not become gRPC metadata"
+            );
+        }
+        assert_eq!(meta.get("x-request-id").unwrap().to_str().unwrap(), "abc");
     }
 
     #[test]
