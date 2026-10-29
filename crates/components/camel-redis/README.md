@@ -38,6 +38,13 @@ redis://host:port[?options]
 | `channels` | - | Pub/Sub channels (comma-separated) |
 | `key` | - | Redis key for operations |
 | `timeout` | `1` | Timeout for blocking operations (seconds) |
+| `group` | - | Consumer-group name for `XREADGROUP` |
+| `consumer` | - | Consumer name within the group |
+| `count` | server default | Maximum entries returned per `XREADGROUP` read; must be positive |
+| `block` | `10000` | `XREADGROUP` block timeout (milliseconds); `0` blocks indefinitely |
+| `streamRecoverEnabled` | `false` | Recover pending stream entries (opt-in) |
+| `streamRecoverMinIdleMs` | `60000` | Minimum pending idle time for recovery, ms (`1..=3600000`) |
+| `streamRecoverBatch` | `10` | Maximum pending entries claimed per recovery pass (`1..=100`) |
 | `password` | - | Redis password |
 | `db` | `0` | Redis database number |
 
@@ -203,6 +210,40 @@ let jobs_dead = RouteBuilder::from("direct:jobs-dead")
     .to("redis://localhost:6379?command=LPUSH")
     .build()?;
 ```
+
+### Streams Consumer Group
+
+```rust
+// XREADGROUP: read new entries for a consumer group
+let route = RouteBuilder::from(
+    "redis://localhost:6379?command=XREADGROUP&key=events&group=workers&consumer=worker-1",
+)
+.log("Received entry", camel_processor::LogLevel::Info)
+.build()?;
+```
+
+`key`, `group`, and `consumer` are required. The Consumer delivers one Exchange
+per entry through `send_and_wait` and issues `XACK` only after the pipeline
+accepts the entry. A failed delivery logs at `warn!`, leaves the entry pending,
+and processing continues.
+
+Each delivered Exchange carries `CamelRedis.Stream`, `CamelRedis.StreamId`,
+`CamelRedis.StreamGroup`, `CamelRedis.StreamConsumer`, and
+`CamelRedis.StreamDeliveryCount`. The delivery count is the number of deliveries
+the consumer group has made for the entry, including the current one: a first
+`>` delivery carries `1`, and a recovered entry carries the post-claim count read
+from Redis after the claim.
+
+#### Pending-entry recovery
+
+Recovery is opt-in with `streamRecoverEnabled=true`. When enabled, a pass runs
+after the first successful connect and then at most once per
+`streamRecoverMinIdleMs`, measured from the start of the previous pass. The pass
+runs on a dedicated recovery connection and claims entries idle for at least
+`streamRecoverMinIdleMs`, in batches of at most `streamRecoverBatch` entries per
+pass. Claimed entries use the same delivery path as `>` reads and are
+acknowledged only after successful delivery. A failed delivery stays pending for
+a later pass. Shutdown stops an in-progress pass promptly.
 
 ### With Authentication
 

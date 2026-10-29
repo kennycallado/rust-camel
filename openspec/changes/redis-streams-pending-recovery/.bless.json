@@ -1,0 +1,24 @@
+{
+  "change": "redis-streams-pending-recovery",
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:f3d8d421c40d41e4b207850f382543f94cf47dcaad953681ea318e9f58c282a1",
+  "expert": "e_opus",
+  "date": "2026-10-29",
+  "supersedes_spec_bless": "sha256:c9ea34e003f369b6cf480de41df3b0c87cfc4fd6bc2fbe2b4597ca02e4b52e91",
+  "spec_bless": {
+    "kind": "spec",
+    "verdict": "BLESS",
+    "hash": "sha256:c9ea34e003f369b6cf480de41df3b0c87cfc4fd6bc2fbe2b4597ca02e4b52e91",
+    "expert": "e_gpt"
+  },
+  "plan_rounds": [
+    { "hash": "sha256:8cb258d97fe93a7e9e57d2405175e0dec7f8a74fff78a2726621b9aea1c3f898", "verdict": "BLESS-WITH-FIXES", "expert": "e_gpt", "findings": "compile-atomic initializers; ownership/state-machine; NEW-symbol conflicts; wire-test executability; spec-coverage gaps" },
+    { "hash": "sha256:1bfd47bb9afdd2cda23c29a9bc8cda96f3914312a621276fedecb06d419e6274", "verdict": "BLESS-WITH-FIXES", "expert": "e_gpt", "findings": "ack-response protocol; full session deps; async claim bridge; wire gates; control-closure/non-transient coverage; field names" },
+    { "hash": "sha256:da86b6ba8dc9be71671c49142336c19879f023ee5923eade8cdb4613c79cb1b6", "verdict": "BLESS-WITH-FIXES", "expert": "e_opus", "findings": "real signature from streams.rs:292; no paused clock with real TCP; ClaimLoopResult definition; reader-closure test hook" },
+    { "hash": "sha256:a040a6e019e3f44c5b1403cf88ba7183aba21d6fedb4f26fe11ab3a0af2d646b", "verdict": "BLESS-WITH-FIXES", "expert": "e_opus", "findings": "DeliveryOutcome terms + metric wire test; pending_summary_gate; session_core composition" },
+    { "hash": "sha256:f21edf4e24f9ee8b604c8d9df0536e0769af8b2122989f23ca271e38c69c886b", "verdict": "BLESS-WITH-FIXES", "expert": "e_opus", "findings": "nil-summary test concreteness; zero-count semantics; ReadTaskMsg::Connected handshake" },
+    { "hash": "sha256:acf4640b5907f3c6e2382e488af66dea29a9678815c6105ca1d2ad59b51bc146", "verdict": "BLESS-WITH-FIXES", "expert": "e_opus", "findings": "ordering-test setup contradiction (read fake vs test-held channels)" },
+    { "hash": "sha256:f3d8d421c40d41e4b207850f382543f94cf47dcaad953681ea318e9f58c282a1", "verdict": "BLESS", "expert": "e_opus" }
+  ]
+}

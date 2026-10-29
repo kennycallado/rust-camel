@@ -261,6 +261,33 @@ pub fn is_transient_redis_error(err: &CamelError) -> bool {
     false
 }
 
+/// Returns true when `err` carries the retry-budget-exhaustion marker.
+///
+/// Budget exhaustion is classified transient for the consumer's metric, but
+/// the stream session must treat it as terminal (supervision), so this probes
+/// only the [`TransientRetryBudgetExhausted`] marker instead of reusing the
+/// transient classifier. It uses the same bounded source-chain walk and Arc
+/// unwrapping as [`is_transient_redis_error`].
+pub(crate) fn is_retry_budget_exhausted(err: &CamelError) -> bool {
+    let mut source = err.source();
+    let mut hops = 0;
+    while let Some(raw) = source {
+        if hops >= MAX_SOURCE_HOPS {
+            break;
+        }
+        let src = unwrap_arc_dyn_error(raw);
+        if src
+            .downcast_ref::<TransientRetryBudgetExhausted>()
+            .is_some()
+        {
+            return true;
+        }
+        source = src.source();
+        hops += 1;
+    }
+    false
+}
+
 /// Rules 4–5 applied to the first `redis::RedisError` in a source chain.
 fn classify_redis_error(err: &redis::RedisError) -> bool {
     match err.kind() {

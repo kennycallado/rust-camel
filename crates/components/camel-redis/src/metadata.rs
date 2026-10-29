@@ -39,6 +39,15 @@ pub(super) struct RedisMetadataDescriptor {
     #[uri_param(name = "block", default = "10000")]
     pub _block: u64,
 
+    #[uri_param(name = "streamRecoverEnabled")]
+    pub _stream_recover_enabled: bool,
+
+    #[uri_param(name = "streamRecoverMinIdleMs", default = "60000")]
+    pub _stream_recover_min_idle_ms: u64,
+
+    #[uri_param(name = "streamRecoverBatch", default = "10")]
+    pub _stream_recover_batch: u64,
+
     #[uri_param(name = "password", secret)]
     pub _password: String,
 
@@ -61,8 +70,20 @@ mod tests {
         names.sort();
 
         let mut expected = vec![
-            "command", "channels", "key", "timeout", "password", "db", "ssl", "group", "consumer",
-            "count", "block",
+            "command",
+            "channels",
+            "key",
+            "timeout",
+            "password",
+            "db",
+            "ssl",
+            "group",
+            "consumer",
+            "count",
+            "block",
+            "streamRecoverEnabled",
+            "streamRecoverMinIdleMs",
+            "streamRecoverBatch",
         ];
         expected.sort();
 

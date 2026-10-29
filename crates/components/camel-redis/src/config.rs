@@ -3,6 +3,7 @@ use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::parse_uri;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use crate::sentinel_config::{SentinelConfig, TopologyKind};
@@ -552,6 +553,9 @@ impl ClusterConfig {
 /// - `consumer` - Consumer name for XREADGROUP (default: None)
 /// - `count` - Optional COUNT for XREADGROUP (default: None)
 /// - `block` - BLOCK milliseconds for XREADGROUP (default: 10000)
+/// - `streamRecoverEnabled` - Recover pending entries before reading new ones (default: false)
+/// - `streamRecoverMinIdleMs` - Minimum pending idle time for recovery, in ms (default: 60000)
+/// - `streamRecoverBatch` - Maximum pending entries claimed per recovery batch (default: 10)
 /// - `username` - Redis ACL username for data-node authentication (default: None)
 /// - `password` - Redis password for authentication (default: None)
 /// - `db` - Redis database number, 0-16383 (default: 0)
@@ -590,6 +594,19 @@ pub struct RedisEndpointConfig {
     /// BLOCK milliseconds for XREADGROUP. Default: 10000; `0` blocks
     /// indefinitely.
     pub block_ms: u64,
+
+    /// Recover pending entries before reading new ones. Only meaningful for
+    /// XREADGROUP; ignored for other commands. Default: false.
+    pub stream_recover_enabled: bool,
+
+    /// Minimum pending idle time in milliseconds before an entry is
+    /// recoverable. Only meaningful for XREADGROUP, range 1..=3600000.
+    /// Default: 60000.
+    pub stream_recover_min_idle_ms: u64,
+
+    /// Maximum pending entries claimed per recovery batch. Only meaningful
+    /// for XREADGROUP, range 1..=100. Default: 10.
+    pub stream_recover_batch: u64,
 
     /// Redis ACL username (Redis 6+) for authenticating to data nodes.
     /// Default: None.
@@ -639,6 +656,12 @@ impl std::fmt::Debug for RedisEndpointConfig {
             .field("consumer", &self.consumer)
             .field("count", &self.count)
             .field("block_ms", &self.block_ms)
+            .field("stream_recover_enabled", &self.stream_recover_enabled)
+            .field(
+                "stream_recover_min_idle_ms",
+                &self.stream_recover_min_idle_ms,
+            )
+            .field("stream_recover_batch", &self.stream_recover_batch)
             .field("username", &redacted_opt(&self.username))
             .field("password", &redacted_opt(&self.password))
             .field("db", &self.db)
@@ -649,6 +672,81 @@ impl std::fmt::Debug for RedisEndpointConfig {
             .field("topology_kind", &self.topology_kind)
             .finish()
     }
+}
+
+/// Parse the streams pending-entry recovery options.
+///
+/// These options are only meaningful for `XREADGROUP`; for any other command
+/// they are ignored entirely, including validation. For `XREADGROUP` they fail
+/// closed: the idle floor must be in `1..=3_600_000` milliseconds and the batch
+/// size must be in `1..=100`.
+fn stream_recover_min_idle_error(value: impl std::fmt::Display) -> CamelError {
+    CamelError::InvalidUri(format!(
+        "invalid streamRecoverMinIdleMs '{}': expected integer 1-3600000",
+        value
+    ))
+}
+
+fn stream_recover_batch_error(value: impl std::fmt::Display) -> CamelError {
+    CamelError::InvalidUri(format!(
+        "invalid streamRecoverBatch '{}': expected integer 1-100",
+        value
+    ))
+}
+
+/// Validate that recovery idle floor and batch size are in their allowed ranges.
+pub(crate) fn validate_stream_recover_ranges(
+    stream_recover_min_idle_ms: u64,
+    stream_recover_batch: u64,
+) -> Result<(), CamelError> {
+    if !(1..=3_600_000).contains(&stream_recover_min_idle_ms) {
+        return Err(stream_recover_min_idle_error(stream_recover_min_idle_ms));
+    }
+    if !(1..=100).contains(&stream_recover_batch) {
+        return Err(stream_recover_batch_error(stream_recover_batch));
+    }
+    Ok(())
+}
+
+fn parse_stream_recover_params(
+    params: &HashMap<String, String>,
+    command: &RedisCommand,
+) -> Result<(bool, u64, u64), CamelError> {
+    if command != &RedisCommand::Xreadgroup {
+        return Ok((false, 60000, 10));
+    }
+
+    let enabled = match params.get("streamRecoverEnabled") {
+        Some(s) => match s.to_lowercase().as_str() {
+            "true" => true,
+            "false" => false,
+            _ => {
+                return Err(CamelError::InvalidUri(format!(
+                    "invalid streamRecoverEnabled '{}': expected 'true' or 'false'",
+                    s
+                )));
+            }
+        },
+        None => false,
+    };
+
+    let min_idle_ms = match params.get("streamRecoverMinIdleMs") {
+        Some(s) => s
+            .parse::<u64>()
+            .map_err(|_| stream_recover_min_idle_error(s))?,
+        None => 60000,
+    };
+
+    let batch = match params.get("streamRecoverBatch") {
+        Some(s) => s
+            .parse::<u64>()
+            .map_err(|_| stream_recover_batch_error(s))?,
+        None => 10,
+    };
+
+    validate_stream_recover_ranges(min_idle_ms, batch)?;
+
+    Ok((enabled, min_idle_ms, batch))
 }
 
 impl RedisEndpointConfig {
@@ -737,6 +835,10 @@ impl RedisEndpointConfig {
                 None => 10000,
             };
 
+            // Parse XREADGROUP pending-entry recovery options.
+            let (stream_recover_enabled, stream_recover_min_idle_ms, stream_recover_batch) =
+                parse_stream_recover_params(&parts.params, &command)?;
+
             // Parse password
             let password = parts.params.get("password").cloned();
 
@@ -754,6 +856,9 @@ impl RedisEndpointConfig {
                 consumer,
                 count,
                 block_ms,
+                stream_recover_enabled,
+                stream_recover_min_idle_ms,
+                stream_recover_batch,
                 username: None,
                 password,
                 db,
@@ -895,6 +1000,10 @@ impl RedisEndpointConfig {
             None => 10000,
         };
 
+        // Parse XREADGROUP pending-entry recovery options.
+        let (stream_recover_enabled, stream_recover_min_idle_ms, stream_recover_batch) =
+            parse_stream_recover_params(&parts.params, &command)?;
+
         // Parse password: userinfo (from redis_url) takes precedence over query param
         let password = password_from_userinfo.or_else(|| parts.params.get("password").cloned());
 
@@ -946,6 +1055,9 @@ impl RedisEndpointConfig {
             consumer,
             count,
             block_ms,
+            stream_recover_enabled,
+            stream_recover_min_idle_ms,
+            stream_recover_batch,
             username: None,
             password,
             db,
@@ -1472,6 +1584,112 @@ mod tests {
     }
 
     #[test]
+    fn stream_recover_defaults_are_safe() {
+        let c = RedisEndpointConfig::from_uri(
+            "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c",
+        )
+        .expect("valid XREADGROUP uri");
+        assert!(!c.stream_recover_enabled);
+        assert_eq!(c.stream_recover_min_idle_ms, 60000);
+        assert_eq!(c.stream_recover_batch, 10);
+    }
+
+    #[test]
+    fn stream_recover_params_parse() {
+        let c = RedisEndpointConfig::from_uri(
+            "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c&streamRecoverEnabled=true&streamRecoverMinIdleMs=30000&streamRecoverBatch=5",
+        )
+        .expect("valid XREADGROUP uri");
+        assert!(c.stream_recover_enabled);
+        assert_eq!(c.stream_recover_min_idle_ms, 30000);
+        assert_eq!(c.stream_recover_batch, 5);
+    }
+
+    #[test]
+    fn stream_recover_params_ignored_for_non_streams_command() {
+        let c = RedisEndpointConfig::from_uri(
+            "redis://127.0.0.1:6379?command=BLPOP&key=q&timeout=5&streamRecoverBatch=0",
+        )
+        .expect("recovery options are ignored outside XREADGROUP");
+        assert!(!c.stream_recover_enabled);
+        assert_eq!(c.stream_recover_min_idle_ms, 60000);
+        assert_eq!(c.stream_recover_batch, 10);
+    }
+
+    #[test]
+    fn stream_recover_batch_zero_fails_closed() {
+        let uri = "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c&streamRecoverBatch=0";
+        let err = RedisEndpointConfig::from_uri(uri).expect_err("batch=0 must fail closed");
+        assert!(
+            err.to_string().contains("streamRecoverBatch"),
+            "error should mention streamRecoverBatch: {err}"
+        );
+    }
+
+    #[test]
+    fn stream_recover_min_idle_out_of_range_fails_closed() {
+        for value in ["3600001", "0"] {
+            let uri = format!(
+                "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c&streamRecoverMinIdleMs={value}"
+            );
+            let err = RedisEndpointConfig::from_uri(&uri)
+                .expect_err("out-of-range min idle must fail closed");
+            assert!(
+                err.to_string().contains("streamRecoverMinIdleMs"),
+                "error should mention streamRecoverMinIdleMs: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_recover_batch_over_cap_fails_closed() {
+        let uri = "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c&streamRecoverBatch=101";
+        let err = RedisEndpointConfig::from_uri(uri).expect_err("batch=101 must fail closed");
+        assert!(
+            err.to_string().contains("streamRecoverBatch"),
+            "error should mention streamRecoverBatch: {err}"
+        );
+    }
+
+    #[test]
+    fn stream_recover_programmatic_bypass_fails_closed() {
+        use std::sync::Arc;
+
+        let runtime = Arc::new(camel_component_api::test_support::PanicRuntimeObservability);
+
+        fn assert_rejected(
+            mutate: impl FnOnce(&mut RedisEndpointConfig),
+            option: &str,
+            runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+        ) {
+            let mut config = RedisEndpointConfig::from_uri(
+                "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c",
+            )
+            .expect("valid XREADGROUP uri");
+            mutate(&mut config);
+            let err = match crate::consumer::RedisConsumer::new(config, runtime) {
+                Err(e) => e,
+                Ok(_) => panic!("out-of-range {option} must fail closed"),
+            };
+            assert!(
+                err.to_string().contains(option),
+                "error must name {option}: {err}"
+            );
+        }
+
+        assert_rejected(
+            |c| c.stream_recover_batch = 0,
+            "streamRecoverBatch",
+            runtime.clone(),
+        );
+        assert_rejected(
+            |c| c.stream_recover_min_idle_ms = 3_600_001,
+            "streamRecoverMinIdleMs",
+            runtime,
+        );
+    }
+
+    #[test]
     fn test_config_auth_db() {
         let c =
             RedisEndpointConfig::from_uri("redis://localhost:6379?password=secret&db=2").unwrap();
@@ -1510,6 +1728,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: Some("pass@word".to_string()),
             db: 0,
@@ -1545,6 +1766,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: Some("pass:word".to_string()),
             db: 0,
@@ -1575,6 +1799,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: Some("pass/word".to_string()),
             db: 0,
@@ -1626,6 +1853,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: None,
             db: 0,
@@ -1656,6 +1886,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: None,
             db: 0,
@@ -1686,6 +1919,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: Some("secret".to_string()),
             db: 0,
@@ -1717,6 +1953,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: Some("secret".to_string()),
             db: 0,
@@ -1748,6 +1987,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: Some("supersecret".to_string()),
             db: 2,
@@ -1785,6 +2027,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: None,
             db: 0,
@@ -1807,6 +2052,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: None,
             db: 0,
@@ -2104,6 +2352,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: None,
             db: 0,
@@ -2133,6 +2384,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: None,
             db: 0,
@@ -2590,6 +2844,9 @@ mod tests {
             consumer: None,
             count: None,
             block_ms: 10000,
+            stream_recover_enabled: false,
+            stream_recover_min_idle_ms: 60000,
+            stream_recover_batch: 10,
             username: None,
             password: Some("secret123".to_string()),
             db: 0,

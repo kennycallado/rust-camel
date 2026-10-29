@@ -1,6 +1,6 @@
 # Redis
 
-The Redis component executes Redis commands and subscribes to Redis channels. One crate covers both directions. The Producer sends the Exchange body to Redis as a command argument. The Consumer subscribes to Pub/Sub channels or blocks on a list key. The `redis` scheme is the route URI scheme. Enable TLS with `ssl = true` on the URI, or `tls_mode` in config; TLS auto-enables for non-loopback hosts. Sentinel clusters register under `redis-sentinel` and `rediss-sentinel`, where a `rediss://` node URL requires TLS.
+The Redis component executes Redis commands and subscribes to Redis channels. One crate covers both directions. The Producer sends the Exchange body to Redis as a command argument. The Consumer subscribes to Pub/Sub channels, blocks on a list key, or reads a consumer group with `XREADGROUP`. The `redis` scheme is the route URI scheme. Enable TLS with `ssl = true` on the URI, or `tls_mode` in config; TLS auto-enables for non-loopback hosts. Sentinel clusters register under `redis-sentinel` and `rediss-sentinel`, where a `rediss://` node URL requires TLS.
 
 The redis-example wires a string producer, a Pub/Sub consumer, a queue consumer, and a Pub/Sub producer against a testcontainers Redis instance:
 
@@ -83,7 +83,7 @@ routes:
 ## URI
 
 ```text
-redis://host:port?command=<cmd>[&key=<key>][&channels=<list>][&timeout=<secs>][&password=<pwd>][&db=<n>][&ssl=<bool>]
+redis://host:port?command=<cmd>[&key=<key>][&channels=<list>][&timeout=<secs>][&group=<name>][&consumer=<name>][&count=<n>][&block=<ms>][&streamRecoverEnabled=<bool>][&streamRecoverMinIdleMs=<ms>][&streamRecoverBatch=<n>][&password=<pwd>][&db=<n>][&ssl=<bool>]
 ```
 
 | Parameter | Required | Default | Description |
@@ -92,6 +92,13 @@ redis://host:port?command=<cmd>[&key=<key>][&channels=<list>][&timeout=<secs>][&
 | `key` | per-command | none | Redis key for the operation |
 | `channels` | Pub/Sub | empty | Comma-separated channel names |
 | `timeout` | queue Consumer | `1` | Blocking pop timeout in seconds |
+| `group` | Streams Consumer | none | Consumer-group name for `XREADGROUP` |
+| `consumer` | Streams Consumer | none | Consumer name within the group |
+| `count` | no | server default | Maximum entries returned per `XREADGROUP` read; positive |
+| `block` | no | `10000` | `XREADGROUP` block timeout in milliseconds; `0` blocks indefinitely |
+| `streamRecoverEnabled` | no | `false` | Recover pending stream entries (opt-in) |
+| `streamRecoverMinIdleMs` | no | `60000` | Minimum pending idle time for recovery, in ms (`1..=3600000`) |
+| `streamRecoverBatch` | no | `10` | Maximum pending entries claimed per recovery pass (`1..=100`) |
 | `password` | no | none | Redis password |
 | `db` | no | `0` | Redis database number (0-16383) |
 | `ssl` | no | auto | Force TLS on or off |
@@ -205,11 +212,49 @@ The Producer is a Tower `Service<Exchange>`. It composes with any pipeline step 
 
 `redis://host:port?command=BLPOP&key=jobs&timeout=5` blocks on a list key and submits one Exchange per popped item. The `CamelRedis.Key` header carries the list key. The `timeout` parameter is the block duration in seconds, and `0` blocks indefinitely. Use `BLPOP` for left pop and `BRPOP` for right pop. A Producer `BLPOP`/`BRPOP` reads the timeout from the `CamelRedis.Timeout` header instead. See [Blocking pops](#blocking-pops).
 
-The Consumer's mode comes from the URI command. `SUBSCRIBE` and `PSUBSCRIBE` use Pub/Sub mode. `BLPOP` and `BRPOP` use queue mode. A command that fits neither returns an error at consumer creation. The component does not silently fall back to BLPOP (REDIS-003).
+The Consumer's mode comes from the URI command. `SUBSCRIBE` and `PSUBSCRIBE` use Pub/Sub mode. `BLPOP` and `BRPOP` use queue mode. `XREADGROUP` uses Streams mode. A command that fits none of these returns an error at consumer creation. The component does not silently fall back to BLPOP (REDIS-003).
 
 ### Blocking pops and connection timeouts
 
 Queue-mode consumers pop on a connection built with `AsyncConnectionConfig::set_response_timeout(None)` and `set_connection_timeout(None)`. The driver sets no response deadline, so the pop `timeout`, the transient retry budget, and route cancellation are the only bounds on a blocking pop. `connection_timeout_secs` remains the TCP connect bound. Producer endpoints whose command is `BLPOP` or `BRPOP` build the same deadline-free connections and ignore the `with_response_timeout` seam. Blocking pops are never multiplexed over a short driver timeout, and the component has no polling fallback (REDIS-003).
+
+### Streams consumer groups
+
+`redis://host:port?command=XREADGROUP&key=events&group=workers&consumer=worker-1` reads new entries from a consumer group with `XREADGROUP GROUP <group> <consumer> ... STREAMS <key> >`. `key`, `group`, and `consumer` are required; a missing or empty value fails at consumer creation. `count` bounds the entries returned per read and must be positive. `block` is the `BLOCK` duration in milliseconds and defaults to `10000`; `0` blocks indefinitely. The read uses a deadline-free connection, like a blocking pop (see [Blocking pops and connection timeouts](#blocking-pops-and-connection-timeouts)).
+
+| Parameter | Required | Default | Description |
+| --- | --- | --- | --- |
+| `group` | Streams | none | Consumer-group name |
+| `consumer` | Streams | none | Consumer name within the group |
+| `count` | no | server default | Maximum entries returned per read; must be positive |
+| `block` | no | `10000` | `BLOCK` duration in milliseconds; `0` blocks indefinitely |
+| `streamRecoverEnabled` | no | `false` | Recover pending entries (opt-in) |
+| `streamRecoverMinIdleMs` | no | `60000` | Minimum pending idle time before recovery, in ms (`1..=3600000`) |
+| `streamRecoverBatch` | no | `10` | Maximum pending entries claimed per recovery pass (`1..=100`) |
+
+The `streamRecover*` options are meaningful only for `XREADGROUP`; other commands ignore them. For `XREADGROUP`, an out-of-range or non-numeric value fails URI parsing and consumer creation with an error that names the option.
+
+The Consumer delivers one Exchange per entry and waits for the route outcome through `send_and_wait`. It issues `XACK` only after the pipeline accepted the entry. A failed delivery logs at `warn!`, leaves the entry pending, and the Consumer continues with the next entry. Each Exchange carries these headers:
+
+| Header | Value |
+| --- | --- |
+| `CamelRedis.Stream` | Stream key |
+| `CamelRedis.StreamId` | Entry ID |
+| `CamelRedis.StreamGroup` | Consumer-group name |
+| `CamelRedis.StreamConsumer` | Consumer name |
+| `CamelRedis.StreamDeliveryCount` | Deliveries the group has made for the entry, including this one |
+
+`CamelRedis.StreamDeliveryCount` is the number of deliveries the consumer group has made for the entry including the current one. A first `>` delivery carries `1`. A recovered entry carries the post-claim count read from Redis after the claim, so redelivery pressure is visible.
+
+The body is the raw field value for a single-field entry. For a multi-field entry the body is a JSON object that maps each field name to its value.
+
+#### Pending-entry recovery
+
+Recovery is opt-in with `streamRecoverEnabled=true`. When enabled, a recovery pass runs after the first successful connect and then at most once per `streamRecoverMinIdleMs`, measured from the start of the previous pass.
+
+A pass runs on a dedicated recovery connection, separate from the read connection. It inspects the Pending Entries List and claims entries idle for at least `streamRecoverMinIdleMs`, in batches of at most `streamRecoverBatch` entries per pass. Claimed entries go through the same pipeline and `send_and_wait` delivery as `>` reads.
+
+The Consumer acknowledges a recovered entry only after its delivery completes successfully. A failed delivery stays pending for a later pass to reclaim. Shutdown stops an in-progress pass promptly; entries already claimed but not delivered or acknowledged remain pending for a later pass or a later session.
 
 ## Security
 
@@ -246,7 +291,7 @@ An unreadable file fails closed. Endpoint creation returns a `Config` error that
 
 The Producer holds a single multiplexed connection per Endpoint. It opens lazily on the first call, and a reconnect drops the cached connection and re-resolves the master through the topology — that re-resolution is where a sentinel failover is picked up. The producer does not re-resolve on every command.
 
-Each Consumer mode — Pub/Sub and queue — holds ONE persistent connection per session. Every message or popped item is delivered over that same connection; the consumer does not reconnect between messages. A blocking-pop timeout (`BLPOP`/`BRPOP` returning nil) keeps the connection. The consumer reconnects only when the Pub/Sub stream ends or a transient transport error strikes, and a Pub/Sub reconnect replays all subscriptions. Reconnects are bounded by the configured `NetworkRetryPolicy`: when the budget is exhausted the consumer returns an error and Route supervision restarts the Route (ADR-0007).
+Each Consumer mode — Pub/Sub, queue, and Streams — holds ONE persistent read connection per session. Every message or popped item is delivered over that same connection; the consumer does not reconnect between messages. A Streams consumer with recovery enabled holds a second, dedicated recovery connection (see [Pending-entry recovery](#pending-entry-recovery)). A blocking-pop timeout (`BLPOP`/`BRPOP` returning nil) keeps the connection. The consumer reconnects only when the Pub/Sub stream ends or a transient transport error strikes, and a Pub/Sub reconnect replays all subscriptions. Reconnects are bounded by the configured `NetworkRetryPolicy`: when the budget is exhausted the consumer returns an error and Route supervision restarts the Route (ADR-0007).
 
 Connections have a 10-second connect timeout by default (`connection_timeout_secs` in the config block). The route `ErrorHandler` owns the operational signal for non-transient errors.
 

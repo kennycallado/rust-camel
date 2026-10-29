@@ -16,7 +16,7 @@ use crate::queue::{
     QueueConsumerParams, QueueIo, QueuePopCommand, RedisQueueIo, queue_command_name, queue_session,
 };
 use crate::streams::{
-    DeliveryOutcome, RedisStreamIo, StreamConsumerParams, StreamEntry, StreamIo,
+    DeliveryOutcome, RedisStreamIo, StreamConsumerParams, StreamEntry,
     build_exchange_from_stream_entry, stream_session,
 };
 use crate::topology::RedisTopology;
@@ -134,6 +134,12 @@ impl RedisConsumer {
                     }
                     count => count,
                 };
+                // URI parsing rejects out-of-range recovery options, but a
+                // programmatic config can bypass it. Fail closed here too.
+                crate::config::validate_stream_recover_ranges(
+                    config.stream_recover_min_idle_ms,
+                    config.stream_recover_batch,
+                )?;
                 RedisConsumerMode::Streams {
                     params: StreamConsumerParams {
                         key,
@@ -141,6 +147,9 @@ impl RedisConsumer {
                         consumer,
                         count,
                         block_ms: config.block_ms,
+                        recover_enabled: config.stream_recover_enabled,
+                        recover_min_idle_ms: config.stream_recover_min_idle_ms,
+                        recover_batch: config.stream_recover_batch,
                     },
                 }
             }
@@ -563,7 +572,9 @@ async fn run_stream_consumer(
         "Stream consumer connecting"
     );
 
-    let mut io: Box<dyn StreamIo> = Box::new(RedisStreamIo::new(config.connection_timeout_secs));
+    // Two independent halves off one factory: each owns its own connection
+    // and retry state.
+    let (read_io, recovery_io) = RedisStreamIo::new(config.connection_timeout_secs).halves();
 
     info!("Stream consumer started, waiting for entries");
 
@@ -619,11 +630,12 @@ async fn run_stream_consumer(
             info!("Stream consumer received shutdown signal");
         }
         result = stream_session(
-            &*topology,
-            &mut *io,
-            &params,
-            &config.reconnect,
-            &cancel_token,
+            read_io,
+            recovery_io,
+            topology,
+            params,
+            config.reconnect,
+            cancel_token.clone(),
             on_ready,
             deliver,
         ) => {
