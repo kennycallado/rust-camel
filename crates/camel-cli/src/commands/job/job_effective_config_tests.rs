@@ -108,8 +108,7 @@ fn sample_job_config() -> CamelConfig {
             },
         )]),
         jobs: JobsCamelConfig {
-            dir: Some("job-roots".to_string()),
-            dirs: None,
+            dirs: Some(vec!["job-roots".to_string()]),
         },
         // Projected fields stay at their defaults (see module doc).
         runtime_journal: None,

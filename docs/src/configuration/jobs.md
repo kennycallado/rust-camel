@@ -17,7 +17,7 @@ A top-level `[jobs]` table works only in a flat config, one without `[default]` 
 ## Keys
 
 - `dirs` (list of strings): ordered discovery roots. Each entry is a directory path resolved against the `Camel.toml` root. The walk is bounded (depth and file caps). The default is `["jobs"]`. An explicit empty list, `dirs = []`, means "no discovery roots": `camel job` finds no documents.
-- `dir` (string, legacy): compatibility alias from before the list form. It folds into a one-element `dirs` list. When both keys are present, `dirs` wins and `dir` adds no duplicate root. Prefer `dirs` in new configurations.
+- `dir` (string, legacy): removed. A `[jobs].dir` key fails the load with a tombstone naming the replacement `dirs = ["<path>"]`.
 
 Entries are literal directory paths, not globs. Do not use `src/**/*.yaml` patterns here; use the directory that contains the job documents.
 
@@ -25,7 +25,7 @@ Entries are literal directory paths, not globs. Do not use `src/**/*.yaml` patte
 
 `[jobs]` follows the standard profile rules: a `[<profile>.jobs]` section merges on top of `[default.jobs]`, and table merges are additive.
 
-Use the same key at both levels. If one profile sets `dirs` and another sets `dir`, the merged table carries both keys and `dirs` takes precedence — the profile-level `dir` is ignored without a warning:
+Use the same key at both levels, and use `dirs` only: a `dir` key that survives into the effective merged `[jobs]` table (the selected profile merge, or a plain single-table config) fails the load with a tombstone naming `dir` and `dirs = ["<path>"]`. A profile-level `dirs` replaces the default list:
 
 ```toml
 [default.jobs]

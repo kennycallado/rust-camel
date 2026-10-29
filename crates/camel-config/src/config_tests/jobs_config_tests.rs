@@ -4,9 +4,8 @@
 //! operator tool surface, not the always-on data plane. Discovery roots are
 //! normalized through `resolved_dirs()` (change `jobdiscovery`): `dirs` is
 //! the ordered set whenever present — an explicit `dirs = []` means "no
-//! roots" and wins over legacy `dir` — while the legacy `dir` alias folds
-//! into a single root, and `["jobs"]` applies only when both keys are
-//! absent. Roots are resolved against the Camel.toml root by callers.
+//! roots" — and `["jobs"]` applies only when `dirs` is absent. Roots are
+//! resolved against the Camel.toml root by callers.
 
 use super::*;
 use crate::config::log_capture::capture_warns;
@@ -34,31 +33,18 @@ fn jobs_table_dirs_round_trip() {
 }
 
 #[test]
-fn explicit_job_dirs_override_legacy_dir() {
-    let cfg: CamelConfig =
-        toml::from_str("[jobs]\ndir = \"legacy\"\ndirs = [\"first\", \"second\"]\n")
-            .expect("dual-key [jobs] table parses");
-    assert_eq!(
-        cfg.jobs.resolved_dirs(),
-        ["first", "second"],
-        "dirs must take precedence and legacy dir must not add a duplicate root"
-    );
-}
-
-#[test]
-fn empty_dirs_override_legacy_dir() {
-    let cfg: CamelConfig =
-        toml::from_str("[jobs]\ndir = \"legacy\"\ndirs = []\n").expect("[jobs] table parses");
+fn explicit_empty_dirs_mean_no_roots() {
+    let cfg: CamelConfig = toml::from_str("[jobs]\ndirs = []\n").expect("[jobs] table parses");
     assert!(
         cfg.jobs.resolved_dirs().is_empty(),
-        "explicit dirs = [] must win over legacy dir and normalize to no roots"
+        "explicit dirs = [] must normalize to no roots"
     );
 }
 
 #[test]
 fn jobs_table_unknown_key_rejected() {
     let err = toml::from_str::<CamelConfig>("[jobs]\nbogus = true\n")
-        .expect_err("deny_unknown_fields must reject unknown [jobs] keys");
+        .expect_err("unknown [jobs] keys must be rejected");
     let msg = err.to_string();
     assert!(
         msg.contains("unknown field"),
@@ -67,24 +53,21 @@ fn jobs_table_unknown_key_rejected() {
 }
 
 #[test]
-fn legacy_jobs_dir_alias_is_supported() {
-    let cfg: CamelConfig =
-        toml::from_str("[jobs]\ndir = \"legacy-jobs\"\n").expect("[jobs] table parses");
-    assert_eq!(
-        cfg.jobs.resolved_dirs(),
-        ["legacy-jobs"],
-        "legacy dir must fold into exactly one root"
+fn jobs_dir_alias_is_a_tombstone() {
+    let err = toml::from_str::<CamelConfig>("[jobs]\ndir = \"legacy\"\n")
+        .expect_err("removed [jobs].dir alias must fail the load");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("dir"),
+        "error must name the removed key; got: {msg}"
     );
-}
-
-#[test]
-fn jobs_table_dir_round_trip() {
-    let cfg: CamelConfig =
-        toml::from_str("[jobs]\ndir = \"ops/jobs\"\n").expect("[jobs] table parses");
-    assert_eq!(
-        cfg.jobs.resolved_dirs(),
-        ["ops/jobs"],
-        "explicit legacy dir must survive the merge as the sole root"
+    assert!(
+        msg.contains("dirs"),
+        "error must name the replacement key; got: {msg}"
+    );
+    assert!(
+        msg.contains("dirs = ["),
+        "error must show the replacement spelling `dirs = [...]`; got: {msg}"
     );
 }
 
@@ -92,8 +75,7 @@ fn jobs_table_dir_round_trip() {
 fn jobs_overlay_overrides_default() {
     let built = CamelConfigBuilder::default()
         .jobs(JobsCamelConfig {
-            dir: Some("ops/jobs".to_string()),
-            dirs: None,
+            dirs: Some(vec!["ops/jobs".to_string()]),
         })
         .build();
     assert_eq!(
@@ -110,12 +92,11 @@ fn jobs_overlay_overrides_default() {
 }
 
 #[test]
-fn merged_profile_keeps_both_keys_dirs_wins() {
+fn merged_profile_legacy_dir_is_a_tombstone() {
     // Cross-profile additive-merge shape (dossier jobconfig-findings): the
     // profile merge is key-by-key, so [default.jobs] dirs + [development.jobs]
-    // dir leaves BOTH keys on the merged table. resolved_dirs() honors dirs
-    // per spec; the CLI warns about the ignored dir at its stderr diagnostic
-    // surface (jobs_roots), not here.
+    // dir leaves BOTH keys on the merged table. The load must fail loudly:
+    // the removed `dir` key is a tombstone, not a silently ignored leftover.
     let _env_guard = EnvGuard::remove("CAMEL_PROFILE");
 
     let tree = toml::from_str(
@@ -129,29 +110,23 @@ dir = "legacy"
     )
     .expect("fixture must be valid TOML");
 
-    let cfg = build_from_toml_value_inner(
+    let err = build_from_toml_value_inner(
         tree,
         Some("development"),
         false,
         Vec::new(),
         &super::ambient_lookup(),
     )
-    .expect("merged profile config must build");
+    .expect_err("merged profile carrying the removed `dir` key must fail the load");
 
-    assert_eq!(
-        cfg.jobs.dir.as_deref(),
-        Some("legacy"),
-        "additive merge must keep the profile-scoped legacy dir"
+    let msg = err.to_string();
+    assert!(
+        msg.contains("dir"),
+        "error must name the removed key; got: {msg}"
     );
-    assert_eq!(
-        cfg.jobs.dirs,
-        Some(vec!["first".to_string(), "second".to_string()]),
-        "additive merge must keep the default dirs list"
-    );
-    assert_eq!(
-        cfg.jobs.resolved_dirs(),
-        ["first", "second"],
-        "dirs must win post-merge"
+    assert!(
+        msg.contains("dirs"),
+        "error must name the replacement key; got: {msg}"
     );
 }
 
@@ -165,7 +140,7 @@ fn jobs_table_no_unselected_profile_warning() {
 log_level = "info"
 
 [jobs]
-dir = "ops/jobs"
+dirs = ["ops/jobs"]
 "#,
     )
     .expect("fixture must be valid TOML");

@@ -1794,7 +1794,6 @@ fn duplicate_job_dirs_entries_resolve_bare_name_once() {
     let config_path = dir.path().join("Camel.toml");
     let config = CamelConfig {
         jobs: JobsCamelConfig {
-            dir: None,
             dirs: Some(vec!["jobs".to_string(), "jobs".to_string()]),
         },
         ..CamelConfig::default()

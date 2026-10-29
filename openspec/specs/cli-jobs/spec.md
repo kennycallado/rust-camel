@@ -231,8 +231,13 @@ polled; the boot-buffer guarantee applies to Unix SIGINT/SIGTERM streams.
 
 ### Requirement: job discovery and no-argument listing
 
-The system SHALL accept a `[jobs]` table with ordered `dirs`, defaulting to `["jobs"]`, and reject unknown keys. Legacy `dir` SHALL fold into one `dirs` entry. Each root SHALL resolve against the `Camel.toml` root. A bare name SHALL probe only `<name>.job.yaml` at the root level of every configured root, report a miss with the probed path, and use the first matching root when exactly one match exists. Multiple matching roots SHALL produce an exit-2 collision naming all paths. Bare names SHALL never consult the current working directory. Document-argument resolution beyond bare names SHALL follow the named job resolution requirement; an explicit-class argument that exists relative to the current working directory SHALL bypass root probing. A job SHALL retain its mandatory explicit route source and SHALL never inherit `routes/` discovery. No-argument listing SHALL show `.job.yaml` and `.job.yml` stems, descriptions or `(no description)`, replace embedded newlines with spaces, tolerate malformed siblings as `(unparseable)`, print the existing creation hint for absent or empty roots, and reject listing-only report options with exit 2. Listing and run reports SHALL never co-occur.
-When both `dir` and `dirs` are present, `dirs` SHALL take precedence and `dir` SHALL not add a duplicate root. Recursive listing SHALL preserve the existing root-level output line for files directly under a configured root (the bare stem). For nested files, it SHALL show the configured-root-relative path as `<relative-path> — <description>` — the exact spelling that resolves as a document argument, so the displayed name is invocable verbatim. Bare-name resolution SHALL remain root-level only: a bare name never resolves a document nested below a root.
+The system SHALL accept a `[jobs]` table with ordered `dirs`, defaulting to `["jobs"]`, and reject unknown keys. The removed legacy `dir` key SHALL fail the load with a tombstone error naming `dir` and the replacement `dirs = ["<path>"]`. Each root SHALL resolve against the `Camel.toml` root. A bare name SHALL probe only `<name>.job.yaml` at the root level of every configured root, report a miss with the probed path, and use the first matching root when exactly one match exists. Multiple matching roots SHALL produce an exit-2 collision naming all paths. Bare names SHALL never consult the current working directory. Document-argument resolution beyond bare names SHALL follow the named job resolution requirement; an explicit-class argument that exists relative to the current working directory SHALL bypass root probing. A job SHALL retain its mandatory explicit route source and SHALL never inherit `routes/` discovery. No-argument listing SHALL show `.job.yaml` and `.job.yml` stems, descriptions or `(no description)`, replace embedded newlines with spaces, tolerate malformed siblings as `(unparseable)`, print the existing creation hint for absent or empty roots, and reject listing-only report options with exit 2. Listing and run reports SHALL never co-occur.
+Recursive listing SHALL preserve the existing root-level output line for files directly under a configured root (the bare stem). For nested files, it SHALL show the configured-root-relative path as `<relative-path> — <description>` — the exact spelling that resolves as a document argument, so the displayed name is invocable verbatim. Bare-name resolution SHALL remain root-level only: a bare name never resolves a document nested below a root.
+
+<!-- openspec-scenario-ops
+dropped: Legacy directory alias | alias removed pre-1.0; a surviving [jobs].dir key fails the load with a tombstone naming dirs (ADR-0090 row 8, bd rc-3lqgi)
+dropped: Explicit dirs take precedence | alias removed pre-1.0; dir/dirs precedence is meaningless once the tombstone rejects dir (ADR-0090 row 8, bd rc-3lqgi)
+-->
 
 #### Scenario: lists found jobs with exit 0
 
@@ -304,25 +309,15 @@ When both `dir` and `dirs` are present, `dirs` SHALL take precedence and `dir` S
 - **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test configured_job_dirs_are_scanned_in_order`.
 - **ASSERT:** Output order matches `team-a`, then `team-b`.
 
-#### Scenario: Legacy directory alias
+#### Scenario: Removed dir alias is a tombstone
 
-- **GIVEN** `Camel.toml` declares only `dir = "legacy-jobs"`
-- **WHEN** `camel job` discovers jobs
-- **THEN** it scans `legacy-jobs` as the sole discovery root
-- **TEST:** `legacy_jobs_dir_alias_is_supported`
-- **SETUP:** Create `Camel.toml` with only `[jobs].dir` and one job below it.
-- **ACTION:** Run `cargo test -p camel-config --lib legacy_jobs_dir_alias_is_supported`.
-- **ASSERT:** Deserialized roots contain exactly `legacy-jobs`.
-
-#### Scenario: Explicit dirs take precedence
-
-- **GIVEN** `Camel.toml` declares `dir = "legacy"` and `dirs = ["first", "second"]`
-- **WHEN** `camel job` discovers jobs
-- **THEN** it scans only `first` and `second`
-- **TEST:** `explicit_job_dirs_override_legacy_dir`
-- **SETUP:** Put `legacy-only.job.yaml` only in `legacy`, and `first.job.yaml` only in `first`.
-- **ACTION:** Run `cargo test -p camel-cli --test job_one_shot_test explicit_job_dirs_override_legacy_dir`.
-- **ASSERT:** Configured roots equal `first`, `second`; stdout contains the exact root-level line `first — (no description)` and does not contain `legacy-only`.
+- **GIVEN** `Camel.toml` declares `[jobs]` with `dir = "legacy-jobs"`
+- **WHEN** the configuration is loaded
+- **THEN** the load fails with an error naming `dir` and the replacement `dirs = ["<path>"]`
+- **TEST:** `jobs_dir_alias_is_a_tombstone`
+- **SETUP:** None.
+- **ACTION:** Run `cargo test -p camel-config jobs_dir_alias_is_a_tombstone`.
+- **ASSERT:** The error message contains `dir`, `dirs`, and the `dirs = [` migration spelling; no `dirs` default or alias fold occurs.
 
 #### Scenario: Default root
 
@@ -1591,4 +1586,3 @@ requirement).
   byte-identical conflict detail prefixed by the endpoint-creation stage
   wording, and the total process elapsed time stays below 1.5 seconds —
   half the 3 second send retry window, proving no retry burn
-

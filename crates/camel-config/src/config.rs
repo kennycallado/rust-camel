@@ -252,38 +252,70 @@ impl Default for CamelConfig {
 ///
 /// Ordered `camel job` discovery roots, resolved against the Camel.toml
 /// root. `dirs` is the ordered discovery set and wins whenever present —
-/// an explicit `dirs = []` means "no roots". The legacy `dir` alias folds
-/// into a single root and is honored only while `dirs` is absent. Key
-/// presence is preserved so callers can tell `dirs = []` from an absent
-/// `dirs`. A job document's route source stays explicit — this table
-/// never feeds route discovery.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+/// an explicit `dirs = []` means "no roots". Key presence is preserved so
+/// callers can tell `dirs = []` from an absent `dirs`. A job document's
+/// route source stays explicit — this table never feeds route discovery.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct JobsCamelConfig {
-    /// Legacy single discovery root. Superseded by `dirs` whenever
-    /// `dirs` is present.
-    #[serde(default)]
-    pub dir: Option<String>,
     /// Ordered discovery roots. Presence (including an empty list)
-    /// overrides the legacy `dir` alias.
-    #[serde(default)]
+    /// overrides the built-in default.
     pub dirs: Option<Vec<String>>,
+}
+
+impl<'de> serde::Deserialize<'de> for JobsCamelConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct JobsVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for JobsVisitor {
+            type Value = JobsCamelConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a `[jobs]` table with an optional `dirs` list")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut dirs = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "dirs" => dirs = map.next_value::<Option<Vec<String>>>()?,
+                        // Tombstone (ADR-0090 pre-1.0 shedding row 8;
+                        // bd rc-3lqgi): the legacy single-root alias was
+                        // removed in favor of the canonical list key, so a
+                        // stale config fails the load naming the replacement
+                        // instead of silently folding into `dirs`.
+                        "dir" => {
+                            return Err(serde::de::Error::custom(
+                                "`dir` was removed from the `[jobs]` table; use `dirs = [\"<path>\"]`",
+                            ));
+                        }
+                        other => {
+                            return Err(serde::de::Error::unknown_field(other, &["dirs"]));
+                        }
+                    }
+                }
+                Ok(JobsCamelConfig { dirs })
+            }
+        }
+
+        deserializer.deserialize_map(JobsVisitor)
+    }
 }
 
 impl JobsCamelConfig {
     /// Normalized ordered discovery roots.
     ///
-    /// Precedence: `dirs` whenever present (an explicit empty list wins),
-    /// then the legacy `dir` folded into one root, then the built-in
-    /// `["jobs"]` default when both keys are absent.
+    /// `dirs` whenever present (an explicit empty list wins), else the
+    /// built-in `["jobs"]` default.
     pub fn resolved_dirs(&self) -> Vec<String> {
-        if let Some(dirs) = &self.dirs {
-            return dirs.clone();
-        }
-        match &self.dir {
-            Some(dir) => vec![dir.clone()],
-            None => vec![default_jobs_dir()],
-        }
+        self.dirs
+            .clone()
+            .unwrap_or_else(|| vec![default_jobs_dir()])
     }
 }
 

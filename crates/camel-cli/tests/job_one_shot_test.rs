@@ -1527,111 +1527,25 @@ fn duplicate_job_dirs_entries_list_once() {
     );
 }
 
-/// `dirs` wins over legacy `dir` when both exist: only `first` and
-/// `second` are scanned, and the legacy-only file never appears.
+/// The removed `dir` alias is a tombstone: a config that still spells it
+/// fails to load and the error names the `dirs` replacement.
 #[test]
-fn explicit_job_dirs_override_legacy_dir() {
+fn jobs_dir_alias_fails_load_naming_dirs() {
     let dir = tempfile::tempdir().expect("tempdir");
-    write_config_with_jobs(
-        dir.path(),
-        "dir = \"legacy\"\ndirs = [\"first\", \"second\"]",
-    );
-    std::fs::create_dir_all(dir.path().join("legacy")).expect("mkdir legacy");
-    std::fs::create_dir_all(dir.path().join("first")).expect("mkdir first");
-    std::fs::create_dir_all(dir.path().join("second")).expect("mkdir second");
-    write_listing_job(
-        &dir.path().join("legacy/legacy-only.job.yaml"),
-        "legacy job",
-    );
-    write_listing_job(&dir.path().join("first/first.job.yaml"), "");
+    write_config_with_jobs(dir.path(), "dir = \"legacy\"");
 
-    let (code, stdout, stderr) = run_job_args(dir.path(), &[]);
+    let (code, _stdout, stderr) = run_job_args(dir.path(), &[]);
     assert_eq!(
-        code, 0,
-        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        code, 2,
+        "the removed alias fails config load with exit 2;\nstderr:\n{stderr}"
     );
     assert!(
-        stdout.lines().any(|l| l == "first — (no description)"),
-        "exact first-root line; got:\n{stdout}"
+        stderr.contains("dir"),
+        "the load error names the removed `dir` key; got:\n{stderr}"
     );
     assert!(
-        !stdout.contains("legacy-only"),
-        "legacy dir must not be scanned when dirs is present; got:\n{stdout}"
-    );
-}
-
-/// Cross-profile shadowing (rc-ijian): the profile merge is key-by-key, so
-/// `[default.jobs] dirs` + `[development.jobs] dir` leaves both keys on the
-/// merged table. `dirs` wins and `camel job` warns once on stderr — before
-/// the tracing subscriber initializes, so the diagnostic must be an
-/// unconditional `eprintln!`, not a `tracing::warn!` (which the CLI drops at
-/// this phase). Without the active profile only `[default]` applies: no
-/// shadowing, no warning.
-#[test]
-fn listing_warns_on_profile_shadowed_legacy_dir() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        dir.path().join("Camel.toml"),
-        r#"[default]
-routes = ["routes/*.yaml"]
-log_level = "off"
-watch = false
-
-[default.jobs]
-dirs = ["first"]
-
-[development.jobs]
-dir = "legacy"
-"#,
-    )
-    .expect("write Camel.toml");
-    std::fs::create_dir_all(dir.path().join("first")).expect("mkdir first");
-    std::fs::create_dir_all(dir.path().join("legacy")).expect("mkdir legacy");
-    write_listing_job(&dir.path().join("first/a.job.yaml"), "first job");
-    write_listing_job(
-        &dir.path().join("legacy/legacy-only.job.yaml"),
-        "legacy job",
-    );
-
-    // Active profile: both keys present post-merge; dirs wins, one warning on
-    // stderr, listing stdout unchanged.
-    let (code, stdout, stderr) =
-        run_job_args_with_env(dir.path(), &[], &[("CAMEL_PROFILE", "development")], &[]);
-    assert_eq!(
-        code, 0,
-        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    assert_eq!(
-        stdout.lines().collect::<Vec<_>>(),
-        vec!["Jobs in first/:", "a — first job"],
-        "listing stdout must be unchanged by the warning; got:\n{stdout}"
-    );
-    let hits = stderr
-        .matches("is ignored because [jobs].dirs is set")
-        .count();
-    assert_eq!(
-        hits, 1,
-        "the shadowed legacy dir must warn exactly once on stderr; got:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("camel job: [jobs].dir is ignored"),
-        "warning must carry the `camel job: ` stderr prefix; got:\n{stderr}"
-    );
-
-    // No active profile: [development] is unselected, no shadowing, no warning.
-    let (code, stdout, stderr) = run_job_args_with_env(dir.path(), &[], &[], &["CAMEL_PROFILE"]);
-    assert_eq!(
-        code, 0,
-        "listing exits 0;\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    assert_eq!(
-        stdout.lines().collect::<Vec<_>>(),
-        vec!["Jobs in first/:", "a — first job"],
-        "listing stdout unchanged without the profile; got:\n{stdout}"
-    );
-    assert!(
-        stderr.trim().is_empty(),
-        "no warning without the active shadowing profile; got:\n{stderr}"
+        stderr.contains("dirs = ["),
+        "the load error names the `dirs` replacement; got:\n{stderr}"
     );
 }
 

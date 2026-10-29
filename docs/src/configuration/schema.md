@@ -37,7 +37,6 @@ Discovery roots for the `camel job` command. This table is an operator-tool surf
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `jobs.dirs` | array of strings | `["jobs"]` | Ordered discovery roots, resolved against the `Camel.toml` root. The walk is bounded (depth and file caps). `dirs = []` means no discovery. |
-| `jobs.dir` | string | — | Legacy alias from before the list form. Folds into a one-element `dirs` list. `dirs` wins when both are present. |
 
 See [Jobs discovery](jobs.md) for the walk rules, profile merging, and the declared-arguments surface of job documents.
 

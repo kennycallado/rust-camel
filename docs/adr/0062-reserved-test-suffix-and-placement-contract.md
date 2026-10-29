@@ -128,7 +128,7 @@ no longer consumes `*.test.yaml`.
   `camel job` with an error that directs the author to rename the file.
   There is no alias and no compatibility shim (zero adoption at the
   time of the rename; accepted breaking change, pre-1.0).
-- Job documents live under `[jobs].dir` in `Camel.toml` (default
+- Job documents live under `[jobs].dirs` in `Camel.toml` (default
   `jobs`), resolved against the `Camel.toml` root. This table governs
   where job documents live, never where a job's routes come from: the
   explicit route source stays mandatory.
@@ -158,11 +158,19 @@ definition moved down the layering; no semantics changed.
 ### Amendment (2026-09-13): Ordered job discovery set
 
 The `jobdiscovery` change for bd `rc-k0rvt` extends the job root from one
-directory to ordered `[jobs].dirs`. It keeps `[jobs].dir` as a compatibility
-alias. Listing uses a bounded metadata walk. It does not invoke route
-discovery, interpolation, or security compilation. This amendment does not
-change job arguments, help, or typed argument behavior.
+directory to ordered `[jobs].dirs`. It kept `[jobs].dir` as a compatibility
+alias, removed by the 2026-10-29 amendment below. Listing uses a bounded
+metadata walk. It does not invoke route discovery, interpolation, or
+security compilation. This amendment does not change job arguments, help,
+or typed argument behavior.
 The walk uses lexical order, root depth 0, maximum depth 8, and 512 files per
 root. It follows no directory symlinks. A truncated root emits one warning.
-If both `dir` and `dirs` exist, `dirs` wins. Nested listing shows relative
-paths. Bare-name lookup remains root-level only.
+`dirs` is the only discovery key. Nested listing shows relative paths.
+Bare-name lookup remains root-level only.
+
+### Amendment (2026-10-29): Legacy `[jobs].dir` alias removed
+
+Pre-1.0 compatibility policy (ADR-0090, row 8; bd `rc-3lqgi`) retires the
+`[jobs].dir` alias from the 2026-09-13 amendment. `dirs` is the only
+discovery key. A `[jobs].dir` key fails the load with a tombstone naming the
+replacement: `dirs = ["<path>"]`.
