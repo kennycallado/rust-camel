@@ -15,3 +15,6 @@ predicate_eval/header_value 154.94 ryzen AMD Ryzen 5 5600G with Radeon Graphics
 predicate_eval/header_eq 153.98 ryzen AMD Ryzen 5 5600G with Radeon Graphics
 predicate_eval/header_gt 128.23 ryzen AMD Ryzen 5 5600G with Radeon Graphics
 predicate_eval/body_contains 128.53 ryzen AMD Ryzen 5 5600G with Radeon Graphics
+# predicate_eval/complex restored by mission 445 (rc-fgjhn); measured with the
+# same statistic on the same host/cpu as the rows above.
+predicate_eval/complex 290.73 ryzen AMD Ryzen 5 5600G with Radeon Graphics

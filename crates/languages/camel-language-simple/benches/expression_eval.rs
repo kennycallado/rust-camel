@@ -44,6 +44,12 @@ const BASELINE_REGRESSION_LIMIT: f64 = 1.10;
 /// The 3-clause choice predicate from the corpus (a scalar-only slot).
 const CHOICE_SCRIPT: &str = "default(header.at, '0') != 'null' && int(property.nowMs) >= int(header.at) && header.body != 'null'";
 
+/// Compound boolean predicate restoring the old `complex` interpolation
+/// workload: three template slots evaluated in one `&&` chain (no
+/// short-circuit — every clause is true for the fixture).
+const COMPLEX_PREDICATE_SCRIPT: &str =
+    "${header.foo} == 'bar' && ${header.count} > 10 && ${body} contains 'world'";
+
 /// 25 `int()` lookups combined by arithmetic/min/max: one whole-slot source.
 const COMPUTE_25_SCRIPT: &str = "${int(header.k1) + int(header.k2) + int(header.k3) + int(header.k4) + int(header.k5) + min(int(header.k6), int(header.k7)) + max(int(header.k8), int(header.k9)) + int(header.k10) * 2 - int(header.k11) + int(header.k12) + int(header.k13) + int(header.k14) + int(header.k15) + int(header.k16) + int(header.k17) + min(int(header.k18), int(header.k19)) + int(header.k20) + int(header.k21) + int(header.k22) + int(header.k23) + int(header.k24) + int(header.k25)}";
 
@@ -75,6 +81,7 @@ const WORKLOADS: &[(&str, &str, &str)] = &[
         PREDICATE_GROUP,
         "body_contains",
     ),
+    ("predicate_eval/complex", PREDICATE_GROUP, "complex"),
     ("predicate_eval/choice", PREDICATE_GROUP, "choice"),
 ];
 
@@ -259,6 +266,7 @@ fn bench_predicate_eval(c: &mut Criterion) {
         ("header_eq", "${header.foo} == 'bar'".to_string()),
         ("header_gt", "${header.count} > 10".to_string()),
         ("body_contains", "${body} contains 'world'".to_string()),
+        ("complex", COMPLEX_PREDICATE_SCRIPT.to_string()),
         ("choice", CHOICE_SCRIPT.to_string()),
     ];
 
