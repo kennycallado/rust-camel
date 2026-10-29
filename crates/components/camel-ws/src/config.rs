@@ -4,7 +4,8 @@ use camel_component_api::{
     CamelError, ComponentMetadata, NetworkRetryPolicy, UriConfig, UriOption,
 };
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
 pub struct WsConfig {
     pub max_connections: Option<u32>,
     pub max_message_size: Option<u32>,
@@ -15,6 +16,13 @@ pub struct WsConfig {
     pub send_timeout_ms: Option<u64>,
     pub binary_payload: Option<bool>,
     pub subprotocols: Option<Vec<String>>,
+    /// Canonical reconnection surface. Set in TOML via
+    /// `[components.ws.reconnect]` (keys: `enabled`, `max_attempts`,
+    /// `initial_delay_ms`, `multiplier`, `max_delay_ms`, `jitter_factor`,
+    /// `max_attempts_absolute`) or programmatically via
+    /// `WsConfig { reconnect, .. }`. The flat `reconnect*` URI parameters
+    /// are tombstoned.
+    pub reconnect: NetworkRetryPolicy,
 }
 
 /// Private container for macro-derived `uri_options()` and `metadata()`.
@@ -98,24 +106,6 @@ struct WsUriConfig {
     #[uri_param(name = "tlsKey", desc = "Path to TLS private key file")]
     tls_key: Option<String>,
     #[uri_param(
-        name = "reconnect",
-        default = "true",
-        desc = "Enable reconnection for client producer"
-    )]
-    reconnect: bool,
-    #[uri_param(
-        name = "reconnectMaxAttempts",
-        default = "5",
-        desc = "Maximum reconnection attempts"
-    )]
-    reconnect_max_attempts: u32,
-    #[uri_param(
-        name = "reconnectDelayMs",
-        default = "1000",
-        desc = "Delay between reconnection attempts"
-    )]
-    reconnect_delay_ms: u64,
-    #[uri_param(
         name = "sendTimeoutMs",
         default = "30000",
         desc = "Send timeout in milliseconds"
@@ -148,16 +138,13 @@ pub struct WsEndpointConfig {
     pub allow_origin: String,
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
-    pub reconnect: bool,
-    pub reconnect_max_attempts: u32,
-    pub reconnect_delay_ms: u64,
     pub send_timeout: Duration,
     pub binary_payload: bool,
     pub subprotocols: Vec<String>,
-    /// Structured reconnection policy, replacing the flat `reconnect`/
-    /// `reconnect_max_attempts`/`reconnect_delay_ms` fields for new config.
-    /// The flat fields remain as a backward-compat shim and are bridged into
-    /// this policy during `from_uri()` construction.
+    /// Structured reconnection policy — the single canonical reconnection
+    /// surface. Set programmatically via `WsConfig::reconnect` (applied by the
+    /// component); the flat `reconnect`/`reconnectMaxAttempts`/`reconnectDelayMs`
+    /// URI parameters were removed and are rejected at parse time.
     pub reconnect_policy: NetworkRetryPolicy,
 }
 
@@ -183,14 +170,27 @@ impl std::fmt::Debug for WsEndpointConfig {
             .field("allow_origin", &self.allow_origin)
             .field("tls_cert", &redacted_opt(&self.tls_cert))
             .field("tls_key", &redacted_opt(&self.tls_key))
-            .field("reconnect", &self.reconnect)
-            .field("reconnect_max_attempts", &self.reconnect_max_attempts)
-            .field("reconnect_delay_ms", &self.reconnect_delay_ms)
             .field("reconnect_policy", &self.reconnect_policy)
             .field("send_timeout", &self.send_timeout)
             .field("binary_payload", &self.binary_payload)
             .field("subprotocols", &self.subprotocols)
             .finish()
+    }
+}
+
+/// The ws-specific default reconnection policy. Deliberately distinct
+/// from `NetworkRetryPolicy::default()` (which has max_attempts 10,
+/// initial_delay 100ms, jitter 0.2): ws keeps its historical
+/// 5 attempts / 1000ms / no-jitter behavior.
+fn ws_default_reconnect_policy() -> NetworkRetryPolicy {
+    NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 5,
+        initial_delay: Duration::from_millis(1000),
+        multiplier: 2.0,
+        max_delay: Duration::from_secs(30),
+        jitter_factor: 0.0, // old behavior had no jitter
+        max_attempts_absolute: None,
     }
 }
 
@@ -212,21 +212,10 @@ impl Default for WsEndpointConfig {
             allow_origin: "*".into(),
             tls_cert: None,
             tls_key: None,
-            reconnect: true,
-            reconnect_max_attempts: 5,
-            reconnect_delay_ms: 1000,
             send_timeout: Duration::from_secs(30),
             binary_payload: false,
             subprotocols: Vec::new(),
-            reconnect_policy: NetworkRetryPolicy {
-                enabled: true,
-                max_attempts: 5,
-                initial_delay: Duration::from_millis(1000),
-                multiplier: 2.0,
-                max_delay: Duration::from_secs(30),
-                jitter_factor: 0.0, // old behavior had no jitter
-                max_attempts_absolute: None,
-            },
+            reconnect_policy: ws_default_reconnect_policy(),
         }
     }
 }
@@ -241,7 +230,74 @@ pub struct WsClientConfig {
     pub inner: WsEndpointConfig,
 }
 
+impl Default for WsConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: None,
+            max_message_size: None,
+            heartbeat_interval_ms: None,
+            idle_timeout_ms: None,
+            connect_timeout_ms: None,
+            response_timeout_ms: None,
+            send_timeout_ms: None,
+            binary_payload: None,
+            subprotocols: None,
+            reconnect: ws_default_reconnect_policy(),
+        }
+    }
+}
+
 impl WsConfig {
+    /// Build the endpoint config for `uri`, applying this component-level
+    /// config over URI parsing.
+    ///
+    /// Precedence:
+    ///
+    /// 1. URI parsing starts from `WsEndpointConfig::default()`; the flat
+    ///    `reconnect*` URI parameters are tombstoned (no URI override for
+    ///    reconnection exists).
+    /// 2. URI parameters override the endpoint defaults.
+    /// 3. Explicitly configured (`Some`) component-level options override
+    ///    the URI values.
+    /// 4. Finally, component `reconnect` replaces the entire
+    ///    `reconnect_policy` unconditionally. A default `WsConfig` applies
+    ///    the ws default policy, so behavior is unchanged without
+    ///    configuration; `[components.ws.reconnect]` (TOML) or a custom
+    ///    `WsConfig::reconnect` (code) override it.
+    pub fn build_endpoint_config(&self, uri: &str) -> Result<WsEndpointConfig, CamelError> {
+        self.validate()?;
+        let mut cfg = WsEndpointConfig::from_uri(uri)?;
+        if let Some(v) = self.max_connections {
+            cfg.max_connections = v;
+        }
+        if let Some(v) = self.max_message_size {
+            cfg.max_message_size = v;
+        }
+        if let Some(v) = self.heartbeat_interval_ms {
+            cfg.heartbeat_interval = Duration::from_millis(v);
+        }
+        if let Some(v) = self.idle_timeout_ms {
+            cfg.idle_timeout = Duration::from_millis(v);
+        }
+        if let Some(v) = self.connect_timeout_ms {
+            cfg.connect_timeout = Duration::from_millis(v);
+        }
+        if let Some(v) = self.response_timeout_ms {
+            cfg.response_timeout = Duration::from_millis(v);
+        }
+        if let Some(v) = self.send_timeout_ms {
+            cfg.send_timeout = Duration::from_millis(v);
+        }
+        if let Some(v) = self.binary_payload {
+            cfg.binary_payload = v;
+        }
+        if let Some(ref v) = self.subprotocols {
+            cfg.subprotocols = v.clone();
+        }
+        cfg.reconnect_policy = self.reconnect.clone();
+        Ok(cfg)
+    }
+
     /// Validate configuration values.
     ///
     /// Returns an error if any explicitly-set value is invalid (e.g. zero).
@@ -259,6 +315,18 @@ impl WsConfig {
         }
         Ok(())
     }
+}
+
+/// Build the error returned when a removed flat `reconnect*` URI parameter is
+/// supplied. Names the TOML and code replacements plus the supported URI keys.
+fn reconnect_tombstone(param: &str, toml_field: &str, code_field: &str) -> CamelError {
+    CamelError::InvalidUri(format!(
+        "{param} URI parameter was removed; set {toml_field} in TOML or {code_field} in code \
+         (WsConfig::reconnect). Supported URI parameters: maxConnections, maxMessageSize, \
+         sendToAll, consumeAsClient, heartbeatIntervalMs, idleTimeoutMs, connectTimeoutMs, \
+         responseTimeoutMs, allowOrigin, tlsCert, tlsKey, sendTimeoutMs, binaryPayload, \
+         subprotocols"
+    ))
 }
 
 impl WsEndpointConfig {
@@ -304,6 +372,32 @@ impl WsEndpointConfig {
         };
 
         let params = parsed.params;
+        // Tombstones (ADR-0090 shedding): the flat reconnect* URI parameters
+        // were removed; fail loudly naming the replacement instead of silently
+        // ignoring them. These checks run before any other parameter validation
+        // so a removed key always wins over unrelated invalid values.
+        // Each check names its own field mapping.
+        if params.contains_key("reconnect") {
+            return Err(reconnect_tombstone(
+                "reconnect",
+                "[components.ws.reconnect].enabled",
+                "reconnect_policy.enabled",
+            ));
+        }
+        if params.contains_key("reconnectMaxAttempts") {
+            return Err(reconnect_tombstone(
+                "reconnectMaxAttempts",
+                "[components.ws.reconnect].max_attempts",
+                "reconnect_policy.max_attempts",
+            ));
+        }
+        if params.contains_key("reconnectDelayMs") {
+            return Err(reconnect_tombstone(
+                "reconnectDelayMs",
+                "[components.ws.reconnect].initial_delay_ms",
+                "reconnect_policy.initial_delay = Duration::from_millis(...)",
+            ));
+        }
         // Validate maxConnections >= 1 (WS-015)
         if let Some(raw) = params.get("maxConnections") {
             let v = raw.parse::<u32>().map_err(|_| {
@@ -390,38 +484,6 @@ impl WsEndpointConfig {
         if let Some(v) = params.get("tlsKey") {
             cfg.tls_key = Some(v.to_string());
         }
-        // Track whether flat reconnect fields were explicitly provided.
-        // Used later for conditional bridging into reconnect_policy:
-        // explicit URI params win, otherwise the structured policy (set
-        // via TOML [reconnect_policy] or defaults) is left untouched.
-        let mut reconnect_explicit = false;
-        let mut reconnect_max_attempts_explicit = false;
-        let mut reconnect_delay_ms_explicit = false;
-
-        if let Some(raw) = params.get("reconnect") {
-            cfg.reconnect = raw.parse::<bool>().map_err(|_| {
-                CamelError::InvalidUri(format!(
-                    "reconnect must be a boolean ('true' or 'false'), got '{raw}'"
-                ))
-            })?;
-            reconnect_explicit = true;
-        }
-        if let Some(raw) = params.get("reconnectMaxAttempts") {
-            cfg.reconnect_max_attempts = raw.parse::<u32>().map_err(|_| {
-                CamelError::InvalidUri(format!(
-                    "reconnectMaxAttempts must be an unsigned integer, got '{raw}'"
-                ))
-            })?;
-            reconnect_max_attempts_explicit = true;
-        }
-        if let Some(raw) = params.get("reconnectDelayMs") {
-            cfg.reconnect_delay_ms = raw.parse::<u64>().map_err(|_| {
-                CamelError::InvalidUri(format!(
-                    "reconnectDelayMs must be an unsigned integer, got '{raw}'"
-                ))
-            })?;
-            reconnect_delay_ms_explicit = true;
-        }
         if let Some(raw) = params.get("sendTimeoutMs") {
             let v = raw.parse::<u64>().map_err(|_| {
                 CamelError::InvalidUri(format!(
@@ -443,24 +505,6 @@ impl WsEndpointConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-        }
-
-        // Bridge flat reconnect fields into the structured policy, but
-        // ONLY for fields that were explicitly provided in the URI.
-        //
-        // Precedence: if the user provides a [reconnect_policy] section
-        // (TOML) or explicit URI params for the policy, that wins over
-        // the legacy flat fields. When flat fields are NOT explicitly
-        // set, the structured policy is left untouched — preserving
-        // whatever was set via TOML or component defaults.
-        if reconnect_explicit {
-            cfg.reconnect_policy.enabled = cfg.reconnect;
-        }
-        if reconnect_max_attempts_explicit {
-            cfg.reconnect_policy.max_attempts = cfg.reconnect_max_attempts;
-        }
-        if reconnect_delay_ms_explicit {
-            cfg.reconnect_policy.initial_delay = Duration::from_millis(cfg.reconnect_delay_ms);
         }
 
         Ok(cfg)
@@ -717,25 +761,94 @@ mod config_validation_tests {
     }
 
     #[test]
-    fn ws_endpoint_uri_bridges_flat_fields_to_policy() {
-        // Non-default values — verify they land in reconnect_policy.
-        let uri =
-            "ws://localhost:9001/test?reconnect=false&reconnectMaxAttempts=7&reconnectDelayMs=250";
-        let cfg = WsEndpointConfig::from_uri(uri).unwrap();
-        assert!(!cfg.reconnect);
-        assert_eq!(cfg.reconnect_max_attempts, 7);
-        assert_eq!(cfg.reconnect_delay_ms, 250);
-        // Bridge should override reconnect_policy defaults.
-        assert!(!cfg.reconnect_policy.enabled);
-        assert_eq!(cfg.reconnect_policy.max_attempts, 7);
-        assert_eq!(
-            cfg.reconnect_policy.initial_delay,
-            std::time::Duration::from_millis(250)
+    fn reconnect_uri_param_rejected_with_tombstone() {
+        let msg = match WsEndpointConfig::from_uri("ws://localhost:8080/echo?reconnect=true") {
+            Err(CamelError::InvalidUri(msg)) => msg,
+            other => panic!("flat reconnect URI parameter must be rejected, got {other:?}"),
+        };
+        assert!(
+            msg.contains("[components.ws.reconnect].enabled"),
+            "tombstone must name the TOML replacement: {msg}"
+        );
+        assert!(
+            msg.contains("reconnect_policy.enabled"),
+            "tombstone must name the code replacement: {msg}"
+        );
+        assert!(
+            msg.contains("maxConnections"),
+            "tombstone must list the supported URI parameters: {msg}"
+        );
+        assert!(
+            !msg.contains("maxConnections must be"),
+            "tombstone must win over other parameter validation: {msg}"
         );
     }
 
     #[test]
-    fn ws_endpoint_policy_defaults_match_old_flat_defaults() {
+    fn reconnect_max_attempts_uri_param_rejected_with_tombstone() {
+        let msg =
+            match WsEndpointConfig::from_uri("ws://localhost:8080/echo?reconnectMaxAttempts=7") {
+                Err(CamelError::InvalidUri(msg)) => msg,
+                other => panic!(
+                    "flat reconnectMaxAttempts URI parameter must be rejected, got {other:?}"
+                ),
+            };
+        assert!(
+            msg.contains("[components.ws.reconnect].max_attempts"),
+            "tombstone must name the TOML replacement: {msg}"
+        );
+        assert!(
+            msg.contains("reconnect_policy.max_attempts"),
+            "tombstone must name the code replacement: {msg}"
+        );
+        assert!(
+            msg.contains("maxConnections"),
+            "tombstone must list the supported URI parameters: {msg}"
+        );
+    }
+
+    #[test]
+    fn reconnect_delay_ms_uri_param_rejected_with_tombstone() {
+        let msg = match WsEndpointConfig::from_uri("ws://localhost:8080/echo?reconnectDelayMs=250")
+        {
+            Err(CamelError::InvalidUri(msg)) => msg,
+            other => panic!("flat reconnectDelayMs URI parameter must be rejected, got {other:?}"),
+        };
+        assert!(
+            msg.contains("[components.ws.reconnect].initial_delay_ms"),
+            "tombstone must name the TOML replacement: {msg}"
+        );
+        assert!(
+            msg.contains("reconnect_policy.initial_delay"),
+            "tombstone must name the code replacement: {msg}"
+        );
+        assert!(
+            msg.contains("maxConnections"),
+            "tombstone must list the supported URI parameters: {msg}"
+        );
+    }
+
+    #[test]
+    fn tombstone_wins_over_other_param_validation() {
+        let err =
+            WsEndpointConfig::from_uri("ws://localhost:8080/echo?reconnect=true&maxConnections=0")
+                .unwrap_err();
+        let msg = match err {
+            CamelError::InvalidUri(msg) => msg,
+            other => panic!("removed reconnect URI parameter must win, got {other:?}"),
+        };
+        assert!(
+            msg.contains("[components.ws.reconnect].enabled"),
+            "tombstone must win over maxConnections validation: {msg}"
+        );
+        assert!(
+            !msg.contains("maxConnections must be"),
+            "tombstone must not defer to maxConnections validation: {msg}"
+        );
+    }
+
+    #[test]
+    fn ws_endpoint_policy_defaults_preserved() {
         let cfg = WsEndpointConfig::default();
         assert!(cfg.reconnect_policy.enabled);
         assert_eq!(cfg.reconnect_policy.max_attempts, 5);
@@ -753,11 +866,11 @@ mod config_validation_tests {
 
     // ── Precedence regression tests ──────────────────────────────────────
 
-    /// When flat reconnect fields are NOT provided in the URI, the structured
+    /// When no reconnect URI parameters are provided, the structured
     /// `reconnect_policy` field (set via `WsEndpointConfig::default()` or, in
     /// the future, TOML `[reconnect_policy]`) MUST NOT be overwritten.
     #[test]
-    fn ws_endpoint_policy_preserved_when_no_flat_fields() {
+    fn ws_endpoint_policy_preserved_from_uri() {
         let cfg = WsEndpointConfig::from_uri("ws://localhost:8080/echo").unwrap();
         // Default policy should be unchanged — no URI reconnect params.
         assert!(cfg.reconnect_policy.enabled);
@@ -770,7 +883,7 @@ mod config_validation_tests {
 
     /// When a custom `reconnect_policy` is set on `WsEndpointConfig`
     /// (simulating TOML `[reconnect_policy]` deserialization), calling
-    /// `from_uri()` without flat reconnect params MUST NOT silently
+    /// `from_uri()` without reconnect URI parameters MUST NOT silently
     /// reset the policy.
     ///
     /// This test covers the TOML path for `[reconnect_policy]`:
@@ -815,22 +928,6 @@ mod config_validation_tests {
         );
     }
 
-    /// When SOME but not ALL flat reconnect fields are provided, only the
-    /// explicit ones bridge; non‑explicit fields keep the default policy value.
-    #[test]
-    fn ws_endpoint_policy_partial_bridge() {
-        let uri = "ws://localhost:9001/test?reconnectMaxAttempts=10";
-        let cfg = WsEndpointConfig::from_uri(uri).unwrap();
-        // max_attempts bridged from URI
-        assert_eq!(cfg.reconnect_policy.max_attempts, 10);
-        // enabled and initial_delay remain at defaults (no explicit URI param)
-        assert!(cfg.reconnect_policy.enabled);
-        assert_eq!(
-            cfg.reconnect_policy.initial_delay,
-            std::time::Duration::from_millis(1000)
-        );
-    }
-
     /// TOML `[reconnect_policy]` parses correctly into `NetworkRetryPolicy`.
     /// This verifies the deserialization path that future WS configs will use.
     #[test]
@@ -851,6 +948,81 @@ mod config_validation_tests {
         assert_eq!(policy.max_delay, std::time::Duration::from_millis(60_000));
         assert!((policy.jitter_factor - 0.1).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn ws_config_default_reconnect_matches_endpoint_default() {
+        assert_eq!(
+            WsConfig::default().reconnect,
+            WsEndpointConfig::default().reconnect_policy,
+            "WsConfig default reconnect must mirror the ws endpoint default policy"
+        );
+    }
+
+    #[test]
+    fn ws_config_reconnect_applies_custom_policy_to_endpoint() {
+        let custom = NetworkRetryPolicy {
+            enabled: false,
+            max_attempts: 9,
+            initial_delay: Duration::from_millis(150),
+            multiplier: 3.0,
+            max_delay: Duration::from_secs(60),
+            jitter_factor: 0.25,
+            max_attempts_absolute: Some(11),
+        };
+        let cfg = WsConfig {
+            reconnect: custom.clone(),
+            ..WsConfig::default()
+        }
+        .build_endpoint_config("ws://localhost:9001/chat")
+        .unwrap();
+        assert_eq!(
+            cfg.reconnect_policy, custom,
+            "custom WsConfig::reconnect must reach WsEndpointConfig.reconnect_policy"
+        );
+    }
+
+    #[test]
+    fn ws_config_toml_reconnect_section_applied() {
+        let toml_str = r#"
+            max_message_size = 1024
+
+            [reconnect]
+            enabled = false
+            max_attempts = 7
+            initial_delay_ms = 250
+            multiplier = 3.0
+            max_delay_ms = 60000
+            jitter_factor = 0.1
+        "#;
+        let config: WsConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.max_message_size, Some(1024));
+        assert!(!config.reconnect.enabled);
+        assert_eq!(config.reconnect.max_attempts, 7);
+        assert_eq!(config.reconnect.initial_delay, Duration::from_millis(250));
+        assert!((config.reconnect.multiplier - 3.0).abs() < f64::EPSILON);
+        assert_eq!(config.reconnect.max_delay, Duration::from_millis(60_000));
+        assert!((config.reconnect.jitter_factor - 0.1).abs() < f64::EPSILON);
+
+        let cfg = config
+            .build_endpoint_config("ws://localhost:9001/chat")
+            .unwrap();
+        assert!(!cfg.reconnect_policy.enabled);
+        assert_eq!(cfg.reconnect_policy.max_attempts, 7);
+    }
+
+    #[test]
+    fn ws_config_without_reconnect_section_keeps_default_policy() {
+        let config: WsConfig = toml::from_str("max_message_size = 1024").unwrap();
+        assert_eq!(config.reconnect, ws_default_reconnect_policy());
+
+        let cfg = config
+            .build_endpoint_config("ws://localhost:9001/chat")
+            .unwrap();
+        assert_eq!(
+            cfg.reconnect_policy,
+            WsEndpointConfig::default().reconnect_policy
+        );
+    }
 }
 
 #[cfg(test)]
@@ -859,7 +1031,7 @@ mod uri_parity_tests {
     fn uri_options_count_parity() {
         assert_eq!(
             super::WsUriConfig::uri_options().len(),
-            17,
+            14,
             "WsUriConfig #[uri_param] count drifted from parser"
         );
     }

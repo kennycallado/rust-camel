@@ -1383,35 +1383,7 @@ impl Component for WsComponent {
         uri: &str,
         ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
-        self.config.validate()?;
-        let mut cfg = WsEndpointConfig::from_uri(uri)?;
-        if let Some(v) = self.config.max_connections {
-            cfg.max_connections = v;
-        }
-        if let Some(v) = self.config.max_message_size {
-            cfg.max_message_size = v;
-        }
-        if let Some(v) = self.config.heartbeat_interval_ms {
-            cfg.heartbeat_interval = std::time::Duration::from_millis(v);
-        }
-        if let Some(v) = self.config.idle_timeout_ms {
-            cfg.idle_timeout = std::time::Duration::from_millis(v);
-        }
-        if let Some(v) = self.config.connect_timeout_ms {
-            cfg.connect_timeout = std::time::Duration::from_millis(v);
-        }
-        if let Some(v) = self.config.response_timeout_ms {
-            cfg.response_timeout = std::time::Duration::from_millis(v);
-        }
-        if let Some(v) = self.config.send_timeout_ms {
-            cfg.send_timeout = std::time::Duration::from_millis(v);
-        }
-        if let Some(v) = self.config.binary_payload {
-            cfg.binary_payload = v;
-        }
-        if let Some(ref v) = self.config.subprotocols {
-            cfg.subprotocols = v.clone();
-        }
+        let cfg = self.config.build_endpoint_config(uri)?;
         let conn_state_tx = if cfg.consume_as_client {
             let (tx, rx) = watch::channel(ClientConnState::Connecting);
             ctx.register_current_route_health_check(Arc::new(ConnectionStateCheck::new(rx)));
@@ -1469,35 +1441,7 @@ impl Component for WssComponent {
         uri: &str,
         ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
-        self.config.validate()?;
-        let mut cfg = WsEndpointConfig::from_uri(uri)?;
-        if let Some(v) = self.config.max_connections {
-            cfg.max_connections = v;
-        }
-        if let Some(v) = self.config.max_message_size {
-            cfg.max_message_size = v;
-        }
-        if let Some(v) = self.config.heartbeat_interval_ms {
-            cfg.heartbeat_interval = std::time::Duration::from_millis(v);
-        }
-        if let Some(v) = self.config.idle_timeout_ms {
-            cfg.idle_timeout = std::time::Duration::from_millis(v);
-        }
-        if let Some(v) = self.config.connect_timeout_ms {
-            cfg.connect_timeout = std::time::Duration::from_millis(v);
-        }
-        if let Some(v) = self.config.response_timeout_ms {
-            cfg.response_timeout = std::time::Duration::from_millis(v);
-        }
-        if let Some(v) = self.config.send_timeout_ms {
-            cfg.send_timeout = std::time::Duration::from_millis(v);
-        }
-        if let Some(v) = self.config.binary_payload {
-            cfg.binary_payload = v;
-        }
-        if let Some(ref v) = self.config.subprotocols {
-            cfg.subprotocols = v.clone();
-        }
+        let cfg = self.config.build_endpoint_config(uri)?;
         let conn_state_tx = if cfg.consume_as_client {
             let (tx, rx) = watch::channel(ClientConnState::Connecting);
             ctx.register_current_route_health_check(Arc::new(ConnectionStateCheck::new(rx)));
@@ -2604,9 +2548,12 @@ mod tests {
         assert_eq!(cfg.allow_origin, "*");
         assert_eq!(cfg.tls_cert, None);
         assert_eq!(cfg.tls_key, None);
-        assert!(cfg.reconnect);
-        assert_eq!(cfg.reconnect_max_attempts, 5);
-        assert_eq!(cfg.reconnect_delay_ms, 1000);
+        assert!(cfg.reconnect_policy.enabled);
+        assert_eq!(cfg.reconnect_policy.max_attempts, 5);
+        assert_eq!(
+            cfg.reconnect_policy.initial_delay,
+            Duration::from_millis(1000)
+        );
         assert_eq!(cfg.send_timeout, Duration::from_secs(30));
         assert!(!cfg.binary_payload);
         assert!(cfg.subprotocols.is_empty());
@@ -2631,19 +2578,12 @@ mod tests {
         assert_eq!(cfg.allow_origin, "https://example.com");
         assert_eq!(cfg.tls_cert.as_deref(), Some("/tmp/cert.pem"));
         assert_eq!(cfg.tls_key.as_deref(), Some("/tmp/key.pem"));
-        assert!(cfg.reconnect);
-        assert_eq!(cfg.reconnect_max_attempts, 5);
-        assert_eq!(cfg.reconnect_delay_ms, 1000);
-    }
-
-    #[test]
-    fn endpoint_config_parses_reconnect_uri_params() {
-        let uri =
-            "ws://localhost:9001/chat?reconnect=false&reconnectMaxAttempts=2&reconnectDelayMs=25";
-        let cfg = WsEndpointConfig::from_uri(uri).unwrap();
-        assert!(!cfg.reconnect);
-        assert_eq!(cfg.reconnect_max_attempts, 2);
-        assert_eq!(cfg.reconnect_delay_ms, 25);
+        assert!(cfg.reconnect_policy.enabled);
+        assert_eq!(cfg.reconnect_policy.max_attempts, 5);
+        assert_eq!(
+            cfg.reconnect_policy.initial_delay,
+            Duration::from_millis(1000)
+        );
     }
 
     #[test]
@@ -2653,6 +2593,90 @@ mod tests {
         assert_eq!(cfg.max_message_size, 65536);
         assert!(!cfg.send_to_all);
         assert_eq!(cfg.response_timeout, Duration::from_secs(30));
+    }
+
+    /// Creation smoke test: proves the `ws` scheme path accepts `WsConfig`
+    /// and routes `WsConfig.reconnect` through the shared
+    /// `build_endpoint_config`. The endpoint trait object exposes no
+    /// config, so value-level application is asserted by
+    /// `ws_config_reconnect_applies_custom_policy_to_endpoint` in
+    /// `config.rs`.
+    #[test]
+    fn component_create_endpoint_smoke_with_config_reconnect_ws() {
+        let config = WsConfig {
+            reconnect: NetworkRetryPolicy {
+                enabled: false,
+                max_attempts: 9,
+                ..NetworkRetryPolicy::default()
+            },
+            ..WsConfig::default()
+        };
+        let ctx = NoOpComponentContext;
+        WsComponent::with_config(config)
+            .create_endpoint("ws://127.0.0.1:9012/cfg", &ctx)
+            .expect("ws create_endpoint must apply WsConfig.reconnect without error");
+    }
+
+    /// Creation smoke test: proves the `wss` scheme path accepts `WsConfig`
+    /// and routes `WsConfig.reconnect` through the shared
+    /// `build_endpoint_config`. The endpoint trait object exposes no
+    /// config, so value-level application is asserted by
+    /// `ws_config_reconnect_applies_custom_policy_to_endpoint` in
+    /// `config.rs`.
+    #[test]
+    fn component_create_endpoint_smoke_with_config_reconnect_wss() {
+        let config = WsConfig {
+            reconnect: NetworkRetryPolicy {
+                enabled: false,
+                max_attempts: 9,
+                ..NetworkRetryPolicy::default()
+            },
+            ..WsConfig::default()
+        };
+        let ctx = NoOpComponentContext;
+        WssComponent::with_config(config)
+            .create_endpoint("wss://127.0.0.1:9012/cfg", &ctx)
+            .expect("wss create_endpoint must apply WsConfig.reconnect without error");
+    }
+
+    #[test]
+    fn component_create_endpoint_rejects_flat_reconnect_uri() {
+        let ctx = NoOpComponentContext;
+        let err = match WsComponent::new()
+            .create_endpoint("ws://127.0.0.1:9012/cfg?reconnect=true", &ctx)
+        {
+            Err(err) => err,
+            Ok(_) => {
+                panic!("flat reconnect URI parameter must be rejected through the ws component")
+            }
+        };
+        let msg = err.to_string();
+        assert!(
+            matches!(err, CamelError::InvalidUri(_)),
+            "tombstone must be an InvalidUri, got {err:?}"
+        );
+        assert!(
+            msg.contains("[components.ws.reconnect]"),
+            "component tombstone must name the TOML replacement: {msg}"
+        );
+
+        let err = match WssComponent::new()
+            .create_endpoint("wss://127.0.0.1:9012/cfg?reconnect=true", &ctx)
+        {
+            Err(err) => err,
+            Ok(_) => {
+                panic!("flat reconnect URI parameter must be rejected through the wss component")
+            }
+        };
+        let msg = err.to_string();
+        assert!(
+            matches!(err, CamelError::InvalidUri(_)),
+            "tombstone must be an InvalidUri, got {err:?}"
+        );
+        assert!(
+            msg.contains("[components.ws.reconnect]"),
+            "component tombstone must name the TOML replacement: {msg}"
+        );
     }
 
     #[test]
@@ -5405,10 +5429,10 @@ mod tests {
     #[tokio::test]
     async fn producer_retries_on_connection_refused() {
         // Port 0: instant deterministic connection refusal, no bind probe.
-        let cfg = WsEndpointConfig::from_uri(
-            "ws://127.0.0.1:0/retry?reconnect=true&reconnectMaxAttempts=2&reconnectDelayMs=50",
-        )
-        .unwrap();
+        let mut cfg = WsEndpointConfig::from_uri("ws://127.0.0.1:0/retry").unwrap();
+        cfg.reconnect_policy.enabled = true;
+        cfg.reconnect_policy.max_attempts = 2;
+        cfg.reconnect_policy.initial_delay = Duration::from_millis(50);
         let producer = WsProducer::new(cfg.client_config());
 
         let exchange = Exchange::new(CamelMessage::new(CamelBody::Text("hello".into())));

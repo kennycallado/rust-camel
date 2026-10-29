@@ -78,6 +78,8 @@ wss://host:port/path[?options]
 | `tlsCert` | required for `wss` | Path to TLS certificate |
 | `tlsKey` | required for `wss` | Path to TLS private key |
 
+Reconnection is not a URI parameter. It is configured once as a structured policy under `[components.ws.reconnect]` (`enabled`, `max_attempts`, `initial_delay_ms`, `multiplier`, `max_delay_ms`, `jitter_factor`, and the optional `max_attempts_absolute` hard cap). The flat parameters `reconnect`, `reconnectMaxAttempts`, and `reconnectDelayMs` were removed: a URI that still carries any of them fails endpoint creation with an error naming the replacement. Without the section, the ws defaults apply (enabled, 5 attempts, 1000 ms initial delay, no jitter). See the camel-ws crate README for a full example.
+
 TLS uses rustls. No OpenSSL dependency.
 
 ## WebSocket consumer
@@ -105,7 +107,7 @@ The mode picker inspects three signals: the `CamelWsSendToAll` header, the `Came
 
 The body becomes a `Text` frame by default. Set `CamelWsMessageType` to `binary` for a `Binary` frame. The URI parameter `binaryPayload=true` makes binary the default for that endpoint.
 
-The client mode reconnects on transient failures with a shared `NetworkRetryPolicy`. The producer also surfaces backpressure: when a server-send channel is full, it sets `CamelWsDeliveryDropped` and returns `Err` on the next `poll_ready` call.
+The client mode reconnects on transient failures with the `NetworkRetryPolicy` configured under `[components.ws.reconnect]`. The producer also surfaces backpressure: when a server-send channel is full, it sets `CamelWsDeliveryDropped` and returns `Err` on the next `poll_ready` call.
 
 ## WebSocket security
 

@@ -99,10 +99,11 @@ binary frames as bytes, with `CamelWsMessageType` set to `text` or `binary`; pin
 handled transparently. Frames larger than `maxMessageSize` are dropped (warn log + error metric)
 and the connection stays up.
 
-- **Reconnect**: on disconnect the consumer runs one fresh bounded reconnect sequence using the
-  endpoint's reconnect policy (`reconnect`, `reconnectMaxAttempts`, `reconnectDelayMs`). Frames
-  resume on the re-established connection without a route restart; policy exhaustion fails the
-  consumer task so route supervision sees it.
+- **Reconnect**: on disconnect the consumer runs one fresh bounded reconnect sequence governed by
+  `WsConfig.reconnect` (a `NetworkRetryPolicy` — set it via the `[components.ws.reconnect]` TOML
+  section or programmatically on `WsComponent::with_config`). Frames resume on the re-established
+  connection without a route restart; policy exhaustion fails the consumer task so route
+  supervision sees it.
 - **Startup**: readiness is signalled only after the first successful connect. An unreachable
   remote fails route start once the policy is exhausted (no silent no-op route).
 - **wss**: `wss://` client-consumer URIs work with native root certificates. As a crate-wide side
@@ -163,9 +164,29 @@ connect_timeout_ms = 5000
 response_timeout_ms = 10000
 ```
 
-URI parameters still take precedence over global defaults.
+Explicitly configured component-level options override URI parameters; URI parameters override the
+built-in defaults.
 
-> **Note:** Global config from Camel.toml is parsed but not yet applied to endpoints. Currently only URI parameters and code defaults are active. Full 3-tier override (defaults → Camel.toml → URI) is planned.
+### Reconnection config
+
+Reconnection is configured once, as a structured policy — there is no URI override:
+
+```toml
+[components.ws.reconnect]
+enabled = true
+max_attempts = 5
+initial_delay_ms = 1000
+multiplier = 2.0
+max_delay_ms = 30000
+jitter_factor = 0.0
+# max_attempts_absolute = 10  # optional hard cap on total attempts
+```
+
+In a profile document, nest it as `[default.components.ws.reconnect]`. The flat URI parameters
+`reconnect`, `reconnectMaxAttempts` and `reconnectDelayMs` were removed. Routes that still carry
+them fail at endpoint creation with an error naming `[components.ws.reconnect]` (TOML) or
+`reconnect_policy` (code); move their values into the section above. Without the section, the ws
+defaults apply (enabled, 5 attempts, 1000 ms initial delay, no jitter).
 
 ## Health Check
 

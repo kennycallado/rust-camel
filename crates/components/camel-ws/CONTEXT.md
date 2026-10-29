@@ -64,8 +64,9 @@ the route is backpressured. Connect observability is owned solely by the retry h
 Connection lifecycle published on a `watch` channel: `Connecting` (attempt in flight),
 `Connected` (handshake done, frames flow), `Reconnecting` (transient failure, bounded reconnect
 sequence in flight), `Exhausted` (reconnect policy exhausted). Each disconnect starts ONE fresh
-bounded sequence via `NetworkRetryPolicy` (`reconnect`/`reconnectMaxAttempts`/`reconnectDelayMs`
-URI bridging); exhaustion fails the consumer task so Route supervision sees it. Startup is
+bounded sequence via `NetworkRetryPolicy` (the single canonical surface is `WsConfig.reconnect`;
+the flat `reconnect*` URI parameters are tombstoned); exhaustion fails the consumer task so Route
+supervision sees it. Startup is
 `ConsumerStartupMode::Explicit`: `mark_ready` only after the first successful connect, fail-loud
 `Err` when the initial connect exhausts the policy. The passive `ws-client` health check reads the
 watch (no probe connections); `Connected` is healthy, every other state is unhealthy.
