@@ -105,7 +105,7 @@ password = "${env:RABBITMQ_PASSWORD}"
 vhost = "/"
 ```
 
-Broker keys are exactly `url`, `username`, `password`, and `vhost`. The last three are optional and override whatever the URL carries. Values support the platform `${env:...}` interpolation. An unknown key fails at boot, including a `tls` section (see the TLS note).
+Broker keys are exactly `url`, `username`, `password`, `vhost`, and an optional `tls` section (see [TLS](#tls-amqps)). `username`, `password`, and `vhost` are optional and override whatever the URL carries. Values support the platform `${env:...}` interpolation. An unknown key fails at boot.
 
 An optional reconnect policy overrides the per-component default:
 
@@ -182,11 +182,43 @@ When the shared body converter cannot materialize an OUT body, reply preparation
 
 Reserved basic-property names (`contentType`, `contentEncoding`, `priority`, `messageId`, `correlationId`, `replyTo`, `expiration`, `timestamp`) map onto AMQP basic properties in both directions. Every other header travels as a free-form AMQP header, written as a long string. Inbound deliveries also carry `rabbitmq.redelivered`. AMQP timestamps cross the wire as Unix seconds and surface as epoch milliseconds.
 
-## TLS (ring)
+## TLS (amqps://)
 
-The component selects lapin with exactly the `tokio`, `rustls--ring`, and `rustls-native-certs` features. `rustls--ring` selects rustls' ring provider, and `rustls-native-certs` supplies the system root store, so `amqps://` works against a system-trusted broker.
+`amqps://` selects TLS. The URL scheme alone decides the transport, so an `amqps://` broker never falls back to plaintext. For a system-trusted broker no `tls` section is needed. lapin performs the handshake against the system native roots.
 
-A custom `tls` section in a broker entry is not implemented. The boot config rejects it and names `tls` and the supported parameters, so the section never parses and is never silently ignored. A per-broker certificate override is tracked in bd `rc-l8ohw` as future work.
+A custom CA adds a trust anchor. Use `amqps://` in the URL and set `tls.ca_cert` to a PEM file:
+
+```toml
+[components.rabbitmq.brokers.secure]
+url = "amqps://broker.internal:5671"
+username = "app"
+password = "${env:RABBITMQ_PASSWORD}"
+vhost = "/"
+
+[components.rabbitmq.brokers.secure.tls]
+ca_cert = "/etc/rabbitmq/tls/ca.pem"
+```
+
+The trust policy is additive. The component trusts the system native roots AND the certificates in `ca_cert`. It does not replace the native store.
+
+TLS SNI and certificate verification always use the host from the broker URL. There is no override. `tls.server_name` is rejected at boot, because lapin 4.12.0 derives both values from the URL host and exposes no override. The error is:
+
+```text
+rabbitmq broker '<name>': tls.server_name is unsupported by lapin 4.12.0; TLS SNI and certificate verification use the broker URL host; remove tls.server_name.
+```
+
+Boot validation is fail-closed for every configured broker, not only the brokers a route uses. Each check names the broker and never the URL, credentials, or PEM contents. The rejected cases are:
+
+- `tls.*` on an `amqp://` URL. The error names the scheme and requires `amqps://`.
+- A missing or unreadable `tls.ca_cert` path.
+- A file with no PEM certificate.
+- A malformed PEM frame or body.
+- A certificate that does not parse as DER.
+- An unknown `tls.*` key, for example `skip_verify`.
+
+TLS provides server authentication only. mTLS and client certificates are not supported, and the client `identity` stays unset.
+
+The component selects lapin with the `rustls--ring` and `rustls-native-certs` features. `rustls--ring` enables only `rustls-connector/rustls--ring`, so the connector's `crypto_provider` fallback selects the ring provider. A process-level `CryptoProvider::install_default` call takes precedence over that fallback. Any crate in a full CLI build can install the default, so this note does not prove the runtime provider beyond that chain and the TLS handshake tests. Process-level provider selection is tracked in bd `rc-2bofp`.
 
 This note describes the component's own selection. It does not claim that the raw dependency tree has no `aws-lc-rs`. Shared workspace dependencies make `aws-lc-rs` reachable outside this component's gate. That reachability is tracked in bd `rc-2bofp`.
 
@@ -199,6 +231,8 @@ RABBITMQ_ITEST=1 cargo test -p camel-component-rabbitmq
 ```
 
 When `RABBITMQ_ITEST` is unset the tier prints a skip notice and exits 0. When it is set and Docker is unavailable the tier panics `infra-unavailable`. It never skips silently. The fixture starts one `rabbitmq:3.13-alpine` container per test and removes it on drop. The tier follows ADR-0069.
+
+The TLS handshake tests run without a broker. They use a local TLS server and static test certificates. The TLS end-to-end tier activates only when `RABBITMQ_TLS_ITEST` is set, and reads `RABBITMQ_TLS_URL` and `RABBITMQ_TLS_CA`. An optional `RABBITMQ_TLS_MISMATCH_URL` (the same broker reached through a host name that is not in its certificate) enables the hostname-mismatch rejection case.
 
 The example uses the same image. Start a local fixture on loopback with explicit demo credentials:
 
@@ -222,7 +256,7 @@ The `rmq`/`rmq` credentials belong to this ephemeral local fixture. They are not
 
 - AMQP 1.0 is not supported. The `amqp:` scheme is reserved for a future component.
 - Streams, transactions, batching, and a manual ack mode are not supported.
-- A per-broker TLS certificate override is not supported (`rc-l8ohw`).
+- mTLS and client certificates are not supported. `tls.server_name` is unsupported by lapin 4.12.0 and is rejected at boot.
 - The component is at-least-once. A redelivery can duplicate a message.
 
 **Reference**: [RabbitMQ crate CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-rabbitmq/CONTEXT.md). Example source: [`examples/rabbitmq-example`](https://github.com/kennycallado/rust-camel/tree/main/examples/rabbitmq-example).

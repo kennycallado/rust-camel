@@ -15,6 +15,7 @@ pub mod health;
 pub(crate) mod metadata;
 pub(crate) mod producer;
 pub(crate) mod reply;
+pub mod tls;
 pub(crate) mod topology;
 
 pub use bundle::RabbitMqBundle;

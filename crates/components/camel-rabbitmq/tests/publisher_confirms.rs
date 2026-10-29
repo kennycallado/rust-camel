@@ -68,6 +68,7 @@ fn component_for(url: &str) -> RabbitMqComponent {
             username: None,
             password: None,
             vhost: None,
+            tls: None,
         },
     );
     RabbitMqComponent::new(RabbitComponentConfig {

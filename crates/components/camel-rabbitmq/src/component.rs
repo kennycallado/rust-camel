@@ -68,7 +68,8 @@ impl RabbitMqComponent {
             .brokers
             .get(name)
             .ok_or_else(|| CamelError::Config(format!("Unknown RabbitMQ broker '{name}'")))?;
-        let mut manager = RabbitConnectionManager::from_broker_config(broker, self.retry.clone());
+        let mut manager =
+            RabbitConnectionManager::try_from_broker_config(name, broker, self.retry.clone())?;
         if let Some(context) = &self.lifecycle_context {
             manager = manager.with_lifecycle_context(Arc::clone(context));
         }
@@ -170,6 +171,7 @@ mod tests {
                 username: None,
                 password: None,
                 vhost: None,
+                tls: None,
             },
         );
         RabbitMqComponent::new(RabbitComponentConfig {

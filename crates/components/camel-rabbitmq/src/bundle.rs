@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use camel_component_api::{CamelError, ComponentBundle, ComponentContext, ComponentRegistrar};
 
-use crate::{RabbitMqComponent, config::RabbitComponentConfig};
+use crate::RabbitMqComponent;
+use crate::config::RabbitComponentConfig;
+use crate::tls;
 
 /// Bundle owning the `rabbitmq` scheme.
 pub struct RabbitMqBundle {
@@ -36,6 +38,7 @@ impl ComponentBundle for RabbitMqBundle {
         let config: RabbitComponentConfig = value
             .try_into()
             .map_err(|e: toml::de::Error| CamelError::Config(e.to_string()))?;
+        tls::validate(&config)?;
         Ok(Self {
             config,
             lifecycle_context: None,
@@ -88,72 +91,63 @@ mod tests {
     }
 
     /// Parse the `[components.rabbitmq]` value shape the boot cascade hands to
-    /// `from_toml` and return the rejection message, panicking on success.
-    fn reject_at_boot(raw: &str) -> String {
+    /// `from_toml`.
+    fn parse_at_boot(raw: &str) -> Result<RabbitMqBundle, CamelError> {
         let value: toml::Value = toml::from_str(raw).expect("test TOML must parse");
-        match RabbitMqBundle::from_toml(value) {
-            Ok(_) => panic!("tls.* must be rejected at boot, not parsed and ignored"),
+        RabbitMqBundle::from_toml(value)
+    }
+
+    fn error_text(result: Result<RabbitMqBundle, CamelError>) -> String {
+        match result {
+            Ok(_) => panic!("expected a boot rejection, got Ok"),
             Err(error) => error.to_string(),
         }
     }
 
-    /// A `tls` key is not a supported broker parameter: the error must name
-    /// `tls`, the broker section, and the supported params — never secrets.
-    fn assert_tls_unsupported(message: &str) {
-        assert!(message.contains("tls"), "must name tls; got: {message}");
-        assert!(
-            message.contains("brokers"),
-            "must name the broker section; got: {message}"
-        );
-        for key in ["url", "username", "password", "vhost"] {
-            assert!(
-                message.contains(key),
-                "must list supported param '{key}'; got: {message}"
-            );
-        }
-    }
-
     #[test]
-    fn tls_ca_cert_rejected_at_boot() {
-        let message = reject_at_boot(
+    fn bundle_from_toml_rejects_tls_on_amqp_url() {
+        let result = parse_at_boot(
             "[brokers.main]\n\
-             url = \"amqp://user:hunter2@localhost:5672\"\n\
-             password = \"hunter2\"\n\
+             url = \"amqp://localhost:5672\"\n\
              [brokers.main.tls]\n\
              ca_cert = \"/etc/rabbitmq/ca.pem\"\n",
         );
-        assert_tls_unsupported(&message);
+        let message = error_text(result);
         assert!(
-            !message.contains("hunter2"),
-            "must not leak secrets: {message}"
+            message.contains("require an amqps:// URL"),
+            "got: {message}"
         );
         assert!(
-            !message.contains("ca.pem"),
-            "must not echo tls values: {message}"
+            message.contains("the URL scheme is 'amqp'"),
+            "got: {message}"
         );
     }
 
     #[test]
-    fn tls_server_name_rejected_at_boot() {
-        let message = reject_at_boot(
-            "[brokers.main]\n\
-             url = \"amqp://localhost:5672\"\n\
-             tls = { server_name = \"broker.internal\" }\n",
+    fn bundle_from_toml_rejects_invalid_tls_at_boot() {
+        let result = parse_at_boot(
+            "[brokers.payments]\n\
+             url = \"amqps://localhost:5671\"\n\
+             [brokers.payments.tls]\n\
+             server_name = \"broker.internal\"\n",
         );
-        assert_tls_unsupported(&message);
-        assert!(
-            !message.contains("broker.internal"),
-            "must not echo tls values: {message}"
-        );
+        let message = error_text(result);
+        let expected = crate::tls::SERVER_NAME_UNSUPPORTED_ERROR.replace("{broker}", "payments");
+        assert!(message.contains(&expected), "got: {message}");
     }
 
     #[test]
-    fn empty_tls_section_rejected_at_boot() {
-        let message = reject_at_boot(
+    fn tls_unknown_sub_key_rejects_at_boot() {
+        let result = parse_at_boot(
             "[brokers.main]\n\
-             url = \"amqp://localhost:5672\"\n\
-             tls = {}\n",
+             url = \"amqps://localhost:5671\"\n\
+             [brokers.main.tls]\n\
+             ca_cert = \"/etc/rabbitmq/ca.pem\"\n\
+             skip_verify = true\n",
         );
-        assert_tls_unsupported(&message);
+        assert!(
+            result.is_err(),
+            "an unknown tls sub-key must fail closed via deny_unknown_fields"
+        );
     }
 }

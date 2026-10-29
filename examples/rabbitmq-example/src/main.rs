@@ -54,6 +54,7 @@ async fn main() -> Result<(), CamelError> {
             username: None,
             password: None,
             vhost: None,
+            tls: None,
         },
     );
 

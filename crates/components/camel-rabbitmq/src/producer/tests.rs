@@ -232,11 +232,16 @@ async fn concurrent_mandatory_returns_are_isolated() {
         username: None,
         password: None,
         vhost: None,
+        tls: None,
     };
-    let manager = Arc::new(RabbitConnectionManager::from_broker_config(
-        &broker,
-        rabbitmq_reconnect_default(),
-    ));
+    let manager = Arc::new(
+        RabbitConnectionManager::try_from_broker_config(
+            "test",
+            &broker,
+            rabbitmq_reconnect_default(),
+        )
+        .expect("test broker config must be valid"),
+    );
     let cache = ChannelCache::new(None);
 
     // Capture the shared connection identity, then open BOTH mandatory

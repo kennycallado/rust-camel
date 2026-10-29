@@ -65,11 +65,12 @@ fn manager_for(url: &str) -> Arc<RabbitConnectionManager> {
         username: None,
         password: None,
         vhost: None,
+        tls: None,
     };
-    Arc::new(RabbitConnectionManager::from_broker_config(
-        &broker,
-        retry_policy(),
-    ))
+    Arc::new(
+        RabbitConnectionManager::try_from_broker_config("test", &broker, retry_policy())
+            .expect("fixture broker config must be valid"),
+    )
 }
 
 /// Start a real consumer and return it with the receiver its engine feeds.

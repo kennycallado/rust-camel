@@ -794,11 +794,16 @@ async fn channel_publish_failure_preserves_connection_and_next_publish_succeeds(
         username: None,
         password: None,
         vhost: None,
+        tls: None,
     };
-    let manager = Arc::new(RabbitConnectionManager::from_broker_config(
-        &broker,
-        rabbitmq_reconnect_default(),
-    ));
+    let manager = Arc::new(
+        RabbitConnectionManager::try_from_broker_config(
+            "test",
+            &broker,
+            rabbitmq_reconnect_default(),
+        )
+        .expect("test broker config must be valid"),
+    );
 
     // Establish the healthy connection and capture its identity.
     let (conn_before, gen_before) = manager
@@ -878,5 +883,236 @@ async fn channel_publish_failure_preserves_connection_and_next_publish_succeeds(
     assert_eq!(
         got.data, b"after-404",
         "the body must round-trip after the channel-scoped failure"
+    );
+}
+
+// --- Task 1.3: TLS transport connect seam ---------------------------------
+
+fn tls_fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tls/test-ca.pem")
+}
+
+fn tls_fixture_contents() -> String {
+    std::fs::read_to_string(tls_fixture_path()).expect("fixture CA must be readable")
+}
+
+fn tls_broker(url: &str, ca_cert: Option<String>) -> RabbitBrokerConfig {
+    RabbitBrokerConfig {
+        url: url.to_string(),
+        username: None,
+        password: None,
+        vhost: None,
+        tls: ca_cert.map(|ca_cert| crate::tls::RabbitTlsConfig {
+            ca_cert: Some(ca_cert),
+            server_name: None,
+        }),
+    }
+}
+
+/// Test-only retry policy: bounded and immediate, so a refused connect
+/// settles without waiting on backoff.
+fn immediate_retry() -> NetworkRetryPolicy {
+    NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 2,
+        initial_delay: Duration::from_millis(1),
+        multiplier: 1.0,
+        max_delay: Duration::from_millis(1),
+        jitter_factor: 0.0,
+        ..NetworkRetryPolicy::default()
+    }
+}
+
+fn config_message(error: CamelError) -> String {
+    match error {
+        CamelError::Config(message) => message,
+        other => panic!("expected CamelError::Config, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn try_from_broker_config_amqps_with_ca_installs_tls_transport() {
+    let contents = tls_fixture_contents();
+    let broker = tls_broker(
+        "amqps://h:5671",
+        Some(tls_fixture_path().to_string_lossy().into_owned()),
+    );
+
+    let manager =
+        RabbitConnectionManager::try_from_broker_config("payments", &broker, immediate_retry())
+            .expect("amqps with a valid CA must construct");
+
+    match manager.transport() {
+        ConnectTransport::Tls(config) => {
+            assert_eq!(config.identity, None, "no client identity is configured");
+            assert_eq!(
+                config.cert_chain.as_deref(),
+                Some(contents.as_str()),
+                "the loaded CA bundle must be the captured trust anchor"
+            );
+        }
+        other => panic!("expected a TLS transport, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn tls_connect_fn_captures_config_across_rebuilds() {
+    let config = lapin::tcp::OwnedTLSConfig {
+        identity: None,
+        cert_chain: Some(tls_fixture_contents()),
+    };
+    let transport = ConnectTransport::Tls(config);
+    let captured = transport
+        .tls_config()
+        .cloned()
+        .expect("a TLS transport must expose its config");
+
+    // Two independently-built seams both retain the same captured config.
+    let first = transport.connect_fn();
+    let second = transport.connect_fn();
+
+    // An unreachable local port proves the real lapin connect path runs with
+    // the captured config instead of a dropped value: it returns a lapin Err.
+    let first_outcome = timeout_wait(
+        "TLS connect closure (first)",
+        Duration::from_secs(5),
+        first("amqps://127.0.0.1:1"),
+    )
+    .await;
+    assert!(
+        first_outcome.is_err(),
+        "connecting to an unreachable TLS broker must return a lapin error"
+    );
+
+    let second_outcome = timeout_wait(
+        "TLS connect closure (second)",
+        Duration::from_secs(5),
+        second("amqps://127.0.0.1:1"),
+    )
+    .await;
+    assert!(
+        second_outcome.is_err(),
+        "the rebuilt closure must still run the real lapin TLS connect path"
+    );
+
+    assert_eq!(
+        transport.tls_config(),
+        Some(&captured),
+        "invoking the closures must not consume or mutate the captured config"
+    );
+}
+
+#[tokio::test]
+async fn try_from_broker_config_amqp_stays_plain() {
+    let broker = tls_broker("amqp://h:5672", None);
+    let manager =
+        RabbitConnectionManager::try_from_broker_config("orders", &broker, immediate_retry())
+            .expect("a plain broker must construct");
+
+    assert!(
+        matches!(manager.transport(), ConnectTransport::Plain),
+        "an amqp:// broker without TLS must stay Plain"
+    );
+}
+
+/// An `amqps://` broker without a custom CA selects the `Plain` adapter, but
+/// that is not a protocol downgrade: lapin selects TLS from the URL scheme
+/// alone, so the AMQPS TLS handshake still happens against the system-native
+/// roots (design.md no-downgrade paragraph). `Plain` only means "no custom CA
+/// capture". If the scheme were plaintext the transport decision would have
+/// to differ here.
+#[tokio::test]
+async fn try_from_broker_config_amqps_without_tls_uses_native_roots() {
+    let broker = tls_broker("amqps://h:5671", None);
+    let manager =
+        RabbitConnectionManager::try_from_broker_config("orders", &broker, immediate_retry())
+            .expect("amqps without a custom CA must construct");
+
+    assert!(
+        matches!(manager.transport(), ConnectTransport::Plain),
+        "no custom CA means the Plain seam, which keeps lapin's AMQPS handshake"
+    );
+}
+
+#[tokio::test]
+async fn try_from_broker_config_missing_ca_fails_closed_naming_broker() {
+    let missing = std::path::Path::new("/nonexistent/tls/missing-ca.pem");
+    let broker = tls_broker(
+        "amqps://h:5671",
+        Some(missing.to_string_lossy().into_owned()),
+    );
+
+    let error =
+        RabbitConnectionManager::try_from_broker_config("payments", &broker, immediate_retry())
+            .expect_err("a missing CA bundle must fail at construction time");
+    let message = config_message(error);
+
+    assert!(message.contains("payments"), "got: {message}");
+    assert!(
+        message.contains("failed to load tls.ca_cert"),
+        "got: {message}"
+    );
+}
+
+#[tokio::test]
+async fn try_from_broker_config_rejects_server_name_directly() {
+    // Struct literal bypasses TOML: the validate-first defense must still fire.
+    let broker = RabbitBrokerConfig {
+        url: "amqps://h:5671".to_string(),
+        username: None,
+        password: None,
+        vhost: None,
+        tls: Some(crate::tls::RabbitTlsConfig {
+            ca_cert: Some(tls_fixture_path().to_string_lossy().into_owned()),
+            server_name: Some("x".to_string()),
+        }),
+    };
+
+    let error =
+        RabbitConnectionManager::try_from_broker_config("payments", &broker, immediate_retry())
+            .expect_err("programmatic server_name must be rejected");
+    let message = config_message(error);
+
+    assert_eq!(
+        message,
+        crate::tls::SERVER_NAME_UNSUPPORTED_ERROR.replace("{broker}", "payments")
+    );
+}
+
+#[tokio::test]
+async fn transport_unchanged_after_failed_connect_and_retry() {
+    let broker = tls_broker(
+        "amqps://127.0.0.1:1",
+        Some(tls_fixture_path().to_string_lossy().into_owned()),
+    );
+    let manager = Arc::new(
+        RabbitConnectionManager::try_from_broker_config("payments", &broker, immediate_retry())
+            .expect("a TLS broker must construct"),
+    );
+    let before = manager
+        .transport()
+        .tls_config()
+        .cloned()
+        .expect("the manager must carry its TLS config");
+
+    let result = timeout_wait(
+        "failed TLS connect",
+        Duration::from_secs(10),
+        manager.connect(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "connecting to an unreachable TLS broker must fail"
+    );
+
+    let after = manager
+        .transport()
+        .tls_config()
+        .cloned()
+        .expect("the manager must still carry its TLS config");
+    assert_eq!(
+        before, after,
+        "the reconnect path must reuse the identical captured TLS config"
     );
 }

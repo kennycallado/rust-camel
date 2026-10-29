@@ -50,6 +50,58 @@ pub type ConnectFuture =
 /// adapter, tests install a deterministic fake.
 pub type ConnectFn = Arc<dyn Fn(&str) -> ConnectFuture + Send + Sync>;
 
+/// The transport a manager was constructed with.
+///
+/// `TryFrom` broker construction is the only production path: it derives the
+/// connect seam from this value, so a reconnect re-invokes the exact captured
+/// configuration (task 1.3). There is deliberately no "accept invalid
+/// certificates" arm — SNI and certificate verification always stay lapin's
+/// URL-host derivation.
+#[derive(Debug)]
+pub(crate) enum ConnectTransport {
+    /// No custom CA. For an `amqps://` URL lapin still performs the TLS
+    /// handshake against the system-native roots; it never means plaintext.
+    Plain,
+    /// AMQPS with a custom `tls.ca_cert` trust anchor.
+    Tls(lapin::tcp::OwnedTLSConfig),
+}
+
+impl ConnectTransport {
+    /// Build the connect seam for this transport.
+    ///
+    /// The `Tls` arm owns an `Arc` clone of the configuration, so every
+    /// invocation — initial connect and any later reconnect — reads the same
+    /// captured value.
+    pub(crate) fn connect_fn(&self) -> ConnectFn {
+        match self {
+            Self::Plain => Arc::new(connect_with_lapin),
+            Self::Tls(config) => {
+                let config = Arc::new(config.clone());
+                Arc::new(move |url: &str| {
+                    let config = Arc::clone(&config);
+                    let url = url.to_string();
+                    Box::pin(async move {
+                        lapin::DefaultConnectionBuilder::new()?
+                            .with_uri_str(url)
+                            .with_tls_config((*config).clone())
+                            .connect()
+                            .await
+                    })
+                })
+            }
+        }
+    }
+
+    /// The captured TLS configuration, if this is a `Tls` transport.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn tls_config(&self) -> Option<&lapin::tcp::OwnedTLSConfig> {
+        match self {
+            Self::Plain => None,
+            Self::Tls(config) => Some(config),
+        }
+    }
+}
+
 /// Watched connection lifecycle state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnStatus {
@@ -151,6 +203,11 @@ pub struct RabbitConnectionManager {
     failure_flight: Mutex<()>,
     retry: NetworkRetryPolicy,
     connect_fn: ConnectFn,
+    /// Captured transport metadata. `try_from_broker_config` is the only
+    /// production constructor and always derives `connect_fn` from this value,
+    /// so reconnects reuse the captured TLS configuration by construction.
+    /// `new` callers (tests) keep their injected fakes with `Plain` metadata.
+    transport: ConnectTransport,
     status_tx: watch::Sender<ConnStatus>,
     /// Registration-time lifecycle supplier. When present, each reconnect
     /// derives a manager-local child of the CURRENT runtime shutdown token so
@@ -178,6 +235,7 @@ impl RabbitConnectionManager {
             failure_flight: Mutex::new(()),
             retry,
             connect_fn,
+            transport: ConnectTransport::Plain,
             status_tx,
             context: None,
             tasks: Arc::new(TaskRegistry::default()),
@@ -198,14 +256,43 @@ impl RabbitConnectionManager {
         self
     }
 
-    /// Build a manager for a configured broker, resolving credentials/vhost
-    /// into the URL and installing the real lapin connect adapter.
-    pub fn from_broker_config(broker: &RabbitBrokerConfig, retry: NetworkRetryPolicy) -> Self {
-        Self::new(
-            resolve_broker_url(broker),
-            retry,
-            Arc::new(connect_with_lapin),
-        )
+    /// Build a manager for a configured broker, fail-closed.
+    ///
+    /// Validation runs first so programmatic construction (not just bundle
+    /// `from_toml`) can never silently ignore `tls.server_name` or pair
+    /// `tls.*` with `amqp://`. The URL is resolved exactly as before and the
+    /// transport is decided in one place: a configured `ca_cert` loads into an
+    /// `OwnedTLSConfig` trust anchor, otherwise the transport stays `Plain`.
+    ///
+    /// `Plain` means "no custom CA": lapin's AMQPS scheme handling still
+    /// performs the TLS handshake with the system-native roots, so this cannot
+    /// downgrade an `amqps://` broker to plaintext.
+    pub fn try_from_broker_config(
+        name: &str,
+        broker: &RabbitBrokerConfig,
+        retry: NetworkRetryPolicy,
+    ) -> Result<Self, CamelError> {
+        crate::tls::validate_broker(name, broker)?;
+        let url = resolve_broker_url(broker);
+        let transport = match broker.tls.as_ref().and_then(|tls| tls.ca_cert.as_deref()) {
+            Some(ca_cert) => {
+                let pem = crate::tls::load_ca_bundle(name, ca_cert)?;
+                ConnectTransport::Tls(lapin::tcp::OwnedTLSConfig {
+                    identity: None,
+                    cert_chain: Some(pem),
+                })
+            }
+            None => ConnectTransport::Plain,
+        };
+        let mut manager = Self::new(url, retry, transport.connect_fn());
+        manager.transport = transport;
+        Ok(manager)
+    }
+
+    /// The transport this manager was constructed with.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn transport(&self) -> &ConnectTransport {
+        &self.transport
     }
 
     /// Establish the connection, delegating to the detached single-flight owner.
@@ -308,7 +395,7 @@ impl RabbitConnectionManager {
     /// returned connection's status to tell a channel-local termination on a
     /// healthy connection from actual connection death — a torn read would
     /// silently defeat both. A `channel.open` failure is classified internally
-    /// against the captured origin (see [`Self::handle_channel_open_failure`]),
+    /// against the captured origin (see `handle_channel_open_failure`),
     /// so the manager is demoted only when that origin is actually dead. The
     /// `channel.open` is bounded so a half-dead connection cannot hang consumer
     /// start.
@@ -727,7 +814,7 @@ async fn wait_cancelled(cancel: &Option<CancellationToken>) {
     }
 }
 
-/// The real connect adapter installed by [`RabbitConnectionManager::from_broker_config`].
+/// The real connect adapter installed by [`ConnectTransport::Plain`].
 fn connect_with_lapin(url: &str) -> ConnectFuture {
     let url = url.to_string();
     Box::pin(async move {

@@ -25,6 +25,14 @@ toml                = { workspace = true }
 thiserror           = { workspace = true }
 futures             = { workspace = true }
 url                 = { workspace = true }
+# Boot-time validation of `tls.ca_cert`: PEM decoding plus a DER trust-anchor
+# parse. Both crates are provider-neutral parsers (rustls-webpki's default
+# `std` feature enables no crypto provider), so this adds no aws-lc-rs edge.
+# `rustls` itself is deliberately NOT a direct dependency: the workspace entry
+# enables default features, which select aws-lc-rs.
+rustls-pki-types    = "1"
+# Package `rustls-webpki`; its library name is `webpki`.
+rustls-webpki       = "0.103"
 dashmap             = { workspace = true }
 uuid                = { workspace = true }
 # lapin 4.12.0 feature list verified against its published feature table
@@ -53,6 +61,12 @@ camel-language-api.workspace = true
 # logs the structured `error` field); a global recording subscriber is required
 # because the engine runs on spawned tasks.
 tracing-subscriber.workspace = true
+# TLS tests use auto-cleaned temp dirs instead of predictable /tmp paths.
+tempfile.workspace = true
+# Local TLS harness: workspace pin (ring provider) for the fixture acceptor.
+tokio-rustls.workspace = true
+# Parse the fixture server key into a rustls private key for the acceptor.
+rustls-pemfile = "2"
 
 [lints]
 workspace = true

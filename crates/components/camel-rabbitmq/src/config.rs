@@ -31,11 +31,11 @@ impl fmt::Debug for SecretString {
 
 /// One `[components.rabbitmq.brokers.<name>]` entry.
 ///
-/// Supported keys are exactly `url`, `username`, `password`, `vhost`.
-/// `deny_unknown_fields` makes any `tls.*` key fail closed at boot: custom
-/// TLS overrides are not implemented, so a `tls` section is rejected with an
-/// error naming `tls` and the supported parameters rather than being parsed
-/// and silently ignored. (Tracked in bd rc-l8ohw.)
+/// Supported keys are exactly `url`, `username`, `password`, `vhost`, `tls`.
+/// The optional `tls` section carries the TLS overrides defined by
+/// [`crate::tls::RabbitTlsConfig`]: `ca_cert` is a custom trust anchor (valid
+/// only with `amqps://`) and `server_name` is rejected at boot. Boot
+/// validation of every configured broker runs in `RabbitMqBundle::from_toml`.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RabbitBrokerConfig {
@@ -43,6 +43,8 @@ pub struct RabbitBrokerConfig {
     pub username: Option<String>,
     pub password: Option<SecretString>,
     pub vhost: Option<String>,
+    /// Optional TLS overrides for this broker (`[brokers.<name>.tls]`).
+    pub tls: Option<crate::tls::RabbitTlsConfig>,
 }
 
 impl fmt::Debug for RabbitBrokerConfig {
@@ -52,6 +54,8 @@ impl fmt::Debug for RabbitBrokerConfig {
             .field("username", &self.username)
             .field("password", &self.password)
             .field("vhost", &self.vhost)
+            // A PEM path and a hostname carry no secret material.
+            .field("tls", &self.tls)
             .finish()
     }
 }
@@ -477,6 +481,7 @@ mod tests {
             username: None,
             password: None,
             vhost: None,
+            tls: None,
         }
     }
 
@@ -641,6 +646,7 @@ mod tests {
             username: Some("user".to_string()),
             password: Some(SecretString::from("hunter2")),
             vhost: None,
+            tls: None,
         };
         let rendered = format!("{config:?}");
         assert!(rendered.contains("<redacted>"), "got: {rendered}");
