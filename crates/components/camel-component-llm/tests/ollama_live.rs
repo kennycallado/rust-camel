@@ -24,7 +24,16 @@ use tower::Service;
 const OLLAMA_BASE_URL: &str = "http://localhost:11434";
 const CHAT_MODEL: &str = "qwen3.5:4b";
 
-fn make_ollama_component() -> LlmComponent {
+/// Build the live-test global config for the single "local" Ollama provider.
+///
+/// Always sets `allow_internal: true` so the `http://localhost` base URL is
+/// accepted. Every live test must construct its config through this helper so
+/// the SSRF policy cannot drift between tests.
+fn make_ollama_global_config(
+    pricing: Option<camel_component_llm::cost::PricingTable>,
+    cache_ttl_secs: Option<u64>,
+    cache_max_entries: Option<usize>,
+) -> LlmGlobalConfig {
     let mut providers = HashMap::new();
     providers.insert(
         "local".into(),
@@ -34,17 +43,42 @@ fn make_ollama_component() -> LlmComponent {
             timeout_secs: None,
             max_concurrency: None,
             network_retry: None,
-            pricing: None,
-            cache_ttl_secs: None,
-            cache_max_entries: None,
+            pricing,
+            cache_ttl_secs,
+            cache_max_entries,
         }),
     );
-    LlmComponent::new(LlmGlobalConfig {
+    LlmGlobalConfig {
         providers,
         allow_internal: true,
         ..Default::default()
-    })
-    .expect("component")
+    }
+}
+
+fn make_ollama_component() -> LlmComponent {
+    LlmComponent::new(make_ollama_global_config(None, None, None)).expect("component")
+}
+
+/// Non-network regression: the local HTTP base URL is accepted only when
+/// `allow_internal` opts in; the default policy must reject it.
+#[cfg(feature = "ollama")]
+#[test]
+fn local_http_base_url_requires_allow_internal() {
+    // allow_internal = true (helper default) accepts the local HTTP base URL.
+    LlmComponent::new(make_ollama_global_config(None, None, None))
+        .expect("allow_internal must accept the local HTTP base_url");
+
+    // Default policy (allow_internal = false) must reject it.
+    let mut config = make_ollama_global_config(None, None, None);
+    config.allow_internal = false;
+    let err = LlmComponent::new(config)
+        .err()
+        .expect("default policy must reject the local HTTP base_url");
+    let message = err.to_string();
+    assert!(
+        message.to_lowercase().contains("https"),
+        "rejection must mention HTTPS, got: {message}"
+    );
 }
 
 fn make_producer_ctx() -> camel_component_api::ProducerContext {
@@ -436,29 +470,14 @@ async fn ollama_multi_turn() {
 #[tokio::test]
 #[ignore = "slow test: requires local Ollama with qwen3.5:4b and pricing configured"]
 async fn ollama_cost_computed() {
-    let mut providers = std::collections::HashMap::new();
-    providers.insert(
-        "local".into(),
-        camel_component_llm::LlmProviderConfig::Ollama(
-            camel_component_llm::config::OllamaProviderConfig {
-                base_url: OLLAMA_BASE_URL.into(),
-                default_model: CHAT_MODEL.into(),
-                timeout_secs: None,
-                max_concurrency: None,
-                network_retry: None,
-                pricing: Some(camel_component_llm::cost::PricingTable {
-                    input_per_1k_tokens: 0.0025,
-                    output_per_1k_tokens: 0.01,
-                }),
-                cache_ttl_secs: None,
-                cache_max_entries: None,
-            },
-        ),
-    );
-    let component = camel_component_llm::LlmComponent::new(camel_component_llm::LlmGlobalConfig {
-        providers,
-        ..Default::default()
-    })
+    let component = LlmComponent::new(make_ollama_global_config(
+        Some(camel_component_llm::cost::PricingTable {
+            input_per_1k_tokens: 0.0025,
+            output_per_1k_tokens: 0.01,
+        }),
+        None,
+        None,
+    ))
     .expect("component");
 
     let endpoint = component
@@ -509,27 +528,8 @@ async fn ollama_cost_computed() {
 #[tokio::test]
 #[ignore = "slow test: requires local Ollama with qwen3.5:4b and cache configured"]
 async fn ollama_cache_hit() {
-    let mut providers = std::collections::HashMap::new();
-    providers.insert(
-        "local".into(),
-        camel_component_llm::LlmProviderConfig::Ollama(
-            camel_component_llm::config::OllamaProviderConfig {
-                base_url: OLLAMA_BASE_URL.into(),
-                default_model: CHAT_MODEL.into(),
-                timeout_secs: None,
-                max_concurrency: None,
-                network_retry: None,
-                pricing: None,
-                cache_ttl_secs: Some(60),
-                cache_max_entries: Some(100),
-            },
-        ),
-    );
-    let component = camel_component_llm::LlmComponent::new(camel_component_llm::LlmGlobalConfig {
-        providers,
-        ..Default::default()
-    })
-    .expect("component");
+    let component =
+        LlmComponent::new(make_ollama_global_config(None, Some(60), Some(100))).expect("component");
 
     let endpoint = component
         .create_endpoint(
