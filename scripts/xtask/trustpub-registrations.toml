@@ -139,10 +139,6 @@ name = "camel-component-opensearch"
 state = "registered"
 
 [[crates]]
-name = "camel-component-rabbitmq"
-state = "registered"
-
-[[crates]]
 name = "camel-component-seda"
 state = "registered"
 
@@ -212,6 +208,10 @@ state = "registered"
 
 [[crates]]
 name = "camel-component-llm"
+state = "registered"
+
+[[crates]]
+name = "camel-component-rabbitmq"
 state = "registered"
 
 [[crates]]

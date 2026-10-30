@@ -67,6 +67,12 @@ tempfile.workspace = true
 tokio-rustls.workspace = true
 # Parse the fixture server key into a rustls private key for the acceptor.
 rustls-pemfile = "2"
+# Runtime route e2e drives a real CamelContext with the rabbitmq scheme
+# registered. Publish-order-safe only while camel-core does NOT depend back
+# on camel-rabbitmq (ADR-0055; same precedent as camel-http/camel-redis/camel-cxf).
+camel-core = { workspace = true }
+camel-builder = { workspace = true }
+camel-component-mock = { workspace = true }
 
 [lints]
 workspace = true

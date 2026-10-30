@@ -105,6 +105,11 @@ failing route requeues it forever.
 A route transport or lifecycle loss (`ChannelClosed`) abandons the delivery with no disposition.
 The consumer closes only its own channel, so the broker redelivers the still-unacked message.
 
+An engine that terminates while the consumer is still running fails the route. Its exit is reported
+through the consumer's supervision handle, and the runtime turns that report into route failure.
+Engine-local reconnects (`wait_connected`, `reopen_backoff`) stay internal and never reach the
+handle. A cancellation resolves the handle cleanly.
+
 The component is at-least-once. A broker restart, a mid-flight stop, or a dropped disposition makes
 the broker redeliver, so a consumer must tolerate duplicates.
 
@@ -241,7 +246,7 @@ certificates. The TLS end-to-end tier activates only when `RABBITMQ_TLS_ITEST` i
 
 | Aspect | This component | Kafka / MQTT |
 |--------|----------------|--------------|
-| Crash and redelivery | The consumer engine owns channel-local recovery. A healthy connection re-opens its subscription; a dead origin is reported to the manager, and the retry policy owns reconnection. A route transport loss terminates the engine and closes its channel. | The consumer does not pin route health on task crash; the runtime owns route failure. |
+| Crash and redelivery | The consumer engine owns channel-local recovery. A healthy connection re-opens its subscription; a dead origin is reported to the manager, and the retry policy owns reconnection. A route transport loss terminates the engine and closes its channel. The engine exit is surfaced to the runtime through the consumer's supervision handle, so the runtime owns route failure. | The consumer does not pin route health on task crash; the runtime owns route failure. |
 | Unmaterializable InOut body | When the shared body converter cannot materialize an OUT body, reply preparation returns no intent and the requester times out. There is no new consumer-side signal. | Not applicable. |
 
 ## Installation

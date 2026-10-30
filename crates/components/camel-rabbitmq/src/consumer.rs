@@ -35,6 +35,14 @@
 //! connection (e.g. a 404 queue not found) is retried under a bounded
 //! cancel-aware backoff and never invalidates the shared connection. The retry
 //! policy, not lapin auto-recovery, owns reconnection.
+//!
+//! # Supervision
+//!
+//! Every engine reports exactly one exit to a per-start supervisor: a drop
+//! guard fires on normal return and on panic unwind alike. The supervisor
+//! resolves `Ok` when the context cancels and `Err` on any engine exit while
+//! the consumer is still running. The runtime takes the handle once through
+//! `background_task_handle()` and owns route-failure propagation.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +56,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use lapin::options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicQosOptions};
 use lapin::types::{FieldTable, ShortString};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -537,6 +546,20 @@ async fn register_consumer(
     Ok(consume_stream(consumer))
 }
 
+/// Drop guard that reports one engine exit to the supervisor.
+///
+/// `Drop` fires on normal return AND on panic unwind, so an engine crashing
+/// mid-delivery still notifies the supervisor exactly once. The channel is
+/// unbounded: the synchronous `send` can only fail when the receiver is already
+/// gone (the supervisor was aborted or dropped), which needs no handling.
+struct EngineExitSignal(mpsc::UnboundedSender<()>);
+
+impl Drop for EngineExitSignal {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
+    }
+}
+
 /// The reconnect wrapper around [`run_loop`].
 ///
 /// Owns the engine's current channel. When a delivery stream ends the engine
@@ -698,6 +721,10 @@ pub struct RabbitConsumer {
     /// release its own channel.
     channels: Vec<lapin::Channel>,
     engine_handles: Vec<JoinHandle<()>>,
+    /// Runtime supervision handle: resolves `Ok` when the context cancels,
+    /// `Err` if an engine exits while the consumer is NOT cancelled. Taken
+    /// (at most once) by `background_task_handle()`.
+    supervisor: Option<JoinHandle<Result<(), CamelError>>>,
 }
 
 impl RabbitConsumer {
@@ -715,6 +742,7 @@ impl RabbitConsumer {
             engine_cancels: Vec::new(),
             channels: Vec::new(),
             engine_handles: Vec::new(),
+            supervisor: None,
         }
     }
 }
@@ -905,6 +933,10 @@ impl Consumer for RabbitConsumer {
         context.mark_ready();
         self.cancel_token = Some(cancel.clone());
 
+        // One exit signal per engine feeds the supervisor below. Unbounded so
+        // the guard's synchronous `Drop` send never blocks the engine task.
+        let (exit_tx, mut exit_rx) = mpsc::unbounded_channel::<()>();
+
         for (((channel, generation), origin), consumer) in channels
             .into_iter()
             .zip(generations)
@@ -920,20 +952,67 @@ impl Consumer for RabbitConsumer {
             // channel is engine-owned and released by `run_engine`.
             let engine_channel = channel.clone();
             self.channels.push(channel);
-            self.engine_handles.push(tokio::spawn(run_engine(
-                consume_stream(consumer),
-                (engine_channel, generation, origin),
-                Arc::clone(&self.manager),
-                Arc::clone(&self.runtime),
-                self.config.clone(),
-                context.clone(),
-                engine_cancel,
-            )));
+
+            // Per-engine clones are taken here, before the future moves into
+            // the task, so the spawn never captures `&self`.
+            let manager = Arc::clone(&self.manager);
+            let runtime = Arc::clone(&self.runtime);
+            let config = self.config.clone();
+            let engine_context = context.clone();
+            let exit_signal = EngineExitSignal(exit_tx.clone());
+            self.engine_handles.push(tokio::spawn(async move {
+                // Dropped when the engine future ends (return, panic, or
+                // abort), notifying the supervisor exactly once.
+                let _exit_signal = exit_signal;
+                run_engine(
+                    consume_stream(consumer),
+                    (engine_channel, generation, origin),
+                    manager,
+                    runtime,
+                    config,
+                    engine_context,
+                    engine_cancel,
+                )
+                .await;
+            }));
         }
+
+        // Supervise every engine. `biased` prefers cancellation so a stop is
+        // always reported `Ok` even when an engine exit lands at the same
+        // instant. A `recv()` result of either `Some(())` (one engine exited)
+        // or `None` (all senders dropped, i.e. every engine exited) means at
+        // least one engine is gone; while the consumer is not cancelled that is
+        // a real failure — engines already reconnect internally, so an exit
+        // here is never normal.
+        let supervisor = tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => Ok(()),
+                _ = exit_rx.recv() => {
+                    if cancel.is_cancelled() {
+                        Ok(())
+                    } else {
+                        Err(RabbitError::PublishFailed(
+                            "rabbitmq consumer engine exited unexpectedly".to_string(),
+                        )
+                        .into())
+                    }
+                }
+            }
+        });
+        self.supervisor = Some(supervisor);
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<(), CamelError> {
+        // Abort an untaken supervisor (the runtime takes it via
+        // `background_task_handle()`; a direct `stop()` without the runtime
+        // must not leave it waiting). Engines are joined before their channels
+        // close so an in-flight ack is never lost.
+        if let Some(supervisor) = self.supervisor.take() {
+            supervisor.abort();
+        }
+
         for engine_cancel in self.engine_cancels.drain(..) {
             engine_cancel.cancel();
         }
@@ -957,6 +1036,10 @@ impl Consumer for RabbitConsumer {
 
     fn startup_mode(&self) -> ConsumerStartupMode {
         ConsumerStartupMode::Explicit
+    }
+
+    fn background_task_handle(&mut self) -> Option<JoinHandle<Result<(), CamelError>>> {
+        self.supervisor.take()
     }
 }
 

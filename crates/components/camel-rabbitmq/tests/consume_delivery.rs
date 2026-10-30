@@ -659,3 +659,117 @@ async fn route_transport_loss_requeues_unacked_message() {
 
     stop_consumer(&mut consumer).await;
 }
+
+/// Cancellation is the normal end of a consumer: the supervisor exposed via
+/// `background_task_handle()` must resolve `Ok(())` once the context token
+/// fires, not while the engines are still running. This pins the "stop is
+/// never reported as an engine failure" half of the supervisor contract
+/// directly, without the runtime.
+#[tokio::test]
+async fn background_task_handle_resolves_ok_on_cancel() {
+    let Some(fx) = common::require_fixture() else {
+        return;
+    };
+    let queue = unique("supervisor-cancel");
+    let (_connection, _channel) = fx.declare_queue(&queue).await;
+
+    let manager = manager_for(&fx.amqp_url);
+    let config = RabbitEndpointConfig::from_uri(&format!("rabbitmq:default?queue={queue}"))
+        .expect("supervisor-cancel URI must parse");
+    let (mut consumer, _rx, cancel) = start_consumer(
+        config,
+        Arc::clone(&manager),
+        noop_rt(),
+        "supervisor-cancel-route",
+    )
+    .await;
+
+    let handle = consumer
+        .background_task_handle()
+        .expect("supervisor handle must be exposed after start");
+    // The supervisor is waiting on either the cancel token or an engine exit;
+    // nothing has exited, so it must still be live right after start.
+    assert!(
+        !handle.is_finished(),
+        "the supervisor must wait while the engines run"
+    );
+
+    cancel.cancel();
+
+    let result = timeout(RPC_BOUND, handle)
+        .await
+        .expect("supervisor must resolve within the bound after cancel")
+        .expect("the supervisor task must not panic");
+    assert!(
+        result.is_ok(),
+        "cancel must resolve the supervisor as Ok, got: {result:?}"
+    );
+
+    // Stop after the supervisor is already taken: the remaining state (engine
+    // tokens, channels) must still tear down cleanly.
+    stop_consumer(&mut consumer).await;
+}
+
+/// An engine that exits while the consumer is NOT cancelled is a real
+/// failure: `background_task_handle()` must resolve `Err` naming the
+/// unexpected exit. The trigger drops the route receiver, so the engine's
+/// next envelope send fails with `ChannelClosed` -> `RouteTransportLoss` and
+/// the engine terminates without any cancel token firing.
+#[tokio::test]
+async fn background_task_handle_errors_when_engine_exits_uncancelled() {
+    let Some(fx) = common::require_fixture() else {
+        return;
+    };
+    let queue = unique("supervisor-exit");
+    let (_connection, channel) = fx.declare_queue(&queue).await;
+
+    // Own the receiver and drop it before start: the engine registers and
+    // reports ready normally, but the first delivery has no route to hand it
+    // to. Mirrors `start_consumer`'s construction exactly so the readiness
+    // gate behaves the same.
+    let (tx, rx) = mpsc::channel(8);
+    drop(rx);
+    let cancel = CancellationToken::new();
+    let (signal, signal_rx) = StartupSignal::pair();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "supervisor-exit-route".to_string())
+        .with_startup(signal);
+    let manager = manager_for(&fx.amqp_url);
+    let config = RabbitEndpointConfig::from_uri(&format!("rabbitmq:default?queue={queue}"))
+        .expect("supervisor-exit URI must parse");
+    let mut consumer = RabbitConsumer::new(config, manager, noop_rt());
+
+    timeout(RPC_BOUND, consumer.start(ctx))
+        .await
+        .expect("consumer.start must return within the bound")
+        .expect("consumer.start must succeed against the fixture");
+    timeout(RPC_BOUND, signal_rx.await_ready())
+        .await
+        .expect("readiness must resolve within the bound")
+        .expect("readiness must be Ok after a successful start");
+
+    let handle = consumer
+        .background_task_handle()
+        .expect("supervisor handle must be exposed after start");
+    assert!(
+        !handle.is_finished(),
+        "the supervisor must wait while the engine is running"
+    );
+
+    // One delivery is enough: the engine takes it, fails to hand it to the
+    // (absent) route, and exits uncancelled.
+    publish(&channel, &queue, b"engine-exit-payload").await;
+
+    let joined = timeout(RPC_BOUND, handle)
+        .await
+        .expect("supervisor must resolve within the bound after an uncancelled engine exit")
+        .expect("the supervisor task must not panic");
+    let error = joined.expect_err("an uncancelled engine exit must surface as Err, not Ok(())");
+    assert!(
+        error.to_string().contains("exited unexpectedly"),
+        "the supervisor error must name the unexpected exit, got: {error}"
+    );
+
+    // Engines already returned normally; stop must still join and close
+    // within its bound rather than hang on the consumed handle.
+    stop_consumer(&mut consumer).await;
+}
