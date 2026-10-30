@@ -17,6 +17,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+tokio-util.workspace = true
 camel-language-simple.workspace = true
 camel-language-api.workspace = true
 camel-component-direct.workspace = true
@@ -64,6 +65,10 @@ harness = false
 
 [[bench]]
 name = "forced_experiment"
+harness = false
+
+[[bench]]
+name = "aggregate_expr"
 harness = false
 
 [lints]

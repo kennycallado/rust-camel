@@ -1093,12 +1093,12 @@ impl DefaultRouteController {
             mpsc::channel::<camel_processor::aggregator::AggregateEmission>(256);
 
         let route_cancel_clone = pipeline_cancel.clone();
-        let mut svc = AggregatorService::new(
+        let mut svc = AggregatorService::try_new(
             split.agg_config.clone(),
             late_tx,
             Arc::clone(&self.languages),
             route_cancel_clone,
-        );
+        )?;
         // Queue-depth visibility: the TTL-sweep pass reports the buffered
         // group count as camel_queue_depth{queue="aggregator:<route>"}.
         if let Some(metrics) = self.tracer_metrics.clone() {

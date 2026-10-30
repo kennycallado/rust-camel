@@ -21,7 +21,6 @@ use super::{
     pack_lifecycles,
 };
 use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
-use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
 use crate::lifecycle::adapters::step_resolution::{compile_language_expression, eval_meta};
 use crate::lifecycle::application::route_definition::BuilderStep;
 use camel_language_api::LanguageExpressionEval;
@@ -526,11 +525,16 @@ impl StepCompiler for SplittingCompiler {
             // ── Aggregate ──
             BuilderStep::Aggregate { config } => {
                 let (late_tx, _late_rx) = mpsc::channel(256);
-                let registry: SharedLanguageRegistry =
-                    Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
                 let cancel = CancellationToken::new();
-                let mut svc =
-                    camel_processor::AggregatorService::new(config, late_tx, registry, cancel);
+                // Compile correlation/completion expressions against the
+                // route's language registry; a missing language or malformed
+                // expression is a route-compile error, not a runtime failure.
+                let mut svc = camel_processor::AggregatorService::try_new(
+                    config,
+                    late_tx,
+                    Arc::clone(ctx.languages),
+                    cancel,
+                )?;
                 // Queue-depth visibility: the TTL-sweep pass reports the
                 // buffered group count under `aggregator:<route>`.
                 if let Some(route_id) = ctx.route_id {
@@ -592,6 +596,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
+    use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
     use crate::lifecycle::adapters::step_compilers::build_registry;
     use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
     use crate::lifecycle::application::route_definition::LanguageExpressionDef;
@@ -688,6 +693,100 @@ mod tests {
             }
             other => panic!("Expected CompiledStep::Process, got {other:?}"),
         }
+    }
+
+    /// Embedded (non-split) aggregate steps compile their correlation and
+    /// completion expressions against the route's language registry. A missing
+    /// language must surface as a compile error, not a construction panic.
+    #[test]
+    fn aggregate_step_unregistered_correlation_language_is_compile_error() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let config = AggregatorConfig::correlate_by("id")
+            .correlate_by_expr("${header.id}", "nonexistent-lang")
+            .complete_when_size(1)
+            .build()
+            .expect("valid aggregator config");
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::SplittingCompiler));
+
+        let err = reg
+            .compile_step(BuilderStep::Aggregate { config }, 0, &ctx)
+            .expect_err("unregistered correlation language must fail compilation");
+        assert!(
+            matches!(&err, CamelError::ProcessorError(msg) if msg.contains("nonexistent-lang")),
+            "expected missing-language error naming the language, got {err:?}"
+        );
+    }
+
+    /// Malformed completion predicate expressions fail at compile time on the
+    /// embedded path too (`create_predicate` rejects them).
+    #[test]
+    fn aggregate_step_malformed_completion_predicate_is_compile_error() {
+        use camel_api::aggregator::{CompletionCondition, CompletionMode};
+
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages = languages_with_simple();
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(NoOpComponentContext);
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = crate::IdempotentRegistry::new();
+        let claim_check_repositories = crate::ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = test_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let mut config = AggregatorConfig::correlate_by("id")
+            .complete_when_size(1)
+            .build()
+            .expect("valid aggregator config");
+        config.completion = CompletionMode::Single(CompletionCondition::PredicateExpr {
+            expr: "${".to_string(),
+            language: "simple".to_string(),
+        });
+
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::SplittingCompiler));
+
+        let err = reg
+            .compile_step(BuilderStep::Aggregate { config }, 0, &ctx)
+            .expect_err("malformed completion predicate must fail compilation");
+        assert!(
+            matches!(&err, CamelError::ProcessorError(msg) if msg.contains("unclosed interpolation")),
+            "malformed completion predicate must fail in the Simple parser: {err:?}"
+        );
     }
 
     #[tokio::test]

@@ -22,9 +22,35 @@ use camel_api::{
     message::Message,
 };
 use camel_component_api::InFlightClaim;
-use camel_language_api::Language;
+use camel_language_api::{Expression, Language, Predicate};
 
 pub type SharedLanguageRegistry = Arc<std::sync::Mutex<HashMap<String, Arc<dyn Language>>>>;
+
+/// Correlation strategy resolved at construction: the language expression is
+/// compiled once and held as a shareable trait object, so the hot path never
+/// touches the language registry.
+#[derive(Clone)]
+enum CompiledCorrelation {
+    HeaderName(String),
+    Expression(Arc<dyn Expression>),
+    #[allow(clippy::type_complexity)]
+    Fn(Arc<dyn Fn(&Exchange) -> Option<String> + Send + Sync>),
+    /// A strategy this build does not understand. Retained so `try_new` can
+    /// fail closed at construction; the hot-path arm is defensive only.
+    Unsupported,
+}
+
+/// Construction-time view of the aggregator config: everything the hot path
+/// needs, with zero references to the language registry.
+#[derive(Clone)]
+struct CompiledAggregatorConfig {
+    correlation: CompiledCorrelation,
+    /// Every `PredicateExpr` completion condition compiled once, in config
+    /// order. Evaluation OR-combines them; an empty slice means the mode has
+    /// no predicate condition (Size/Predicate/Timeout only). Sync completion
+    /// still reads the original [`AggregatorConfig::completion`].
+    completion_predicates: Arc<[Arc<dyn Predicate>]>,
+}
 
 /// A bucket emission delivered outside the submitting call (timeout
 /// fire, `force_complete_all`): the aggregated exchange plus every
@@ -109,7 +135,10 @@ pub struct AggregatorService {
     timeout_tasks: Arc<Mutex<HashMap<String, CancellationToken>>>,
     timeout_handles: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     late_tx: mpsc::Sender<AggregateEmission>,
-    language_registry: SharedLanguageRegistry,
+    /// Correlation/completion expressions compiled once at construction.
+    /// The language registry is intentionally NOT retained. Shared behind an
+    /// `Arc` so the per-exchange clone is a refcount bump, not a rebuild.
+    compiled: Arc<CompiledAggregatorConfig>,
     /// Swappable cell holding the cancellation token for the background
     /// maintenance sweep task. `StepLifecycle::start` replaces this with a fresh token
     /// so the sweep respawns on the next `poll_ready`; `shutdown` cancels the
@@ -184,6 +213,88 @@ impl Drop for AggregatorService {
 }
 
 impl AggregatorService {
+    /// Fallible constructor: validates the config and compiles every
+    /// correlation/completion expression ONCE against the language registry.
+    ///
+    /// Construction takes a single registry snapshot and drops it before
+    /// returning, so the service holds zero registry references and the hot
+    /// path cannot fail on a missing/unregistered language. Fails closed
+    /// (ADR-0033): an invalid config, unknown language, malformed expression,
+    /// or unsupported correlation strategy is an error here, never a deferred
+    /// per-exchange failure.
+    ///
+    /// Construction is runtime-free (no `tokio::spawn`); the maintenance sweep
+    /// spawns lazily on the first `poll_ready`.
+    pub fn try_new(
+        config: AggregatorConfig,
+        late_tx: mpsc::Sender<AggregateEmission>,
+        language_registry: SharedLanguageRegistry,
+        route_cancel: CancellationToken,
+    ) -> Result<Self, CamelError> {
+        // R3-M2: at least one memory-release bound is mandatory.
+        config.validate()?;
+
+        // R3-M2 advisory: Size/Predicate-only completion (no Timeout) with no
+        // bucket_ttl means buckets accumulate until max_buckets is hit. Bounded
+        // by max_buckets (validated above) but worth surfacing to operators.
+        let has_timeout = has_timeout_condition(&config.completion);
+        if !has_timeout && config.bucket_ttl.is_none() {
+            tracing::warn!(
+                "Aggregator configured with Size/Predicate completion and no \
+                 bucket_ttl: buckets accumulate until max_buckets is reached"
+            );
+        }
+
+        // Resolve every language handle under ONE lock, then compile. The
+        // snapshot is local and dropped before returning; the service keeps
+        // only the compiled trait objects. Compilation is synchronous, so the
+        // guard never spans an await.
+        let languages = snapshot_languages(&language_registry);
+        let correlation = compile_correlation(&config.correlation, &languages)?;
+        // A future strategy compiles to the inert variant; fail closed here so
+        // the hot path never sees it.
+        if matches!(correlation, CompiledCorrelation::Unsupported) {
+            return Err(CamelError::ProcessorError(
+                "Aggregator: unsupported correlation strategy".to_string(),
+            ));
+        }
+        let compiled = Arc::new(CompiledAggregatorConfig {
+            correlation,
+            completion_predicates: compile_completion_predicates(&config.completion, &languages)?,
+        });
+
+        // Build the shared buckets map up front so the sweep task can
+        // share it via Arc::clone.
+        let buckets: Arc<Mutex<HashMap<String, Bucket>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        // R3-C1 Batch 1: the TTL-sweep is NOT spawned here — construction
+        // must stay runtime-free so callers that build an AggregatorService
+        // outside a tokio runtime (route-spec tests) do not panic on
+        // `tokio::spawn`. The sweep is spawned lazily on the first
+        // `poll_ready`. The inline `guard.retain(...)` per `call` evicts
+        // expired buckets regardless, so the cap + TTL invariants hold
+        // whether or not the sweep has started yet.
+
+        Ok(Self {
+            config,
+            buckets,
+            timeout_tasks: Arc::new(Mutex::new(HashMap::new())),
+            timeout_handles: Arc::new(Mutex::new(HashMap::new())),
+            late_tx,
+            compiled,
+            sweep_cancel: Arc::new(Mutex::new(route_cancel)),
+            sweep_handle: Arc::new(Mutex::new(None)),
+            queue_metrics: None,
+            clone_guard: Arc::new(()),
+            cached_key: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            key_serializations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        })
+    }
+
+    /// Infallible constructor preserving the historical signature. Panics when
+    /// [`Self::try_new`] rejects the config (fail-closed startup invariant).
+    ///
     /// Lifecycle invariant: `sweep_cancel` is initially seeded from the
     /// route's cancellation token and wrapped in a swappable `Arc<Mutex<...>>`
     /// cell. `StepLifecycle::start` replaces it with a fresh token so the
@@ -200,52 +311,12 @@ impl AggregatorService {
         language_registry: SharedLanguageRegistry,
         route_cancel: CancellationToken,
     ) -> Self {
-        // R3-M2: at least one memory-release bound is mandatory.
-        config.validate().expect(
+        Self::try_new(config, late_tx, language_registry, route_cancel).expect(
             // allow-unwrap
             // fail-closed startup invariant (ADR-0033); a config without a bound is a programmer/operator error.
             "AggregatorService::new: config failed validation \
              (need max_buckets, completionTimeout, or bucket_ttl)",
-        );
-
-        // R3-M2 advisory: Size/Predicate-only completion (no Timeout) with no
-        // bucket_ttl means buckets accumulate until max_buckets is hit. Bounded
-        // by max_buckets (validated above) but worth surfacing to operators.
-        let has_timeout = has_timeout_condition(&config.completion);
-        if !has_timeout && config.bucket_ttl.is_none() {
-            tracing::warn!(
-                "Aggregator configured with Size/Predicate completion and no \
-                 bucket_ttl: buckets accumulate until max_buckets is reached"
-            );
-        }
-
-        // Build the shared buckets map up front so the sweep task can
-        // share it via Arc::clone.
-        let buckets: Arc<Mutex<HashMap<String, Bucket>>> = Arc::new(Mutex::new(HashMap::new()));
-
-        // R3-C1 Batch 1: the TTL-sweep is NOT spawned here — construction
-        // must stay runtime-free so callers that build an AggregatorService
-        // outside a tokio runtime (route-spec tests) do not panic on
-        // `tokio::spawn`. The sweep is spawned lazily on the first
-        // `poll_ready`. The inline `guard.retain(...)` per `call` evicts
-        // expired buckets regardless, so the cap + TTL invariants hold
-        // whether or not the sweep has started yet.
-
-        Self {
-            config,
-            buckets,
-            timeout_tasks: Arc::new(Mutex::new(HashMap::new())),
-            timeout_handles: Arc::new(Mutex::new(HashMap::new())),
-            late_tx,
-            language_registry,
-            sweep_cancel: Arc::new(Mutex::new(route_cancel)),
-            sweep_handle: Arc::new(Mutex::new(None)),
-            queue_metrics: None,
-            clone_guard: Arc::new(()),
-            cached_key: Arc::new(Mutex::new(None)),
-            #[cfg(test)]
-            key_serializations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }
+        )
     }
 
     /// Inject queue-depth reporting: the TTL-sweep maintenance pass publishes
@@ -551,14 +622,13 @@ impl AggregatorService {
         let timeout_tasks = Arc::clone(&self.timeout_tasks);
         let timeout_handles = Arc::clone(&self.timeout_handles);
         let late_tx = self.late_tx.clone();
-        let language_registry = Arc::clone(&self.language_registry);
+        let compiled = self.compiled.clone();
         let cached_key = Arc::clone(&self.cached_key);
         #[cfg(test)]
         let key_serializations = Arc::clone(&self.key_serializations);
 
         let inner = async move {
-            let key_value =
-                extract_correlation_key(&exchange, &config.correlation, &language_registry).await?;
+            let key_value = extract_correlation_key(&exchange, &compiled.correlation).await?;
 
             // Constant-key fast path: STRING keys only are memoized — one
             // string equality check replaces per-fragment serde, and string
@@ -592,12 +662,13 @@ impl AggregatorService {
                     .map_err(|e| CamelError::ProcessorError(e.to_string()))?
             };
 
-            // Pre-evaluate the completion predicate (if any) BEFORE taking the
-            // buckets lock — expression evaluation is async + uses the language
-            // registry, which cannot run under the !Send buckets MutexGuard.
+            // Pre-evaluate the compiled completion predicate (if any) BEFORE
+            // taking the buckets lock — predicate evaluation is async and
+            // cannot run under the !Send buckets MutexGuard. The predicate was
+            // compiled at construction, so this no longer touches the language
+            // registry.
             let predicate_satisfied =
-                evaluate_completion_predicate(&config.completion, &exchange, &language_registry)
-                    .await?;
+                evaluate_completion_predicate(&compiled.completion_predicates, &exchange).await?;
 
             let completed_bucket = {
                 let mut guard = buckets.lock().unwrap_or_else(|e| e.into_inner());
@@ -756,87 +827,57 @@ impl AggregatorService {
     }
 }
 
-async fn extract_correlation_key(
-    exchange: &Exchange,
+/// Snapshot the registry once. Construction resolves every language handle
+/// under a single lock and drops the guard immediately; compilation is
+/// synchronous, so no guard ever spans an await.
+fn snapshot_languages(registry: &SharedLanguageRegistry) -> HashMap<String, Arc<dyn Language>> {
+    registry.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Compile the correlation strategy once at construction.
+fn compile_correlation(
     strategy: &CorrelationStrategy,
-    registry: &SharedLanguageRegistry,
-) -> Result<serde_json::Value, CamelError> {
+    languages: &HashMap<String, Arc<dyn Language>>,
+) -> Result<CompiledCorrelation, CamelError> {
     match strategy {
-        CorrelationStrategy::HeaderName(h) => {
-            exchange.input.headers.get(h).cloned().ok_or_else(|| {
-                CamelError::ProcessorError(format!(
-                    "Aggregator: missing correlation key header '{}'",
-                    h
-                ))
-            })
-        }
+        CorrelationStrategy::HeaderName(h) => Ok(CompiledCorrelation::HeaderName(h.clone())),
         CorrelationStrategy::Expression { expr, language } => {
-            let expression = {
-                let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
-                let lang = reg.get(language).ok_or_else(|| {
-                    CamelError::ProcessorError(format!(
-                        "Aggregator: language '{}' not found in registry",
-                        language
-                    ))
-                })?;
-                lang.create_expression(expr)
-                    .map_err(|e| CamelError::ProcessorError(e.to_string()))?
-            };
-            let value = expression
-                .evaluate(exchange)
-                .await
+            let lang = languages.get(language).ok_or_else(|| {
+                CamelError::ProcessorError(format!(
+                    "Aggregator: language '{}' not found in registry",
+                    language
+                ))
+            })?;
+            let expression = lang
+                .create_expression(expr)
                 .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
-            if value.is_null() {
-                return Err(CamelError::ProcessorError(format!(
-                    "Aggregator: correlation expression '{}' evaluated to null",
-                    expr
-                )));
-            }
-            Ok(value)
+            Ok(CompiledCorrelation::Expression(Arc::from(expression)))
         }
-        CorrelationStrategy::Fn(f) => f(exchange).map(serde_json::Value::String).ok_or_else(|| {
-            CamelError::ProcessorError("Aggregator: correlation function returned None".to_string())
-        }),
-        // Future correlation strategies are unsupported here.
-        _ => Err(CamelError::ProcessorError(
-            "Aggregator: unsupported correlation strategy".to_string(),
-        )),
+        CorrelationStrategy::Fn(f) => Ok(CompiledCorrelation::Fn(Arc::clone(f))),
+        // Future correlation strategies are unsupported: surface the inert
+        // variant so `try_new` can fail closed with one message.
+        _ => Ok(CompiledCorrelation::Unsupported),
     }
 }
 
-/// Yield `(&expr, &language)` for every `PredicateExpr` condition in `mode`.
-fn iter_predicate_exprs(mode: &CompletionMode) -> Vec<(&String, &String)> {
-    let mut out = Vec::new();
-    match mode {
-        CompletionMode::Single(CompletionCondition::PredicateExpr { expr, language }) => {
-            out.push((expr, language));
-        }
-        CompletionMode::Any(conds) => {
-            for c in conds {
-                if let CompletionCondition::PredicateExpr { expr, language } = c {
-                    out.push((expr, language));
-                }
-            }
-        }
-        _ => {}
-    }
-    out
-}
-
-/// Pre-evaluate ALL `PredicateExpr` conditions against the incoming exchange,
-/// OR-combining (matches `CompletionMode::Any` semantics). MUST be called BEFORE
-/// the `buckets` lock — it awaits the language registry and cannot run under the
-/// `!Send` `buckets` MutexGuard. Mirrors `extract_correlation_key`.
-async fn evaluate_completion_predicate(
+/// Compile every `PredicateExpr` completion condition once, preserving config
+/// order. `Single`/`Any` both yield their predicates in order; Size/Predicate/
+/// Timeout conditions have no compiled predicate and are evaluated by the
+/// synchronous path from the original config.
+fn compile_completion_predicates(
     mode: &CompletionMode,
-    incoming: &Exchange,
-    registry: &SharedLanguageRegistry,
-) -> Result<bool, CamelError> {
-    let mut satisfied = false;
-    for (expr, language) in iter_predicate_exprs(mode) {
-        let predicate = {
-            let reg = registry.lock().unwrap_or_else(|e| e.into_inner());
-            let lang = reg.get(language).ok_or_else(|| {
+    languages: &HashMap<String, Arc<dyn Language>>,
+) -> Result<Arc<[Arc<dyn Predicate>]>, CamelError> {
+    let conditions: &[CompletionCondition] = match mode {
+        CompletionMode::Single(cond) => std::slice::from_ref(cond),
+        CompletionMode::Any(conditions) => conditions.as_slice(),
+        // Future completion modes have no synchronous/predicate completion.
+        _ => &[],
+    };
+    let mut predicates: Vec<Arc<dyn Predicate>> = Vec::new();
+    for cond in conditions {
+        if let CompletionCondition::PredicateExpr { expr, language } = cond {
+            let lang = languages.get(language).ok_or_else(|| {
                 CamelError::ProcessorError(format!(
                     "Aggregator: language '{}' not found in registry",
                     language
@@ -844,10 +885,62 @@ async fn evaluate_completion_predicate(
             })?;
             // Predicate grammar, not template mode: completion conditions are
             // strict booleans. A non-bool result is a `LanguageError`
-            // (type mismatch) surfaced as `ProcessorError`.
-            lang.create_predicate(expr)
-                .map_err(|e| CamelError::ProcessorError(e.to_string()))?
-        }; // registry guard dropped here — safe to await below
+            // (type mismatch) surfaced as `ProcessorError` at evaluation time.
+            let predicate = lang
+                .create_predicate(expr)
+                .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+            predicates.push(Arc::from(predicate));
+        }
+    }
+    Ok(Arc::from(predicates))
+}
+
+async fn extract_correlation_key(
+    exchange: &Exchange,
+    strategy: &CompiledCorrelation,
+) -> Result<serde_json::Value, CamelError> {
+    match strategy {
+        CompiledCorrelation::HeaderName(h) => {
+            exchange.input.headers.get(h).cloned().ok_or_else(|| {
+                CamelError::ProcessorError(format!(
+                    "Aggregator: missing correlation key header '{}'",
+                    h
+                ))
+            })
+        }
+        CompiledCorrelation::Expression(expression) => {
+            let value = expression
+                .evaluate(exchange)
+                .await
+                .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+            if value.is_null() {
+                return Err(CamelError::ProcessorError(
+                    "Aggregator: correlation expression evaluated to null".to_string(),
+                ));
+            }
+            Ok(value)
+        }
+        CompiledCorrelation::Fn(f) => f(exchange).map(serde_json::Value::String).ok_or_else(|| {
+            CamelError::ProcessorError("Aggregator: correlation function returned None".to_string())
+        }),
+        // `try_new` rejects unsupported strategies; this arm is defensive only.
+        CompiledCorrelation::Unsupported => Err(CamelError::ProcessorError(
+            "Aggregator: unsupported correlation strategy".to_string(),
+        )),
+    }
+}
+
+/// Pre-evaluate the compiled `PredicateExpr` conditions against the incoming
+/// exchange, OR-combining (matches `CompletionMode::Any` semantics). MUST be
+/// called BEFORE the `buckets` lock — predicate evaluation is async and cannot
+/// run under the `!Send` `buckets` MutexGuard. Expressions are compiled at
+/// construction, so no registry lookup happens here.
+async fn evaluate_completion_predicate(
+    predicates: &[Arc<dyn Predicate>],
+    incoming: &Exchange,
+) -> Result<bool, CamelError> {
+    let mut satisfied = false;
+    for predicate in predicates {
         let matched = predicate
             .matches(incoming)
             .await
@@ -1095,7 +1188,7 @@ mod tests {
 
     /// Same as `new_test_svc` but lets the caller install a pre-populated
     /// language registry. Used by `CompletionCondition::PredicateExpr` tests
-    /// where the simple language must be resolvable at evaluation time.
+    /// where the simple language must be resolvable at construction time.
     fn new_test_svc_with_registry(
         config: AggregatorConfig,
         registry: SharedLanguageRegistry,
@@ -1103,6 +1196,40 @@ mod tests {
         let (tx, _rx) = mpsc::channel(256);
         let cancel = CancellationToken::new();
         AggregatorService::new(config, tx, registry, cancel)
+    }
+
+    fn registry_with_simple() -> SharedLanguageRegistry {
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        registry.lock().unwrap().insert(
+            "simple".to_string(),
+            Arc::new(camel_language_simple::SimpleLanguage::new()) as Arc<dyn Language>,
+        );
+        registry
+    }
+
+    /// Compile a completion mode via the same internal helper `try_new` uses.
+    fn compile_test_completion(
+        mode: &CompletionMode,
+        registry: &SharedLanguageRegistry,
+    ) -> Result<Arc<[Arc<dyn Predicate>]>, CamelError> {
+        compile_completion_predicates(mode, &snapshot_languages(registry))
+    }
+
+    /// Compile a correlation strategy via the same internal helper `try_new`
+    /// uses.
+    fn compile_test_correlation(
+        strategy: &CorrelationStrategy,
+        registry: &SharedLanguageRegistry,
+    ) -> Result<CompiledCorrelation, CamelError> {
+        compile_correlation(strategy, &snapshot_languages(registry))
+    }
+
+    #[test]
+    fn aggregator_service_and_compiled_handles_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<AggregatorService>();
+        assert_send_sync::<Arc<dyn Expression>>();
+        assert_send_sync::<Arc<dyn Predicate>>();
     }
 
     #[tokio::test]
@@ -2432,16 +2559,8 @@ mod tests {
     #[tokio::test]
     async fn evaluate_completion_predicate_or_combines_any() {
         use camel_api::aggregator::{CompletionCondition, CompletionMode};
-        use camel_language_api::Language;
-        use std::collections::HashMap;
 
-        // Register the simple language in an otherwise-empty registry.
-        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        registry.lock().unwrap().insert(
-            "simple".to_string(),
-            Arc::new(camel_language_simple::SimpleLanguage::new()) as Arc<dyn Language>,
-        );
-
+        let registry = registry_with_simple();
         let incoming = make_exchange("k", "X", "hello");
 
         // Any with two PredicateExpr conditions; second matches body == "hello".
@@ -2456,30 +2575,30 @@ mod tests {
             },
         ]);
 
-        let satisfied = evaluate_completion_predicate(&mode, &incoming, &registry)
+        let compiled = compile_test_completion(&mode, &registry).expect("compile must succeed");
+        let satisfied = evaluate_completion_predicate(&compiled, &incoming)
             .await
             .expect("eval must succeed");
         assert!(satisfied, "second predicate matches → OR true");
     }
 
     #[tokio::test]
-    async fn evaluate_completion_predicate_no_predicate_skips_registry() {
+    async fn evaluate_completion_predicate_size_only_returns_false() {
         use camel_api::aggregator::{CompletionCondition, CompletionMode};
-        use std::collections::HashMap;
 
-        // Size-only completion: iter_predicate_exprs returns empty vec.
-        // The registry is EMPTY — any accidental lock-and-get would fail loudly,
-        // proving the fast path does not touch the registry.
+        // Size-only completion has no PredicateExpr, so compilation needs no
+        // language and evaluation returns false without touching a predicate.
         let mode = CompletionMode::Single(CompletionCondition::Size(3));
         let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let incoming = make_exchange("k", "X", "hello");
-        let result = evaluate_completion_predicate(&mode, &incoming, &registry).await;
+        let compiled = compile_test_completion(&mode, &registry).expect("compile must succeed");
+        let result = evaluate_completion_predicate(&compiled, &incoming).await;
         assert!(result.is_ok(), "fast path must not error: {:?}", result);
         assert!(!result.unwrap(), "no predicate → not satisfied");
     }
 
     #[tokio::test]
-    async fn evaluate_completion_predicate_unregistered_language_errors() {
+    async fn compile_completion_unregistered_language_errors() {
         use camel_api::aggregator::{CompletionCondition, CompletionMode};
 
         let mode = CompletionMode::Single(CompletionCondition::PredicateExpr {
@@ -2487,29 +2606,27 @@ mod tests {
             language: "nonexistent-lang".to_string(),
         });
         let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let incoming = make_exchange("k", "X", "hello");
-        let result = evaluate_completion_predicate(&mode, &incoming, &registry).await;
-        assert!(result.is_err(), "unregistered language must error");
+        let err = compile_test_completion(&mode, &registry)
+            .err()
+            .expect("unregistered language must fail at construction");
+        assert!(
+            matches!(&err, CamelError::ProcessorError(msg) if msg.contains("not found in registry")),
+            "error must name the missing language: {err:?}"
+        );
     }
 
     #[tokio::test]
     async fn evaluate_completion_predicate_all_miss_returns_false() {
         use camel_api::aggregator::{CompletionCondition, CompletionMode};
-        use camel_language_api::Language;
-        use std::collections::HashMap;
 
-        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        registry.lock().unwrap().insert(
-            "simple".to_string(),
-            Arc::new(camel_language_simple::SimpleLanguage::new()) as Arc<dyn Language>,
-        );
-
+        let registry = registry_with_simple();
         let mode = CompletionMode::Single(CompletionCondition::PredicateExpr {
             expr: "${body} == 'NOPE'".to_string(),
             language: "simple".to_string(),
         });
         let incoming = make_exchange("k", "X", "hello");
-        let result = evaluate_completion_predicate(&mode, &incoming, &registry).await;
+        let compiled = compile_test_completion(&mode, &registry).expect("compile must succeed");
+        let result = evaluate_completion_predicate(&compiled, &incoming).await;
         assert!(result.is_ok(), "eval must succeed: {:?}", result);
         assert!(!result.unwrap(), "predicate does not match");
     }
@@ -2517,14 +2634,8 @@ mod tests {
     #[tokio::test]
     async fn completion_predicate_non_bool_is_error() {
         use camel_api::aggregator::{CompletionCondition, CompletionMode};
-        use camel_language_api::Language;
-        use std::collections::HashMap;
 
-        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        registry.lock().unwrap().insert(
-            "simple".to_string(),
-            Arc::new(camel_language_simple::SimpleLanguage::new()) as Arc<dyn Language>,
-        );
+        let registry = registry_with_simple();
 
         // A bare slot is a value, not a boolean. Completion predicates are
         // strict: the Simple predicate reports a type mismatch (expected bool)
@@ -2534,7 +2645,8 @@ mod tests {
             language: "simple".to_string(),
         });
         let incoming = make_exchange("k", "X", "x");
-        let err = evaluate_completion_predicate(&mode, &incoming, &registry)
+        let compiled = compile_test_completion(&mode, &registry).expect("compile must succeed");
+        let err = evaluate_completion_predicate(&compiled, &incoming)
             .await
             .expect_err("non-bool predicate must error, not coerce to false");
         // Redacted diagnostic: type names only, asserted via the "bool" text,
@@ -2549,23 +2661,19 @@ mod tests {
     #[tokio::test]
     async fn completion_predicate_eval_error_propagates() {
         use camel_api::aggregator::{CompletionCondition, CompletionMode};
-        use camel_language_api::Language;
-        use std::collections::HashMap;
 
-        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        registry.lock().unwrap().insert(
-            "simple".to_string(),
-            Arc::new(camel_language_simple::SimpleLanguage::new()) as Arc<dyn Language>,
-        );
+        let registry = registry_with_simple();
 
         // `${body} > 1` over a non-numeric body is an evaluation error. The
         // aggregator has no `EvalMeta`, so it surfaces as `ProcessorError`.
+        // Compilation succeeds; the error still surfaces per exchange.
         let mode = CompletionMode::Single(CompletionCondition::PredicateExpr {
             expr: "${body} > 1".to_string(),
             language: "simple".to_string(),
         });
         let incoming = make_exchange("k", "X", "hello");
-        let err = evaluate_completion_predicate(&mode, &incoming, &registry)
+        let compiled = compile_test_completion(&mode, &registry).expect("compile must succeed");
+        let err = evaluate_completion_predicate(&compiled, &incoming)
             .await
             .expect_err("evaluation error must propagate, not coerce to false");
         assert!(
@@ -2575,17 +2683,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compile_correlation_expression_evaluates_after_compile() {
+        let registry = registry_with_simple();
+        let strategy = CorrelationStrategy::Expression {
+            expr: "${header.corr-id}".to_string(),
+            language: "simple".to_string(),
+        };
+        let compiled =
+            compile_test_correlation(&strategy, &registry).expect("compile must succeed");
+        let key = extract_correlation_key(&make_exchange("corr-id", "bucket-1", "body"), &compiled)
+            .await
+            .expect("evaluate must succeed");
+        assert_eq!(key, serde_json::json!("bucket-1"));
+    }
+
+    #[tokio::test]
+    async fn try_new_expression_correlation_with_empty_registry_fails_at_construction() {
+        use camel_api::aggregator::CorrelationStrategy;
+
+        let mut config = AggregatorConfig::correlate_by("key")
+            .complete_when_size(2)
+            .build()
+            .expect("config builds");
+        config.correlation = CorrelationStrategy::Expression {
+            expr: "${header.corr-id}".to_string(),
+            language: "simple".to_string(),
+        };
+
+        let (tx, _rx) = mpsc::channel(8);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let err = AggregatorService::try_new(config, tx, registry, CancellationToken::new())
+            .expect_err("construction must fail without the language");
+        assert!(
+            matches!(&err, CamelError::ProcessorError(msg) if msg.contains("not found in registry")),
+            "expected missing-language error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_new_malformed_expression_fails_at_construction() {
+        // Unclosed interpolation: the Simple parser rejects it at
+        // create_expression time (not per exchange).
+        let config = AggregatorConfig::correlate_by("key")
+            .correlate_by_expr("${", "simple")
+            .complete_when_size(2)
+            .build()
+            .expect("config builds");
+
+        let (tx, _rx) = mpsc::channel(8);
+        let err = AggregatorService::try_new(
+            config,
+            tx,
+            registry_with_simple(),
+            CancellationToken::new(),
+        )
+        .expect_err("construction must fail on malformed expression");
+        assert!(
+            matches!(&err, CamelError::ProcessorError(msg) if msg.contains("unclosed interpolation")),
+            "malformed expression must fail in the Simple parser: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn try_new_malformed_predicate_fails_at_construction() {
+        use camel_api::aggregator::{CompletionCondition, CompletionMode};
+
+        // Unclosed interpolation: the Simple predicate parser rejects it at
+        // create_predicate time (not per exchange).
+        let mut config = AggregatorConfig::correlate_by("key")
+            .complete_when_size(2)
+            .build()
+            .expect("config builds");
+        config.completion = CompletionMode::Single(CompletionCondition::PredicateExpr {
+            expr: "${".to_string(),
+            language: "simple".to_string(),
+        });
+
+        let (tx, _rx) = mpsc::channel(8);
+        let err = AggregatorService::try_new(
+            config,
+            tx,
+            registry_with_simple(),
+            CancellationToken::new(),
+        )
+        .expect_err("construction must fail on malformed predicate");
+        assert!(
+            matches!(&err, CamelError::ProcessorError(msg) if msg.contains("unclosed interpolation")),
+            "malformed predicate must fail in the Simple parser: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn predicate_expr_override_with_unknown_language_fails_at_construction() {
+        use camel_api::aggregator::{CompletionCondition, CompletionMode};
+
+        // Override the completion AFTER `build()` (post-validate): the
+        // constructor still compiles it and must fail closed.
+        let mut config = AggregatorConfig::correlate_by("key")
+            .complete_when_size(2)
+            .build()
+            .expect("config builds");
+        config.completion = CompletionMode::Single(CompletionCondition::PredicateExpr {
+            expr: "${body} == 'DONE'".to_string(),
+            language: "nonexistent-lang".to_string(),
+        });
+
+        let (tx, _rx) = mpsc::channel(8);
+        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let err = AggregatorService::try_new(config, tx, registry, CancellationToken::new())
+            .expect_err("construction must fail on an unknown language");
+        assert!(
+            matches!(&err, CamelError::ProcessorError(msg) if msg.contains("not found in registry")),
+            "expected missing-language error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compiled_expressions_do_not_touch_registry_after_construction() {
+        use camel_api::aggregator::{CompletionCondition, CompletionMode};
+
+        let registry = registry_with_simple();
+
+        let mut config = AggregatorConfig::correlate_by("unused")
+            .correlate_by_expr("${header.corr-id}", "simple")
+            .complete_when_size(2)
+            .build()
+            .expect("config builds");
+        config.completion = CompletionMode::Any(vec![
+            CompletionCondition::Size(2),
+            CompletionCondition::PredicateExpr {
+                expr: "${header.corr-id} == 'never-matches'".to_string(),
+                language: "simple".to_string(),
+            },
+        ]);
+
+        let (tx, _rx) = mpsc::channel(8);
+        let mut svc =
+            AggregatorService::try_new(config, tx, Arc::clone(&registry), CancellationToken::new())
+                .expect("construction compiles expressions");
+
+        // Structural proof: construction consumed its registry snapshot. If
+        // the service still held the registry, clearing it would break
+        // correlation and completion on the next exchange.
+        registry.lock().unwrap().clear();
+
+        let first = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("corr-id", "bucket-1", "a"))
+            .await
+            .unwrap();
+        assert!(first.property(CAMEL_AGGREGATOR_PENDING).is_some());
+
+        let second = svc
+            .ready()
+            .await
+            .unwrap()
+            .call(make_exchange("corr-id", "bucket-1", "b"))
+            .await
+            .unwrap();
+        assert!(second.property(CAMEL_AGGREGATOR_PENDING).is_none());
+        assert_eq!(
+            second.property(CAMEL_AGGREGATED_COMPLETION_REASON),
+            Some(&serde_json::json!("size"))
+        );
+    }
+
+    #[tokio::test]
     async fn completion_predicate_expr_completes_on_match() {
         use camel_api::aggregator::{CompletionCondition, CompletionMode};
-        use camel_language_api::Language;
-        use std::collections::HashMap;
-
-        // Build a registry with the simple language registered.
-        let registry: SharedLanguageRegistry = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        registry.lock().unwrap().insert(
-            "simple".to_string(),
-            Arc::new(camel_language_simple::SimpleLanguage::new()) as Arc<dyn Language>,
-        );
 
         // Build the config via the builder for correlation + size defaults
         // (required by `AggregatorService::new`'s validate()), then OVERRIDE
@@ -2600,7 +2867,7 @@ mod tests {
             language: "simple".to_string(),
         });
 
-        let mut svc = new_test_svc_with_registry(config, registry);
+        let mut svc = new_test_svc_with_registry(config, registry_with_simple());
 
         // First exchange — predicate false → still pending.
         let r = svc

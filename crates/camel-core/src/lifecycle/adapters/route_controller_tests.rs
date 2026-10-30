@@ -136,6 +136,18 @@ fn build_controller_with_components() -> DefaultRouteController {
     )
 }
 
+fn build_controller_with_timer() -> DefaultRouteController {
+    let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+    registry
+        .lock()
+        .expect("registry lock")
+        .register(Arc::new(camel_component_timer::TimerComponent::new()));
+    DefaultRouteController::new(
+        registry,
+        Arc::new(camel_api::NoopPlatformService::default()),
+    )
+}
+
 fn register_simple_language(controller: &mut DefaultRouteController) {
     controller.languages.lock().expect("languages lock").insert(
         "simple".into(),
@@ -1524,6 +1536,146 @@ async fn aggregate_force_completion_on_stop_emits_pending_bucket_without_timeout
     assert_eq!(
         received[0].property("CamelAggregatedCompletionReason"),
         Some(&serde_json::json!("stop"))
+    );
+}
+
+// ── rc-p5qlx: split-aggregate construction failures surface as start errors ──
+
+/// Timeout (or force-completion) aggregate routes bypass the embedded
+/// `SplittingCompiler` and construct their service in
+/// `start_aggregate_route`; a config that cannot compile must fail the route
+/// start with `Err`, never panic.
+#[tokio::test]
+async fn aggregate_split_unregistered_correlation_language_fails_start() {
+    let mut controller = build_controller_with_timer();
+    let agg_config = camel_api::AggregatorConfig::correlate_by("key")
+        .correlate_by_expr("${header.corr}", "nonexistent-lang")
+        .complete_on_size_or_timeout(10, Duration::from_secs(30))
+        .build()
+        .expect("config builds");
+
+    controller
+        .add_route(
+            RouteDefinition::new(
+                "timer:tick?period=10&repeatCount=1",
+                vec![BuilderStep::Aggregate { config: agg_config }],
+            )
+            .with_route_id("agg-bad-correlation-lang"),
+        )
+        .await
+        .expect("route adds (split compilation defers expression checks)");
+
+    let err = controller
+        .start_route("agg-bad-correlation-lang")
+        .await
+        .expect_err("start must reject an unregistered correlation language");
+    assert!(
+        matches!(&err, CamelError::ProcessorError(msg) if msg.contains("nonexistent-lang")),
+        "expected missing-language error naming the language, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_split_malformed_correlation_expression_fails_start() {
+    let mut controller = build_controller_with_timer();
+    register_simple_language(&mut controller);
+    let agg_config = camel_api::AggregatorConfig::correlate_by("key")
+        .correlate_by_expr("${", "simple")
+        .complete_on_size_or_timeout(10, Duration::from_secs(30))
+        .build()
+        .expect("config builds");
+
+    controller
+        .add_route(
+            RouteDefinition::new(
+                "timer:tick?period=10&repeatCount=1",
+                vec![BuilderStep::Aggregate { config: agg_config }],
+            )
+            .with_route_id("agg-bad-correlation-expr"),
+        )
+        .await
+        .expect("route adds");
+
+    let err = controller
+        .start_route("agg-bad-correlation-expr")
+        .await
+        .expect_err("start must reject a malformed correlation expression");
+    assert!(
+        matches!(&err, CamelError::ProcessorError(msg) if msg.contains("unclosed interpolation")),
+        "malformed correlation expression must fail in the Simple parser: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_split_unregistered_completion_language_fails_start() {
+    use camel_api::aggregator::{CompletionCondition, CompletionMode};
+
+    let mut controller = build_controller_with_timer();
+    let mut agg_config = camel_api::AggregatorConfig::correlate_by("key")
+        .complete_when_size(10)
+        .force_completion_on_stop(true)
+        .build()
+        .expect("config builds");
+    agg_config.completion = CompletionMode::Single(CompletionCondition::PredicateExpr {
+        expr: "${body} == 'DONE'".to_string(),
+        language: "nonexistent-lang".to_string(),
+    });
+
+    controller
+        .add_route(
+            RouteDefinition::new(
+                "timer:tick?period=10&repeatCount=1",
+                vec![BuilderStep::Aggregate { config: agg_config }],
+            )
+            .with_route_id("agg-bad-completion-lang"),
+        )
+        .await
+        .expect("route adds");
+
+    let err = controller
+        .start_route("agg-bad-completion-lang")
+        .await
+        .expect_err("start must reject an unregistered completion language");
+    assert!(
+        matches!(&err, CamelError::ProcessorError(msg) if msg.contains("nonexistent-lang")),
+        "expected missing-language error naming the language, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn aggregate_split_malformed_completion_predicate_fails_start() {
+    use camel_api::aggregator::{CompletionCondition, CompletionMode};
+
+    let mut controller = build_controller_with_timer();
+    register_simple_language(&mut controller);
+    let mut agg_config = camel_api::AggregatorConfig::correlate_by("key")
+        .complete_when_size(10)
+        .force_completion_on_stop(true)
+        .build()
+        .expect("config builds");
+    agg_config.completion = CompletionMode::Single(CompletionCondition::PredicateExpr {
+        expr: "${".to_string(),
+        language: "simple".to_string(),
+    });
+
+    controller
+        .add_route(
+            RouteDefinition::new(
+                "timer:tick?period=10&repeatCount=1",
+                vec![BuilderStep::Aggregate { config: agg_config }],
+            )
+            .with_route_id("agg-bad-completion-expr"),
+        )
+        .await
+        .expect("route adds");
+
+    let err = controller
+        .start_route("agg-bad-completion-expr")
+        .await
+        .expect_err("start must reject a malformed completion predicate");
+    assert!(
+        matches!(&err, CamelError::ProcessorError(msg) if msg.contains("unclosed interpolation")),
+        "malformed completion predicate must fail in the Simple parser: {err:?}"
     );
 }
 
