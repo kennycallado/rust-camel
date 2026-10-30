@@ -1116,3 +1116,117 @@ async fn transport_unchanged_after_failed_connect_and_retry() {
         "the reconnect path must reuse the identical captured TLS config"
     );
 }
+
+/// `resolve_broker_url` must encode the explicit vhost as exactly one path
+/// segment: a bare `set_path(vhost)` turns vhost "/" into an empty path, which
+/// RabbitMQ rejects with `NOT_ALLOWED - vhost  not found`.
+#[test]
+fn resolve_broker_url_encodes_default_vhost_as_one_segment() {
+    let broker = RabbitBrokerConfig {
+        url: "amqp://localhost:5672".to_string(),
+        username: None,
+        password: None,
+        vhost: Some("/".to_string()),
+        tls: None,
+    };
+
+    let resolved = resolve_broker_url(&broker);
+    let parsed = url::Url::parse(&resolved).expect("the resolved URL must parse");
+
+    assert_eq!(
+        parsed.path(),
+        "/%2F",
+        "vhost \"/\" must encode to one segment /%2F, not an empty vhost"
+    );
+}
+
+#[test]
+fn resolve_broker_url_encodes_plain_vhost_as_one_segment() {
+    let broker = RabbitBrokerConfig {
+        url: "amqp://localhost:5672".to_string(),
+        username: None,
+        password: None,
+        vhost: Some("prod".to_string()),
+        tls: None,
+    };
+
+    let resolved = resolve_broker_url(&broker);
+    let parsed = url::Url::parse(&resolved).expect("the resolved URL must parse");
+
+    assert_eq!(parsed.path(), "/prod", "a plain vhost must stay /prod");
+}
+
+#[test]
+fn resolve_broker_url_encodes_nested_vhost_as_one_segment() {
+    let broker = RabbitBrokerConfig {
+        url: "amqp://localhost:5672".to_string(),
+        username: None,
+        password: None,
+        vhost: Some("a/b".to_string()),
+        tls: None,
+    };
+
+    let resolved = resolve_broker_url(&broker);
+    let parsed = url::Url::parse(&resolved).expect("the resolved URL must parse");
+
+    assert_eq!(
+        parsed.path(),
+        "/a%2Fb",
+        "vhost \"a/b\" must stay one segment /a%2Fb, not a nested /a/b"
+    );
+}
+
+#[test]
+fn resolve_broker_url_without_vhost_keeps_the_base_path() {
+    let broker = RabbitBrokerConfig {
+        url: "amqp://localhost:5672/existing".to_string(),
+        username: None,
+        password: None,
+        vhost: None,
+        tls: None,
+    };
+
+    let resolved = resolve_broker_url(&broker);
+    let parsed = url::Url::parse(&resolved).expect("the resolved URL must parse");
+
+    assert_eq!(
+        parsed.path(),
+        "/existing",
+        "no explicit vhost must leave the base URL path untouched"
+    );
+}
+
+#[test]
+fn resolve_broker_url_still_applies_credentials() {
+    let broker = RabbitBrokerConfig {
+        url: "amqp://olduser:oldpass@localhost:5672".to_string(),
+        username: Some("guest".to_string()),
+        password: Some(crate::config::SecretString::from("s3cret")),
+        vhost: None,
+        tls: None,
+    };
+
+    let resolved = resolve_broker_url(&broker);
+    let parsed = url::Url::parse(&resolved).expect("the resolved URL must parse");
+
+    assert_eq!(
+        parsed.username(),
+        "guest",
+        "an explicit username must override the base URL"
+    );
+    assert_eq!(
+        parsed.password(),
+        Some("s3cret"),
+        "an explicit password must override the base URL"
+    );
+    assert_ne!(
+        parsed.username(),
+        "olduser",
+        "the base URL username must not survive"
+    );
+    assert_ne!(
+        parsed.password(),
+        Some("oldpass"),
+        "the base URL password must not survive"
+    );
+}

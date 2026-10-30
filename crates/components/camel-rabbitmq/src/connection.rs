@@ -835,7 +835,13 @@ fn resolve_broker_url(broker: &RabbitBrokerConfig) -> String {
         let _ = parsed.set_password(Some(password.expose()));
     }
     if let Some(vhost) = &broker.vhost {
-        parsed.set_path(vhost);
+        // The vhost is ONE path segment: "/" percent-encodes to %2F, so the
+        // default vhost stays addressable (a bare path "/" parses as an empty
+        // vhost and RabbitMQ rejects it).
+        if let Ok(mut segments) = parsed.path_segments_mut() {
+            segments.clear();
+            segments.push(vhost);
+        }
     }
     parsed.to_string()
 }

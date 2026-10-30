@@ -19,8 +19,9 @@ use camel_component_api::{
 };
 use camel_component_rabbitmq::RabbitMqComponent;
 use camel_component_rabbitmq::config::{RabbitBrokerConfig, RabbitComponentConfig};
-use lapin::options::BasicGetOptions;
-use lapin::types::{AMQPValue, ShortString};
+use lapin::ExchangeKind;
+use lapin::options::{BasicGetOptions, ExchangeDeclareOptions, QueueBindOptions};
+use lapin::types::{AMQPValue, FieldTable, ShortString};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -296,6 +297,91 @@ async fn publish_to_missing_exchange_counts_failure() {
             "failure".to_string()
         )],
         "exactly one failure publish must be recorded"
+    );
+}
+
+/// rc-07a1x: a fanout exchange publishes with no routing key (the relaxed
+/// URI) and the message reaches a queue bound with key `""`.
+#[tokio::test]
+async fn fanout_publish_without_routing_key_reaches_bound_queue() {
+    let Some(fx) = require_fixture() else {
+        return;
+    };
+    let exchange = unique("fanout").replace('-', ".");
+    let queue = unique("fanout-q");
+    let (_connection, channel) = fx.declare_queue(&queue).await;
+
+    timeout(
+        RPC_BOUND,
+        channel.exchange_declare(
+            ShortString::from(exchange.as_str()),
+            ExchangeKind::Fanout,
+            ExchangeDeclareOptions {
+                durable: true,
+                ..ExchangeDeclareOptions::default()
+            },
+            FieldTable::default(),
+        ),
+    )
+    .await
+    .expect("fanout exchange declare must return within the bound")
+    .expect("fanout exchange declare must succeed");
+
+    timeout(
+        RPC_BOUND,
+        channel.queue_bind(
+            ShortString::from(queue.as_str()),
+            ShortString::from(exchange.as_str()),
+            ShortString::from(""),
+            QueueBindOptions::default(),
+            FieldTable::default(),
+        ),
+    )
+    .await
+    .expect("fanout bind must return within the bound")
+    .expect("fanout bind must succeed");
+
+    let component = component_for(&fx.amqp_url);
+    let endpoint = component
+        .create_endpoint(
+            &format!("rabbitmq:{exchange}?exchangeType=fanout"),
+            &NoOpComponentContext,
+        )
+        .expect("a fanout exchange without queue or routingKey must create an endpoint");
+
+    let rt = RecordingRuntimeObservability::new(true);
+    let rt_dyn: Arc<dyn RuntimeObservability> = rt.clone();
+    let mut producer = endpoint
+        .create_producer(rt_dyn, &ProducerContext::default())
+        .expect("producer creation must succeed");
+
+    producer
+        .call(Exchange::new(Message::new(Body::Text(
+            "fanout-hello".to_string(),
+        ))))
+        .await
+        .expect("fanout publish without a routing key must succeed");
+
+    let got = timeout(
+        RPC_BOUND,
+        channel.basic_get(
+            ShortString::from(queue.as_str()),
+            BasicGetOptions { no_ack: true },
+        ),
+    )
+    .await
+    .expect("fanout basic_get must return within the bound")
+    .expect("basic_get must not error")
+    .expect("the fanout message must be on the bound queue");
+    assert_eq!(
+        got.data, b"fanout-hello",
+        "payload must arrive through the fanout exchange"
+    );
+    assert_eq!(
+        recorded_successes(&rt),
+        1,
+        "exactly one success publish must be recorded; ops: {:?}",
+        rt.ops()
     );
 }
 

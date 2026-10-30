@@ -10,15 +10,16 @@ through the shared `NetworkRetryPolicy`, the same policy the JMS and MQTT compon
 ## URI format
 
 ```text
-rabbitmq:<exchange>?queue=<queue>[&routingKey=<key>][&broker=<name>][&<option>=<value>...]
+rabbitmq:<exchange>[?queue=<queue>][&routingKey=<key>][&broker=<name>][&<option>=<value>...]
 ```
 
 - `<exchange>` is the target exchange. An empty path or the literal `default` selects the broker's
   default exchange. The default exchange routes by queue name, so `rabbitmq:default?queue=orders`
   publishes to `orders`.
 - A consumer requires `queue`.
-- A producer target is `routingKey` when set, otherwise `queue`. A URI must carry at least one of
-  the two.
+- A producer publishes with `routingKey` when set, otherwise the `queue` name. Only the default
+  exchange requires one of the two. A named exchange may omit both and publishes with an empty
+  routing key (fanout and headers exchanges ignore it).
 - `broker` selects a named broker. When exactly one broker is configured the parameter is optional.
   When several are configured the URI must name one.
 
@@ -28,6 +29,9 @@ rabbitmq:orders?queue=orders
 
 # Producer with an explicit routing key
 rabbitmq:events?queue=orders&routingKey=orders.created
+
+# Producer to a fanout exchange (no queue or routing key)
+rabbitmq:events?exchangeType=fanout
 
 # Named broker
 rabbitmq:orders?queue=orders&broker=secondary
@@ -45,7 +49,8 @@ vhost = "/"
 
 Broker keys are exactly `url`, `username`, `password`, `vhost`, and an optional `tls` section (see
 [TLS](#tls-amqps)). `username`, `password`, and `vhost` are optional and override whatever the URL carries. Values
-support the platform `${env:...}` interpolation. An unknown key fails at boot.
+support the platform `${env:...}` interpolation. An unknown key fails at boot. `vhost` is encoded as exactly one URL
+path segment, so `"/"` targets the default vhost and `a/b` stays a single (nested) vhost name.
 
 An optional reconnect policy overrides the per-component default:
 
@@ -72,7 +77,7 @@ asserts that the descriptor exposes exactly these names, derived from the `P1_OP
 |-----------|---------|-------------|
 | `broker` | (none) | Named broker from `[components.rabbitmq.brokers]`; optional when exactly one is configured |
 | `queue` | (none) | Queue to consume from; required for a consumer |
-| `routingKey` | (none) | Publish routing key; falls back to `queue` |
+| `routingKey` | (none) | Publish routing key; falls back to `queue`. Required only for the default exchange; a named exchange may omit it and publishes with an empty key (fanout/headers ignore it) |
 | `persistent` | `true` | Delivery mode 2 (`true`) or 1 (`false`) |
 | `contentType` | (none) | Content type; overrides the exchange `contentType` header |
 | `requeueOnFailure` | `false` | Requeue a failed route's delivery instead of rejecting it (see the warning below) |
@@ -84,11 +89,14 @@ asserts that the descriptor exposes exactly these names, derived from the `P1_OP
 | `autoDeclare` | `false` | Actively declare the exchange, queue, and binding at consumer start |
 | `exchangeType` | `direct` | Exchange kind for the active declare |
 | `durableQueue` | `true` | Durability of the actively declared queue |
-| `queueArguments` | (none) | JSON object of string values, URL-encoded, for the actively declared queue |
+| `queueArguments` | (none) | JSON object of scalar values, URL-encoded, for the actively declared queue |
 
-`queueArguments` is a JSON object of `string -> string`. Each value becomes a long-string
-`FieldTable` entry, for example `queueArguments={"x-dead-letter-exchange":"dlx"}` (URL-encoded in
-the URI). A non-object or a non-string value fails closed.
+`queueArguments` is a JSON object whose values are scalars. A string becomes a long-string
+`FieldTable` entry, an integer a long-long-int, a float a double, and a boolean a boolean. An
+integer must fit a signed 64-bit value; an out-of-range integer token fails closed rather than
+silently becoming a double. For
+example `queueArguments={"x-message-ttl":30000,"x-expires":60000}` (URL-encoded in the URI). A
+non-object, or a null, array, or nested-object value, fails closed.
 
 ## Delivery semantics
 

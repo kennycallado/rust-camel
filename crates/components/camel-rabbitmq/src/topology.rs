@@ -234,15 +234,31 @@ fn exchange_kind(exchange_type: &str) -> ExchangeKind {
     }
 }
 
-/// Convert the parsed `queueArguments` map into long-string `FieldTable`
-/// entries (e.g. `x-dead-letter-exchange`).
-fn queue_arguments_field_table(arguments: &HashMap<String, String>) -> FieldTable {
+/// Convert the parsed `queueArguments` map into typed `FieldTable` entries.
+///
+/// Strings become long strings, integers long-long-ints, floats doubles, and
+/// booleans booleans (e.g. `x-message-ttl` as an integer). Parse-time
+/// validation rejects null, arrays, nested objects, and out-of-range integers;
+/// those arms map to [`AMQPValue::Void`] as a fail-safe rather than panicking.
+fn queue_arguments_field_table(arguments: &HashMap<String, serde_json::Value>) -> FieldTable {
     let mut table = FieldTable::default();
     for (key, value) in arguments {
-        table.insert(
-            ShortString::from(key.as_str()),
-            AMQPValue::LongString(LongString::from(value.as_str())),
-        );
+        let mapped = match value {
+            serde_json::Value::String(text) => {
+                AMQPValue::LongString(LongString::from(text.as_str()))
+            }
+            serde_json::Value::Number(number) => match (number.as_i64(), number.as_f64()) {
+                (Some(integer), _) => AMQPValue::LongLongInt(integer),
+                (None, Some(float)) => AMQPValue::Double(float),
+                (None, None) => AMQPValue::Void,
+            },
+            serde_json::Value::Bool(flag) => AMQPValue::Boolean(*flag),
+            // Unreachable after parse-time validation; fail safe without a panic.
+            serde_json::Value::Null
+            | serde_json::Value::Array(_)
+            | serde_json::Value::Object(_) => AMQPValue::Void,
+        };
+        table.insert(ShortString::from(key.as_str()), mapped);
     }
     table
 }
@@ -259,4 +275,40 @@ async fn close_probe_channel(channel: lapin::Channel) {
         channel.close(200, ShortString::from("rabbitmq topology probe complete")),
     )
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_arguments_map_json_scalars_to_amqp_values() {
+        let config = RabbitEndpointConfig::from_uri(
+            r#"rabbitmq:default?queue=q&queueArguments={"x-ttl":30000,"x-ratio":1.5,"x-flag":true,"x-dlx":"dlx"}"#,
+        )
+        .expect("mixed-scalar queueArguments must parse");
+
+        let table = queue_arguments_field_table(&config.queue_arguments);
+
+        assert_eq!(
+            table.inner().get("x-ttl"),
+            Some(&AMQPValue::LongLongInt(30000)),
+            "an integer must map to LongLongInt"
+        );
+        assert_eq!(
+            table.inner().get("x-ratio"),
+            Some(&AMQPValue::Double(1.5)),
+            "a float must map to Double"
+        );
+        assert_eq!(
+            table.inner().get("x-flag"),
+            Some(&AMQPValue::Boolean(true)),
+            "a boolean must map to Boolean"
+        );
+        assert_eq!(
+            table.inner().get("x-dlx"),
+            Some(&AMQPValue::LongString(LongString::from("dlx"))),
+            "a string must map to LongString"
+        );
+    }
 }

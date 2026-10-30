@@ -264,10 +264,12 @@ pub struct RabbitEndpointConfig {
     /// `true`). Applies to the QUEUE only; the exchange is always declared
     /// durable (task 3.4).
     pub durable_queue: bool,
-    /// Queue arguments (URI `queueArguments`, default empty): a JSON object of
-    /// `string -> string`. Each value maps to a long-string `FieldTable` entry
-    /// (e.g. `{"x-dead-letter-exchange":"dlx"}`).
-    pub queue_arguments: HashMap<String, String>,
+    /// Queue arguments (URI `queueArguments`, default empty): a JSON object
+    /// whose values are scalars. A string maps to a long-string `FieldTable`
+    /// entry, an integer to a long-long-int, a float to a double, and a boolean
+    /// to a boolean (e.g. `{"x-message-ttl":30000}`). Null, arrays, and nested
+    /// objects fail closed at parse time.
+    pub queue_arguments: HashMap<String, serde_json::Value>,
 }
 
 impl RabbitEndpointConfig {
@@ -305,7 +307,10 @@ impl RabbitEndpointConfig {
         let queue = parts.params.get("queue").cloned();
         let routing_key = parts.params.get("routingKey").cloned();
 
-        if queue.is_none() && routing_key.is_none() {
+        // The default exchange routes by queue name, so it needs a target.
+        // A named exchange may publish without one (fanout/headers ignore the
+        // routing key); `target()` then defaults the key to "".
+        if exchange.is_empty() && queue.is_none() && routing_key.is_none() {
             return Err(CamelError::InvalidUri(
                 "rabbitmq URI requires the 'queue' or 'routingKey' parameter".to_string(),
             ));
@@ -421,16 +426,29 @@ impl RabbitEndpointConfig {
             None => DEFAULT_DURABLE_QUEUE,
         };
 
-        // `queueArguments` is a JSON object of string -> string. No existing
-        // component parses map params from URIs, so this JSON-object encoding
-        // is this change's decision: non-object or non-string values fail
-        // closed naming the option.
+        // `queueArguments` is a JSON object whose values are scalars. No
+        // existing component parses map params from URIs, so this JSON-object
+        // encoding is this change's decision: a non-object, or a value that
+        // cannot map to an AMQP scalar, fails closed naming the option.
         let queue_arguments = match parts.params.get("queueArguments") {
-            Some(raw) => serde_json::from_str::<HashMap<String, String>>(raw).map_err(|_| {
-                CamelError::InvalidUri(format!(
-                    "queueArguments must be a JSON object with string values, got '{raw}'"
-                ))
-            })?,
+            Some(raw) => {
+                // Parse into raw tokens first: serde_json silently reclassifies
+                // integer tokens that fit neither `i64` nor `u64` as `f64`, so
+                // classifying the parsed `Value` lets out-of-range integers
+                // slip through as doubles. The raw token text is authoritative.
+                let parsed =
+                    serde_json::from_str::<HashMap<String, Box<serde_json::value::RawValue>>>(raw)
+                        .map_err(|_| {
+                            CamelError::InvalidUri(format!(
+                                "queueArguments must be a JSON object, got '{raw}'"
+                            ))
+                        })?;
+                let mut values = HashMap::with_capacity(parsed.len());
+                for (key, raw_value) in parsed {
+                    values.insert(key.clone(), parse_queue_argument(&key, raw_value.get())?);
+                }
+                values
+            }
             None => HashMap::new(),
         };
 
@@ -457,7 +475,9 @@ impl RabbitEndpointConfig {
     /// Publish target `(exchange, routing_key)`.
     ///
     /// An explicit `routingKey` wins; otherwise the queue name is used.
-    /// `from_uri` guarantees at least one of the two is present.
+    /// A named exchange may carry neither (fanout/headers ignore the routing
+    /// key), in which case the key is `""`. Only the default exchange requires
+    /// a target, guaranteed by `from_uri`.
     pub fn target(&self) -> (String, String) {
         let routing_key = self
             .routing_key
@@ -466,6 +486,62 @@ impl RabbitEndpointConfig {
             .unwrap_or_default();
         (self.exchange.clone(), routing_key)
     }
+}
+
+/// Classify one `queueArguments` entry from its raw JSON token.
+///
+/// The raw token is authoritative: `serde_json` parses integer tokens that fit
+/// neither `i64` nor `u64` as `f64`, so a parsed `Value` cannot distinguish
+/// `-9223372036854775809` from a genuine float. Integer tokens must fit a
+/// signed 64-bit value; strings, booleans, and genuine float syntax are
+/// accepted. Everything else fails closed naming the option and key.
+fn parse_queue_argument(key: &str, token: &str) -> Result<serde_json::Value, CamelError> {
+    let token = token.trim();
+    if let Ok(integer) = token.parse::<i64>() {
+        return Ok(serde_json::Value::from(integer));
+    }
+    if token.parse::<u64>().is_ok() {
+        return Err(queue_argument_error(
+            key,
+            "an integer that exceeds the signed 64-bit (i64) range",
+        ));
+    }
+    // A pure integer token (e.g. `-9223372036854775809`) that fits neither
+    // `i64` nor `u64` must not be mistaken for float syntax below: serde_json
+    // parses it as `f64`, but it is an out-of-range integer, not a float.
+    if is_integer_token(token) {
+        return Err(queue_argument_error(
+            key,
+            "an integer that exceeds the signed 64-bit (i64) range",
+        ));
+    }
+    match serde_json::from_str::<serde_json::Value>(token) {
+        Ok(serde_json::Value::Bool(flag)) => Ok(serde_json::Value::Bool(flag)),
+        Ok(serde_json::Value::String(text)) => Ok(serde_json::Value::String(text)),
+        // `i64`/`u64` tokens are consumed above, so any remaining number is a
+        // genuine float such as `1.5` or `1e20`.
+        Ok(serde_json::Value::Number(number)) => Ok(serde_json::Value::Number(number)),
+        Ok(serde_json::Value::Null) => Err(queue_argument_error(key, "a null value")),
+        Ok(serde_json::Value::Array(_)) => Err(queue_argument_error(key, "an array")),
+        Ok(serde_json::Value::Object(_)) => Err(queue_argument_error(key, "a nested object")),
+        Err(_) => Err(queue_argument_error(key, "a non-scalar token")),
+    }
+}
+
+fn queue_argument_error(key: &str, kind: &str) -> CamelError {
+    CamelError::InvalidUri(format!(
+        "queueArguments value for '{key}' must be a string, integer fitting a \
+         signed 64-bit value, float, or boolean, got {kind}"
+    ))
+}
+
+/// Whether `token` is pure JSON integer syntax (optional sign plus digits).
+fn is_integer_token(token: &str) -> bool {
+    let digits = token
+        .strip_prefix('-')
+        .or_else(|| token.strip_prefix('+'))
+        .unwrap_or(token);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -520,17 +596,142 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_config_rejects_non_string_queue_arguments() {
-        for raw in [r#"{"x":1}"#, "[1,2]", r#""plain""#] {
+    fn endpoint_config_rejects_non_object_queue_arguments() {
+        for raw in ["[1,2]", "5", r#""plain""#] {
             let message = err_message(RabbitEndpointConfig::from_uri(&format!(
                 "rabbitmq:default?queue=q&queueArguments={raw}"
             )));
             assert!(message.contains("queueArguments"), "got: {message}");
             assert!(
                 message.contains("JSON object"),
-                "a non-object/non-string queueArguments must be rejected with the \
+                "a non-object queueArguments must be rejected with the \
                  JSON-object diagnostic, got: {message}"
             );
+        }
+    }
+
+    #[test]
+    fn queue_arguments_accepts_integer_value() {
+        let config = RabbitEndpointConfig::from_uri(
+            r#"rabbitmq:default?queue=q&queueArguments={"x-message-ttl":30000}"#,
+        )
+        .expect("integer queueArguments must parse");
+        match config.queue_arguments.get("x-message-ttl") {
+            Some(serde_json::Value::Number(number)) => {
+                assert_eq!(number.as_i64(), Some(30000), "got: {number}");
+            }
+            other => panic!("expected an integer value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queue_arguments_accepts_float_value() {
+        let config = RabbitEndpointConfig::from_uri(
+            r#"rabbitmq:default?queue=q&queueArguments={"x-ratio":1.5}"#,
+        )
+        .expect("float queueArguments must parse");
+        match config.queue_arguments.get("x-ratio") {
+            Some(serde_json::Value::Number(number)) => {
+                assert_eq!(number.as_f64(), Some(1.5), "got: {number}");
+            }
+            other => panic!("expected a float value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queue_arguments_accepts_boolean_value() {
+        let config = RabbitEndpointConfig::from_uri(
+            r#"rabbitmq:default?queue=q&queueArguments={"x-single-active-consumer":true}"#,
+        )
+        .expect("boolean queueArguments must parse");
+        assert_eq!(
+            config.queue_arguments.get("x-single-active-consumer"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn queue_arguments_accepts_string_value() {
+        let config = RabbitEndpointConfig::from_uri(
+            r#"rabbitmq:default?queue=q&queueArguments={"x-dead-letter-exchange":"dlx"}"#,
+        )
+        .expect("string queueArguments must parse");
+        assert_eq!(
+            config.queue_arguments.get("x-dead-letter-exchange"),
+            Some(&serde_json::Value::String("dlx".to_string()))
+        );
+    }
+
+    #[test]
+    fn queue_arguments_rejects_array_value() {
+        let message = err_message(RabbitEndpointConfig::from_uri(
+            r#"rabbitmq:default?queue=q&queueArguments={"x-bad":[1]}"#,
+        ));
+        assert!(message.contains("queueArguments"), "got: {message}");
+        assert!(message.contains("x-bad"), "got: {message}");
+        assert!(message.contains("array"), "got: {message}");
+    }
+
+    #[test]
+    fn queue_arguments_rejects_object_value() {
+        let message = err_message(RabbitEndpointConfig::from_uri(
+            r#"rabbitmq:default?queue=q&queueArguments={"x-bad":{"a":1}}"#,
+        ));
+        assert!(message.contains("queueArguments"), "got: {message}");
+        assert!(message.contains("x-bad"), "got: {message}");
+        assert!(message.contains("object"), "got: {message}");
+    }
+
+    #[test]
+    fn queue_arguments_rejects_null_value() {
+        let message = err_message(RabbitEndpointConfig::from_uri(
+            r#"rabbitmq:default?queue=q&queueArguments={"x-bad":null}"#,
+        ));
+        assert!(message.contains("queueArguments"), "got: {message}");
+        assert!(message.contains("x-bad"), "got: {message}");
+        assert!(message.contains("null"), "got: {message}");
+    }
+
+    #[test]
+    fn queue_arguments_rejects_out_of_range_integer() {
+        let message = err_message(RabbitEndpointConfig::from_uri(
+            r#"rabbitmq:default?queue=q&queueArguments={"x-big":18446744073709551615}"#,
+        ));
+        assert!(message.contains("queueArguments"), "got: {message}");
+        assert!(message.contains("x-big"), "got: {message}");
+        assert!(message.contains("i64"), "got: {message}");
+    }
+
+    #[test]
+    fn queue_arguments_rejects_negative_integer_below_i64_min() {
+        let message = err_message(RabbitEndpointConfig::from_uri(
+            r#"rabbitmq:default?queue=q&queueArguments={"x-big":-9223372036854775809}"#,
+        ));
+        assert!(message.contains("queueArguments"), "got: {message}");
+        assert!(message.contains("x-big"), "got: {message}");
+    }
+
+    #[test]
+    fn queue_arguments_rejects_positive_integer_above_u64_range() {
+        let message = err_message(RabbitEndpointConfig::from_uri(
+            r#"rabbitmq:default?queue=q&queueArguments={"x-big":18446744073709551616}"#,
+        ));
+        assert!(message.contains("queueArguments"), "got: {message}");
+        assert!(message.contains("x-big"), "got: {message}");
+    }
+
+    #[test]
+    fn queue_arguments_accepts_genuine_float_syntax_beyond_integer_ranges() {
+        let config = RabbitEndpointConfig::from_uri(
+            r#"rabbitmq:default?queue=q&queueArguments={"x-float":1e20}"#,
+        )
+        .expect("genuine float syntax must parse as a float");
+        match config.queue_arguments.get("x-float") {
+            Some(serde_json::Value::Number(number)) => {
+                assert_eq!(number.as_f64(), Some(1e20), "got: {number}");
+                assert!(number.is_f64(), "1e20 must be a float, got: {number}");
+            }
+            other => panic!("expected a float value, got {other:?}"),
         }
     }
 
@@ -549,8 +750,32 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_config_requires_queue_or_routing_key() {
-        let message = err_message(RabbitEndpointConfig::from_uri("rabbitmq:ex"));
+    fn endpoint_config_fanout_exchange_without_target_parses() {
+        let config = RabbitEndpointConfig::from_uri("rabbitmq:fans?exchangeType=fanout")
+            .expect("a fanout exchange must not require queue or routingKey");
+        assert_eq!(config.exchange, "fans");
+        assert_eq!(config.target(), ("fans".to_string(), String::new()));
+    }
+
+    #[test]
+    fn endpoint_config_headers_exchange_without_target_parses() {
+        let config = RabbitEndpointConfig::from_uri("rabbitmq:hdr?exchangeType=headers")
+            .expect("a headers exchange must not require queue or routingKey");
+        assert_eq!(config.exchange, "hdr");
+        assert_eq!(config.target(), ("hdr".to_string(), String::new()));
+    }
+
+    #[test]
+    fn endpoint_config_fanout_explicit_routing_key_unchanged() {
+        let config =
+            RabbitEndpointConfig::from_uri("rabbitmq:fans?exchangeType=fanout&routingKey=rk")
+                .expect("an explicit routingKey on a fanout exchange must parse");
+        assert_eq!(config.target(), ("fans".to_string(), "rk".to_string()));
+    }
+
+    #[test]
+    fn endpoint_config_requires_queue_or_routing_key_for_default_exchange() {
+        let message = err_message(RabbitEndpointConfig::from_uri("rabbitmq:"));
         assert!(message.contains("queue"), "got: {message}");
         assert!(message.contains("routingKey"), "got: {message}");
     }

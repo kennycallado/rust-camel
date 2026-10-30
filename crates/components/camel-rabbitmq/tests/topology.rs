@@ -30,7 +30,7 @@ use lapin::options::{
     BasicGetOptions, BasicPublishOptions, ExchangeDeclareOptions, QueueBindOptions,
     QueueDeclareOptions,
 };
-use lapin::types::{FieldTable, ShortString};
+use lapin::types::{AMQPValue, FieldTable, LongString, ShortString};
 use lapin::{Channel, ExchangeKind};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -257,6 +257,32 @@ async fn raw_declare_queue(
                 ..QueueDeclareOptions::default()
             },
             FieldTable::default(),
+        ),
+    )
+    .await
+    .expect("raw queue_declare must return within the bound")
+    .map(|_| ())
+}
+
+/// Raw `queue_declare` carrying `arguments`, returning the broker verdict.
+///
+/// Used for argument-type non-vacuity probes: redeclaring an existing queue
+/// with the same keys as a different AMQP type answers 406 PRECONDITION.
+async fn raw_declare_queue_with_args(
+    channel: &Channel,
+    name: &str,
+    durable: bool,
+    arguments: FieldTable,
+) -> Result<(), lapin::Error> {
+    timeout(
+        RPC_BOUND,
+        channel.queue_declare(
+            ShortString::from(name),
+            QueueDeclareOptions {
+                durable,
+                ..QueueDeclareOptions::default()
+            },
+            arguments,
         ),
     )
     .await
@@ -709,6 +735,80 @@ async fn queue_arguments_passthrough() {
     assert_eq!(
         dead.data, b"poison",
         "the queue argument must have wired the dead-letter exchange"
+    );
+
+    stop_consumer(&mut consumer).await;
+    cancel.cancel();
+}
+
+/// `queueArguments` integer values reach the broker as typed AMQP integers.
+///
+/// An active declare with `x-message-ttl`/`x-expires` supplied as JSON integers
+/// succeeds (RabbitMQ validates that these arguments are integers). Redeclaring
+/// the SAME queue with equivalent integer-typed args must also succeed
+/// (RabbitMQ's equivalence check compares argument types, so this holds only if
+/// the live queue really carries `LongLongInt`). Redeclaring with the SAME keys
+/// as strings is then rejected PRECONDITION_FAILED (inequivalent args). Together
+/// the three verdicts prove the typed arguments reach the broker as LongLongInt,
+/// not LongString — and exclude a queue declared with an empty argument table.
+#[tokio::test]
+async fn queue_arguments_integers_reach_broker_typed() {
+    let _serial = tokio::time::timeout(Duration::from_secs(180), TOPOLOGY_TESTS.lock())
+        .await
+        .expect("the topology-test serialization lock must be acquired within the bound");
+    let Some(fx) = common::require_fixture() else {
+        return;
+    };
+
+    let queue = unique("args-typed");
+    // URL-encoded JSON object: {"x-message-ttl":30000,"x-expires":60000}
+    let config = RabbitEndpointConfig::from_uri(&format!(
+        "rabbitmq:default?queue={queue}&autoDeclare=true&queueArguments=%7B%22x-message-ttl%22%3A30000%2C%22x-expires%22%3A60000%7D"
+    ))
+    .expect("typed queueArguments URI must parse");
+
+    // The active declare must be accepted: the integer values are valid AMQP
+    // types for these arguments.
+    let (mut consumer, _rx, cancel) =
+        start_consumer(config, manager_for(&fx.amqp_url), "typed-args-route").await;
+
+    // Positive equivalence control: redeclaring the SAME queue with the SAME
+    // flags and the integer-typed args must SUCCEED. RabbitMQ compares argument
+    // types, so this passes only if the live queue really carries
+    // LongLongInt(30000)/LongLongInt(60000); an empty argument table (the bug
+    // this test guards against) would be inequivalent and be rejected.
+    let (_conn, channel) = raw_channel(&fx.amqp_url).await;
+    let mut integer_args = FieldTable::default();
+    integer_args.insert(
+        ShortString::from("x-message-ttl"),
+        AMQPValue::LongLongInt(30_000),
+    );
+    integer_args.insert(
+        ShortString::from("x-expires"),
+        AMQPValue::LongLongInt(60_000),
+    );
+    raw_declare_queue_with_args(&channel, &queue, true, integer_args)
+        .await
+        .expect("an equivalent integer-typed redeclare must succeed");
+
+    // Same queue, same keys, same numeric text — but as LongString. Only the
+    // AMQP type differs, so the broker must reject the redeclare as a mismatch.
+    let (_conn, channel) = raw_channel(&fx.amqp_url).await;
+    let mut string_args = FieldTable::default();
+    string_args.insert(
+        ShortString::from("x-message-ttl"),
+        AMQPValue::LongString(LongString::from("30000")),
+    );
+    string_args.insert(
+        ShortString::from("x-expires"),
+        AMQPValue::LongString(LongString::from("60000")),
+    );
+    let conflict = raw_declare_queue_with_args(&channel, &queue, true, string_args).await;
+    let error =
+        conflict.expect_err("a string-typed redeclare must conflict with the integer-typed queue");
+    assert!(
+        error.to_string().contains("PRECONDITION"),
+        "the string/integer argument mismatch must be a PRECONDITION: {error}"
     );
 
     stop_consumer(&mut consumer).await;

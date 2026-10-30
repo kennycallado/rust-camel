@@ -78,7 +78,7 @@ pub(super) struct RabbitMqMetadataDescriptor {
     #[uri_param(name = "durableQueue", default = "true")]
     pub _durable_queue: bool,
 
-    /// Queue arguments as a JSON object of string values (task 3.4).
+    /// Queue arguments as a JSON object of scalar values (task 3.4).
     #[uri_param(name = "queueArguments")]
     pub _queue_arguments: Option<String>,
 }
