@@ -1043,14 +1043,10 @@ fn run_child() -> i32 {
             return 2;
         }
     };
-    // Version dispatch mirrors the binary self-detect path: a v1
-    // trailer builds the single-document request, a v2 multi-document
-    // trailer builds the virtual-store request (store decode plus
-    // typed-reference re-validation inside the constructor).
-    let request = match decoded {
-        trailer::DecodedArtifact::V1(v1) => EmbeddedRequest::from_trailer(v1, args),
-        trailer::DecodedArtifact::V2(v2) => EmbeddedRequest::from_v2(v2, args),
-    };
+    // The only artifact runtime is the v2 virtual-store path (the v1
+    // read path is deleted); the constructor re-validates the store and
+    // typed references.
+    let request = EmbeddedRequest::from_v2(decoded, args);
     let request = match request {
         Ok(request) => request,
         Err(e) => {
@@ -1994,8 +1990,8 @@ fn artifact_manifest_exits_without_boot() {
 /// `--manifest` on a v2 virtual-store artifact prints the schema-3
 /// canonical manifest — `manifest_schema` 3, the runtime version, and
 /// EVERY embedded logical path with its document kind — and exits 0
-/// without booting (multidoc Task 2.3). The v1 six-field form above is
-/// untouched; a v2 artifact carries the independent store metadata.
+/// without booting (multidoc Task 2.3). A v2 artifact carries the
+/// independent store metadata.
 #[test]
 fn artifact_manifest_lists_virtual_store_without_boot() {
     let (deploy, artifact) = deploy_artifact(&fixture().multi_route);
@@ -3741,8 +3737,8 @@ fn artifact_rejects_marked_corruption() {
     let (deploy, artifact) = deploy_artifact(&fixture().route);
     let valid = std::fs::read(&artifact).expect("artifact bytes");
 
-    let data_end = valid.len() - trailer::FOOTER_LEN;
-    for (name, offset) in [("data", data_end - 1), ("footer", data_end + 28)] {
+    let data_end = valid.len() - trailer::FOOTER_LEN_V2;
+    for (name, offset) in [("data", data_end - 1), ("footer", data_end + 36)] {
         let mut bytes = valid.clone();
         bytes[offset] ^= 0xFF;
         let path = deploy.path().join(format!("corrupt-{name}.bin"));
@@ -3925,7 +3921,7 @@ fn artifact_truncated_without_marker_keeps_clap_fallback() {
     // trailer, so argv must reach Clap unchanged.
     bytes.truncate(bytes.len() - trailer::MAGIC.len());
     assert_eq!(
-        trailer::decode(&bytes),
+        trailer::decode_artifact(&bytes),
         Ok(None),
         "truncation must remove the marker"
     );
@@ -4470,56 +4466,372 @@ fn compiled_multidocument_ignores_post_compile_decoy() {
     assert_eq!(code, 0, "graceful shutdown with decoy present");
 }
 
-/// A v1 single-document artifact still runs through the v1
-/// single-entry adapter: the single-document embedded seam boots the
-/// payload and the virtual-store runtime stays out of the picture.
+/// A v1 image is a tombstone: the removed version-1 framing fails closed
+/// before boot with the recompile remedy, never adapting to a one-entry
+/// store. The image is hand-built inline — arbitrary payload plus the
+/// 68-byte v1 footer (`MAGIC`, version 1, kind 1, zero reserved/lengths/
+/// checksum, terminal `MAGIC`) — because the compiler emits only v2.
 #[test]
-fn compiled_v1_artifact_uses_single_entry_adapter() {
+fn v1_artifact_fails_closed_with_tombstone() {
     child_guard();
     let deploy = tempfile::tempdir().expect("deploy tempdir");
 
-    // Hand-build a v1 artifact: the v1 trailer alone (the library seam
-    // decodes from the file tail; no executable image is needed).
-    let manifest =
-        camel_cli::compile::manifest::derive("app.yaml", trailer::TrailerKind::Route, ROUTE_DOC)
-            .expect("v1 manifest derives");
-    let v1 = trailer::Trailer {
-        kind: trailer::TrailerKind::Route,
-        payload: ROUTE_DOC.as_bytes().to_vec(),
-        manifest: manifest.to_legacy_json().into_bytes(),
-    };
-    let artifact = deploy.path().join("app.bin");
-    std::fs::write(&artifact, trailer::encode(&v1)).expect("write v1 artifact");
+    let mut image = b"arbitrary v1 payload".to_vec();
+    let mut footer = [0u8; 68];
+    footer[0..8].copy_from_slice(&trailer::MAGIC);
+    footer[8..10].copy_from_slice(&1u16.to_le_bytes());
+    footer[10] = 1; // route kind
+    footer[60..68].copy_from_slice(&trailer::MAGIC);
+    image.extend_from_slice(&footer);
 
-    let mut child = spawn_child(
-        "compiled_v1_artifact_uses_single_entry_adapter",
+    let artifact = deploy.path().join("app.bin");
+    std::fs::write(&artifact, &image).expect("write v1 artifact");
+
+    let (code, stdout, stderr) = spawn_child_output(
+        "v1_artifact_fails_closed_with_tombstone",
         deploy.path(),
         &artifact,
         &[],
         &[],
     );
-    let drained = spawn_drained(&mut child);
-    assert!(
-        wait_for_marker(&drained, "context started", Duration::from_secs(60)),
-        "v1 artifact must boot: {}",
-        drained.captured()
-    );
-    let all_output = format!(
-        "{}{}",
-        drained.out.lock().expect("stdout lock"),
-        drained.err.lock().expect("stderr lock")
+    assert_eq!(
+        code, 2,
+        "a v1 artifact must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        all_output.contains("loading routes from compiled://app.yaml"),
-        "the v1 single-document seam must serve the run: {all_output}"
+        stderr.contains("unsupported compiled artifact version 1"),
+        "the tombstone must name version 1: {stderr}"
     );
     assert!(
-        !all_output.contains("virtual store"),
-        "v1 artifacts keep the single-entry adapter path: {all_output}"
+        stderr.contains("recompile from source with this version"),
+        "the tombstone must carry the recompile remedy: {stderr}"
     );
-    send_signal(&child.0, "-TERM");
-    let code = wait_exit_code(&mut child, Duration::from_secs(30));
-    assert_eq!(code, 0, "graceful shutdown on the v1 path");
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        !combined.contains("context started"),
+        "a v1 artifact must never boot: {combined}"
+    );
+}
+
+/// bd rc-n6dof: any unsupported trailer version is a payload-free
+/// tombstone. The image ends in the 76-byte v2-family window declaring
+/// version 9, and the last 68 bytes open with the version field rather
+/// than the family magic, so the v1-shaped-footer probe cannot alias a
+/// different declared version. The removed v1 framing has its own test
+/// above; this covers the generic unsupported-version arm.
+#[test]
+fn unsupported_version_artifact_fails_closed_with_tombstone() {
+    child_guard();
+    let deploy = tempfile::tempdir().expect("deploy tempdir");
+
+    let mut image = b"arbitrary v9 payload".to_vec();
+    let mut footer = [0u8; trailer::FOOTER_LEN_V2];
+    // The window opens with filler (zeros), not MAGIC: the last 68
+    // bytes are deliberately not a v1-shaped footer.
+    footer[8..10].copy_from_slice(&9u16.to_le_bytes());
+    footer[10] = 1; // route kind
+    footer[68..76].copy_from_slice(&trailer::MAGIC);
+    image.extend_from_slice(&footer);
+
+    let artifact = deploy.path().join("app.bin");
+    std::fs::write(&artifact, &image).expect("write v9 artifact");
+
+    let (code, stdout, stderr) = spawn_child_output(
+        "unsupported_version_artifact_fails_closed_with_tombstone",
+        deploy.path(),
+        &artifact,
+        &[],
+        &[],
+    );
+    assert_eq!(
+        code, 2,
+        "a version-9 artifact must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unsupported compiled artifact version 9"),
+        "the tombstone must name version 9: {stderr}"
+    );
+    assert!(
+        stderr.contains("recompile from source with this version"),
+        "the tombstone must carry the recompile remedy: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        !combined.contains("context started"),
+        "a version-9 artifact must never boot: {combined}"
+    );
+}
+
+/// The valid sections shared by the tombstone images below: a minimal
+/// single-route virtual store (content plus canonical index) and its
+/// schema-3 manifest. Each tombstone test forges exactly one field so
+/// the named diagnostic is attributable to that validation boundary.
+fn tombstone_route_sections() -> (Vec<u8>, camel_cli::compile::store::StoreIndex, Vec<u8>) {
+    use camel_cli::compile::store::{StoreDocument, StoreEntryKind, VirtualDocumentStore};
+
+    let route_text = "routes:\n  - id: demo\n    from: timer:tick?period=300\n    steps:\n      - to: log:demo\n";
+    let store = VirtualDocumentStore::build(
+        "app.yaml",
+        &[StoreDocument {
+            path: "app.yaml".to_string(),
+            kind: StoreEntryKind::Route,
+            bytes: route_text.as_bytes().to_vec(),
+        }],
+        &[],
+        &["app.yaml".to_string()],
+    )
+    .expect("minimal route store builds");
+    let manifest = camel_cli::compile::manifest::derive_for_store(
+        &store,
+        camel_cli::compile::trailer::TrailerKind::Route,
+        &[("app.yaml".to_string(), route_text.to_string())],
+    )
+    .expect("minimal route manifest derives");
+    (
+        store.content,
+        store.index,
+        manifest.to_canonical_json().into_bytes(),
+    )
+}
+
+/// bd rc-n6dof: the removed store-1/manifest-2 pair tombstones on the
+/// manifest schema, because manifest validation precedes the store
+/// decode. `decode_v2_marked` verifies the BLAKE3 checksum before the
+/// manifest, so the image is assembled through `encode_v2` (which
+/// re-seals the checksum over the forged sections) — otherwise the
+/// failure would be a checksum mismatch instead of the tombstone.
+#[test]
+fn legacy_pair_manifest2_tombstone_precedence() {
+    child_guard();
+    use camel_cli::compile::trailer::{TrailerKind, TrailerV2};
+
+    let deploy = tempfile::tempdir().expect("deploy tempdir");
+    let (content, index, _manifest) = tombstone_route_sections();
+    let mut legacy_index = index;
+    legacy_index.store_schema = 1;
+
+    let schema2_manifest = br#"{"components":["direct"],"embedded_files":[],"env_names":[],"kind":"route","listeners":[],"manifest_schema":2,"runtime_version":"0.0.0","source_name":"app.yaml"}"#.to_vec();
+    let artifact_bytes = trailer::encode_v2(&TrailerV2 {
+        kind: TrailerKind::Route,
+        content,
+        index: legacy_index
+            .encode_canonical()
+            .expect("legacy store index encodes"),
+        manifest: schema2_manifest,
+    });
+    let artifact = deploy.path().join("legacy-pair.bin");
+    std::fs::write(&artifact, artifact_bytes).expect("write legacy-pair artifact");
+
+    let (code, stdout, stderr) = spawn_child_output(
+        "legacy_pair_manifest2_tombstone_precedence",
+        deploy.path(),
+        &artifact,
+        &[],
+        &[],
+    );
+    assert_eq!(
+        code, 2,
+        "the removed pair must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unsupported manifest schema 2"),
+        "manifest validation precedes the store decode, so schema 2 must be named: {stderr}"
+    );
+    assert!(
+        stderr.contains("recompile from source with this version"),
+        "the tombstone must carry the recompile remedy: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unsupported store schema 1"),
+        "the manifest tombstone must precede the store tombstone: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        !combined.contains("context started"),
+        "the removed pair must never boot: {combined}"
+    );
+}
+
+/// bd rc-n6dof: a removed `store_schema: 1` beside an otherwise current
+/// schema-3 manifest fails its own store-schema tombstone after the
+/// manifest passes validation. Re-sealed through `encode_v2`, so the
+/// named failure is the store schema, never checksum integrity.
+#[test]
+fn store_schema1_beside_current_manifest_tombstone() {
+    child_guard();
+    use camel_cli::compile::trailer::{TrailerKind, TrailerV2};
+
+    let deploy = tempfile::tempdir().expect("deploy tempdir");
+    let (content, mut index, manifest) = tombstone_route_sections();
+    index.store_schema = 1;
+    let artifact_bytes = trailer::encode_v2(&TrailerV2 {
+        kind: TrailerKind::Route,
+        content,
+        index: index
+            .encode_canonical()
+            .expect("legacy store index encodes"),
+        manifest,
+    });
+    let artifact = deploy.path().join("store1.bin");
+    std::fs::write(&artifact, artifact_bytes).expect("write store-1 artifact");
+
+    let (code, stdout, stderr) = spawn_child_output(
+        "store_schema1_beside_current_manifest_tombstone",
+        deploy.path(),
+        &artifact,
+        &[],
+        &[],
+    );
+    assert_eq!(
+        code, 2,
+        "a store schema 1 must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("unsupported store schema 1"),
+        "the tombstone must name store schema 1: {stderr}"
+    );
+    assert!(
+        stderr.contains("recompile from source with this version"),
+        "the tombstone must carry the recompile remedy: {stderr}"
+    );
+    assert!(
+        !stderr.contains("checksum mismatch"),
+        "the re-sealed artifact must fail on the store schema, not integrity: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        !combined.contains("context started"),
+        "a store-1 artifact must never boot: {combined}"
+    );
+}
+
+/// bd rc-n6dof: the schema-less legacy manifest — a body with a
+/// recognizable `kind` but no `manifest_schema` field — fails the
+/// missing-field tombstone before the store decode. Re-sealed through
+/// `encode_v2`, so the named failure is the missing field.
+#[test]
+fn missing_manifest_schema_field_tombstone() {
+    child_guard();
+    use camel_cli::compile::trailer::{TrailerKind, TrailerV2};
+
+    let deploy = tempfile::tempdir().expect("deploy tempdir");
+    let (content, index, manifest) = tombstone_route_sections();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&manifest).expect("derived manifest is JSON");
+    let object = value
+        .as_object_mut()
+        .expect("derived manifest is a JSON object");
+    let kind = object
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    object.remove("manifest_schema");
+    assert_eq!(
+        kind.as_deref(),
+        Some("route"),
+        "the forged body must keep a recognizable kind: {value}"
+    );
+    let artifact_bytes = trailer::encode_v2(&TrailerV2 {
+        kind: TrailerKind::Route,
+        content,
+        index: index.encode_canonical().expect("canonical index"),
+        manifest: serde_json::to_vec(&value).expect("forge schema-less manifest"),
+    });
+    let artifact = deploy.path().join("schema-less.bin");
+    std::fs::write(&artifact, artifact_bytes).expect("write schema-less artifact");
+
+    let (code, stdout, stderr) = spawn_child_output(
+        "missing_manifest_schema_field_tombstone",
+        deploy.path(),
+        &artifact,
+        &[],
+        &[],
+    );
+    assert_eq!(
+        code, 2,
+        "a schema-less manifest must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("manifest_schema field is missing"),
+        "the tombstone must name the missing field: {stderr}"
+    );
+    assert!(
+        stderr.contains("recompile from source with this version"),
+        "the tombstone must carry the recompile remedy: {stderr}"
+    );
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        !combined.contains("context started"),
+        "a schema-less artifact must never boot: {combined}"
+    );
+}
+
+/// bd rc-n6dof: the artifact tombstone precedes trust policy. A
+/// schema-2 manifest beside a strict truststore fails on the removed
+/// manifest schema, so the strict-unsigned diagnostic never fires. The
+/// forged sections are appended to a real executable image (the self-
+/// detect path runs the deployed binary itself), re-sealed through
+/// `encode_v2` so framing reaches manifest validation.
+#[test]
+fn removed_schema2_under_strict_truststore_fails_tombstone() {
+    use camel_cli::compile::trailer::{TrailerKind, TrailerV2};
+
+    let (deploy, artifact) = deploy_artifact(&fixture().route);
+    let valid = std::fs::read(&artifact).expect("artifact bytes");
+    let data_end = valid.len() - trailer::FOOTER_LEN_V2;
+    let footer = &valid[data_end..];
+    let le = |range: std::ops::Range<usize>| {
+        u64::from_le_bytes(footer[range].try_into().expect("length field"))
+    };
+    let total = (le(12..20) + le(20..28) + le(28..36)) as usize;
+    let content_start = data_end - total;
+    // The executable image ends right before the leading family magic.
+    let mut image = valid[..content_start - trailer::MAGIC.len()].to_vec();
+
+    let schema2_manifest = br#"{"components":["direct"],"embedded_files":[],"env_names":[],"kind":"route","listeners":[],"manifest_schema":2,"runtime_version":"0.0.0","source_name":"app.yaml"}"#.to_vec();
+    image.extend_from_slice(&trailer::encode_v2(&TrailerV2 {
+        kind: TrailerKind::Route,
+        content: Vec::new(),
+        index: br#"{"store_schema":1}"#.to_vec(),
+        manifest: schema2_manifest,
+    }));
+
+    let legacy = deploy.path().join("legacy-schema2.bin");
+    // locked (bd rc-vio10): write fd window must not overlap any fork
+    {
+        let _guard = common::artifact_spawn_lock()
+            .lock()
+            .expect("artifact spawn lock");
+        std::fs::write(&legacy, &image).expect("write schema-2 artifact");
+        #[cfg(unix)]
+        make_executable(&legacy);
+    }
+    let truststore = write_truststore(deploy.path(), "strict.keys", "strict\n");
+
+    let (code, stdout, stderr) =
+        common::run_binary(deploy.path(), &legacy, &["--truststore", &truststore], &[]);
+    let combined = format!("{stdout}{stderr}");
+    assert_eq!(
+        code, 2,
+        "the schema-2 artifact must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        combined.contains("unsupported manifest schema 2"),
+        "the manifest-schema tombstone must fire: {combined}"
+    );
+    assert!(
+        combined.contains("recompile from source with this version"),
+        "the tombstone must carry the recompile remedy: {combined}"
+    );
+    assert!(
+        !combined.contains("strict-unsigned"),
+        "the tombstone precedes trust policy, so strict-unsigned must not fire: {combined}"
+    );
+    assert!(
+        !combined.contains("context started"),
+        "the schema-2 artifact must never boot: {combined}"
+    );
+    drop(std::fs::remove_file(&legacy));
 }
 
 /// An invalid decoded store fails closed before boot: a structurally
@@ -5034,46 +5346,24 @@ fn unsigned_with_stray_envelope_fails_closed() {
     );
 }
 
-/// A v1 legacy artifact with ANY envelope beside it fails closed as an
-/// unpaired envelope: the v1 trailer's schema-less manifest decodes as
-/// schema 1 and carries no signing block, so no envelope may be present
-/// — exit 2, no boot. Direct twin of the schema-3 case, bd rc-5u0jx
-/// item (a). The artifact is a REAL executable — the camel binary with
-/// a hand-assembled v1 trailer appended (the compiler emits only v2
-/// trailers now) — because the unpaired check lives in the binary
-/// self-detect path, which the harness child branch never enters.
+/// An unsigned schema-3 artifact with ANY envelope beside it fails closed
+/// as an unpaired envelope and the diagnostic pins the schema-3 manifest.
+/// Direct twin of [`unsigned_with_stray_envelope_fails_closed`] with the
+/// schema number asserted, bd rc-5u0jx item (a). The artifact is a
+/// CURRENT compile output deployed through the shared harness.
 #[test]
-fn v1_artifact_with_stray_envelope_fails_closed() {
+fn unsigned_schema3_artifact_with_stray_envelope_names_schema() {
     // No harness-child spawn below (run_binary executes the artifact),
     // but the guard keeps this test safe against any future conversion
     // to a spawn helper (bd rc-wvydl).
     child_guard();
-    use std::io::Write as _;
-    let deploy = tempfile::tempdir().expect("deploy tempdir");
-
-    let manifest =
-        camel_cli::compile::manifest::derive("app.yaml", trailer::TrailerKind::Route, ROUTE_DOC)
-            .expect("v1 manifest derives");
-    let v1 = trailer::Trailer {
-        kind: trailer::TrailerKind::Route,
-        payload: ROUTE_DOC.as_bytes().to_vec(),
-        manifest: manifest.to_legacy_json().into_bytes(),
-    };
-    let artifact = deploy.path().join("app.bin");
-    std::fs::copy(env!("CARGO_BIN_EXE_camel"), &artifact).expect("copy camel binary");
-    let mut tail = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&artifact)
-        .expect("open artifact for trailer append");
-    tail.write_all(&trailer::encode(&v1))
-        .expect("append v1 trailer");
-    drop(tail);
+    let (deploy, artifact) = deploy_artifact(&fixture().route);
     std::fs::write(sig_path_of(&artifact), b"stray").expect("write stray envelope");
 
     let (code, stdout, stderr) = common::run_binary(deploy.path(), &artifact, &[], &[]);
     assert_eq!(
         code, 2,
-        "stray envelope on a v1 artifact must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "stray envelope on an unsigned artifact must fail closed;\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     let combined = format!("{stdout}{stderr}");
     assert!(
@@ -5081,8 +5371,8 @@ fn v1_artifact_with_stray_envelope_fails_closed() {
         "the diagnostic must name the unpaired envelope: {combined}"
     );
     assert!(
-        combined.contains("schema 1"),
-        "the diagnostic must pin the legacy manifest's default schema 1: {combined}"
+        combined.contains("schema 3"),
+        "the diagnostic must pin the manifest's schema 3: {combined}"
     );
     assert!(
         !combined.contains("context started"),
@@ -5090,8 +5380,8 @@ fn v1_artifact_with_stray_envelope_fails_closed() {
     );
 }
 
-/// An unsigned artifact without an envelope still boots: the v1
-/// compatibility regression guard — no signature step, zero hashing.
+/// An unsigned artifact without an envelope still boots: the unsigned
+/// regression guard — no signature step, zero hashing.
 #[test]
 fn unsigned_without_envelope_still_runs() {
     let (deploy, artifact) = deploy_artifact(&fixture().job);
@@ -5805,8 +6095,8 @@ fn unsigned_artifact_ignores_truststore() {
 // malformed store fails closed for unsigned artifacts too. Signed artifacts
 // keep the pin + freshness policy exactly as without the directive. The
 // cases reuse the keypin deploy helpers, the schema-5 `signed_job` fixture
-// as the fingerprint source, and the hand-assembled v1 trailer pattern of
-// `v1_artifact_with_stray_envelope_fails_closed`.
+// as the fingerprint source, and the shared unsigned compile fixture for
+// the no-signing-block rejection.
 // ---------------------------------------------------------------------------
 
 /// A strict truststore (pin + directive) rejects an unsigned schema-3
@@ -6109,38 +6399,18 @@ fn strip_rule_keeps_precedence_under_strict_store() {
     );
 }
 
-/// A strict store also rejects a hand-assembled v1 legacy artifact (no
+/// A strict store also rejects a CURRENT unsigned schema-3 artifact (no
 /// signing block at any schema number): boot exits 2 with
 /// `strict-unsigned` — the decision keys on the absent signing block, not
-/// the schema number. The trailer construction twins
-/// `v1_artifact_with_stray_envelope_fails_closed`, but NO envelope is
-/// written beside this artifact.
+/// the schema number. The artifact is a real compile output deployed
+/// through the shared harness, and NO envelope is written beside it.
 #[test]
-fn strict_store_rejects_v1_artifact_without_signing_block() {
+fn strict_store_rejects_unsigned_schema3_artifact_without_signing_block() {
     // No harness-child spawn below (run_binary executes the artifact),
     // but the guard keeps this test safe against any future conversion
     // to a spawn helper (bd rc-wvydl).
     child_guard();
-    use std::io::Write as _;
-    let deploy = tempfile::tempdir().expect("deploy tempdir");
-
-    let manifest =
-        camel_cli::compile::manifest::derive("app.yaml", trailer::TrailerKind::Route, ROUTE_DOC)
-            .expect("v1 manifest derives");
-    let v1 = trailer::Trailer {
-        kind: trailer::TrailerKind::Route,
-        payload: ROUTE_DOC.as_bytes().to_vec(),
-        manifest: manifest.to_legacy_json().into_bytes(),
-    };
-    let artifact = deploy.path().join("app.bin");
-    std::fs::copy(env!("CARGO_BIN_EXE_camel"), &artifact).expect("copy camel binary");
-    let mut tail = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&artifact)
-        .expect("open artifact for trailer append");
-    tail.write_all(&trailer::encode(&v1))
-        .expect("append v1 trailer");
-    drop(tail);
+    let (deploy, artifact) = deploy_artifact(&fixture().route);
 
     let truststore = write_truststore(
         deploy.path(),
@@ -6156,7 +6426,7 @@ fn strict_store_rejects_v1_artifact_without_signing_block() {
     );
     assert_eq!(
         code, 2,
-        "a strict store must refuse a v1 artifact with no signing block;\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "a strict store must refuse an unsigned artifact with no signing block;\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     let combined = format!("{stdout}{stderr}");
     assert!(

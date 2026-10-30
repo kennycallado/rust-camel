@@ -1,26 +1,21 @@
 //! Embedded-document runtime for compiled artifacts (openspec changes
 //! `cli-compile` Tasks 2.2/2.3 and `multidoc` Task 2.2).
 //!
-//! [`run_embedded_document`] takes a validated [`EmbeddedRequest`] — a
-//! v1 single-document trailer or a v2 decoded
-//! [`VirtualDocumentStore`] plus
-//! the parsed artifact arguments — and runs it through the EXISTING
-//! lifecycles:
+//! [`run_embedded_document`] takes a validated [`EmbeddedRequest`] — the
+//! decoded [`VirtualDocumentStore`] plus the parsed artifact arguments —
+//! and runs it through the EXISTING lifecycles:
 //!
-//! - v1 route artifacts drive the shared `camel run` lifecycle
-//!   (`crate::commands::run::drive_lifecycle`) with the default
-//!   in-memory config, the embedded single-document discovery seam,
-//!   and `watch = false`;
-//! - v2 multi-document route artifacts call
+//! - multi-document route artifacts call
 //!   [`camel_dsl::discover_virtual_store`] BEFORE boot (the merged
 //!   embedded configuration feeds the context), build the
 //!   `CamelConfig` through the deployment-time `${env:}` seam, and
-//!   drive the same lifecycle with the discovered routes;
-//! - job artifacts drive the existing job report/outcome lifecycle:
-//!   v1 with the embedded document as the sole inline route source,
-//!   v2 consuming the embedded job/config/route entries (indexed
-//!   route files or the inline `routes:` block) with no filesystem
-//!   route discovery.
+//!   drive the shared `camel run` lifecycle
+//!   (`crate::commands::run::drive_lifecycle`) with the discovered
+//!   routes and `watch = false`;
+//! - job artifacts drive the existing job report/outcome lifecycle,
+//!   consuming the embedded job/config/route entries (indexed route
+//!   files or the inline `routes:` block) with no filesystem route
+//!   discovery.
 //!
 //! Asset resolution (r2embed Task 3.2): the substitution table recorded
 //! at compile time is the ONLY runtime resolution path. Before kind
@@ -71,7 +66,7 @@ use super::signature;
 use super::store::{
     SubstitutionContext, SubstitutionEntry, SubstitutionSpan, VirtualDocumentStore,
 };
-use super::trailer::{self, Trailer, TrailerKind};
+use super::trailer::{self, TrailerKind};
 use super::trust;
 use crate::commands::run::{Discover, LifecycleFailure, LifecycleSpec};
 
@@ -316,81 +311,25 @@ impl RouteReport {
     }
 }
 
-/// One validated embedded run request: the decoded artifact plus the
-/// parsed artifact arguments.
-///
-/// - v1 (`[`EmbeddedRequest::SingleDocument`]`, built by
-///   [`EmbeddedRequest::from_trailer`]): the single-document trailer
-///   payload runs through the single-document seams — default
-///   in-memory config, embedded-text discovery. v1 artifacts keep this
-///   path verbatim.
-/// - v2 ([`EmbeddedRequest::VirtualStore`], built by
-///   [`EmbeddedRequest::from_v2`]; multidoc Task 2.2): the decoded
-///   multi-document store runs through the virtual-store runtime —
-///   merged embedded configuration, ordered source-plan routes,
-///   deployment-time `${env:}` resolution. Single-document v2 stores
-///   take the same path.
+/// One validated embedded run request: the decoded virtual store plus the
+/// parsed artifact arguments. The runtime has exactly one request shape
+/// (multidoc Task 2.2); the removed v1 single-document path has no
+/// request type.
 #[derive(Debug, Clone)]
-pub enum EmbeddedRequest {
-    /// v1 single-document artifact.
-    SingleDocument {
-        /// Embedded artifact kind (route/job).
-        kind: TrailerKind,
-        /// Logical source name; the runtime source identity is
-        /// `compiled://<source_name>`.
-        source_name: String,
-        /// Normalized document text (pre-interpolation authoring text).
-        document: String,
-        /// Canonical manifest JSON (printed verbatim by `--manifest`).
-        manifest_json: String,
-        /// Parsed artifact arguments.
-        args: ArtifactArgs,
-    },
-    /// v2 multi-document virtual-store artifact (multidoc Task 2.2).
-    VirtualStore {
-        /// Embedded artifact kind (route/job).
-        kind: TrailerKind,
-        /// Decoded virtual-document store; the entry point is
-        /// `store.index.entry_point` and every document is read through
-        /// the store, never the filesystem.
-        store: super::store::VirtualDocumentStore,
-        /// Canonical manifest JSON (printed verbatim by `--manifest`).
-        manifest_json: String,
-        /// Parsed artifact arguments.
-        args: ArtifactArgs,
-    },
+pub struct EmbeddedRequest {
+    /// Embedded artifact kind (route/job).
+    pub kind: TrailerKind,
+    /// Decoded virtual-document store; the entry point is
+    /// `store.index.entry_point` and every document is read through the
+    /// store, never the filesystem.
+    pub store: super::store::VirtualDocumentStore,
+    /// Canonical manifest JSON (printed verbatim by `--manifest`).
+    pub manifest_json: String,
+    /// Parsed artifact arguments.
+    pub args: ArtifactArgs,
 }
 
 impl EmbeddedRequest {
-    /// Build the request from a decoded v1 trailer and parsed
-    /// arguments. Both payload and manifest are validated UTF-8 (the
-    /// encoder normalized the document and serialized the manifest as
-    /// canonical UTF-8 JSON); the manifest must carry its
-    /// `source_name`.
-    pub fn from_trailer(trailer: Trailer, args: ArtifactArgs) -> Result<Self, CompileError> {
-        let document = String::from_utf8(trailer.payload).map_err(|_| CompileError::InvalidUtf8)?;
-        let manifest_json =
-            String::from_utf8(trailer.manifest).map_err(|_| CompileError::InvalidUtf8)?;
-        let source_name = serde_json::from_str::<serde_json::Value>(&manifest_json)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("source_name")
-                    .and_then(|name| name.as_str())
-                    .map(str::to_string)
-            })
-            .ok_or_else(|| {
-                CompileError::InvalidDocument("manifest carries no source_name".to_string())
-            })?;
-        Ok(Self::SingleDocument {
-            kind: trailer.kind,
-            source_name,
-            document,
-            manifest_json,
-            args,
-        })
-    }
-
     /// Build the request from a decoded v2 multi-document trailer and
     /// parsed arguments (multidoc Task 2.2). `decode_artifact` already
     /// verified the checksums, the store index, the typed references,
@@ -404,7 +343,7 @@ impl EmbeddedRequest {
             .map_err(|e| CompileError::InvalidDocument(format!("invalid virtual store: {e}")))?;
         let manifest_json =
             String::from_utf8(v2.manifest).map_err(|_| CompileError::InvalidUtf8)?;
-        Ok(Self::VirtualStore {
+        Ok(Self {
             kind: v2.kind,
             store,
             manifest_json,
@@ -882,15 +821,16 @@ fn prepare_embedded_assets(
 ///   normal dispatch, so the artifact is SHA-512-streamed at most once
 ///   per invocation.
 ///
-/// Version dispatch (multidoc Task 2.2): a v1 artifact feeds the
-/// single-document runtime (default in-memory config, embedded-text
-/// discovery); a v2 multi-document artifact feeds the virtual-store
-/// runtime — `discover_virtual_store` assembles the merged embedded
-/// configuration and the ordered source-plan routes before boot, with
-/// the deployment environment as the `${env:}` lookup.
-/// `decode_artifact` has already validated the store, its references,
-/// and the manifest/store agreement before this point; the request
-/// builder re-validates as defense in depth.
+/// Version dispatch (multidoc Task 2.2): a valid v2 multi-document
+/// trailer feeds the virtual-store runtime — `discover_virtual_store`
+/// assembles the merged embedded configuration and the ordered
+/// source-plan routes before boot, with the deployment environment as
+/// the `${env:}` lookup. A marked artifact declaring any other version
+/// (including the removed v1 framing) fails closed with the recompile
+/// tombstone before argument parsing or boot; there is no v1 runtime
+/// path to dispatch to. `decode_artifact` has already validated the
+/// store, its references, and the manifest/store agreement before this
+/// point; the request builder re-validates as defense in depth.
 pub async fn self_detect_artifact() -> Option<i32> {
     // A missing or unreadable executable image carries no trailer
     // evidence: that is absence, not corruption, so fall through.
@@ -935,10 +875,7 @@ pub async fn self_detect_artifact() -> Option<i32> {
     if let Some(code) = verify_for_boot(&exe, &manifest, truststore) {
         return Some(code);
     }
-    let request = match decoded {
-        trailer::DecodedArtifact::V1(v1) => EmbeddedRequest::from_trailer(v1, args),
-        trailer::DecodedArtifact::V2(v2) => EmbeddedRequest::from_v2(v2, args),
-    };
+    let request = EmbeddedRequest::from_v2(decoded, args);
     match request {
         Ok(request) => Some(run_embedded_document_code(request).await),
         Err(e) => {
@@ -951,14 +888,10 @@ pub async fn self_detect_artifact() -> Option<i32> {
 /// Parse the decoded artifact's manifest into the typed
 /// [`manifest::Manifest`] the signing decisions read (schema and
 /// signing block). `decode_artifact` has already validated the manifest
-/// bytes per trailer version, so a failure here is defensive and fails
-/// closed with the integrity diagnostic already on stderr.
-fn artifact_manifest(decoded: &trailer::DecodedArtifact) -> Result<manifest::Manifest, ()> {
-    let bytes = match decoded {
-        trailer::DecodedArtifact::V1(v1) => &v1.manifest,
-        trailer::DecodedArtifact::V2(v2) => &v2.manifest,
-    };
-    manifest::Manifest::from_canonical_json(bytes).map_err(|e| {
+/// bytes, so a failure here is defensive and fails closed with the
+/// integrity diagnostic already on stderr.
+fn artifact_manifest(decoded: &trailer::TrailerV2) -> Result<manifest::Manifest, ()> {
+    manifest::Manifest::from_canonical_json(&decoded.manifest).map_err(|e| {
         eprintln!("compiled artifact integrity error: {e}");
     })
 }
@@ -983,11 +916,11 @@ fn stream_sha512(artifact: &Path) -> std::io::Result<[u8; 64]> {
 }
 
 /// Whether the manifest marks a boot without the envelope unacceptable:
-/// exactly the schema-4 and schema-5 manifests — the only schemas that
-/// carry a signing block — whose required bit is set. The decision keys
-/// on `manifest_schema` being 4 or 5, never on the signing block's
-/// presence: the lenient legacy parse never populates `signing`
-/// for a schema other than 4 or 5, so keying on the schema keeps the
+/// exactly the schema-4 and schema-5 manifests — the only accepted
+/// schemas that carry a signing block — whose required bit is set. The
+/// decision keys on `manifest_schema` being 4 or 5, never on the signing
+/// block's presence: manifest schema 3 is the only accepted unsigned form
+/// and never carries `signing`, so keying on the schema keeps the
 /// decision total.
 fn requires_signature(manifest: &manifest::Manifest) -> bool {
     matches!(
@@ -999,8 +932,8 @@ fn requires_signature(manifest: &manifest::Manifest) -> bool {
 /// Verify a PRESENT envelope against the artifact and the manifest
 /// signing block — the shared chain of the `--verify` surface and boot
 /// verification (r4sign Task 1.3): the unpaired-schema check first
-/// (keyed on manifest schema 4 or 5; schema 3 or earlier plus a present
-/// envelope stays the unpaired rejection), then one
+/// (keyed on manifest schema 4 or 5; schema 3 plus a present envelope
+/// stays the unpaired rejection), then one
 /// artifact stream through [`stream_sha512`], then
 /// [`signature::verify_envelope`] with the manifest's fingerprint and
 /// algorithm. Every failure has already printed its exit-2 diagnostic
@@ -1010,17 +943,17 @@ fn verify_envelope_bytes(
     exe: &Path,
     manifest: &manifest::Manifest,
 ) -> Result<signature::VerifiedEnvelope, ()> {
-    // Schema-agnostic rejection: every manifest below schema 4 pairs
-    // with no signing block, so a present envelope is stray regardless
-    // of the integer printed. Boot-level twins cover schemas 1 and 3
-    // (v1_artifact_with_stray_envelope_fails_closed,
-    // unsigned_with_stray_envelope_fails_closed); the schema-2
-    // boot-level twin is deferred — hand-assembling a store-1 (R1-era)
-    // artifact outweighs the marginal coverage, and schema-2 decode and
-    // pairing rejection are unit-tested in manifest.rs
-    // (manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired).
-    // Reopen the defer only if a store-1 artifact builder ever lands
-    // (bd rc-pbezt).
+    // Schema-agnostic rejection: schema 3 is the only accepted unsigned
+    // manifest and carries no signing block, so a present envelope is
+    // stray regardless of the integer printed. Removed schemas (1, 2, and
+    // unknown values) never reach this check: they fail the
+    // manifest-schema tombstone during manifest validation, before store
+    // decoding, pairing, and any signing/trust policy. Boot-level twins
+    // for schema 3 live in
+    // unsigned_schema3_artifact_with_stray_envelope_names_schema and
+    // unsigned_with_stray_envelope_fails_closed; the precedence test is
+    // manifest_pairing_accepts_current_pairs_and_rejects_removed in
+    // manifest.rs.
     if !matches!(
         manifest.manifest_schema,
         manifest::MANIFEST_SCHEMA_V4 | manifest::MANIFEST_SCHEMA_V5
@@ -1366,7 +1299,8 @@ fn print_freshness_rollback(signing: &manifest::SigningBlock, floor: Option<u64>
 /// supplied truststore, when the manifest carries a signing block (the
 /// keypin Task 1.2 strip rule) or the store is strict and the manifest
 /// carries no signing block (`strict-unsigned`) — otherwise the
-/// artifact proceeds with ZERO hashing (v1 compatibility). A present envelope runs the shared
+/// artifact proceeds with ZERO hashing (unsigned compatibility). A present
+/// envelope runs the shared
 /// verification chain and then the trust policy before the dispatch; any
 /// failure exits 2 with the named step on stderr and no boot.
 ///
@@ -1393,8 +1327,8 @@ fn verify_for_boot(
                 );
                 return Some(EXIT_REJECTION);
             }
-            // No envelope and no requirement: boot unchanged, v1
-            // compatible — zero hashing.
+            // No envelope and no requirement: boot unchanged,
+            // unsigned-compatible — zero hashing.
             return None;
         }
         Err(e) => {
@@ -1418,74 +1352,46 @@ fn verify_for_boot(
 /// harness children that re-exit with [`std::process::exit`] (an
 /// `ExitCode` cannot be read back out).
 pub async fn run_embedded_document_code(request: EmbeddedRequest) -> i32 {
-    // The exclusive print-and-exit modes are common to both artifact
-    // versions and never boot.
-    let (help, version, manifest, report) = match &request {
-        EmbeddedRequest::SingleDocument { args, .. }
-        | EmbeddedRequest::VirtualStore { args, .. } => {
-            (args.help, args.version, args.manifest, args.report.clone())
-        }
-    };
-    if help {
+    let EmbeddedRequest {
+        kind,
+        mut store,
+        manifest_json,
+        args,
+    } = request;
+    // The exclusive print-and-exit modes never boot.
+    if args.help {
         print_artifact_usage();
         return 0;
     }
-    if version {
+    if args.version {
         println!("camel {}", manifest::RUNTIME_VERSION);
         return 0;
     }
-    if manifest {
-        let manifest_json = match &request {
-            EmbeddedRequest::SingleDocument { manifest_json, .. }
-            | EmbeddedRequest::VirtualStore { manifest_json, .. } => manifest_json,
-        };
+    if args.manifest {
         println!("{manifest_json}");
         return 0;
     }
-    match request {
-        EmbeddedRequest::SingleDocument {
-            kind,
-            source_name,
-            document,
-            ..
-        } => match kind {
-            TrailerKind::Route => {
-                run_embedded_route(&source_name, &document, report.as_deref()).await
-            }
-            TrailerKind::Job => {
-                crate::commands::job::run_embedded_job(&source_name, &document, report).await
-            }
-        },
-        EmbeddedRequest::VirtualStore {
-            kind,
-            mut store,
-            manifest_json,
-            ..
-        } => {
-            // The DECIDED single swap point (r2embed Task 3.2): after
-            // decode, BEFORE the kind dispatch. The store is rewritten
-            // IN-LEASE and passed by value below, so neither
-            // `drive_lifecycle` nor `run_embedded_job_store` changes.
-            let materialization = match prepare_embedded_assets(&mut store, &manifest_json) {
-                Ok(prepared) => prepared,
-                Err(e) => {
-                    eprintln!("compiled artifact error: {e}");
-                    return EXIT_REJECTION;
-                }
-            };
-            let code = match kind {
-                TrailerKind::Route => run_embedded_store_route(&store, report.as_deref()).await,
-                TrailerKind::Job => {
-                    crate::commands::job::run_embedded_job_store(store, report).await
-                }
-            };
-            // The confined per-boot directory is removed on BOTH the
-            // graceful return and every boot-failure return above: the
-            // guard drops at this scope's end either way.
-            drop(materialization);
-            code
+    let report = args.report;
+    // The DECIDED single swap point (r2embed Task 3.2): after decode,
+    // BEFORE the kind dispatch. The store is rewritten IN-LEASE and
+    // passed by value below, so neither `drive_lifecycle` nor
+    // `run_embedded_job_store` changes.
+    let materialization = match prepare_embedded_assets(&mut store, &manifest_json) {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            eprintln!("compiled artifact error: {e}");
+            return EXIT_REJECTION;
         }
-    }
+    };
+    let code = match kind {
+        TrailerKind::Route => run_embedded_store_route(&store, report.as_deref()).await,
+        TrailerKind::Job => crate::commands::job::run_embedded_job_store(store, report).await,
+    };
+    // The confined per-boot directory is removed on BOTH the graceful
+    // return and every boot-failure return above: the guard drops at
+    // this scope's end either way.
+    drop(materialization);
+    code
 }
 
 /// Artifact `--help` text (no boot).
@@ -1499,45 +1405,6 @@ fn print_artifact_usage() {
     );
     println!("  --version        print the runtime version and exit");
     println!("  --help           print this usage and exit");
-}
-
-/// Route-artifact lifecycle: default in-memory config, embedded source,
-/// `watch = false` — the same boot, route registration, context start,
-/// signal, and shutdown path `camel run` drives. Writes the
-/// [`RouteReport`] to `report` when given.
-///
-/// Exit codes: 0 graceful completion; 2 boot/discovery/report-write
-/// failure. Pipeline failure (1) stays reserved: a signal-driven route
-/// run ends either in graceful completion or a boot-class failure.
-async fn run_embedded_route(source_name: &str, document: &str, report: Option<&Path>) -> i32 {
-    let config = match crate::commands::run::in_memory_default_config() {
-        Ok(config) => config,
-        Err(e) => return fail_route(report, e.to_string()),
-    };
-    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let spec = LifecycleSpec {
-        config,
-        project_root,
-        discover: Discover::Embedded {
-            text: document.to_string(),
-            source_name: source_name.to_string(),
-            kind: camel_dsl::EmbeddedDocumentKind::Route,
-        },
-        watch: None,
-        trust_note: false,
-        idle_note: IDLE_NOTE,
-    };
-    match crate::commands::run::drive_lifecycle(spec).await {
-        Ok(()) => {
-            if let Err(e) = write_route_report(report, &RouteReport::completed()) {
-                eprintln!("failed to write route report: {e}");
-                return EXIT_REJECTION;
-            }
-            0
-        }
-        Err(LifecycleFailure::Discovery(e)) => fail_route(report, e.to_string()),
-        Err(LifecycleFailure::Boot(e)) => fail_route(report, e.to_string()),
-    }
 }
 
 /// Pre-boot failure of the shared virtual-store resolution. The two
@@ -1962,10 +1829,7 @@ mod tests {
         .expect("route store builds");
         let request = super::EmbeddedRequest::from_v2(v2(&route_store), Default::default())
             .expect("kind-agreeing store builds a request");
-        assert!(matches!(
-            request,
-            super::EmbeddedRequest::VirtualStore { .. }
-        ));
+        assert_eq!(request.kind, TrailerKind::Route);
 
         // Kind mismatch: a route artifact over a job entry point fails
         // by name before any boot.

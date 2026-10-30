@@ -146,8 +146,9 @@ artifact runtime, never from the compile environment. This crate owns both
 sides of the format: `compile::sources` (`SourceSelection`, `resolve`)
 resolves compile inputs, `compile::policy` collects and confines the R2
 asset-reference matrix, `compile::store` embeds asset entries into the
-store, `compile::trailer` owns the `CAMELTR1` codec (v1 68-byte footer,
-v2 76-byte footer, `decode_artifact` dispatch), `compile::manifest` owns
+store, `compile::trailer` owns the `CAMELTR1` codec (v2 76-byte footer,
+`decode_artifact` dispatch, and the v1-footer tombstone probe; the v1
+68-byte framing itself is deleted), `compile::manifest` owns
 the operational manifest with its independent `manifest_schema: 3`
 (paired with `store_schema: 2`) and `embedded_files` list,
 `compile::materialize` owns the confined per-boot asset materialization,
@@ -236,10 +237,10 @@ metadata (asset paths, classes, lengths, digests), `artifact_kind`,
 listeners — and exits 0 without boot; secret-class entries print only the
 class, length, and digest, the logical path stays withheld, and no asset
 bytes or key material appear in any output or log.
-Decoding yields an `EmbeddedRequest`: v1 trailers adapt to
-`EmbeddedRequest::SingleDocument` with unchanged behavior; v2 trailers
-build `EmbeddedRequest::VirtualStore` with the decoded store, manifest,
-and one entry point. After decode and before the route/job kind dispatch —
+Decoding yields an `EmbeddedRequest` with exactly one shape — the decoded
+virtual store, its manifest, and one entry point — built by
+`EmbeddedRequest::from_v2`; a marked v1 artifact tombstones before this
+point. After decode and before the route/job kind dispatch —
 the single swap point, so both artifact kinds get identical treatment —
 the runtime populates the camel-bundles asset registry from the
 positionally paired store and manifest entries and applies the
@@ -308,7 +309,7 @@ envelope is written after the artifact rename via tmp+rename at mode 0644;
 an envelope failure removes the artifact and exits 2. A signed manifest
 moves to schema 4 with a mandatory `signing` block (algorithm, `blake3:`
 key fingerprint, `required`); unsigned compiles stay schema 3
-byte-identical, and store schema 2 pairs with manifest schema 3 or 4.
+byte-identical, and store schema 2 pairs with manifest schema 3, 4, or 5.
 `compile::signature` owns the codec. At boot, a present envelope is
 verified (parse → algorithm → fingerprint → signature) before dispatch,
 any mismatch exits 2, and a required-but-absent envelope exits 2; an

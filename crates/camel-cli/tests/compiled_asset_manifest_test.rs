@@ -7,7 +7,7 @@
 
 use std::process::Command;
 
-use camel_cli::compile::trailer::{self, DecodedArtifact};
+use camel_cli::compile::trailer;
 
 /// A route whose `xslt:` URI operand references a public-class stylesheet
 /// asset next to the document.
@@ -46,9 +46,7 @@ fn artifact_manifest_prints_assets_without_boot() {
     let decoded = trailer::decode_artifact(&bytes)
         .expect("trailer must be intact")
         .expect("terminal magic must mark the trailer present");
-    let DecodedArtifact::V2(v2) = decoded else {
-        panic!("compile must emit a v2 multi-document artifact");
-    };
+    let v2 = decoded;
     let body: serde_json::Value =
         serde_json::from_slice(&v2.manifest).expect("manifest must be JSON");
     assert_eq!(body["manifest_schema"], 3, "manifest: {body}");

@@ -209,6 +209,10 @@ The directive changes nothing about pin or freshness decisions for
 signed artifacts, and the default stays permissive: a well-formed store
 without the directive changes nothing.
 
+## Amendment: manifest schema tombstones (2026-10-29)
+
+The "Compatibility" paragraph of the 2026-09-26 amendment states that readers accept manifest schemas 2, 3, 4, and 5. That statement is superseded by the ADR-0075 2026-10-29 amendment. Schemas 1 and 2 are tombstones: they fail closed with a payload-free diagnostic naming the declared schema and the recompile remedy. The accepted set is exactly manifest schema 3, 4, or 5 paired with store schema 2. Signing behavior is unchanged.
+
 ## References
 
 - bd rc-osv9x (R4 acceptance criteria); epic rc-rye74

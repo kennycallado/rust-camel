@@ -31,12 +31,13 @@
 //! defaults), `embedded_files` entries carry well-formed digests, kinds,
 //! lengths, classes, and canonical paths (secret-class entries carry a
 //! null path), and the v2 trailer decode additionally enforces the
-//! schema pairing (manifest 3, 4, or 5 ⇔ store 2, manifest 2 ⇔ store 1)
-//! and
+//! schema pairing (manifest 3, 4, or 5 ⇔ store 2) and
 //! agreement between the manifest and the embedded store (same entries
 //! by position, same content digests, path exposed exactly when the
-//! class is public). The schema-less legacy form stays lenient and is
-//! accepted only in v1 trailers.
+//! class is public). Only manifest schemas 3, 4, and 5 are read: the
+//! removed schemas 1 and 2, and a manifest with no `manifest_schema`
+//! field, fail their tombstones naming the schema (or the missing field)
+//! and the recompile remedy before any pairing consideration.
 //!
 //! Derivation runs on the normalized, pre-interpolation document text: the
 //! artifact captures authoring text before `${env:}` resolution, so every
@@ -50,7 +51,7 @@ use regex::Regex;
 use super::CompileError;
 use super::signature;
 use super::store::StoreEntryKind;
-use super::trailer::{FORMAT_VERSION, FORMAT_VERSION_V2, TrailerError, TrailerKind};
+use super::trailer::{TrailerError, TrailerKind};
 
 /// Runtime version recorded in every manifest built by this crate.
 pub const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -76,14 +77,12 @@ pub const MANIFEST_SCHEMA_V4: u64 = 4;
 /// schema-2 store index.
 pub const MANIFEST_SCHEMA_V5: u64 = 5;
 
-/// Manifest schema of an R1-era v2 artifact (the operational fields and
-/// 4-field `embedded_files` entries only). Valid only paired with a
-/// schema-1 store index.
-pub const MANIFEST_SCHEMA_V2: u64 = 2;
+/// Payload-free remedy appended to every removed-schema tombstone.
+const MANIFEST_RECOMPILE_REMEDY: &str = "recompile from source with this version (camel compile)";
 
-/// Manifest schema value of a legacy v1 artifact, whose JSON carried no
-/// `manifest_schema` field at all.
-pub const MANIFEST_SCHEMA_LEGACY: u64 = 1;
+/// Payload-free diagnostic for a manifest with no `manifest_schema` field:
+/// the schema-less legacy form is no longer accepted.
+const MANIFEST_SCHEMA_MISSING: &str = "manifest_schema field is missing: the schema-less legacy form is no longer accepted; recompile from source with this version (camel compile)";
 
 /// Secret-material class of one `embedded_files` entry: `public` for
 /// documents and every non-private-key asset, `secret` for exactly the
@@ -190,9 +189,9 @@ pub struct SigningBlock {
 /// Operational manifest of a compiled artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
-    /// Manifest schema; only [`MANIFEST_SCHEMA`] is written, and
-    /// [`MANIFEST_SCHEMA_V2`] and [`MANIFEST_SCHEMA_LEGACY`] are
-    /// tolerated on decode (each under its own store-schema pairing).
+    /// Manifest schema; only [`MANIFEST_SCHEMA`], [`MANIFEST_SCHEMA_V4`],
+    /// and [`MANIFEST_SCHEMA_V5`] are read, each paired with a schema-2
+    /// store index.
     pub manifest_schema: u64,
     /// Logical source name: input path relative to the compile working
     /// directory. Runtime source identity becomes `compiled://<source_name>`.
@@ -270,52 +269,25 @@ impl Manifest {
         serde_json::to_string(&value).expect("json! of strings and arrays cannot fail") // allow-unwrap
     }
 
-    /// Serialize to the legacy schema-less JSON form carried by v1
-    /// trailers: the operational fields only — no `manifest_schema` (the
-    /// legacy JSON predates the field) and no `embedded_files` (a v1
-    /// artifact embeds exactly the one document named by `source_name`).
-    /// The v1 compile writer uses this so its artifacts decode under the
-    /// version-matched rules; multidoc Task 1.2 switches the writer to the
-    /// v2 store with [`Self::to_canonical_json`]. v1-decode path only;
-    /// retained for legacy artifact reading.
-    pub fn to_legacy_json(&self) -> String {
-        let value = serde_json::json!({
-            "components": self.components,
-            "env_names": self.env_names,
-            "kind": self.kind.as_str(),
-            "listeners": self.listeners,
-            "runtime_version": self.runtime_version,
-            "source_name": self.source_name,
-        });
-        serde_json::to_string(&value).expect("json! of strings and arrays cannot fail") // allow-unwrap
-    }
-
-    /// Parse and validate canonical manifest JSON. The schema is validated
-    /// independently from any trailer version: [`MANIFEST_SCHEMA`] (3),
-    /// [`MANIFEST_SCHEMA_V2`] (2), [`MANIFEST_SCHEMA_V4`] (4),
-    /// [`MANIFEST_SCHEMA_V5`] (5), and the schema-less legacy v1 form are
-    /// accepted, anything else is rejected. The strict per-schema field
-    /// rules apply whenever the declared schema is known:
-    /// `check_schema3_fields` for [`MANIFEST_SCHEMA`],
+    /// Parse and validate canonical manifest JSON. Only schemas 3, 4, and
+    /// 5 are read — each under its own strict field rules
+    /// (`check_schema3_fields` for [`MANIFEST_SCHEMA`],
     /// `check_schema4_fields` for [`MANIFEST_SCHEMA_V4`],
-    /// `check_schema5_fields` for [`MANIFEST_SCHEMA_V5`], and
-    /// `check_schema2_fields` for [`MANIFEST_SCHEMA_V2`]. The
-    /// store-schema pairing is enforced where both schemas are visible —
-    /// in the trailer decode (`decode_artifact`), never here.
+    /// `check_schema5_fields` for [`MANIFEST_SCHEMA_V5`]). A manifest
+    /// with no `manifest_schema` field, or declaring any other schema
+    /// (including the removed schemas 1 and 2), fails closed with the
+    /// recompile remedy. The store-schema pairing is enforced where both
+    /// schemas are visible — in the trailer decode (`decode_artifact`),
+    /// never here.
     pub fn from_canonical_json(bytes: &[u8]) -> Result<Manifest, CompileError> {
         let value: serde_json::Value = serde_json::from_slice(bytes)
             .map_err(|e| CompileError::InvalidDocument(format!("manifest is not JSON: {e}")))?;
-        let schema = manifest_schema_of(&value).map_err(|_| {
-            CompileError::InvalidDocument("manifest schema is not an integer".to_string())
-        })?;
-        if schema != MANIFEST_SCHEMA
-            && schema != MANIFEST_SCHEMA_V2
-            && schema != MANIFEST_SCHEMA_V4
-            && schema != MANIFEST_SCHEMA_V5
-            && schema != MANIFEST_SCHEMA_LEGACY
+        let schema = manifest_schema_of(&value)
+            .map_err(|_| CompileError::InvalidDocument(MANIFEST_SCHEMA_MISSING.to_string()))?;
+        if schema != MANIFEST_SCHEMA && schema != MANIFEST_SCHEMA_V4 && schema != MANIFEST_SCHEMA_V5
         {
             return Err(CompileError::InvalidDocument(format!(
-                "unsupported manifest schema {schema}"
+                "unsupported manifest schema {schema}: {MANIFEST_RECOMPILE_REMEDY}"
             )));
         }
         match schema {
@@ -328,10 +300,11 @@ impl Manifest {
             MANIFEST_SCHEMA_V5 => {
                 check_schema5_fields(&value).map_err(CompileError::InvalidDocument)?;
             }
-            MANIFEST_SCHEMA_V2 => {
-                check_schema2_fields(&value).map_err(CompileError::InvalidDocument)?;
+            _ => {
+                return Err(CompileError::InvalidDocument(format!(
+                    "unsupported manifest schema {schema}: {MANIFEST_RECOMPILE_REMEDY}"
+                )));
             }
-            _ => {}
         }
         let object = |field: &str| {
             value.get(field).and_then(serde_json::Value::as_str).ok_or(
@@ -368,41 +341,34 @@ impl Manifest {
                     "manifest embedded_files is not an array".to_string(),
                 ));
             }
-            // Legacy v1 manifests predate `embedded_files`; absence is the
-            // empty list. For schemas 2 and 3 the field is required, and
-            // the per-schema field check has already rejected its absence.
-            None => Vec::new(),
+            // Unreachable for schemas 3, 4, and 5: `check_schema345_fields`
+            // requires the field. Kept fail-closed rather than defaulting
+            // to an empty list.
+            None => {
+                return Err(CompileError::InvalidDocument(
+                    "manifest embedded_files is missing".to_string(),
+                ));
+            }
         };
         // Schemas 3, 4, and 5 carry `artifact_kind` and
         // `total_embedded_bytes` explicitly (validated by the per-schema
-        // field checks); older schemas predate both, so they are derived
-        // to keep the parsed struct total: the artifact kind from the
-        // trailer kind, and the aggregate from the entry lengths.
-        let (artifact_kind, total_embedded_bytes) = if schema == MANIFEST_SCHEMA
-            || schema == MANIFEST_SCHEMA_V4
-            || schema == MANIFEST_SCHEMA_V5
-        {
-            (
-                object("artifact_kind")?.to_string(),
-                value
-                    .get("total_embedded_bytes")
-                    .and_then(serde_json::Value::as_u64)
-                    .ok_or(CompileError::InvalidDocument(
-                        "manifest carries no total_embedded_bytes integer".to_string(),
-                    ))?,
-            )
-        } else {
-            (
-                artifact_kind_for(kind).to_string(),
-                embedded_files.iter().map(|f| f.length).sum(),
-            )
-        };
+        // field checks).
+        let artifact_kind = object("artifact_kind")?.to_string();
+        let total_embedded_bytes = value
+            .get("total_embedded_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(CompileError::InvalidDocument(
+                "manifest carries no total_embedded_bytes integer".to_string(),
+            ))?;
         // The signing block exists only in schema-4 and schema-5
         // manifests; the per-schema field checks have already rejected
-        // its presence in schemas 2/3 (unknown field) and enforced its
+        // its presence in schema 3 (unknown field) and enforced its
         // shape (freshness included, per schema) in schemas 4/5.
-        // Extraction is gated on schemas 4/5 so the lenient legacy form
-        // never gains a signing block it did not carry.
+        // Extraction is gated on schemas 4/5: schema 3 is the only
+        // accepted unsigned form and never carries a signing block, and
+        // the removed schemas 1 and 2 have already failed the
+        // manifest-schema tombstone above, so they never reach this
+        // extraction.
         let signing = if schema == MANIFEST_SCHEMA_V4 || schema == MANIFEST_SCHEMA_V5 {
             match value.get("signing") {
                 Some(block) => Some(
@@ -432,30 +398,15 @@ impl Manifest {
 }
 
 /// Read the effective manifest schema from parsed manifest JSON: the
-/// `manifest_schema` field, defaulting to the legacy schema when absent.
+/// required `manifest_schema` field. A missing field (or a non-integer
+/// value) is an error — the schema-less legacy form is no longer
+/// accepted.
 pub(crate) fn manifest_schema_of(value: &serde_json::Value) -> Result<u64, ()> {
     match value.get("manifest_schema") {
-        None => Ok(MANIFEST_SCHEMA_LEGACY),
+        None => Err(()),
         Some(v) => v.as_u64().ok_or(()),
     }
 }
-
-/// Every field a schema-2 manifest may carry. Anything else is rejected:
-/// an unrecognized field would silently change meaning without a schema
-/// bump.
-const SCHEMA2_FIELDS: [&str; 8] = [
-    "components",
-    "embedded_files",
-    "env_names",
-    "kind",
-    "listeners",
-    "manifest_schema",
-    "runtime_version",
-    "source_name",
-];
-
-/// Every field an `embedded_files` entry may carry.
-const EMBEDDED_FILE_FIELDS: [&str; 4] = ["digest", "kind", "length", "path"];
 
 /// Every field a schema-3 manifest may carry. Anything else is rejected:
 /// an unrecognized field would silently change meaning without a schema
@@ -507,111 +458,6 @@ fn is_blake3_hex(digest: &str) -> bool {
         && digest
             .bytes()
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-/// Strict field rules for a schema-2 manifest, shared by the
-/// trailer-decode validator and the canonical manifest parser:
-///
-/// - only the declared [`SCHEMA2_FIELDS`] may appear (unknown fields
-///   rejected);
-/// - `kind`, `source_name`, and `runtime_version` are required strings;
-/// - `components`, `env_names`, and `listeners` are required arrays of
-///   strings (wrong types and non-string entries rejected, never
-///   collapsed to defaults);
-/// - `embedded_files` is a required array of typed entries with exactly
-///   the [`EMBEDDED_FILE_FIELDS`]: a 64-character lowercase-hex BLAKE3
-///   `digest`, a known document `kind`, a `length` integer, and a
-///   canonical relative `/` `path` (same rule as store entry paths);
-/// - entries are in canonical path order (strictly ascending, no
-///   duplicates).
-fn check_schema2_fields(value: &serde_json::Value) -> Result<(), String> {
-    let Some(map) = value.as_object() else {
-        return Err("manifest is not a JSON object".to_string());
-    };
-    for key in map.keys() {
-        if !SCHEMA2_FIELDS.contains(&key.as_str()) {
-            return Err(format!("unknown schema-2 manifest field {key:?}"));
-        }
-    }
-    for field in ["kind", "source_name", "runtime_version"] {
-        if value
-            .get(field)
-            .and_then(serde_json::Value::as_str)
-            .is_none()
-        {
-            return Err(format!("schema-2 manifest carries no {field}"));
-        }
-    }
-    for field in ["components", "env_names", "listeners"] {
-        let Some(items) = value.get(field).and_then(serde_json::Value::as_array) else {
-            return Err(format!("schema-2 manifest field {field} is not an array"));
-        };
-        if items.iter().any(|item| item.as_str().is_none()) {
-            return Err(format!(
-                "schema-2 manifest array {field} carries a non-string entry"
-            ));
-        }
-    }
-    let Some(serde_json::Value::Array(items)) = value.get("embedded_files") else {
-        return Err("schema-2 manifest carries no embedded_files array".to_string());
-    };
-    let mut paths = Vec::with_capacity(items.len());
-    for item in items {
-        paths.push(check_embedded_file(item)?);
-    }
-    for window in paths.windows(2) {
-        if window[0] >= window[1] {
-            return Err("embedded_files are not in canonical path order".to_string());
-        }
-    }
-    Ok(())
-}
-
-/// Type- and shape-check one `embedded_files` entry and return its
-/// canonical path.
-fn check_embedded_file(item: &serde_json::Value) -> Result<String, String> {
-    let Some(map) = item.as_object() else {
-        return Err("embedded_files entry is not a JSON object".to_string());
-    };
-    for key in map.keys() {
-        if !EMBEDDED_FILE_FIELDS.contains(&key.as_str()) {
-            return Err(format!("unknown embedded_files field {key:?}"));
-        }
-    }
-    let digest = map
-        .get("digest")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "embedded_files entry carries no digest string".to_string())?;
-    if !is_blake3_hex(digest) {
-        return Err(format!(
-            "embedded_files digest {digest:?} is not 64-character lowercase hex"
-        ));
-    }
-    let kind = map
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "embedded_files entry carries no kind string".to_string())?;
-    // The manifest mirrors every store entry 1:1 (r2embed Task 1.2):
-    // the schema-2 store carries typed asset entries, so embedded_files
-    // entries accept `kind: "asset"` too. Per-asset `asset_class`/`
-    // `class` manifest fields are the schema-3 form (Task 2.2); schema-2
-    // entries keep the R1-era 4-field shape.
-    if StoreEntryKind::from_name(kind).is_none() {
-        return Err(format!("embedded_files entry names unknown kind {kind:?}"));
-    }
-    if map
-        .get("length")
-        .and_then(serde_json::Value::as_u64)
-        .is_none()
-    {
-        return Err("embedded_files entry carries no length integer".to_string());
-    }
-    let path = map
-        .get("path")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "embedded_files entry carries no path string".to_string())?;
-    super::store::validate_path(path).map_err(|e| format!("embedded_files path invalid: {e}"))?;
-    Ok(path.to_string())
 }
 
 /// Type- and shape-check one schema-3 `embedded_files` entry and return
@@ -716,8 +562,8 @@ fn check_embedded_file3(item: &serde_json::Value) -> Result<u64, String> {
     Ok(length)
 }
 
-/// Strict field rules for a schema-3 manifest: the schema-2 rules plus
-/// the asset-aware additions —
+/// Strict field rules for a schema-3 manifest: the shared operational
+/// rules plus the asset-aware additions —
 ///
 /// - only the declared [`SCHEMA3_FIELDS`] may appear;
 /// - `kind`, `source_name`, and `runtime_version` are required strings;
@@ -921,50 +767,34 @@ fn check_signing_block(value: &serde_json::Value, schema5: bool) -> Result<(), S
 
 /// Validate manifest bytes for trailer decode and return the artifact kind.
 ///
-/// Each trailer version accepts exactly its own manifest forms: a v1
-/// trailer carries the schema-less legacy manifest only, and a v2 trailer
-/// requires `manifest_schema: 3` (unsigned), `manifest_schema: 4`
-/// (signed, r4sign), or `manifest_schema: 5` (signed freshness, keypin
-/// Task 2.1) with the strict schema-3/schema-4/schema-5 field rules
+/// Only `manifest_schema: 3` (unsigned), `manifest_schema: 4` (signed,
+/// r4sign), and `manifest_schema: 5` (signed freshness, keypin Task 2.1)
+/// are read, each under its strict field rules
 /// ([`check_schema3_fields`]/[`check_schema4_fields`],
-/// [`check_schema5_fields`]) or the R1-era
-/// `manifest_schema: 2` with the strict schema-2 field rules
-/// ([`check_schema2_fields`]) — which of these is valid for THIS
-/// artifact is decided by the store-schema pairing check in
-/// `decode_artifact` (manifest 3, 4, or 5 ⇔ store 2, manifest 2 ⇔
-/// store 1), the only site that sees both schemas. Fail closed on unknown schemas,
-/// non-JSON bytes, unrecognizable kinds, and incomplete manifests; the
-/// unknown-schema check runs first, so an unknown manifest schema is
-/// named before any pairing consideration.
-pub(crate) fn validate_manifest(
-    manifest: &[u8],
-    trailer_version: u16,
-) -> Result<TrailerKind, TrailerError> {
+/// [`check_schema5_fields`]). Which of these is valid for THIS artifact is
+/// decided by the store-schema pairing check in `decode_artifact`
+/// (manifest 3, 4, or 5 ⇔ store 2), the only site that sees both schemas.
+/// A manifest with no `manifest_schema` field fails closed naming the
+/// missing field; the removed schemas 1 and 2 — and any other unknown
+/// schema — fail their own tombstone naming the schema and the recompile
+/// remedy, before any pairing consideration. Removed schemas therefore
+/// never reach pairing.
+pub(crate) fn validate_manifest(manifest: &[u8]) -> Result<TrailerKind, TrailerError> {
     let value: serde_json::Value =
         serde_json::from_slice(manifest).map_err(|_| TrailerError::InvalidManifest)?;
-    let schema = manifest_schema_of(&value).map_err(|_| TrailerError::InvalidManifest)?;
-    match trailer_version {
-        FORMAT_VERSION => {
-            if schema != MANIFEST_SCHEMA_LEGACY {
-                return Err(TrailerError::InvalidManifestSchema(schema));
-            }
+    let schema = manifest_schema_of(&value)
+        .map_err(|_| TrailerError::InvalidManifestFields(MANIFEST_SCHEMA_MISSING.to_string()))?;
+    match schema {
+        MANIFEST_SCHEMA => {
+            check_schema3_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
         }
-        FORMAT_VERSION_V2 => match schema {
-            MANIFEST_SCHEMA => {
-                check_schema3_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
-            }
-            MANIFEST_SCHEMA_V4 => {
-                check_schema4_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
-            }
-            MANIFEST_SCHEMA_V5 => {
-                check_schema5_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
-            }
-            MANIFEST_SCHEMA_V2 => {
-                check_schema2_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
-            }
-            _ => return Err(TrailerError::InvalidManifestSchema(schema)),
-        },
-        _ => return Err(TrailerError::InvalidVersion(trailer_version)),
+        MANIFEST_SCHEMA_V4 => {
+            check_schema4_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
+        }
+        MANIFEST_SCHEMA_V5 => {
+            check_schema5_fields(&value).map_err(TrailerError::InvalidManifestFields)?;
+        }
+        _ => return Err(TrailerError::InvalidManifestSchema(schema)),
     }
     let kind = value
         .get("kind")
@@ -972,42 +802,6 @@ pub(crate) fn validate_manifest(
         .and_then(TrailerKind::from_name)
         .ok_or(TrailerError::InvalidManifest)?;
     Ok(kind)
-}
-
-/// Derive the manifest from a normalized, pre-interpolation document.
-/// v1-decode path only; retained for legacy artifact reading.
-pub fn derive(
-    source_name: &str,
-    kind: TrailerKind,
-    document: &str,
-) -> Result<Manifest, CompileError> {
-    let root = parse_document(document)
-        .map_err(|e| CompileError::InvalidDocument(format!("not a YAML/JSON document: {e}")))?;
-    let mut components = Vec::new();
-    let mut listeners = Vec::new();
-    walk_document(&root, &mut components, &mut listeners);
-    let env_names = scan_env_names(document);
-    let length = document.len() as u64;
-    Ok(Manifest {
-        manifest_schema: MANIFEST_SCHEMA,
-        source_name: source_name.to_string(),
-        runtime_version: RUNTIME_VERSION.to_string(),
-        kind,
-        artifact_kind: artifact_kind_for(kind).to_string(),
-        components,
-        env_names,
-        listeners,
-        total_embedded_bytes: length,
-        embedded_files: vec![EmbeddedFile {
-            asset_class: None,
-            class: ManifestClass::Public,
-            digest: blake3::hash(document.as_bytes()).to_hex().to_string(),
-            kind: StoreEntryKind::from(kind),
-            length,
-            path: Some(source_name.to_string()),
-        }],
-        signing: None,
-    })
 }
 
 /// Derive the schema-3 manifest for a built virtual store (r2embed Task
@@ -1427,8 +1221,23 @@ mcp:
     tools: []
 ";
 
-    let manifest = derive("routes/app.yaml", TrailerKind::Route, document)
-        .expect("supported document must derive a manifest");
+    let store = super::store::VirtualDocumentStore::build(
+        "routes/app.yaml",
+        &[super::store::StoreDocument {
+            path: "routes/app.yaml".to_string(),
+            kind: StoreEntryKind::Route,
+            bytes: document.as_bytes().to_vec(),
+        }],
+        &[],
+        &["routes/app.yaml".to_string()],
+    )
+    .expect("single-route store must build");
+    let manifest = derive_for_store(
+        &store,
+        TrailerKind::Route,
+        &[("routes/app.yaml".to_string(), document.to_string())],
+    )
+    .expect("supported document must derive a manifest");
 
     assert_eq!(manifest.source_name, "routes/app.yaml");
     assert_eq!(manifest.kind, TrailerKind::Route);
@@ -1708,20 +1517,22 @@ fn secret_manifest_entries_expose_digest_and_length_only() {
 }
 
 /// r2embed Task 2.2 (pairing widened by r4sign Task 1.2 and keypin Task
-/// 2.1): the manifest reader is trailer-version aware and the v2 pairing
-/// is enforced in both directions — the R1-era pair (store 1 + manifest
-/// 2) decodes with null asset classes, an unknown manifest schema fails
-/// with the unknown-schema diagnostic (never a pairing error), a
-/// schema-4 body without its signing block fails under the schema-4
-/// field rules, and BOTH mismatched pairings (store 2 + manifest 2,
-/// store 1 + manifest 3) fail closed with the pairing diagnostic naming
-/// the accepted set. The pairing check itself runs in `decode_artifact`
-/// after the store decode; the cases are exercised end-to-end here
-/// through `decode_artifact`.
+/// 2.1, narrowed by bd rc-n6dof): only manifest schemas 3, 4, and 5 are
+/// read, and store 2 pairs with exactly those. The removed R1-era pair
+/// (store 1 + manifest 2) is a manifest tombstone: manifest validation
+/// precedes the store decode, so the legacy pair surfaces
+/// `InvalidManifestSchema(2)`, never a pairing error. An unknown manifest
+/// schema fails the same way, a schema-4 body without its signing block
+/// fails under the schema-4 field rules, and a current manifest beside a
+/// store-1 index is rejected by the store decoder before pairing runs
+/// (`UnsupportedStoreSchema(1)` with the recompile remedy); the pairing
+/// fail-closed arm survives only as direct-call defense in depth
+/// (`pairing_arm_for_store_one_is_gone` in trailer.rs). The other cases
+/// are exercised end-to-end here through `decode_artifact`.
 #[test]
-fn manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired() {
+fn manifest_pairing_accepts_current_pairs_and_rejects_removed() {
     use super::store::{StoreDocument, VirtualDocumentStore};
-    use super::trailer::{self, DecodedArtifact, TrailerV2};
+    use super::trailer::{self, TrailerV2};
 
     let route_text = "routes:\n- id: r\n  from: direct:r\n";
     let content = route_text.as_bytes().to_vec();
@@ -1736,8 +1547,8 @@ fn manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired() {
 \"source_plan\":{{\"references\":[\"app.yaml\"]}},\
 \"store_schema\":1}}"
     );
-    // Schema-2 manifest (R1 era): the 8 operational fields and 4-field
-    // entries only.
+    // Schema-2 manifest (R1 era, removed): the 8 operational fields and
+    // 4-field entries only.
     let schema2_manifest = format!(
         "{{\"components\":[],\
 \"embedded_files\":[{{\"digest\":\"{digest}\",\"kind\":\"route\",\"length\":{length},\"path\":\"app.yaml\"}}],\
@@ -1745,7 +1556,7 @@ fn manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired() {
 \"runtime_version\":\"{rt}\",\"source_name\":\"app.yaml\"}}",
         rt = RUNTIME_VERSION
     );
-    // Schema-3 manifest: the full paired form for a store-2 index.
+    // Schema-3 manifest: the current paired form for a store-2 index.
     let schema3_manifest = format!(
         "{{\"artifact_kind\":\"server\",\"components\":[],\
 \"embedded_files\":[{{\"asset_class\":null,\"class\":\"public\",\"digest\":\"{digest}\",\"kind\":\"route\",\"length\":{length},\"path\":\"app.yaml\"}}],\
@@ -1754,7 +1565,7 @@ fn manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired() {
         rt = RUNTIME_VERSION
     );
 
-    // A real store-2 store for the paired and unknown-schema cases.
+    // A real store-2 store for the current-pair and tombstone cases.
     let store = VirtualDocumentStore::build(
         "app.yaml",
         &[StoreDocument {
@@ -1777,24 +1588,38 @@ fn manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired() {
         }))
     };
 
-    // 1. The R1-era pair (store 1 + manifest 2) still decodes; its
-    // entries carry null asset classes and implicitly public class.
-    let decoded = decode(v1_index.as_bytes(), &schema2_manifest)
-        .expect("the R1 pair must decode")
+    // 1. The current pair (store 2 + manifest 3) decodes.
+    let v2 = decode(&store2_index, &schema3_manifest)
+        .expect("the current pair must decode")
         .expect("terminal magic must mark the trailer present");
-    let DecodedArtifact::V2(v2) = decoded else {
-        panic!("the R1 pair must decode as DecodedArtifact::V2");
-    };
     let parsed = Manifest::from_canonical_json(&v2.manifest).expect("manifest must validate");
+    assert_eq!(parsed.manifest_schema, MANIFEST_SCHEMA);
     assert_eq!(parsed.embedded_files[0].asset_class, None);
     assert_eq!(parsed.embedded_files[0].class, ManifestClass::Public);
     assert_eq!(parsed.embedded_files[0].path.as_deref(), Some("app.yaml"));
 
-    // 2. Unknown manifest schema (6): the unknown-schema diagnostic runs
+    // 2. The removed store-1/manifest-2 pair is a manifest tombstone:
+    // manifest validation precedes the store decode, so the schema-2 body
+    // is named before the schema-1 index is even decoded.
+    let Err(err) = decode(v1_index.as_bytes(), &schema2_manifest) else {
+        panic!("the legacy pair must tombstone the removed manifest schema 2");
+    };
+    assert_eq!(err, TrailerError::InvalidManifestSchema(2));
+    assert!(
+        err.to_string()
+            .contains("recompile from source with this version"),
+        "the tombstone must carry the remedy: {err}"
+    );
+
+    // 3. A schema-2 body beside a current store fails the same tombstone,
+    // never the pairing check.
+    let Err(TrailerError::InvalidManifestSchema(2)) = decode(&store2_index, &schema2_manifest)
+    else {
+        panic!("store 2 with the removed manifest schema 2 must tombstone");
+    };
+
+    // 4. Unknown manifest schema (6): the unknown-schema diagnostic runs
     // FIRST — never a pairing error — even against a store-2 index.
-    // (Schema 5 became a known reader schema with keypin Task 2.1; a
-    // signing-block-less schema-5 body fails under the schema-5 field
-    // rules instead, exercised by the unit tests.)
     let schema6 = schema3_manifest.replacen("\"manifest_schema\":3", "\"manifest_schema\":6", 1);
     assert!(
         matches!(
@@ -1804,7 +1629,7 @@ fn manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired() {
         "schema 6 must fail with the unknown-schema diagnostic"
     );
 
-    // 3. Schema 4 without the mandatory signing block: named by the
+    // 5. Schema 4 without the mandatory signing block: named by the
     // schema-4 field rules before any pairing consideration.
     let schema4_unsigned =
         schema3_manifest.replacen("\"manifest_schema\":3", "\"manifest_schema\":4", 1);
@@ -1817,31 +1642,18 @@ fn manifest_reader_accepts_schema2_and_rejects_unknown_and_unpaired() {
         "the diagnostic must name the missing signing block: {reason}"
     );
 
-    // 4. store 2 + manifest 2: the un-paired legacy pairing fails closed,
-    // naming the accepted set (manifest 3, 4, or 5).
+    // 6. The reverse pair, a current manifest 3 with store 1, never
+    // reaches the pairing check: the store decoder rejects schema 1 itself
+    // (UnsupportedStoreSchema(1), with the recompile remedy) before
+    // pairing runs. The direct-call defense-in-depth path that bypasses
+    // decode is `pairing_arm_for_store_one_is_gone` in trailer.rs.
+    let Err(TrailerError::InvalidStore(reason)) = decode(v1_index.as_bytes(), &schema3_manifest)
+    else {
+        panic!("store 1 with manifest 3 must fail closed");
+    };
     assert!(
-        matches!(
-            decode(&store2_index, &schema2_manifest),
-            Err(TrailerError::InvalidSchemaPairing {
-                store_schema: 2,
-                manifest_schema: 2,
-                accepted_manifest_schemas: [3, 4, 5],
-            })
-        ),
-        "store 2 with manifest 2 must fail the pairing check"
-    );
-
-    // 5. The reverse pair, manifest 3 with store 1, fails closed too.
-    assert!(
-        matches!(
-            decode(v1_index.as_bytes(), &schema3_manifest),
-            Err(TrailerError::InvalidSchemaPairing {
-                store_schema: 1,
-                manifest_schema: 3,
-                accepted_manifest_schemas: [2],
-            })
-        ),
-        "store 1 with manifest 3 must fail the pairing check"
+        reason.contains("unsupported store schema 1"),
+        "the removed store-1 pairing arm must fail through the store decoder: {reason}"
     );
 }
 
@@ -1870,8 +1682,23 @@ routes:
           value: \"$${arg:lit} ${env:HOST}\"
 ";
 
-    let manifest = derive("args.job.yaml", TrailerKind::Job, document)
-        .expect("declared job document must derive a manifest");
+    let store = super::store::VirtualDocumentStore::build(
+        "args.job.yaml",
+        &[super::store::StoreDocument {
+            path: "args.job.yaml".to_string(),
+            kind: StoreEntryKind::Job,
+            bytes: document.as_bytes().to_vec(),
+        }],
+        &[],
+        &["args.job.yaml".to_string()],
+    )
+    .expect("single-job store must build");
+    let manifest = derive_for_store(
+        &store,
+        TrailerKind::Job,
+        &[("args.job.yaml".to_string(), document.to_string())],
+    )
+    .expect("declared job document must derive a manifest");
 
     assert_eq!(
         manifest.env_names,
@@ -2064,16 +1891,51 @@ mod tests {
 
     #[test]
     fn manifest_derive_rejects_unparsable_document() {
+        use super::super::store::{StoreDocument, VirtualDocumentStore};
+
         // Unclosed flow sequence: neither valid YAML nor valid JSON.
-        let err = derive("x.yaml", TrailerKind::Route, "key: [unclosed")
-            .expect_err("unparsable document must be named");
+        let store = VirtualDocumentStore::build(
+            "x.yaml",
+            &[StoreDocument {
+                path: "x.yaml".to_string(),
+                kind: StoreEntryKind::Route,
+                bytes: b"key: [unclosed".to_vec(),
+            }],
+            &[],
+            &["x.yaml".to_string()],
+        )
+        .expect("store build does not parse document text");
+        let err = derive_for_store(
+            &store,
+            TrailerKind::Route,
+            &[("x.yaml".to_string(), "key: [unclosed".to_string())],
+        )
+        .expect_err("unparsable document must be named");
         assert!(matches!(err, CompileError::InvalidDocument(_)));
     }
 
     #[test]
     fn manifest_rest_defaults_applied_when_fields_absent() {
+        use super::super::store::{StoreDocument, VirtualDocumentStore};
+
         let document = "rest:\n  - operations:\n      - get: /x\n        to: direct:a\n";
-        let manifest = derive("a.yaml", TrailerKind::Route, document).expect("derives");
+        let store = VirtualDocumentStore::build(
+            "a.yaml",
+            &[StoreDocument {
+                path: "a.yaml".to_string(),
+                kind: StoreEntryKind::Route,
+                bytes: document.as_bytes().to_vec(),
+            }],
+            &[],
+            &["a.yaml".to_string()],
+        )
+        .expect("single-route store must build");
+        let manifest = derive_for_store(
+            &store,
+            TrailerKind::Route,
+            &[("a.yaml".to_string(), document.to_string())],
+        )
+        .expect("derives");
         assert_eq!(manifest.listeners, vec!["0.0.0.0:8080"]);
     }
 
@@ -2084,26 +1946,6 @@ mod tests {
              ${env:REQUIRED}",
         );
         assert_eq!(names, vec!["REQUIRED"]);
-    }
-
-    /// A minimal strict-valid schema-2 manifest; every case below mutates
-    /// exactly one rule.
-    fn schema2_json() -> serde_json::Value {
-        serde_json::json!({
-            "components": ["direct"],
-            "embedded_files": [{
-                "digest": blake3::hash(b"doc").to_hex().to_string(),
-                "kind": "route",
-                "length": 3,
-                "path": "routes/a.yaml",
-            }],
-            "env_names": [],
-            "kind": "route",
-            "listeners": [],
-            "manifest_schema": MANIFEST_SCHEMA_V2,
-            "runtime_version": RUNTIME_VERSION,
-            "source_name": "routes/a.yaml",
-        })
     }
 
     fn parse(value: &serde_json::Value) -> Result<Manifest, CompileError> {
@@ -2186,23 +2028,27 @@ mod tests {
         );
     }
 
-    /// Readers accept manifest schemas 2 through 5 — each under its own
-    /// strictness — and still reject schema 6; the schema-5 form parses
-    /// its freshness marker into the typed signing block.
+    /// Readers accept exactly manifest schemas 3, 4, and 5 — each under
+    /// its own strictness — and reject the removed schemas 1 and 2, an
+    /// unknown schema, and a manifest with no `manifest_schema` field with
+    /// the recompile remedy.
     #[test]
-    fn readers_accept_manifest_schemas_2_through_5() {
-        assert!(parse(&schema2_json()).is_ok(), "schema 2 decodes");
-        assert!(
-            parse(&schema345_json(MANIFEST_SCHEMA, None)).is_ok(),
-            "schema 3 decodes"
-        );
-        assert!(
-            parse(&schema345_json(
-                MANIFEST_SCHEMA_V4,
-                Some(signing_json(None))
-            ))
-            .is_ok(),
-            "schema 4 decodes"
+    fn readers_accept_schemas_345_and_reject_removed_and_unknown() {
+        let schema3 = parse(&schema345_json(MANIFEST_SCHEMA, None)).expect("schema 3 decodes");
+        assert_eq!(schema3.manifest_schema, MANIFEST_SCHEMA);
+        assert_eq!(schema3.source_name, "routes/a.yaml");
+        assert_eq!(schema3.artifact_kind, "server");
+
+        let schema4 = parse(&schema345_json(
+            MANIFEST_SCHEMA_V4,
+            Some(signing_json(None)),
+        ))
+        .expect("schema 4 decodes");
+        assert_eq!(schema4.manifest_schema, MANIFEST_SCHEMA_V4);
+        assert_eq!(
+            schema4.signing.as_ref().and_then(|s| s.freshness),
+            None,
+            "schema 4 carries no freshness marker"
         );
 
         let schema5 = schema345_json(5, Some(signing_json(Some(1_700_000_000))));
@@ -2214,38 +2060,82 @@ mod tests {
             "the freshness marker parses into the signing block"
         );
 
-        let mut schema6 = schema5;
-        schema6["manifest_schema"] = serde_json::json!(6);
+        for schema in [1, 2, 6] {
+            let mut value = schema345_json(MANIFEST_SCHEMA, None);
+            value["manifest_schema"] = serde_json::json!(schema);
+            let Err(CompileError::InvalidDocument(reason)) = parse(&value) else {
+                panic!("manifest schema {schema} must be rejected");
+            };
+            assert!(
+                reason.contains(&format!("unsupported manifest schema {schema}")),
+                "the tombstone must name schema {schema}: {reason}"
+            );
+            assert!(
+                reason.contains("recompile from source with this version"),
+                "the tombstone must carry the remedy for schema {schema}: {reason}"
+            );
+        }
+
+        let mut missing = schema345_json(MANIFEST_SCHEMA, None);
+        missing
+            .as_object_mut()
+            .expect("fixture is an object")
+            .remove("manifest_schema");
+        let Err(CompileError::InvalidDocument(reason)) = parse(&missing) else {
+            panic!("a manifest with no manifest_schema field must be rejected");
+        };
         assert!(
-            matches!(
-                parse(&schema6),
-                Err(CompileError::InvalidDocument(reason))
-                    if reason.contains("unsupported manifest schema 6")
-            ),
-            "schema 6 stays unsupported: {:?}",
-            parse(&schema6)
+            reason.contains("manifest_schema field is missing"),
+            "the diagnostic must name the missing field: {reason}"
+        );
+        assert!(
+            reason.contains("recompile from source with this version"),
+            "the diagnostic must carry the remedy: {reason}"
         );
     }
 
-    /// The strict schema-2 field rules: unknown fields, wrong types, bad
-    /// entry shapes, and noncanonical entry order are all rejected by name
-    /// — nothing collapses silently to a default.
+    /// The removed schemas are tombstoned by the trailer-decode validator
+    /// before the store decode, so they never reach the pairing check.
     #[test]
-    fn schema2_manifest_rejects_unknown_fields_wrong_types_and_shapes() {
+    fn validate_manifest_names_removed_schemas_before_pairing() {
+        let schema2 = format!(
+            r#"{{"components":["direct"],"embedded_files":[],"env_names":[],"kind":"route","listeners":[],"manifest_schema":2,"runtime_version":"{rt}","source_name":"routes/main.yaml"}}"#,
+            rt = RUNTIME_VERSION,
+        );
+        let err = validate_manifest(schema2.as_bytes())
+            .expect_err("the removed schema 2 must be tombstoned");
+        assert_eq!(err, TrailerError::InvalidManifestSchema(2));
+        let display = err.to_string();
+        assert!(
+            display.contains("unsupported manifest schema 2"),
+            "the tombstone must name the schema: {display}"
+        );
+        assert!(
+            display.contains("recompile from source with this version"),
+            "the tombstone must carry the remedy: {display}"
+        );
+    }
+
+    /// The strict schema-3 field rules: unknown fields, wrong types, and
+    /// bad entry shapes are all rejected by name — nothing collapses
+    /// silently to a default. Entry order is enforced positionally by the
+    /// trailer decode's manifest/store agreement check, not here.
+    #[test]
+    fn schema3_manifest_rejects_unknown_fields_wrong_types_and_shapes() {
         // The baseline is strict-valid.
-        assert!(parse(&schema2_json()).is_ok());
+        assert!(parse(&schema345_json(MANIFEST_SCHEMA, None)).is_ok());
 
         // Unknown top-level field.
-        let mut value = schema2_json();
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
         value["signed"] = serde_json::json!(true);
         assert!(matches!(
             parse(&value),
             Err(CompileError::InvalidDocument(reason))
-                if reason.contains("unknown schema-2 manifest field \"signed\"")
+                if reason.contains("unknown schema-3 manifest field \"signed\"")
         ));
 
         // Wrong type: a string where `components` must be an array.
-        let mut value = schema2_json();
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
         value["components"] = serde_json::json!("direct");
         assert!(matches!(
             parse(&value),
@@ -2254,7 +2144,7 @@ mod tests {
         ));
 
         // Wrong element type inside a required string array.
-        let mut value = schema2_json();
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
         value["env_names"] = serde_json::json!(["NAME", 7]);
         assert!(matches!(
             parse(&value),
@@ -2263,7 +2153,7 @@ mod tests {
         ));
 
         // Wrong `kind` type.
-        let mut value = schema2_json();
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
         value["kind"] = serde_json::json!(1);
         assert!(matches!(
             parse(&value),
@@ -2271,8 +2161,26 @@ mod tests {
                 if reason.contains("carries no kind")
         ));
 
+        // Wrong `artifact_kind`: must agree with `kind` (route -> server).
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
+        value["artifact_kind"] = serde_json::json!("job");
+        assert!(matches!(
+            parse(&value),
+            Err(CompileError::InvalidDocument(reason))
+                if reason.contains("does not match kind")
+        ));
+
+        // Wrong `total_embedded_bytes`: must equal the entry length sum.
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
+        value["total_embedded_bytes"] = serde_json::json!(4);
+        assert!(matches!(
+            parse(&value),
+            Err(CompileError::InvalidDocument(reason))
+                if reason.contains("does not equal the entry length sum")
+        ));
+
         // Unknown field inside an `embedded_files` entry.
-        let mut value = schema2_json();
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
         value["embedded_files"][0]["digest_algorithm"] = serde_json::json!("blake3");
         assert!(matches!(
             parse(&value),
@@ -2282,7 +2190,7 @@ mod tests {
 
         // Digest shape: not 64 lowercase hex characters.
         for bad in ["ABCD", &"g".repeat(64), &"a".repeat(63)] {
-            let mut value = schema2_json();
+            let mut value = schema345_json(MANIFEST_SCHEMA, None);
             value["embedded_files"][0]["digest"] = serde_json::json!(bad);
             assert!(matches!(
                 parse(&value),
@@ -2294,7 +2202,7 @@ mod tests {
         // Path shape: traversal, backslash, and drive-prefix forms are
         // rejected by the same canonical-path rule as store entry paths.
         for bad in ["../escape.yaml", "routes\\a.yaml", "C:/routes/a.yaml"] {
-            let mut value = schema2_json();
+            let mut value = schema345_json(MANIFEST_SCHEMA, None);
             value["embedded_files"][0]["path"] = serde_json::json!(bad);
             assert!(matches!(
                 parse(&value),
@@ -2303,16 +2211,52 @@ mod tests {
             ));
         }
 
-        // Unknown kind (asset is known since r2embed Task 1.2 — schema-2
-        // manifests mirror the schema-2 store's typed asset entries).
-        let mut value = schema2_json();
-        value["embedded_files"][0]["path"] = serde_json::json!("routes/a.yaml");
+        // Bad entry shapes: an entry must be an object; a document entry
+        // carries a null asset_class; a public entry carries its path; an
+        // asset entry carries its asset_class; the secret class is exactly
+        // the private-key family.
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
+        value["embedded_files"] = serde_json::json!(["not-an-object"]);
+        assert!(matches!(
+            parse(&value),
+            Err(CompileError::InvalidDocument(reason))
+                if reason.contains("not a JSON object")
+        ));
+
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
+        value["embedded_files"][0]["asset_class"] = serde_json::json!("certificate");
+        assert!(matches!(
+            parse(&value),
+            Err(CompileError::InvalidDocument(reason))
+                if reason.contains("must carry a null asset_class")
+        ));
+
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
+        value["embedded_files"][0]["path"] = serde_json::json!(null);
+        assert!(matches!(
+            parse(&value),
+            Err(CompileError::InvalidDocument(reason))
+                if reason.contains("public entry must carry its path")
+        ));
+
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
         value["embedded_files"][0]["kind"] = serde_json::json!("asset");
-        assert!(
-            parse(&value).is_ok(),
-            "asset entries mirror store entries since r2embed Task 1.2"
-        );
-        let mut value = schema2_json();
+        assert!(matches!(
+            parse(&value),
+            Err(CompileError::InvalidDocument(reason))
+                if reason.contains("carries no asset_class string")
+        ));
+
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
+        value["embedded_files"][0]["class"] = serde_json::json!("secret");
+        assert!(matches!(
+            parse(&value),
+            Err(CompileError::InvalidDocument(reason))
+                if reason.contains("does not match its asset_class")
+        ));
+
+        // Unknown kind.
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
         value["embedded_files"][0]["kind"] = serde_json::json!("galaxy");
         assert!(matches!(
             parse(&value),
@@ -2321,53 +2265,12 @@ mod tests {
         ));
 
         // Wrong `length` type.
-        let mut value = schema2_json();
-        value["embedded_files"][0]["kind"] = serde_json::json!("route");
+        let mut value = schema345_json(MANIFEST_SCHEMA, None);
         value["embedded_files"][0]["length"] = serde_json::json!("3");
         assert!(matches!(
             parse(&value),
             Err(CompileError::InvalidDocument(reason))
                 if reason.contains("carries no length integer")
         ));
-
-        // Noncanonical entry order (and, equally, a duplicate path).
-        let mut value = schema2_json();
-        let second = schema2_json()["embedded_files"][0].clone();
-        value["embedded_files"] = serde_json::json!([
-            schema2_json()["embedded_files"][0],
-            { "digest": blake3::hash(b"other").to_hex().to_string(),
-              "kind": "route", "length": 5, "path": "routes/00.yaml" },
-            second,
-        ]);
-        assert!(matches!(
-            parse(&value),
-            Err(CompileError::InvalidDocument(reason))
-                if reason.contains("not in canonical path order")
-        ));
-    }
-
-    /// The v1 writer emits the legacy schema-less form: no
-    /// `manifest_schema`, no `embedded_files`, accepted by the v1 trailer
-    /// validation and rejected as a v2 manifest.
-    #[test]
-    fn legacy_json_omits_schema2_fields_and_validates_as_v1() {
-        let document = "routes:\n- id: a\n  from: direct:a\n";
-        let manifest = derive("routes/app.yaml", TrailerKind::Route, document).expect("derives");
-        let legacy = manifest.to_legacy_json();
-
-        assert!(!legacy.contains("manifest_schema"));
-        assert!(!legacy.contains("embedded_files"));
-        assert!(legacy.contains(r#""kind":"route""#));
-        assert!(legacy.contains(r#""source_name":"routes/app.yaml""#));
-
-        assert_eq!(
-            validate_manifest(legacy.as_bytes(), FORMAT_VERSION),
-            Ok(TrailerKind::Route),
-            "the transitional v1 writer must produce decodable v1 artifacts"
-        );
-        assert_eq!(
-            validate_manifest(legacy.as_bytes(), FORMAT_VERSION_V2),
-            Err(TrailerError::InvalidManifestSchema(MANIFEST_SCHEMA_LEGACY))
-        );
     }
 }

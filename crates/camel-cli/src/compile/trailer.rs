@@ -1,47 +1,41 @@
 //! Deterministic EOF trailer codec for compiled artifacts.
 //!
-//! The `CAMELTR1` family has two versions. Version 1 appends
-//! `payload || manifest || fixed footer` to the executable; the exact 68-byte
-//! footer is `CAMELTR1` magic (8), little-endian `u16` version 1, `u8` kind
-//! (`1=route`, `2=job`), zero reserved `u8`, little-endian `u64` payload
-//! length, little-endian `u64` manifest length, 32-byte BLAKE3, and terminal
-//! `CAMELTR1` magic (8).
-//!
-//! Version 2 appends `CAMELTR1 || content || index || manifest || footer`;
+//! Artifacts append `CAMELTR1 || content || index || manifest || footer`;
 //! the exact 76-byte footer is `CAMELTR1` magic (8), little-endian `u16`
 //! version 2, `u8` kind (`1=route`, `2=job`), zero flags `u8`, little-endian
 //! `u64` content length, `u64` index length, `u64` manifest length, 32-byte
 //! BLAKE3, and terminal `CAMELTR1` magic (8). The leading magic keeps the
-//! family marker so old readers recognize a marked artifact and reject the
-//! unsupported version instead of treating it as a trailer-free executable.
+//! family marker so a marked artifact is recognized and an unsupported
+//! version is rejected instead of being treated as a trailer-free executable.
 //!
-//! Checksum domains: ASCII `rust-camel-trailer-v1` (v1) or
-//! `rust-camel-trailer-v2` (v2), one `0x00` byte, then the little-endian
-//! encoded version, kind, and length fields, followed by the payload (v1) or
-//! content/index/manifest (v2). Both magic fields and the reserved/flags
+//! The v2 checksum domain is ASCII `rust-camel-trailer-v2`, one `0x00`
+//! byte, then the little-endian encoded version, kind, and length fields,
+//! followed by content/index/manifest. Both magic fields and the flags
 //! byte are excluded.
+//!
+//! The version-1 framing (`payload || manifest || 68-byte footer`) is
+//! deleted. Only its footer length survives, so a marked v1 image
+//! tombstones with [`TrailerError::InvalidVersion`] naming version 1 and
+//! the recompile remedy instead of adapting to a one-entry store.
 //!
 //! Decode distinguishes an absent trailer (no exact terminal magic — the
 //! image is indistinguishable from a trailer-free executable and the caller
 //! falls through to normal CLI behavior) from marked corruption (terminal
 //! magic present but any field, bound, or checksum invalid — fail closed).
-//! A v2-capable reader decodes a v1 artifact as a one-entry virtual store;
-//! a v1 reader rejects v2 as an unsupported version, and a marked
-//! v2-family footer carrying any other version fails closed with that
+//! A marked footer carrying any version other than 2 fails closed with that
 //! unsupported version named. A v2 decode applies
 //! the strict version-matched manifest rules (schema 3 — the asset-aware
 //! form with `asset_class`, the secret-material `class`, null paths for
 //! secret-class entries, `total_embedded_bytes`, and `artifact_kind` —
 //! schema 4 (r4sign) — the schema-3 fields plus the mandatory `signing`
-//! block — schema 5 (keypin) — the schema-4 signing block plus the
-//! mandatory `freshness` marker — or the R1-era schema 2, each with
-//! typed required fields, no unknown fields, and canonical embedded
-//! digests; the schema-less legacy form only in v1), validates the
-//! content/index sections through the canonical
-//! [`VirtualDocumentStore`] decoder, enforces the schema pairing
-//! (manifest 3, 4, or 5 ⇔ store 2, manifest 2 ⇔ store 1 — only when both
-//! schemas are known values, so unknown-schema diagnostics are named
-//! first) and
+//! block — and schema 5 (keypin) — the schema-4 signing block plus the
+//! mandatory `freshness` marker — each with typed required fields, no
+//! unknown fields, and canonical embedded digests; the removed schemas 1
+//! and 2, and the schema-less legacy form, fail their tombstones), validates
+//! the content/index sections through the canonical
+//! `VirtualDocumentStore` decoder, enforces the schema pairing
+//! (manifest 3, 4, or 5 ⇔ store 2 — defense in depth behind the manifest
+//! and store validators, since removed schemas never reach it) and
 //! the typed reference
 //! invariants (entry point, configuration references, and source plan must
 //! agree with the artifact kind), and enforces manifest/store agreement
@@ -56,18 +50,15 @@ use std::io::{self, Read, Seek, SeekFrom};
 
 use super::CompileError;
 use super::manifest;
-use super::store::{
-    STORE_SCHEMA, SourcePlan, StoreEntry, StoreEntryKind, StoreIndex, VirtualDocumentStore,
-};
+use super::store::StoreIndex;
 
 /// Leading and terminal footer magic.
 pub const MAGIC: [u8; 8] = *b"CAMELTR1";
 
-/// Exact footer size in bytes.
-pub const FOOTER_LEN: usize = 68;
-
-/// Trailer format version written by `encode` and required by `decode`.
-pub const FORMAT_VERSION: u16 = 1;
+/// Exact v1 footer size in bytes. v1 framing is otherwise deleted; the
+/// length survives only so a marked v1 image is recognized and tombstoned
+/// with [`TrailerError::InvalidVersion`] instead of being misparsed.
+const FOOTER_LEN_V1: usize = 68;
 
 /// Exact v2 footer size in bytes: magic (8), version (2), kind (1), flags
 /// (1), three lengths (24), BLAKE3 (32), terminal magic (8).
@@ -76,9 +67,6 @@ pub const FOOTER_LEN_V2: usize = 76;
 /// Trailer format version written by `encode_v2` and required by the v2
 /// branch of `decode_artifact`.
 pub const FORMAT_VERSION_V2: u16 = 2;
-
-/// ASCII domain separator prefixed to every v1 checksum input.
-const CHECKSUM_DOMAIN: &[u8] = b"rust-camel-trailer-v1";
 
 /// ASCII domain separator prefixed to every v2 checksum input.
 const CHECKSUM_DOMAIN_V2: &[u8] = b"rust-camel-trailer-v2";
@@ -139,16 +127,15 @@ impl TrailerKind {
 /// magic was present, so the caller must fail closed instead of falling back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrailerError {
-    /// Terminal magic present but fewer than [`FOOTER_LEN`] trailing bytes.
+    /// Terminal magic present but fewer than [`FOOTER_LEN_V2`] trailing bytes.
     Truncated,
     /// Leading footer magic is not [`MAGIC`].
     InvalidMagic,
-    /// Footer version is not [`FORMAT_VERSION`].
+    /// Footer declares an unsupported artifact version (the removed v1
+    /// framing tombstones here).
     InvalidVersion(u16),
     /// Footer kind byte is neither `1` nor `2`.
     InvalidKind(u8),
-    /// Reserved byte is not zero.
-    InvalidReserved(u8),
     /// v2 flags byte is not zero.
     InvalidFlags(u8),
     /// Payload and manifest lengths overflow when added.
@@ -161,15 +148,16 @@ pub enum TrailerError {
     KindMismatch,
     /// Manifest is not JSON with a recognizable `kind` field.
     InvalidManifest,
-    /// Manifest fails the strict field rules of its trailer version (for
-    /// example a schema-2 manifest without `embedded_files` or a required
+    /// Manifest fails the strict field rules of its declared schema (for
+    /// example a schema-3 manifest without `embedded_files` or a required
     /// typed string field).
     InvalidManifestFields(String),
-    /// Manifest declares a `manifest_schema` the reader does not support.
+    /// Manifest declares a `manifest_schema` the reader does not support,
+    /// including the removed schemas 1 and 2.
     InvalidManifestSchema(u64),
     /// Manifest schema is not an accepted pair of the store index schema
-    /// (store 2 pairs with manifest 3, 4, or 5; store 1 ⇔ manifest 2).
-    /// Checked only when both schemas are known values.
+    /// (store 2 pairs with manifest 3, 4, or 5). Checked only when both
+    /// schemas are known values.
     InvalidSchemaPairing {
         /// The decoded store index schema.
         store_schema: u64,
@@ -190,9 +178,12 @@ impl fmt::Display for TrailerError {
                 "trailer is truncated (terminal magic present, footer incomplete)"
             ),
             Self::InvalidMagic => write!(f, "trailer header magic is not {MAGIC:?}"),
-            Self::InvalidVersion(v) => write!(f, "unsupported trailer version {v}"),
+            Self::InvalidVersion(v) => write!(
+                f,
+                "unsupported compiled artifact version {v}: recompile from source with this \
+                 version (camel compile)"
+            ),
             Self::InvalidKind(k) => write!(f, "invalid trailer kind byte {k}"),
-            Self::InvalidReserved(r) => write!(f, "trailer reserved byte is {r}, must be zero"),
             Self::InvalidFlags(flags) => {
                 write!(f, "trailer flags byte is {flags}, must be zero")
             }
@@ -204,9 +195,11 @@ impl fmt::Display for TrailerError {
             Self::InvalidManifestFields(reason) => {
                 write!(f, "manifest does not satisfy its schema: {reason}")
             }
-            Self::InvalidManifestSchema(schema) => {
-                write!(f, "unsupported manifest schema {schema}")
-            }
+            Self::InvalidManifestSchema(schema) => write!(
+                f,
+                "unsupported manifest schema {schema}: recompile from source with this version \
+                 (camel compile)"
+            ),
             Self::InvalidSchemaPairing {
                 store_schema,
                 manifest_schema,
@@ -224,15 +217,6 @@ impl fmt::Display for TrailerError {
 
 impl std::error::Error for TrailerError {}
 
-/// One embedded document: its kind, normalized payload bytes, and canonical
-/// manifest bytes (in that order in the encoded image).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Trailer {
-    pub kind: TrailerKind,
-    pub payload: Vec<u8>,
-    pub manifest: Vec<u8>,
-}
-
 /// A v2 artifact's three sections in encoded order: content (the store's
 /// document bytes), index (canonical store-index JSON), and manifest
 /// (canonical operational-manifest JSON).
@@ -242,192 +226,6 @@ pub struct TrailerV2 {
     pub content: Vec<u8>,
     pub index: Vec<u8>,
     pub manifest: Vec<u8>,
-}
-
-/// Result of a version-aware artifact decode: a legacy v1 single-document
-/// trailer, or a v2 multi-document store artifact.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DecodedArtifact {
-    /// Legacy v1 single-document trailer; expose it as a one-entry store
-    /// with [`Trailer::to_single_entry_store`].
-    V1(Trailer),
-    /// v2 multi-document store artifact.
-    V2(TrailerV2),
-}
-
-impl Trailer {
-    /// Expose a v1 single-document artifact as a one-entry virtual store:
-    /// the manifest's `source_name` becomes the entry path and logical
-    /// entry point, and the payload becomes the entry content.
-    ///
-    /// Legacy provenance rule: v1 `source_name`s predate the strict v2
-    /// canonical-path rule, and existing artifacts legitimately carry
-    /// absolute names (`/abs/dir/app.yaml`) or parent-relative names
-    /// (`../shared/app.yaml`) — the v1 writer preserved the operator's
-    /// input path. The adaptation therefore preserves the name verbatim
-    /// instead of applying [`super::store::validate_path`], which stays a
-    /// v2-only rule. Only a missing, empty, or NUL-carrying identity is
-    /// unusable source identity and fails closed; the one-entry layout
-    /// itself is canonical (offset 0, exactly covering the payload).
-    pub fn to_single_entry_store(&self) -> Result<VirtualDocumentStore, TrailerError> {
-        let value: serde_json::Value =
-            serde_json::from_slice(&self.manifest).map_err(|_| TrailerError::InvalidManifest)?;
-        let source_name = value
-            .get("source_name")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(TrailerError::InvalidManifest)?;
-        if source_name.is_empty() || source_name.contains('\0') {
-            return Err(TrailerError::InvalidManifest);
-        }
-        Ok(VirtualDocumentStore {
-            content: self.payload.clone(),
-            index: StoreIndex {
-                config_references: Vec::new(),
-                entry_point: source_name.to_string(),
-                entries: vec![StoreEntry {
-                    asset_class: None,
-                    kind: StoreEntryKind::from(self.kind),
-                    length: self.payload.len() as u64,
-                    offset: 0,
-                    path: source_name.to_string(),
-                }],
-                source_plan: SourcePlan {
-                    references: vec![source_name.to_string()],
-                },
-                store_schema: STORE_SCHEMA,
-                substitutions: Vec::new(),
-            },
-        })
-    }
-}
-
-/// Build the checksum domain bytes: `rust-camel-trailer-v1`, `0x00`, then the
-/// little-endian version/kind/length fields, payload, and manifest.
-fn checksum_domain(
-    version: u16,
-    kind: u8,
-    payload_len: u64,
-    manifest_len: u64,
-    payload: &[u8],
-    manifest: &[u8],
-) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(
-        CHECKSUM_DOMAIN.len() + 1 + 2 + 1 + 8 + 8 + payload.len() + manifest.len(),
-    );
-    buf.extend_from_slice(CHECKSUM_DOMAIN);
-    buf.push(0x00);
-    buf.extend_from_slice(&version.to_le_bytes());
-    buf.push(kind);
-    buf.extend_from_slice(&payload_len.to_le_bytes());
-    buf.extend_from_slice(&manifest_len.to_le_bytes());
-    buf.extend_from_slice(payload);
-    buf.extend_from_slice(manifest);
-    buf
-}
-
-/// Encode `payload || manifest || footer`.
-pub fn encode(trailer: &Trailer) -> Vec<u8> {
-    let mut out = Vec::with_capacity(trailer.payload.len() + trailer.manifest.len() + FOOTER_LEN);
-    out.extend_from_slice(&trailer.payload);
-    out.extend_from_slice(&trailer.manifest);
-
-    let mut footer = [0u8; FOOTER_LEN];
-    footer[0..8].copy_from_slice(&MAGIC);
-    footer[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
-    footer[10] = trailer.kind.disc();
-    // footer[11]: reserved byte stays zero.
-    footer[12..20].copy_from_slice(&(trailer.payload.len() as u64).to_le_bytes());
-    footer[20..28].copy_from_slice(&(trailer.manifest.len() as u64).to_le_bytes());
-    let checksum = blake3::hash(&checksum_domain(
-        FORMAT_VERSION,
-        trailer.kind.disc(),
-        trailer.payload.len() as u64,
-        trailer.manifest.len() as u64,
-        &trailer.payload,
-        &trailer.manifest,
-    ));
-    footer[28..60].copy_from_slice(checksum.as_bytes());
-    footer[60..68].copy_from_slice(&MAGIC);
-    out.extend_from_slice(&footer);
-    out
-}
-
-/// Decode the trailer from an artifact image.
-///
-/// Returns `Ok(None)` when the image cannot contain a trailer (shorter than
-/// the magic, or the final 8 bytes are not the exact terminal magic) — the
-/// caller falls through to normal CLI behavior. Returns `Err` only for MARKED
-/// corruption: the terminal magic is present but the footer is truncated,
-/// malformed, out of bounds, checksum-invalid, or disagrees with its
-/// manifest.
-pub fn decode(bytes: &[u8]) -> Result<Option<Trailer>, TrailerError> {
-    if bytes.len() < MAGIC.len() || bytes[bytes.len() - MAGIC.len()..] != MAGIC {
-        return Ok(None);
-    }
-    // Terminal magic is exact: everything past this point is marked.
-    if bytes.len() < FOOTER_LEN {
-        return Err(TrailerError::Truncated);
-    }
-    let footer = &bytes[bytes.len() - FOOTER_LEN..];
-
-    if footer[0..8] != MAGIC {
-        return Err(TrailerError::InvalidMagic);
-    }
-    let mut field2 = [0u8; 2];
-    field2.copy_from_slice(&footer[8..10]);
-    let version = u16::from_le_bytes(field2);
-    if version != FORMAT_VERSION {
-        return Err(TrailerError::InvalidVersion(version));
-    }
-    let kind_disc = footer[10];
-    let kind = TrailerKind::from_disc(kind_disc).ok_or(TrailerError::InvalidKind(kind_disc))?;
-    let reserved = footer[11];
-    if reserved != 0 {
-        return Err(TrailerError::InvalidReserved(reserved));
-    }
-
-    let mut field8 = [0u8; 8];
-    field8.copy_from_slice(&footer[12..20]);
-    let payload_len = u64::from_le_bytes(field8);
-    field8.copy_from_slice(&footer[20..28]);
-    let manifest_len = u64::from_le_bytes(field8);
-
-    let total_len = payload_len
-        .checked_add(manifest_len)
-        .ok_or(TrailerError::LengthOverflow)?;
-    let data_end = bytes.len() - FOOTER_LEN;
-    if total_len > data_end as u64 {
-        return Err(TrailerError::LengthOutOfBounds);
-    }
-
-    // Bounded by `data_end`, so the usize casts cannot truncate.
-    let payload_start = data_end - total_len as usize;
-    let payload_end = payload_start + payload_len as usize;
-    let payload = &bytes[payload_start..payload_end];
-    let manifest = &bytes[payload_end..data_end];
-
-    let checksum = blake3::hash(&checksum_domain(
-        version,
-        kind_disc,
-        payload_len,
-        manifest_len,
-        payload,
-        manifest,
-    ));
-    if checksum.as_bytes() != &footer[28..60] {
-        return Err(TrailerError::ChecksumMismatch);
-    }
-
-    let manifest_kind = manifest::validate_manifest(manifest, FORMAT_VERSION)?;
-    if manifest_kind != kind {
-        return Err(TrailerError::KindMismatch);
-    }
-
-    Ok(Some(Trailer {
-        kind,
-        payload: payload.to_vec(),
-        manifest: manifest.to_vec(),
-    }))
 }
 
 /// Build the v2 checksum domain bytes: `rust-camel-trailer-v2`, `0x00`, then
@@ -572,7 +370,7 @@ fn decode_v2_marked(bytes: &[u8]) -> Result<TrailerV2, TrailerError> {
         return Err(TrailerError::ChecksumMismatch);
     }
 
-    let manifest_kind = manifest::validate_manifest(manifest, FORMAT_VERSION_V2)?;
+    let manifest_kind = manifest::validate_manifest(manifest)?;
     if manifest_kind != kind {
         return Err(TrailerError::KindMismatch);
     }
@@ -590,9 +388,9 @@ fn decode_v2_marked(bytes: &[u8]) -> Result<TrailerV2, TrailerError> {
     super::store::validate_typed_references(&decoded_index, kind)
         .map_err(|e| TrailerError::InvalidStore(e.to_string()))?;
 
-    // Manifest/store agreement: the schema-2 manifest must describe the
-    // very store embedded next to it — same entries in the same canonical
-    // order, with matching kinds, lengths, and content digests.
+    // Manifest/store agreement: the manifest must describe the very store
+    // embedded next to it — same entries in the same canonical order, with
+    // matching kinds, lengths, and content digests.
     validate_manifest_store_agreement(manifest, content, &decoded_index)?;
 
     Ok(TrailerV2 {
@@ -606,21 +404,20 @@ fn decode_v2_marked(bytes: &[u8]) -> Result<TrailerV2, TrailerError> {
 /// Enforce the v2 schema pairing (r2embed Task 2.2, design "nit a";
 /// widened by r4sign Task 1.2 and keypin Task 2.1): `manifest_schema: 3`
 /// (unsigned), `manifest_schema: 4` (signed), or `manifest_schema: 5`
-/// (signed freshness) is valid only with `store_schema: 2`, and
-/// `manifest_schema: 2` (the R1-era form) only with `store_schema: 1`,
-/// because the substitution table and asset classes only exist when both
-/// halves evolve together. Runs AFTER `StoreIndex::decode`, so an unknown
-/// store schema is already named by its own decoder ("unsupported store
-/// schema N"); an unknown manifest schema was already named by
-/// `validate_manifest` before the store decode. This check therefore only
-/// ever sees known schema values, and rejects the mismatched pairs in
-/// both directions, with the error carrying the accepted schema set.
+/// (signed freshness) is valid only with `store_schema: 2`, because the
+/// substitution table and asset classes only exist when both halves
+/// evolve together. This check is defense in depth behind the manifest
+/// and store validators: `validate_manifest` tombstones every schema
+/// other than 3, 4, and 5 (including the removed schemas 1 and 2) before
+/// the store decode, and `StoreIndex::decode` names an unsupported store
+/// schema first. It runs AFTER `StoreIndex::decode`, so the only
+/// surviving case is a current manifest beside a store schema this arm
+/// does not accept; the fail-closed `other` arm rejects that pairing.
 fn enforce_schema_pairing(index: &StoreIndex, manifest: &[u8]) -> Result<(), TrailerError> {
     let value: serde_json::Value =
         serde_json::from_slice(manifest).map_err(|_| TrailerError::InvalidManifest)?;
     let schema = manifest::manifest_schema_of(&value).map_err(|_| TrailerError::InvalidManifest)?;
     let accepted: &'static [u64] = match index.store_schema {
-        1 => &[manifest::MANIFEST_SCHEMA_V2],
         2 => &[
             manifest::MANIFEST_SCHEMA,
             manifest::MANIFEST_SCHEMA_V4,
@@ -628,7 +425,8 @@ fn enforce_schema_pairing(index: &StoreIndex, manifest: &[u8]) -> Result<(), Tra
         ],
         // Unreachable through `decode_v2_marked` (the store decoder fails
         // closed on any other schema first); kept fail-closed for defense
-        // in depth so a hand-routed index cannot bypass the pairing.
+        // in depth so a hand-routed index cannot bypass the pairing. The
+        // removed store-1/manifest-2 arm is gone.
         other => {
             return Err(TrailerError::InvalidStore(format!(
                 "unsupported store schema {other}"
@@ -740,36 +538,54 @@ fn validate_manifest_store_agreement(
 ///
 /// Returns `Ok(None)` when the image cannot contain a trailer (shorter than
 /// the magic, or the final 8 bytes are not the exact terminal magic).
-/// Otherwise the version is taken from the candidate 76-byte footer window
-/// and dispatch is decided by the v2-family evidence, before any v1
-/// parsing: a window declaring version 2 decodes through the v2 codec (for
-/// a genuine v1 image that window field aliases the first two bytes of the
-/// v1 footer magic `"CA"`, so it can never read as 2); a window declaring
-/// any other version falls to the v1 codec ONLY when the last
-/// [`FOOTER_LEN`] bytes still open with the family magic (a genuine v1
-/// footer always does), and is named [`TrailerError::InvalidVersion`]
-/// otherwise — a marked v2-family footer with an unsupported version must
-/// not surface as a v1 magic error. A v1 result is wrapped as
-/// [`DecodedArtifact::V1`]; expose its one-entry store with
-/// [`Trailer::to_single_entry_store`].
-pub fn decode_artifact(bytes: &[u8]) -> Result<Option<DecodedArtifact>, TrailerError> {
+/// Otherwise the version is taken from the candidate 76-byte footer window:
+/// a window declaring version 2 decodes through the v2 codec. A window
+/// declaring any other version fails closed with
+/// [`TrailerError::InvalidVersion`] naming the declared version. When the
+/// last `FOOTER_LEN_V1` bytes open with the family magic, that footer
+/// declares the version, so a genuine v1 image tombstones as version 1
+/// instead of surfacing a nonsense version aliased from its magic bytes.
+/// The version-1 framing is otherwise deleted: no v1 payload, manifest, or
+/// checksum is parsed and no one-entry store is adapted. The tombstone error
+/// is payload-free.
+///
+/// The probe-tail equivalence is preserved: every byte this function reads
+/// lies in the footer window or the `FOOTER_LEN_V1` tail, both of which
+/// [`read_probe_tail`] always returns.
+pub fn decode_artifact(bytes: &[u8]) -> Result<Option<TrailerV2>, TrailerError> {
     if bytes.len() < MAGIC.len() || bytes[bytes.len() - MAGIC.len()..] != MAGIC {
         return Ok(None);
     }
     if bytes.len() >= FOOTER_LEN_V2 {
         let window = &bytes[bytes.len() - FOOTER_LEN_V2..];
-        let mut field2 = [0u8; 2];
-        field2.copy_from_slice(&window[8..10]);
-        let version = u16::from_le_bytes(field2);
+        let version = u16::from_le_bytes([window[8], window[9]]);
         if version == FORMAT_VERSION_V2 {
-            return decode_v2_marked(bytes).map(DecodedArtifact::V2).map(Some);
+            return decode_v2_marked(bytes).map(Some);
         }
-        let footer_start = bytes.len() - FOOTER_LEN;
-        if bytes[footer_start..footer_start + MAGIC.len()] != MAGIC {
-            return Err(TrailerError::InvalidVersion(version));
+        if let Some(declared) = declared_v1_version(bytes) {
+            return Err(TrailerError::InvalidVersion(declared));
         }
+        return Err(TrailerError::InvalidVersion(version));
     }
-    decode(bytes).map(|trailer| trailer.map(DecodedArtifact::V1))
+    // A marked image shorter than the v2 window: only a complete v1-shaped
+    // footer can name a version; anything else is marked truncation.
+    if let Some(declared) = declared_v1_version(bytes) {
+        return Err(TrailerError::InvalidVersion(declared));
+    }
+    Err(TrailerError::Truncated)
+}
+
+/// The version declared by a v1-shaped footer (the last [`FOOTER_LEN_V1`]
+/// bytes opening with [`MAGIC`]), if the image is long enough to carry one.
+fn declared_v1_version(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < FOOTER_LEN_V1 {
+        return None;
+    }
+    let footer = &bytes[bytes.len() - FOOTER_LEN_V1..];
+    if footer[..MAGIC.len()] != MAGIC {
+        return None;
+    }
+    Some(u16::from_le_bytes([footer[8], footer[9]]))
 }
 
 /// Read the smallest tail slice of an image that carries every byte
@@ -835,14 +651,10 @@ fn probe_declared_span(footer_win: &[u8]) -> u64 {
             .saturating_add(le_u64(&footer_win[28..36]));
         return sections.saturating_add(FOOTER_LEN_V2 as u64 + MAGIC.len() as u64);
     }
-    let v1_footer = &footer_win[footer_win.len() - FOOTER_LEN..];
-    if v1_footer[0..MAGIC.len()] != MAGIC {
-        // Unsupported v2-family version: decode_artifact fails on the
-        // footer window alone; no section bytes are needed.
-        return FOOTER_LEN_V2 as u64;
-    }
-    let sections = le_u64(&v1_footer[12..20]).saturating_add(le_u64(&v1_footer[20..28]));
-    sections.saturating_add(FOOTER_LEN as u64)
+    // Unsupported versions — including a v1-shaped footer — tombstone on
+    // the footer window alone; no section bytes are needed. The
+    // `read_probe_tail` floor keeps the tail at least this wide.
+    FOOTER_LEN_V2 as u64
 }
 
 /// Little-endian `u64` from the first 8 bytes of `win`.
@@ -908,202 +720,26 @@ pub fn normalize_documents(
 // Extra coverage lives in `mod tests` below.
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
-const PAYLOAD: &[u8] = b"routes:\n- id: r\n  from: direct:start\n";
-#[cfg(test)]
-const MANIFEST: &[u8] = br#"{"kind":"route","source_name":"routes/route.yaml"}"#;
-
-#[cfg(test)]
-fn sample(kind: TrailerKind) -> Trailer {
-    Trailer {
-        kind,
-        payload: PAYLOAD.to_vec(),
-        manifest: MANIFEST.to_vec(),
-    }
-}
-
-/// Rewrite the footer checksum so it covers the current (mutated) footer
-/// fields and data — simulating corruption that stays checksum-consistent
-/// so later checks (kind, reserved) surface by name.
-#[cfg(test)]
-fn reseal(mut encoded: Vec<u8>) -> Vec<u8> {
-    let f = encoded.len() - FOOTER_LEN;
-    let mut b2 = [0u8; 2];
-    b2.copy_from_slice(&encoded[f + 8..f + 10]);
-    let version = u16::from_le_bytes(b2);
-    let kind = encoded[f + 10];
-    let mut b8 = [0u8; 8];
-    b8.copy_from_slice(&encoded[f + 12..f + 20]);
-    let payload_len = u64::from_le_bytes(b8);
-    b8.copy_from_slice(&encoded[f + 20..f + 28]);
-    let manifest_len = u64::from_le_bytes(b8);
-    let data_end = f;
-    let payload_start = data_end - (payload_len + manifest_len) as usize;
-    let payload = &encoded[payload_start..payload_start + payload_len as usize];
-    let manifest = &encoded[payload_start + payload_len as usize..data_end];
-    let sum = blake3::hash(&checksum_domain(
-        version,
-        kind,
-        payload_len,
-        manifest_len,
-        payload,
-        manifest,
-    ));
-    encoded[f + 28..f + 60].copy_from_slice(sum.as_bytes());
-    encoded
-}
-
-#[test]
-fn trailer_round_trip_preserves_payload_and_manifest() {
-    let trailer = sample(TrailerKind::Route);
-    let encoded = encode(&trailer);
-    let decoded = decode(&encoded)
-        .expect("valid encoding must decode")
-        .expect("terminal magic must mark the trailer present");
-
-    assert_eq!(decoded.payload, PAYLOAD);
-    assert_eq!(decoded.manifest, MANIFEST);
-    assert_eq!(decoded.kind, TrailerKind::Route);
-
-    // Exact checksum: footer BLAKE3 equals the recomputed domain hash.
-    let footer = &encoded[encoded.len() - FOOTER_LEN..];
-    let expected = blake3::hash(&checksum_domain(
-        FORMAT_VERSION,
-        TrailerKind::Route.disc(),
-        PAYLOAD.len() as u64,
-        MANIFEST.len() as u64,
-        PAYLOAD,
-        MANIFEST,
-    ));
-    assert_eq!(&footer[28..60], expected.as_bytes());
-}
-
-#[test]
-fn trailer_encoding_uses_exact_68_byte_footer() {
-    let payload = b"payload";
-    let manifest: &[u8] = br#"{"kind":"job"}"#;
-    let encoded = encode(&Trailer {
-        kind: TrailerKind::Job,
-        payload: payload.to_vec(),
-        manifest: manifest.to_vec(),
-    });
-
-    assert_eq!(encoded.len(), payload.len() + manifest.len() + 68);
-    assert_eq!(&encoded[..payload.len()], payload);
-    assert_eq!(
-        &encoded[payload.len()..payload.len() + manifest.len()],
-        manifest
-    );
-
-    let footer = &encoded[encoded.len() - 68..];
-    assert_eq!(&footer[0..8], &MAGIC, "leading magic");
-    assert_eq!(&footer[8..10], &1u16.to_le_bytes(), "version u16 LE");
-    assert_eq!(footer[10], 2, "kind 2=job");
-    assert_eq!(footer[11], 0, "reserved byte zero");
-    assert_eq!(&footer[12..20], &(payload.len() as u64).to_le_bytes());
-    assert_eq!(&footer[20..28], &(manifest.len() as u64).to_le_bytes());
-    assert_eq!(&footer[60..68], &MAGIC, "terminal magic");
-
-    let expected = blake3::hash(&checksum_domain(
-        FORMAT_VERSION,
-        TrailerKind::Job.disc(),
-        payload.len() as u64,
-        manifest.len() as u64,
-        payload,
-        manifest,
-    ));
-    assert_eq!(&footer[28..60], expected.as_bytes(), "BLAKE3 checksum");
-}
-
-#[test]
-fn trailer_rejects_marked_corruption_invalid_version_lengths_and_kind() {
-    let encoded = encode(&sample(TrailerKind::Route));
-    let f = encoded.len() - FOOTER_LEN;
-
-    // Mutated payload -> checksum mismatch.
-    let mut corrupted = encoded.clone();
-    corrupted[0] ^= 0xFF;
-    assert_eq!(decode(&corrupted), Err(TrailerError::ChecksumMismatch));
-
-    // Mutated checksum -> checksum mismatch.
-    let mut corrupted = encoded.clone();
-    corrupted[f + 28] ^= 0xFF;
-    assert_eq!(decode(&corrupted), Err(TrailerError::ChecksumMismatch));
-
-    // Unsupported version.
-    let mut corrupted = encoded.clone();
-    corrupted[f + 8..f + 10].copy_from_slice(&2u16.to_le_bytes());
-    assert_eq!(decode(&corrupted), Err(TrailerError::InvalidVersion(2)));
-
-    // Overflowing length field (payload u64::MAX + manifest 1).
-    let mut corrupted = encoded.clone();
-    corrupted[f + 12..f + 20].copy_from_slice(&u64::MAX.to_le_bytes());
-    corrupted[f + 20..f + 28].copy_from_slice(&1u64.to_le_bytes());
-    assert_eq!(decode(&corrupted), Err(TrailerError::LengthOverflow));
-
-    // Out-of-bounds length field (sum fits u64, data does not: 1 TiB).
-    let mut corrupted = encoded.clone();
-    corrupted[f + 12..f + 20].copy_from_slice(&(1u64 << 40).to_le_bytes());
-    assert_eq!(decode(&corrupted), Err(TrailerError::LengthOutOfBounds));
-
-    // Invalid kind byte, checksum-consistent.
-    let mut corrupted = encoded.clone();
-    corrupted[f + 10] = 7;
-    let corrupted = reseal(corrupted);
-    assert_eq!(decode(&corrupted), Err(TrailerError::InvalidKind(7)));
-
-    // Non-zero reserved byte, checksum-consistent.
-    let mut corrupted = encoded.clone();
-    corrupted[f + 11] = 1;
-    let corrupted = reseal(corrupted);
-    assert_eq!(decode(&corrupted), Err(TrailerError::InvalidReserved(1)));
-
-    // Footer kind disagrees with the manifest kind, checksum-consistent.
-    let mut corrupted = encoded.clone();
-    corrupted[f + 10] = TrailerKind::Job.disc();
-    let corrupted = reseal(corrupted);
-    assert_eq!(decode(&corrupted), Err(TrailerError::KindMismatch));
-
-    // Manifest without a recognizable kind.
-    let no_kind = encode(&Trailer {
-        kind: TrailerKind::Route,
-        payload: PAYLOAD.to_vec(),
-        manifest: b"{}".to_vec(),
-    });
-    assert_eq!(decode(&no_kind), Err(TrailerError::InvalidManifest));
-
-    // Corrupt header magic (checksum excludes magics).
-    let mut corrupted = encoded.clone();
-    corrupted[f..f + 8].copy_from_slice(b"OTHERTR1");
-    assert_eq!(decode(&corrupted), Err(TrailerError::InvalidMagic));
-
-    // Terminal magic present, footer incomplete (marked truncation).
-    let mut short = Vec::new();
-    short.extend_from_slice(b"ab");
-    short.extend_from_slice(&MAGIC);
-    short.extend_from_slice(&MAGIC);
-    assert_eq!(short.len(), 18);
-    assert_eq!(decode(&short), Err(TrailerError::Truncated));
-
-    // Every case above is MARKED corruption: never an absent fallback.
-    // (Each assertion above already asserted `Err`, not `Ok(None)`.)
-}
-
 #[test]
 fn trailer_without_terminal_marker_is_absent() {
     // Ordinary bytes never carried a trailer.
-    assert_eq!(decode(b"an ordinary executable image"), Ok(None));
+    assert_eq!(decode_artifact(b"an ordinary executable image"), Ok(None));
     // Empty image.
-    assert_eq!(decode(b""), Ok(None));
+    assert_eq!(decode_artifact(b""), Ok(None));
     // Shorter than the magic.
-    assert_eq!(decode(b"CAMEL"), Ok(None));
+    assert_eq!(decode_artifact(b"CAMEL"), Ok(None));
     // Truncation that removes the terminal marker: bytes of a valid
-    // trailer survive, but presence is undecidable -> absent.
-    let encoded = encode(&sample(TrailerKind::Route));
+    // image survive, but presence is undecidable -> absent.
+    let encoded = encode_v2(&TrailerV2 {
+        kind: TrailerKind::Route,
+        content: b"content".to_vec(),
+        index: b"index".to_vec(),
+        manifest: b"{}".to_vec(),
+    });
     let truncated = &encoded[..encoded.len() - 4];
-    assert_eq!(decode(truncated), Ok(None));
+    assert_eq!(decode_artifact(truncated), Ok(None));
     // Partial magic lookalike.
-    assert_eq!(decode(b"x\x00CAMELTR"), Ok(None));
+    assert_eq!(decode_artifact(b"x\x00CAMELTR"), Ok(None));
 }
 
 #[test]
@@ -1221,26 +857,6 @@ fn probe_tail_short_image_is_absence() {
         let tail = read_probe_tail(&mut reader).expect("short image must probe cleanly");
         assert!(tail.is_none(), "{short}-byte image cannot carry magic");
     }
-}
-
-#[test]
-fn probe_tail_v1_image_equivalence_and_bound() {
-    let mut image = vec![0u8; 64 * 1024];
-    image.extend_from_slice(&encode(&sample(TrailerKind::Route)));
-    let mut reader = counting(std::io::Cursor::new(image.clone()));
-    let tail = read_probe_tail(&mut reader)
-        .expect("marked image must probe cleanly")
-        .expect("terminal magic is present");
-    assert_tail_decode_matches_whole(&tail, &image);
-    decode_artifact(&tail)
-        .expect("valid v1 trailer must decode from the tail")
-        .expect("magic marks it present");
-    // One footer window plus the exact v1 trailer span — never the image.
-    assert!(
-        reader.read_bytes <= FOOTER_LEN_V2 + FOOTER_LEN + PAYLOAD.len() + MANIFEST.len(),
-        "probe read {} bytes",
-        reader.read_bytes
-    );
 }
 
 #[test]
@@ -1450,14 +1066,173 @@ fn probe_tail_short_marked_window_between_v1_footer_and_v2_footer() {
 mod tests {
     use super::*;
 
+    /// A v1-shaped footer: magic, the declared version, kind 1 (route),
+    /// zero reserved/lengths/checksum, terminal magic. v1 framing is
+    /// otherwise deleted; the shape exists only to prove the tombstone.
+    fn v1_footer(version: u16) -> [u8; FOOTER_LEN_V1] {
+        let mut footer = [0u8; FOOTER_LEN_V1];
+        footer[0..MAGIC.len()].copy_from_slice(&MAGIC);
+        footer[8..10].copy_from_slice(&version.to_le_bytes());
+        footer[10] = TrailerKind::Route.disc();
+        footer[FOOTER_LEN_V1 - MAGIC.len()..].copy_from_slice(&MAGIC);
+        footer
+    }
+
     #[test]
-    fn trailer_round_trip_preserves_job_kind() {
-        let mut trailer = sample(TrailerKind::Job);
-        trailer.manifest = br#"{"kind":"job"}"#.to_vec();
-        let decoded = decode(&encode(&trailer))
-            .expect("valid encoding must decode")
+    fn v1_trailer_is_a_tombstone_naming_version_one() {
+        let mut image = b"arbitrary payload bytes".to_vec();
+        image.extend_from_slice(&v1_footer(1));
+
+        let err = decode_artifact(&image).expect_err("a v1 image must not decode");
+        assert_eq!(err, TrailerError::InvalidVersion(1));
+        let message = err.to_string();
+        assert!(
+            message.contains("unsupported compiled artifact version 1"),
+            "the tombstone must name version 1: {message}"
+        );
+        assert!(
+            message.contains("recompile from source with this version"),
+            "the tombstone must carry the remedy: {message}"
+        );
+        assert!(
+            message.contains("camel compile"),
+            "the tombstone must name the command: {message}"
+        );
+        assert!(
+            !message.contains("arbitrary payload bytes"),
+            "the tombstone must be payload-free: {message}"
+        );
+    }
+
+    #[test]
+    fn unsupported_version_without_v1_footer_names_declared_version() {
+        let mut image = vec![0u8; 1000];
+        let mut window = [0u8; FOOTER_LEN_V2];
+        window[8..10].copy_from_slice(&9u16.to_le_bytes());
+        window[FOOTER_LEN_V2 - MAGIC.len()..].copy_from_slice(&MAGIC);
+        image.extend_from_slice(&window);
+
+        let err = decode_artifact(&image).expect_err("version 9 must not decode");
+        assert_eq!(err, TrailerError::InvalidVersion(9));
+        let message = err.to_string();
+        assert!(
+            message.contains("unsupported compiled artifact version 9"),
+            "the tombstone must name version 9: {message}"
+        );
+        assert!(
+            message.contains("recompile from source with this version"),
+            "the tombstone must carry the remedy: {message}"
+        );
+    }
+
+    #[test]
+    fn probe_tail_v1_image_tombstone_equivalence() {
+        let mut image = vec![0u8; 64 * 1024];
+        image.extend_from_slice(b"arbitrary payload bytes");
+        image.extend_from_slice(&v1_footer(1));
+
+        let mut reader = counting(std::io::Cursor::new(image.clone()));
+        let tail = read_probe_tail(&mut reader)
+            .expect("marked image must probe cleanly")
+            .expect("terminal magic is present");
+
+        let from_tail = decode_artifact(&tail);
+        let from_whole = decode_artifact(&image);
+        assert_eq!(from_tail, Err(TrailerError::InvalidVersion(1)));
+        assert_eq!(
+            from_tail, from_whole,
+            "bounded tail decode must equal whole-image decode"
+        );
+    }
+
+    #[test]
+    fn v2_round_trip_still_decodes() {
+        let documents = sample_documents();
+        let store = VirtualDocumentStore::build(
+            "routes/main.yaml",
+            &documents,
+            &["cfg/camel.toml".to_string()],
+            &[
+                "routes/main.yaml".to_string(),
+                "routes/other.yaml".to_string(),
+            ],
+        )
+        .expect("store must build");
+        let trailer = TrailerV2 {
+            kind: TrailerKind::Route,
+            content: store.content.clone(),
+            index: store.index.encode_canonical().expect("index encodes"),
+            manifest: sample_manifest(&documents, &store.index)
+                .to_canonical_json()
+                .into_bytes(),
+        };
+
+        let decoded = decode_artifact(&encode_v2(&trailer))
+            .expect("valid v2 image must decode")
             .expect("terminal magic must mark the trailer present");
-        assert_eq!(decoded.kind, TrailerKind::Job);
+        assert_eq!(decoded, trailer);
+    }
+
+    #[test]
+    fn trailer_free_image_still_falls_through() {
+        assert_eq!(
+            decode_artifact(b"an ordinary executable image"),
+            Ok(None),
+            "no terminal magic is absence, not corruption"
+        );
+        assert_eq!(decode_artifact(b"CAMEL"), Ok(None));
+    }
+
+    /// bd rc-n6dof: the store-1 pairing arm is gone. The removed
+    /// store-1/manifest-2 pair surfaces the manifest-schema tombstone,
+    /// because manifest validation precedes the store decode; if the
+    /// pairing check is reached directly with a store-1 index it falls
+    /// through the fail-closed store-schema arm, never the deleted
+    /// manifest-2 acceptance.
+    #[test]
+    fn pairing_arm_for_store_one_is_gone() {
+        use super::super::store::{SourcePlan, StoreEntry, StoreEntryKind};
+
+        let schema2_manifest = br#"{"components":["direct"],"embedded_files":[],"env_names":[],"kind":"route","listeners":[],"manifest_schema":2,"runtime_version":"0.0.0","source_name":"app.yaml"}"#.to_vec();
+
+        // The tombstone the legacy pair surfaces: manifest validation
+        // precedes store decoding.
+        let err = manifest::validate_manifest(&schema2_manifest)
+            .expect_err("the removed manifest schema 2 must tombstone");
+        assert_eq!(err, TrailerError::InvalidManifestSchema(2));
+        assert!(
+            err.to_string()
+                .contains("recompile from source with this version"),
+            "the tombstone must carry the remedy: {err}"
+        );
+
+        // The pairing arm itself is gone: a store-1 index now falls
+        // through the fail-closed store-schema arm.
+        let index = StoreIndex {
+            config_references: Vec::new(),
+            entry_point: "app.yaml".to_string(),
+            entries: vec![StoreEntry {
+                asset_class: None,
+                kind: StoreEntryKind::Route,
+                length: 8,
+                offset: 0,
+                path: "app.yaml".to_string(),
+            }],
+            source_plan: SourcePlan {
+                references: vec!["app.yaml".to_string()],
+            },
+            store_schema: 1,
+            substitutions: Vec::new(),
+        };
+        let Err(TrailerError::InvalidStore(reason)) =
+            enforce_schema_pairing(&index, &schema2_manifest)
+        else {
+            panic!("the removed store-1 pairing arm must not accept manifest schema 2");
+        };
+        assert!(
+            reason.contains("unsupported store schema 1"),
+            "the store-1 index must fail through the store-schema arm: {reason}"
+        );
     }
 }
 
@@ -1475,6 +1250,9 @@ use super::store::StoreAsset;
 
 #[cfg(test)]
 use super::store::StoreDocument;
+
+#[cfg(test)]
+use super::store::{StoreEntryKind, VirtualDocumentStore};
 
 /// BLAKE3 hex digest used in manifest `embedded_files` entries.
 #[cfg(test)]
@@ -1546,7 +1324,7 @@ fn sample_manifest(documents: &[StoreDocument], index: &StoreIndex) -> Manifest 
 #[test]
 fn v2_trailer_round_trip_preserves_store_and_manifest() {
     // Setup: two route entries, one config entry, canonical index, and a
-    // schema-2 manifest.
+    // schema-3 manifest.
     let documents = sample_documents();
     let store = VirtualDocumentStore::build(
         "routes/main.yaml",
@@ -1573,9 +1351,7 @@ fn v2_trailer_round_trip_preserves_store_and_manifest() {
     let decoded = decode_artifact(&encoded)
         .expect("valid v2 encoding must decode")
         .expect("terminal magic must mark the trailer present");
-    let DecodedArtifact::V2(got) = decoded else {
-        panic!("v2 image must decode as DecodedArtifact::V2");
-    };
+    let got = decoded;
 
     // Kind, content, index, and manifest bytes are identical.
     assert_eq!(got.kind, TrailerKind::Route);
@@ -1648,7 +1424,7 @@ fn v2_trailer_round_trip_preserves_store_and_manifest() {
 
 #[test]
 fn v2_trailer_uses_exact_footer_and_checksum_domain() {
-    // Setup: a real canonical store and its schema-2 manifest — the decode
+    // Setup: a real canonical store and its schema-3 manifest — the decode
     // path validates both, so the framing and checksum-domain assertions
     // below are byte-exact for decodable inputs.
     let documents = sample_documents();
@@ -1745,112 +1521,6 @@ fn v2_trailer_uses_exact_footer_and_checksum_domain() {
 }
 
 #[test]
-fn v2_decoder_accepts_v1_as_single_entry_store() {
-    // Setup: a valid v1 artifact (legacy manifest without a schema field).
-    let payload = b"jobs:\n- id: nightly\n  from: cron:0 0 * * *\n".to_vec();
-    let v1 = Trailer {
-        kind: TrailerKind::Job,
-        payload: payload.clone(),
-        manifest: br#"{"kind":"job","source_name":"jobs/nightly.job.yaml"}"#.to_vec(),
-    };
-    let encoded = encode(&v1);
-
-    // Action: decode with the v2 reader.
-    let decoded = decode_artifact(&encoded)
-        .expect("valid v1 encoding must decode")
-        .expect("terminal magic must mark the trailer present");
-    let DecodedArtifact::V1(trailer) = decoded else {
-        panic!("v1 image must decode as DecodedArtifact::V1");
-    };
-    assert_eq!(trailer.payload, payload);
-
-    // One job entry with the original source identity and payload.
-    let store = trailer
-        .to_single_entry_store()
-        .expect("v1 artifact must expose a one-entry store");
-    assert_eq!(store.index.entries.len(), 1);
-    let entry = &store.index.entries[0];
-    assert_eq!(
-        entry.path, "jobs/nightly.job.yaml",
-        "original source identity"
-    );
-    assert_eq!(entry.kind, StoreEntryKind::Job);
-    assert_eq!(entry.offset, 0);
-    assert_eq!(entry.length, payload.len() as u64);
-    assert_eq!(store.index.entry_point, "jobs/nightly.job.yaml");
-    assert_eq!(
-        store.index.source_plan.references,
-        ["jobs/nightly.job.yaml"]
-    );
-    assert_eq!(
-        store.read("jobs/nightly.job.yaml"),
-        Some(payload.as_slice())
-    );
-
-    // The one-entry store re-encodes to a canonical index that validates.
-    let index_bytes = store.index.encode_canonical().expect("index encodes");
-    assert!(StoreIndex::decode(&index_bytes, store.content.len()).is_ok());
-}
-
-/// Regression: v1-to-store adaptation preserves valid legacy v1
-/// `source_name`s verbatim. The strict v2 canonical-path rule must not be
-/// applied to legacy provenance: the v1 writer carried absolute input
-/// paths and parent-relative names, and existing artifacts legitimately
-/// hold them. Only a missing, empty, or NUL-carrying identity is unusable
-/// and fails closed.
-#[test]
-fn v1_store_adaptation_preserves_legacy_source_names() {
-    // Setup: a valid v1 artifact whose source identity predates the
-    // canonical-path rule.
-    let payload = b"routes:\n- id: a\n  from: direct:a\n".to_vec();
-    for name in ["/abs/dir/app.yaml", "../shared/app.yaml"] {
-        let encoded = encode(&Trailer {
-            kind: TrailerKind::Route,
-            payload: payload.clone(),
-            manifest: format!(r#"{{"kind":"route","source_name":"{name}"}}"#).into_bytes(),
-        });
-
-        // Action: decode with the v2 reader and adapt to a store.
-        let DecodedArtifact::V1(trailer) = decode_artifact(&encoded)
-            .expect("valid v1 encoding must decode")
-            .expect("terminal magic must mark the trailer present")
-        else {
-            panic!("v1 image must decode as DecodedArtifact::V1");
-        };
-        let store = trailer
-            .to_single_entry_store()
-            .expect("legacy v1 source identity must adapt");
-
-        // Assertion: the legacy name is preserved verbatim as the entry
-        // path, entry point, and plan reference.
-        assert_eq!(store.index.entry_point, name);
-        assert_eq!(store.index.entries.len(), 1);
-        assert_eq!(store.index.entries[0].path, name);
-        assert_eq!(store.index.source_plan.references, [name]);
-        assert_eq!(store.read(name), Some(payload.as_slice()));
-    }
-
-    // Unusable source identity (absent, empty, NUL) fails closed, by name.
-    for manifest in [
-        &br#"{"kind":"route"}"#[..],
-        br#"{"kind":"route","source_name":""}"#,
-        // serde decodes the \u0000 escape into a real NUL byte.
-        br#"{"kind":"route","source_name":"a\u0000b.yaml"}"#,
-    ] {
-        let trailer = Trailer {
-            kind: TrailerKind::Route,
-            payload: payload.clone(),
-            manifest: manifest.to_vec(),
-        };
-        assert_eq!(
-            trailer.to_single_entry_store(),
-            Err(TrailerError::InvalidManifest),
-            "manifest {manifest:?} carries no usable source identity"
-        );
-    }
-}
-
-#[test]
 fn aggregate_normalization_preserves_utf8_bom_newlines_and_cap() {
     // Setup: a BOM+CRLF entry with a terminal newline and a lone-CR entry
     // without one.
@@ -1896,9 +1566,9 @@ fn aggregate_normalization_preserves_utf8_bom_newlines_and_cap() {
 }
 
 /// Regression: a marked v2-family footer carrying an unsupported version
-/// reports `InvalidVersion`, never the v1 reader's `InvalidMagic` (the
-/// 68-byte footer candidate of a 76-byte-footer image opens with footer
-/// bytes, not the family magic).
+/// reports `InvalidVersion` naming that version (the 68-byte footer
+/// candidate of a 76-byte-footer image opens with footer bytes, not the
+/// family magic, so it cannot be mistaken for a v1 footer).
 #[test]
 fn marked_v2_family_footer_with_unsupported_version_reports_invalid_version() {
     let documents = sample_documents();
@@ -1929,21 +1599,20 @@ fn marked_v2_family_footer_with_unsupported_version_reports_invalid_version() {
         );
     }
 
-    // A genuine v1 image still routes to the v1 codec: its footer opens
-    // with the magic, so the window's aliased bytes fall through.
-    let v1 = encode(&Trailer {
-        kind: TrailerKind::Route,
-        payload: PAYLOAD.to_vec(),
-        manifest: br#"{"kind":"route","source_name":"routes/route.yaml"}"#.to_vec(),
-    });
-    assert!(matches!(
-        decode_artifact(&v1),
-        Ok(Some(DecodedArtifact::V1(_)))
-    ));
+    // A genuine v1 image tombstones as version 1 rather than aliasing its
+    // magic bytes into a nonsense version.
+    let mut v1 = b"arbitrary v1 payload".to_vec();
+    let mut v1_footer = [0u8; 68];
+    v1_footer[0..8].copy_from_slice(&MAGIC);
+    v1_footer[8..10].copy_from_slice(&1u16.to_le_bytes());
+    v1_footer[10] = TrailerKind::Route.disc();
+    v1_footer[60..68].copy_from_slice(&MAGIC);
+    v1.extend_from_slice(&v1_footer);
+    assert_eq!(decode_artifact(&v1), Err(TrailerError::InvalidVersion(1)));
 }
 
 /// Regression: manifest/store agreement is enforced at v2 decode — a
-/// checksum-consistent image whose schema-2 manifest describes a different
+/// checksum-consistent image whose manifest describes a different
 /// store (entry count, path/kind/length, or content digest) fails closed
 /// by name.
 #[test]
@@ -2033,7 +1702,7 @@ fn v2_manifest_store_disagreement_fails_closed() {
     ));
 }
 
-/// Regression: schema-2 manifest/store agreement requires
+/// Regression: manifest/store agreement requires
 /// `manifest.source_name == index.entry_point`. A checksum-consistent
 /// image whose manifest names a different existing entry (a coherent
 /// manifest, just not of this store) fails closed by name.
@@ -2123,7 +1792,7 @@ fn v2_manifest_store_agreement_handles_secret_null_path() {
     let decoded = decode_artifact(&encode_with(&base))
         .expect("the null-path secret form must decode")
         .expect("terminal magic must mark the trailer present");
-    assert!(matches!(decoded, DecodedArtifact::V2(_)));
+    assert_eq!(decoded.kind, TrailerKind::Route);
 
     // Variant B (invalid): a secret entry carrying a non-null path. The
     // schema-3 field rules name it first; the agreement check (below,
@@ -2214,6 +1883,23 @@ mod v2_corruption_tests {
             decode_artifact(&corrupted),
             Err(TrailerError::InvalidFlags(1))
         );
+        // Invalid kind byte, checksum-consistent.
+        let mut corrupted = encoded.clone();
+        corrupted[f + 10] = 7;
+        let corrupted = reseal_v2(corrupted);
+        assert_eq!(
+            decode_artifact(&corrupted),
+            Err(TrailerError::InvalidKind(7))
+        );
+
+        // Overflowing length fields (content u64::MAX + index 1).
+        let mut corrupted = encoded.clone();
+        corrupted[f + 12..f + 20].copy_from_slice(&u64::MAX.to_le_bytes());
+        corrupted[f + 20..f + 28].copy_from_slice(&1u64.to_le_bytes());
+        assert_eq!(
+            decode_artifact(&corrupted),
+            Err(TrailerError::LengthOverflow)
+        );
 
         // Footer kind disagrees with the manifest kind, checksum-consistent.
         let mut corrupted = encoded.clone();
@@ -2270,12 +1956,6 @@ mod v2_corruption_tests {
 
         // Absent trailer falls through (never an error).
         assert_eq!(decode_artifact(b"an ordinary executable image"), Ok(None));
-
-        // A v2 image is rejected by the v1-only reader as unsupported
-        // rather than misparsed or treated as absent: the garbage v1 footer
-        // candidate fails the v1 checks (here the magic check).
-        assert!(decode(&encoded).is_err());
-        assert_ne!(decode(&encoded), Ok(None));
     }
 
     /// Reseal a v2 footer checksum after mutating excluded fields so later
@@ -2411,11 +2091,11 @@ mod v2_corruption_tests {
         }
     }
 
-    /// Regression: v2 manifest parsing is strict — schema 2 requires
-    /// `embedded_files` and the required typed string fields, and the
-    /// schema-less legacy form is accepted only in a v1 artifact.
+    /// Regression: v2 manifest parsing is strict — schema 3 requires
+    /// `embedded_files` and the required typed string fields, and a
+    /// manifest with no `manifest_schema` field is no longer accepted.
     #[test]
-    fn v2_manifest_strictness_rejects_incomplete_and_legacy_forms() {
+    fn v2_manifest_strictness_rejects_incomplete_and_schemaless_forms() {
         let documents = sample_documents();
         let store = VirtualDocumentStore::build(
             "routes/main.yaml",
@@ -2436,61 +2116,42 @@ mod v2_corruption_tests {
             })
         };
 
-        // Schema 2 without `embedded_files`: rejected by name.
+        // Schema 3 without `embedded_files`: rejected by name.
         let incomplete = format!(
-            r#"{{"components":["direct"],"env_names":[],"kind":"route","listeners":[],"manifest_schema":2,"runtime_version":"{rt}","source_name":"routes/main.yaml"}}"#,
+            r#"{{"artifact_kind":"server","components":["direct"],"env_names":[],"kind":"route","listeners":[],"manifest_schema":3,"runtime_version":"{rt}","source_name":"routes/main.yaml","total_embedded_bytes":0}}"#,
             rt = manifest::RUNTIME_VERSION,
         );
         assert_eq!(
             decode_artifact(&encode_with(incomplete.into_bytes())),
             Err(TrailerError::InvalidManifestFields(
-                "schema-2 manifest carries no embedded_files array".to_string()
+                "schema-3 manifest carries no embedded_files array".to_string()
             ))
         );
 
-        // Schema 2 without `runtime_version`: required typed field.
-        let no_runtime = br#"{"components":[],"embedded_files":[],"env_names":[],"kind":"route","listeners":[],"manifest_schema":2,"source_name":"routes/main.yaml"}"#.to_vec();
+        // Schema 3 without `runtime_version`: required typed field.
+        let no_runtime = br#"{"artifact_kind":"server","components":[],"embedded_files":[],"env_names":[],"kind":"route","listeners":[],"manifest_schema":3,"source_name":"routes/main.yaml","total_embedded_bytes":0}"#.to_vec();
         assert_eq!(
             decode_artifact(&encode_with(no_runtime)),
             Err(TrailerError::InvalidManifestFields(
-                "schema-2 manifest carries no runtime_version".to_string()
+                "schema-3 manifest carries no runtime_version".to_string()
             ))
         );
 
-        // Schema-less legacy manifest in a v2 artifact: legacy is v1-only.
+        // Schema-less legacy manifest: the missing field is named with the
+        // recompile remedy, never the generic invalid-JSON diagnostic.
         let legacy = br#"{"kind":"route","source_name":"routes/main.yaml"}"#.to_vec();
-        assert_eq!(
-            decode_artifact(&encode_with(legacy.clone())),
-            Err(TrailerError::InvalidManifestSchema(
-                manifest::MANIFEST_SCHEMA_LEGACY
-            ))
+        let Err(TrailerError::InvalidManifestFields(reason)) =
+            decode_artifact(&encode_with(legacy))
+        else {
+            panic!("the schema-less legacy form must be rejected");
+        };
+        assert!(
+            reason.contains("manifest_schema field is missing"),
+            "the diagnostic must name the missing field: {reason}"
         );
-
-        // The same legacy manifest decodes fine in a v1 artifact.
-        let v1 = encode(&Trailer {
-            kind: TrailerKind::Route,
-            payload: b"routes:\n- id: main\n  from: direct:in\n".to_vec(),
-            manifest: legacy,
-        });
-        assert!(decode_artifact(&v1).is_ok());
-
-        // And a v1 artifact carrying an explicit current manifest schema
-        // is rejected too: each trailer version accepts exactly its own
-        // manifest form (v1 accepts only the schema-less legacy form).
-        let v1_schema3_manifest = format!(
-            r#"{{"artifact_kind":"server","components":[],"embedded_files":[],"env_names":[],"kind":"route","listeners":[],"manifest_schema":3,"runtime_version":"{rt}","source_name":"routes/main.yaml","total_embedded_bytes":0}}"#,
-            rt = manifest::RUNTIME_VERSION,
-        );
-        let v1_schema3 = encode(&Trailer {
-            kind: TrailerKind::Route,
-            payload: b"routes:\n- id: main\n  from: direct:in\n".to_vec(),
-            manifest: v1_schema3_manifest.into_bytes(),
-        });
-        assert_eq!(
-            decode_artifact(&v1_schema3),
-            Err(TrailerError::InvalidManifestSchema(
-                manifest::MANIFEST_SCHEMA
-            ))
+        assert!(
+            reason.contains("recompile from source with this version"),
+            "the diagnostic must carry the remedy: {reason}"
         );
     }
 }

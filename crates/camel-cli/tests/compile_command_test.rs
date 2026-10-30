@@ -13,7 +13,7 @@ use std::process::{Command, Output};
 
 use camel_cli::compile::signature;
 use camel_cli::compile::store::{StoreIndex, VirtualDocumentStore};
-use camel_cli::compile::trailer::{self, DecodedArtifact, TrailerKind, TrailerV2};
+use camel_cli::compile::trailer::{self, TrailerKind, TrailerV2};
 use ed25519_dalek::SigningKey;
 
 /// A minimal supported single-route document.
@@ -67,9 +67,7 @@ fn decode_v2(bytes: &[u8]) -> (TrailerV2, VirtualDocumentStore, serde_json::Valu
     let decoded = trailer::decode_artifact(bytes)
         .expect("trailer must be intact")
         .expect("terminal magic must mark the trailer present");
-    let DecodedArtifact::V2(v2) = decoded else {
-        panic!("compile must emit a v2 multi-document artifact");
-    };
+    let v2 = decoded;
     let store =
         VirtualDocumentStore::decode(v2.content.clone(), &v2.index).expect("store must decode");
     let manifest: serde_json::Value =

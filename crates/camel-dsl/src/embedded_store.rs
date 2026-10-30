@@ -18,11 +18,10 @@
 //! index additionally carries the compile-time `substitutions` table:
 //! ordered `(document, declared string) → asset logical path` entries,
 //! each recording the declared string's exact byte span(s) inside its
-//! site entry and the site context (`literal` or `uri`). The table is
-//! absent from schema-1 indexes.
+//! site entry and the site context (`literal` or `uri`).
 //!
 //! Decode is fail-closed: an unsupported store schema (this reader
-//! understands schemas 1 and 2), malformed path, duplicate path,
+//! understands only schema 2, [`STORE_SCHEMA`]), malformed path, duplicate path,
 //! noncanonical entry order, out-of-bounds or overlapping range,
 //! unreferenced content byte, reference to a missing entry, malformed
 //! substitution table (missing document or asset target, span outside
@@ -41,9 +40,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 /// Store index schema written by the builder and understood by this
-/// reader. The reader also accepts schema 1 (the legacy document-only
-/// shape, with no asset classes and no substitution table); any other
-/// value fails closed on decode.
+/// reader. Any other value fails closed on decode.
 pub const STORE_SCHEMA: u64 = 2;
 
 /// The document kind of one store entry.
@@ -180,11 +177,10 @@ pub struct StoreIndex {
     pub entries: Vec<StoreEntry>,
     /// Ordered route-source plan.
     pub source_plan: SourcePlan,
-    /// Index schema; this reader understands schemas 1 and 2.
+    /// Index schema; must equal [`STORE_SCHEMA`].
     pub store_schema: u64,
     /// Compile-time substitution sites in canonical
-    /// `(document, declared, context)` order; empty for schema-1
-    /// indexes.
+    /// `(document, declared, context)` order.
     pub substitutions: Vec<SubstitutionEntry>,
 }
 
@@ -276,7 +272,11 @@ impl fmt::Display for StoreError {
             Self::InvalidUtf8 => write!(f, "store index is not valid UTF-8"),
             Self::InvalidJson(reason) => write!(f, "store index is not valid JSON: {reason}"),
             Self::UnsupportedStoreSchema(schema) => {
-                write!(f, "unsupported store schema {schema}")
+                write!(
+                    f,
+                    "unsupported store schema {schema}: recompile from source with this version \
+                     (camel compile)"
+                )
             }
             Self::InvalidEntryKind(kind) => write!(f, "invalid store entry kind {kind:?}"),
             Self::InvalidSubstitution(reason) => {
@@ -397,9 +397,9 @@ impl StoreIndex {
     pub fn decode(bytes: &[u8], content_len: usize) -> Result<StoreIndex, StoreError> {
         let text = std::str::from_utf8(bytes).map_err(|_| StoreError::InvalidUtf8)?;
 
-        // Schema first: probe only the schema field, pick the exact index
-        // shape for the declared schema, and never shape-parse (let alone
-        // reinterpret) bytes of an unknown schema.
+        // Schema first: probe only the schema field and reject anything but
+        // the current schema before shape-parsing, so bytes of another
+        // schema are never reinterpreted as this one.
         let probe: serde_json::Value =
             serde_json::from_str(text).map_err(|e| StoreError::InvalidJson(e.to_string()))?;
         let schema = probe
@@ -408,56 +408,12 @@ impl StoreIndex {
             .ok_or_else(|| {
                 StoreError::InvalidJson("missing or non-integer store_schema".to_string())
             })?;
-        if !matches!(schema, 1 | 2) {
+        if schema != STORE_SCHEMA {
             return Err(StoreError::UnsupportedStoreSchema(schema));
         }
 
-        // Shape-match the declared schema exactly: schema-1 bytes carry no
-        // asset classes and no substitution table, and their presence in a
-        // schema-1 index is rejected as an unknown field.
-        let raw = if schema == 1 {
-            let raw: RawIndexV1 =
-                serde_json::from_str(text).map_err(|e| StoreError::InvalidJson(e.to_string()))?;
-            ParsedIndex {
-                config_references: raw.config_references,
-                entry_point: raw.entry_point,
-                entries: raw
-                    .entries
-                    .into_iter()
-                    .map(|entry| ParsedEntry {
-                        asset_class: None,
-                        kind: entry.kind,
-                        length: entry.length,
-                        offset: entry.offset,
-                        path: entry.path,
-                    })
-                    .collect(),
-                source_plan: raw.source_plan,
-                store_schema: raw.store_schema,
-                substitutions: Vec::new(),
-            }
-        } else {
-            let raw: RawIndexV2 =
-                serde_json::from_str(text).map_err(|e| StoreError::InvalidJson(e.to_string()))?;
-            ParsedIndex {
-                config_references: raw.config_references,
-                entry_point: raw.entry_point,
-                entries: raw
-                    .entries
-                    .into_iter()
-                    .map(|entry| ParsedEntry {
-                        asset_class: entry.asset_class,
-                        kind: entry.kind,
-                        length: entry.length,
-                        offset: entry.offset,
-                        path: entry.path,
-                    })
-                    .collect(),
-                source_plan: raw.source_plan,
-                store_schema: raw.store_schema,
-                substitutions: raw.substitutions,
-            }
-        };
+        let raw: RawIndexV2 =
+            serde_json::from_str(text).map_err(|e| StoreError::InvalidJson(e.to_string()))?;
 
         // Typed entries: known kind, valid path, no duplicates, canonical
         // order, and asset classes only on asset entries.
@@ -466,12 +422,6 @@ impl StoreIndex {
         for entry in &raw.entries {
             let kind = StoreEntryKind::from_name(&entry.kind)
                 .ok_or_else(|| StoreError::InvalidEntryKind(entry.kind.clone()))?;
-            // Schema 1 is the legacy document-only shape: it has no asset
-            // classes and no substitution table, so an asset entry there
-            // fails closed rather than decoding with a forced `None` class.
-            if raw.store_schema == 1 && kind == StoreEntryKind::Asset {
-                return Err(StoreError::InvalidEntryKind(entry.kind.clone()));
-            }
             validate_path(&entry.path)?;
             if kind != StoreEntryKind::Asset && entry.asset_class.is_some() {
                 return Err(StoreError::UnexpectedAssetClass(entry.path.clone()));
@@ -532,8 +482,8 @@ impl StoreIndex {
             }
         }
 
-        // Substitution table (schema 2 only): typed contexts plus the full
-        // validated-entry rules.
+        // Substitution table: typed contexts plus the full validated-entry
+        // rules.
         let mut substitutions = Vec::with_capacity(raw.substitutions.len());
         for sub in &raw.substitutions {
             let context = match sub.context.as_str() {
@@ -590,25 +540,6 @@ impl StoreIndex {
 /// meaning without a schema bump.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawIndexV1 {
-    config_references: Vec<String>,
-    entry_point: String,
-    entries: Vec<RawEntryV1>,
-    source_plan: RawSourcePlan,
-    store_schema: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawEntryV1 {
-    kind: String,
-    length: u64,
-    offset: u64,
-    path: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawIndexV2 {
     config_references: Vec<String>,
     entry_point: String,
@@ -649,25 +580,6 @@ struct RawSpan {
 #[serde(deny_unknown_fields)]
 struct RawSourcePlan {
     references: Vec<String>,
-}
-
-/// Schema-independent raw index shape shared by the schema-1 and schema-2
-/// parse paths once the declared shape has been matched exactly.
-struct ParsedIndex {
-    config_references: Vec<String>,
-    entry_point: String,
-    entries: Vec<ParsedEntry>,
-    source_plan: RawSourcePlan,
-    store_schema: u64,
-    substitutions: Vec<RawSubstitution>,
-}
-
-struct ParsedEntry {
-    asset_class: Option<String>,
-    kind: String,
-    length: u64,
-    offset: u64,
-    path: String,
 }
 
 /// Validate the substitution table against the typed entries: canonical
@@ -1000,17 +912,19 @@ mod tests {
         }
     }
 
-    /// Canonical baseline JSON for one route entry over a 4-byte blob.
+    /// Canonical schema-2 baseline JSON for one route entry over a 4-byte
+    /// blob.
     fn baseline(entries: &str, entry_point: &str, plan: &str) -> String {
         format!(
             "{{\"config_references\":[],\"entry_point\":\"{entry_point}\",\
              \"entries\":[{entries}],\
              \"source_plan\":{{\"references\":[{plan}]}},\
-             \"store_schema\":1}}"
+             \"store_schema\":{STORE_SCHEMA},\"substitutions\":[]}}"
         )
     }
 
-    const ONE_ENTRY: &str = r#"{"kind":"route","length":4,"offset":0,"path":"a.yaml"}"#;
+    const ONE_ENTRY: &str =
+        r#"{"asset_class":null,"kind":"route","length":4,"offset":0,"path":"a.yaml"}"#;
 
     /// All byte spans of `needle` inside `haystack`, ascending and
     /// non-overlapping — the substitution-table span shape.
@@ -1213,14 +1127,40 @@ mod tests {
             Err(StoreError::InvalidEntryKind("widget".to_string()))
         );
 
-        // Asset kind in a schema-1 index: schema 1 is the legacy
-        // document-only shape, so an asset entry fails closed with the
-        // named kind error rather than decoding with a forced `None` class.
+        // Schema 1 no longer decodes: the legacy document-only shape is
+        // gone, so even a well-formed schema-1 index fails closed before
+        // any shape parse, with the recompile remedy.
         let entry = r#"{"kind":"asset","length":4,"offset":0,"path":"a.yaml"}"#;
-        let json = baseline(entry, "a.yaml", r#""a.yaml""#);
-        assert_eq!(
-            StoreIndex::decode(json.as_bytes(), 4),
-            Err(StoreError::InvalidEntryKind("asset".to_string()))
+        let json = format!(
+            "{{\"config_references\":[],\"entry_point\":\"a.yaml\",\
+             \"entries\":[{entry}],\
+             \"source_plan\":{{\"references\":[\"a.yaml\"]}},\"store_schema\":1}}"
+        );
+        let err =
+            StoreIndex::decode(json.as_bytes(), 4).expect_err("schema-1 index must not decode");
+        assert_eq!(err, StoreError::UnsupportedStoreSchema(1));
+        assert!(
+            err.to_string()
+                .contains("recompile from source with this version"),
+            "the schema-1 rejection must carry the remedy: {err}"
+        );
+    }
+
+    /// An unknown schema carries the recompile remedy (Mission 451).
+    #[test]
+    fn store_decoder_rejects_unknown_schema_with_remedy() {
+        let entry = r#"{"asset_class":null,"kind":"route","length":4,"offset":0,"path":"a.yaml"}"#;
+        let json = schema2_baseline(entry, "a.yaml", r#""a.yaml""#, "[]", 99);
+        let err = StoreIndex::decode(json.as_bytes(), 4).expect_err("schema 99 must not decode");
+        assert_eq!(err, StoreError::UnsupportedStoreSchema(99));
+        let display = err.to_string();
+        assert!(
+            display.contains("unsupported store schema 99"),
+            "the rejection must name the schema: {display}"
+        );
+        assert!(
+            display.contains("recompile from source with this version"),
+            "the rejection must carry the remedy: {display}"
         );
     }
 
@@ -1287,7 +1227,8 @@ mod tests {
         let json = format!(
             "{{\"compression\":null,\"config_references\":[],\"entry_point\":\"a.yaml\",\
              \"entries\":[{ONE_ENTRY}],\
-             \"source_plan\":{{\"references\":[\"a.yaml\"]}},\"store_schema\":1}}"
+             \"source_plan\":{{\"references\":[\"a.yaml\"]}},\
+             \"store_schema\":{STORE_SCHEMA},\"substitutions\":[]}}"
         );
         assert!(matches!(
             StoreIndex::decode(json.as_bytes(), 4),
@@ -1296,7 +1237,7 @@ mod tests {
 
         // Unknown field inside an entry object.
         let json = baseline(
-            r#"{"digest":"00","kind":"route","length":4,"offset":0,"path":"a.yaml"}"#,
+            r#"{"asset_class":null,"digest":"00","kind":"route","length":4,"offset":0,"path":"a.yaml"}"#,
             "a.yaml",
             r#""a.yaml""#,
         );
@@ -1310,7 +1251,7 @@ mod tests {
             "{{\"config_references\":[],\"entry_point\":\"a.yaml\",\
              \"entries\":[{ONE_ENTRY}],\
              \"source_plan\":{{\"declared_order\":true,\"references\":[\"a.yaml\"]}},\
-             \"store_schema\":1}}"
+             \"store_schema\":{STORE_SCHEMA},\"substitutions\":[]}}"
         );
         assert!(matches!(
             StoreIndex::decode(json.as_bytes(), 4),
@@ -1321,7 +1262,8 @@ mod tests {
         // field, so its absence is malformed, not an empty list.
         let json = format!(
             "{{\"entry_point\":\"a.yaml\",\"entries\":[{ONE_ENTRY}],\
-             \"source_plan\":{{\"references\":[\"a.yaml\"]}},\"store_schema\":1}}"
+             \"source_plan\":{{\"references\":[\"a.yaml\"]}},\
+             \"store_schema\":{STORE_SCHEMA},\"substitutions\":[]}}"
         );
         assert!(matches!(
             StoreIndex::decode(json.as_bytes(), 4),
@@ -1330,7 +1272,7 @@ mod tests {
 
         // Wrong field types stay named errors too (length as string).
         let json = baseline(
-            r#"{"kind":"route","length":"4","offset":0,"path":"a.yaml"}"#,
+            r#"{"asset_class":null,"kind":"route","length":"4","offset":0,"path":"a.yaml"}"#,
             "a.yaml",
             r#""a.yaml""#,
         );

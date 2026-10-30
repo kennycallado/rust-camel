@@ -42,7 +42,7 @@ use std::process::{Command, Output};
 
 use camel_cli::compile::sources::{self, SourceError, SourceSelection};
 use camel_cli::compile::store::VirtualDocumentStore;
-use camel_cli::compile::trailer::{self, DecodedArtifact, TrailerKind};
+use camel_cli::compile::trailer::{self, TrailerKind};
 use camel_config::CamelConfig;
 
 /// The committed fixture project, anchored at the camel-cli crate.
@@ -110,9 +110,7 @@ fn decoded_store(bytes: &[u8]) -> VirtualDocumentStore {
     let decoded = trailer::decode_artifact(bytes)
         .expect("trailer must be intact")
         .expect("terminal magic must mark the trailer present");
-    let DecodedArtifact::V2(v2) = decoded else {
-        panic!("compile must emit a v2 multi-document artifact");
-    };
+    let v2 = decoded;
     VirtualDocumentStore::decode(v2.content, &v2.index).expect("store must decode")
 }
 

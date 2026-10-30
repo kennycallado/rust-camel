@@ -60,3 +60,15 @@ The sealed amendment checklist (bd `rc-p823t`), each item binding:
 ## Amendment: R4 artifact signing (2026-09-26)
 
 The `r4sign` change adds R4. `camel compile --sign` emits a detached `<artifact>.sig` envelope (`CAMELSG1` framing) beside the artifact, and a signed compile moves the manifest to schema 4 with a `signing` block. R4 signs outside the trailer checksum domain: the trailer, its BLAKE3 checksum, and the store/manifest schema pairing stay unchanged. The signature covers the complete final artifact bytes (executable copy plus trailer), so a strip or a mutation fails closed before boot. The runtime artifact argument surface is unchanged except for the sanctioned `--verify`. The full decision is recorded in ADR-0083.
+
+## Amendment: v1 read path removed (2026-10-29)
+
+The reader no longer accepts the v1 trailer framing or the store-1/manifest-2 legacy pairing. This amendment supersedes the historical v1 format description in "Decision" and the "Compatibility stays within the family" paragraph in the v2 amendment; neither is rewritten.
+
+The reason is pre-1.0 shedding of our own legacy surface (ADR-0090, "Deletion, not hiding" and "A removal carries a tombstone"; shedding-plan row 10, bd `rc-v6wiz`; bd `rc-n6dof`). The v1 read path kept a second decode surface alive. It also kept a downgrade and rollback path: an attacker could replace a current artifact with a v1 artifact and reach the older store and manifest decoders. Removing the read path removes that attack surface.
+
+The accepted set is exactly v2 framing with `store_schema: 2` and `manifest_schema` 3, 4, or 5. The pairing remains mandatory in both directions.
+
+A marked v1 artifact, or a marked artifact that declares any other unsupported version, fails closed with a payload-free tombstone. The tombstone names the declared version and the remedy: recompile from source with this version (`camel compile`). The same remedy covers manifest schema 1 or 2, a manifest with no `manifest_schema` field, and a store schema other than 2. The artifact never boots and never falls through to the CLI. A truly trailer-free executable keeps the normal CLI fall-through.
+
+Migration: recompile from source with the current version.

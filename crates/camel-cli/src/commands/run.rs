@@ -131,19 +131,6 @@ pub(crate) enum Discover {
         /// expansion, the test-suffix skip, and errors).
         patterns: Vec<String>,
     },
-    /// A compiled artifact's embedded document: the normalized payload
-    /// through `camel_dsl::discover_embedded_text` with the virtual
-    /// identity `compiled://<source_name>` and the ambient (deployment)
-    /// environment as the `${env:}` lookup. No config, glob, external
-    /// route file, or temporary file is ever touched.
-    Embedded {
-        /// Normalized document text (pre-interpolation authoring text).
-        text: String,
-        /// Logical source name from the artifact manifest.
-        source_name: String,
-        /// Route/job document kind recorded in the trailer.
-        kind: camel_dsl::EmbeddedDocumentKind,
-    },
     /// A v2 multi-document artifact's virtual store (multidoc Task
     /// 2.2): route definitions already discovered from the store's
     /// ordered source plan through `camel_dsl::discover_virtual_store`
@@ -486,30 +473,6 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
                     // steps of timer routes with timing processors when
                     // BENCH_LATENCY_MODE=route (bench_instrument module).
                     crate::commands::bench_instrument::maybe_instrument_routes(defs)
-                }
-                Err(e) => return Err(LifecycleFailure::Discovery(e)),
-            }
-        }
-        Discover::Embedded {
-            text,
-            source_name,
-            kind,
-        } => {
-            // Embedded seam: the normalized payload parses through the
-            // shared discovery pipeline with the virtual identity
-            // `compiled://<source_name>` and the ambient (deployment)
-            // environment as the `${env:}` lookup — no filesystem access.
-            tracing::info!("camel-cli: loading routes from compiled://{source_name}");
-            let ambient = &|name: &str| std::env::var(name).ok();
-            match camel_dsl::discover_embedded_text(&text, &source_name, kind, ambient) {
-                Ok(defs) => {
-                    if defs.is_empty() {
-                        tracing::warn!(
-                            "embedded document compiled://{source_name} declared zero \
-                             routes; starting with no routes"
-                        );
-                    }
-                    defs
                 }
                 Err(e) => return Err(LifecycleFailure::Discovery(e)),
             }

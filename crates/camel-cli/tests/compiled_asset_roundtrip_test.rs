@@ -493,10 +493,7 @@ fn run_child() -> i32 {
             return 2;
         }
     };
-    let request = match decoded {
-        trailer::DecodedArtifact::V1(v1) => EmbeddedRequest::from_trailer(v1, args),
-        trailer::DecodedArtifact::V2(v2) => EmbeddedRequest::from_v2(v2, args),
-    };
+    let request = EmbeddedRequest::from_v2(decoded, args);
     let request = match request {
         Ok(request) => request,
         Err(e) => {

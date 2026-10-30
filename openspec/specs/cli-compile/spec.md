@@ -9,7 +9,11 @@ signing, truststore pinning, and freshness floors.
 ## Requirements
 ### Requirement: Compile a native single-document artifact
 
-The CLI SHALL provide `camel compile <document> -o <artifact>` that resolves one logical route or job entry point and appends `CAMELTR1 || content || index || manifest || footer` to a copy of the current executable, preserving executable permissions. The 76-byte v2 footer contains `CAMELTR1`, little-endian `u16` version 2, `u8` kind (`1=route`, `2=job`), zero `u8` flags, little-endian `u64` content/index/manifest lengths, BLAKE3, and terminal `CAMELTR1`. The checksum SHALL cover ASCII `rust-camel-trailer-v2`, one zero byte, the encoded version/kind/three lengths, content, index, and manifest, excluding magic and flags. Normalization SHALL accept valid UTF-8, remove one BOM, convert CRLF and lone CR to LF, preserve terminal-newline state, and reject invalid UTF-8; normalization SHALL apply to document entries only, and asset entries SHALL embed verbatim. The content SHALL contain normalized pre-interpolation route, job, `Camel.toml`, include, and selected-profile entries plus verbatim deploy-time asset entries. The index SHALL be canonical UTF-8 JSON with independent `store_schema: 2`, typed entries, offsets, lengths, one logical entry point, configuration references, an ordered source plan, and the compile-time substitution table recording each (document, declared string) pair's exact byte span(s) in the normalized document or config entry together with its asset logical path. The manifest SHALL use independent `manifest_schema: 3` for unsigned artifacts and `manifest_schema: 4` for artifacts signed under the detached-envelope requirement, and `store_schema: 2` SHALL pair with either manifest schema: readers SHALL reject a store-2 index with a manifest other than 3 or 4, a manifest-3 or manifest-4 body with a non-2 store, and a manifest-4 body without a signing block. The compiler SHALL resolve route files, includes, profiles, supported job route sources, and deploy-time asset references at compile time using the explicitly supplied `--config <Camel.toml>`, repeated `--profile <name>`, and `--embed-secrets` options; without `--config`, it SHALL embed no configuration and select no profile, and it SHALL never discover ambient configuration. TLS-class asset references SHALL resolve embedded-only, with no host-filesystem fallback at compile time or runtime (sealed bd `rc-p823t`); each TLS-class reference resolves to an embedded virtual-store entry or compilation fails, leaving the reference syntax free for R5 `host:`/`env:` prefixes. The store SHALL preserve logical relative paths and the ordered source plan. Aggregate embedded bytes — normalized document bytes plus verbatim asset bytes — SHALL remain limited to the compile-time cap selected with `--max-payload-bytes <bytes>`, a positive value whose default SHALL be 16 MiB; exceeding the cap SHALL fail compilation with a diagnostic naming the total and the cap before any output is created. Embedding a secret-family asset — exactly the private-key class: the `key` document field and the `tlsKey`, `serverKeyPath`, and `clientKeyPath` TLS URI parameters — SHALL require explicit opt-in: compilation SHALL fail closed with a diagnostic naming the field and the secret class unless the operator passes `--embed-secrets`. An artifact compiled with the opt-in that contains a secret-family entry SHALL be written with file mode 0700; artifacts without embedded secret-family entries SHALL be written with mode 0755.
+The CLI SHALL provide `camel compile <document> -o <artifact>` that resolves one logical route or job entry point and appends `CAMELTR1 || content || index || manifest || footer` to a copy of the current executable, preserving executable permissions. The 76-byte v2 footer contains `CAMELTR1`, little-endian `u16` version 2, `u8` kind (`1=route`, `2=job`), zero `u8` flags, little-endian `u64` content/index/manifest lengths, BLAKE3, and terminal `CAMELTR1`. The checksum SHALL cover ASCII `rust-camel-trailer-v2`, one zero byte, the encoded version/kind/three lengths, content, index, and manifest, excluding magic and flags. Normalization SHALL accept valid UTF-8, remove one BOM, convert CRLF and lone CR to LF, preserve terminal-newline state, and reject invalid UTF-8; normalization SHALL apply to document entries only, and asset entries SHALL embed verbatim. The content SHALL contain normalized pre-interpolation route, job, `Camel.toml`, include, and selected-profile entries plus verbatim deploy-time asset entries. The index SHALL be canonical UTF-8 JSON with independent `store_schema: 2`, typed entries, offsets, lengths, one logical entry point, configuration references, an ordered source plan, and the compile-time substitution table recording each (document, declared string) pair's exact byte span(s) in the normalized document or config entry together with its asset logical path. The manifest SHALL use independent `manifest_schema: 3` for unsigned artifacts and `manifest_schema: 4` for artifacts signed under the detached-envelope requirement, and `store_schema: 2` SHALL pair with either manifest schema: The reader SHALL accept exactly trailer framing version 2 with `store_schema: 2` and `manifest_schema` 3 (unsigned), 4 (signed), or 5 (signed freshness); readers SHALL reject a store-2 index with a manifest other than 3, 4, or 5, a manifest-3, manifest-4, or manifest-5 body with a non-2 store, and a manifest-4 or manifest-5 body without a signing block. The compiler SHALL resolve route files, includes, profiles, supported job route sources, and deploy-time asset references at compile time using the explicitly supplied `--config <Camel.toml>`, repeated `--profile <name>`, and `--embed-secrets` options; without `--config`, it SHALL embed no configuration and select no profile, and it SHALL never discover ambient configuration. TLS-class asset references SHALL resolve embedded-only, with no host-filesystem fallback at compile time or runtime (sealed bd `rc-p823t`); each TLS-class reference resolves to an embedded virtual-store entry or compilation fails, leaving the reference syntax free for R5 `host:`/`env:` prefixes. The store SHALL preserve logical relative paths and the ordered source plan. Aggregate embedded bytes — normalized document bytes plus verbatim asset bytes — SHALL remain limited to the compile-time cap selected with `--max-payload-bytes <bytes>`, a positive value whose default SHALL be 16 MiB; exceeding the cap SHALL fail compilation with a diagnostic naming the total and the cap before any output is created. Embedding a secret-family asset — exactly the private-key class: the `key` document field and the `tlsKey`, `serverKeyPath`, and `clientKeyPath` TLS URI parameters — SHALL require explicit opt-in: compilation SHALL fail closed with a diagnostic naming the field and the secret class unless the operator passes `--embed-secrets`. An artifact compiled with the opt-in that contains a secret-family entry SHALL be written with file mode 0700; artifacts without embedded secret-family entries SHALL be written with mode 0755.
+
+<!-- openspec-scenario-ops
+dropped: Single-document v1 remains readable | v1 read path removed pre-1.0; a marked v1 artifact is a tombstone naming version 1 and the recompile remedy (ADR-0090 "A removal carries a tombstone", shedding-plan row 10 bd rc-v6wiz, bd rc-n6dof)
+-->
 
 #### Scenario: Compile a supported document
 
@@ -53,12 +57,6 @@ The CLI SHALL provide `camel compile <document> -o <artifact>` that resolves one
 - **WHEN** the compiler builds the virtual store
 - **THEN** the index identifies each document separately, runtime can request each by logical path, and only the substitution table's recorded byte spans are rewritten — the document text is otherwise untouched
 
-#### Scenario: Single-document v1 remains readable
-
-- **GIVEN** an existing valid version-1 single-document artifact
-- **WHEN** a version-2-capable executable starts it
-- **THEN** the reader exposes it as a one-entry virtual store and preserves existing runtime behavior
-
 #### Scenario: Reject unsupported target compilation
 
 - **GIVEN** a requested target different from the native Linux target
@@ -85,9 +83,21 @@ The CLI SHALL provide `camel compile <document> -o <artifact>` that resolves one
 
 #### Scenario: Schema pairing is enforced
 
-- **GIVEN** an artifact whose index declares `store_schema: 2` but whose manifest body declares a schema other than 3 or 4
+- **GIVEN** an artifact whose declared store and manifest schemas are not a current pair
 - **WHEN** the artifact starts
-- **THEN** it exits 2 before boot with a schema-pairing diagnostic, and the symmetric case (manifest 3 or 4 with a non-2 store, or a manifest-4 body without a signing block) fails the same way
+- **THEN** it exits 2 before boot with the first failing validation's own diagnostic: a manifest body whose schema is not 3, 4, or 5 — including the removed schemas 1 and 2 — fails the manifest-schema tombstone naming the schema and the recompile remedy; a store index whose schema is not 2, beside a current manifest, fails the store-schema tombstone naming the store schema and the remedy; a manifest-4 or manifest-5 body without its signing block fails the manifest-field rules; the explicit pairing check remains as defense in depth behind those validators
+
+#### Scenario: Unsupported artifact version is a tombstone
+
+- **GIVEN** a marked artifact carrying the removed version-1 trailer framing or any other unsupported trailer version
+- **WHEN** the artifact starts
+- **THEN** it exits 2 before boot with a payload-free tombstone error naming the declared artifact version and the remedy to recompile from source with this version (`camel compile`), never booting, never adapting to a one-entry store, and never falling through to the ordinary CLI path
+
+#### Scenario: Legacy store-1/manifest-2 pairing is a tombstone
+
+- **GIVEN** a marked v2-framed artifact whose index declares the removed `store_schema: 1` beside a `manifest_schema: 2` body
+- **WHEN** the artifact starts
+- **THEN** it exits 2 before boot with a tombstone naming the removed manifest schema 2 and the remedy to recompile from source with this version, because manifest validation precedes store decoding; a removed `store_schema: 1` beside a current manifest fails its own store-schema tombstone the same way
 
 ### Requirement: Preserve runtime interpolation
 
@@ -189,7 +199,7 @@ The compiler SHALL embed the R2 asset matrix — certificates, private keys, and
 
 ### Requirement: Verify trailer integrity and version
 
-The artifact reader SHALL distinguish an absent trailer from a malformed trailer, enforce footer bounds, reject unsupported format versions, and verify the mandatory BLAKE3 checksum before runtime boot.
+The artifact reader SHALL distinguish an absent trailer from a malformed trailer, enforce footer bounds, reject unsupported format versions, and verify the mandatory BLAKE3 checksum before runtime boot. A rejected unsupported version — including the removed version-1 framing — SHALL surface a payload-free tombstone error naming the declared version and the remedy to recompile from source with this version; the artifact SHALL NOT be treated as a trailer-free executable and SHALL NOT fall back to ordinary CLI behavior.
 
 #### Scenario: Corrupted artifact fails closed
 
@@ -202,6 +212,12 @@ The artifact reader SHALL distinguish an absent trailer from a malformed trailer
 - **GIVEN** the normal Camel executable has no recognizable trailer magic
 - **WHEN** the executable starts with a normal CLI command
 - **THEN** it invokes the existing Clap command path with unchanged behavior
+
+#### Scenario: Unsupported version fails closed with a tombstone
+
+- **GIVEN** a marked artifact whose footer declares a format version the reader does not support, including a genuine version-1 trailer
+- **WHEN** the artifact starts
+- **THEN** it exits 2 with a tombstone naming the declared version and the recompile remedy, and the same rejection results whether the whole image or only the bounded probe tail is decoded
 
 ### Requirement: Run embedded documents without extraction
 
@@ -221,9 +237,9 @@ The artifact SHALL feed the indexed documents through the existing parse, runtim
 
 #### Scenario: Unknown store schema fails closed
 
-- **GIVEN** a marked artifact whose index declares a store schema the executable does not support
+- **GIVEN** a marked artifact whose index declares a store schema other than the supported `store_schema: 2` — including the removed schema 1 — beside an otherwise current (schema 3, 4, or 5) manifest
 - **WHEN** the artifact starts
-- **THEN** it exits 2 before configuration or route boot
+- **THEN** it exits 2 before configuration or route boot with an error naming the unsupported store schema and the remedy to recompile from source with this version
 
 #### Scenario: Read-only deployment
 
@@ -266,10 +282,7 @@ any manifest, output, or log. Entries for secret-class assets SHALL expose only 
 digest: their logical path SHALL be withheld from the manifest body and `--manifest` output, and no key material SHALL
 appear in any output or log. The `artifact_kind` field is the sealed R3 tripwire (bd `rc-p823t`): no long-lived manifest
 entries ship before the R5 TLS decision exists, and any artifact that can outlive a short bounded run triggers that
-decision; the optional compile-side warning for server-type consumers in job artifacts is NOT taken in R2. Manifest
-schema values SHALL be validated independently from trailer version; readers SHALL accept manifest schemas 2, 3, 4, and
-5 and reject others, and SHALL enforce the pairing rule that manifest schemas 3, 4, and 5 require store schema 2 and
-store schema 2 requires manifest schema 3, 4, or 5. `--manifest` SHALL print this metadata without booting. The manifest
+decision; the optional compile-side warning for server-type consumers in job artifacts is NOT taken in R2. Manifest schema values SHALL be validated independently from trailer version; readers SHALL accept manifest schemas 3, 4, and 5 and reject others — including the removed schemas 1 and 2 and a missing `manifest_schema` field — with a tombstone naming the schema and the remedy to recompile from source with this version, and SHALL enforce the pairing rule that manifest schemas 3, 4, and 5 require store schema 2 and store schema 2 requires manifest schema 3, 4, or 5. `--manifest` SHALL print this metadata without booting. The manifest
 SHALL not contain compile-time environment values and SHALL list required environment variables without defaults.
 Listener declarations SHALL report the artifact kind's effective runtime listeners: job artifacts SHALL omit listeners
 the job boot projection suppresses, and route artifacts SHALL list all configuration-declared listeners.
@@ -303,9 +316,9 @@ the job boot projection suppresses, and route artifacts SHALL list all configura
 
 #### Scenario: Unknown manifest schema fails closed
 
-- **GIVEN** a marked artifact with a manifest schema that the reader does not support
+- **GIVEN** a marked artifact with a manifest schema that the reader does not support — including the removed schemas 1 and 2 or a missing `manifest_schema` field
 - **WHEN** the artifact starts
-- **THEN** it exits 2 before boot and does not reinterpret trailer version as manifest schema
+- **THEN** it exits 2 before boot with a payload-free tombstone naming the rejected schema — or, for a missing field, the missing `manifest_schema` field — and the remedy to recompile from source with this version, and does not reinterpret trailer version as manifest schema
 
 #### Scenario: Unknown artifact argument
 
@@ -845,7 +858,7 @@ plus a mandatory `freshness` marker encoded as an unsigned 64-bit
 unix-seconds integer inside the signing block. The marker SHALL live in
 the manifest bytes, which the envelope signature covers, so an attacker
 cannot change it without breaking the signature. Readers SHALL accept
-manifest schemas 2, 3, 4, and 5; a schema-5 manifest without a valid
+manifest schemas 3, 4, and 5; a schema-5 manifest without a valid
 freshness marker SHALL be rejected. When a truststore pins the
 artifact's key, the truststore SHALL record the highest previously
 accepted marker as that key's floor: a marker below the floor SHALL
@@ -946,8 +959,9 @@ lines SHALL be idempotent. A `strict` line with any second token
 SHALL be a malformed line (step `truststore-parse`), and `strict`
 SHALL NOT be accepted as a pin fingerprint. When a supplied
 truststore carries the strict directive and the manifest carries no
-signing block (schema 1, 2, or 3 — any manifest without a signing
-block), every trust-policy surface SHALL exit 2 with a `strict-unsigned` diagnostic naming the
+signing block (schema 3 — the only unsigned schema the reader
+accepts; the removed schemas 1 and 2 fail their own tombstones before
+trust policy runs), every trust-policy surface SHALL exit 2 with a `strict-unsigned` diagnostic naming the
 artifact and the truststore path, and the artifact SHALL NOT boot:
 boot and `--verify` under either store source (the `--truststore`
 argument or the `CAMEL_TRUSTSTORE` variable), and the boot-side
@@ -1007,13 +1021,20 @@ truststore.
 - **THEN** it exits 2 with a `truststore-parse` diagnostic naming the path, and does not boot — an unreadable strict
   policy is never silently skipped
 
-#### Scenario: Strict applies to every manifest without a signing block
+#### Scenario: Strict applies to every accepted manifest without a signing block
 
-- **GIVEN** an artifact whose manifest carries no signing block, whatever its schema number, and a strict truststore
+- **GIVEN** an artifact whose manifest is a current schema-3 body (no signing block) and a strict truststore
   supplied
 - **WHEN** the artifact starts
 - **THEN** the strict decision keys on the absence of the signing block, not on the schema number, and it exits 2 with
   a `strict-unsigned` diagnostic
+
+#### Scenario: Removed schema under a strict store fails its tombstone
+
+- **GIVEN** an artifact whose manifest declares the removed `manifest_schema: 2` and a strict truststore supplied
+- **WHEN** the artifact starts
+- **THEN** it exits 2 with the manifest-schema tombstone naming schema 2 and the recompile remedy — the tombstone
+  precedes trust policy, so the `strict-unsigned` diagnostic never fires for it
 
 #### Scenario: Strip rule keeps precedence under a strict store
 

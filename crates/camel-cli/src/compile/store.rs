@@ -118,8 +118,8 @@ fn entry_json(kind: &str, offset: u64, length: u64, path: &str) -> String {
     format!("{{\"kind\":\"{kind}\",\"length\":{length},\"offset\":{offset},\"path\":\"{path}\"}}")
 }
 
-/// Schema-2 index JSON (the [`STORE_SCHEMA`] shape): the schema-1 layout
-/// plus the substitution table field the schema-2 reader requires.
+/// Schema-2 index JSON (the [`STORE_SCHEMA`] shape): the current layout,
+/// including the substitution table field the schema-2 reader requires.
 #[cfg(test)]
 fn index_json_v2(entries: &str, entry_point: &str, plan: &str) -> String {
     format!(
@@ -151,11 +151,20 @@ fn store_decoder_rejects_schema_ranges_references_and_order() {
     );
     assert!(StoreIndex::decode(canonical.as_bytes(), CONTENT_LEN).is_ok());
 
-    // Unknown store schema: fail closed, never reinterpret.
+    // Unknown store schema: fail closed, never reinterpret, with the
+    // recompile remedy.
     let json = index_json(&two_routes, 99, "routes/a.yaml", "\"routes/a.yaml\"");
-    assert_eq!(
-        StoreIndex::decode(json.as_bytes(), CONTENT_LEN),
-        Err(StoreError::UnsupportedStoreSchema(99))
+    let err =
+        StoreIndex::decode(json.as_bytes(), CONTENT_LEN).expect_err("schema 99 must not decode");
+    assert_eq!(err, StoreError::UnsupportedStoreSchema(99));
+    let display = err.to_string();
+    assert!(
+        display.contains("unsupported store schema 99"),
+        "the rejection must name the schema: {display}"
+    );
+    assert!(
+        display.contains("recompile from source with this version"),
+        "the rejection must carry the remedy: {display}"
     );
 
     // Out-of-bounds range: second entry runs past the content end.
@@ -342,27 +351,27 @@ fn asset_bytes_embed_verbatim() {
     assert!(asset_bytes.contains(&0x00));
 }
 
-/// The schema-2 reader still accepts schema-1 store indexes (r2embed
-/// Task 1.1): a legacy one-entry index decodes unchanged, with no asset
-/// class and no substitution table.
+/// The schema-1 store shape is gone (Mission 451): only [`STORE_SCHEMA`]
+/// decodes, so a legacy schema-1 index fails closed with the recompile
+/// remedy instead of decoding unchanged.
 #[test]
-fn schema2_decoder_accepts_schema1_store() {
+fn store_decoder_rejects_schema1_store() {
     let json = index_json(
         &entry_json("job", 0, 15, "jobs/nightly.job.yaml"),
         1,
         "jobs/nightly.job.yaml",
         "\"jobs/nightly.job.yaml\"",
     );
-    let store = VirtualDocumentStore::decode(vec![0xA6; 15], json.as_bytes())
-        .expect("schema-1 index must decode under the schema-2 reader");
-    assert_eq!(store.index.store_schema, 1);
-    assert_eq!(store.index.entries.len(), 1);
-    assert_eq!(store.index.entries[0].kind, StoreEntryKind::Job);
-    assert_eq!(store.index.entries[0].path, "jobs/nightly.job.yaml");
-    assert_eq!(store.index.entries[0].asset_class, None);
-    assert!(store.index.substitutions.is_empty());
-    assert_eq!(
-        store.read("jobs/nightly.job.yaml"),
-        Some([0xA6; 15].as_slice())
+    let err = VirtualDocumentStore::decode(vec![0xA6; 15], json.as_bytes())
+        .expect_err("schema-1 index must not decode");
+    assert_eq!(err, StoreError::UnsupportedStoreSchema(1));
+    let display = err.to_string();
+    assert!(
+        display.contains("unsupported store schema 1"),
+        "the rejection must name the schema: {display}"
+    );
+    assert!(
+        display.contains("recompile from source with this version"),
+        "the rejection must carry the remedy: {display}"
     );
 }
