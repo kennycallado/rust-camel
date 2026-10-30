@@ -150,24 +150,25 @@ header to supply SQL text. The body can supply SQL text only when both
 `allowDynamicQuery=true` and `useMessageBodyForSql=true`. The opt-in makes the
 route responsible for establishing that the selected exchange data is trusted.
 
-### `ssl_mode` default at connection build time
+### `ssl_mode` precedence at connection build time
 
-Applied in `enrich_db_url_with_ssl_params()` (`fn enrich_db_url_with_ssl`, config.rs:561-636), NOT in `Default::default()`:
-- PostgreSQL (`postgres`/`postgresql` scheme): defaults to `"require"` when `ssl_mode` is `None`.
-- MySQL (`mysql` scheme): defaults to `"prefer"` when `ssl_mode` is `None`.
+Applied in `enrich_db_url_with_ssl_params()` (`fn enrich_db_url_with_ssl`, config.rs:787-888), NOT in `Default::default()`:
+- Precedence: explicit endpoint `sslMode` config > explicit URL `sslmode` (PostgreSQL) or `ssl-mode` (MySQL) > driver default. The driver default applies only when neither the endpoint config nor the URL supplies a mode; an empty-value URL key counts as absent.
+- PostgreSQL (`postgres`/`postgresql` scheme): driver default is `"require"`.
+- MySQL (`mysql` scheme): driver default is `"prefer"`.
 - `SqlEndpointConfig.ssl_mode` stays `Option<String>` — `Default::default()` remains `None` for backward compatibility.
-- The `SqlGlobalConfig` also has `ssl_mode: Option<String>`; it propagates to endpoints via `apply_defaults()` (`fn apply_defaults`, config.rs:467-470).
+- The `SqlGlobalConfig` also has `ssl_mode: Option<String>`; it propagates to endpoints via `apply_defaults()` (`fn apply_defaults`, config.rs:693-723).
 
 ### `connect_timeout=10` appended to URL
 
-In `enrich_db_url_with_ssl_params()` (config.rs:623-625): appends `connect_timeout=10` via `url::Url`
+In `enrich_db_url_with_ssl_params()` (config.rs:873-877): appends `connect_timeout=10` via `url::Url`
 query mutation when no `connect_timeout` query parameter already exists. This is the `sqlx` URL-level
 TCP connect timeout, NOT the pool `acquire_timeout`.
 
 ### SQLite unaffected
 
-SQLite URLs (`sqlite*` scheme) return early at `fn enrich_db_url_with_ssl_params` (config.rs:583) before any SSL enrichment or connect_timeout
-appending. SSL options set alongside a SQLite URL produce a `warn!` log but are silently ignored.
+SQLite URLs (`sqlite*` scheme) return early at `fn enrich_db_url_with_ssl_params` (config.rs:815-823) before any SSL enrichment or connect_timeout
+appending. SSL options set alongside a SQLite URL are ignored; the diagnostic is logged at DEBUG level so a shared config does not warn on every boot.
 
 ## Dependency boundary
 

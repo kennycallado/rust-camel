@@ -126,9 +126,13 @@ Non-pool parameters like `outputType`, `onConsume`, `delay` etc. work normally w
 
 ### SSL/TLS Options
 
+TLS support is compiled in by default (sqlx `tls-rustls` with webpki roots). `sslMode` defaults to `require` for PostgreSQL (fail-closed) and `prefer` for MySQL.
+
+Precedence: explicit endpoint `sslMode` > explicit URL `sslmode`/`ssl-mode` > driver default (`require` PG / `prefer` MySQL). An explicit URL value is never overwritten by the default.
+
 | Option | Default | Description |
 |--------|---------|-------------|
-| `sslMode` | - | SSL mode (e.g. `require`, `verify-ca`, `verify-full`) |
+| `sslMode` | `require` (PG) / `prefer` (MySQL) | SSL mode (e.g. `require`, `verify-ca`, `verify-full`) |
 | `sslRootCert` | - | Path to CA certificate for server verification |
 | `sslCert` | - | Path to client certificate for mTLS |
 | `sslKey` | - | Path to client private key for mTLS |

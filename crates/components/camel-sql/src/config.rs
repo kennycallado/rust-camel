@@ -5,7 +5,7 @@ use camel_api::component_metadata::{ComponentMetadata, UriOption};
 use camel_component_api::CamelError;
 use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::{UriComponents, UriConfig, parse_uri};
-use tracing::warn;
+use tracing::debug;
 
 /// Redaction helper: returns `Some("***")` if the option is `Some`, otherwise `None`.
 fn redacted_opt(opt: &Option<String>) -> Option<&'static str> {
@@ -815,7 +815,7 @@ pub(crate) fn enrich_db_url_with_ssl_params(
     if scheme.starts_with("sqlite") {
         if ssl_mode.is_some() || ssl_root_cert.is_some() || ssl_cert.is_some() || ssl_key.is_some()
         {
-            warn!(
+            debug!(
                 "SSL options configured for SQLite database URL, but SQLite does not support SSL/TLS; ignoring sslMode/sslRootCert/sslCert/sslKey"
             );
         }
@@ -827,11 +827,24 @@ pub(crate) fn enrich_db_url_with_ssl_params(
     }
     let is_mysql = scheme == "mysql";
 
-    // Compute effective ssl_mode with per-driver default when none is specified.
-    let effective_ssl_mode: &str = ssl_mode.unwrap_or(if is_mysql { "prefer" } else { "require" });
+    // Explicit URL sslmode/ssl-mode is operator intent and must not be
+    // overwritten by the per-driver default (ADR-0033).
+    let (driver_ssl_mode_key, default_ssl_mode) = if is_mysql {
+        ("ssl-mode", "prefer")
+    } else {
+        ("sslmode", "require")
+    };
+    let url_has_explicit_ssl_mode = parsed
+        .query_pairs()
+        .any(|(k, v)| k.as_ref() == driver_ssl_mode_key && !v.is_empty());
+    let effective_ssl_mode: Option<&str> = match ssl_mode {
+        Some(value) => Some(value),
+        None if url_has_explicit_ssl_mode => None,
+        None => Some(default_ssl_mode),
+    };
 
     let ssl_params: Vec<(&str, &str)> = [
-        Some(("sslMode", effective_ssl_mode)),
+        effective_ssl_mode.map(|value| ("sslMode", value)),
         ssl_root_cert.map(|v| ("sslRootCert", v)),
         ssl_cert.map(|v| ("sslCert", v)),
         ssl_key.map(|v| ("sslKey", v)),
@@ -1709,6 +1722,64 @@ mod tests {
     }
 
     #[test]
+    fn pg_url_sslmode_disable_preserved_when_config_absent() {
+        let url = enrich_db_url_with_ssl_params(
+            "postgres://localhost/test?sslmode=disable",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(url.contains("sslmode=disable"), "got: {}", url);
+        assert!(!url.contains("sslmode=require"), "got: {}", url);
+        assert!(url.contains("connect_timeout=10"), "got: {}", url);
+    }
+
+    #[test]
+    fn pg_url_sslmode_require_and_verify_full_preserved_when_config_absent() {
+        for mode in ["require", "verify-full"] {
+            let url = enrich_db_url_with_ssl_params(
+                &format!("postgres://localhost/test?sslmode={mode}"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(url.contains(&format!("sslmode={mode}")), "got: {}", url);
+        }
+    }
+
+    #[test]
+    fn mysql_url_ssl_mode_disable_preserved_when_config_absent() {
+        let url = enrich_db_url_with_ssl_params(
+            "mysql://localhost/test?ssl-mode=disable",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(url.contains("ssl-mode=disable"), "got: {}", url);
+        assert!(!url.contains("ssl-mode=prefer"), "got: {}", url);
+    }
+
+    #[test]
+    fn config_overrides_url_mysql() {
+        let url = enrich_db_url_with_ssl_params(
+            "mysql://localhost/test?ssl-mode=disable",
+            Some("require"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(url.contains("ssl-mode=require"), "got: {}", url);
+        assert!(!url.contains("ssl-mode=disable"), "got: {}", url);
+    }
+
+    #[test]
     fn enrich_preserves_explicit_connect_timeout() {
         let mut c = SqlEndpointConfig::from_uri(
             "sql:select 1?db_url=postgres://localhost/test?connect_timeout=5",
@@ -1748,6 +1819,48 @@ mod tests {
         c.resolve_defaults();
         let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
         assert_eq!(url, "sqlite://localhost/test.db");
+    }
+
+    /// Pins both sides of the SQLite SSL-ignore diagnostic: it must stay
+    /// below WARN (one env-driven config shared by SQLite and Postgres
+    /// datasources must not warn on every boot) and it must still be emitted
+    /// at DEBUG. `tracing-test` here is built with `no-env-filter`, so the
+    /// subscriber captures every level; assert on the rendered level rather
+    /// than on message presence alone.
+    #[tracing_test::traced_test]
+    #[test]
+    fn sqlite_ssl_options_debug_not_warn() {
+        let url = enrich_db_url_with_ssl_params(
+            "sqlite://test.db?mode=rwc",
+            Some("require"),
+            None,
+            None,
+            None,
+        )
+        .expect("sqlite URL enrichment must succeed");
+        assert_eq!(url, "sqlite://test.db?mode=rwc");
+
+        logs_assert(|lines| {
+            let loud: Vec<&str> = lines
+                .iter()
+                .filter(|line| line.contains(" WARN ") || line.contains(" ERROR "))
+                .copied()
+                .collect();
+            if !loud.is_empty() {
+                return Err(format!(
+                    "SQLite SSL enrichment must log nothing at WARN or above, got: {loud:?}"
+                ));
+            }
+
+            let diagnostic = lines.iter().any(|line| {
+                line.contains(" DEBUG ") && line.contains("SQLite does not support SSL/TLS")
+            });
+            if diagnostic {
+                Ok(())
+            } else {
+                Err("SQLite SSL enrichment must keep its ignore diagnostic at DEBUG level, but none was captured".to_string())
+            }
+        });
     }
 
     #[test]

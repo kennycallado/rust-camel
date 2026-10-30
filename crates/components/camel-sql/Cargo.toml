@@ -14,10 +14,11 @@ categories = ["database", "asynchronous", "network-programming"]
 # SQL-019: feature gates for optional database drivers.
 # All drivers are enabled by default; users can opt-in to only the drivers they need.
 [features]
-default = ["postgres", "mysql", "sqlite"]
+default = ["postgres", "mysql", "sqlite", "tls"]
 postgres = ["sqlx/postgres"]
 mysql = ["sqlx/mysql"]
 sqlite = ["sqlx/sqlite"]
+tls = ["sqlx/tls-rustls"]
 
 [dependencies]
 camel-api = { workspace = true }

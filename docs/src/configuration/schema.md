@@ -532,7 +532,7 @@ Named datasource pools. Each entry is keyed by a name that routes reference thro
 | `min_connections` | integer | `null` | Minimum pool size. |
 | `idle_timeout_secs` | integer (s) | `null` | Idle connection timeout. |
 | `max_lifetime_secs` | integer (s) | `null` | Maximum connection lifetime. |
-| `ssl_mode` | string | `null` | TLS mode. Provider-specific values. |
+| `ssl_mode` | string | `null` | TLS mode. Provider-specific values. TLS support is built in (sqlx `tls-rustls`); defaults to `require` for PostgreSQL (fail-closed) and `prefer` for MySQL. Precedence: explicit `ssl_mode` > explicit URL `sslmode`/`ssl-mode` > driver default. |
 | `ssl_root_cert` | string | `null` | Path to the root CA. |
 | `ssl_cert` | string | `null` | Path to the client certificate. |
 | `ssl_key` | string | `null` | Path to the client key. |
