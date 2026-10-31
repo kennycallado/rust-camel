@@ -64,7 +64,7 @@ UTF-8 and no `/` escape. Native `Map` keys are sorted.
 The outbound converter `dynamic_to_value` refuses `JsonValue` and `JsonNumber`
 with the stable labels `json value` and `json number`. Direct outbound wrapper
 conversion is deferred, so persisting parsed JSON uses `to_json` or a native
-leaf. The inbound converter and `make_scope`/`prepare_scope` are unchanged.
+leaf. The inbound converter and the `snapshot`/`snapshot_maps` helpers are unchanged.
 
 Authority: bd rc-qka42. `rc-m01r9` (eager scope conversion) and `rc-141om`
 (inbound u64 refusal) remain out of scope.

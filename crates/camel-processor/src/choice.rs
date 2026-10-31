@@ -1,7 +1,8 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
-use camel_api::{BoxProcessor, PredicateSource};
+use camel_api::{BoxProcessor, CamelError, PredicateSource};
 
 /// A single when-clause: a fallible predicate + the sub-pipeline to execute
 /// when it matches.
@@ -88,6 +89,100 @@ impl camel_api::OutcomePipeline for ChoiceSegment {
                 otherwise.run(exchange).await
             } else {
                 camel_api::PipelineOutcome::Completed(exchange)
+            }
+        })
+    }
+}
+
+// ── ChoiceGroupSegment (grouped when clauses) ─────────────────────────────
+
+/// Outcome-aware structural EIP segment for grouped `when` clauses that share
+/// one language.
+///
+/// Grouped evaluation of same-language `when` clauses — one group evaluation
+/// per message replaces per-clause `PredicateSource::matches`. Clause order,
+/// first-match, and error semantics are identical to [`ChoiceSegment`].
+pub struct ChoiceGroupSegment {
+    /// The shared-language predicate group evaluated once per message.
+    pub group: Arc<dyn camel_language_api::PredicateGroup>,
+    /// Per-clause evaluation metadata, parallel to `bodies`.
+    pub metas: Vec<camel_language_api::EvalMeta>,
+    /// Sub-pipeline for each clause, parallel to `metas`.
+    pub bodies: Vec<camel_api::OutcomeSegment>,
+    /// Pipeline to run when no clause matches.
+    pub otherwise: Option<camel_api::OutcomeSegment>,
+}
+
+impl Clone for ChoiceGroupSegment {
+    fn clone(&self) -> Self {
+        Self {
+            group: Arc::clone(&self.group),
+            metas: self.metas.clone(),
+            bodies: self.bodies.clone(),
+            otherwise: self.otherwise.clone(),
+        }
+    }
+}
+
+impl ChoiceGroupSegment {
+    /// Build a grouped choice segment.
+    ///
+    /// `metas` and `bodies` are parallel: `metas[i]` attributes an error from
+    /// clause `i` and `bodies[i]` is the pipeline to run when clause `i` is the
+    /// first match. Empty groups are rejected because the compiler falls back
+    /// to the sequential path for 0/1 clauses.
+    pub fn new(
+        group: Arc<dyn camel_language_api::PredicateGroup>,
+        metas: Vec<camel_language_api::EvalMeta>,
+        bodies: Vec<camel_api::OutcomeSegment>,
+        otherwise: Option<camel_api::OutcomeSegment>,
+    ) -> Result<Self, CamelError> {
+        if bodies.is_empty() {
+            return Err(CamelError::Config(
+                "ChoiceGroupSegment requires at least one clause".to_string(),
+            ));
+        }
+        if metas.len() != bodies.len() {
+            return Err(CamelError::Config(format!(
+                "ChoiceGroupSegment metas ({}) and bodies ({}) must have equal length",
+                metas.len(),
+                bodies.len()
+            )));
+        }
+        Ok(Self {
+            group,
+            metas,
+            bodies,
+            otherwise,
+        })
+    }
+}
+
+impl camel_api::OutcomePipeline for ChoiceGroupSegment {
+    fn clone_box(&self) -> Box<dyn camel_api::OutcomePipeline> {
+        Box::new(self.clone())
+    }
+
+    fn run<'a>(
+        &'a mut self,
+        exchange: camel_api::Exchange,
+    ) -> Pin<Box<dyn Future<Output = camel_api::PipelineOutcome> + Send + 'a>> {
+        Box::pin(async move {
+            match self.group.first_match(&exchange).await {
+                Ok(Some(index)) => self.bodies[index].run(exchange).await,
+                Ok(None) => {
+                    if let Some(otherwise) = self.otherwise.as_mut() {
+                        otherwise.run(exchange).await
+                    } else {
+                        camel_api::PipelineOutcome::Completed(exchange)
+                    }
+                }
+                Err(indexed) => camel_api::PipelineOutcome::Failed(
+                    camel_language_api::eval::to_expression_failed(
+                        indexed.error,
+                        &self.metas[indexed.index],
+                    ),
+                ),
             }
         })
     }
@@ -317,6 +412,179 @@ mod tests {
             otherwise_calls.load(Ordering::SeqCst),
             0,
             "otherwise must never execute when a when-predicate errors"
+        );
+    }
+
+    // ── ChoiceGroupSegment (grouped when clauses) ────────────────────────
+
+    use camel_language_api::{EvalMeta, IndexedPredicateError, LanguageError, PredicateGroup};
+
+    enum GroupOutcome {
+        Match(usize),
+        NoMatch,
+        Error { index: usize },
+    }
+
+    struct MockGroup {
+        outcome: GroupOutcome,
+        calls: Arc<AtomicU32>,
+    }
+
+    impl MockGroup {
+        fn mock(outcome: GroupOutcome, calls: Arc<AtomicU32>) -> Arc<dyn PredicateGroup> {
+            Arc::new(Self { outcome, calls })
+        }
+    }
+
+    #[camel_language_api::async_trait]
+    impl PredicateGroup for MockGroup {
+        async fn first_match(
+            &self,
+            _exchange: &Exchange,
+        ) -> Result<Option<usize>, IndexedPredicateError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match &self.outcome {
+                GroupOutcome::Match(i) => Ok(Some(*i)),
+                GroupOutcome::NoMatch => Ok(None),
+                GroupOutcome::Error { index } => Err(IndexedPredicateError {
+                    index: *index,
+                    error: LanguageError::NotSupported {
+                        feature: "predicate_group".to_string(),
+                        language: "rhai".to_string(),
+                    },
+                }),
+            }
+        }
+    }
+
+    fn group_meta(index: usize) -> EvalMeta {
+        EvalMeta {
+            language: "rhai".to_string(),
+            route_id: "r1".to_string(),
+            step_id: format!("step#{index}"),
+            verb: format!("choice/when[{index}]"),
+            target: None,
+        }
+    }
+
+    fn group_segment(
+        group: Arc<dyn PredicateGroup>,
+        metas: Vec<EvalMeta>,
+        bodies: Vec<camel_api::OutcomeSegment>,
+        otherwise: Option<camel_api::OutcomeSegment>,
+    ) -> ChoiceGroupSegment {
+        ChoiceGroupSegment::new(group, metas, bodies, otherwise).expect("valid group segment")
+    }
+
+    fn body_segments(suffixes: &[&'static str]) -> Vec<camel_api::OutcomeSegment> {
+        suffixes
+            .iter()
+            .map(|s| processor_segment(append_body(s)))
+            .collect()
+    }
+
+    // 1. First matching clause runs its body.
+    #[tokio::test]
+    async fn choice_group_first_when_matches() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let group = MockGroup::mock(GroupOutcome::Match(0), Arc::clone(&calls));
+        let mut seg = group_segment(
+            group,
+            vec![group_meta(0), group_meta(1)],
+            body_segments(&["-A", "-B"]),
+            None,
+        );
+        let ex = Exchange::new(Message::new("x"));
+        let result = completed_exchange(seg.run(ex).await);
+        assert_eq!(result.input.body.as_text(), Some("x-A"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "exactly one first_match");
+    }
+
+    // 2. No match runs otherwise.
+    #[tokio::test]
+    async fn choice_group_no_match_runs_otherwise() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let group = MockGroup::mock(GroupOutcome::NoMatch, Arc::clone(&calls));
+        let mut seg = group_segment(
+            group,
+            vec![group_meta(0)],
+            body_segments(&["-A"]),
+            Some(processor_segment(append_body("-else"))),
+        );
+        let ex = Exchange::new(Message::new("x"));
+        let result = completed_exchange(seg.run(ex).await);
+        assert_eq!(result.input.body.as_text(), Some("x-else"));
+    }
+
+    // 3. No match and no otherwise → passthrough.
+    #[tokio::test]
+    async fn choice_group_no_match_passthrough_without_otherwise() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let group = MockGroup::mock(GroupOutcome::NoMatch, Arc::clone(&calls));
+        let mut seg = group_segment(group, vec![group_meta(0)], body_segments(&["-A"]), None);
+        let ex = Exchange::new(Message::new("untouched"));
+        let result = completed_exchange(seg.run(ex).await);
+        assert_eq!(result.input.body.as_text(), Some("untouched"));
+    }
+
+    // 4. Group errors are attributed to the offending clause's metadata.
+    #[tokio::test]
+    async fn choice_group_error_maps_through_offending_clause_meta() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let group = MockGroup::mock(GroupOutcome::Error { index: 2 }, Arc::clone(&calls));
+        let mut seg = group_segment(
+            group,
+            vec![group_meta(0), group_meta(1), group_meta(2)],
+            body_segments(&["-A", "-B", "-C"]),
+            None,
+        );
+        match seg.run(Exchange::default()).await {
+            PipelineOutcome::Failed(err) => match err {
+                CamelError::ExpressionFailed { step_id, verb, .. } => {
+                    assert_eq!(verb, "choice/when[2]", "clause attribution");
+                    assert_eq!(step_id, "step#2");
+                }
+                other => panic!("expected ExpressionFailed, got {other:?}"),
+            },
+            other => panic!("expected PipelineOutcome::Failed, got {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "exactly one first_match");
+    }
+
+    // 5. Only the selected clause's body runs.
+    #[tokio::test]
+    async fn choice_group_runs_body_of_selected_clause_only() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let group = MockGroup::mock(GroupOutcome::Match(1), Arc::clone(&calls));
+        let mut seg = group_segment(
+            group,
+            vec![group_meta(0), group_meta(1), group_meta(2)],
+            body_segments(&["-A", "-B", "-C"]),
+            None,
+        );
+        let ex = Exchange::new(Message::new("x"));
+        let result = completed_exchange(seg.run(ex).await);
+        assert_eq!(result.input.body.as_text(), Some("x-B"));
+    }
+
+    // 6. Constructor rejects mismatched metas/bodies and empty groups.
+    #[test]
+    fn choice_group_new_rejects_metas_body_mismatch() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let group = MockGroup::mock(GroupOutcome::NoMatch, Arc::clone(&calls));
+        assert!(
+            ChoiceGroupSegment::new(
+                Arc::clone(&group),
+                vec![group_meta(0), group_meta(1)],
+                body_segments(&["-A"]),
+                None,
+            )
+            .is_err(),
+            "metas.len() != bodies.len() must be rejected"
+        );
+        assert!(
+            ChoiceGroupSegment::new(group, vec![], vec![], None).is_err(),
+            "empty groups must be rejected"
         );
     }
 }

@@ -2,7 +2,8 @@
 //!
 //! Language SPI for rust-camel — defines the core traits all expression/predicate languages implement.
 //!
-//! Main traits: `Language`, `Expression`, `Predicate`, `MutatingExpression`, `MutatingPredicate`.
+//! Main traits: `Language`, `Expression`, `Predicate`, `PredicateGroup`, `MutatingExpression`,
+//! `MutatingPredicate`.
 //! Main modules: `error`, `eval`, `language_limits`.
 
 pub mod error;
@@ -30,6 +31,19 @@ pub trait Language: Send + Sync {
     fn name(&self) -> &'static str;
     fn create_expression(&self, script: &str) -> Result<Box<dyn Expression>, LanguageError>;
     fn create_predicate(&self, script: &str) -> Result<Box<dyn Predicate>, LanguageError>;
+
+    /// Create a group of predicates that can be evaluated in one engine call.
+    ///
+    /// The default returns `Ok(None)`, meaning group evaluation is not
+    /// supported by this language; callers fall back to per-clause sequential
+    /// evaluation.
+    fn create_predicate_group(
+        &self,
+        scripts: &[&str],
+    ) -> Result<Option<Box<dyn PredicateGroup>>, LanguageError> {
+        let _ = scripts;
+        Ok(None)
+    }
 
     /// Create a mutating expression. Default returns NotSupported.
     fn create_mutating_expression(
@@ -80,6 +94,48 @@ pub trait Predicate: Send + Sync {
 #[async_trait]
 pub trait MutatingPredicate: Send + Sync {
     async fn matches(&self, exchange: &mut Exchange) -> Result<bool, LanguageError>;
+}
+
+/// Error from evaluating one clause of a predicate group.
+///
+/// `Display` renders only the clause index plus the inner error's class and
+/// [`LanguageError::redacted_detail`], never the inner error's raw `Display`:
+/// free-form payloads such as `LanguageError::EvalError` may carry arbitrary
+/// exchange or provider data.
+#[derive(Debug)]
+pub struct IndexedPredicateError {
+    /// Index of the clause whose evaluation failed.
+    pub index: usize,
+    /// Underlying language error for that clause.
+    pub error: LanguageError,
+}
+
+impl std::fmt::Display for IndexedPredicateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "predicate group clause {} failed", self.index)?;
+        if let Some(class) = self.error.class() {
+            write!(f, " ({class})")?;
+        }
+        if let Some(detail) = self.error.redacted_detail() {
+            write!(f, ": {detail}")?;
+        }
+        Ok(())
+    }
+}
+
+/// A group of predicates evaluated together in declaration order.
+#[async_trait]
+pub trait PredicateGroup: Send + Sync {
+    /// Evaluate predicates in declaration order and return the first match.
+    ///
+    /// `Ok(Some(i))` is the index of the first matching clause, `Ok(None)`
+    /// means no clause matched, and `Err(IndexedPredicateError)` means clause
+    /// `i` failed to evaluate. Clauses after a match, and skipped clauses, are
+    /// never evaluated.
+    async fn first_match(
+        &self,
+        exchange: &Exchange,
+    ) -> Result<Option<usize>, IndexedPredicateError>;
 }
 
 #[cfg(test)]
@@ -166,5 +222,31 @@ mod tests {
     fn language_trait_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<MockLanguage>();
+    }
+
+    #[test]
+    fn default_create_predicate_group_returns_none() {
+        let lang = MockLanguage;
+        let result = lang.create_predicate_group(&["a", "b"]);
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn language_trait_group_hook_is_object_safe() {
+        let lang: &dyn Language = &MockLanguage;
+        let result: Result<Option<Box<dyn PredicateGroup>>, LanguageError> =
+            lang.create_predicate_group(&["a", "b"]);
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn indexed_predicate_error_display_names_index() {
+        let err = IndexedPredicateError {
+            index: 2,
+            error: LanguageError::EvalError("SECRET".into()),
+        };
+        let rendered = format!("{err}");
+        assert!(rendered.contains('2'), "rendered: {rendered}");
+        assert!(!rendered.contains("SECRET"), "rendered: {rendered}");
     }
 }

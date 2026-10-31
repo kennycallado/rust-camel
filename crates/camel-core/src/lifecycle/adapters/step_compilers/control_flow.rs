@@ -13,7 +13,9 @@ use super::{
     pack_lifecycles,
 };
 use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
-use crate::lifecycle::adapters::step_resolution::{compile_filter_predicate, eval_meta};
+use crate::lifecycle::adapters::step_resolution::{
+    compile_choice_group, compile_filter_predicate, eval_meta,
+};
 use crate::lifecycle::application::route_definition::BuilderStep;
 use camel_processor::{CatchClauseSegment, CatchMatcher, DoTrySegment, FinallyClauseSegment};
 
@@ -151,42 +153,75 @@ impl StepCompiler for ControlFlowCompiler {
 
             // ── DeclarativeChoice ──
             BuilderStep::DeclarativeChoice { whens, otherwise } => {
-                let mut when_segments = Vec::new();
-                let mut all_lifecycles = Vec::new();
-                for when_step in whens {
-                    let meta = eval_meta(
-                        ctx,
-                        &when_step.predicate.language,
-                        "choice/when",
-                        step_index,
-                        None,
-                    );
-                    let predicate =
-                        compile_filter_predicate(ctx.languages, &when_step.predicate, meta)?;
-                    let (sub_segments, lifecycles) =
-                        ctx.compile_children_segments(when_step.steps, registry)?;
-                    all_lifecycles.extend(lifecycles);
-                    let body = compose_outcome_segment(sub_segments);
-                    when_segments.push(camel_processor::WhenClauseSegment { predicate, body });
-                }
-                let otherwise_seg = if let Some(otherwise_steps) = otherwise {
-                    let (sub_segments, lifecycles) =
-                        ctx.compile_children_segments(otherwise_steps, registry)?;
-                    all_lifecycles.extend(lifecycles);
-                    Some(compose_outcome_segment(sub_segments))
+                if let Some((group, metas)) =
+                    compile_choice_group(ctx.languages, &whens, ctx, step_index)?
+                {
+                    let mut bodies = Vec::with_capacity(whens.len());
+                    let mut all_lifecycles = Vec::new();
+                    for when_step in whens {
+                        let (sub_segments, lifecycles) =
+                            ctx.compile_children_segments(when_step.steps, registry)?;
+                        all_lifecycles.extend(lifecycles);
+                        bodies.push(compose_outcome_segment(sub_segments));
+                    }
+                    let otherwise_seg = if let Some(otherwise_steps) = otherwise {
+                        let (sub_segments, lifecycles) =
+                            ctx.compile_children_segments(otherwise_steps, registry)?;
+                        all_lifecycles.extend(lifecycles);
+                        Some(compose_outcome_segment(sub_segments))
+                    } else {
+                        None
+                    };
+                    let choice_segment = camel_processor::ChoiceGroupSegment::new(
+                        group,
+                        metas,
+                        bodies,
+                        otherwise_seg,
+                    )?;
+                    Ok(CompileOutcome::Matched(CompiledStep::Segment {
+                        segment: camel_api::OutcomeSegment::new(Box::new(choice_segment)),
+                        body_contract: None,
+                        lifecycle: pack_lifecycles(all_lifecycles),
+                        label: None,
+                    }))
                 } else {
-                    None
-                };
-                let choice_segment = camel_processor::ChoiceSegment {
-                    clauses: when_segments,
-                    otherwise: otherwise_seg,
-                };
-                Ok(CompileOutcome::Matched(CompiledStep::Segment {
-                    segment: camel_api::OutcomeSegment::new(Box::new(choice_segment)),
-                    body_contract: None,
-                    lifecycle: pack_lifecycles(all_lifecycles),
-                    label: None,
-                }))
+                    let mut when_segments = Vec::new();
+                    let mut all_lifecycles = Vec::new();
+                    for when_step in whens {
+                        let meta = eval_meta(
+                            ctx,
+                            &when_step.predicate.language,
+                            "choice/when",
+                            step_index,
+                            None,
+                        );
+                        let predicate =
+                            compile_filter_predicate(ctx.languages, &when_step.predicate, meta)?;
+                        let (sub_segments, lifecycles) =
+                            ctx.compile_children_segments(when_step.steps, registry)?;
+                        all_lifecycles.extend(lifecycles);
+                        let body = compose_outcome_segment(sub_segments);
+                        when_segments.push(camel_processor::WhenClauseSegment { predicate, body });
+                    }
+                    let otherwise_seg = if let Some(otherwise_steps) = otherwise {
+                        let (sub_segments, lifecycles) =
+                            ctx.compile_children_segments(otherwise_steps, registry)?;
+                        all_lifecycles.extend(lifecycles);
+                        Some(compose_outcome_segment(sub_segments))
+                    } else {
+                        None
+                    };
+                    let choice_segment = camel_processor::ChoiceSegment {
+                        clauses: when_segments,
+                        otherwise: otherwise_seg,
+                    };
+                    Ok(CompileOutcome::Matched(CompiledStep::Segment {
+                        segment: camel_api::OutcomeSegment::new(Box::new(choice_segment)),
+                        body_contract: None,
+                        lifecycle: pack_lifecycles(all_lifecycles),
+                        label: None,
+                    }))
+                }
             }
 
             // ── DeclarativeDoTry ──

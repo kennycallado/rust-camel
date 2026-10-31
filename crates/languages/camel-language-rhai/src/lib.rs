@@ -109,8 +109,8 @@
 use async_trait::async_trait;
 use camel_api::{ErrorPosition, ExpressionErrorClass};
 use camel_language_api::{
-    Body, Exchange, Expression, Language, LanguageError, MutatingExpression, Predicate,
-    RhaiLimitsConfig, Value,
+    Body, Exchange, Expression, IndexedPredicateError, Language, LanguageError, MutatingExpression,
+    Predicate, PredicateGroup, RhaiLimitsConfig, Value,
 };
 use rhai::{
     AST, Engine, OptimizationLevel, Scope,
@@ -118,7 +118,11 @@ use rhai::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::sync::OnceLock;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tracing::debug;
 
@@ -480,6 +484,15 @@ fn read_only_mutation_reason(mutation: ReadOnlyMutation) -> String {
     }
 }
 
+/// An owned exchange snapshot for read-only evaluation: the converted `body`
+/// plus the header and property maps. Every field is converted exactly once so
+/// group evaluation can reuse the snapshot across clauses.
+struct ExchangeSnapshot {
+    body: rhai::Dynamic,
+    headers: rhai::Map,
+    properties: rhai::Map,
+}
+
 /// Rhai scripting language for rust-camel.
 ///
 /// Read-only expressions and predicates have access to:
@@ -609,30 +622,42 @@ impl RhaiLanguage {
         Ok((d, counters))
     }
 
-    /// Build a scope with `body` and `headers` variables from the exchange.
+    /// Convert the exchange into an owned snapshot: the `body` value plus the
+    /// `headers` and `properties` maps, each converted EXACTLY ONCE.
     ///
-    /// Inbound conversion is fallible: a header or property holding a value
-    /// rhai cannot represent (u64 > i64::MAX, sealed Q4) fails the evaluation
-    /// before the script runs.
-    fn make_scope(
-        exchange: &Exchange,
-    ) -> Result<(Scope<'static>, rhai::Map, rhai::Map), LanguageError> {
-        let mut scope = Scope::new();
-        let (body, _) = Self::bind_body(&exchange.input.body)?;
-        scope.push("body", body);
+    /// This is the single conversion site for group evaluation and the
+    /// non-mutating eval path. Inbound conversion is fallible: a header,
+    /// property, or body holding a value rhai cannot represent (u64 > i64::MAX,
+    /// sealed Q4) fails before any script runs.
+    fn snapshot(exchange: &Exchange) -> Result<ExchangeSnapshot, LanguageError> {
+        // Body FIRST, then headers, then properties: this preserves the
+        // pre-snapshot `eval_async` error precedence (body -> header entry ->
+        // property entry) for an exchange with several unconvertible values.
+        let body = Self::body_to_dynamic(&exchange.input.body, "body")?;
+        let (headers, properties) = Self::snapshot_maps(exchange)?;
+        Ok(ExchangeSnapshot {
+            body,
+            headers,
+            properties,
+        })
+    }
 
+    /// Convert only the header/property maps into an owned snapshot. Used by
+    /// the stream-body group branch, which converts the body per clause (a
+    /// marker clone is counted as a materializing read, so one marker must not
+    /// be shared across clauses).
+    fn snapshot_maps(exchange: &Exchange) -> Result<(rhai::Map, rhai::Map), LanguageError> {
         let mut headers = rhai::Map::new();
         for (k, v) in &exchange.input.headers {
             headers.insert(k.clone().into(), json_to_dynamic(v, "header entry")?);
         }
-        scope.push("headers", headers.clone());
 
         let mut properties = rhai::Map::new();
         for (k, v) in &exchange.properties {
             properties.insert(k.clone().into(), json_to_dynamic(v, "property entry")?);
         }
 
-        Ok((scope, headers, properties))
+        Ok((headers, properties))
     }
 
     /// Create a read-only eval engine with `header()` and `property()`
@@ -746,13 +771,28 @@ impl RhaiLanguage {
         headers_map: rhai::Map,
         properties_map: rhai::Map,
     ) -> Result<Value, LanguageError> {
+        let engine = Self::create_eval_engine(limits, headers_map.clone(), properties_map.clone());
+        Self::eval_with_engine(&engine, ast, body, headers_map, properties_map)
+    }
+
+    /// Evaluate a pre-compiled read-only AST with an already-built eval engine.
+    ///
+    /// This is the shared tail of [`Self::eval_sync`] and the predicate-group
+    /// clause loop: a fresh scope seeded from the owned snapshot, the
+    /// post-eval stream-refusal rule, and the `dynamic_to_value` conversion.
+    /// Keeping both callers on this helper preserves failure-contract parity.
+    fn eval_with_engine(
+        engine: &Engine,
+        ast: &rhai::AST,
+        body: rhai::Dynamic,
+        headers_map: rhai::Map,
+        properties_map: rhai::Map,
+    ) -> Result<Value, LanguageError> {
         let mut scope = Scope::new();
         let stream = StreamCounters::of_dynamic(&body);
         scope.push("body", body);
-        scope.push("headers", headers_map.clone());
-        scope.push("properties", properties_map.clone());
-
-        let engine = Self::create_eval_engine(limits, headers_map, properties_map);
+        scope.push("headers", headers_map);
+        scope.push("properties", properties_map);
 
         // eval_ast_with_scope reuses the pre-compiled AST — no re-parse per eval.
         // The AST was built once in `create_expression` / `create_predicate`.
@@ -951,6 +991,79 @@ struct RhaiPredicate {
     limits: RhaiLimitsConfig,
 }
 
+/// A group of read-only Rhai predicates evaluated together in declaration
+/// order.
+///
+/// One engine and one exchange snapshot are built per [`first_match`] call;
+/// every clause reuses them with a fresh [`Scope`]. Each clause keeps its own
+/// timeout and operation budget, so budgets never accumulate across clauses.
+///
+/// [`first_match`]: PredicateGroup::first_match
+pub struct RhaiPredicateGroup {
+    asts: Vec<Arc<AST>>,
+    limits: RhaiLimitsConfig,
+    /// Test-only: number of real body conversions performed by this instance.
+    /// Incremented inside [`RhaiPredicateGroup::counted_body_to_dynamic`], so
+    /// it tracks work rather than a manual call-site marker: one per
+    /// `first_match` call for eager bodies, one per clause for stream bodies.
+    #[cfg(test)]
+    snapshot_conversions: AtomicUsize,
+    /// Test-only: clause indices evaluated, in evaluation order.
+    #[cfg(test)]
+    eval_log: Arc<Mutex<Vec<usize>>>,
+}
+
+impl RhaiPredicateGroup {
+    /// Convert a body for clause evaluation, counting the conversion in test
+    /// builds. Both conversion sites in [`first_match`] route through here, so
+    /// the test counter tracks real conversions instead of a manual marker: an
+    /// eager-body regression that re-converts per clause is observable, and
+    /// the stream branch's legitimate per-clause conversions are counted too.
+    /// In non-test builds the increment is compiled out and this inlines to
+    /// [`RhaiLanguage::body_to_dynamic`].
+    #[inline]
+    fn counted_body_to_dynamic(
+        &self,
+        body: &Body,
+        target: &str,
+    ) -> Result<rhai::Dynamic, LanguageError> {
+        #[cfg(test)]
+        self.snapshot_conversions.fetch_add(1, Ordering::Relaxed);
+        RhaiLanguage::body_to_dynamic(body, target)
+    }
+}
+
+#[cfg(test)]
+impl RhaiPredicateGroup {
+    /// Number of body snapshot conversions performed by this instance.
+    pub(crate) fn snapshot_conversions(&self) -> usize {
+        self.snapshot_conversions.load(Ordering::Relaxed)
+    }
+
+    /// Clause indices evaluated by this instance, in evaluation order.
+    pub(crate) fn eval_log(&self) -> Vec<usize> {
+        self.eval_log
+            .lock()
+            .expect("eval_log mutex poisoned")
+            .clone()
+    }
+}
+
+/// Strict predicate result: predicates must evaluate to a real boolean. No
+/// truthiness coercion — any other value (including Null) is a type error
+/// (change `language-value-boundary`). Shared by [`RhaiPredicate`] and
+/// [`RhaiPredicateGroup`] so both report the identical error class.
+fn strict_predicate_bool(val: &Value) -> Result<bool, LanguageError> {
+    match val {
+        Value::Bool(b) => Ok(*b),
+        other => Err(LanguageError::TypeMismatch {
+            expected: "bool".to_string(),
+            actual: value_type_name(other).to_string(),
+            position: None,
+        }),
+    }
+}
+
 /// Shared async eval helper used by both [`RhaiExpression`] and [`RhaiPredicate`].
 /// Resolves limits, applies the timeout, and runs the script via `spawn_blocking`.
 async fn eval_async(
@@ -960,13 +1073,20 @@ async fn eval_async(
 ) -> Result<Value, LanguageError> {
     let r = resolve_rhai_limits(limits);
     let timeout = Duration::from_millis(r.execution_timeout_ms);
-    let body = RhaiLanguage::body_to_dynamic(&exchange.input.body, "body")?;
-    let (_, headers_map, properties_map) = RhaiLanguage::make_scope(exchange)?;
+    // Exactly one body conversion: the snapshot owns the converted body plus
+    // the header/property maps.
+    let snapshot = RhaiLanguage::snapshot(exchange)?;
     let limits = limits.clone();
 
     tokio::time::timeout(timeout, async move {
         tokio::task::spawn_blocking(move || {
-            RhaiLanguage::eval_sync(&ast, &limits, body, headers_map, properties_map)
+            RhaiLanguage::eval_sync(
+                &ast,
+                &limits,
+                snapshot.body,
+                snapshot.headers,
+                snapshot.properties,
+            )
         })
         .await
         .map_err(|_join| {
@@ -997,17 +1117,106 @@ impl Expression for RhaiExpression {
 impl Predicate for RhaiPredicate {
     async fn matches(&self, exchange: &Exchange) -> Result<bool, LanguageError> {
         let val = eval_async(self.ast.clone(), &self.limits, exchange).await?;
-        // Strict bool: predicates must evaluate to a real boolean. No
-        // truthiness coercion — any other value (including Null) is a type
-        // error (change `language-value-boundary`).
-        match &val {
-            Value::Bool(b) => Ok(*b),
-            other => Err(LanguageError::TypeMismatch {
-                expected: "bool".to_string(),
-                actual: value_type_name(other).to_string(),
-                position: None,
-            }),
+        // Strict bool: no truthiness coercion, identical class to the group path.
+        strict_predicate_bool(&val)
+    }
+}
+
+#[async_trait]
+impl PredicateGroup for RhaiPredicateGroup {
+    async fn first_match(
+        &self,
+        exchange: &Exchange,
+    ) -> Result<Option<usize>, IndexedPredicateError> {
+        let r = resolve_rhai_limits(&self.limits);
+        let timeout = Duration::from_millis(r.execution_timeout_ms);
+
+        // Snapshot ONCE, before the clause loop: header/property maps always,
+        // the body only for eager bodies. A stream-body marker is converted
+        // per clause instead — cloning a marker counts as a materializing read,
+        // so sharing one marker across clauses would corrupt the per-clause
+        // refusal accounting.
+        let stream_body = matches!(&exchange.input.body, Body::Stream(_));
+        let (shared_body, headers_map, properties_map) = if stream_body {
+            let (headers, properties) = RhaiLanguage::snapshot_maps(exchange)
+                .map_err(|error| IndexedPredicateError { index: 0, error })?;
+            (None, headers, properties)
+        } else {
+            // Body first, then the maps: preserves `snapshot`'s error
+            // precedence (body -> header entry -> property entry).
+            let body = self
+                .counted_body_to_dynamic(&exchange.input.body, "body")
+                .map_err(|error| IndexedPredicateError { index: 0, error })?;
+            let (headers, properties) = RhaiLanguage::snapshot_maps(exchange)
+                .map_err(|error| IndexedPredicateError { index: 0, error })?;
+            (Some(body), headers, properties)
+        };
+
+        // ONE eval engine for the whole call, built before the loop. The
+        // clause loop only clones the shared `Arc`, never constructs an engine.
+        let engine = Arc::new(RhaiLanguage::create_eval_engine(
+            &self.limits,
+            headers_map.clone(),
+            properties_map.clone(),
+        ));
+
+        for (index, ast) in self.asts.iter().enumerate() {
+            #[cfg(test)]
+            self.eval_log
+                .lock()
+                .expect("eval_log mutex poisoned")
+                .push(index);
+
+            // Eager bodies reuse the shared conversion; stream bodies get a
+            // fresh marker per clause (exempt from the once-only rule).
+            let body = match &shared_body {
+                Some(body) => body.clone(),
+                None => self
+                    .counted_body_to_dynamic(&exchange.input.body, "body")
+                    .map_err(|error| IndexedPredicateError { index, error })?,
+            };
+
+            let engine = Arc::clone(&engine);
+            let ast = Arc::clone(ast);
+            let headers = headers_map.clone();
+            let properties = properties_map.clone();
+
+            // Per-clause timeout + `spawn_blocking`, mirroring `eval_async`.
+            // rhai's `eval_ast_with_scope` takes `&self`, so the one engine is
+            // shared by cloning the `Arc` into each blocking task.
+            let clause_result = tokio::time::timeout(timeout, async move {
+                tokio::task::spawn_blocking(move || {
+                    RhaiLanguage::eval_with_engine(&engine, &ast, body, headers, properties)
+                })
+                .await
+                .map_err(|_join| {
+                    // Panic payload may carry exchange data — never render it.
+                    LanguageError::EvalFailure {
+                        class: ExpressionErrorClass::Runtime,
+                        position: None,
+                        detail: None,
+                    }
+                })?
+            })
+            .await
+            .map_err(|_elapsed| IndexedPredicateError {
+                index,
+                error: LanguageError::EvalFailure {
+                    class: ExpressionErrorClass::Timeout,
+                    position: None,
+                    detail: None,
+                },
+            })?
+            .map_err(|error| IndexedPredicateError { index, error })?;
+
+            match strict_predicate_bool(&clause_result) {
+                Ok(true) => return Ok(Some(index)),
+                Ok(false) => {}
+                Err(error) => return Err(IndexedPredicateError { index, error }),
+            }
         }
+
+        Ok(None)
     }
 }
 
@@ -1123,6 +1332,33 @@ impl Language for RhaiLanguage {
         }))
     }
 
+    /// Compile each clause through the same read-only path as
+    /// [`Self::create_predicate`]. An empty slice returns `Ok(None)` so
+    /// zero-clause callers fall back to sequential evaluation.
+    fn create_predicate_group(
+        &self,
+        scripts: &[&str],
+    ) -> Result<Option<Box<dyn PredicateGroup>>, LanguageError> {
+        if scripts.is_empty() {
+            return Ok(None);
+        }
+
+        let mut asts = Vec::with_capacity(scripts.len());
+        for script in scripts {
+            asts.push(Arc::new(Self::compile_read_only(script, &self.limits)?));
+        }
+
+        debug!("rhai predicate group compiled");
+        Ok(Some(Box::new(RhaiPredicateGroup {
+            asts,
+            limits: self.limits.clone(),
+            #[cfg(test)]
+            snapshot_conversions: AtomicUsize::new(0),
+            #[cfg(test)]
+            eval_log: Arc::new(Mutex::new(Vec::new())),
+        })))
+    }
+
     /// Create a mutating Rhai expression.
     ///
     /// The script can modify `headers`, `properties`, and `body` via assignment syntax.
@@ -1159,12 +1395,15 @@ impl Default for RhaiLanguage {
 mod tests {
     use camel_api::{ErrorPosition, ExpressionErrorClass};
     use camel_language_api::{
-        EvalMeta, Exchange, Language, LanguageError, Message, Value, to_expression_failed,
+        EvalMeta, Exchange, Language, LanguageError, Message, PredicateGroup, RhaiLimitsConfig,
+        Value, to_expression_failed,
     };
     use std::fs;
     use tempfile::NamedTempFile;
 
-    use super::{RhaiExpression, RhaiLanguage, RhaiMutatingExpression, RhaiPredicate};
+    use super::{
+        RhaiExpression, RhaiLanguage, RhaiMutatingExpression, RhaiPredicate, RhaiPredicateGroup,
+    };
 
     #[test]
     fn types_are_send_sync() {
@@ -3875,6 +4114,59 @@ mod tests {
         );
     }
 
+    /// Regression (473-t2a fix round 1): the shared snapshot converts the
+    /// body BEFORE the header/property maps. An exchange whose body and
+    /// header are both unconvertible must report the body error, matching the
+    /// pre-snapshot `eval_async` precedence.
+    #[tokio::test]
+    async fn conversion_error_precedence_body_before_header() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("body").expect("script compiles");
+        let mut ex = Exchange::new(Message::new(Body::Json(Value::from(u64::MAX))));
+        ex.input
+            .headers
+            .insert("big".to_string(), Value::from(u64::MAX));
+
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("body and header are both unconvertible");
+
+        match err {
+            LanguageError::ConversionError { target, .. } => {
+                assert_eq!(target, "body", "body conversion must win");
+            }
+            other => panic!("expected ConversionError, got {other:?}"),
+        }
+    }
+
+    /// Regression (473-t2a fix round 1): with a valid body, the header map is
+    /// converted before the property map, so a header entry error wins over a
+    /// property entry error. Uses the predicate entry point.
+    #[tokio::test]
+    async fn conversion_error_precedence_header_before_property() {
+        let lang = RhaiLanguage::new();
+        let pred = lang.create_predicate("true").expect("predicate compiles");
+        let mut ex = Exchange::new(Message::new("valid"));
+        ex.input
+            .headers
+            .insert("big".to_string(), Value::from(u64::MAX));
+        ex.properties
+            .insert("big".to_string(), Value::from(u64::MAX));
+
+        let err = pred
+            .matches(&ex)
+            .await
+            .expect_err("header and property are both unconvertible");
+
+        match err {
+            LanguageError::ConversionError { target, .. } => {
+                assert_eq!(target, "header entry", "header conversion must win");
+            }
+            other => panic!("expected ConversionError, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn json_explicit_serialization_yields_text_body() {
         let lang = RhaiLanguage::new();
@@ -3958,5 +4250,569 @@ mod tests {
             !ex.input.headers.contains_key("t"),
             "refused timestamp must not write back"
         );
+    }
+
+    // ── 473-t2b: RhaiPredicateGroup semantics + isolation ──
+    //
+    // `create_predicate_group` hands back `Box<dyn PredicateGroup>`, which
+    // cannot be downcast to read the test-only instrumentation. Construct the
+    // concrete `RhaiPredicateGroup` directly instead: the struct fields and
+    // `compile_read_only` are visible to this child module.
+
+    /// Build a concrete group through the same two-AST compile path as
+    /// [`RhaiLanguage::create_predicate_group`].
+    fn rhai_group(lang: &RhaiLanguage, scripts: &[&str]) -> RhaiPredicateGroup {
+        let asts = scripts
+            .iter()
+            .map(|script| {
+                Arc::new(
+                    RhaiLanguage::compile_read_only(script, &lang.limits)
+                        .expect("test clause compiles"),
+                )
+            })
+            .collect();
+        RhaiPredicateGroup {
+            asts,
+            limits: lang.limits.clone(),
+            snapshot_conversions: std::sync::atomic::AtomicUsize::new(0),
+            eval_log: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn group_limits(max_operations: u64, execution_timeout_ms: u64) -> RhaiLimitsConfig {
+        RhaiLimitsConfig {
+            max_operations: Some(max_operations),
+            execution_timeout_ms: Some(execution_timeout_ms),
+            ..Default::default()
+        }
+    }
+
+    fn group_lang(max_operations: u64, execution_timeout_ms: u64) -> RhaiLanguage {
+        RhaiLanguage::with_limits(group_limits(max_operations, execution_timeout_ms))
+    }
+
+    /// A terminating busy loop that returns `false`; the iteration count is
+    /// the only workload knob (no sleeps anywhere in these tests).
+    fn budget_loop_script(iterations: u64) -> String {
+        format!("let x = 0; while x < {iterations} {{ x += 1; }} false")
+    }
+
+    async fn standalone_outcome(
+        lang: &RhaiLanguage,
+        script: &str,
+        exchange: &Exchange,
+    ) -> Result<bool, LanguageError> {
+        let predicate = lang.create_predicate(script).expect("test clause compiles");
+        predicate.matches(exchange).await
+    }
+
+    async fn timed_standalone(
+        lang: &RhaiLanguage,
+        script: &str,
+        exchange: &Exchange,
+    ) -> (std::time::Duration, Result<bool, LanguageError>) {
+        let predicate = lang.create_predicate(script).expect("test clause compiles");
+        let start = std::time::Instant::now();
+        let outcome = predicate.matches(exchange).await;
+        (start.elapsed(), outcome)
+    }
+
+    /// Operation-limit band for the budget tests: large enough that the
+    /// per-iteration operation cost is a small fraction of `(L/2, L)`.
+    const GROUP_BUDGET_LIMIT: u64 = 100_000;
+
+    /// Find the smallest loop count whose standalone run trips `limit / 2`
+    /// operations, then move to roughly the middle of the `(limit/2, limit)`
+    /// band so a hypothetical cumulative counter has clear margin.
+    async fn calibrate_budget_loop_count(limit: u64) -> u64 {
+        let tight = group_lang(limit / 2, 5_000);
+        let loose = group_lang(limit, 5_000);
+        let exchange = exchange_with_body("x");
+
+        let mut low = 1_u64;
+        let mut high = limit;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let script = budget_loop_script(mid);
+            match standalone_outcome(&tight, &script, &exchange).await {
+                Err(err) if err.class() == Some(ExpressionErrorClass::Limit) => high = mid,
+                Err(err) => {
+                    panic!("budget calibration hit an unexpected failure at count {mid}: {err:?}")
+                }
+                Ok(_) => low = mid + 1,
+            }
+        }
+
+        // `low` is the first count above the L/2 boundary. Aim at ~0.75L and
+        // fall back to the boundary if the linear scale overshoots L.
+        let boundary = low;
+        let candidate = boundary + boundary / 2;
+        let candidate_script = budget_loop_script(candidate);
+        match standalone_outcome(&loose, &candidate_script, &exchange).await {
+            Ok(false) => candidate,
+            _ => boundary,
+        }
+    }
+
+    /// Measure a seed loop and scale its iteration count to `target`.
+    async fn calibrate_loop_count_for_duration(
+        lang: &RhaiLanguage,
+        exchange: &Exchange,
+        target: std::time::Duration,
+    ) -> u64 {
+        const SEED: u64 = 5_000_000;
+        let seed_script = budget_loop_script(SEED);
+        let (seed_elapsed, seed_outcome) = timed_standalone(lang, &seed_script, exchange).await;
+        assert!(
+            matches!(&seed_outcome, Ok(false)),
+            "seed busy loop must return false: {seed_outcome:?}"
+        );
+        let seed_ns = seed_elapsed.as_nanos().max(1);
+        let target_ns = target.as_nanos().max(1);
+        let count = u128::from(SEED) * target_ns / seed_ns;
+        u64::try_from(count.max(1)).expect("calibrated iteration count fits u64")
+    }
+
+    #[tokio::test]
+    async fn group_first_match_returns_first_matching_index() {
+        let lang = RhaiLanguage::new();
+        let group = rhai_group(
+            &lang,
+            &[
+                r#"header("k") == "1""#,
+                r#"header("k") == "2""#,
+                r#"header("k") == "3""#,
+            ],
+        );
+        let exchange = exchange_with_header("k", "2");
+
+        assert_eq!(
+            group.first_match(&exchange).await.expect("group evaluates"),
+            Some(1),
+            "clause 1 is the first match"
+        );
+        assert_eq!(
+            group.eval_log(),
+            vec![0, 1],
+            "clause 2 must never be evaluated after the first match"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_no_match_evaluates_every_clause() {
+        let lang = RhaiLanguage::new();
+        let exchange = exchange_with_body("x");
+
+        let throwing = rhai_group(&lang, &["false", "false", "false", r#"throw "probe-last""#]);
+        let err = throwing
+            .first_match(&exchange)
+            .await
+            .expect_err("the final thrower must surface");
+        assert_eq!(err.index, 3, "the thrower is clause 3");
+        assert_class(&err.error, ExpressionErrorClass::Runtime, "thrown probe");
+        assert_eq!(throwing.eval_log(), vec![0, 1, 2, 3]);
+
+        let all_false = rhai_group(&lang, &["false", "false", "false"]);
+        assert_eq!(
+            all_false
+                .first_match(&exchange)
+                .await
+                .expect("no thrower, no match"),
+            None
+        );
+        assert_eq!(all_false.eval_log(), vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn group_skipped_clauses_never_evaluate() {
+        let lang = RhaiLanguage::new();
+        let group = rhai_group(&lang, &["true", r#"throw "probe-1""#, "true"]);
+        let exchange = exchange_with_body("x");
+
+        assert_eq!(
+            group
+                .first_match(&exchange)
+                .await
+                .expect("clause 0 matches"),
+            Some(0)
+        );
+        assert_eq!(
+            group.eval_log(),
+            vec![0],
+            "neither the throwing clause nor the harmless clause may evaluate"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_budget_workloads_are_validated_standalone() {
+        let exchange = exchange_with_body("x");
+        let count = calibrate_budget_loop_count(GROUP_BUDGET_LIMIT).await;
+        let script = budget_loop_script(count);
+
+        let loose = group_lang(GROUP_BUDGET_LIMIT, 5_000);
+        match standalone_outcome(&loose, &script, &exchange).await {
+            Ok(false) => {}
+            other => panic!(
+                "workload count {count} must succeed under L={GROUP_BUDGET_LIMIT}; got {other:?}"
+            ),
+        }
+
+        let tight = group_lang(GROUP_BUDGET_LIMIT / 2, 5_000);
+        match standalone_outcome(&tight, &script, &exchange).await {
+            Err(err) => assert_class(&err, ExpressionErrorClass::Limit, "L/2 workload"),
+            Ok(value) => panic!(
+                "workload count {count} must fail under L/2={}; got Ok({value:?})",
+                GROUP_BUDGET_LIMIT / 2
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn group_budgets_do_not_accumulate_across_clauses() {
+        let exchange = exchange_with_body("x");
+        let count = calibrate_budget_loop_count(GROUP_BUDGET_LIMIT).await;
+        let script = budget_loop_script(count);
+
+        // Each clause alone fits under L; if the shared engine carried one
+        // cumulative operation counter, clause 1 would breach it.
+        let lang = group_lang(GROUP_BUDGET_LIMIT, 5_000);
+        let group = rhai_group(&lang, &[script.as_str(), script.as_str()]);
+        assert_eq!(
+            group
+                .first_match(&exchange)
+                .await
+                .expect("both clauses fit their own budget"),
+            None
+        );
+        assert_eq!(group.eval_log(), vec![0, 1]);
+    }
+
+    #[tokio::test]
+    async fn group_budget_breach_is_indexed() {
+        let lang = group_lang(10_000, 5_000);
+        let group = rhai_group(&lang, &["false", "while true {}", r#"throw "probe-2""#]);
+        let exchange = exchange_with_body("x");
+
+        let err = group
+            .first_match(&exchange)
+            .await
+            .expect_err("the unbounded clause must trip the operation limit");
+        assert_eq!(err.index, 1, "the breach belongs to clause 1");
+        assert_class(&err.error, ExpressionErrorClass::Limit, "unbounded clause");
+        assert_eq!(group.eval_log(), vec![0, 1]);
+    }
+
+    #[test]
+    fn group_clause_timeout_is_indexed_and_stops() {
+        use std::time::{Duration, Instant};
+
+        const TIMEOUT_MS: u64 = 100;
+        const OP_LIMIT: u64 = 1_000_000_000;
+        const CLEANUP_BOUND: Duration = Duration::from_secs(2);
+
+        // One blocking thread makes the cleanup sentinel queue behind the
+        // detached clause-1 workload, so observing the sentinel proves the
+        // finite loop completed. An infinite loop would stall teardown.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("single-blocking-thread test runtime builds");
+
+        runtime.block_on(async {
+            let exchange = exchange_with_body("x");
+            // Calibration runs with a non-binding timeout so the measured
+            // natural runtime is not clipped by the per-clause timeout.
+            let calibration_lang = group_lang(OP_LIMIT, 60_000);
+            let target = Duration::from_millis(TIMEOUT_MS * 3);
+            let count =
+                calibrate_loop_count_for_duration(&calibration_lang, &exchange, target).await;
+            let busy = budget_loop_script(count);
+
+            let (measured, outcome) = timed_standalone(&calibration_lang, &busy, &exchange).await;
+            assert!(
+                matches!(&outcome, Ok(false)),
+                "calibrated workload must terminate normally: count={count}, outcome={outcome:?}"
+            );
+            assert!(
+                measured > Duration::from_millis(TIMEOUT_MS),
+                "calibrated workload must outlast the timeout: measured={measured:?}, \
+                 timeout={TIMEOUT_MS}ms, count={count}"
+            );
+            assert!(
+                measured < CLEANUP_BOUND,
+                "calibrated workload must finish inside the cleanup bound: measured={measured:?}, \
+                 bound={CLEANUP_BOUND:?}, count={count}"
+            );
+
+            let lang = group_lang(OP_LIMIT, TIMEOUT_MS);
+            let group = rhai_group(&lang, &["false", busy.as_str(), "false"]);
+            let err = group
+                .first_match(&exchange)
+                .await
+                .expect_err("clause 1 must exceed its own timeout");
+            assert_eq!(err.index, 1, "timeout must be indexed to clause 1");
+            assert_class(
+                &err.error,
+                ExpressionErrorClass::Timeout,
+                "clause 1 timeout",
+            );
+            assert_eq!(group.eval_log(), vec![0, 1]);
+
+            let cleanup_start = Instant::now();
+            tokio::time::timeout(CLEANUP_BOUND, tokio::task::spawn_blocking(|| ()))
+                .await
+                .expect("clause 1 blocking task must finish inside the cleanup bound")
+                .expect("cleanup sentinel joins");
+            let cleanup = cleanup_start.elapsed();
+            assert!(
+                cleanup <= CLEANUP_BOUND,
+                "clause 1 cleanup took {cleanup:?}, bound {CLEANUP_BOUND:?}"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn group_timeouts_are_independent_per_clause() {
+        use std::time::Duration;
+
+        const TIMEOUT_MS: u64 = 200;
+        const OP_LIMIT: u64 = 1_000_000_000;
+
+        let exchange = exchange_with_body("x");
+        let timeout = Duration::from_millis(TIMEOUT_MS);
+        let target = timeout.mul_f64(0.6);
+        let per_clause_bound = timeout.mul_f64(0.8);
+        let sum_floor = timeout.mul_f64(1.1);
+
+        // Non-binding timeout for natural-runtime measurements; the group's
+        // per-clause timeout is the only limiter in the assertion language.
+        let calibration_lang = group_lang(OP_LIMIT, 60_000);
+        let lang = group_lang(OP_LIMIT, TIMEOUT_MS);
+
+        let mut count =
+            calibrate_loop_count_for_duration(&calibration_lang, &exchange, target).await;
+        let mut measurements = String::new();
+
+        for attempt in 0..2 {
+            let script = budget_loop_script(count);
+            let (first_elapsed, first_outcome) = timed_standalone(&lang, &script, &exchange).await;
+            let (second_elapsed, second_outcome) =
+                timed_standalone(&lang, &script, &exchange).await;
+            let sum = first_elapsed + second_elapsed;
+            measurements = format!(
+                "attempt {attempt}: count={count}, first={first_elapsed:?} ({first_outcome:?}), \
+                 second={second_elapsed:?} ({second_outcome:?}), sum={sum:?}"
+            );
+
+            let outcomes_ok =
+                matches!(&first_outcome, Ok(false)) && matches!(&second_outcome, Ok(false));
+            let per_clause_ok =
+                first_elapsed < per_clause_bound && second_elapsed < per_clause_bound;
+            let sum_ok = sum > sum_floor;
+
+            if outcomes_ok && per_clause_ok && sum_ok {
+                let group = rhai_group(&lang, &[script.as_str(), script.as_str()]);
+                assert_eq!(
+                    group
+                        .first_match(&exchange)
+                        .await
+                        .expect("both clauses fit their own timeout"),
+                    None,
+                    "per-clause timeouts must let both clauses run"
+                );
+                assert_eq!(group.eval_log(), vec![0, 1]);
+                return;
+            }
+
+            if attempt == 0 {
+                // Re-scale once from the slower observed clause.
+                let observed_ns = first_elapsed.max(second_elapsed).as_nanos().max(1);
+                let target_ns = target.as_nanos().max(1);
+                let rescaled = u128::from(count) * target_ns / observed_ns;
+                count = u64::try_from(rescaled.max(1)).expect("rescaled count fits u64");
+            }
+        }
+
+        panic!(
+            "independent-timeout workload validation failed after one recalibration; \
+             required each < {per_clause_bound:?} and sum > {sum_floor:?}; {measurements}"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_conversion_failure_is_indexed_to_clause_zero() {
+        let lang = RhaiLanguage::new();
+        let group = rhai_group(&lang, &["true", "true"]);
+        let mut exchange = Exchange::new(Message::new("valid"));
+        exchange
+            .input
+            .headers
+            .insert("big".to_string(), Value::from(u64::MAX));
+
+        let err = group
+            .first_match(&exchange)
+            .await
+            .expect_err("an unrepresentable header must refuse before the loop");
+        assert_eq!(err.index, 0, "pre-loop snapshot failure is indexed to 0");
+        assert_class(
+            &err.error,
+            ExpressionErrorClass::Conversion,
+            "unrepresentable header",
+        );
+        assert!(
+            group.eval_log().is_empty(),
+            "pre-loop failure must not record an evaluated clause"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_stream_marker_body_falls_back_to_per_clause_conversion() {
+        let lang = RhaiLanguage::new();
+        let (exchange, handle) = stream_exchange();
+
+        // Each clause gets a fresh marker. Sharing one marker would count the
+        // per-clause clone as a materializing read and refuse clause 0, so
+        // `Ok(Some(1))` proves the per-clause conversion fallback.
+        let group = rhai_group(&lang, &["false", r#"type_of(body) == "StreamBodyRef""#]);
+        assert_eq!(
+            group
+                .first_match(&exchange)
+                .await
+                .expect("a non-materializing marker read must not refuse"),
+            Some(1)
+        );
+        assert_eq!(group.eval_log(), vec![0, 1]);
+        assert_body_still_stream(&exchange, &handle);
+
+        // A clause that materializes the marker is refused with the typed
+        // Body::Stream conversion, indexed to that clause, and the stream
+        // handle stays bit-identical and unconsumed (sequential-path parity).
+        let refusing = rhai_group(&lang, &["false", "let x = body; true"]);
+        let err = refusing
+            .first_match(&exchange)
+            .await
+            .expect_err("a materializing read must refuse");
+        assert_eq!(err.index, 1, "the materializing clause is clause 1");
+        assert_stream_body_conversion(&err.error);
+        assert_eq!(refusing.eval_log(), vec![0, 1]);
+        assert_body_still_stream(&exchange, &handle);
+    }
+
+    #[tokio::test]
+    async fn group_snapshot_and_engine_are_per_call_not_per_clause() {
+        let lang = RhaiLanguage::new();
+        let group = rhai_group(&lang, &["false", "false", "false", "false"]);
+        let exchange = exchange_with_body("payload");
+
+        assert_eq!(
+            group.first_match(&exchange).await.expect("no-match group"),
+            None
+        );
+        assert_eq!(
+            group.snapshot_conversions(),
+            1,
+            "one body snapshot conversion per first_match call, not per clause"
+        );
+        assert_eq!(group.eval_log(), vec![0, 1, 2, 3]);
+
+        // Per call, not per instance: a second call converts once more.
+        assert_eq!(
+            group.first_match(&exchange).await.expect("second call"),
+            None
+        );
+        assert_eq!(group.snapshot_conversions(), 2);
+
+        // The counter tracks real conversions, not a manual marker: a stream
+        // body legitimately converts once per clause, so the same clause
+        // count yields one conversion per clause. Together with the eager
+        // `== 1` above this is vacuity-proof: a per-clause reconversion on the
+        // eager path pushes that count above 1, and removing either counting
+        // site breaks this assertion.
+        let stream_group = rhai_group(&lang, &["false", "false", "false", "false"]);
+        let (stream_ex, _handle) = stream_exchange();
+        assert_eq!(
+            stream_group
+                .first_match(&stream_ex)
+                .await
+                .expect("stream no-match group"),
+            None
+        );
+        assert_eq!(
+            stream_group.snapshot_conversions(),
+            4,
+            "stream bodies convert once per clause; the counter must track that"
+        );
+        assert_eq!(stream_group.eval_log(), vec![0, 1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn group_scope_does_not_leak_between_clauses() {
+        let lang = RhaiLanguage::new();
+        let exchange = exchange_with_body("x");
+
+        // Clause 0 declares a local and returns false. If the clause loop
+        // reused one rhai `Scope`, `leak_probe` would stay bound and clause 1
+        // would match (`Some(1)`). A fresh scope per evaluation leaves the
+        // identifier unbound, so clause 1 must fail at eval time.
+        let group = rhai_group(&lang, &["let leak_probe = 1; false", "leak_probe == 1"]);
+
+        let err = group
+            .first_match(&exchange)
+            .await
+            .expect_err("clause 0's local must not leak into clause 1");
+        assert_eq!(err.index, 1, "the unbound identifier belongs to clause 1");
+        assert_class(
+            &err.error,
+            ExpressionErrorClass::Runtime,
+            "unbound clause-1 variable",
+        );
+        assert_eq!(
+            group.eval_log(),
+            vec![0, 1],
+            "clause 0 returned false, so clause 1 must run and fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn group_rejects_non_boolean_predicate_like_create_predicate() {
+        let lang = RhaiLanguage::new();
+        let exchange = exchange_with_body("x");
+
+        let sequential = lang
+            .create_predicate(r#""false""#)
+            .expect("predicate compiles");
+        let sequential_err = sequential
+            .matches(&exchange)
+            .await
+            .expect_err("sequential path rejects a non-bool");
+
+        let group = rhai_group(&lang, &[r#""false""#]);
+        let group_err = group
+            .first_match(&exchange)
+            .await
+            .expect_err("group path rejects a non-bool");
+        assert_eq!(group_err.index, 0);
+        assert_eq!(
+            group_err.error.class(),
+            sequential_err.class(),
+            "group and create_predicate must report the same strict-bool class"
+        );
+        assert!(
+            matches!(&group_err.error, LanguageError::TypeMismatch { .. }),
+            "non-bool clause must stay a TypeMismatch: {:?}",
+            group_err.error
+        );
+        assert_class(
+            &group_err.error,
+            ExpressionErrorClass::TypeMismatch,
+            "non-bool clause",
+        );
+    }
+
+    #[test]
+    fn group_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<RhaiPredicateGroup>();
     }
 }

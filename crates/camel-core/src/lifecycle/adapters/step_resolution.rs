@@ -13,7 +13,8 @@ use camel_api::{CamelError, Exchange, FunctionInvoker, ProducerContext};
 use camel_bean::BeanRegistry;
 use camel_component_api::{ComponentContext, RuntimeObservability};
 use camel_language_api::{
-    EvalMeta, Expression, Language, LanguageExpressionEval, LanguagePredicateEval, Predicate,
+    EvalMeta, Expression, Language, LanguageError, LanguageExpressionEval, LanguagePredicateEval,
+    Predicate, PredicateGroup,
 };
 use camel_processor::{
     ClaimKeySource, EnrichmentStrategy, MessageIdSource, SortKeySource, ThrowOnNoPoll,
@@ -21,7 +22,9 @@ use camel_processor::{
 };
 
 use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
-use crate::lifecycle::application::route_definition::{BuilderStep, LanguageExpressionDef};
+use crate::lifecycle::application::route_definition::{
+    BuilderStep, DeclarativeWhenStep, LanguageExpressionDef,
+};
 use crate::shared::components::domain::Registry;
 
 /// Build the trusted [`EvalMeta`] for a compiling step.
@@ -184,6 +187,103 @@ pub(crate) fn compile_filter_predicate(
     Ok(PredicateSource::Async(
         LanguagePredicateEval::new(predicate, meta).into_bool_fn(),
     ))
+}
+
+/// Compile a same-language set of declarative `when` clauses into one
+/// [`PredicateGroup`] plus one [`EvalMeta`] per clause.
+///
+/// Returns `Ok(None)` when the sequential path should run instead:
+/// fewer than two clauses, clauses whose languages differ, or a registered
+/// language that opts out of group evaluation by returning `Ok(None)` from
+/// [`Language::create_predicate_group`].
+///
+/// An unregistered language is a fail-fast compilation error, not a fallback:
+/// the language is resolved before group creation and a missing registration
+/// surfaces as a route error.
+///
+/// On success the returned metas preserve the sequential path's outer step
+/// identity (`step_id = "choice/when#{step_index}"`) and move the clause
+/// position into `verb` (`"choice/when[{i}]"`), so runtime failures are
+/// attributed to the offending clause without changing the step identity.
+///
+/// A group compile error is a compile-time route error. When the language
+/// error carries the offending source text (`ParseError`), the clause index is
+/// recovered by matching that text against the submitted scripts; errors with
+/// no source text produce a group-level message and never invent an index.
+#[allow(clippy::type_complexity)]
+pub(crate) fn compile_choice_group(
+    languages: &SharedLanguageRegistry,
+    whens: &[DeclarativeWhenStep],
+    ctx: &crate::lifecycle::adapters::step_compilers::CompilationContext<'_>,
+    step_index: usize,
+) -> Result<Option<(Arc<dyn PredicateGroup>, Vec<EvalMeta>)>, CamelError> {
+    if whens.len() < 2 {
+        return Ok(None);
+    }
+
+    let language = whens[0].predicate.language.as_str();
+    if language.is_empty()
+        || whens
+            .iter()
+            .any(|when| when.predicate.language.as_str() != language)
+    {
+        return Ok(None);
+    }
+
+    let resolved = resolve_language(languages, language)?;
+    let sources: Vec<&str> = whens
+        .iter()
+        .map(|when| when.predicate.source.as_str())
+        .collect();
+
+    let group = match resolved.create_predicate_group(&sources) {
+        Ok(Some(group)) => group,
+        Ok(None) => return Ok(None),
+        Err(error) => return Err(choice_group_compile_error(language, &sources, error)),
+    };
+
+    let metas = whens
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let mut meta = eval_meta(ctx, language, "choice/when", step_index, None);
+            meta.verb = format!("choice/when[{index}]");
+            meta
+        })
+        .collect();
+
+    Ok(Some((Arc::from(group), metas)))
+}
+
+/// Map a predicate-group compile failure onto a route error.
+///
+/// `ParseError` carries the expression text; matching it against the submitted
+/// scripts recovers the clause index. Every other variant is reported at group
+/// level with the clause count, because fabricating a position would misattribute
+/// the failure.
+fn choice_group_compile_error(
+    language: &str,
+    sources: &[&str],
+    error: LanguageError,
+) -> CamelError {
+    let clause = match &error {
+        LanguageError::ParseError { expr, .. } => {
+            sources.iter().position(|source| *source == expr.as_str())
+        }
+        _ => None,
+    };
+
+    match clause {
+        Some(index) => CamelError::RouteError(format!(
+            "clause {index}: failed to compile {language} predicate `{}`: {error}",
+            sources[index]
+        )),
+        None => CamelError::RouteError(format!(
+            "failed to compile {language} predicate group: one of {} choice/when \
+             clauses failed to compile: {error}",
+            sources.len()
+        )),
+    }
 }
 
 /// Compile a `LanguageExpressionDef` into a fallible [`SortKeySource`].
@@ -1065,6 +1165,442 @@ mod tests {
                 err.to_string().contains("unknown EnrichmentStrategy"),
                 "unexpected error message: {err}"
             ),
+        }
+    }
+
+    // ── 473-t4: grouped DeclarativeChoice compilation ──────────────────────
+
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    use crate::lifecycle::adapters::step_compilers::{CompilationContext, build_registry};
+    use camel_api::{Message, PipelineOutcome};
+
+    fn language_registry(
+        languages: Vec<(&str, Arc<dyn Language>)>,
+    ) -> &'static SharedLanguageRegistry {
+        let mut map: HashMap<String, Arc<dyn Language>> = HashMap::new();
+        for (name, language) in languages {
+            map.insert(name.to_string(), language);
+        }
+        Box::leak(Box::new(Arc::new(std::sync::Mutex::new(map))))
+    }
+
+    fn compilation_ctx(languages: &'static SharedLanguageRegistry) -> CompilationContext<'static> {
+        let producer_ctx: &'static ProducerContext = Box::leak(Box::new(ProducerContext::new()));
+        let beans: &'static Arc<std::sync::Mutex<BeanRegistry>> = Box::leak(Box::new(Arc::new(
+            std::sync::Mutex::new(BeanRegistry::new()),
+        )));
+        let staging: &'static FunctionStagingMode =
+            Box::leak(Box::new(FunctionStagingMode::DirectAdd));
+        let idempotent: &'static crate::IdempotentRegistry =
+            Box::leak(Box::new(crate::IdempotentRegistry::new()));
+        let claim_check: &'static crate::ClaimCheckRegistry =
+            Box::leak(Box::new(crate::ClaimCheckRegistry::new()));
+        let cache: &'static crate::CacheRegistry = Box::leak(Box::new(crate::CacheRegistry::new()));
+
+        CompilationContext {
+            producer_ctx,
+            rt: Arc::new(camel_component_api::NoOpComponentContext),
+            languages,
+            beans,
+            function_invoker: None,
+            component_ctx: Arc::new(camel_component_api::NoOpComponentContext),
+            route_id: Some("r1"),
+            staging_mode: staging,
+            idempotent_repositories: idempotent,
+            claim_check_repositories: claim_check,
+            cache_repositories: cache,
+            intercept: crate::intercept::InterceptRules::default(),
+        }
+    }
+
+    fn compile_choice(
+        whens: Vec<DeclarativeWhenStep>,
+        otherwise: Option<Vec<BuilderStep>>,
+        languages: &'static SharedLanguageRegistry,
+    ) -> Result<CompiledStep, CamelError> {
+        let ctx = compilation_ctx(languages);
+        let registry = build_registry();
+        registry
+            .compile_step(BuilderStep::DeclarativeChoice { whens, otherwise }, 0, &ctx)?
+            .ok_or_else(|| CamelError::RouteError("no compiler matched the choice".into()))
+    }
+
+    async fn run_segment(step: CompiledStep, exchange: Exchange) -> PipelineOutcome {
+        match step {
+            CompiledStep::Segment { mut segment, .. } => segment.run(exchange).await,
+            other => panic!("expected CompiledStep::Segment, got {other:?}"),
+        }
+    }
+
+    fn when(language: &str, source: &str, steps: Vec<BuilderStep>) -> DeclarativeWhenStep {
+        DeclarativeWhenStep {
+            predicate: LanguageExpressionDef {
+                language: language.to_string(),
+                source: source.to_string(),
+            },
+            steps,
+        }
+    }
+
+    /// Counters shared by [`CountingGroupLanguage`] and its group mock.
+    struct CountingState {
+        create_predicate: AtomicUsize,
+        create_predicate_group: AtomicUsize,
+        first_match: AtomicUsize,
+        group_sources: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CountingState {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                create_predicate: AtomicUsize::new(0),
+                create_predicate_group: AtomicUsize::new(0),
+                first_match: AtomicUsize::new(0),
+                group_sources: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    /// Test language that records predicate / group construction and can opt in
+    /// or out of group evaluation.
+    struct CountingGroupLanguage {
+        state: Arc<CountingState>,
+        supports_group: bool,
+    }
+
+    impl Language for CountingGroupLanguage {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+
+        fn create_expression(&self, _script: &str) -> Result<Box<dyn Expression>, LanguageError> {
+            Ok(Box::new(CountingExpression))
+        }
+
+        fn create_predicate(&self, _script: &str) -> Result<Box<dyn Predicate>, LanguageError> {
+            self.state
+                .create_predicate
+                .fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(Box::new(CountingPredicate))
+        }
+
+        fn create_predicate_group(
+            &self,
+            scripts: &[&str],
+        ) -> Result<Option<Box<dyn PredicateGroup>>, LanguageError> {
+            self.state
+                .create_predicate_group
+                .fetch_add(1, AtomicOrdering::SeqCst);
+            *self
+                .state
+                .group_sources
+                .lock()
+                .expect("group sources mutex") =
+                scripts.iter().map(|source| (*source).to_string()).collect();
+            if self.supports_group {
+                Ok(Some(Box::new(CountingGroup {
+                    state: Arc::clone(&self.state),
+                })))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    struct CountingExpression;
+
+    #[async_trait::async_trait]
+    impl Expression for CountingExpression {
+        async fn evaluate(&self, _exchange: &Exchange) -> Result<Value, LanguageError> {
+            Ok(Value::Null)
+        }
+    }
+
+    struct CountingPredicate;
+
+    #[async_trait::async_trait]
+    impl Predicate for CountingPredicate {
+        async fn matches(&self, _exchange: &Exchange) -> Result<bool, LanguageError> {
+            Ok(false)
+        }
+    }
+
+    struct CountingGroup {
+        state: Arc<CountingState>,
+    }
+
+    #[async_trait::async_trait]
+    impl PredicateGroup for CountingGroup {
+        async fn first_match(
+            &self,
+            _exchange: &Exchange,
+        ) -> Result<Option<usize>, camel_language_api::IndexedPredicateError> {
+            self.state.first_match.fetch_add(1, AtomicOrdering::SeqCst);
+            Ok(Some(0))
+        }
+    }
+
+    #[tokio::test]
+    async fn declarative_choice_hook_selected_for_group_capable_language() {
+        let state = CountingState::new();
+        let languages = language_registry(vec![(
+            "counting",
+            Arc::new(CountingGroupLanguage {
+                state: Arc::clone(&state),
+                supports_group: true,
+            }),
+        )]);
+        let whens = vec![
+            when("counting", "a", vec![]),
+            when("counting", "b", vec![]),
+            when("counting", "c", vec![]),
+        ];
+
+        let compiled = compile_choice(whens, None, languages).expect("choice compiles");
+
+        assert_eq!(
+            state.create_predicate_group.load(AtomicOrdering::SeqCst),
+            1,
+            "group hook must be called exactly once"
+        );
+        assert_eq!(
+            state.create_predicate.load(AtomicOrdering::SeqCst),
+            0,
+            "clauses must not be compiled individually on the group path"
+        );
+        assert_eq!(
+            *state.group_sources.lock().expect("group sources mutex"),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            "the group must receive all clause sources in order"
+        );
+
+        let outcome = run_segment(compiled, Exchange::new(Message::new("payload"))).await;
+        assert!(
+            matches!(outcome, PipelineOutcome::Completed(_)),
+            "group path should complete, got {outcome:?}"
+        );
+        assert_eq!(
+            state.first_match.load(AtomicOrdering::SeqCst),
+            1,
+            "one exchange must invoke first_match exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn declarative_choice_unsupported_hook_falls_back_to_sequential() {
+        let state = CountingState::new();
+        let languages = language_registry(vec![(
+            "counting",
+            Arc::new(CountingGroupLanguage {
+                state: Arc::clone(&state),
+                supports_group: false,
+            }),
+        )]);
+        let whens = vec![
+            when("counting", "a", vec![]),
+            when("counting", "b", vec![]),
+            when("counting", "c", vec![]),
+        ];
+
+        let compiled = compile_choice(whens, None, languages).expect("choice compiles");
+
+        assert_eq!(
+            state.create_predicate_group.load(AtomicOrdering::SeqCst),
+            1,
+            "the opt-out hook is still consulted once"
+        );
+        assert_eq!(
+            state.create_predicate.load(AtomicOrdering::SeqCst),
+            3,
+            "sequential fallback compiles every clause predicate"
+        );
+
+        let outcome = run_segment(compiled, Exchange::new(Message::new("payload"))).await;
+        assert!(
+            matches!(outcome, PipelineOutcome::Completed(_)),
+            "sequential fallback should complete, got {outcome:?}"
+        );
+        assert_eq!(
+            state.first_match.load(AtomicOrdering::SeqCst),
+            0,
+            "no group exists to invoke"
+        );
+    }
+
+    #[tokio::test]
+    async fn declarative_choice_single_clause_falls_back() {
+        let state = CountingState::new();
+        let languages = language_registry(vec![(
+            "counting",
+            Arc::new(CountingGroupLanguage {
+                state: Arc::clone(&state),
+                supports_group: true,
+            }),
+        )]);
+
+        let compiled = compile_choice(vec![when("counting", "a", vec![])], None, languages)
+            .expect("choice compiles");
+
+        assert_eq!(
+            state.create_predicate_group.load(AtomicOrdering::SeqCst),
+            0,
+            "a single clause cannot form a group"
+        );
+        assert_eq!(
+            state.create_predicate.load(AtomicOrdering::SeqCst),
+            1,
+            "the single clause follows the sequential path"
+        );
+        assert!(matches!(compiled, CompiledStep::Segment { .. }));
+    }
+
+    #[tokio::test]
+    async fn declarative_choice_mixed_languages_falls_back_to_sequential() {
+        let state = CountingState::new();
+        let languages = language_registry(vec![
+            (
+                "counting",
+                Arc::new(CountingGroupLanguage {
+                    state: Arc::clone(&state),
+                    supports_group: true,
+                }),
+            ),
+            (
+                "simple",
+                Arc::new(camel_language_simple::SimpleLanguage::new()),
+            ),
+        ]);
+        let whens = vec![
+            when("counting", "a", vec![]),
+            when("simple", "${header.mix} == 'x'", vec![]),
+            when("counting", "c", vec![]),
+        ];
+
+        let compiled = compile_choice(whens, None, languages).expect("choice compiles");
+
+        assert_eq!(
+            state.create_predicate_group.load(AtomicOrdering::SeqCst),
+            0,
+            "mixed languages must not form a group"
+        );
+        assert_eq!(
+            state.create_predicate.load(AtomicOrdering::SeqCst),
+            2,
+            "each counting clause compiles on the sequential path"
+        );
+        assert!(matches!(compiled, CompiledStep::Segment { .. }));
+    }
+
+    #[cfg(feature = "lang-rhai")]
+    fn rhai_registry() -> &'static SharedLanguageRegistry {
+        language_registry(vec![(
+            "rhai",
+            Arc::new(camel_language_rhai::RhaiLanguage::new()),
+        )])
+    }
+
+    #[cfg(feature = "lang-rhai")]
+    fn set_header_step(key: &str, value: &str) -> BuilderStep {
+        BuilderStep::DeclarativeSetHeader {
+            key: key.to_string(),
+            value: ValueSourceDef::Literal(Value::String(value.to_string())),
+        }
+    }
+
+    #[cfg(feature = "lang-rhai")]
+    #[tokio::test]
+    async fn declarative_choice_same_language_rhai_uses_group_path() {
+        let languages = rhai_registry();
+        let whens = vec![
+            when(
+                "rhai",
+                r#"header("kind") == "a""#,
+                vec![set_header_step("hit", "clause0")],
+            ),
+            when(
+                "rhai",
+                r#"header("kind") == "b""#,
+                vec![set_header_step("hit", "clause1")],
+            ),
+            // Clause 2 would fail the pipeline if the group evaluated it after
+            // clause 1 already matched.
+            when(
+                "rhai",
+                r#"throw "clause2 must not run""#,
+                vec![set_header_step("hit", "clause2")],
+            ),
+        ];
+
+        let compiled = compile_choice(whens, None, languages).expect("rhai group compiles");
+
+        let mut message = Message::default();
+        message.set_header("kind", Value::String("b".into()));
+        let outcome = run_segment(compiled, Exchange::new(message)).await;
+        let exchange = match outcome {
+            PipelineOutcome::Completed(exchange) => exchange,
+            other => panic!("expected Completed, got {other:?}"),
+        };
+        assert_eq!(
+            exchange.input.headers.get("hit"),
+            Some(&Value::String("clause1".into())),
+            "clause 1's body effect must run and no later clause may evaluate"
+        );
+    }
+
+    #[cfg(feature = "lang-rhai")]
+    #[tokio::test]
+    async fn declarative_choice_group_compile_error_propagates() {
+        let languages = rhai_registry();
+        let bad_source = r#"header("kind") == "#;
+        let whens = vec![
+            when("rhai", r#"header("kind") == "a""#, vec![]),
+            when("rhai", bad_source, vec![]),
+            when("rhai", r#"header("kind") == "c""#, vec![]),
+        ];
+
+        let error = compile_choice(whens, None, languages)
+            .expect_err("the syntax error must fail compilation");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("clause 1"),
+            "parse error source must map back to clause 1, got: {message}"
+        );
+        assert!(
+            message.contains(bad_source),
+            "the error must name the offending source, got: {message}"
+        );
+        assert!(
+            message.contains("failed to compile rhai predicate"),
+            "the error must name the language and predicate compile failure, got: {message}"
+        );
+    }
+
+    #[cfg(feature = "lang-rhai")]
+    #[tokio::test]
+    async fn declarative_choice_group_error_attributed_to_clause() {
+        let languages = rhai_registry();
+        let whens = vec![
+            when("rhai", r#"header("kind") == "a""#, vec![]),
+            when("rhai", r#"header("kind") == "b""#, vec![]),
+            when("rhai", r#"throw "boom in clause 2""#, vec![]),
+        ];
+
+        let compiled = compile_choice(whens, None, languages).expect("rhai group compiles");
+
+        let mut message = Message::default();
+        message.set_header("kind", Value::String("none".into()));
+        match run_segment(compiled, Exchange::new(message)).await {
+            PipelineOutcome::Failed(CamelError::ExpressionFailed { verb, step_id, .. }) => {
+                assert_eq!(verb, "choice/when[2]", "the failing clause is attributed");
+                assert_eq!(
+                    step_id, "choice/when#0",
+                    "the shared outer step identity matches the sequential path"
+                );
+            }
+            other => panic!("expected ExpressionFailed, got {other:?}"),
         }
     }
 }

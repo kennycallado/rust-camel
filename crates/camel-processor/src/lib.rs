@@ -59,7 +59,7 @@ pub use cache_eip::{
     CacheInvalidateService, CacheInvalidateTarget, CachePeekStaleService, CacheService,
     CacheStatsService, PeekStaleMissPolicy,
 };
-pub use choice::{ChoiceSegment, WhenClause, WhenClauseSegment};
+pub use choice::{ChoiceGroupSegment, ChoiceSegment, WhenClause, WhenClauseSegment};
 pub use circuit_breaker::{
     CircuitBreakerDecision, CircuitBreakerGate, CircuitBreakerLayer, CircuitBreakerService,
 };

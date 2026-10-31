@@ -72,6 +72,8 @@ Phase 4 (ADR-0025) migrated structural EIPs from Tower services returning `Err(C
 | `LoadBalanceSegment` | `load_balancer` | Load balancing / failover — selects one endpoint per strategy (round-robin, random, failover). Stop from selected branch propagates. |
 | `IdempotentConsumerSegment` | `idempotent_consumer` | Dedup — backed by `Arc<dyn IdempotentRepository>` (`camel-api/src/idempotent.rs:21`); computes message id via `MessageIdExpression`, checks `contains(key)`, runs body + records key on first sighting, skips body on duplicate. Stop from body propagates. |
 
+A Choice with two or more `when` clauses in the same language that supports group evaluation compiles to `ChoiceGroupSegment`, which evaluates one `PredicateGroup` per message and keeps the `ChoiceSegment` first-match, body, and error contract.
+
 ## Public API surface (v1.0 freeze)
 
 Status values: `stable` means normal public API, and `legacy-pending-removal` means retained only for a documented migration window.

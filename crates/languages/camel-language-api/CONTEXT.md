@@ -21,7 +21,9 @@ birth. Compliance is enforced by `cargo xtask lint-non-exhaustive`.
 The factory SPI (`lib.rs`). `name()` returns the registration key; `create_expression` /
 `create_predicate` compile a script string. `create_mutating_expression` /
 `create_mutating_predicate` default to `Err(NotSupported)` so a language opts in to mutation rather
-than being forced to implement it.
+than being forced to implement it. `create_predicate_group` compiles two or more same-language
+scripts into one `PredicateGroup`; the default returns `Ok(None)`, so a language opts in to grouped
+evaluation.
 _Avoid_: language registry, language plugin (the trait is the contract, not the registration)
 
 **Expression (trait)** / **Predicate (trait)**:

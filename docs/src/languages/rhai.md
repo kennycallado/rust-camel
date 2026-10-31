@@ -46,6 +46,10 @@ Rhai integrates with Rust types without a foreign-function boundary. Exchange va
 
 Resource limits bound CPU and memory use. Defaults are 100,000 max operations, 1 MiB max string size, 10,000 max array elements, 10,000 max map entries, 64 max expression depth, 32 max function-expression depth, 64 max call levels, and a 5,000 ms execution timeout. The timeout wraps synchronous evaluation in `spawn_blocking`. It returns control to the route after five seconds but cannot cancel the blocking task. The operation limit eventually stops a CPU-bound script.
 
+## Grouped predicate evaluation
+
+When a Choice has two or more `when` clauses that all use Rhai, rust-camel compiles them into one predicate group and evaluates the group once per message. For eager (non-stream) bodies, the group builds one engine and one exchange snapshot per message, while stream-marker bodies keep per-clause markers so refusal accounting stays per predicate; it then evaluates the clauses in declaration order until one matches. Each clause keeps its own operation budget and execution timeout, so budgets never accumulate across clauses. Clauses after the first match, and skipped clauses, never run. A failed clause reports its position in the `EvalMeta` verb as `choice/when[<index>]`. Choices that mix script languages, and choices with a single `when` clause, evaluate each predicate in sequence. No user-facing configuration enables or disables grouping.
+
 ## Read surface
 
 Read-only expressions and predicates expose `body`, `headers`, and `properties` variables plus the `header()` and `property()` readers. A `MutatingExpression` (a `script:` step) exposes `body`, `headers`, and `properties` as mutable scope variables and also provides `header()` and `property()`. Its write-back is a validate-all-then-commit transaction: only changed entries and an assigned body are written, and the Exchange is untouched unless the whole evaluation succeeds.

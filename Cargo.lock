@@ -2857,6 +2857,7 @@ dependencies = [
  "camel-auth",
  "camel-component-api",
  "camel-language-api",
+ "camel-language-rhai",
  "camel-language-simple",
  "criterion",
  "csv",
