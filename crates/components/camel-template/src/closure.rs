@@ -430,26 +430,18 @@ impl StableTemplateReader for FilesystemTemplateReader {
 /// `ReloadHandler` in Task 5.1) can re-acquire snapshots across reloads
 /// against the same handle without paying for an extra root open.
 ///
-/// `entry` is the absolute entry path (caller passes `&PathBuf` which
-/// coerces to `&Path`); the root-relative name passed to [`acquire_closure`]
-/// is its `file_name()`. A path with no file name is rejected as
-/// [`TemplateReloadError::PathEscape`] because it cannot be a root-relative
-/// template reference.
+/// `entry_name` is the root-relative entry name (as resolved by
+/// [`crate::root::resolve_entry`]); it is passed verbatim to
+/// [`acquire_closure`] and becomes the closure key. No `file_name()`
+/// reduction happens here — the caller owns the root-relative spelling.
 #[allow(dead_code)] // pub(crate) function; consumed by Phase 4 (Task 4.x reader impl).
 pub(crate) fn build_snapshot(
-    entry: &std::path::Path,
     root: &OwnedHandle,
+    entry_name: &str,
     limits: ResolvedExternalTemplateLimits,
 ) -> Result<ClosureSnapshot, TemplateReloadError> {
-    let name = entry
-        .file_name()
-        .ok_or_else(|| {
-            TemplateReloadError::PathEscape(format!("entry has no file name: {}", entry.display()))
-        })?
-        .to_string_lossy()
-        .into_owned();
     let reader = FilesystemTemplateReader;
-    acquire_closure(&reader, name, root, limits)
+    acquire_closure(&reader, entry_name.to_string(), root, limits)
 }
 
 #[cfg(test)]
@@ -638,12 +630,13 @@ mod tests {
             b"{% include \"header.html\" %}Body",
         )
         .expect("write page");
-        let entry = dir.path().join("page.html");
         let (root, _id) = open_root(dir.path()).expect("open root");
 
         // Act: build two snapshots reusing the same root handle.
-        let snap1 = build_snapshot(&entry, &root, default_limits()).expect("snapshot 1 acquired");
-        let snap2 = build_snapshot(&entry, &root, default_limits()).expect("snapshot 2 acquired");
+        let snap1 =
+            build_snapshot(&root, "page.html", default_limits()).expect("snapshot 1 acquired");
+        let snap2 =
+            build_snapshot(&root, "page.html", default_limits()).expect("snapshot 2 acquired");
 
         // Assert: 2 entries (page + included header) and a stable hash.
         assert_eq!(snap1.entries().len(), 2, "page + header");
@@ -657,12 +650,51 @@ mod tests {
     }
 
     #[test]
+    fn closure_build_snapshot_uses_given_name() {
+        // The caller supplies the root-relative name directly; the snapshot
+        // must be keyed by exactly that name (no `file_name()` reduction).
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("page.html"), b"<h1>hello</h1>").expect("write page");
+        let (root, _id) = open_root(dir.path()).expect("open root");
+
+        let snap = build_snapshot(&root, "page.html", default_limits()).expect("snapshot");
+        assert_eq!(snap.entries().len(), 1);
+        assert!(
+            snap.entries().contains_key("page.html"),
+            "snapshot must be keyed by the given name"
+        );
+    }
+
+    #[test]
+    fn closure_build_snapshot_nested_name() {
+        // A nested entry name is preserved verbatim: the key is
+        // `templates/page.html`, not the basename.
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("templates")).expect("create templates dir");
+        fs::write(dir.path().join("templates/page.html"), b"nested-marker").expect("write page");
+        let (root, _id) = open_root(dir.path()).expect("open root");
+
+        let snap = build_snapshot(&root, "templates/page.html", default_limits())
+            .expect("nested snapshot");
+        let entry = snap
+            .entries()
+            .get("templates/page.html")
+            .expect("nested name must be the snapshot key");
+        assert!(
+            entry
+                .bytes
+                .windows(b"nested-marker".len())
+                .any(|w| w == b"nested-marker"),
+            "snapshot must hold the nested file bytes"
+        );
+    }
+
+    #[test]
     fn build_snapshot_rejects_oversize() {
         // Arrange: a file larger than the configured `max_template_size`.
         let dir = tempfile::tempdir().expect("tempdir");
         let big = vec![b'x'; 1024];
         fs::write(dir.path().join("page.html"), &big).expect("write page");
-        let entry = dir.path().join("page.html");
         let (root, _id) = open_root(dir.path()).expect("open root");
 
         // Tight limit: 100 bytes per template.
@@ -675,7 +707,7 @@ mod tests {
         };
 
         // Act
-        let err = build_snapshot(&entry, &root, tight).expect_err("oversize must fail");
+        let err = build_snapshot(&root, "page.html", tight).expect_err("oversize must fail");
 
         // Assert
         assert!(

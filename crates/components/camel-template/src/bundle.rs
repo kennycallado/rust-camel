@@ -21,14 +21,15 @@ use crate::component::TemplateComponent;
 use crate::config::AutoescapeMode;
 use crate::config::ExternalTemplateLimitsConfig;
 
-/// Operator-facing `[components.template]` block: two independent limit layers.
+/// Operator-facing `[components.template]` block: three independent settings.
 ///
 /// - `limits`        → [`ExternalTemplateLimitsConfig`] (acquisition bounds:
 ///   closure size, include count/depth, template size, reload timeout).
 /// - `render-limits` → [`MinijinjaLimitsConfig`] (render-time bounds: source,
 ///   context, output size, fuel, recursion, execution timeout).
+/// - `root`           → confinement root anchoring every `template:` endpoint.
 ///
-/// Both are `#[serde(default)]`, so a missing sub-table falls back to the
+/// All are `#[serde(default)]`, so a missing key or sub-table falls back to the
 /// per-struct defaults (ADR-0047 §4.1).
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -45,6 +46,13 @@ pub struct TemplateBundleConfig {
     /// `{% autoescape %}` statement. Parsed in [`TemplateBundle::from_toml`].
     #[serde(default)]
     pub default_autoescape: Option<toml::Value>,
+
+    /// Confinement root for `template:` endpoints. Absolute or relative to the
+    /// process CWD at route start. Required for relative
+    /// `template:file:<rel-path>` entry URIs; when set, it anchors every
+    /// template endpoint (absolute entries must land inside it).
+    #[serde(default)]
+    pub root: Option<std::path::PathBuf>,
 }
 
 /// Bundle that registers the `template:` scheme from the `[template]` config
@@ -84,21 +92,28 @@ impl ComponentBundle for TemplateBundle {
         if let Some(mode) = self.default_autoescape {
             component = component.with_default_autoescape(mode);
         }
+        if let Some(root) = self.config.root.clone() {
+            component = component.with_root(root);
+        }
         ctx.register_component_dyn(Arc::new(component));
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     struct TestRegistrar {
         schemes: Vec<String>,
+        components: Vec<Arc<dyn camel_component_api::Component>>,
     }
 
     impl ComponentRegistrar for TestRegistrar {
         fn register_component_dyn(&mut self, component: Arc<dyn camel_component_api::Component>) {
             self.schemes.push(component.scheme().to_string());
+            self.components.push(component);
         }
     }
 
@@ -200,10 +215,84 @@ render-limits.fuel = 1234
     }
 
     #[test]
+    fn from_toml_parses_root() {
+        let config: TemplateBundleConfig =
+            toml::from_str("root = \"templates\"").expect("`root` must deserialize");
+        assert_eq!(config.root, Some(PathBuf::from("templates")));
+    }
+
+    #[test]
+    fn from_toml_root_defaults_to_none() {
+        let config: TemplateBundleConfig =
+            toml::from_str("limits.max-include-count = 8").expect("must deserialize");
+        assert!(config.root.is_none(), "absent `root` must default to None");
+    }
+
+    #[test]
+    fn from_toml_rejects_unknown_root_typo() {
+        let result: Result<TemplateBundleConfig, _> = toml::from_str("rooot = \"templates\"");
+        assert!(
+            result.is_err(),
+            "deny_unknown_fields must reject the `rooot` typo"
+        );
+    }
+
+    #[test]
     fn register_all_registers_template_scheme() {
         let bundle = TemplateBundle::from_toml(toml::Value::Table(toml::map::Map::new())).unwrap();
-        let mut registrar = TestRegistrar { schemes: vec![] };
+        let mut registrar = TestRegistrar {
+            schemes: vec![],
+            components: vec![],
+        };
         bundle.register_all(&mut registrar);
         assert_eq!(registrar.schemes, vec!["template"]);
+    }
+
+    /// Task 1.4: the configured `root` must flow through `register_all` into
+    /// the registered component. Construction of a relative endpoint is
+    /// parse-only, so it succeeds WITHOUT the tempdir holding `page.html`.
+    #[test]
+    fn register_all_applies_configured_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let raw = format!("root = \"{}\"", dir.path().display());
+        let value: toml::Value = toml::from_str(&raw).unwrap();
+        let bundle = TemplateBundle::from_toml(value).expect("bundle with root");
+
+        let mut registrar = TestRegistrar {
+            schemes: vec![],
+            components: vec![],
+        };
+        bundle.register_all(&mut registrar);
+
+        assert_eq!(registrar.components.len(), 1, "one component registered");
+        let ctx = camel_component_api::NoOpComponentContext;
+        let result = registrar.components[0].create_endpoint("template:file:page.html", &ctx);
+        assert!(
+            result.is_ok(),
+            "registered component must carry the configured root, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// Task 1.4 negative twin: without `root`, the registered component must
+    /// reject the same relative URI at the `create_endpoint` seam.
+    #[test]
+    fn register_all_without_root_rejects_relative() {
+        let value = toml::Value::Table(toml::map::Map::new());
+        let bundle = TemplateBundle::from_toml(value).expect("bundle without root");
+
+        let mut registrar = TestRegistrar {
+            schemes: vec![],
+            components: vec![],
+        };
+        bundle.register_all(&mut registrar);
+
+        assert_eq!(registrar.components.len(), 1, "one component registered");
+        let ctx = camel_component_api::NoOpComponentContext;
+        match registrar.components[0].create_endpoint("template:file:page.html", &ctx) {
+            Err(CamelError::Config(_)) => {}
+            Err(other) => panic!("expected CamelError::Config, got {other:?}"),
+            Ok(_) => panic!("relative URI without a root must be rejected"),
+        }
     }
 }

@@ -7,7 +7,6 @@
 //! directory, build a `ClosureSnapshot`, compile the entry, seed the
 //! `SharedTemplates` cell, and construct a [`ReloadHandler`].
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use camel_api::{CamelError, StepLifecycle, StepShutdownReason};
@@ -18,10 +17,11 @@ use camel_language_api::MinijinjaLimitsConfig;
 
 use crate::closure;
 use crate::config::{AutoescapeMode, ResolvedExternalTemplateLimits};
-use crate::error::TemplateReloadError;
 use crate::path_util;
 use crate::reload::ReloadHandler;
+use crate::root::{self, RootAnchor};
 use crate::template_set::{SharedTemplates, TemplateSet};
+use crate::uri::TemplateEntry;
 
 /// Lifecycle handle returned from `TemplateEndpoint::lifecycle()`.
 ///
@@ -36,9 +36,11 @@ use crate::template_set::{SharedTemplates, TemplateSet};
 pub(crate) struct StartupBuildHandle {
     /// Compiled-set swap cell shared with the endpoint and the producer.
     pub(crate) shared: SharedTemplates,
-    /// Absolute filesystem path of the entry template (parsed by
-    /// `parse_template_uri`, validated at Task 2.2).
-    pub(crate) entry_abs_path: PathBuf,
+    /// Parsed entry template (absolute or root-relative spelling).
+    pub(crate) entry: TemplateEntry,
+    /// Directory the entry is resolved against (entry parent or configured
+    /// root).
+    pub(crate) root_anchor: RootAnchor,
     /// Per-route render limits (consumed at render time).
     pub(crate) render_limits: MinijinjaLimitsConfig,
     /// Operator-resolved acquisition limits (consumed at build time).
@@ -63,7 +65,7 @@ pub(crate) struct StartupBuildHandle {
 impl std::fmt::Debug for StartupBuildHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StartupBuildHandle")
-            .field("entry_abs_path", &self.entry_abs_path)
+            .field("entry", &self.entry)
             .field("route_id", &self.route_id)
             .field(
                 "handler_set",
@@ -81,41 +83,26 @@ impl StepLifecycle for StartupBuildHandle {
     }
 
     async fn start(&self) -> Result<(), CamelError> {
-        // The root directory is the entry's parent; every confined read
-        // is `openat`-relative to it. A path with no parent (e.g. `/`)
-        // cannot anchor a closure.
-        let parent = self.entry_abs_path.parent().ok_or_else(|| {
-            CamelError::from(TemplateReloadError::PathEscape(
-                "entry has no parent directory".into(),
-            ))
-        })?;
-
-        // The entry name registered into the Environment is the entry's
-        // `file_name()` — the SAME root-relative name `build_snapshot`
-        // uses to key the closure, so `compile`'s lookup resolves.
-        // `to_string_lossy` matches `build_snapshot`'s key conversion
-        // exactly, so a non-UTF-8 file name stays consistent across both.
-        let entry_name = self.entry_abs_path.file_name().ok_or_else(|| {
-            CamelError::from(TemplateReloadError::PathEscape(
-                "entry has no file name".into(),
-            ))
-        })?;
-        let entry_str = entry_name.to_string_lossy();
+        // Resolve the entry against its anchor: the root directory every
+        // confined read is `openat`-relative to, plus the root-relative name
+        // used both as the closure key and the Environment key.
+        let (root_path, entry_name) = root::resolve_entry(&self.root_anchor, &self.entry)?;
 
         // Open the root ONCE. The handle is retained in the ReloadHandler
         // below so Phase-5 reloads re-acquire snapshots against the same
         // anchor without paying for another root open.
-        let (root, _root_identity) = path_util::open_root(parent).map_err(CamelError::from)?;
+        let (root, _root_identity) = path_util::open_root(&root_path).map_err(CamelError::from)?;
         let root = Arc::new(root);
 
-        // Walk the dependency closure `openat`-relative to the root.
-        let snapshot = closure::build_snapshot(&self.entry_abs_path, root.as_ref(), self.limits)
+        // Walk the dependency closure `openat`-relative to the root, keyed by
+        // the resolved root-relative name.
+        let snapshot = closure::build_snapshot(root.as_ref(), &entry_name, self.limits)
             .map_err(CamelError::from)?;
 
         // Compile once, under the configured render limits.
         let set = TemplateSet::compile(
             &snapshot,
-            &entry_str,
+            &entry_name,
             self.render_limits.clone(),
             self.default_autoescape,
         )
@@ -131,7 +118,7 @@ impl StepLifecycle for StartupBuildHandle {
         // so `template_reloads_total` is not incremented here (Task 5.4).
         let handler = Arc::new(ReloadHandler {
             shared: Arc::clone(&self.shared),
-            entry_abs_path: self.entry_abs_path.clone(),
+            entry_name,
             render_limits: self.render_limits.clone(),
             limits: self.limits,
             generation: Mutex::new(0),
@@ -211,7 +198,8 @@ mod tests {
 
         let handle = StartupBuildHandle {
             shared: Arc::clone(&shared),
-            entry_abs_path: entry,
+            entry: TemplateEntry::Absolute(entry),
+            root_anchor: RootAnchor::EntryParent,
             render_limits: MinijinjaLimitsConfig::default(),
             limits: default_limits(),
             route_id: "test-route".to_string(),
@@ -242,7 +230,8 @@ mod tests {
 
         let handle = StartupBuildHandle {
             shared: Arc::clone(&shared),
-            entry_abs_path: entry,
+            entry: TemplateEntry::Absolute(entry),
+            root_anchor: RootAnchor::EntryParent,
             render_limits: MinijinjaLimitsConfig::default(),
             limits: default_limits(),
             route_id: "test-route".to_string(),
@@ -285,7 +274,8 @@ mod tests {
         let shared: SharedTemplates = Arc::new(ArcSwap::from_pointee(TemplateSet::empty()));
         let handle = StartupBuildHandle {
             shared: Arc::clone(&shared),
-            entry_abs_path: entry,
+            entry: TemplateEntry::Absolute(entry),
+            root_anchor: RootAnchor::EntryParent,
             render_limits: MinijinjaLimitsConfig::default(),
             limits: default_limits(),
             route_id: route.to_string(),

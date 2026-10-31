@@ -32,11 +32,46 @@ The Rust example reads the template path from `env!("CARGO_MANIFEST_DIR")` so it
 
 ```text
 template:file:///<absolute-path-to-template>
+template:file:<relative-path-to-template>
 ```
 
-The URI has two parts. The outer scheme is `template`. The inner scheme is `file`, followed by an empty authority and an absolute path. Bare paths (`template:/srv/t/page.html`) and non-`file` inner schemes are rejected at Endpoint construction. The path must be absolute and free of `..` segments.
+The URI has two parts. The outer scheme is `template`. The inner scheme is `file`, followed by an absolute path or a canonical relative path. Bare paths (`template:/srv/t/page.html`) and non-`file` inner schemes are rejected at Endpoint construction with `CamelError::Config`.
 
-The component is zero-override. The URI is operator-configured at route construction. No Exchange header or property can replace the entry, the root, or the template source. The `template:file:///` form is the only accepted shape; there is no `template:http://` or header-driven loader.
+The absolute form has an empty authority (`template:file:///`). The path must be absolute and free of `..` segments.
+
+The canonical relative form is `template:file:<rel-path>`. It has no `./` prefix, no `.` or `..` components, and no empty components. Any other relative spelling is a configuration error. A relative entry requires `[components.template] root`; without it, Endpoint construction fails with `CamelError::Config`.
+
+The component is zero-override. The URI is operator-configured at route construction. No Exchange header or property can replace the entry, the root, or the template source. The `template:file:///` form is the only absolute shape; there is no `template:http://` or header-driven loader.
+
+### Configured root
+
+```toml
+[components.template]
+root = "templates"
+```
+
+`root` may be absolute or relative to the process working directory. The component resolves and canonicalizes it at route start; a missing directory fails the route with an error naming the configured value. A relative root depends on where the process starts: run from the project directory, or configure an absolute root.
+
+When `root` is configured, it anchors every `template:` Endpoint:
+
+| `root` configured | Entry form | Behavior |
+|-------------------|------------|----------|
+| no | absolute | The entry's parent directory anchors the closure. Existing behavior is unchanged. |
+| no | relative | `CamelError::Config` at Endpoint construction. |
+| yes | relative | Resolved under the canonical root; the entry must exist. |
+| yes | absolute | Validated inside the canonical root. An entry outside it is a configuration error. |
+
+Confinement is enforced when the route starts:
+
+- The configured root and the entry candidate are both canonicalized.
+- `.` and `..` components are rejected in relative entry URIs, and `..` is rejected in the dependency closure.
+- Leaf and intermediate symlinks are rejected with `O_NOFOLLOW`, even when the link target stays inside the root.
+- The dependency closure is confined to the canonical root. Every `include`, `extends`, `import`, and `from` target resolves relative to the canonical root, not the entry's directory, and a target that escapes the root is rejected. Without a configured root, the closure resolves relative to the entry's parent directory.
+- A missing root fails the route with an error naming the configured root value and the filesystem error. A missing entry and an absolute entry outside the canonical root fail with an error naming the entry and the canonical root.
+
+Absolute entries must be spelled under the configured root's canonical path. An absolute path that reaches the root through a symlink alias is rejected; use a relative entry or the canonical absolute spelling. Confinement opens the original path components to reject symlinks, so an alias spelling cannot be accepted.
+
+The root setting changes file location and confinement only. ADR-0047 remains in force: render semantics and the autoescape contract are unchanged, and no implicit autoescape is added.
 
 ## Render contract
 
@@ -106,7 +141,7 @@ The two layers are checked at different times. Acquisition limits apply while bu
 
 Templates are compiled once at route startup (fail-closed). A missing file, a syntax error, or an acquisition-limit overflow prevents the route from starting. The compiled set is cached for zero-filesystem-I/O hot-path rendering. A control-plane `ReloadTemplates` command re-acquires the dependency closure, recompiles, and atomically swaps the compiled set without disturbing in-flight renders. A failed reload preserves the prior set.
 
-File reads go through `openat`-relative handles. `..` segments, symlinks, absolute path escapes, and include cycles are rejected at acquisition time. The MiniJinja environment registers no functions, filters, or globals — an unknown function call fails at render, not at the host boundary.
+File reads go through `openat`-relative handles, anchored at the canonical root when `root` is configured and at the entry's parent directory otherwise. `..` segments, symlinks, absolute closure-target paths, and include cycles are rejected at acquisition time. The MiniJinja environment registers no functions, filters, or globals — an unknown function call fails at render, not at the host boundary.
 
 ## When to use it
 

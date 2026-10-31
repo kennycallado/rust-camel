@@ -1,0 +1,69 @@
+{
+  "kind": "plan",
+  "change": "add-template-relative-root",
+  "verdict": "BLESS",
+  "hash": "sha256:a939bd93509ee4d784aea2cb339a478983f8957eb0ffee2029552c66a88d1034",
+  "expert": "experts/e_gpt",
+  "date": "2026-10-31",
+  "history": [
+    {
+      "kind": "spec",
+      "verdict": "REJECT",
+      "hash": "sha256:0e61444cb31672370227e06a13bccbe5f74c1cd7ad163714fbcf52f88766a370",
+      "expert": "experts/e_gpt",
+      "findings": [
+        "canonicalization bypasses O_NOFOLLOW symlink rejection",
+        "Dependency-closure contract parent-anchor contradiction",
+        "file_name() reductions break nested entry names"
+      ]
+    },
+    {
+      "kind": "spec",
+      "verdict": "BLESS",
+      "hash": "sha256:ebfb75295ae4648bb9a28b5dbab018e4b5e447dee18ee3602feaf9bbaadd05f0",
+      "expert": "experts/e_gpt"
+    },
+    {
+      "kind": "plan",
+      "round": "reviewer-loop",
+      "verdicts": [
+        "REJECT (build independence; missing root-anchored include test; registration plumbing)",
+        "REJECT (create_endpoint SPI name)",
+        "APPROVE"
+      ],
+      "reviewer": "reviewers/r_gpt"
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:4e5a516e461633c1f07ad99684037c3c4f842c0ec5c6b17746618b0034b500b1",
+      "expert": "experts/e_gpt",
+      "findings": [
+        "1.3 dead-code under -D warnings (cfg(test) staging)",
+        "1.5 RED impossible after 1.4 (feature RED moved to 1.4 step 1)",
+        "wrong assertion seam (add_route_definition wraps errors)",
+        "helper requires default-autoescape",
+        "EntryParent error contract must stay PathEscape",
+        "docs must state lexical absolute spelling rule"
+      ]
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:f6220c9131ae006756b3954b6b67df0c3d85a666b81b814380a6fc2412b76bee",
+      "expert": "experts/e_gpt",
+      "findings": [
+        "reclassify non-RED tests, state RED-first precisely",
+        "RouteError wrapper assertion at registration seam",
+        "helper wiring owned by 1.4 step 2"
+      ]
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:a939bd93509ee4d784aea2cb339a478983f8957eb0ffee2029552c66a88d1034",
+      "expert": "experts/e_gpt",
+      "findings": ["two textual leftovers (three->two, shifted step refs)"]
+    }
+  ]
+}

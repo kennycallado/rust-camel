@@ -16,7 +16,8 @@ Templates are compiled once at route startup (fail-closed) and cached for zero-f
 - **Bounded acquisition**: Configurable limits on total source bytes, include count/depth, single-template size, and reload wall-clock timeout
 - **Bounded render**: Per-render limits on context size, output size, fuel, recursion depth, and execution timeout (inherited from the MiniJinja language engine)
 - **Atomic hot-reload**: Dependency-closure re-acquisition, compilation, and swap — prior set retained on failure
-- **openat-based confinement**: All file reads go through `openat`-relative handles; `..`, symlinks, absolute paths, and cycles are rejected
+- **Configurable root**: An optional `[components.template] root` anchors relative entries and, when set, confines every template read to one canonical directory tree
+- **openat-based confinement**: All file reads go through `openat`-relative handles; `..`, symlinks, and cycles are rejected
 
 ## Installation
 
@@ -31,16 +32,19 @@ camel-template = "*"
 
 ```
 template:file:///<absolute-path-to-template>
+template:file:<relative-path-to-template>
 ```
 
-The URI has two parts:
+The URI has two parts. The outer scheme is `template`. The inner scheme is `file`, followed by an absolute path or a canonical relative path.
 
-| Part | Description |
-|------|-------------|
-| `template` | Outer scheme identifying this component |
-| `file:///<abs-path>` | Inner scheme with an absolute filesystem path to the entry template |
+| Inner form | Description |
+|------------|-------------|
+| `file:///<abs-path>` | Absolute filesystem path to the entry template |
+| `file:<rel-path>` | Canonical relative entry path, resolved against the configured root |
 
-Bare paths (`template:/srv/t/page.html`) and non-`file:` inner schemes are rejected at endpoint construction. The path must be absolute and free of `..` segments.
+Bare paths (`template:/srv/t/page.html`) and non-`file:` inner schemes are rejected at endpoint construction with `CamelError::Config`.
+
+The absolute form must be free of `..` segments. The relative form is the canonical `template:file:<rel-path>` spelling: it has no `./` prefix, no `.` or `..` components, and no empty components. Any other relative spelling is a configuration error. A relative entry requires `[components.template] root`; without it, endpoint construction fails with `CamelError::Config`.
 
 ## Usage
 
@@ -140,6 +144,36 @@ fuel = 100000
 
 `default-autoescape` is an optional operator default for the entry template. Precedence is: a valid explicit top-level `{% autoescape %}` block in the entry, then the configured default, then rejection at compile time. The default applies only when the entry contains no `{% autoescape %}` or `{% endautoescape %}` statement at all, so an invalid, partial, duplicate, or malformed explicit statement still rejects. The injected block wraps the entry only; include targets keep their own escaping semantics. The key is absent by default, and absence always requires the explicit block — the framework never applies an implicit HTML default. Only the exact lowercase values `"html"`, `"json"`, and `"none"` are accepted; any other value fails config load and names the key with the allowed values. Inline `language: minijinja` templates are unchanged and keep their mandatory explicit block.
 
+## Configured root (`root`)
+
+```toml
+[components.template]
+root = "templates"
+```
+
+`root` may be absolute or relative to the process working directory. It is resolved and canonicalized at route start; a missing root directory fails the route with an error that names the configured value. A relative root depends on where the process starts, so run from the project directory or configure an absolute root.
+
+When `root` is configured, it anchors every `template:` endpoint. The relative entry form is the canonical `template:file:<rel-path>` spelling described in [URI Format](#uri-format).
+
+| `root` configured | Entry form | Behavior |
+|-------------------|------------|----------|
+| no | absolute | The entry's parent directory anchors the closure. Existing behavior is unchanged. |
+| no | relative | `CamelError::Config` at endpoint construction. |
+| yes | relative | Resolved under the canonical root; the entry must exist. |
+| yes | absolute | Validated inside the canonical root. An entry outside it is a configuration error. |
+
+### Confinement guarantees
+
+- The configured root and the entry candidate are both canonicalized at route start.
+- `.` and `..` components are rejected in relative entry URIs, and `..` is rejected in the dependency closure.
+- Leaf and intermediate symlinks are rejected with `O_NOFOLLOW`, even when the link target stays inside the root.
+- The dependency closure is confined to the canonical root. Every `include`, `extends`, `import`, and `from` target resolves relative to the canonical root, not the entry's directory, and a target that escapes the root is rejected. Without a configured root, the closure resolves relative to the entry's parent directory.
+- A missing root fails at route start with an error naming the configured root value and the filesystem error. A missing entry and an absolute entry outside the canonical root fail with an error naming the entry and the canonical root.
+
+**Absolute spelling rule.** An absolute entry must be spelled under the configured root's canonical path. An absolute path that reaches the root through a symlink alias is rejected; use a relative entry or the canonical absolute spelling. Confinement opens the original path components to reject symlinks, so a canonical-name open cannot be substituted for an alias spelling.
+
+`root` changes file location and confinement only. ADR-0047 remains in force: render semantics and the autoescape contract are unchanged, and no implicit autoescape is added.
+
 ## Error Behavior
 
 | Scenario | Error | Behavior |
@@ -151,6 +185,11 @@ fuel = 100000
 | Output size exceeds limit | `CamelError::ProcessorError` | Render halted, body unchanged |
 | Execution timeout | `CamelError::ProcessorError` | Render cancelled, body unchanged |
 | Bounded-acquisition exceeded | `CamelError::TemplateReload` | Route fails to start (fail-closed) |
+| Relative entry with no configured root | `CamelError::Config` | Endpoint construction fails |
+| `.` or `..` component in a relative entry URI | `CamelError::Config` | Endpoint construction fails |
+| Missing configured root or entry | `CamelError::Config` | Route fails to start |
+| Absolute entry outside the configured root | `CamelError::Config` | Route fails to start |
+| Symlink, `..`, or include escape in the closure | `CamelError::TemplateReload` | Route fails to start (fail-closed) |
 
 On every render failure, the exchange body is **not mutated** — the inbound body reaches the error handler byte-identical to what was submitted.
 

@@ -15,7 +15,6 @@
 //! The lifecycle handle is wired in [`Endpoint::lifecycle`] and is a stub
 //! `StepLifecycle` until Task 4.4 implements the real `start()`.
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
@@ -27,13 +26,16 @@ use camel_language_minijinja::ResolvedLimits;
 use crate::config::{AutoescapeMode, ResolvedExternalTemplateLimits};
 use crate::lifecycle::StartupBuildHandle;
 use crate::producer::TemplateProducer;
+use crate::root::RootAnchor;
 use crate::template_set::{SharedTemplates, TemplateSet};
+use crate::uri::TemplateEntry;
 
 /// Producer-only Endpoint for the `template:` scheme.
 #[allow(dead_code)] // fields seeded for Phase 4/5 wiring; consumed via impls below.
 pub(crate) struct TemplateEndpoint {
     uri: String,
-    entry_abs_path: PathBuf,
+    entry: TemplateEntry,
+    root_anchor: RootAnchor,
     limits: ResolvedExternalTemplateLimits,
     render_limits: MinijinjaLimitsConfig,
     route_id: String,
@@ -45,12 +47,13 @@ pub(crate) struct TemplateEndpoint {
 
 impl TemplateEndpoint {
     /// Construct an endpoint from already-resolved limits and the parsed
-    /// entry path. `shared` is seeded with an empty [`TemplateSet`] —
+    /// entry. `shared` is seeded with an empty [`TemplateSet`] —
     /// `start()` (Task 4.4) replaces it with a compiled set.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         uri: String,
-        entry_abs_path: PathBuf,
+        entry: TemplateEntry,
+        root_anchor: RootAnchor,
         limits: ResolvedExternalTemplateLimits,
         render_limits: MinijinjaLimitsConfig,
         route_id: String,
@@ -58,7 +61,8 @@ impl TemplateEndpoint {
     ) -> Self {
         Self {
             uri,
-            entry_abs_path,
+            entry,
+            root_anchor,
             limits,
             render_limits,
             route_id,
@@ -103,7 +107,8 @@ impl Endpoint for TemplateEndpoint {
     fn lifecycle(&self) -> Option<Arc<dyn StepLifecycle>> {
         Some(Arc::new(StartupBuildHandle {
             shared: Arc::clone(&self.shared),
-            entry_abs_path: self.entry_abs_path.clone(),
+            entry: self.entry.clone(),
+            root_anchor: self.root_anchor.clone(),
             render_limits: self.render_limits.clone(),
             limits: self.limits,
             route_id: self.route_id.clone(),
@@ -119,6 +124,7 @@ mod tests {
     use super::*;
     use camel_component_api::test_support::PanicRuntimeObservability;
     use camel_language_api::MinijinjaLimitsConfig;
+    use std::path::PathBuf;
 
     /// Build a `TemplateEndpoint` with reasonable defaults for the
     /// endpoint-only tests. The constructor is `pub(crate)` and the
@@ -127,7 +133,8 @@ mod tests {
     fn make_endpoint() -> TemplateEndpoint {
         TemplateEndpoint::new(
             "template:file:///srv/t/page.html".to_string(),
-            PathBuf::from("/srv/t/page.html"),
+            TemplateEntry::Absolute(PathBuf::from("/srv/t/page.html")),
+            RootAnchor::EntryParent,
             ResolvedExternalTemplateLimits {
                 max_total_source_bytes: 16 * 1024 * 1024,
                 max_include_count: 64,

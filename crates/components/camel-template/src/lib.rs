@@ -24,6 +24,8 @@ pub(crate) mod producer;
 #[cfg(feature = "default")]
 pub(crate) mod reload;
 #[cfg(feature = "default")]
+pub(crate) mod root;
+#[cfg(feature = "default")]
 pub(crate) mod template_set;
 pub(crate) mod uri;
 

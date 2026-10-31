@@ -15,7 +15,6 @@
 //! committed.
 
 use std::any::Any;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -40,9 +39,9 @@ use crate::template_set::{SharedTemplates, TemplateSet};
 pub(crate) struct ReloadHandler {
     /// Compiled-set swap cell shared with the endpoint and the producer.
     pub(crate) shared: SharedTemplates,
-    /// Absolute path of the entry template (the closure seed in the reload
-    /// build).
-    pub(crate) entry_abs_path: PathBuf,
+    /// Root-relative entry name (the closure and Environment key in the
+    /// reload build).
+    pub(crate) entry_name: String,
     /// Per-route render limits (consumed at render time; cloned into each
     /// reload build).
     pub(crate) render_limits: MinijinjaLimitsConfig,
@@ -68,7 +67,7 @@ pub(crate) struct ReloadHandler {
 impl std::fmt::Debug for ReloadHandler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReloadHandler")
-            .field("entry_abs_path", &self.entry_abs_path)
+            .field("entry_name", &self.entry_name)
             .field("route_id", &self.route_id)
             .field("generation", &self.generation)
             .finish_non_exhaustive()
@@ -125,26 +124,19 @@ impl ReloadHandler {
         // 'static + Send: the root Arc, the entry path, the Copy limits, and
         // the render limits.
         let root = Arc::clone(&self.root);
-        let entry = self.entry_abs_path.clone();
+        let entry_name = self.entry_name.clone();
         let limits = self.limits;
         let render_limits = self.render_limits.clone();
         let default_autoescape = self.default_autoescape;
 
         let join =
             tokio::task::spawn_blocking(move || -> Result<TemplateSet, TemplateReloadError> {
-                let snapshot = closure::build_snapshot(&entry, root.as_ref(), limits)?;
-                // The entry name registered into the Environment must equal the
-                // name `build_snapshot` keyed the closure under (the entry's
-                // `file_name()`), so compile's lookup resolves — mirrors
+                let snapshot = closure::build_snapshot(root.as_ref(), &entry_name, limits)?;
+                // The entry name registered into the Environment is the SAME
+                // root-relative name `build_snapshot` keyed the closure under,
+                // so compile's lookup resolves — mirrors
                 // `StartupBuildHandle::start()` exactly.
-                let entry_str = entry
-                    .file_name()
-                    .ok_or_else(|| {
-                        TemplateReloadError::PathEscape("entry has no file name".into())
-                    })?
-                    .to_string_lossy()
-                    .into_owned();
-                TemplateSet::compile(&snapshot, &entry_str, render_limits, default_autoescape)
+                TemplateSet::compile(&snapshot, &entry_name, render_limits, default_autoescape)
             });
 
         // Any failure — acquire/compile OR a join error — returns WITHOUT
@@ -275,16 +267,11 @@ mod tests {
 
         // Seed S0: build a snapshot + compile under the same root handle the
         // handler will reuse for reloads.
-        let snapshot = closure::build_snapshot(&entry, root.as_ref(), default_limits())
+        let snapshot = closure::build_snapshot(root.as_ref(), "page.html", default_limits())
             .expect("seed snapshot");
-        let entry_str = entry
-            .file_name()
-            .expect("entry file name")
-            .to_string_lossy()
-            .into_owned();
         let set = TemplateSet::compile(
             &snapshot,
-            &entry_str,
+            "page.html",
             MinijinjaLimitsConfig::default(),
             None,
         )
@@ -293,7 +280,7 @@ mod tests {
 
         let handler = Arc::new(ReloadHandler {
             shared: Arc::clone(&shared),
-            entry_abs_path: entry.clone(),
+            entry_name: "page.html".to_string(),
             render_limits: MinijinjaLimitsConfig::default(),
             limits: default_limits(),
             generation: Mutex::new(0),

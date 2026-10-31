@@ -17,6 +17,7 @@ use camel_language_api::MinijinjaLimitsConfig;
 use crate::config::AutoescapeMode;
 use crate::config::ExternalTemplateLimitsConfig;
 use crate::endpoint::TemplateEndpoint;
+use crate::root::RootAnchor;
 use crate::uri;
 
 /// Factory for `template:` scheme Endpoints (ADR-0047 Stage 2).
@@ -30,6 +31,7 @@ pub struct TemplateComponent {
     limits: ExternalTemplateLimitsConfig,
     render_limits: MinijinjaLimitsConfig,
     default_autoescape: Option<AutoescapeMode>,
+    root: Option<std::path::PathBuf>,
 }
 
 impl TemplateComponent {
@@ -39,6 +41,7 @@ impl TemplateComponent {
             limits,
             render_limits,
             default_autoescape: None,
+            root: None,
         }
     }
 
@@ -51,6 +54,16 @@ impl TemplateComponent {
     #[must_use]
     pub fn with_default_autoescape(mut self, mode: AutoescapeMode) -> Self {
         self.default_autoescape = Some(mode);
+        self
+    }
+
+    /// Set the confinement root that anchors every `template:` endpoint.
+    ///
+    /// Relative entry URIs are resolved against this root; absolute entries
+    /// must land inside it.
+    #[must_use]
+    pub fn with_root(mut self, root: std::path::PathBuf) -> Self {
+        self.root = Some(root);
         self
     }
 }
@@ -70,6 +83,20 @@ impl Component for TemplateComponent {
         ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let config = uri::parse_template_uri(uri_str, self.limits.clone())?;
+        // A relative entry needs a configured root to resolve against. This
+        // must run before `resolve()` so a relative URI combined with an
+        // invalid limit still reports the missing root, matching pre-change
+        // behavior (the relative URI was rejected at parse time).
+        if matches!(config.entry, uri::TemplateEntry::Relative(_)) && self.root.is_none() {
+            return Err(CamelError::Config(
+                "relative template URI requires [components.template] root to be configured".into(),
+            ));
+        }
+        let root_anchor = self
+            .root
+            .clone()
+            .map(RootAnchor::ConfiguredRoot)
+            .unwrap_or(RootAnchor::EntryParent);
         // Fail closed on a zero operator-supplied limit. `resolve()`
         // returns `TemplateReloadError`, which has a `From` impl that maps
         // to `CamelError::TemplateReload(_)` (see `crate::error`).
@@ -77,7 +104,8 @@ impl Component for TemplateComponent {
         let route_id = ctx.route_id().unwrap_or("template-endpoint").to_string();
         Ok(Box::new(TemplateEndpoint::new(
             uri_str.to_string(),
-            config.entry_abs_path,
+            config.entry,
+            root_anchor,
             limits,
             self.render_limits.clone(),
             route_id,
@@ -88,6 +116,8 @@ impl Component for TemplateComponent {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     /// The component must register under the URI scheme `template`.
@@ -97,5 +127,91 @@ mod tests {
     fn component_scheme_is_template() {
         let component = TemplateComponent::default();
         assert_eq!(component.scheme(), "template");
+    }
+
+    #[test]
+    fn with_root_builder_sets_root() {
+        let component = TemplateComponent::new(Default::default(), Default::default())
+            .with_root(PathBuf::from("t"));
+        assert_eq!(component.root, Some(PathBuf::from("t")));
+    }
+
+    #[test]
+    fn component_default_has_no_root() {
+        let component = TemplateComponent::default();
+        assert!(component.root.is_none());
+    }
+
+    #[test]
+    fn create_endpoint_relative_without_root_is_config_error() {
+        let component = TemplateComponent::default();
+        let ctx = camel_component_api::NoOpComponentContext;
+
+        let result = component.create_endpoint("template:file:page.html", &ctx);
+
+        match result {
+            Err(CamelError::Config(_)) => {}
+            Err(other) => panic!("expected CamelError::Config, got {other:?}"),
+            Ok(_) => panic!("relative URI without a root must be rejected"),
+        }
+    }
+
+    /// A relative entry with a configured root constructs directly: endpoint
+    /// creation is parse-only, so a non-existent root must NOT be touched
+    /// here (filesystem validation happens at lifecycle start).
+    #[test]
+    fn create_endpoint_relative_with_root_constructs() {
+        let component =
+            TemplateComponent::default().with_root(PathBuf::from("/tmp/whatever-nonexistent"));
+        let ctx = camel_component_api::NoOpComponentContext;
+
+        let result = component.create_endpoint("template:file:page.html", &ctx);
+
+        assert!(
+            result.is_ok(),
+            "relative entry under a configured root must construct, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn create_endpoint_relative_with_zero_limit_is_config_error() {
+        let limits = ExternalTemplateLimitsConfig {
+            max_include_count: Some(0),
+            ..Default::default()
+        };
+        let component = TemplateComponent::new(limits, Default::default());
+        let ctx = camel_component_api::NoOpComponentContext;
+
+        let result = component.create_endpoint("template:file:page.html", &ctx);
+
+        match result {
+            Err(CamelError::Config(message)) => assert_eq!(
+                message,
+                "relative template URI requires [components.template] root to be configured"
+            ),
+            Err(other) => panic!("expected CamelError::Config, got {other:?}"),
+            Ok(_) => panic!("relative URI without a root must be rejected"),
+        }
+    }
+
+    #[test]
+    fn create_endpoint_absolute_zero_limit_still_bound_error() {
+        let limits = ExternalTemplateLimitsConfig {
+            max_include_count: Some(0),
+            ..Default::default()
+        };
+        let component = TemplateComponent::new(limits, Default::default());
+        let ctx = camel_component_api::NoOpComponentContext;
+
+        let result = component.create_endpoint("template:file:///srv/t/page.html", &ctx);
+
+        match result {
+            Err(err) => assert!(
+                !matches!(err, CamelError::Config(_)),
+                "absolute URI must reach limit validation, got {err:?}"
+            ),
+            Ok(_) => panic!("zero limit must still be rejected for absolute URIs"),
+        }
     }
 }
