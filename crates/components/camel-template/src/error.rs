@@ -15,6 +15,14 @@ pub enum TemplateReloadError {
     #[error("template compilation failed: {0}")]
     Compile(String),
 
+    /// A data-plane render failure (per-Exchange), separate from compile:
+    /// strict-undefined, unknown filter/function, template lookup at render
+    /// time, output cap, execution timeout, `spawn_blocking` join error, and
+    /// non-UTF-8 output. Compile-time failures (syntax, autoescape wrapper,
+    /// closure compilation) stay in [`TemplateReloadError::Compile`].
+    #[error("template render failed: {0}")]
+    Render(String),
+
     #[error("template path escapes configured root: {0}")]
     PathEscape(String),
 

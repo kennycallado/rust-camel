@@ -2952,6 +2952,7 @@ dependencies = [
  "toml",
  "tower 0.5.3",
  "tracing",
+ "tracing-subscriber",
  "url",
  "windows-sys 0.61.2",
 ]

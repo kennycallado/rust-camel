@@ -24,6 +24,7 @@ use camel_language_minijinja::ResolvedLimits;
 use camel_language_minijinja::engine::build_context_bounded;
 use tower::Service;
 
+use crate::error::TemplateReloadError;
 use crate::template_set::SharedTemplates;
 
 /// Tower `Service<Exchange>` that renders the operator-configured compiled
@@ -103,6 +104,13 @@ impl TemplateProducer {
     /// `producer_leaves_body_on_render_error` pins this property by
     /// observing the borrowed `&mut Exchange` directly.
     ///
+    /// On render failure the producer emits a WARN log carrying the render
+    /// phase, the operator-configured entry name, and a best-effort error
+    /// class, then returns `CamelError::ProcessorError` exactly as before.
+    /// The log carries no error string and no exchange payload or context:
+    /// minijinja interpolates operand values into some error displays, so the
+    /// full error Display flows exclusively on the `ProcessorError` surface.
+    ///
     /// The entry and root are taken from `self.templates.load_full()`
     /// (operator-configured). No header or property of the inbound
     /// exchange is consulted — the `producer_ignores_override_header`
@@ -135,16 +143,59 @@ impl TemplateProducer {
         // set for the lifetime of this render.
         let set = self.templates.load_full();
 
-        let rendered = set
-            .render_entry(context, self.render_limits)
-            .await
-            .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+        let rendered = match set.render_entry(context, self.render_limits).await {
+            Ok(rendered) => rendered,
+            Err(err) => {
+                let template = set.entry_name();
+                let class = match &err {
+                    TemplateReloadError::Render(msg) => render_error_class(msg),
+                    _ => "other",
+                };
+                tracing::warn!(
+                    target: "camel::template",
+                    phase = "render",
+                    template = %template,
+                    class,
+                    "template render failed; body left unchanged; diagnostics live in \
+                     logs (HTTP consumers return an empty 500 body by policy)"
+                );
+                return Err(CamelError::ProcessorError(err.to_string()));
+            }
+        };
 
         // Body is replaced ONLY on the success path. A failure above
         // returns without touching `exchange.input.body`, so the
         // body-unchanged-on-error contract holds.
         exchange.input.body = Body::from(rendered);
         Ok(())
+    }
+}
+
+/// Best-effort classification of a render error message for the render-failure
+/// WARN log. The check order matters: camel-owned sub-phase prefixes
+/// (`template lookup:`, timeout, `spawn_blocking join:`, `non-utf8 output:`)
+/// come first, then the minijinja kind descriptions, with `other` as the
+/// fallback. The full message stays on the `ProcessorError` surface and never
+/// enters the log, so a misclassification only affects the `class` field.
+fn render_error_class(msg: &str) -> &'static str {
+    if msg.contains("template lookup:") {
+        "lookup"
+    } else if msg.contains("minijinja execution timeout") {
+        "timeout"
+    } else if msg.contains("spawn_blocking join:") {
+        "join"
+    } else if msg.contains("non-utf8 output:") {
+        "utf8"
+    } else if msg.contains("unknown filter") {
+        "filter"
+    } else if msg.contains("unknown function") {
+        "function"
+    } else if msg.contains("undefined") {
+        "undefined"
+    } else if msg.contains("syntax error") {
+        "syntax"
+    } else {
+        "other"
     }
 }
 
@@ -170,6 +221,107 @@ mod tests {
 
     use crate::closure::ClosureSnapshot;
     use crate::template_set::TemplateSet;
+
+    /// Install a bare registry as the process-global tracing default, once per
+    /// test binary.
+    ///
+    /// Guards capture tests against callsite-interest poisoning: `tracing`
+    /// caches each callsite's `Interest` process-wide from its FIRST macro
+    /// execution, evaluated against the executing thread's dispatcher. A
+    /// subscriber-less sibling test that hits a shared `warn!` callsite first
+    /// caches `Interest::never`, so a later thread-local `set_default` capture
+    /// silently drops events. The global registry heals prior poison and floors
+    /// future rebuilds at `sometimes` (convention:
+    /// `docs/testing/tracing-capture-guards.md`).
+    fn ensure_global_tracing_default() {
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+    }
+
+    /// Flattens an event's structured fields plus its message into a single
+    /// `key=value key=value ...` line for substring assertions.
+    ///
+    /// `%value` (Display) and message fields arrive through `record_debug`;
+    /// string shorthand fields arrive through `record_str` and are kept
+    /// unquoted so assertions can match `class=undefined` directly.
+    struct FieldCollector {
+        line: String,
+    }
+
+    impl FieldCollector {
+        fn push(&mut self, field: &tracing::field::Field, rendered: &str) {
+            if !self.line.is_empty() {
+                self.line.push(' ');
+            }
+            self.line.push_str(field.name());
+            self.line.push('=');
+            self.line.push_str(rendered);
+        }
+    }
+
+    impl tracing::field::Visit for FieldCollector {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.push(field, value);
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.push(field, &format!("{value:?}"));
+        }
+    }
+
+    /// `tracing_subscriber` layer recording WARN events as flattened lines.
+    struct CaptureLayer {
+        events: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl<C> tracing_subscriber::Layer<C> for CaptureLayer
+    where
+        C: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, C>,
+        ) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            let mut collector = FieldCollector {
+                line: String::new(),
+            };
+            event.record(&mut collector);
+            self.events
+                .lock()
+                .expect("capture buffer lock")
+                .push(collector.line);
+        }
+    }
+
+    /// Install a thread-local subscriber recording WARN lines; returns the
+    /// shared buffer and the default-subscriber guard.
+    ///
+    /// `set_default` (guard-scoped, thread-local) is used instead of
+    /// `with_default` because the guard must span the `.await` points of an
+    /// async test body; `#[tokio::test]` polls the future on the test thread,
+    /// so the thread-local subscriber observes the producer's warn event.
+    fn capture_warns() -> (
+        Arc<std::sync::Mutex<Vec<String>>>,
+        tracing::subscriber::DefaultGuard,
+    ) {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+
+        ensure_global_tracing_default();
+        let events: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let layer = CaptureLayer {
+            events: Arc::clone(&events),
+        };
+        let guard = tracing_subscriber::registry().with(layer).set_default();
+        (events, guard)
+    }
 
     /// Build a `SharedTemplates` seeded with a single-entry `ClosureSnapshot`
     /// compiled to the entry name `entry_name`.
@@ -245,12 +397,18 @@ mod tests {
             .insert("X-Keep".to_string(), Value::String("kept".to_string()));
 
         let result = producer.render_into(&mut exchange).await;
+        let err_msg = match &result {
+            Err(CamelError::ProcessorError(msg)) => msg.clone(),
+            other => panic!(
+                "strict-undefined is a data-plane render error and must surface as \
+                 CamelError::ProcessorError (NOT CamelError::TemplateReload, which is \
+                 reserved for the control-plane startup-build and hot-reload paths in \
+                 lifecycle.rs / reload.rs), got: {other:?}"
+            ),
+        };
         assert!(
-            matches!(result, Err(CamelError::ProcessorError(_))),
-            "strict-undefined is a data-plane render error and must surface as \
-             CamelError::ProcessorError (NOT CamelError::TemplateReload, which is \
-             reserved for the control-plane startup-build and hot-reload paths in \
-             lifecycle.rs / reload.rs), got: {result:?}"
+            err_msg.starts_with("template render failed:"),
+            "render failures must carry the render-variant display prefix, got: {err_msg}"
         );
 
         // Body must be byte-identical to the inbound body — the
@@ -473,19 +631,20 @@ mod tests {
             ),
         };
         // The LimitedWriter trips and render_entry wraps the failure as
-        // `TemplateReloadError::Compile("render: {e}")` (template_set.rs),
+        // `TemplateReloadError::Render("render: {e}")` (template_set.rs),
         // which render_into surfaces as `CamelError::ProcessorError`. Assert
-        // on the camel-owned `render:` prefix (stable across minijinja
-        // versions) rather than minijinja-internal error strings, which a
-        // `cargo update` could rephrase. The real contract — fail-closed +
-        // body unchanged — is already pinned by the variant assertion above
-        // and the body equality below; this prefix check adds provenance
-        // that the render path (not e.g. fuel) tripped. Without the cap,
-        // the render would report success with ~10 KiB of output.
+        // on the render-variant display prefix and the camel-owned `render:`
+        // sub-phase prefix (both stable across minijinja versions) rather
+        // than minijinja-internal error strings, which a `cargo update` could
+        // rephrase. The real contract — fail-closed + body unchanged — is
+        // already pinned by the variant assertion above and the body equality
+        // below; this prefix check adds provenance that the render path (not
+        // e.g. fuel) tripped. Without the cap, the render would report success
+        // with ~10 KiB of output.
         assert!(
-            err_msg.contains("render:"),
+            err_msg.contains("template render failed: render:"),
             "output-cap failure must originate from the render path \
-             (render_entry prefix); got: {err_msg}"
+             (render_entry prefixes); got: {err_msg}"
         );
 
         // Body-unchanged-on-error contract still holds on the S6 path.
@@ -684,7 +843,7 @@ mod tests {
     ///
     /// This is the LAST coverage gap before the change can re-validate gates
     /// and merge (e_opus audit gap G10, LOW). The observed error (probed live)
-    /// is `"template compilation failed: render: unknown function: ..."` — the
+    /// is `"template render failed: render: unknown function: ..."` — the
     /// camel-owned `render:` prefix is stable across minijinja versions.
     #[tokio::test]
     async fn producer_rejects_unknown_function_call() {
@@ -698,10 +857,17 @@ mod tests {
         let mut exchange = Exchange::new(Message::new(Body::from(original_body.clone())));
 
         let result = producer.render_into(&mut exchange).await;
+        let err_msg = match &result {
+            Err(CamelError::ProcessorError(msg)) => msg.clone(),
+            other => panic!(
+                "unknown function call must surface as CamelError::ProcessorError \
+                 (data-plane render error), got: {other:?}"
+            ),
+        };
         assert!(
-            matches!(result, Err(CamelError::ProcessorError(_))),
-            "unknown function call must surface as CamelError::ProcessorError \
-             (data-plane render error), got: {result:?}"
+            err_msg.starts_with("template render failed:"),
+            "unknown-function failure must carry the render-variant display prefix, \
+             got: {err_msg}"
         );
 
         // Body must be byte-unchanged after the failed render (fail-closed, S6
@@ -713,5 +879,181 @@ mod tests {
             ),
             other => panic!("expected unchanged Text body, got: {other:?}"),
         }
+    }
+
+    /// Pins the best-effort classifier for every render error class the
+    /// `render_entry` sub-phase prefixes and minijinja kind descriptions can
+    /// produce. The order is intentional: camel-owned sub-phase prefixes are
+    /// checked before minijinja text, and `other` is the fallback. A
+    /// misclassification is cosmetic only — the full message never enters the
+    /// log and stays on the `ProcessorError` surface.
+    #[test]
+    fn render_error_class_maps_known_classes() {
+        let cases = [
+            ("template lookup: x", "lookup"),
+            ("minijinja execution timeout", "timeout"),
+            ("minijinja spawn_blocking join: x", "join"),
+            ("non-utf8 output: x", "utf8"),
+            ("render: unknown filter: f", "filter"),
+            ("render: unknown function: f", "function"),
+            ("render: undefined value: v", "undefined"),
+            ("render: syntax error: x", "syntax"),
+            ("render: something else", "other"),
+        ];
+        for (msg, expected) in cases {
+            assert_eq!(
+                render_error_class(msg),
+                expected,
+                "classifier must map {msg:?} to {expected:?}"
+            );
+        }
+    }
+
+    /// A render failure must emit exactly one WARN carrying the render phase,
+    /// the operator-configured entry name, and the best-effort class — and
+    /// must never include exchange payload.
+    #[tokio::test]
+    async fn producer_render_failure_logs_render_phase() {
+        let templates = make_templates(
+            "boom.html",
+            r#"{% autoescape "none" %}{{undefined_var}}{% endautoescape %}"#,
+        );
+        let producer = TemplateProducer::new(templates, ResolvedLimits::default());
+        let mut exchange = make_exchange_with_body("original-payload-secret");
+
+        let (warns, _guard) = capture_warns();
+        let result = producer.render_into(&mut exchange).await;
+        assert!(
+            matches!(result, Err(CamelError::ProcessorError(_))),
+            "render failure must stay a ProcessorError, got: {result:?}"
+        );
+
+        let warns = warns.lock().expect("capture buffer lock");
+        assert_eq!(
+            warns.len(),
+            1,
+            "exactly one WARN expected for one render failure, got: {warns:?}"
+        );
+        let line = &warns[0];
+        for needle in [
+            "phase=render",
+            "template=boom.html",
+            "class=undefined",
+            "template render failed",
+        ] {
+            assert!(
+                line.contains(needle),
+                "render-failure WARN must contain {needle:?}, got: {line}"
+            );
+        }
+        assert!(
+            !line.contains("original-payload-secret"),
+            "render-failure WARN must never contain exchange payload, got: {line}"
+        );
+    }
+
+    /// An unknown filter fails at render time; the WARN must name the entry
+    /// and classify the failure as a filter error.
+    #[tokio::test]
+    async fn producer_unknown_filter_logs_filter_class() {
+        let templates = make_templates(
+            "filter.html",
+            r#"{% autoescape "none" %}{{ x | nosuchfilter }}{% endautoescape %}"#,
+        );
+        let producer = TemplateProducer::new(templates, ResolvedLimits::default());
+        let mut exchange = make_exchange_with_body("payload");
+
+        let (warns, _guard) = capture_warns();
+        let result = producer.render_into(&mut exchange).await;
+        assert!(
+            result.is_err(),
+            "unknown filter must fail the render, got: {result:?}"
+        );
+
+        let warns = warns.lock().expect("capture buffer lock");
+        assert_eq!(
+            warns.len(),
+            1,
+            "exactly one WARN expected for one render failure, got: {warns:?}"
+        );
+        let line = &warns[0];
+        assert!(
+            line.contains("template=filter.html"),
+            "WARN must name the failing entry, got: {line}"
+        );
+        assert!(
+            line.contains("class=filter"),
+            "WARN must classify an unknown filter, got: {line}"
+        );
+    }
+
+    /// The producer WARN must never carry the error Display: minijinja
+    /// interpolates operand values into some error details (for example
+    /// `unable to calculate {lhs} // {rhs}` on integer division by zero), so
+    /// logging the Display would leak exchange-derived payload into the log.
+    /// The full detail stays on the `CamelError::ProcessorError` surface only.
+    #[tokio::test]
+    async fn producer_warn_omits_value_bearing_error_detail() {
+        let templates = make_templates(
+            "leak.html",
+            r#"{% autoescape "none" %}{{ (body | int) // 0 }}{% endautoescape %}"#,
+        );
+        let producer = TemplateProducer::new(templates, ResolvedLimits::default());
+        let mut exchange = make_exchange_with_body("867530912345");
+
+        let (warns, _guard) = capture_warns();
+        let result = producer.render_into(&mut exchange).await;
+
+        let err_msg = match &result {
+            Err(CamelError::ProcessorError(msg)) => msg.clone(),
+            other => panic!(
+                "division by zero must surface as CamelError::ProcessorError, got: {other:?}"
+            ),
+        };
+        // Boundary: the full error detail (which embeds the payload value)
+        // travels on the ProcessorError surface, never in the log.
+        assert!(
+            err_msg.contains("867530912345"),
+            "ProcessorError must keep the full error detail, got: {err_msg}"
+        );
+
+        let warns = warns.lock().expect("capture buffer lock");
+        assert_eq!(
+            warns.len(),
+            1,
+            "exactly one WARN expected for one render failure, got: {warns:?}"
+        );
+        let line = &warns[0];
+        assert!(
+            !line.contains("867530912345"),
+            "render-failure WARN must never contain exchange payload, got: {line}"
+        );
+        assert!(
+            !line.contains("unable to calculate"),
+            "render-failure WARN must never contain the value-bearing error display, got: {line}"
+        );
+    }
+
+    /// The success path must not emit any WARN.
+    #[tokio::test]
+    async fn producer_success_logs_no_warn() {
+        let templates = make_templates(
+            "echo.html",
+            r#"{% autoescape "none" %}body={{body}}{% endautoescape %}"#,
+        );
+        let producer = TemplateProducer::new(templates, ResolvedLimits::default());
+        let mut exchange = make_exchange_with_body("hello");
+
+        let (warns, _guard) = capture_warns();
+        producer
+            .render_into(&mut exchange)
+            .await
+            .expect("successful render");
+
+        let warns = warns.lock().expect("capture buffer lock");
+        assert!(
+            warns.is_empty(),
+            "successful render must emit no WARN, got: {warns:?}"
+        );
     }
 }

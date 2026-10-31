@@ -193,6 +193,18 @@ When `root` is configured, it anchors every `template:` endpoint. The relative e
 
 On every render failure, the exchange body is **not mutated** — the inbound body reaches the error handler byte-identical to what was submitted.
 
+### Error phases: compile vs render
+
+The component separates control-plane compile failures from data-plane render failures, because the two happen at different times, carry different error types, and have different recovery semantics.
+
+**1. Compile phase (control plane).** Runs at startup build and at hot-reload build. Failures include MiniJinja syntax errors, autoescape wrapper violations, non-UTF-8 template source, a missing entry template, and dependency-closure acquisition problems (cycles, path escapes, duplicate identities). Syntax, autoescape, non-UTF-8 source, and missing-entry failures are `TemplateReloadError::Compile` (display prefix `template compilation failed:`); the closure problems use their dedicated `TemplateReloadError` variants. All of them surface as `CamelError::TemplateReload`, and at startup the route fails closed. A failed hot-reload keeps the prior compiled set.
+
+**2. Render phase (data plane).** Runs per Exchange. Failures include strict-undefined variable access, unknown filters or functions, template lookup failure at render time, the output cap (`LimitedWriter`), execution timeout, `spawn_blocking` join errors, and non-UTF-8 output. These are `TemplateReloadError::Render` (display prefix `template render failed:`) and surface as `CamelError::ProcessorError`. The Exchange body is left unchanged.
+
+**3. Logging.** On a render failure the producer emits one WARN with target `camel::template` carrying `phase=render`, `template` (the entry name), and `class` (best-effort error class: `undefined`, `filter`, `function`, `syntax`, `lookup`, `timeout`, `join`, `utf8`, or `other`). The log carries no error string and no exchange payload or context: minijinja interpolates operand values into some error displays, so the full error text flows exclusively on the `CamelError::ProcessorError` surface, which the empty-500 HTTP body policy keeps out of response bodies. Compile-phase diagnostics keep the distinct `template compilation failed` label.
+
+**4. HTTP response body policy (explicit, unchanged).** When a render or compile error reaches an HTTP consumer, the HTTP error policy returns an empty 500 response body. That is the HTTP consumer's policy, not the template component's, and this component deliberately keeps it: diagnostics live in logs only, so neither an error detail nor a payload can leak through the response body.
+
 ### Empty body caveat
 
 An empty inbound body (`Body::Empty`) is exposed to the template as `null`. Under minijinja's default stringification, `{{ body }}` renders the **literal word `none`** — not an empty string, and not an error (strict-undefined does not trip because the `body` key *is present*). If a route may receive empty bodies, guard the reference explicitly:

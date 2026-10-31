@@ -156,6 +156,12 @@ impl TemplateSet {
         })
     }
 
+    /// The entry template name this set was compiled for. Used by the producer
+    /// for render-failure logging (never consulted to choose what to render).
+    pub(crate) fn entry_name(&self) -> &str {
+        &self.entry
+    }
+
     /// Render the already-compiled entry against `context`.
     ///
     /// Mirrors the inline engine's render geometry: a `spawn_blocking` closure
@@ -165,8 +171,11 @@ impl TemplateSet {
     /// it does NOT call `engine::render` (which recompiles from source),
     /// preserving the compile-once invariant.
     ///
-    /// Render-time failures (strict-undefined, fuel exhaustion, output limit,
-    /// timeout, join error) are mapped to [`TemplateReloadError::Compile`].
+    /// Render-time failures (strict-undefined, unknown filter/function,
+    /// template lookup at render time, fuel exhaustion, output limit,
+    /// timeout, join error, non-UTF-8 output) are mapped to
+    /// [`TemplateReloadError::Render`], keeping a camel-owned sub-phase prefix
+    /// for provenance.
     #[allow(dead_code)] // pub fn; consumed by Phase 4/5 component lifecycle.
     pub async fn render_entry(
         &self,
@@ -182,21 +191,21 @@ impl TemplateSet {
         let join = tokio::task::spawn_blocking(move || -> Result<String, TemplateReloadError> {
             let tmpl = env
                 .get_template(&entry)
-                .map_err(|e| TemplateReloadError::Compile(format!("template lookup: {e}")))?;
+                .map_err(|e| TemplateReloadError::Render(format!("template lookup: {e}")))?;
             let mut buf = Vec::new();
             let mut writer = LimitedWriter::new(&mut buf, max_output);
             tmpl.render_captured_to(&context, &mut writer)
-                .map_err(|e| TemplateReloadError::Compile(format!("render: {e}")))?;
+                .map_err(|e| TemplateReloadError::Render(format!("render: {e}")))?;
             String::from_utf8(buf)
-                .map_err(|e| TemplateReloadError::Compile(format!("non-utf8 output: {e}")))
+                .map_err(|e| TemplateReloadError::Render(format!("non-utf8 output: {e}")))
         });
 
         match tokio::time::timeout(timeout, join).await {
             Ok(Ok(rendered)) => rendered,
-            Ok(Err(join_err)) => Err(TemplateReloadError::Compile(format!(
+            Ok(Err(join_err)) => Err(TemplateReloadError::Render(format!(
                 "minijinja spawn_blocking join: {join_err}"
             ))),
-            Err(_) => Err(TemplateReloadError::Compile(
+            Err(_) => Err(TemplateReloadError::Render(
                 "minijinja execution timeout".to_string(),
             )),
         }
@@ -287,9 +296,17 @@ mod tests {
         let result = set
             .render_entry(ctx_empty(), ResolvedLimits::default())
             .await;
+        let err = match result {
+            Err(err @ TemplateReloadError::Render(_)) => err,
+            other => panic!(
+                "strict-undefined is a render-time failure and must surface as \
+                 TemplateReloadError::Render, got: {other:?}"
+            ),
+        };
+        let display = err.to_string();
         assert!(
-            matches!(result, Err(TemplateReloadError::Compile(_))),
-            "strict-undefined must surface as Compile, got: {result:?}"
+            display.starts_with("template render failed:"),
+            "render-variant display must start with `template render failed:`, got: {display}"
         );
     }
 
@@ -543,7 +560,7 @@ mod tests {
     /// time is the runtime guard: every `{% include %}` increments the
     /// depth counter, and exceeding `max_recursion_depth` causes minijinja
     /// to return an error, which `render_entry` wraps as
-    /// `TemplateReloadError::Compile("render: …")`.
+    /// `TemplateReloadError::Render("render: …")`.
     ///
     /// The recursion limit is tightened to 8 AT COMPILE TIME (the only place
     /// `set_recursion_limit` is honored — render_entry does not read
@@ -578,9 +595,9 @@ mod tests {
             .render_entry(ctx_empty(), ResolvedLimits::default())
             .await;
         let err_msg = match &result {
-            Err(TemplateReloadError::Compile(msg)) => msg.clone(),
+            Err(TemplateReloadError::Render(msg)) => msg.clone(),
             other => panic!(
-                "recursion bomb must fail-closed as TemplateReloadError::Compile \
+                "recursion bomb must fail-closed as TemplateReloadError::Render \
                  (no hang, no stack overflow, no panic), got: {other:?}"
             ),
         };
@@ -593,6 +610,96 @@ mod tests {
             err_msg.contains("render:"),
             "recursion-bomb rejection must originate from the render path \
              (render_entry prefix); got: {err_msg}"
+        );
+    }
+
+    /// A filter is resolved at EVALUATION time, not compile time: an unknown
+    /// filter name parses cleanly and only fails while rendering. This pins
+    /// the render-phase mapping (`TemplateReloadError::Render`) for that
+    /// failure class.
+    #[tokio::test]
+    async fn template_set_unknown_filter_is_render_error() {
+        let snap = snapshot(
+            "filter.html",
+            r#"{% autoescape "none" %}{{ x | nosuchfilter }}{% endautoescape %}"#,
+        );
+        // Compile must SUCCEED — minijinja resolves filters at evaluation
+        // time, so an unknown filter is invisible to `add_template_owned`.
+        let set =
+            TemplateSet::compile(&snap, "filter.html", MinijinjaLimitsConfig::default(), None)
+                .expect("compile must succeed — filter names are resolved at render time");
+
+        let result = set
+            .render_entry(ctx_empty(), ResolvedLimits::default())
+            .await;
+        let msg = match &result {
+            Err(TemplateReloadError::Render(msg)) => msg.clone(),
+            other => panic!(
+                "unknown filter is a render-time failure and must surface as \
+                 TemplateReloadError::Render, got: {other:?}"
+            ),
+        };
+        assert!(
+            msg.contains("unknown filter"),
+            "unknown-filter failure must report minijinja's `unknown filter` text, got: {msg}"
+        );
+    }
+
+    /// The wall-clock timeout is enforced by `render_entry` (not by
+    /// `compile`), so a slow-but-valid loop surfaces as a render-phase
+    /// failure.
+    ///
+    /// The test runs on tokio's paused clock (`start_paused = true`) to
+    /// remove the real-time race: `Timeout` polls the inner future before the
+    /// timer, so a render that exhausts its fuel before the 1 ms deadline is
+    /// observed would surface a fuel error instead. Auto-advance alone is not
+    /// enough here: an in-flight `spawn_blocking` keeps the runtime busy, so
+    /// the clock is advanced explicitly after the first poll registers the
+    /// timeout. That makes the deadline fire deterministically while the
+    /// fuel-bound render is still pending.
+    ///
+    /// MiniJinja 2.24 refuses `range` spans over 100,000 elements, so the
+    /// work is expressed as nested 100,000-element loops rather than one
+    /// oversized `range`. The 1,000,000 fuel budget is deliberately finite:
+    /// the loop runs long enough for the 1 ms timeout to win, and the
+    /// (detached) blocking render still terminates promptly once fuel is
+    /// exhausted instead of pinning a worker thread.
+    #[tokio::test(start_paused = true)]
+    async fn template_set_execution_timeout_is_render_error() {
+        let limits = ResolvedLimits {
+            execution_timeout_ms: 1,
+            fuel: 1_000_000,
+            ..ResolvedLimits::default()
+        };
+        // Compile-time limits are the only place fuel is registered on the
+        // Environment (`set_fuel`); raise it from the 100k default so the
+        // loop does not trip fuel exhaustion before the timeout fires.
+        let compile_limits = MinijinjaLimitsConfig {
+            fuel: Some(limits.fuel),
+            ..MinijinjaLimitsConfig::default()
+        };
+        let snap = snapshot(
+            "slow.html",
+            r#"{% autoescape "none" %}{% for i in range(0, 100000) %}{% for j in range(0, 100000) %}{% endfor %}{% endfor %}{% endautoescape %}"#,
+        );
+        let set = TemplateSet::compile(&snap, "slow.html", compile_limits, None)
+            .expect("compile must succeed — the loop is syntactically valid");
+        // `join!` polls the render first (registering the 1 ms `Sleep`) and
+        // the advance second, so the paused clock jumps straight past the
+        // deadline instead of waiting for the blocked runtime to auto-advance.
+        let (result, ()) = tokio::join!(set.render_entry(ctx_empty(), limits), async {
+            tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        });
+        let msg = match &result {
+            Err(TemplateReloadError::Render(msg)) => msg.clone(),
+            other => panic!(
+                "execution timeout is a render-time failure and must surface as \
+                 TemplateReloadError::Render, got: {other:?}"
+            ),
+        };
+        assert!(
+            msg.contains("minijinja execution timeout"),
+            "timeout failure must report the camel-owned timeout text, got: {msg}"
         );
     }
 
