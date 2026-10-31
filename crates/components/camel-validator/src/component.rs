@@ -658,6 +658,7 @@ mod tests {
         let cfg = ValidatorConfig {
             schema_path: std::path::PathBuf::from("/nonexistent/root.xsd"),
             schema_type: crate::config::SchemaType::Xml,
+            message: None,
             max_payload_bytes: None,
             schema_cache_max_entries: crate::config::DEFAULT_SCHEMA_CACHE_MAX_ENTRIES,
             fail_on_null_body: true,

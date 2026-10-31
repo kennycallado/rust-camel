@@ -11,6 +11,7 @@ pub enum SchemaType {
     Xml,
     Json,
     Yaml,
+    Protobuf,
     RelaxNg,
     Schematron,
 }
@@ -28,6 +29,10 @@ pub const DEFAULT_VALIDATE_FORMATS: bool = true;
 pub struct ValidatorConfig {
     pub schema_path: PathBuf,
     pub schema_type: SchemaType,
+    /// Fully-qualified protobuf message name (`message` query parameter).
+    /// REQUIRED when `schema_type` is `Protobuf`; enforcement happens at
+    /// compile/route-build time (`CompiledValidator::compile`), not parse time.
+    pub message: Option<String>,
     /// Maximum allowed body size in bytes. Bodies exceeding this limit are
     /// rejected before validation begins. `None` means no limit.
     pub max_payload_bytes: Option<usize>,
@@ -91,24 +96,7 @@ impl ValidatorConfig {
             ));
         }
 
-        let schema_type = if let Some(q) = query {
-            let type_val = q.split('&').find_map(|kv| kv.strip_prefix("type="));
-            match type_val {
-                Some("xml") | Some("xml-schema") | Some("xsd") => SchemaType::Xml,
-                Some("json") | Some("json-schema") => SchemaType::Json,
-                Some("yaml") | Some("yaml-schema") => SchemaType::Yaml,
-                Some("rng") | Some("relaxng") => SchemaType::RelaxNg,
-                Some("sch") | Some("schematron") => SchemaType::Schematron,
-                Some(other) => {
-                    return Err(CamelError::InvalidUri(format!(
-                        "unknown schema type '{other}'; expected xml, json, yaml, rng, or schematron"
-                    )));
-                }
-                None => detect_type_from_extension(&schema_path)?,
-            }
-        } else {
-            detect_type_from_extension(&schema_path)?
-        };
+        let schema_type = resolve_schema_type(query, &schema_path)?;
 
         let mut max_payload_bytes: Option<usize> = None;
         let mut schema_cache_max_entries: usize = DEFAULT_SCHEMA_CACHE_MAX_ENTRIES;
@@ -118,6 +106,7 @@ impl ValidatorConfig {
         let validate_formats: bool = DEFAULT_VALIDATE_FORMATS;
         let mut schema_aliases: BTreeMap<String, String> = BTreeMap::new();
         let mut schema_aliases_seen = false;
+        let mut message: Option<String> = None;
 
         if let Some(q) = query {
             for kv in q.split('&') {
@@ -141,6 +130,10 @@ impl ValidatorConfig {
                     })?;
                 } else if let Some(val) = kv.strip_prefix("headerName=") {
                     header_name = Some(val.to_string());
+                } else if let Some(val) = kv.strip_prefix("message=") {
+                    // Stored raw (empty stays `Some("")`); an empty or blank
+                    // message is rejected at compile/route-build time.
+                    message = Some(val.to_string());
                 } else if let Some(val) = kv.strip_prefix("failOnNullHeader=") {
                     fail_on_null_header = val.parse::<bool>().map_err(|e| {
                         CamelError::InvalidUri(format!("invalid failOnNullHeader '{val}': {e}"))
@@ -160,6 +153,7 @@ impl ValidatorConfig {
         Ok(ValidatorConfig {
             schema_path,
             schema_type,
+            message,
             max_payload_bytes,
             schema_cache_max_entries,
             fail_on_null_body,
@@ -193,11 +187,69 @@ fn detect_type_from_extension(path: &Path) -> Result<SchemaType, CamelError> {
         Some("xsd") => Ok(SchemaType::Xml),
         Some("json") => Ok(SchemaType::Json),
         Some("yaml") | Some("yml") => Ok(SchemaType::Yaml),
+        Some("proto") => Ok(SchemaType::Protobuf),
         Some("rng") | Some("rnc") => Ok(SchemaType::RelaxNg),
         Some("sch") => Ok(SchemaType::Schematron),
         ext => Err(CamelError::InvalidUri(format!(
-            "cannot infer schema type from extension {ext:?}; use ?type=xml|json|yaml|rng|schematron"
+            "cannot infer schema type from extension {ext:?}; use ?type=xml|json|yaml|protobuf|rng|schematron"
         ))),
+    }
+}
+
+/// Resolves the schema type from the `type` and `schemaType` query aliases
+/// (equal aliases; `schemaType` is canonical), falling back to the path
+/// extension when neither key is present.
+fn resolve_schema_type(query: Option<&str>, path: &Path) -> Result<SchemaType, CamelError> {
+    // Validate every occurrence as it is scanned. Deferring validation until
+    // after a last-occurrence-wins collection lets a repeated parameter shadow
+    // an invalid earlier value (`?schemaType=csv&schemaType=protobuf`).
+    let mut resolved: Option<SchemaType> = None;
+    if let Some(q) = query {
+        for kv in q.split('&') {
+            let (value, param) = if let Some(v) = kv.strip_prefix("type=") {
+                (v, "type")
+            } else if let Some(v) = kv.strip_prefix("schemaType=") {
+                (v, "schemaType")
+            } else {
+                continue;
+            };
+            let current = resolve_named_type(value, param)?;
+            if let Some(first) = &resolved {
+                if *first != current {
+                    return Err(CamelError::InvalidUri(
+                        "conflicting schema type parameters: 'type' and 'schemaType' must agree"
+                            .to_string(),
+                    ));
+                }
+            } else {
+                resolved = Some(current);
+            }
+        }
+    }
+
+    match resolved {
+        Some(schema_type) => Ok(schema_type),
+        None => detect_type_from_extension(path),
+    }
+}
+
+fn resolve_named_type(value: &str, param: &str) -> Result<SchemaType, CamelError> {
+    schema_type_from_value(value).ok_or_else(|| {
+        CamelError::InvalidUri(format!(
+            "unknown schema type '{value}' via {param}; expected xml, json, yaml, protobuf, rng, or schematron"
+        ))
+    })
+}
+
+fn schema_type_from_value(value: &str) -> Option<SchemaType> {
+    match value {
+        "xml" | "xml-schema" | "xsd" => Some(SchemaType::Xml),
+        "json" | "json-schema" => Some(SchemaType::Json),
+        "yaml" | "yaml-schema" => Some(SchemaType::Yaml),
+        "protobuf" => Some(SchemaType::Protobuf),
+        "rng" | "relaxng" => Some(SchemaType::RelaxNg),
+        "sch" | "schematron" => Some(SchemaType::Schematron),
+        _ => None,
     }
 }
 
@@ -497,6 +549,115 @@ mod tests {
             matches!(result, Err(CamelError::InvalidUri(_))),
             "a double-encoded schemaAliases value must fail after exactly one decode"
         );
+    }
+
+    // ── protobuf schema type and message parameter ──────────────────────
+
+    #[test]
+    fn parses_type_protobuf_with_message() {
+        let cfg = ValidatorConfig::from_uri(
+            "validator:schemas/person.proto?type=protobuf&message=test.v1.Person",
+        )
+        .unwrap();
+        assert_eq!(cfg.schema_type, SchemaType::Protobuf);
+        assert_eq!(cfg.message.as_deref(), Some("test.v1.Person"));
+    }
+
+    #[test]
+    fn parses_schematype_protobuf_alias() {
+        let cfg = ValidatorConfig::from_uri(
+            "validator:schemas/person.proto?schemaType=protobuf&message=test.v1.Person",
+        )
+        .unwrap();
+        assert_eq!(cfg.schema_type, SchemaType::Protobuf);
+        assert_eq!(cfg.message.as_deref(), Some("test.v1.Person"));
+    }
+
+    #[test]
+    fn proto_extension_infers_protobuf() {
+        let cfg =
+            ValidatorConfig::from_uri("validator:schemas/person.proto?message=test.v1.Person")
+                .unwrap();
+        assert_eq!(cfg.schema_type, SchemaType::Protobuf);
+    }
+
+    #[test]
+    fn message_param_stored_raw() {
+        let empty =
+            ValidatorConfig::from_uri("validator:schemas/person.proto?type=protobuf&message=")
+                .unwrap();
+        assert_eq!(empty.message.as_deref(), Some(""));
+
+        let named =
+            ValidatorConfig::from_uri("validator:schemas/person.proto?type=protobuf&message=a.b.C")
+                .unwrap();
+        assert_eq!(named.message.as_deref(), Some("a.b.C"));
+    }
+
+    #[test]
+    fn type_and_schematype_conflict_errors() {
+        let result = ValidatorConfig::from_uri(
+            "validator:schemas/person.proto?type=json&schemaType=protobuf",
+        );
+        assert!(
+            matches!(result, Err(CamelError::InvalidUri(ref m)) if m.contains("conflicting")),
+            "conflicting aliases must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_schema_type_error_names_param() {
+        let result = ValidatorConfig::from_uri("validator:schemas/person.proto?schemaType=csv");
+        let Err(CamelError::InvalidUri(m)) = result else {
+            panic!("expected Err(InvalidUri) for an unknown schema type");
+        };
+        assert!(
+            m.contains("schemaType"),
+            "error must name the offending parameter, got: {m}"
+        );
+        assert!(
+            m.contains("protobuf"),
+            "error must list protobuf among the expected values, got: {m}"
+        );
+    }
+
+    #[test]
+    fn shadowed_unknown_schema_type_rejected() {
+        // A later repeated parameter must not hide an earlier unknown value.
+        let result = ValidatorConfig::from_uri(
+            "validator:schemas/person.proto?schemaType=csv&schemaType=protobuf&message=test.v1.Person",
+        );
+        let Err(CamelError::InvalidUri(m)) = result else {
+            panic!("expected Err(InvalidUri) for a shadowed unknown schema type");
+        };
+        assert!(
+            m.contains("schemaType"),
+            "error must name the offending parameter, got: {m}"
+        );
+        assert!(
+            m.contains("csv"),
+            "error must name the unknown value, got: {m}"
+        );
+    }
+
+    #[test]
+    fn repeated_conflicting_type_values_rejected() {
+        let result =
+            ValidatorConfig::from_uri("validator:schemas/person.proto?type=json&type=protobuf");
+        assert!(
+            matches!(result, Err(CamelError::InvalidUri(ref m)) if m.contains("conflicting")),
+            "repeated conflicting type values must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn repeated_same_type_accepted() {
+        let cfg = ValidatorConfig::from_uri(
+            "validator:schemas/person.proto?type=protobuf&schemaType=protobuf&message=test.v1.Person",
+        )
+        .unwrap();
+        assert_eq!(cfg.schema_type, SchemaType::Protobuf);
+        assert_eq!(cfg.message.as_deref(), Some("test.v1.Person"));
     }
 
     #[test]

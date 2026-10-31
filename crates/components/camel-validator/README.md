@@ -1,11 +1,12 @@
 # camel-component-validator
 
-> Schema validation component for rust-camel (XSD via gRPC bridge, JSON Schema, YAML).
+> Schema validation component for rust-camel (XSD via gRPC bridge, JSON Schema, YAML, protobuf).
 
 ## Overview
 
-Validates message bodies or header values against XSD, JSON Schema, and YAML schemas. XSD
-validation uses the `xml-bridge` gRPC backend. JSON and YAML validation run in-process.
+Validates message bodies or header values against XSD, JSON Schema, YAML, and protobuf schemas.
+XSD validation uses the `xml-bridge` gRPC backend. JSON, YAML, and protobuf validation run
+in-process.
 
 ## Usage
 
@@ -31,15 +32,19 @@ route!{
 
 ## URI format
 
-`validator:path/to/schema[?type=xml|json|yaml&failOnNullBody=true|false&headerName=X-Header&failOnNullHeader=true|false&schemaAliases=<percent-encoded JSON object>]`
+`validator:path/to/schema[?type=xml|json|yaml|protobuf&schemaType=<type>&message=<fully.qualified.Message>&failOnNullBody=true|false&headerName=X-Header&failOnNullHeader=true|false&schemaAliases=<percent-encoded JSON object>]`
 
-If `type` is omitted, schema type is inferred from file extension.
+If `type` and `schemaType` are omitted, schema type is inferred from the file extension (for
+example `.xsd` selects xml, `.json` selects json, `.yaml`/`.yml` select yaml, and `.proto`
+selects protobuf).
 
 ### URI options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `type` | *(from extension)* | Schema type: `xml`, `json`, or `yaml`. `rng` and `schematron` are recognized but not yet supported. |
+| `type` | *(from extension)* | Schema type: `xml`, `json`, `yaml`, or `protobuf`. `rng` and `schematron` are recognized but not yet supported. |
+| `schemaType` | *(from extension)* | Canonical alias of `type`. Both keys are accepted and must agree when both are set. |
+| `message` | *(none)* | Required for `protobuf`: fully-qualified message name, e.g. `test.v1.Person`. |
 | `maxPayloadBytes` | *(none)* | Reject bodies larger than this. Accepts `maxPayloadBytes=` and `maxPayloadBytes:`. |
 | `schemaCacheMaxEntries` | `256` | Maximum XSD schema entries before the bridge cache is evicted. |
 | `failOnNullBody` | `true` | Reject empty bodies when `true` |
@@ -61,10 +66,37 @@ Rust reads the confined schema files and transmits the schema set in memory.
 The Java bridge resolves only from the transmitted in-memory set.
 Its supplied-key resolver never fetches: no network and no filesystem access occur.
 
+### Protobuf validation
+
+```text
+validator:schemas/person.proto?message=test.v1.Person
+```
+
+The protobuf validator accepts JSON-shaped bodies only. `Body::Json` is the primary input;
+`Body::Text` and `Body::Bytes` are parsed as UTF-8 JSON first. Other body variants are rejected.
+
+The body is never encoded or decoded as protobuf and never mutated. A passing body passes through
+byte-identical, with no JSON normalization.
+
+Unknown fields, wrong scalar, enum, or oneof shapes, malformed JSON, and non-UTF-8 bytes are
+rejected with `CamelError::ValidationError`. The shared transport error mapping turns that into
+HTTP 400 (`validation_error`), the same mapping that REST schema failures use. This is new-path
+behavior and does not change how Xml, Json, or Yaml validator results are classified.
+
+JSON `null` and missing proto3 fields follow proto3 default semantics. They are accepted, and the
+fields fall back to their defaults.
+
+The descriptor compiles once at endpoint creation through the hermetic proto compiler
+(ADR-0084). Input may be `.proto` source or a precompiled descriptor set (`.binpb`, `.pb`, `.desc`,
+`.protoset`). Include paths are empty. The existing path validation rejects `..` traversal.
+
+A missing or empty `message` fails endpoint or route creation with a config error that names
+`message`. A missing schema file or an uncompilable schema also fails endpoint creation.
+
 ## Startup behavior
 
-JSON and YAML schemas compile when the Endpoint is created. Invalid schemas fail Endpoint
-creation. XSD registration is deferred until the first validation call so bridge startup runs in
+JSON, YAML, and protobuf schemas compile when the Endpoint is created. Invalid schemas fail
+Endpoint creation. XSD registration is deferred until the first validation call so bridge startup runs in
 an async context. The compiled validator remains cached for the Endpoint's lifetime.
 
 ## Build requirement

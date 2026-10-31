@@ -8,7 +8,7 @@ use camel_component_api::UriConfig;
     descriptor,
     metadata(
         scheme = "validator",
-        description = "Schema validation producer (XSD, JSON Schema, YAML)",
+        description = "Schema validation producer (XSD, JSON Schema, YAML, Protobuf)",
         producer
     ),
     crate = "camel_component_api"
@@ -16,6 +16,12 @@ use camel_component_api::UriConfig;
 pub(super) struct ValidatorMetadataDescriptor {
     #[uri_param(name = "type")]
     pub _type: String,
+
+    #[uri_param(name = "schemaType")]
+    pub _schema_type: Option<String>,
+
+    #[uri_param(name = "message")]
+    pub _message: Option<String>,
 
     #[uri_param(name = "maxPayloadBytes")]
     pub _max_payload_bytes: Option<u64>,
@@ -52,8 +58,10 @@ mod tests {
             "failOnNullHeader",
             "headerName",
             "maxPayloadBytes",
+            "message",
             "schemaAliases",
             "schemaCacheMaxEntries",
+            "schemaType",
             "type",
         ];
         expected.sort();

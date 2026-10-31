@@ -15,12 +15,14 @@ categories.workspace = true
 camel-api.workspace = true
 camel-component-api.workspace = true
 camel-bridge = { workspace = true }
+camel-proto-compiler = { workspace = true }
 dashmap = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
 prost = { workspace = true }
+prost-reflect = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 jsonschema = { workspace = true }

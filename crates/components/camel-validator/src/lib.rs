@@ -26,6 +26,9 @@ pub const BRIDGE_VERSION: &str = "0.8.4";
 #[cfg(test)]
 mod bridge_client_test;
 
+#[cfg(test)]
+mod component_protobuf_tests;
+
 pub mod proto {
     tonic::include_proto!("xml_bridge");
 }

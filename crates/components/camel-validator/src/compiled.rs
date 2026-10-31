@@ -1,8 +1,10 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use camel_component_api::{Body, CamelError};
+use prost_reflect::MessageDescriptor;
 // serde_yml migrated to noyalib (compat-serde-yaml shim) — closes RUSTSEC-2025-0068.
 // Module alias preserves call-site paths byte-for-byte.
 use noyalib::compat::serde_yaml as serde_yml;
@@ -66,6 +68,10 @@ pub(crate) enum CompiledValidator {
         validator: Arc<jsonschema::Validator>,
         max_payload_bytes: Option<usize>,
     },
+    Protobuf {
+        descriptor: MessageDescriptor,
+        max_payload_bytes: Option<usize>,
+    },
 }
 
 impl std::fmt::Debug for CompiledValidator {
@@ -117,6 +123,9 @@ impl CompiledValidator {
                     ),
                     _ => unreachable!("outer arm restricts this branch to JSON and YAML"),
                 }
+            }
+            SchemaType::Protobuf => {
+                Self::compile_protobuf(path, config.message.as_deref(), config.max_payload_bytes)
             }
             SchemaType::RelaxNg | SchemaType::Schematron => Err(CamelError::Config(format!(
                 "schema type {:?} is not yet supported; supported: Xml, Json, Yaml",
@@ -212,6 +221,46 @@ impl CompiledValidator {
         })
     }
 
+    /// Compiles the `.proto` descriptor and stores the requested message
+    /// descriptor once, at endpoint creation.
+    ///
+    /// Any compile failure (missing file or invalid proto source) is a
+    /// route-build error: it can only be fixed by changing operator config.
+    fn compile_protobuf(
+        path: &Path,
+        message: Option<&str>,
+        max_payload_bytes: Option<usize>,
+    ) -> Result<Self, CamelError> {
+        let message = message
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                CamelError::Config(
+                    "validator protobuf requires a 'message' query parameter naming the \
+                     fully-qualified message"
+                        .to_string(),
+                )
+            })?;
+
+        let pool = camel_proto_compiler::compile_proto(path, std::iter::empty::<&Path>()).map_err(
+            |e| {
+                CamelError::EndpointCreationFailed(format!(
+                    "failed to compile proto schema '{}': {e}",
+                    path.display()
+                ))
+            },
+        )?;
+
+        let descriptor = pool.get_message_by_name(message).ok_or_else(|| {
+            CamelError::Config(format!("message descriptor not found: {message}"))
+        })?;
+
+        Ok(CompiledValidator::Protobuf {
+            descriptor,
+            max_payload_bytes,
+        })
+    }
+
     pub async fn validate(&self, body: &Body) -> Result<(), CamelError> {
         if let Some(limit) = self.max_payload_bytes()
             && let Some(actual) = approx_body_byte_len(body)
@@ -228,6 +277,9 @@ impl CompiledValidator {
             } => Self::validate_xml(schema_set, backend, body).await,
             CompiledValidator::Json { validator, .. } => Self::validate_json(validator, body),
             CompiledValidator::Yaml { validator, .. } => Self::validate_yaml(validator, body),
+            CompiledValidator::Protobuf { descriptor, .. } => {
+                Self::validate_protobuf(descriptor, body)
+            }
         }
     }
 
@@ -240,6 +292,9 @@ impl CompiledValidator {
                 max_payload_bytes, ..
             } => *max_payload_bytes,
             CompiledValidator::Yaml {
+                max_payload_bytes, ..
+            } => *max_payload_bytes,
+            CompiledValidator::Protobuf {
                 max_payload_bytes, ..
             } => *max_payload_bytes,
         }
@@ -334,6 +389,41 @@ impl CompiledValidator {
             )))
         }
     }
+
+    /// Validates a JSON-shaped body against a protobuf message descriptor.
+    ///
+    /// This only deserializes into a [`prost_reflect::DynamicMessage`] to prove
+    /// the payload matches the descriptor, then drops it. The body is never
+    /// mutated (not even normalized), and no protobuf encode/decode happens.
+    fn validate_protobuf(descriptor: &MessageDescriptor, body: &Body) -> Result<(), CamelError> {
+        let json: Cow<'_, str> = match body {
+            Body::Json(value) => Cow::Owned(serde_json::to_string(value).map_err(|e| {
+                CamelError::ValidationError(format!("protobuf validation failed: {e}"))
+            })?),
+            Body::Text(text) => Cow::Borrowed(text.as_str()),
+            Body::Bytes(bytes) => Cow::Borrowed(std::str::from_utf8(bytes).map_err(|e| {
+                CamelError::ValidationError(format!(
+                    "protobuf validation failed: body bytes are not valid UTF-8: {e}"
+                ))
+            })?),
+            _ => {
+                return Err(CamelError::ValidationError(
+                    "protobuf validator requires Body::Json, Body::Text, or Body::Bytes"
+                        .to_string(),
+                ));
+            }
+        };
+
+        // `DeserializeOptions::default()` denies unknown fields, so any
+        // unrecognized key, wrong scalar/enum shape, or bad oneof shape fails.
+        let mut de = serde_json::Deserializer::from_str(json.as_ref());
+        let parsed = prost_reflect::DynamicMessage::deserialize(descriptor.clone(), &mut de);
+        let tail = de.end();
+        parsed
+            .map_err(|e| CamelError::ValidationError(format!("protobuf validation failed: {e}")))?;
+        tail.map_err(|e| CamelError::ValidationError(format!("protobuf validation failed: {e}")))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +470,7 @@ mod tests {
         let cfg = ValidatorConfig {
             schema_path: schema.path().to_path_buf(),
             schema_type: SchemaType::Xml,
+            message: None,
             max_payload_bytes: None,
             schema_cache_max_entries: DEFAULT_SCHEMA_CACHE_MAX_ENTRIES,
             fail_on_null_body: true,
@@ -484,5 +575,68 @@ mod tests {
         let json_len = approx_body_byte_len(&Body::Json(serde_json::json!({"id": 1})));
         assert!(json_len.is_some());
         assert!(json_len.unwrap() > 0);
+    }
+
+    const PROTO_PERSON: &[u8] = br#"
+syntax = "proto3";
+package test.v1;
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_ADMIN = 1;
+  ROLE_USER = 2;
+}
+
+message Person {
+  string name = 1;
+  int32 age = 2;
+  Role role = 3;
+  oneof contact {
+    string email = 4;
+    string phone = 5;
+  }
+}
+"#;
+
+    #[tokio::test]
+    async fn protobuf_compile_stores_descriptor_and_validates() {
+        use std::io::Write;
+
+        let mut f = tempfile::Builder::new()
+            .suffix(".proto")
+            .tempfile()
+            .unwrap();
+        f.write_all(PROTO_PERSON).unwrap();
+
+        let cfg = ValidatorConfig {
+            schema_path: f.path().to_path_buf(),
+            schema_type: SchemaType::Protobuf,
+            message: Some("test.v1.Person".to_string()),
+            max_payload_bytes: None,
+            schema_cache_max_entries: DEFAULT_SCHEMA_CACHE_MAX_ENTRIES,
+            fail_on_null_body: true,
+            header_name: None,
+            fail_on_null_header: true,
+            validate_formats: DEFAULT_VALIDATE_FORMATS,
+            schema_aliases: BTreeMap::new(),
+        };
+
+        let bridge = Arc::new(MockBridge { register_err: None });
+        let compiled = CompiledValidator::compile(&cfg, bridge).expect("compile should succeed");
+
+        assert!(
+            compiled
+                .validate(&Body::Text(r#"{"name":"Ann"}"#.to_string()))
+                .await
+                .is_ok(),
+            "a valid protobuf JSON body must pass"
+        );
+        assert!(
+            compiled
+                .validate(&Body::Text("{oops".to_string()))
+                .await
+                .is_err(),
+            "malformed JSON must fail protobuf validation"
+        );
     }
 }

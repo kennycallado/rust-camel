@@ -1,6 +1,6 @@
 # Validator
 
-The Validator component validates message bodies against XSD, JSON Schema, and YAML Schema files. It runs in routes as a `to:` Producer. Validation failure returns a `CamelError` to the route's error handler.
+The Validator component validates message bodies against XSD, JSON Schema, YAML Schema, and protobuf schema files. It runs in routes as a `to:` Producer. Validation failure returns a `CamelError` to the route's error handler.
 
 The validator-example wires timer-driven producers against local schemas for each format:
 
@@ -30,12 +30,14 @@ The Rust example resolves the schema path with `CARGO_MANIFEST_DIR`. Substitute 
 ## URI
 
 ```text
-validator:<schema-path>[?type=xml|json|yaml&failOnNullBody=true|false&headerName=<name>&failOnNullHeader=true|false&maxPayloadBytes=<n>&schemaCacheMaxEntries=<n>&schemaAliases=<percent-encoded JSON object>]
+validator:<schema-path>[?type=xml|json|yaml|protobuf&schemaType=<type>&message=<fully.qualified.Message>&failOnNullBody=true|false&headerName=<name>&failOnNullHeader=true|false&maxPayloadBytes=<n>&schemaCacheMaxEntries=<n>&schemaAliases=<percent-encoded JSON object>]
 ```
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `type` | from extension | Schema type: `xml`, `json`, or `yaml`. `rng` and `schematron` are parsed but rejected at endpoint creation. |
+| `type` | from extension | Schema type: `xml`, `json`, `yaml`, or `protobuf`. `rng` and `schematron` are parsed but rejected at endpoint creation. |
+| `schemaType` | from extension | Canonical alias of `type`. Both keys are accepted and must agree when both are set. |
+| `message` | none | Required for `protobuf`: fully-qualified message name, for example `test.v1.Person`. |
 | `failOnNullBody` | `true` | Reject exchanges with empty bodies when `true` |
 | `headerName` | none | Validate this header's value instead of the body |
 | `failOnNullHeader` | `true` | Reject exchanges where the named header is missing |
@@ -43,7 +45,7 @@ validator:<schema-path>[?type=xml|json|yaml&failOnNullBody=true|false&headerName
 | `schemaCacheMaxEntries` | `256` | Maximum XSD schema entries the bridge cache holds before eviction |
 | `schemaAliases` | none | Absolute-URI to root-relative virtual path map, as one percent-encoded JSON object. See below. |
 
-The schema type defaults to the file extension (`.xsd`, `.json`, `.yaml`, `.yml`). Pass `type=xml` to override the extension when the path is ambiguous. Paths accept percent-encoded characters.
+The schema type defaults to the file extension (`.xsd`, `.json`, `.yaml`, `.yml`, `.proto`). Pass `type=xml` to override the extension when the path is ambiguous. Paths accept percent-encoded characters.
 
 `schemaAliases` accepts one JSON object that maps absolute schema URIs to root-relative virtual paths. The value is percent-encoded once. For example, `schemaAliases=%7B%22http%3A%2F%2Fexample.com%2Fp.xsd%22%3A%22a%2Fparent.xsd%22%7D` decodes once to `{"http://example.com/p.xsd":"a/parent.xsd"}`. A malformed value, a duplicated `schemaAliases` query parameter, or more than 128 entries fail endpoint creation before the bridge starts. Alias values are root-relative virtual paths.
 
@@ -75,6 +77,24 @@ Validation failure returns a `CamelError` to the route's error handler. Empty bo
 ### Schema diagnostics
 
 The native `xml-bridge` packages the Xerces message bundles, including the regular-expression bundle. An `xs:pattern` that Xerces rejects is reported with the offending pattern and the Xerces parse message, up to a 512-character bound. A very long pattern can push the parse message past that bound. Older bridge builds hid the message behind `Installation Problem??? Couldn't load messages`. If you see that text, upgrade the bridge.
+
+## Protobuf validation
+
+```text
+validator:schemas/person.proto?message=test.v1.Person
+```
+
+The schema type can also be set explicitly with `schemaType=protobuf` (or the `type=protobuf` alias), and `.proto` paths infer protobuf without either key. `schemaType` is the canonical key; when both keys are present they must agree, and unknown values are rejected.
+
+The `message` parameter names the fully-qualified message to validate against. It is required for protobuf. A missing or empty `message` fails endpoint or route creation with a config error that names `message`.
+
+The validator accepts JSON-shaped bodies. `Body::Json` is the primary input; `Body::Text` and `Body::Bytes` are parsed as UTF-8 JSON first. Other body variants are rejected. The body is never encoded or decoded as protobuf and never mutated: a body that passes validation passes through byte-identical, with no JSON normalization.
+
+Validation rejects unknown fields, wrong scalar, enum, or oneof shapes, malformed JSON, and non-UTF-8 bytes. These failures raise `CamelError::ValidationError`, which the shared transport error mapping turns into HTTP 400 (`validation_error`), the same mapping REST schema failures use. This is new-path behavior and does not change how Xml, Json, or Yaml validator results are classified. JSON `null` and missing proto3 fields follow proto3 default semantics: they are accepted and the fields fall back to their defaults.
+
+The descriptor compiles once at endpoint creation through the hermetic proto compiler (ADR-0084). The path may point at `.proto` source or at a precompiled descriptor set (`.binpb`, `.pb`, `.desc`, `.protoset`). Include paths are empty, and the existing path validation rejects `..` traversal. A missing schema file or an uncompilable schema fails endpoint creation. The compiled descriptor stays cached for the endpoint's lifetime.
+
+The `maxPayloadBytes`, `headerName`, `failOnNullBody`, and `failOnNullHeader` options behave as described above and apply to protobuf endpoints.
 
 ## Bridge lifecycle
 
