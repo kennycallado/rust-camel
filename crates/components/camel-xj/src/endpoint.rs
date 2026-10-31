@@ -12,7 +12,9 @@ use std::sync::Arc;
 /// # Body Contract
 ///
 /// Input: XML or JSON string/bytes depending on `direction`
-/// Output: transformed JSON or XML string
+/// Output: transformed JSON or XML string. For a custom stylesheet with
+/// `direction=xml2json`, the custom XSL output (XML) is converted to JSON
+/// through the bundled identity stylesheet; the body is JSON.
 pub struct XjEndpoint {
     uri: String,
     stylesheet_id: StylesheetId,
@@ -23,6 +25,7 @@ pub struct XjEndpoint {
     max_payload_bytes: Option<usize>,
     retry_count: u32,
     retry_delay_ms: u64,
+    xml2json_chain_id: Option<StylesheetId>,
 }
 
 impl XjEndpoint {
@@ -37,6 +40,7 @@ impl XjEndpoint {
         max_payload_bytes: Option<usize>,
         retry_count: u32,
         retry_delay_ms: u64,
+        xml2json_chain_id: Option<StylesheetId>,
     ) -> Self {
         Self {
             uri,
@@ -48,6 +52,7 @@ impl XjEndpoint {
             max_payload_bytes,
             retry_count,
             retry_delay_ms,
+            xml2json_chain_id,
         }
     }
 }
@@ -80,6 +85,7 @@ impl Endpoint for XjEndpoint {
             self.max_payload_bytes,
             self.retry_count,
             self.retry_delay_ms,
+            self.xml2json_chain_id.clone(),
         )))
     }
 }

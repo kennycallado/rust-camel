@@ -19,6 +19,7 @@ pub struct XjProducer {
     max_payload_bytes: Option<usize>,
     retry_count: u32,
     retry_delay_ms: u64,
+    xml2json_chain_id: Option<StylesheetId>,
 }
 
 impl XjProducer {
@@ -32,6 +33,7 @@ impl XjProducer {
         max_payload_bytes: Option<usize>,
         retry_count: u32,
         retry_delay_ms: u64,
+        xml2json_chain_id: Option<StylesheetId>,
     ) -> Self {
         Self {
             stylesheet_id,
@@ -42,6 +44,7 @@ impl XjProducer {
             max_payload_bytes,
             retry_count,
             retry_delay_ms,
+            xml2json_chain_id,
         }
     }
 }
@@ -64,6 +67,7 @@ impl Service<Exchange> for XjProducer {
         let max_payload_bytes = self.max_payload_bytes;
         let retry_count = self.retry_count;
         let retry_delay_ms = self.retry_delay_ms;
+        let xml2json_chain_id = self.xml2json_chain_id.clone();
 
         Box::pin(async move {
             let input_body = std::mem::take(&mut exchange.input.body);
@@ -97,6 +101,27 @@ impl Service<Exchange> for XjProducer {
                 )
                 .await
                 .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
+
+            // Apache Camel Java xj parity: a custom xml2json stylesheet produces
+            // XML; its output is chained through the bundled XML->JSON identity
+            // stylesheet so the body ends up as JSON. The chain is unconditional —
+            // custom xml2json stylesheets must emit XML (see README). The exchange
+            // body is set only after the full chain succeeds, so an error leaves
+            // the exchange without a partial body.
+            let transformed = match (direction, xml2json_chain_id) {
+                (Direction::XmlToJson, Some(chain_id)) => runtime
+                    .transform_with_retry_configured(
+                        &client,
+                        &chain_id,
+                        transformed,
+                        Vec::new(),
+                        retry_count,
+                        retry_delay_ms,
+                    )
+                    .await
+                    .map_err(|e| CamelError::ProcessorError(e.to_string()))?,
+                _ => transformed,
+            };
 
             exchange.input.body = Body::from(transformed);
             Ok(exchange)
@@ -135,6 +160,7 @@ mod tests {
             max_payload_bytes,
             3,
             500,
+            None,
         )
     }
 

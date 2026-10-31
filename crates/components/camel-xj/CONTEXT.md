@@ -10,6 +10,14 @@ stylesheet and document to the sidecar. Rust does not parse XML or execute
 XSLT. XML parsing, DTD handling, entity resolution, and XSLT security controls
 belong to the sidecar and must be audited in `bridges/xml/`.
 
+For a custom stylesheet with `direction=xml2json`, the sidecar runs the custom
+XSL and then the bundled XML-to-JSON identity stylesheet (Apache Camel Java
+`xj` parity). The chain is unconditional: custom `xml2json` stylesheets must
+emit XML. The exchange body is set only after the full chain succeeds. The
+conversion mapping diverges from Java: Java consumes a JSON-XML intermediate
+(`object`/`array` elements act as containers with `xj:name` keys); rust-camel converts generic XML with
+the bundled identity stylesheet.
+
 For `json2xml`, Rust validates UTF-8 and forwards the JSON text as the
 `jsonInput` XSLT parameter with a minimal XML document. It does not parse the
 JSON document.

@@ -280,8 +280,12 @@ impl XjBridgeRuntime {
 
     fn is_transient_error(err: &XjError) -> bool {
         let msg = err.to_string().to_lowercase();
+        // Match the `XsltError::Io` display prefix ("io error: ..."), not a bare
+        // "io" substring: the latter spuriously matches words such as
+        // "conversion" and would restart the bridge for a deterministic
+        // transform failure.
         Self::is_transport_error(&msg)
-            || msg.contains("io")
+            || msg.contains("io error")
             || msg.contains("network")
             || msg.contains("timed out")
             || msg.contains("connection")
@@ -503,6 +507,25 @@ impl Component for XjComponent {
                 .map_err(XjError::from)
         })?;
 
+        // A custom xml2json stylesheet produces XML (Apache Camel Java xj parity):
+        // chain its output through the bundled XML->JSON identity stylesheet so the
+        // exchange body ends up as JSON. Identity endpoints already compile
+        // XML_TO_JSON_XSLT as their primary stylesheet and must not add a second
+        // step.
+        let xml2json_chain_id = if endpoint_config.direction == Direction::XmlToJson
+            && endpoint_config.stylesheet_uri != "classpath:identity"
+        {
+            let identity_bytes = XML_TO_JSON_XSLT.as_bytes().to_vec();
+            Some(self.block_on_result(async {
+                self.client
+                    .compile(identity_bytes)
+                    .await
+                    .map_err(XjError::from)
+            })?)
+        } else {
+            None
+        };
+
         Ok(Box::new(XjEndpoint::new(
             uri.to_string(),
             stylesheet_id,
@@ -513,6 +536,7 @@ impl Component for XjComponent {
             endpoint_config.max_payload_bytes,
             endpoint_config.retry_count,
             endpoint_config.retry_delay_ms,
+            xml2json_chain_id,
         )))
     }
 }
@@ -565,6 +589,28 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn io_error_is_transient() {
+        // `XsltError::Io` displays as "io error: ..." and must still retry.
+        let err = XjError::from(camel_xslt::XsltError::Io(std::io::Error::other(
+            "disk full",
+        )));
+        assert!(XjBridgeRuntime::is_transient_error(&err));
+    }
+
+    #[test]
+    fn transform_failed_with_io_substring_is_not_transient() {
+        // Regression: the old bare "io" match treated "conversion" as an IO
+        // failure and restarted the bridge for a deterministic transform error.
+        let err = XjError::from(camel_xslt::XsltError::TransformFailed(
+            "Saxon: identity conversion failed".to_string(),
+        ));
+        assert!(
+            !XjBridgeRuntime::is_transient_error(&err),
+            "deterministic transform failure must not be classified transient"
+        );
     }
 
     #[test]

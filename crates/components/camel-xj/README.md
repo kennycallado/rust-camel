@@ -12,7 +12,7 @@ The component bundles built-in identity stylesheets for both directions, so you 
 
 - **XML → JSON**: Converts arbitrary XML to JSON using recursive XSLT 3.0 templates
 - **JSON → XML**: Converts JSON to a structured XML representation using `fn:json-to-xml()`
-- **Custom stylesheets**: Supply your own XSLT for domain-specific transformations
+- **Custom stylesheets**: Supply your own XSLT for domain-specific transformations. Custom `xml2json` stylesheets emit XML and chain to JSON through the bundled identity stylesheet
 - **Automatic retries**: Transient transport errors trigger bridge restart with configurable retry
 - **Payload size limits**: Reject oversized payloads before sending to the bridge process
 - **Graceful lifecycle**: Bridge process is cleaned up when the Camel context stops
@@ -89,6 +89,28 @@ let route = RouteBuilder::from("direct:start")
     .build()?;
 ```
 
+#### Custom `xml2json` Stylesheet Contract
+
+A custom stylesheet used with `direction=xml2json` must emit XML. The component
+chains that XML through the bundled identity `XML_TO_JSON_XSLT` stylesheet, so
+the exchange body is JSON. This matches Apache Camel Java `xj` behavior. The
+chain is unconditional: the component does not detect the output format. A
+custom stylesheet that emits JSON instead fails in the conversion step with a
+typed error.
+
+Divergence from Apache Camel Java: Java consumes the custom template output
+as JSON-XML — `object`/`array` elements are containers with `xj:name` keys,
+so upstream `X2JOutputStringTest` (`helloxml2json.xsl` over
+`<hello>world!</hello>`) yields `{"hello":"world!"}`; Java's identity path
+collapses a simple root element to a `"#text"` key. rust-camel instead
+converts generic XML with the bundled identity stylesheet: element names
+become literal keys and attributes become `"@name"` keys. The chain
+structure matches Java; the value mapping is a documented divergence.
+
+A custom stylesheet used with `direction=json2xml` receives the JSON body as
+the `jsonInput` XSLT parameter and `<root/>` as the source document. It emits
+the final XML. No conversion step follows.
+
 ### With Retry Configuration
 
 ```rust,ignore
@@ -105,11 +127,15 @@ let route = RouteBuilder::from("direct:start")
 | `xml2json` | XML (string/bytes) | JSON (bytes)       |
 | `json2xml` | JSON (string/bytes) | XML (bytes)        |
 
+With a custom stylesheet and `direction=xml2json`, the custom XSL output is
+intermediate: the body is JSON after the identity conversion step. On an error
+in either step the exchange fails and carries no partial body.
+
 ## How It Works
 
 1. On first use, the component starts an `xml-bridge` subprocess that hosts a Saxon XSLT engine
 2. The requested stylesheet is compiled and cached in the bridge
-3. Each exchange body is sent to the bridge via gRPC for transformation
+3. Each exchange body is sent to the bridge via gRPC for transformation. A custom stylesheet with `direction=xml2json` runs two transforms: the custom XSL, then the bundled XML-to-JSON identity stylesheet
 4. On transient transport errors, the bridge is automatically restarted and stylesheets are recompiled
 
 ## Configuration

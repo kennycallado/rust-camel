@@ -125,6 +125,29 @@ routes:
 
 The `xml2json` identity stylesheet follows the Apache Camel xj compatibility convention. Attributes become `"@name"` keys. Text content becomes `"#text"` when the element also has attributes or children. Repeated siblings become JSON arrays. A self-closing element with no attributes becomes `null`. A simple leaf with no attributes or children becomes a plain string.
 
+The identity `xml2json` stylesheet also reads the `xj:type` and `xj:name`
+annotations that `json2xml` produces. Its `xj-reverse` templates restore the
+original JSON types, so a JSON to XML to JSON round trip through the identity
+pair preserves types.
+
+A custom stylesheet changes both directions:
+
+- `xml2json`: the custom stylesheet must emit XML. The component converts that
+  XML to JSON with the bundled identity stylesheet, so the body is JSON. The
+  chain is unconditional (Apache Camel Java parity): a stylesheet that emits
+  JSON instead fails in the conversion step with a typed error.
+- `json2xml`: the custom stylesheet receives the JSON body as the `jsonInput`
+  parameter with `<root/>` as the source document, and emits the final XML.
+
+The conversion mapping diverges from Java. Java reads the custom template
+output as JSON-XML: `object`/`array` elements are containers and `xj:name`
+attributes supply keys, so upstream `X2JOutputStringTest` yields
+`{"hello":"world!"}` where rust-camel yields `{"object":{"hello":"world!"}}`.
+On Java's identity path a simple root element collapses to `"#text"`.
+rust-camel converts generic XML: element names become literal keys and
+attributes become `"@name"` keys. The chain structure matches Java; the
+mapping does not.
+
 ### URI
 
 ```text
