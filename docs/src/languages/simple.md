@@ -247,4 +247,6 @@ Simple evaluates scalar policy and predicates only. It does not implement `Mutat
 
 Simple is the most common language for predicates in EIP patterns. Use it for flat header and body access in filter, choice, and enrichment steps. It requires no external engine. For structured JSON queries, use [JSONPath](jsonpath.md).
 
+See [Value boundaries across languages](value-boundary.md) for missing-value and null-versus-empty semantics across all languages.
+
 **Reference**: [Language SPI](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-api/CONTEXT.md) · [Simple crate](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-simple/CONTEXT.md) · ADR-0092

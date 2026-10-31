@@ -100,6 +100,7 @@
   - [JavaScript](languages/js.md)
   - [Rhai](languages/rhai.md)
   - [MiniJinja](languages/minijinja.md)
+  - [Value boundaries across languages](languages/value-boundary.md)
 - [Data formats](data-formats/index.md)
   - [Protobuf](data-formats/protobuf.md)
 - [YAML DSL](yaml-dsl/index.md)

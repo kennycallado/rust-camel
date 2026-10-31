@@ -47,4 +47,6 @@ MiniJinja templates have no wall-clock access: there is no `now` function, filte
 
 A route that needs a timestamp computes it upstream with Simple `date:` or Rhai `now_ms()` and passes it as a header or property. Set a header with `${date:now}` and render `{{ headers.renderedAt }}`. `{{ now() }}` fails at evaluation as an unknown function.
 
+See [Value boundaries across languages](value-boundary.md) for missing-value and null-versus-empty semantics across all languages.
+
 **Reference**: [Language SPI](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-api/CONTEXT.md) · [MiniJinja crate](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-minijinja/CONTEXT.md)

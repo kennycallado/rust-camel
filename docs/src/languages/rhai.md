@@ -343,4 +343,6 @@ nothing to shadow for those names.
 The `rhai_replace_*` characterization tests in the Rhai crate pin the in-place
 behavior.
 
+See [Value boundaries across languages](value-boundary.md) for missing-value and null-versus-empty semantics across all languages.
+
 **Reference**: [Language SPI](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-api/CONTEXT.md) · [Rhai crate](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-rhai/CONTEXT.md)

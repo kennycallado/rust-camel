@@ -528,6 +528,66 @@ async fn strict_boolean_results_stay() {
     assert!(!pred.matches(&ex).await.unwrap());
 }
 
+/// Scenario: Missing bare predicate is type mismatch
+#[tokio::test]
+async fn missing_bare_predicate_is_type_mismatch() {
+    let ex = Exchange::default();
+    let pred = lang()
+        .create_predicate("${header.missing}")
+        .expect("missing-header predicate must compile");
+    let err = pred.matches(&ex).await.unwrap_err();
+    match err {
+        LanguageError::TypeMismatch {
+            expected, actual, ..
+        } => {
+            assert_eq!(
+                expected, "bool",
+                "a bare missing header has no truthiness coercion at the predicate boundary"
+            );
+            assert_eq!(
+                actual, "null",
+                "an absent header lands as Null on the boundary"
+            );
+        }
+        other => panic!("expected bool type mismatch, got: {other:?}"),
+    }
+
+    let pred = lang()
+        .create_predicate("${header.missing} == null")
+        .expect("null comparison predicate must compile");
+    assert!(
+        pred.matches(&ex)
+            .await
+            .expect("null comparison must evaluate"),
+        "comparing a missing header against null is the documented escape hatch"
+    );
+}
+
+/// Scenario: Null and empty string are false inside `&&` and `||`
+#[tokio::test]
+async fn logical_operands_coerce_null_and_empty_to_false() {
+    let lang = SimpleLanguage::new();
+    let ex = Exchange::default();
+
+    // `false` as the right operand discriminates: a truthy left operand would
+    // make the `||` result true and a falsy one leaves it false.
+    for (src, expected) in [
+        ("header.missing || false", false),
+        ("'' || false", false),
+        ("header.missing && true", false),
+        ("'' && true", false),
+    ] {
+        let pred = lang
+            .create_predicate(src)
+            .unwrap_or_else(|err| panic!("predicate {src:?} must parse: {err:?}"));
+        assert_eq!(
+            pred.matches(&ex).await.unwrap(),
+            expected,
+            "predicate {src:?}"
+        );
+    }
+}
+
 /// Scenario: Parse-time limits
 #[tokio::test]
 async fn parse_time_limits() {

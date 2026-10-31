@@ -356,3 +356,141 @@ async fn mutating_set_property_is_function_not_found() {
         other => panic!("expected EvalFailure FunctionNotFound, got: {other:?}"),
     }
 }
+
+// --- Mission 471: missing-value semantics (pinning) --------------------------
+
+/// A header that does not exist reads as rhai unit, which lands on the camel
+/// `Value` boundary as `Value::Null` — for both the `header()` reader and the
+/// `headers` map index.
+#[tokio::test]
+async fn missing_header_read_is_unit_null() {
+    let lang = RhaiLanguage::new();
+    let ex = Exchange::new(Message::default());
+
+    let expr = lang
+        .create_expression(r#"header("missing")"#)
+        .expect("header reader must compile");
+    assert_eq!(
+        expr.evaluate(&ex).await.expect("eval"),
+        Value::Null,
+        "missing header() must read as unit/Null"
+    );
+
+    let expr = lang
+        .create_expression(r#"headers["missing"]"#)
+        .expect("headers index read must compile");
+    assert_eq!(
+        expr.evaluate(&ex).await.expect("eval"),
+        Value::Null,
+        "missing headers[] entry must read as unit/Null"
+    );
+}
+
+/// Predicates are strict-bool: a script that resolves to unit (missing header)
+/// is a `TypeMismatch` expecting `bool`, not a truthiness coercion.
+#[tokio::test]
+async fn missing_value_predicate_is_type_mismatch() {
+    let pred = RhaiLanguage::new()
+        .create_predicate(r#"header("missing")"#)
+        .expect("predicate must compile");
+    let ex = Exchange::new(Message::default());
+
+    let err = pred.matches(&ex).await.expect_err("unit is not a bool");
+    match err {
+        LanguageError::TypeMismatch {
+            expected, actual, ..
+        } => {
+            assert_eq!(expected, "bool", "predicate must demand a real bool");
+            assert_eq!(actual, "null", "unit lands as Null on the boundary");
+        }
+        other => panic!("expected TypeMismatch, got: {other:?}"),
+    }
+}
+
+/// Presence tests distinguish an absent header from a stored `null`: both read
+/// as rhai unit through the value surface, but `"k" in headers` and
+/// `headers.contains("k")` report whether the key exists.
+#[tokio::test]
+async fn missing_header_presence_and_stored_null_are_distinguishable() {
+    let lang = RhaiLanguage::new();
+
+    // Act A: the key is absent. Both presence forms report false.
+    let ex = Exchange::new(Message::default());
+
+    let expr = lang
+        .create_expression(r#""missing" in headers"#)
+        .expect("`in` presence test must compile");
+    assert_eq!(
+        expr.evaluate(&ex).await.expect("eval"),
+        Value::Bool(false),
+        "`in` must report an absent key as false"
+    );
+
+    let expr = lang
+        .create_expression(r#"headers.contains("missing")"#)
+        .expect("contains presence test must compile");
+    assert_eq!(
+        expr.evaluate(&ex).await.expect("eval"),
+        Value::Bool(false),
+        "contains must report an absent key as false"
+    );
+
+    // Act B: the key is present and stores `null`. Presence is true while the
+    // value read still lands on the camel boundary as `Value::Null`.
+    let mut msg = Message::default();
+    msg.set_header("k", Value::Null);
+    let ex = Exchange::new(msg);
+
+    let expr = lang
+        .create_expression(r#""k" in headers"#)
+        .expect("`in` presence test must compile");
+    assert_eq!(
+        expr.evaluate(&ex).await.expect("eval"),
+        Value::Bool(true),
+        "`in` must report a stored-null key as present"
+    );
+
+    let expr = lang
+        .create_expression(r#"headers.contains("k")"#)
+        .expect("contains presence test must compile");
+    assert_eq!(
+        expr.evaluate(&ex).await.expect("eval"),
+        Value::Bool(true),
+        "contains must report a stored-null key as present"
+    );
+
+    let expr = lang
+        .create_expression(r#"header("k")"#)
+        .expect("header reader must compile");
+    assert_eq!(
+        expr.evaluate(&ex).await.expect("eval"),
+        Value::Null,
+        "a stored null still reads as unit/Null on the camel boundary"
+    );
+}
+
+/// Using a missing header directly as an `if` condition is a runtime error —
+/// a unit value is not a boolean condition.
+#[tokio::test]
+async fn missing_value_if_condition_fails() {
+    let expr = RhaiLanguage::new()
+        .create_expression(r#"if header("missing") { "yes" } else { "no" }"#)
+        .expect("if-condition script must compile");
+    let ex = Exchange::new(Message::default());
+
+    let err = expr
+        .evaluate(&ex)
+        .await
+        .expect_err("unit is not a valid if condition");
+    match err {
+        LanguageError::EvalFailure { class, detail, .. } => {
+            assert_eq!(
+                class,
+                ExpressionErrorClass::TypeMismatch,
+                "a unit condition is a type mismatch at evaluation"
+            );
+            assert_eq!(detail, None, "the failure detail is redacted");
+        }
+        other => panic!("expected EvalFailure for unit if condition, got: {other:?}"),
+    }
+}
