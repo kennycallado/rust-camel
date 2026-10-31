@@ -664,8 +664,16 @@ impl CxfSecurityFields {
         &self,
         profile: &str,
     ) -> Result<(), camel_component_api::CamelError> {
-        let has_verification_material =
-            self.keystore_path.is_some() || self.truststore_path.is_some();
+        // `hasText` parity (mission 378): a blank store path is not
+        // verification material; the Java bridge treats it as absent.
+        let has_verification_material = self
+            .keystore_path
+            .as_deref()
+            .is_some_and(|p| !p.trim().is_empty())
+            || self
+                .truststore_path
+                .as_deref()
+                .is_some_and(|p| !p.trim().is_empty());
         for (key, raw) in [
             (
                 "allowed_signature_algorithms",
@@ -2169,6 +2177,81 @@ mod tests {
             }
             other => panic!("expected CamelError::Config, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn allowed_algorithms_blank_material_rejected() {
+        // An empty or whitespace-only store path is not verification material:
+        // the Java bridge uses `hasText`, so a blank path must reject the allow-list.
+        for key in ["allowed_signature_algorithms", "allowed_digest_algorithms"] {
+            for blank in ["", "   ", "\t\n"] {
+                for (store, mut security) in [
+                    (
+                        "security.keystore_path",
+                        CxfSecurityFields {
+                            keystore_path: Some(blank.to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                    (
+                        "security.truststore_path",
+                        CxfSecurityFields {
+                            truststore_path: Some(blank.to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                ] {
+                    match key {
+                        "allowed_signature_algorithms" => {
+                            security.allowed_signature_algorithms =
+                                Some(LEGACY_SIG_URI.to_string());
+                        }
+                        _ => {
+                            security.allowed_digest_algorithms =
+                                Some("http://www.w3.org/2001/04/xmlenc#sha256".to_string());
+                        }
+                    }
+                    let cfg = CxfPoolConfig {
+                        profiles: vec![profile_with_security("legacy", security)],
+                        ..Default::default()
+                    };
+                    match cfg.validate().unwrap_err() {
+                        camel_component_api::CamelError::Config(msg) => {
+                            assert!(
+                                msg.contains(key),
+                                "error must name {key}, store {store}, blank {blank:?}: got: {msg}"
+                            );
+                            assert!(
+                                msg.contains("no inbound verification material"),
+                                "store {store}, blank {blank:?}: got: {msg}"
+                            );
+                        }
+                        other => panic!("expected CamelError::Config, got {other:?}"),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn blank_store_paths_alone_stay_valid() {
+        // hasText parity: a blank store path counts as absent, so a profile
+        // with only blank paths and no inbound knobs passes validation.
+        let security = CxfSecurityFields {
+            keystore_path: Some("   ".to_string()),
+            keystore_password: Some("changeit".to_string()),
+            truststore_path: Some("\t\n".to_string()),
+            truststore_password: Some("changeit".to_string()),
+            ..Default::default()
+        };
+        let cfg = CxfPoolConfig {
+            profiles: vec![profile_with_security("legacy", security)],
+            ..Default::default()
+        };
+        assert!(
+            cfg.validate().is_ok(),
+            "blank store paths without inbound knobs stay valid"
+        );
     }
 
     #[test]

@@ -55,6 +55,8 @@ port_name = "{http://example.com/hello}HelloPort"
 
 Multiple profiles are supported — add as many `[[components.cxf.profiles]]` entries as needed. All profiles share a single bridge process. Profile names must match `[a-z0-9_]+` (lowercase, digits, underscore).
 
+Blank `keystore_path` or `truststore_path` values are treated as absent at config validation. Setting an inbound allow-list (`allowed_signature_algorithms`, `allowed_digest_algorithms`) or a timestamp window on a profile with no non-blank store path fails validation with a config error that names the field, instead of failing later at bridge startup.
+
 ## Quick Start
 
 ### Producer Route (call a SOAP service)
