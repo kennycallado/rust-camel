@@ -66,7 +66,7 @@ The example binds `0.0.0.0` to listen on every interface. Use `127.0.0.1` when t
 
 The Consumer bounds resource use. It enforces a 2 MiB default request-body limit, a read timeout, and an in-flight request semaphore. The reply finaliser maps the Exchange body shape to a response. A `Body::Json` value serializes to JSON. A `Body::Stream` value streams the response. The `CamelHttpResponseCode` header sets the HTTP status. A missing header produces `200 OK`.
 
-Endpoints declared through a `rest:` block are `http:` consumers after lowering, and they are secured the same way: the block-level `security_policy` is copied onto every lowered route, so its roles or scopes policy runs at the request boundary. See [Route structure](../yaml-dsl/route-structure.md) for the block key and [`examples/rest-crud`](https://github.com/kennycallado/rust-camel/tree/main/examples/rest-crud) for the runnable secured variant.
+Endpoints declared through a `rest:` block are `http:` consumers after lowering, and they are secured the same way: the block-level `security_policy` is copied onto every lowered route, so its roles or scopes policy runs at the request boundary. See [Route structure](../yaml-dsl/route-structure.md) for the block key and [`examples/rest-crud`](https://github.com/kennycallado/rust-camel/tree/main/examples/rest-crud) for the runnable secured variant. For non-JSON payloads such as protobuf, the operation declares `binding: raw` with explicit data-format steps; see [REST usage (raw binding)](../data-formats/protobuf.md#rest-usage-raw-binding).
 
 ## Client
 

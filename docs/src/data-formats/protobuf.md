@@ -61,6 +61,40 @@ The protobuf format is not built-in. The YAML DSL resolves it through the `proto
 
 The `camel-dsl` crate gates this format behind its non-default `protobuf` cargo feature. A route that names `protobuf:` fails at compile time when the feature is off. The proto path must be relative and cannot contain `..`.
 
+## REST usage (raw binding)
+
+A `rest:` operation cannot auto-lower protobuf from `consumes` and `produces`: a media type carries no `<path>#<Message>` selector. Declare `binding: raw` and add explicit `unmarshal:` and `marshal:` steps. The `json` binding rejects any non-JSON media type at route load, so it cannot serve protobuf.
+
+```yaml
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /api
+    operations:
+      - method: POST
+        path: /orders/{orderId}
+        operation_id: createOrder
+        binding: raw
+        consumes: application/x-protobuf
+        produces: application/x-protobuf
+        steps:
+          - unmarshal: "protobuf:protos/orders.proto#orders.CreateOrder"
+          - to: direct:handleOrder
+          - marshal: "protobuf:protos/orders.proto#orders.OrderReceipt"
+```
+
+The `raw` binding injects no automatic data-format steps. The explicit `unmarshal` decodes the streamed request, and the explicit `marshal` encodes the response.
+
+Do not add a separate `stream_cache:` step. The DSL wraps every `Unmarshal` step in `StreamCacheService`, which buffers the request `Body::Stream` into bytes before the protobuf unmarshal decodes it. A `stream_cache: true` around the unmarshal is redundant.
+
+The media negotiation gate stays first. An undeclared request `Content-Type` fails with `415`, and an `Accept` mismatch fails with `406`. Declare both `consumes` and `produces`. Path templates such as `{orderId}` keep working unchanged.
+
+`request_schema` and `response.schema` are JSON Schema and are rejected in raw mode: the protobuf schema lives in the `.proto` file, not in the operation. A raw `POST` defaults to `201`; set `success_status` to override.
+
+Raw lowering sets the response `Content-Type` header to the declared `produces` value after the user steps run, and it intentionally overrides an earlier user-set Content-Type. A `do_try`/`catch` error body can therefore carry `application/x-protobuf` even when its bytes are not protobuf, unless the catch branch replaces the body with valid protobuf bytes or a later step overrides the header.
+
+The route must enable the `camel-dsl` `protobuf` cargo feature and register the format; a route that names `protobuf:` fails at compile time otherwise. See [Route usage](#route-usage) for the format string rules (relative path, no `..`) and [Precompiled descriptor sets](#precompiled-descriptor-sets) for descriptor inputs.
+
 ## Body type support
 
 | Body type | Marshal | Unmarshal |
