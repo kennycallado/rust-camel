@@ -18,6 +18,7 @@ Templates are compiled once at route startup (fail-closed) and cached for zero-f
 - **Atomic hot-reload**: Dependency-closure re-acquisition, compilation, and swap — prior set retained on failure
 - **Configurable root**: An optional `[components.template] root` anchors relative entries and, when set, confines every template read to one canonical directory tree
 - **openat-based confinement**: All file reads go through `openat`-relative handles; `..`, symlinks, and cycles are rejected
+- **Allowlisted filters**: Two component-owned render filters — `truncate` and `dump` — on top of the filters the locked MiniJinja engine provides; no functions or globals are registered
 
 ## Installation
 
@@ -143,6 +144,20 @@ fuel = 100000
 ```
 
 `default-autoescape` is an optional operator default for the entry template. Precedence is: a valid explicit top-level `{% autoescape %}` block in the entry, then the configured default, then rejection at compile time. The default applies only when the entry contains no `{% autoescape %}` or `{% endautoescape %}` statement at all, so an invalid, partial, duplicate, or malformed explicit statement still rejects. The injected block wraps the entry only; include targets keep their own escaping semantics. The key is absent by default, and absence always requires the explicit block — the framework never applies an implicit HTML default. Only the exact lowercase values `"html"`, `"json"`, and `"none"` are accepted; any other value fails config load and names the key with the allowed values. Inline `language: minijinja` templates are unchanged and keep their mandatory explicit block.
+
+## Filters
+
+The component registers exactly two filters of its own — `truncate(length, end="…")` and `dump` — on top of the filters the locked MiniJinja engine itself provides. It registers no functions or globals of its own; any other unregistered filter name fails at render time.
+
+`truncate(length, end="…")` cuts a string to `length` Unicode scalar values. Only a non-negative integer length renders; negative, non-integral, boolean, and non-numeric lengths are render errors. The `end` marker (default `…`) is appended only when truncation occurs. The filter has no HTML awareness: its output is ordinary text and stays subject to the active escape mode.
+
+`dump` produces deterministic JSON serialization with sorted object keys. An unserializable value is a render error. Its output is ordinary text and stays subject to the active escape mode; it is not marked safe.
+
+## HTML escaping and `&#x2f;`
+
+The component keeps MiniJinja's built-in HTML escaper unchanged. That escaper escapes `/` as `&#x2f;` alongside the other HTML metacharacters, and the component neither adds a custom escaper nor weakens the built-in one.
+
+`|safe` marks content as safe, and it is for trusted content only. Pre-rendered or interpolated content without explicit safe marking stays escaped: MiniJinja's formatter checks safe-string marking, not content provenance, so pre-rendering alone does not bypass autoescaping.
 
 ## Configured root (`root`)
 

@@ -30,6 +30,13 @@ symlinks, absolute paths, and cycles are rejected. Bare paths and
 non-`file:` inner schemes are rejected at endpoint construction.
 _Avoid_: sandboxing (the confinement is filesystem-path-only)
 
+**Allowlisted filters**:
+The two component-owned registrations in the compiled environment:
+`truncate` and `dump`. The filters provided by the locked MiniJinja engine
+are the engine's, not the component's. No functions or globals are
+registered.
+_Avoid_: custom filters, host functions
+
 Render limits (context size, output size, fuel, recursion depth, execution
 timeout) are inherited from the MiniJinja language engine
 (`MinijinjaLimitsConfig`). Authority: ADR-0047.

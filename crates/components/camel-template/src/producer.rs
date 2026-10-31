@@ -835,11 +835,13 @@ mod tests {
 
     /// S8 — no host callables (ADR-0047 §8). The template engine exposes zero
     /// functions, methods, or globals that a template author could invoke to
-    /// reach the host runtime. `compile` registers ONLY template entries via
-    /// `add_template_owned` (template_set.rs:114); it NEVER calls
-    /// `add_function`, `add_filter`, or `set_globals`. A template that invokes
-    /// an unknown function (e.g. `{{ evil_global_function() }}`) MUST FAIL at
-    /// render — it must NOT silently no-op and must NOT reach any host code.
+    /// reach the host runtime. `compile` registers template entries via
+    /// `add_template_owned`, plus exactly two allowlisted pure filters
+    /// (`truncate`, `dump`) that close over no host state; it NEVER calls
+    /// `add_function` or `set_globals`. The invariant that holds is: no host
+    /// callables and no host state. A template that invokes an unknown function
+    /// (e.g. `{{ evil_global_function() }}`) MUST FAIL at render — it must NOT
+    /// silently no-op and must NOT reach any host code.
     ///
     /// This is the LAST coverage gap before the change can re-validate gates
     /// and merge (e_opus audit gap G10, LOW). The observed error (probed live)

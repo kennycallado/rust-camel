@@ -106,6 +106,20 @@ The injected block wraps the entry only. Include, import, and extends targets ke
 
 The key is absent by default, and absence always requires the explicit block. The framework never applies an implicit HTML default. Inline `language: minijinja` templates are not affected: they keep the mandatory explicit block required by ADR-0047.
 
+### Filters
+
+The component registers exactly two filters of its own — `truncate(length, end="…")` and `dump` — on top of the filters the locked MiniJinja engine itself provides. It registers no functions or globals of its own. Any other unregistered filter name fails at render time.
+
+`truncate(length, end="…")` cuts a string to `length` Unicode scalar values. Only a non-negative integer length renders; a negative, non-integral, boolean, or non-numeric length is a render error. The `end` marker is appended only when truncation occurs, and it defaults to `…`. The filter has no HTML awareness: its output is ordinary text and stays subject to the active escape mode.
+
+`dump` produces deterministic JSON serialization of the value, with object keys sorted. An unserializable value is a render error. The output is ordinary text, so it stays subject to the active escape mode; it is not marked safe.
+
+### HTML escaping and `&#x2f;`
+
+The component keeps MiniJinja's built-in HTML escaper unchanged. That escaper escapes `/` as `&#x2f;`, alongside the other HTML metacharacters, and the component neither adds a custom escaper nor weakens the built-in one.
+
+`|safe` marks content as safe, and it is for trusted content only. Pre-rendered or interpolated content without explicit safe marking stays escaped. MiniJinja's formatter checks safe-string marking, not content provenance, so pre-rendering alone does not bypass autoescaping.
+
 ## Limits
 
 The bundle owns two independent limit layers under `[components.template]`. Both default when absent. A zero value is rejected at startup; a limit cannot be silently disabled.
@@ -141,7 +155,7 @@ The two layers are checked at different times. Acquisition limits apply while bu
 
 Templates are compiled once at route startup (fail-closed). A missing file, a syntax error, or an acquisition-limit overflow prevents the route from starting. The compiled set is cached for zero-filesystem-I/O hot-path rendering. A control-plane `ReloadTemplates` command re-acquires the dependency closure, recompiles, and atomically swaps the compiled set without disturbing in-flight renders. A failed reload preserves the prior set.
 
-File reads go through `openat`-relative handles, anchored at the canonical root when `root` is configured and at the entry's parent directory otherwise. `..` segments, symlinks, absolute closure-target paths, and include cycles are rejected at acquisition time. The MiniJinja environment registers no functions, filters, or globals — an unknown function call fails at render, not at the host boundary.
+File reads go through `openat`-relative handles, anchored at the canonical root when `root` is configured and at the entry's parent directory otherwise. `..` segments, symlinks, absolute closure-target paths, and include cycles are rejected at acquisition time. The environment registers exactly two component-owned filters — `truncate` and `dump` (see [Filters](#filters)) — and no functions or globals of its own; any other unregistered filter name fails at render time.
 
 ## When to use it
 

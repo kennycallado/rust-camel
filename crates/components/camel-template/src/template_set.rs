@@ -53,6 +53,74 @@ pub(crate) struct TemplateSet {
 #[allow(dead_code)] // pub(crate) type alias; consumed by Phase 4/5 component lifecycle.
 pub(crate) type SharedTemplates = Arc<ArcSwap<TemplateSet>>;
 
+/// The allowlisted `truncate` render filter: cut a string to `length` Unicode
+/// scalar values, appending `end` (default `…`) only when truncation occurred.
+///
+/// `length` must be an integral, non-negative number; booleans, strings,
+/// sequences, and maps are rejected by the kind check before MiniJinja's
+/// coercing integer conversion can accept them. Non-string input is an error.
+fn truncate_filter(
+    value: minijinja::Value,
+    length: minijinja::Value,
+    end: Option<String>,
+) -> Result<minijinja::Value, minijinja::Error> {
+    let invalid_length = || {
+        minijinja::Error::new(
+            minijinja::ErrorKind::InvalidOperation,
+            "truncate: length must be a non-negative integer",
+        )
+    };
+    if length.kind() != minijinja::value::ValueKind::Number {
+        return Err(invalid_length());
+    }
+    // Validate integrality/non-negativity in the f64 domain rather than
+    // narrowing to i64: an integral length above i64::MAX (for example u64
+    // 9223372036854775808) is still a valid length and must reach the no-op
+    // path, not be rejected. f64 is exact for any length a real string can
+    // reach, so this loses nothing observable.
+    let length = f64::try_from(length).map_err(|_| invalid_length())?;
+    if length < 0.0 || length.fract() != 0.0 {
+        return Err(invalid_length());
+    }
+    let s = value.as_str().ok_or_else(|| {
+        minijinja::Error::new(
+            minijinja::ErrorKind::InvalidOperation,
+            "truncate: value must be a string",
+        )
+    })?;
+    if (s.chars().count() as f64) <= length {
+        return Ok(minijinja::Value::from(s));
+    }
+    // The guard above means the length is below the char count (a small,
+    // usize-representable value), so the cast cannot saturate.
+    let mut truncated: String = s.chars().take(length as usize).collect();
+    truncated.push_str(end.as_deref().unwrap_or("…"));
+    Ok(minijinja::Value::from(truncated))
+}
+
+/// The allowlisted `dump` render filter: deterministic JSON text for the value.
+///
+/// On serialization failure returns an `InvalidOperation` error naming the
+/// constraint. The result is ordinary text and stays subject to the active
+/// autoescape mode (it is deliberately not marked safe).
+fn dump_filter(value: minijinja::Value) -> Result<minijinja::Value, minijinja::Error> {
+    serde_json::to_string(&value)
+        .map(minijinja::Value::from)
+        .map_err(|e| {
+            minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                format!("dump: value is not JSON-serializable: {e}"),
+            )
+        })
+}
+
+/// Register exactly the component's allowlisted render filters. No functions
+/// or globals are added; any other filter name stays an `unknown filter` error.
+fn register_allowlisted_filters(env: &mut minijinja::Environment<'static>) {
+    env.add_filter("truncate", truncate_filter);
+    env.add_filter("dump", dump_filter);
+}
+
 impl TemplateSet {
     /// An empty set, used ONLY as the [`SharedTemplates`] seed before `start()`
     /// installs a compiled set. Never rendered: [`render_entry`] on an empty
@@ -132,6 +200,7 @@ impl TemplateSet {
         env.set_undefined_behavior(minijinja::UndefinedBehavior::Strict);
         env.set_fuel(Some(limits.fuel));
         env.set_recursion_limit(limits.max_recursion_depth as usize);
+        register_allowlisted_filters(&mut env);
 
         // Register every closure member under its snapshot name so the entry can
         // resolve `include`/`extends`/`import`/`from` targets. The entry name in
@@ -735,6 +804,344 @@ mod tests {
             "non-UTF-8 source must be rejected at COMPILE (control-plane → \
              TemplateReloadError::Compile), NOT silently accepted or deferred \
              to render, got: {result:?}"
+        );
+    }
+
+    // --- 470-template-filters: allowlisted render filters (Task 1.1 red) ---
+
+    /// `truncate` must be a no-op when the input is at most `length` Unicode
+    /// scalar values long; no end marker is appended because no truncation
+    /// occurred.
+    #[tokio::test]
+    async fn truncate_shorter_than_limit_is_noop() {
+        let snap = snapshot(
+            "truncate.html",
+            r#"{% autoescape "none" %}{{ name | truncate(10) }}{% endautoescape %}"#,
+        );
+        let set = TemplateSet::compile(
+            &snap,
+            "truncate.html",
+            MinijinjaLimitsConfig::default(),
+            None,
+        )
+        .expect("compile must succeed — the filter is resolved at render time");
+        let rendered = set
+            .render_entry(ctx_name("eleventy"), ResolvedLimits::default())
+            .await
+            .expect("render must succeed once `truncate` is registered");
+        assert_eq!(
+            rendered, "eleventy",
+            "a value shorter than the limit must pass through untouched (no end marker)"
+        );
+    }
+
+    /// Truncation is measured in Unicode scalar values, never bytes, so a
+    /// multibyte payload is cut cleanly (no partial UTF-8 sequence).
+    #[tokio::test]
+    async fn truncate_multibyte_stays_scalar_aligned() {
+        let snap = snapshot(
+            "truncate.html",
+            r#"{% autoescape "none" %}{{ name | truncate(5) }}{% endautoescape %}"#,
+        );
+        let set = TemplateSet::compile(
+            &snap,
+            "truncate.html",
+            MinijinjaLimitsConfig::default(),
+            None,
+        )
+        .expect("compile must succeed — the filter is resolved at render time");
+        let rendered = set
+            .render_entry(ctx_name("cafés niños"), ResolvedLimits::default())
+            .await
+            .expect("render must succeed once `truncate` is registered");
+        assert_eq!(
+            rendered, "cafés…",
+            "truncation must keep the first 5 Unicode scalar values and append \
+             the default end marker, with no partial bytes"
+        );
+    }
+
+    /// A custom end marker is appended only when truncation actually occurs.
+    #[tokio::test]
+    async fn truncate_custom_end_only_on_truncation() {
+        let snap = snapshot(
+            "truncate.html",
+            r#"{% autoescape "none" %}{{ name | truncate(4, "[more]") }}|{{ short | truncate(4, "[more]") }}{% endautoescape %}"#,
+        );
+        let set = TemplateSet::compile(
+            &snap,
+            "truncate.html",
+            MinijinjaLimitsConfig::default(),
+            None,
+        )
+        .expect("compile must succeed — the filter is resolved at render time");
+        let mut m: BTreeMap<&str, &str> = BTreeMap::new();
+        m.insert("name", "abcdefgh");
+        m.insert("short", "abc");
+        let rendered = set
+            .render_entry(
+                minijinja::Value::from_serialize(&m),
+                ResolvedLimits::default(),
+            )
+            .await
+            .expect("render must succeed once `truncate` is registered");
+        assert_eq!(
+            rendered, "abcd[more]|abc",
+            "the end marker must be appended only when the input was truncated"
+        );
+    }
+
+    /// Negative, fractional, boolean, and string lengths are all invalid; each
+    /// must fail at render time on the length constraint (not on filter
+    /// resolution).
+    #[tokio::test]
+    async fn truncate_invalid_length_values_are_render_errors() {
+        let cases = [
+            ("negative", "{{ name | truncate(-2) }}"),
+            ("fractional", "{{ name | truncate(2.5) }}"),
+            ("boolean", "{{ name | truncate(true) }}"),
+            ("string", r#"{{ name | truncate("2") }}"#),
+        ];
+        for (label, expr) in cases {
+            let source = format!(r#"{{% autoescape "none" %}}{expr}{{% endautoescape %}}"#);
+            let snap = snapshot("truncate.html", &source);
+            let set = TemplateSet::compile(
+                &snap,
+                "truncate.html",
+                MinijinjaLimitsConfig::default(),
+                None,
+            )
+            .expect("compile must succeed — invalid lengths are render-time errors");
+            let result = set
+                .render_entry(ctx_name("abcdefgh"), ResolvedLimits::default())
+                .await;
+            let msg = match &result {
+                Err(TemplateReloadError::Render(msg)) => msg.clone(),
+                other => panic!(
+                    "invalid truncate length ({label}) must be a render-time failure \
+                     and surface as TemplateReloadError::Render, got: {other:?}"
+                ),
+            };
+            assert!(
+                !msg.contains("unknown filter"),
+                "invalid truncate length ({label}) must fail on the length constraint, \
+                 not on filter resolution; got: {msg}"
+            );
+        }
+    }
+
+    /// An integral length above `i64::MAX` is still valid: it simply exceeds
+    /// the input's char count, so the filter must be a no-op (no end marker)
+    /// rather than failing the i64 narrowing.
+    #[tokio::test]
+    async fn truncate_oversized_integral_length_is_noop() {
+        let snap = snapshot(
+            "truncate.html",
+            r#"{% autoescape "none" %}{{ name | truncate(9223372036854775808) }}{% endautoescape %}"#,
+        );
+        let set = TemplateSet::compile(
+            &snap,
+            "truncate.html",
+            MinijinjaLimitsConfig::default(),
+            None,
+        )
+        .expect("compile must succeed — the filter is resolved at render time");
+        let rendered = set
+            .render_entry(ctx_name("abc"), ResolvedLimits::default())
+            .await
+            .expect("an oversized integral length must be accepted as a no-op");
+        assert_eq!(
+            rendered, "abc",
+            "a length above i64::MAX must leave the string untouched (no end marker)"
+        );
+    }
+
+    /// `dump` is deterministic JSON for the plain data shapes it is meant for:
+    /// objects (sorted keys), arrays, and scalars.
+    #[tokio::test]
+    async fn dump_serializes_object_array_scalar_deterministically() {
+        let snap = snapshot(
+            "dump.html",
+            r#"{% autoescape "none" %}{{ obj | dump }}|{{ items | dump }}|{{ title | dump }}{% endautoescape %}"#,
+        );
+        let set = TemplateSet::compile(&snap, "dump.html", MinijinjaLimitsConfig::default(), None)
+            .expect("compile must succeed — the filter is resolved at render time");
+        let mut m: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
+        m.insert("obj", serde_json::json!({"name": "Ada", "year": 1843}));
+        m.insert("items", serde_json::json!([1, 2, 3]));
+        m.insert("title", serde_json::json!("Ada"));
+        let ctx = minijinja::Value::from_serialize(&m);
+        let first = set
+            .render_entry(ctx.clone(), ResolvedLimits::default())
+            .await
+            .expect("render must succeed once `dump` is registered");
+        assert_eq!(
+            first, r#"{"name":"Ada","year":1843}|[1,2,3]|"Ada""#,
+            "dump must emit JSON with sorted object keys and no extra structure"
+        );
+        let second = set
+            .render_entry(ctx, ResolvedLimits::default())
+            .await
+            .expect("second render must succeed");
+        assert_eq!(
+            first, second,
+            "dump output must be byte-identical across renders of the same context"
+        );
+    }
+
+    /// Direct unit call: a map whose key is a sequence has no JSON object
+    /// representation, so the filter must return `Err` instead of panicking or
+    /// silently lossy-converting.
+    #[test]
+    fn dump_filter_fails_on_unserializable_map() {
+        let fixture = std::iter::once((
+            minijinja::Value::from(vec![1i64, 2]),
+            minijinja::Value::from("x"),
+        ))
+        .collect::<minijinja::Value>();
+        assert!(
+            serde_json::to_string(&fixture).is_err(),
+            "fixture precondition: a sequence-keyed map has no JSON object form"
+        );
+        let result = dump_filter(fixture);
+        assert!(
+            result.is_err(),
+            "dump_filter must reject an unserializable value with Err, got: {result:?}"
+        );
+    }
+
+    /// Render-path pin for the same scenario: the failure surfaces as
+    /// `TemplateReloadError::Render`, never as a panic or a compile error.
+    #[tokio::test]
+    async fn dump_unserializable_value_is_render_error() {
+        let snap = snapshot(
+            "dump.html",
+            r#"{% autoescape "none" %}{{ broken | dump }}{% endautoescape %}"#,
+        );
+        let set = TemplateSet::compile(&snap, "dump.html", MinijinjaLimitsConfig::default(), None)
+            .expect("compile must succeed — the filter is resolved at render time");
+        let broken = std::iter::once((
+            minijinja::Value::from(vec![1i64, 2]),
+            minijinja::Value::from("x"),
+        ))
+        .collect::<minijinja::Value>();
+        let ctx: minijinja::Value = std::iter::once(("broken", broken)).collect();
+        let result = set.render_entry(ctx, ResolvedLimits::default()).await;
+        match &result {
+            Err(TemplateReloadError::Render(_)) => {}
+            other => panic!(
+                "an unserializable dump input must be a render-time failure and \
+                 surface as TemplateReloadError::Render, got: {other:?}"
+            ),
+        }
+    }
+
+    /// `dump` returns ordinary text, so the active autoescape mode still
+    /// escapes it (the result must NOT be marked safe).
+    #[tokio::test]
+    async fn dump_output_stays_subject_to_autoescape() {
+        let snap = snapshot(
+            "dump.html",
+            r#"{% autoescape "html" %}{{ obj | dump }}{% endautoescape %}"#,
+        );
+        let set = TemplateSet::compile(&snap, "dump.html", MinijinjaLimitsConfig::default(), None)
+            .expect("compile must succeed — the filter is resolved at render time");
+        let mut m: BTreeMap<&str, serde_json::Value> = BTreeMap::new();
+        m.insert("obj", serde_json::json!({"path": "a/b"}));
+        let rendered = set
+            .render_entry(
+                minijinja::Value::from_serialize(&m),
+                ResolvedLimits::default(),
+            )
+            .await
+            .expect("render must succeed once `dump` is registered");
+        assert!(
+            rendered.contains("&#x2f;"),
+            "dump output must be escaped under html autoescape, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("a/b"),
+            "the raw `/` inside dump output must not survive html escaping, got: {rendered}"
+        );
+    }
+
+    /// Allowlist pin: only the component's registered filters resolve; a name
+    /// it never registers stays an `unknown filter` render error.
+    #[tokio::test]
+    async fn only_allowlisted_component_filters_resolve() {
+        let snap = ClosureSnapshot::from_entries(vec![
+            (
+                "truncate.html",
+                br#"{% autoescape "none" %}{{ name | truncate(10) }}{% endautoescape %}"#,
+            ),
+            (
+                "numerify.html",
+                br#"{% autoescape "none" %}{{ name | numerify }}{% endautoescape %}"#,
+            ),
+        ]);
+        let truncating = TemplateSet::compile(
+            &snap,
+            "truncate.html",
+            MinijinjaLimitsConfig::default(),
+            None,
+        )
+        .expect("compile must succeed — both entries parse");
+        let rendered = truncating
+            .render_entry(ctx_name("eleventy"), ResolvedLimits::default())
+            .await
+            .expect("the allowlisted `truncate` filter must resolve");
+        assert_eq!(rendered, "eleventy");
+
+        let unknown = TemplateSet::compile(
+            &snap,
+            "numerify.html",
+            MinijinjaLimitsConfig::default(),
+            None,
+        )
+        .expect("compile must succeed — filter names are resolved at render time");
+        let result = unknown
+            .render_entry(ctx_name("eleventy"), ResolvedLimits::default())
+            .await;
+        let msg = match &result {
+            Err(TemplateReloadError::Render(msg)) => msg.clone(),
+            other => panic!(
+                "an unregistered filter name must be a render-time failure and \
+                 surface as TemplateReloadError::Render, got: {other:?}"
+            ),
+        };
+        assert!(
+            msg.contains("unknown filter"),
+            "a name the component never registers must stay unregistered \
+             (`unknown filter`), got: {msg}"
+        );
+    }
+
+    /// Regression guard for the no-custom-escaper policy: `/` in an
+    /// expression is escaped to `&#x2f;` by minijinja's built-in html escaper.
+    #[tokio::test]
+    async fn slash_escapes_under_html_autoescape() {
+        let snap = snapshot(
+            "page.html",
+            r#"{% autoescape "html" %}{{ path }}{% endautoescape %}"#,
+        );
+        let set = TemplateSet::compile(&snap, "page.html", MinijinjaLimitsConfig::default(), None)
+            .expect("compile must succeed");
+        let mut m: BTreeMap<&str, &str> = BTreeMap::new();
+        m.insert("path", "a/b");
+        let rendered = set
+            .render_entry(
+                minijinja::Value::from_serialize(&m),
+                ResolvedLimits::default(),
+            )
+            .await
+            .expect("render");
+        assert!(
+            rendered.contains("&#x2f;"),
+            "html autoescape must escape `/` to `&#x2f;`, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("a/b"),
+            "the expression-emitted raw `/` must be absent, got: {rendered}"
         );
     }
 }
