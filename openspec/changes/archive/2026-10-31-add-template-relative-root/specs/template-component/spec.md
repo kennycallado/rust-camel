@@ -94,7 +94,7 @@ relative form SHALL contain no empty path component, no `.` component, and
 no `..` component. File acquisition SHALL occur during awaited startup, not
 at construction.
 
-#### Scenario: valid absolute file URI parses at construction
+#### Scenario: valid file URI parses at construction
 
 - **GIVEN** a route declaring `template:file:///srv/templates/page.html`
 - **WHEN** the endpoint is constructed
