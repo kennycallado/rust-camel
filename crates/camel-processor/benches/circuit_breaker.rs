@@ -7,6 +7,8 @@ use std::time::Duration;
 use camel_api::{
     BoxProcessor, BoxProcessorExt, CamelError, CircuitBreakerConfig, Exchange, Message,
 };
+use camel_processor::circuit_breaker::CircuitBreakerDecision;
+use camel_processor::circuit_breaker::CircuitBreakerGate;
 use camel_processor::circuit_breaker::CircuitBreakerLayer;
 use criterion::{Criterion, criterion_group, criterion_main};
 use tower::{Layer, ServiceExt};
@@ -39,10 +41,13 @@ fn ex() -> Exchange {
 
 fn bench_circuit_breaker_states(c: &mut Criterion) {
     let mut group = c.benchmark_group("circuit_breaker");
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        tokio::time::pause();
-    });
+    // The breaker measures open-state expiry with `std::time::Instant`
+    // (real monotonic time), so these benches must sleep for real instead
+    // of advancing a paused tokio clock.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
     group.bench_function("closed_passthrough", |b| {
         b.to_async(&rt).iter(|| {
@@ -91,7 +96,7 @@ fn bench_circuit_breaker_states(c: &mut Criterion) {
                 for _ in 0..threshold {
                     let _ = svc.clone().oneshot(ex()).await;
                 }
-                tokio::time::advance(config.open_duration + Duration::from_millis(1)).await;
+                tokio::time::sleep(config.open_duration + Duration::from_millis(10)).await;
                 svc.clone().oneshot(ex()).await.unwrap();
             }
         })
@@ -121,7 +126,7 @@ fn bench_circuit_breaker_states(c: &mut Criterion) {
                     for _ in 0..threshold {
                         let _ = svc.clone().oneshot(ex()).await;
                     }
-                    tokio::time::advance(config.open_duration + Duration::from_millis(1)).await;
+                    tokio::time::sleep(config.open_duration + Duration::from_millis(10)).await;
                     svc.clone().oneshot(ex()).await.unwrap();
                 }
             }
@@ -131,5 +136,67 @@ fn bench_circuit_breaker_states(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_circuit_breaker_states);
+/// Calls per task in the gate microbench.
+const GATE_ITERATIONS: usize = 2_000;
+
+fn bench_gate_multi(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gate_multi");
+    // Dedicated multi-thread runtime: the tasks must actually run in
+    // parallel so the gate's mutex is contended. Tokio time is NOT paused
+    // here — the breaker measures expiry with `std::time::Instant`, and
+    // `open_duration` is 1h, so the gate stays Closed for the sweep.
+    let multi_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build multi-thread runtime");
+
+    for tasks in [1usize, 8, 16] {
+        // One gate shared by every task: the point is the contended hot
+        // state, not per-task copies.
+        let gate = Arc::new(CircuitBreakerGate::new(
+            CircuitBreakerConfig::new()
+                .failure_threshold(100_000)
+                .open_duration(Duration::from_secs(3600)),
+            Arc::from("bench"),
+            None,
+        ));
+
+        group.bench_function(format!("gate_closed_success_tasks_{tasks}"), |b| {
+            b.to_async(&multi_rt).iter(|| {
+                let gate = Arc::clone(&gate);
+                async move {
+                    let barrier = Arc::new(tokio::sync::Barrier::new(tasks));
+                    let mut handles = Vec::with_capacity(tasks);
+                    for _ in 0..tasks {
+                        let gate = Arc::clone(&gate);
+                        let barrier = Arc::clone(&barrier);
+                        handles.push(tokio::spawn(async move {
+                            barrier.wait().await;
+                            // `Exchange` is not `Clone`, and rebuilding it
+                            // per call would swamp the mutex cost, so build
+                            // the `Ok` result once and reuse its reference.
+                            let ok: Result<Exchange, CamelError> =
+                                Ok(Exchange::new(Message::new("msg")));
+                            for _ in 0..GATE_ITERATIONS {
+                                let decision = gate.before_call();
+                                if !matches!(&decision, CircuitBreakerDecision::Allow) {
+                                    panic!("gate left the closed success path");
+                                }
+                                std::hint::black_box(&decision);
+                                gate.after_result(&ok);
+                            }
+                        }));
+                    }
+                    for handle in handles {
+                        handle.await.expect("gate bench task panicked");
+                    }
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_circuit_breaker_states, bench_gate_multi);
 criterion_main!(benches);

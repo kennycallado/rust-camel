@@ -1,8 +1,9 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tower::{Layer, Service};
 
@@ -11,20 +12,78 @@ use camel_api::{BoxProcessor, CamelError, CircuitBreakerConfig, Exchange};
 
 // ── State ──────────────────────────────────────────────────────────────
 
-enum CircuitState {
-    Closed {
-        consecutive_failures: u32,
-    },
-    Open {
-        opened_at: Instant,
-    },
-    /// `probe_admitted == true` means a probe request is in flight; subsequent
-    /// concurrent callers must be rejected until the probe completes.
-    /// `probe_admitted == false` means no probe is in flight and the next
-    /// caller is admitted as the probe.
-    HalfOpen {
-        probe_admitted: bool,
-    },
+/// Circuit is closed — all calls pass through.
+const STATE_CLOSED: u8 = 0;
+/// Circuit is open — calls are rejected or fall back until expiry.
+const STATE_OPEN: u8 = 1;
+/// Half-open with the single probe slot taken (a probe is in flight, or the
+/// caller that observed expiry claims the slot).
+const STATE_HALF_OPEN_PROBE_HELD: u8 = 2;
+/// Half-open with the probe slot free — released when `poll_ready` returned
+/// `Pending` while a probe was claimed, so a re-poll can re-claim it (D-M1).
+const STATE_HALF_OPEN_PROBE_FREE: u8 = 3;
+
+/// Shared breaker state. The closed/success path touches only `state` and
+/// `consecutive_failures` with plain atomic loads; `opened_at` is the single
+/// serializer for slow-path transitions (opens, recovery close, expiry).
+struct SharedBreakerState {
+    state: AtomicU8,
+    consecutive_failures: AtomicU32,
+    opened_at: Mutex<Option<Instant>>,
+}
+
+/// Outcome of an attempt to claim the half-open probe after expiry.
+enum HalfOpenTransition {
+    /// The caller won the Open → HalfOpen transition and becomes the probe.
+    Transitioned,
+    /// The circuit is still within `open_duration`.
+    NotExpired,
+    /// Expiry passed but another caller won the CAS; re-load and retry.
+    LostRace,
+}
+
+impl SharedBreakerState {
+    fn new() -> Self {
+        Self {
+            state: AtomicU8::new(STATE_CLOSED),
+            consecutive_failures: AtomicU32::new(0),
+            opened_at: Mutex::new(None),
+        }
+    }
+
+    /// Run a slow-path state transition while holding the `opened_at` lock.
+    ///
+    /// The closure re-loads `state` under the lock and acts only if it still
+    /// shows the expected state, so qualification, timestamp publication, and
+    /// the state CAS are atomic against recovery.
+    fn with_transition(&self, f: impl FnOnce(&mut Option<Instant>) -> bool) -> bool {
+        let mut guard = self.opened_at.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut guard)
+    }
+
+    /// Attempt the Open → HalfOpen(probe claimed) transition. Returns
+    /// [`HalfOpenTransition::Transitioned`] when the caller won the transition
+    /// (it becomes the probe). The `opened_at` lock is held across the expiry
+    /// check and the CAS so a freshly re-opened circuit cannot be half-opened
+    /// off a stale timestamp.
+    fn try_transition_to_half_open(&self, open_duration: Duration) -> HalfOpenTransition {
+        let opened_at = self.opened_at.lock().unwrap_or_else(|e| e.into_inner());
+        let expired = opened_at
+            .map(|at| at.elapsed() >= open_duration)
+            .unwrap_or(false);
+        if !expired {
+            return HalfOpenTransition::NotExpired;
+        }
+        match self.state.compare_exchange(
+            STATE_OPEN,
+            STATE_HALF_OPEN_PROBE_HELD,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => HalfOpenTransition::Transitioned,
+            Err(_) => HalfOpenTransition::LostRace,
+        }
+    }
 }
 
 // ── Layer ──────────────────────────────────────────────────────────────
@@ -33,7 +92,7 @@ enum CircuitState {
 #[derive(Clone)]
 pub struct CircuitBreakerLayer {
     config: CircuitBreakerConfig,
-    state: Arc<Mutex<CircuitState>>,
+    state: Arc<SharedBreakerState>,
     route_id: Arc<str>,
     metrics: Option<Arc<dyn MetricsCollector>>,
 }
@@ -50,9 +109,7 @@ impl CircuitBreakerLayer {
     ) -> Self {
         Self {
             config,
-            state: Arc::new(Mutex::new(CircuitState::Closed {
-                consecutive_failures: 0,
-            })),
+            state: Arc::new(SharedBreakerState::new()),
             route_id,
             metrics,
         }
@@ -79,7 +136,7 @@ impl<S> Layer<S> for CircuitBreakerLayer {
 pub struct CircuitBreakerService<S> {
     inner: S,
     config: CircuitBreakerConfig,
-    state: Arc<Mutex<CircuitState>>,
+    state: Arc<SharedBreakerState>,
     route_id: Arc<str>,
     metrics: Option<Arc<dyn MetricsCollector>>,
 }
@@ -115,151 +172,230 @@ where
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        match *state {
-            CircuitState::Closed { .. } => {
-                drop(state);
-                self.inner.poll_ready(cx)
-            }
-            CircuitState::Open { opened_at } => {
-                if opened_at.elapsed() >= self.config.open_duration {
-                    tracing::info!("Circuit breaker transitioning from Open to HalfOpen");
-                    *state = CircuitState::HalfOpen {
-                        probe_admitted: true,
-                    };
-                    drop(state);
-                    // If the inner service returns Pending we MUST release the
-                    // probe claim so a re-poll can re-claim it; otherwise the
-                    // breaker wedges until the half-open probe completes.
-                    match self.inner.poll_ready(cx) {
-                        Poll::Ready(result) => Poll::Ready(result),
-                        Poll::Pending => {
-                            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                            if matches!(*st, CircuitState::HalfOpen { .. }) {
-                                *st = CircuitState::HalfOpen {
-                                    probe_admitted: false,
-                                };
-                            }
-                            Poll::Pending
-                        }
+        loop {
+            match self.state.state.load(Ordering::Acquire) {
+                STATE_CLOSED => return self.inner.poll_ready(cx),
+                STATE_OPEN => match self
+                    .state
+                    .try_transition_to_half_open(self.config.open_duration)
+                {
+                    HalfOpenTransition::Transitioned => {
+                        tracing::info!("Circuit breaker transitioning from Open to HalfOpen");
+                        return self.poll_ready_as_probe(cx);
                     }
-                } else if self.config.fallback.is_some() {
-                    Poll::Ready(Ok(()))
-                } else {
-                    self.record_rejection();
-                    Poll::Ready(Err(CamelError::CircuitOpen(
-                        "circuit breaker is open".into(),
-                    )))
-                }
-            }
-            CircuitState::HalfOpen { probe_admitted } => {
-                if probe_admitted {
+                    HalfOpenTransition::NotExpired => {
+                        if self.config.fallback.is_some() {
+                            return Poll::Ready(Ok(()));
+                        }
+                        self.record_rejection();
+                        return Poll::Ready(Err(CamelError::CircuitOpen(
+                            "circuit breaker is open".into(),
+                        )));
+                    }
+                    HalfOpenTransition::LostRace => continue,
+                },
+                STATE_HALF_OPEN_PROBE_HELD => {
                     // A probe is already in flight — reject this concurrent
                     // caller. Always Err (even with fallback): returning Ok
                     // here would let a 2nd caller reach call() → inner,
                     // bypassing the single-probe gate. The caller retries
                     // when after_result resolves the probe state.
-                    drop(state);
                     self.record_rejection();
-                    Poll::Ready(Err(CamelError::CircuitOpen(
+                    return Poll::Ready(Err(CamelError::CircuitOpen(
                         "circuit breaker is half-open (probe in flight)".into(),
-                    )))
-                } else {
+                    )));
+                }
+                STATE_HALF_OPEN_PROBE_FREE => {
                     // Claim the probe slot and forward to inner. If inner
                     // returns Pending, release the claim so re-poll works.
-                    *state = CircuitState::HalfOpen {
-                        probe_admitted: true,
-                    };
-                    drop(state);
-                    match self.inner.poll_ready(cx) {
-                        Poll::Ready(result) => Poll::Ready(result),
-                        Poll::Pending => {
-                            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                            if matches!(*st, CircuitState::HalfOpen { .. }) {
-                                *st = CircuitState::HalfOpen {
-                                    probe_admitted: false,
-                                };
-                            }
-                            Poll::Pending
-                        }
+                    if self
+                        .state
+                        .state
+                        .compare_exchange(
+                            STATE_HALF_OPEN_PROBE_FREE,
+                            STATE_HALF_OPEN_PROBE_HELD,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return self.poll_ready_as_probe(cx);
                     }
+                    // Lost the claim race — re-load and decide again.
                 }
+                _ => continue,
             }
         }
     }
 
     fn call(&mut self, exchange: Exchange) -> Self::Future {
-        {
-            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if let CircuitState::Open { opened_at } = *st {
-                if opened_at.elapsed() < self.config.open_duration {
-                    if let Some(mut fallback) = self.config.fallback.clone() {
-                        return Box::pin(async move { fallback.call(exchange).await });
+        let mut decided_half_open = false;
+        loop {
+            match self.state.state.load(Ordering::Acquire) {
+                STATE_CLOSED => break,
+                STATE_OPEN => match self
+                    .state
+                    .try_transition_to_half_open(self.config.open_duration)
+                {
+                    HalfOpenTransition::Transitioned => {
+                        tracing::info!("Circuit breaker transitioning from Open to HalfOpen");
+                        decided_half_open = true;
+                        break;
                     }
-                    self.record_rejection();
-                    return Box::pin(async {
-                        Err(CamelError::CircuitOpen("circuit breaker is open".into()))
-                    });
+                    HalfOpenTransition::NotExpired => {
+                        if let Some(mut fallback) = self.config.fallback.clone() {
+                            return Box::pin(async move { fallback.call(exchange).await });
+                        }
+                        self.record_rejection();
+                        return Box::pin(async {
+                            Err(CamelError::CircuitOpen("circuit breaker is open".into()))
+                        });
+                    }
+                    HalfOpenTransition::LostRace => continue,
+                },
+                STATE_HALF_OPEN_PROBE_HELD | STATE_HALF_OPEN_PROBE_FREE => {
+                    // D-M1: the single-probe gate lives in poll_ready — 2nd callers
+                    // get Err there and never reach call(). The probe caller (whose
+                    // poll_ready claimed the probe) proceeds here to inner.
+                    decided_half_open = true;
+                    break;
                 }
-
-                tracing::info!("Circuit breaker transitioning from Open to HalfOpen");
-                *st = CircuitState::HalfOpen {
-                    probe_admitted: true,
-                };
+                _ => continue,
             }
-            // D-M1: the single-probe gate lives in poll_ready — 2nd callers
-            // get Err there and never reach call(). The probe caller (whose
-            // poll_ready set probe_admitted: true) proceeds here to inner.
         }
+
+        // One load replaces the old second lock snapshot.
+        let current_is_half_open = decided_half_open
+            || matches!(
+                self.state.state.load(Ordering::Acquire),
+                STATE_HALF_OPEN_PROBE_HELD | STATE_HALF_OPEN_PROBE_FREE
+            );
 
         // Clone inner service (Tower pattern) and state handle.
         let mut inner = self.inner.clone();
         let state = Arc::clone(&self.state);
         let config = self.config.clone();
 
-        // Snapshot the current state before calling (briefly lock).
-        let current_is_half_open = matches!(
-            *state.lock().unwrap_or_else(|e| e.into_inner()),
-            CircuitState::HalfOpen { .. }
-        );
-
         Box::pin(async move {
             let result = inner.call(exchange).await;
 
-            // Update state based on result (briefly lock).
-            let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
             match &result {
                 Ok(_) => {
-                    // Success → reset to Closed.
-                    if current_is_half_open {
-                        tracing::info!("Circuit breaker transitioning from HalfOpen to Closed");
+                    let s = state.state.load(Ordering::Acquire);
+                    if s == STATE_CLOSED {
+                        // Step 1 (bd rc-bnsxr) fast path: no RMW when already clean.
+                        if state.consecutive_failures.load(Ordering::Acquire) == 0 {
+                            return result;
+                        }
+                        state.consecutive_failures.swap(0, Ordering::Release);
+                        return result;
                     }
-                    *st = CircuitState::Closed {
-                        consecutive_failures: 0,
-                    };
+                    if matches!(s, STATE_HALF_OPEN_PROBE_HELD | STATE_HALF_OPEN_PROBE_FREE) {
+                        // Recovery runs under the transition lock: the counter
+                        // reset and the Close CAS are serialized against every
+                        // other slow-path transition, so an observer of CLOSED
+                        // never sees a stale pre-open failure count.
+                        state.with_transition(|_opened_at| {
+                            // The CAS can only lose to the lockless probe admission
+                            // (FREE -> HELD): every other HALF-code mutation holds
+                            // this same lock. A lost recovery is retried so a
+                            // concurrent admission cannot silently drop a completed
+                            // probe's recovery; the log fires only when the
+                            // transition happened.
+                            let mut recovered = false;
+                            for _ in 0..3 {
+                                let s = state.state.load(Ordering::Acquire);
+                                if s != STATE_HALF_OPEN_PROBE_HELD
+                                    && s != STATE_HALF_OPEN_PROBE_FREE
+                                {
+                                    break; // state moved to OPEN/CLOSED — nothing to recover
+                                }
+                                if state
+                                    .state
+                                    .compare_exchange(
+                                        s,
+                                        STATE_CLOSED,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_ok()
+                                {
+                                    state.consecutive_failures.swap(0, Ordering::Release);
+                                    recovered = true;
+                                    break;
+                                }
+                                // CAS lost only to the lockless probe admission
+                                // (FREE -> HELD); reload and retry.
+                            }
+                            if recovered {
+                                tracing::info!(
+                                    "Circuit breaker transitioning from HalfOpen to Closed"
+                                );
+                            }
+                            recovered
+                        });
+                    }
+                    // s == STATE_OPEN: leave untouched — success does not close
+                    // an open circuit.
                 }
                 Err(_) => {
                     if current_is_half_open {
                         // Half-open failure → reopen circuit.
-                        tracing::warn!(
-                            "Circuit breaker transitioning from HalfOpen to Open (probe failed)"
-                        );
-                        *st = CircuitState::Open {
-                            opened_at: Instant::now(),
-                        };
-                    } else if let CircuitState::Closed {
-                        consecutive_failures,
-                    } = &mut *st
-                    {
-                        *consecutive_failures += 1;
-                        if *consecutive_failures >= config.failure_threshold {
+                        state.with_transition(|opened_at| {
+                            let s = state.state.load(Ordering::Acquire);
+                            if !matches!(s, STATE_HALF_OPEN_PROBE_HELD | STATE_HALF_OPEN_PROBE_FREE)
+                            {
+                                return false;
+                            }
                             tracing::warn!(
-                                threshold = config.failure_threshold,
-                                "Circuit breaker transitioning from Closed to Open (failure threshold reached)"
+                                "Circuit breaker transitioning from HalfOpen to Open (probe failed)"
                             );
-                            *st = CircuitState::Open {
-                                opened_at: Instant::now(),
-                            };
+                            *opened_at = Some(Instant::now());
+                            let _ = state.state.compare_exchange(
+                                s,
+                                STATE_OPEN,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            );
+                            true
+                        });
+                    } else {
+                        let s = state.state.load(Ordering::Acquire);
+                        if s == STATE_CLOSED {
+                            // Slow-path transitions serialize on the opened_at
+                            // lock: qualification, timestamp publication, and
+                            // the state CAS hold the lock together, and recovery
+                            // (probe success) takes the same lock, so a threshold
+                            // qualification can never be split across an
+                            // open/expiry/recovery cycle — the invariant the old
+                            // mutex gave per after_result call.
+                            state.with_transition(|opened_at| {
+                                let s = state.state.load(Ordering::Acquire);
+                                if s != STATE_CLOSED {
+                                    return false;
+                                }
+                                let prev =
+                                    state.consecutive_failures.fetch_add(1, Ordering::AcqRel);
+                                if prev + 1 >= config.failure_threshold {
+                                    *opened_at = Some(Instant::now());
+                                    if state
+                                        .state
+                                        .compare_exchange(
+                                            STATE_CLOSED,
+                                            STATE_OPEN,
+                                            Ordering::AcqRel,
+                                            Ordering::Acquire,
+                                        )
+                                        .is_ok()
+                                    {
+                                        tracing::warn!(
+                                            threshold = config.failure_threshold,
+                                            "Circuit breaker transitioning from Closed to Open (failure threshold reached)"
+                                        );
+                                    }
+                                }
+                                true
+                            });
                         }
                     }
                 }
@@ -267,6 +403,46 @@ where
 
             result
         })
+    }
+}
+
+impl<S> CircuitBreakerService<S>
+where
+    S: Service<Exchange, Response = Exchange, Error = CamelError> + Clone + Send + 'static,
+    S::Future: Send,
+{
+    /// Forward to the inner service while holding the claimed half-open probe.
+    /// If the inner service returns `Pending` we MUST release the probe claim
+    /// so a re-poll can re-claim it; otherwise the breaker wedges until the
+    /// half-open probe completes.
+    fn poll_ready_as_probe(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
+        match self.inner.poll_ready(cx) {
+            Poll::Ready(result) => Poll::Ready(result),
+            Poll::Pending => {
+                // Release the probe claim so a re-poll can re-claim it; otherwise
+                // the breaker wedges until the half-open probe completes.
+                // (Holds the transition lock: recovery serializes against this
+                // release — a recovery reload+CAS can no longer be invalidated by
+                // it.)
+                let _ = self.state.with_transition(|_| {
+                    let s = self.state.state.load(Ordering::Acquire);
+                    if s == STATE_HALF_OPEN_PROBE_HELD {
+                        self.state
+                            .state
+                            .compare_exchange(
+                                STATE_HALF_OPEN_PROBE_HELD,
+                                STATE_HALF_OPEN_PROBE_FREE,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                    } else {
+                        false
+                    }
+                });
+                Poll::Pending
+            }
+        }
     }
 }
 
@@ -287,7 +463,7 @@ pub enum CircuitBreakerDecision {
 #[derive(Clone)]
 pub struct CircuitBreakerGate {
     config: CircuitBreakerConfig,
-    state: Arc<Mutex<CircuitState>>,
+    state: Arc<SharedBreakerState>,
     route_id: Arc<str>,
     metrics: Option<Arc<dyn MetricsCollector>>,
 }
@@ -303,9 +479,7 @@ impl CircuitBreakerGate {
     ) -> Self {
         Self {
             config,
-            state: Arc::new(Mutex::new(CircuitState::Closed {
-                consecutive_failures: 0,
-            })),
+            state: Arc::new(SharedBreakerState::new()),
             route_id,
             metrics,
         }
@@ -319,77 +493,171 @@ impl CircuitBreakerGate {
     }
 
     pub fn before_call(&self) -> CircuitBreakerDecision {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        match *state {
-            CircuitState::Closed { .. } => CircuitBreakerDecision::Allow,
-            CircuitState::Open { opened_at } => {
-                if opened_at.elapsed() >= self.config.open_duration {
-                    tracing::info!("Circuit breaker gate: Open → HalfOpen");
-                    *state = CircuitState::HalfOpen {
-                        probe_admitted: true,
-                    };
-                    CircuitBreakerDecision::Allow
-                } else if let Some(ref fallback) = self.config.fallback {
-                    CircuitBreakerDecision::Fallback(fallback.clone())
-                } else {
-                    self.record_rejection();
-                    CircuitBreakerDecision::Reject(CamelError::CircuitOpen(
-                        "circuit breaker is open".into(),
-                    ))
-                }
-            }
-            CircuitState::HalfOpen { probe_admitted } => {
-                if probe_admitted {
-                    if let Some(ref fallback) = self.config.fallback {
-                        CircuitBreakerDecision::Fallback(fallback.clone())
-                    } else {
-                        self.record_rejection();
-                        CircuitBreakerDecision::Reject(CamelError::CircuitOpen(
-                            "circuit breaker is half-open (probe in flight)".into(),
-                        ))
+        loop {
+            match self.state.state.load(Ordering::Acquire) {
+                STATE_CLOSED => return CircuitBreakerDecision::Allow,
+                STATE_OPEN => match self
+                    .state
+                    .try_transition_to_half_open(self.config.open_duration)
+                {
+                    HalfOpenTransition::Transitioned => {
+                        tracing::info!("Circuit breaker gate: Open → HalfOpen");
+                        return CircuitBreakerDecision::Allow;
                     }
-                } else {
-                    *state = CircuitState::HalfOpen {
-                        probe_admitted: true,
-                    };
-                    CircuitBreakerDecision::Allow
+                    HalfOpenTransition::NotExpired => {
+                        if let Some(ref fallback) = self.config.fallback {
+                            return CircuitBreakerDecision::Fallback(fallback.clone());
+                        }
+                        self.record_rejection();
+                        return CircuitBreakerDecision::Reject(CamelError::CircuitOpen(
+                            "circuit breaker is open".into(),
+                        ));
+                    }
+                    HalfOpenTransition::LostRace => continue,
+                },
+                STATE_HALF_OPEN_PROBE_HELD => {
+                    if let Some(ref fallback) = self.config.fallback {
+                        return CircuitBreakerDecision::Fallback(fallback.clone());
+                    }
+                    self.record_rejection();
+                    return CircuitBreakerDecision::Reject(CamelError::CircuitOpen(
+                        "circuit breaker is half-open (probe in flight)".into(),
+                    ));
                 }
+                STATE_HALF_OPEN_PROBE_FREE => {
+                    // Admit ourselves as the probe.
+                    if self
+                        .state
+                        .state
+                        .compare_exchange(
+                            STATE_HALF_OPEN_PROBE_FREE,
+                            STATE_HALF_OPEN_PROBE_HELD,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return CircuitBreakerDecision::Allow;
+                    }
+                    // Lost the claim race — re-load and decide again.
+                }
+                _ => continue,
             }
         }
     }
 
     pub fn after_result(&self, result: &Result<Exchange, CamelError>) {
-        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let current_is_half_open = matches!(*st, CircuitState::HalfOpen { .. });
         match result {
             Ok(_) => {
-                if current_is_half_open {
-                    tracing::info!("Circuit breaker gate: HalfOpen → Closed");
+                let s = self.state.state.load(Ordering::Acquire);
+                if s == STATE_CLOSED {
+                    // Step 1 (bd rc-bnsxr) fast path: no RMW when already clean.
+                    if self.state.consecutive_failures.load(Ordering::Acquire) == 0 {
+                        return;
+                    }
+                    self.state.consecutive_failures.swap(0, Ordering::Release);
+                    return;
                 }
-                *st = CircuitState::Closed {
-                    consecutive_failures: 0,
-                };
+                if matches!(s, STATE_HALF_OPEN_PROBE_HELD | STATE_HALF_OPEN_PROBE_FREE) {
+                    // Recovery runs under the transition lock: the counter reset
+                    // and the Close CAS are serialized against every other
+                    // slow-path transition, so an observer of CLOSED never sees
+                    // a stale pre-open failure count.
+                    self.state.with_transition(|_opened_at| {
+                        // The CAS can only lose to the lockless probe admission
+                        // (FREE -> HELD): every other HALF-code mutation holds
+                        // this same lock. A lost recovery is retried so a
+                        // concurrent admission cannot silently drop a completed
+                        // probe's recovery; the log fires only when the
+                        // transition happened.
+                        let mut recovered = false;
+                        for _ in 0..3 {
+                            let s = self.state.state.load(Ordering::Acquire);
+                            if s != STATE_HALF_OPEN_PROBE_HELD && s != STATE_HALF_OPEN_PROBE_FREE {
+                                break; // state moved to OPEN/CLOSED — nothing to recover
+                            }
+                            if self
+                                .state
+                                .state
+                                .compare_exchange(
+                                    s,
+                                    STATE_CLOSED,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                )
+                                .is_ok()
+                            {
+                                self.state.consecutive_failures.swap(0, Ordering::Release);
+                                recovered = true;
+                                break;
+                            }
+                            // CAS lost only to the lockless probe admission
+                            // (FREE -> HELD); reload and retry.
+                        }
+                        if recovered {
+                            tracing::info!("Circuit breaker gate: HalfOpen → Closed");
+                        }
+                        recovered
+                    });
+                }
+                // s == STATE_OPEN: leave untouched — success does not close an
+                // open circuit.
             }
             Err(_) => {
-                if current_is_half_open {
-                    tracing::warn!("Circuit breaker gate: HalfOpen → Open (probe failed)");
-                    *st = CircuitState::Open {
-                        opened_at: Instant::now(),
-                    };
-                } else if let CircuitState::Closed {
-                    consecutive_failures,
-                } = &mut *st
-                {
-                    *consecutive_failures += 1;
-                    if *consecutive_failures >= self.config.failure_threshold {
-                        tracing::warn!(
-                            threshold = self.config.failure_threshold,
-                            "Circuit breaker gate: Closed → Open (failure threshold reached)"
+                let s = self.state.state.load(Ordering::Acquire);
+                if matches!(s, STATE_HALF_OPEN_PROBE_HELD | STATE_HALF_OPEN_PROBE_FREE) {
+                    self.state.with_transition(|opened_at| {
+                        let s = self.state.state.load(Ordering::Acquire);
+                        if !matches!(s, STATE_HALF_OPEN_PROBE_HELD | STATE_HALF_OPEN_PROBE_FREE) {
+                            return false;
+                        }
+                        tracing::warn!("Circuit breaker gate: HalfOpen → Open (probe failed)");
+                        *opened_at = Some(Instant::now());
+                        let _ = self.state.state.compare_exchange(
+                            s,
+                            STATE_OPEN,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
                         );
-                        *st = CircuitState::Open {
-                            opened_at: Instant::now(),
-                        };
-                    }
+                        true
+                    });
+                } else if s == STATE_CLOSED {
+                    // Slow-path transitions serialize on the opened_at lock:
+                    // qualification, timestamp publication, and the state CAS
+                    // hold the lock together, and recovery (probe success) takes
+                    // the same lock, so a threshold qualification can never be
+                    // split across an open/expiry/recovery cycle — the invariant
+                    // the old mutex gave per after_result call.
+                    self.state.with_transition(|opened_at| {
+                        let s = self.state.state.load(Ordering::Acquire);
+                        if s != STATE_CLOSED {
+                            return false;
+                        }
+                        let prev = self
+                            .state
+                            .consecutive_failures
+                            .fetch_add(1, Ordering::AcqRel);
+                        if prev + 1 >= self.config.failure_threshold {
+                            *opened_at = Some(Instant::now());
+                            if self
+                                .state
+                                .state
+                                .compare_exchange(
+                                    STATE_CLOSED,
+                                    STATE_OPEN,
+                                    Ordering::AcqRel,
+                                    Ordering::Acquire,
+                                )
+                                .is_ok()
+                            {
+                                tracing::warn!(
+                                    threshold = self.config.failure_threshold,
+                                    "Circuit breaker gate: Closed → Open (failure threshold reached)"
+                                );
+                            }
+                        }
+                        true
+                    });
                 }
             }
         }
@@ -402,9 +670,34 @@ impl CircuitBreakerGate {
 mod tests {
     use super::*;
     use camel_api::{BoxProcessor, BoxProcessorExt, Message};
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
+    use tokio::sync::Barrier;
     use tower::ServiceExt;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum ObservedState {
+        Closed { consecutive_failures: u32 },
+        Open,
+        HalfOpen { probe_admitted: bool },
+    }
+
+    fn observe(shared: &SharedBreakerState) -> ObservedState {
+        match shared.state.load(Ordering::Acquire) {
+            STATE_CLOSED => ObservedState::Closed {
+                consecutive_failures: shared.consecutive_failures.load(Ordering::Acquire),
+            },
+            STATE_OPEN => ObservedState::Open,
+            STATE_HALF_OPEN_PROBE_HELD => ObservedState::HalfOpen {
+                probe_admitted: true,
+            },
+            STATE_HALF_OPEN_PROBE_FREE => ObservedState::HalfOpen {
+                probe_admitted: false,
+            },
+            _ => unreachable!("unknown breaker state"),
+        }
+    }
 
     fn make_exchange() -> Exchange {
         Exchange::new(Message::new("test"))
@@ -462,13 +755,12 @@ mod tests {
         }
 
         // State should still be closed with 0 failures.
-        let state = svc.state.lock().unwrap();
-        match *state {
-            CircuitState::Closed {
-                consecutive_failures,
-            } => assert_eq!(consecutive_failures, 0),
-            _ => panic!("expected Closed state"),
-        }
+        assert_eq!(
+            observe(&svc.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            }
+        );
     }
 
     /// 2. Circuit opens after failure_threshold consecutive failures.
@@ -518,13 +810,12 @@ mod tests {
         assert!(result.is_ok(), "half-open probe should succeed");
 
         // After successful probe, circuit should be back to Closed.
-        let state = svc.state.lock().unwrap();
-        match *state {
-            CircuitState::Closed {
-                consecutive_failures,
-            } => assert_eq!(consecutive_failures, 0),
-            _ => panic!("expected Closed state after successful half-open probe"),
-        }
+        assert_eq!(
+            observe(&svc.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            }
+        );
     }
 
     /// 4. Half-open failure reopens circuit.
@@ -549,11 +840,7 @@ mod tests {
         assert!(result.is_err());
 
         // Circuit should be open again.
-        let state = svc.state.lock().unwrap();
-        match *state {
-            CircuitState::Open { .. } => {} // expected
-            _ => panic!("expected Open state after half-open failure"),
-        }
+        assert_eq!(observe(&svc.state), ObservedState::Open);
     }
 
     /// 5. Intermittent failures below threshold don't open circuit.
@@ -586,11 +873,7 @@ mod tests {
         }
 
         // Circuit should still be closed because successes reset the counter.
-        let state = svc.state.lock().unwrap();
-        match *state {
-            CircuitState::Closed { .. } => {} // expected
-            _ => panic!("expected circuit to remain Closed"),
-        }
+        assert!(matches!(observe(&svc.state), ObservedState::Closed { .. }));
     }
 
     #[tokio::test]
@@ -811,5 +1094,439 @@ mod tests {
             Poll::Ready(Err(CamelError::CircuitOpen(_))) => {} // expected
             other => panic!("expected CircuitOpen error on 2nd probe, got {other:?}"),
         }
+    }
+
+    // ── bd rc-bnsxr item 3: deterministic concurrency coverage ────────────
+
+    /// Inner service for the D-M1 release dance: its `poll_ready` is gated on
+    /// a flag the test flips, and its first `call` fails so the breaker can be
+    /// tripped through the normal failure path.
+    #[derive(Clone)]
+    struct ProbeReadyService {
+        ready: Arc<AtomicBool>,
+        calls: Arc<AtomicU32>,
+    }
+
+    impl Service<Exchange> for ProbeReadyService {
+        type Response = Exchange;
+        type Error = CamelError;
+        type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), CamelError>> {
+            if self.ready.load(Ordering::Acquire) {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn call(&mut self, _exchange: Exchange) -> Self::Future {
+            let is_trip = self.calls.fetch_add(1, Ordering::AcqRel) == 0;
+            Box::pin(async move {
+                if is_trip {
+                    Err(CamelError::ProcessorError("trip".into()))
+                } else {
+                    Ok(make_exchange())
+                }
+            })
+        }
+    }
+
+    /// 1. A concurrent success storm never observes a failure and leaves the
+    /// circuit Closed with a clean counter.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_successes_stay_closed_and_clean() {
+        const TASKS: usize = 8;
+        const ITERS: usize = 5_000;
+
+        let gate = gate_with(
+            CircuitBreakerConfig::new()
+                .failure_threshold(8)
+                .open_duration(Duration::from_secs(3_600)),
+        );
+        let barrier = Arc::new(Barrier::new(TASKS));
+        let mut handles = Vec::with_capacity(TASKS);
+
+        for _ in 0..TASKS {
+            let gate = gate.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(5), barrier.wait())
+                    .await
+                    .expect("barrier wait must not deadlock");
+                for i in 0..ITERS {
+                    match gate.before_call() {
+                        CircuitBreakerDecision::Allow => {}
+                        CircuitBreakerDecision::Fallback(_) => panic!(
+                            "no fallback configured, yet iteration {i} got Fallback: state={:?}",
+                            observe(&gate.state)
+                        ),
+                        CircuitBreakerDecision::Reject(err) => panic!(
+                            "success storm iteration {i} was rejected: {err:?}, state={:?}",
+                            observe(&gate.state)
+                        ),
+                    }
+                    gate.after_result(&Ok(make_exchange()));
+                }
+            }));
+        }
+        for handle in handles {
+            handle
+                .await
+                .expect("success storm task panicked before joining");
+        }
+
+        assert_eq!(
+            observe(&gate.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            },
+            "40k concurrent successes must never trip the breaker or dirty the counter"
+        );
+    }
+
+    /// 2. Under a barrier-start race, exactly one caller claims the half-open
+    /// probe; every other concurrent caller is rejected. Repeats 25 recovery
+    /// cycles to shake scheduling skew.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_before_call_admits_exactly_one_probe() {
+        const TASKS: usize = 8;
+        const ROUNDS: usize = 25;
+
+        let open_duration = Duration::from_millis(10);
+        let gate = gate_with(
+            CircuitBreakerConfig::new()
+                .failure_threshold(1)
+                .open_duration(open_duration),
+        );
+
+        for round in 0..ROUNDS {
+            gate.after_result(&Err::<Exchange, CamelError>(CamelError::ProcessorError(
+                format!("trip {round}"),
+            )));
+            assert_eq!(
+                observe(&gate.state),
+                ObservedState::Open,
+                "round {round}: a single failure must trip the threshold(1) breaker"
+            );
+
+            tokio::time::sleep(open_duration + Duration::from_millis(10)).await; // allow-test-sleep: expiry timer is the behavior under test
+
+            let barrier = Arc::new(Barrier::new(TASKS));
+            let mut handles = Vec::with_capacity(TASKS);
+            for _ in 0..TASKS {
+                let gate = gate.clone();
+                let barrier = Arc::clone(&barrier);
+                handles.push(tokio::spawn(async move {
+                    tokio::time::timeout(Duration::from_secs(5), barrier.wait())
+                        .await
+                        .expect("barrier wait must not deadlock");
+                    gate.before_call()
+                }));
+            }
+
+            let mut allows = 0usize;
+            let mut rejects = 0usize;
+            for handle in handles {
+                match handle.await.expect("probe race task panicked") {
+                    CircuitBreakerDecision::Allow => allows += 1,
+                    CircuitBreakerDecision::Reject(_) => rejects += 1,
+                    CircuitBreakerDecision::Fallback(_) => {
+                        panic!("round {round}: no fallback is configured")
+                    }
+                }
+            }
+            assert_eq!(
+                allows, 1,
+                "round {round}: exactly one concurrent caller may be admitted as the probe"
+            );
+            assert_eq!(
+                rejects, 7,
+                "round {round}: every non-probe caller must be rejected"
+            );
+            assert_eq!(
+                observe(&gate.state),
+                ObservedState::HalfOpen {
+                    probe_admitted: true
+                },
+                "round {round}: the admitted probe must hold the single probe slot"
+            );
+
+            // Resolve the probe so the next round starts from Closed.
+            gate.after_result(&Ok(make_exchange()));
+            assert_eq!(
+                observe(&gate.state),
+                ObservedState::Closed {
+                    consecutive_failures: 0
+                },
+                "round {round}: the successful probe must close the circuit"
+            );
+        }
+    }
+
+    /// 3. Exactly-threshold concurrent failures must all be counted: no lost
+    /// increment may leave the circuit Closed, and no extra transition may
+    /// double-open it. A failing half-open probe then reopens it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_failures_open_exactly_at_threshold() {
+        // Phase A pins threshold atomicity (exactly-threshold concurrent failures
+        // must open; a lost increment would leave it Closed) behind a 1-hour open
+        // window so the post-join assertions carry no timing deadline. Phase B
+        // covers probe-fail reopen on a fresh short-expiry gate, single-tasked.
+
+        // Phase A — threshold qualification, deterministic.
+        const TASKS: usize = 8;
+        const PER_TASK: usize = 8;
+        const THRESHOLD: u32 = 64;
+
+        let gate_a = gate_with(
+            CircuitBreakerConfig::new()
+                .failure_threshold(THRESHOLD)
+                .open_duration(Duration::from_secs(60 * 60)),
+        );
+        let barrier = Arc::new(Barrier::new(TASKS));
+        let mut handles = Vec::with_capacity(TASKS);
+
+        for _ in 0..TASKS {
+            let gate = gate_a.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(5), barrier.wait())
+                    .await
+                    .expect("barrier wait must not deadlock");
+                for _ in 0..PER_TASK {
+                    gate.after_result(&Err::<Exchange, CamelError>(CamelError::ProcessorError(
+                        "boom".into(),
+                    )));
+                }
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("threshold storm task panicked");
+        }
+
+        assert_eq!(
+            observe(&gate_a.state),
+            ObservedState::Open,
+            "exactly {THRESHOLD} concurrent failures must open the circuit (no lost increment)"
+        );
+        assert!(
+            matches!(gate_a.before_call(), CircuitBreakerDecision::Reject(_)),
+            "a freshly opened circuit must reject before expiry"
+        );
+
+        // Phase B — probe-fail reopen on a fresh short-expiry gate, no concurrency.
+        let open_duration = Duration::from_millis(10);
+        let gate_b = gate_with(
+            CircuitBreakerConfig::new()
+                .failure_threshold(1)
+                .open_duration(open_duration),
+        );
+        gate_b.after_result(&Err::<Exchange, CamelError>(CamelError::ProcessorError(
+            "boom".into(),
+        )));
+        assert_eq!(
+            observe(&gate_b.state),
+            ObservedState::Open,
+            "a single failure must trip a threshold-1 circuit"
+        );
+
+        tokio::time::sleep(open_duration + Duration::from_millis(10)).await; // allow-test-sleep: expiry timer is the behavior under test
+        assert!(
+            matches!(gate_b.before_call(), CircuitBreakerDecision::Allow),
+            "an expired circuit must admit the probe"
+        );
+        gate_b.after_result(&Err::<Exchange, CamelError>(CamelError::ProcessorError(
+            "probe".into(),
+        )));
+        assert_eq!(
+            observe(&gate_b.state),
+            ObservedState::Open,
+            "a failed probe must reopen the circuit"
+        );
+    }
+
+    /// 4. Expiry reopens the probe path exactly once, and expiry must never
+    /// re-open a circuit that a successful probe already closed.
+    #[tokio::test]
+    async fn expiry_reopens_the_probe_path() {
+        let open_duration = Duration::from_millis(20);
+        let gate = gate_with(
+            CircuitBreakerConfig::new()
+                .failure_threshold(1)
+                .open_duration(open_duration),
+        );
+
+        gate.after_result(&Err::<Exchange, CamelError>(CamelError::ProcessorError(
+            "boom".into(),
+        )));
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Reject(_)),
+            "an open circuit must reject before expiry"
+        );
+
+        tokio::time::sleep(Duration::from_millis(50)).await; // allow-test-sleep: expiry timer is the behavior under test
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Allow),
+            "an expired circuit must admit the first caller as the probe"
+        );
+        assert_eq!(
+            observe(&gate.state),
+            ObservedState::HalfOpen {
+                probe_admitted: true
+            },
+            "the expiry winner must hold the probe slot"
+        );
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Reject(_)),
+            "the single-probe gate must reject an immediate second caller"
+        );
+
+        gate.after_result(&Ok(make_exchange()));
+        assert_eq!(
+            observe(&gate.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            },
+            "a successful probe must close the circuit"
+        );
+
+        // No failures: waiting past open_duration again must not re-open it.
+        tokio::time::sleep(Duration::from_millis(50)).await; // allow-test-sleep: expiry timer is the behavior under test
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Allow),
+            "expiry must never re-open a Closed circuit"
+        );
+        assert_eq!(
+            observe(&gate.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            },
+            "the circuit must stay Closed after the probe recovery"
+        );
+    }
+
+    /// 5. A half-open success closes the circuit and resets the counter, and
+    /// further successes keep it Closed.
+    #[tokio::test]
+    async fn success_after_half_open_closes_and_resets_counter() {
+        let open_duration = Duration::from_millis(10);
+        let gate = gate_with(
+            CircuitBreakerConfig::new()
+                .failure_threshold(2)
+                .open_duration(open_duration),
+        );
+
+        for _ in 0..2 {
+            gate.after_result(&Err::<Exchange, CamelError>(CamelError::ProcessorError(
+                "boom".into(),
+            )));
+        }
+        assert_eq!(
+            observe(&gate.state),
+            ObservedState::Open,
+            "threshold(2) must open after two failures"
+        );
+
+        tokio::time::sleep(Duration::from_millis(20)).await; // allow-test-sleep: expiry timer is the behavior under test
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Allow),
+            "an expired circuit must admit the probe"
+        );
+        gate.after_result(&Ok(make_exchange()));
+        assert_eq!(
+            observe(&gate.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            },
+            "a successful probe must close the circuit and reset the counter"
+        );
+
+        for _ in 0..100 {
+            gate.after_result(&Ok(make_exchange()));
+        }
+        assert_eq!(
+            observe(&gate.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            },
+            "further successes must keep the recovered circuit Closed with a zeroed counter"
+        );
+    }
+
+    /// 6. D-M1 release dance: a `poll_ready` Pending from the inner service
+    /// releases the probe claim so a re-poll can re-claim it.
+    #[tokio::test]
+    async fn poll_ready_pending_releases_the_probe_claim() {
+        let open_duration = Duration::from_millis(10);
+        let ready = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicU32::new(0));
+        let layer = CircuitBreakerLayer::new(
+            CircuitBreakerConfig::new()
+                .failure_threshold(1)
+                .open_duration(open_duration),
+            Arc::from("test"),
+            None,
+        );
+        let mut svc = layer.layer(ProbeReadyService {
+            ready: Arc::clone(&ready),
+            calls: Arc::clone(&calls),
+        });
+
+        // Trip the breaker through the ordinary failure path. The inner
+        // service's first call fails; readiness is irrelevant to `call`.
+        let trip = svc.call(make_exchange()).await;
+        assert!(trip.is_err(), "the first inner call must fail to trip");
+        assert_eq!(
+            observe(&svc.state),
+            ObservedState::Open,
+            "one failed call must trip the threshold(1) breaker"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await; // allow-test-sleep: expiry timer is the behavior under test
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // First poll: expiry claims the probe, inner says Pending, so the
+        // claim must be released back to FREE.
+        let first = Pin::new(&mut svc).poll_ready(&mut cx);
+        assert!(
+            matches!(first, Poll::Pending),
+            "not-ready inner service must surface Pending, got {first:?}"
+        );
+        assert_eq!(
+            observe(&svc.state),
+            ObservedState::HalfOpen {
+                probe_admitted: false
+            },
+            "Pending must release the probe claim (HELD -> FREE)"
+        );
+
+        // Re-poll once the inner service is ready: the claim is re-taken and
+        // the breaker admits the probe.
+        ready.store(true, Ordering::Release);
+        let second = Pin::new(&mut svc).poll_ready(&mut cx);
+        assert!(
+            matches!(second, Poll::Ready(Ok(()))),
+            "a ready inner service must let the probe proceed, got {second:?}"
+        );
+        assert_eq!(
+            observe(&svc.state),
+            ObservedState::HalfOpen {
+                probe_admitted: true
+            },
+            "the re-poll must re-claim the probe slot (FREE -> HELD)"
+        );
+
+        // Complete the probe: the second inner call succeeds and closes.
+        let result = svc.call(make_exchange()).await;
+        assert!(result.is_ok(), "the half-open probe must succeed");
+        assert_eq!(
+            observe(&svc.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            },
+            "a successful probe must close the circuit and reset the counter"
+        );
     }
 }
