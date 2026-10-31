@@ -95,6 +95,38 @@ Set an explicit method when the source is not HTTP. Append `httpMethod=GET` to t
 - to: "http://wfs.example.org/ows"
 ```
 
+### URL header inheritance and bridgeEndpoint
+
+The HTTP consumer sets `CamelHttpMethod`, `CamelHttpPath`, and `CamelHttpQuery` on the inbound Exchange. An `http:` producer in the same Route reads these headers to build the outbound request. This inheritance is the default state (`bridgeEndpoint=false`).
+
+The inherited path appends to the endpoint path. This route sends the request to `/_actions/contact/_forms/contact`:
+
+```yaml
+routes:
+  - from: "http://0.0.0.0:8080/_forms/contact"
+    steps:
+      - to: "http://host/_actions/contact"
+```
+
+Remove the header before the producer call to keep the configured path:
+
+```yaml
+routes:
+  - from: "http://0.0.0.0:8080/_forms/contact"
+    steps:
+      - remove_header:
+          key: CamelHttpPath
+      - to: "http://host/_actions/contact"
+```
+
+The request path is now `/_actions/contact`. The `remove_header` step takes the exact header name. It has no wildcard support. Remove `CamelHttpQuery` in the same way when the inherited query is unwanted.
+
+`bridgeEndpoint=true` is the other option. The producer then ignores `CamelHttpUri`, `CamelHttpPath`, and `CamelHttpQuery`, and sends the request to the endpoint base URL with only the endpoint query. Bridging also skips the configured auth headers, the configured `userAgent` header, and the OTel W3C trace-context headers when the `otel` feature is enabled. It is not a drop-in proxy switch. When only one header is unwanted, prefer `remove_header`.
+
+The Producer resolves the trio in this order: the `httpMethod` option beats `CamelHttpMethod`. In the no-override case, endpoint query pairs beat `CamelHttpQuery` pairs on collision. With a `CamelHttpUri` override, the override URI's own query is the higher-precedence source and the endpoint query does not ride. `CamelHttpPath` appends to the configured path, or to a `CamelHttpUri` override path.
+
+Default path inheritance and `bridgeEndpoint=true` semantics are Apache Camel parity. The `CamelHttpQuery` composition rules are a rust-camel divergence, documented in [ADR-0071](https://github.com/kennycallado/rust-camel/blob/main/docs/adr/0071-http-outbound-url-policy.md). Neither is a defect. The component emits no runtime warning for it.
+
 ## Direction choice
 
 A route that serves an API uses HTTP as a source. A route that calls another service uses HTTP as a sink. A route that does both needs two Endpoints, one in each position. The second Endpoint belongs to a second Route. The component supports both directions because the same crate owns the connection plumbing. Each Endpoint still picks one direction at creation time.

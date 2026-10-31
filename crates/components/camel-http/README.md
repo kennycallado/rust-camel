@@ -58,6 +58,7 @@ https://host:port/path[?options]
 | `allowCleartext` | `false` | Allow cleartext `http://` to public targets (ADR-0081 transport consent) |
 | `blockedHosts` | Global default | Comma-separated blocked hosts |
 | `maxBodySize` | Global default | Max response body size (bytes) |
+| `bridgeEndpoint` | `false` | When `true`, ignore exchange URL headers (`CamelHttpUri`, `CamelHttpPath`, `CamelHttpQuery`) and send to the endpoint URI as-is. Also skips configured auth/`userAgent` headers and OTel trace-context injection. See [URL header inheritance and bridgeEndpoint](#url-header-inheritance-and-bridgeendpoint). |
 
 > **Connection-level settings** (`connect_timeout_ms`, `pool_max_idle_per_host`, `pool_idle_timeout_ms`, `follow_redirects`) are configured globally in `Camel.toml` and cannot be overridden per URI. See [Global Configuration](#global-configuration).
 
@@ -118,6 +119,40 @@ let route = RouteBuilder::from("direct:proxy")
     .build()?;
 ```
 
+### URL header inheritance and bridgeEndpoint
+
+The HTTP consumer sets `CamelHttpMethod`, `CamelHttpPath`, and `CamelHttpQuery` on each inbound Exchange. When the same Exchange reaches an `http:` producer, the producer reads these headers to build the outbound request.
+
+The `bridgeEndpoint` option defaults to `false`. In the default mode:
+
+- `CamelHttpPath` appends to the endpoint URI path. A `/` separator is inserted when needed. If `CamelHttpUri` is set, the path appends to the override URI path instead.
+- `CamelHttpQuery` composes with the endpoint query. In the no-override case, endpoint pairs come first and win collisions. Header pairs append for keys that the higher-precedence source does not contain. With a `CamelHttpUri` override, the override URI's own query is the higher-precedence source and the endpoint query does not ride (see [ADR-0071](../../../docs/adr/0071-http-outbound-url-policy.md)).
+- `CamelHttpMethod` overrides the method unless the `httpMethod` URI option is set. The full order is the `httpMethod` option, then the `CamelHttpMethod` header, then the body fallback (empty body selects `GET`, non-empty body selects `POST`).
+
+Path inheritance follows Apache Camel semantics. A route entered at `/_forms/contact` that calls `to: http://host/_actions/contact` sends the request to `/_actions/contact/_forms/contact`.
+
+To drop one inherited header, remove it before the producer call:
+
+```yaml
+- remove_header:
+    key: CamelHttpPath
+- to: "http://host/_actions/contact"
+```
+
+`remove_header` takes the exact header name and has no wildcard support. Remove `CamelHttpQuery` in a second step when the inherited query is also unwanted.
+
+With `bridgeEndpoint=true`, the producer ignores all exchange URL headers (`CamelHttpUri`, `CamelHttpPath`, `CamelHttpQuery`):
+
+```rust
+.to("http://host/endpoint?bridgeEndpoint=true")
+```
+
+The request goes to the endpoint base URL with only the endpoint query. `bridgeEndpoint` is a consumed option and adds nothing to the wire query. Bridging also skips the configured auth headers (`authMethod=Basic` or `Bearer`), the configured `userAgent` header, and the OTel W3C trace-context headers when the `otel` feature is enabled. It suits a bridge to a full URL, but it is not a drop-in proxy switch.
+
+When only one header is unwanted, prefer the `remove_header` step. Bridging also disables auth, `userAgent`, and OTel injection, and it ignores `CamelHttpQuery`.
+
+Default path inheritance and `bridgeEndpoint=true` semantics are Apache Camel parity. The `CamelHttpQuery` composition rules are a rust-camel divergence, documented in [ADR-0071](../../../docs/adr/0071-http-outbound-url-policy.md). Neither is a defect. The component emits no runtime warning because a warning would fire on every normal producer call.
+
 ### HTTPS
 
 ```rust
@@ -150,9 +185,9 @@ let route = RouteBuilder::from("timer:secure")
 | Header | Description |
 |--------|-------------|
 | `CamelHttpUri` | Override target URL |
-| `CamelHttpPath` | Append to base URL path |
-| `CamelHttpQuery` | Composes with the endpoint query: header pairs append for keys absent from the higher-precedence source (override URI query first, else endpoint query); collisions keep the higher-precedence pair |
-| `CamelHttpMethod` | Override HTTP method |
+| `CamelHttpPath` | Append to base URL path. The http consumer sets it on the inbound Exchange. Appends to the `CamelHttpUri` override path when that header is set. Ignored when `bridgeEndpoint=true`. See [URL header inheritance and bridgeEndpoint](#url-header-inheritance-and-bridgeendpoint). |
+| `CamelHttpQuery` | Composes with the endpoint query: header pairs append for keys absent from the higher-precedence source (override URI query first, else endpoint query); collisions keep the higher-precedence pair. The http consumer sets it on the inbound Exchange. Ignored when `bridgeEndpoint=true`. See [URL header inheritance and bridgeEndpoint](#url-header-inheritance-and-bridgeendpoint). |
+| `CamelHttpMethod` | Override HTTP method. The http consumer sets it on the inbound Exchange. The `httpMethod` URI option takes precedence. See [URL header inheritance and bridgeEndpoint](#url-header-inheritance-and-bridgeendpoint). |
 
 Outbound URL composition and the `allowedUriHosts` override-host fence follow [ADR-0071](../../../docs/adr/0071-http-outbound-url-policy.md).
 

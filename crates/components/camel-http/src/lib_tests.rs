@@ -1457,6 +1457,126 @@ async fn producer_honours_skip_request_headers() {
 }
 
 #[tokio::test]
+async fn producer_default_inherits_camel_http_path() {
+    use tower::ServiceExt;
+
+    let (url, captured, _handle) = start_request_capturing_server().await;
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}/_actions/contact?allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpPath",
+        serde_json::Value::String("/_forms/contact".to_string()),
+    );
+
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("no outbound request captured");
+    let request_line = request.lines().next().unwrap_or_default();
+    assert_eq!(
+        request_line, "GET /_actions/contact/_forms/contact HTTP/1.1",
+        "expected inherited CamelHttpPath appended to configured path on wire\n{request}"
+    );
+}
+
+#[tokio::test]
+async fn producer_without_camel_http_path_uses_configured_path() {
+    use tower::ServiceExt;
+
+    let (url, captured, _handle) = start_request_capturing_server().await;
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}/_actions/contact?allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpPath",
+        serde_json::Value::String("/_forms/contact".to_string()),
+    );
+    // Exactly what the declarative remove_header step does: exact-key remove (camel_processor::RemoveHeader removes the same key; its own crate pins the step-level behavior).
+    exchange.input.headers.remove("CamelHttpPath");
+
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("no outbound request captured");
+    let request_line = request.lines().next().unwrap_or_default();
+    assert_eq!(
+        request_line, "GET /_actions/contact HTTP/1.1",
+        "expected configured path alone when CamelHttpPath is absent\n{request}"
+    );
+}
+
+#[tokio::test]
+async fn producer_bridge_endpoint_true_ignores_path_and_auth() {
+    use tower::ServiceExt;
+
+    let (url, captured, _handle) = start_request_capturing_server().await;
+    let ctx = test_producer_ctx();
+    let component = HttpComponent::new();
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!(
+                "{url}/_actions/contact?allowInternal=true&bridgeEndpoint=true&authMethod=Basic&authUsername=u&authPassword=p"
+            ),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let mut exchange = Exchange::new(Message::default());
+    exchange.input.set_header(
+        "CamelHttpPath",
+        serde_json::Value::String("/_forms/contact".to_string()),
+    );
+
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_ok(), "producer call failed: {:?}", result);
+
+    let request = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("no outbound request captured");
+    let request_line = request.lines().next().unwrap_or_default();
+    assert_eq!(
+        request_line, "GET /_actions/contact HTTP/1.1",
+        "bridgeEndpoint=true must ignore CamelHttpPath and use configured path\n{request}"
+    );
+    let lower = request.to_ascii_lowercase();
+    assert!(
+        !lower.lines().any(|l| l.starts_with("authorization:")),
+        "bridgeEndpoint=true must not inject configured Basic auth\n{request}"
+    );
+}
+
+#[tokio::test]
 async fn producer_stringifies_scalar_header_values_on_wire() {
     use tower::ServiceExt;
 
@@ -5087,6 +5207,40 @@ mod otel_tests {
     }
 
     #[tokio::test]
+    async fn test_producer_bridge_endpoint_true_does_not_inject_traceparent() {
+        let (url, _handle) = start_test_server_with_header_capture().await;
+        let ctx = test_producer_ctx();
+
+        let component = HttpComponent::new();
+        let endpoint_ctx = NoOpComponentContext;
+        let endpoint = component
+            .create_endpoint(
+                &format!("{url}/api?allowInternal=true&bridgeEndpoint=true"),
+                &endpoint_ctx,
+            )
+            .unwrap();
+        let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+        // Create exchange with an OTel context by extracting from a traceparent header
+        let mut exchange = Exchange::new(Message::default());
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "traceparent".to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        camel_otel::extract_into_exchange(&mut exchange, &headers);
+
+        let result = producer.oneshot(exchange).await;
+        assert!(result.is_ok(), "producer call failed: {:?}", result);
+        let result = result.expect("producer result checked above");
+
+        assert!(
+            result.input.header("X-Received-Traceparent").is_none(),
+            "bridgeEndpoint=true must not inject OTel trace headers"
+        );
+    }
+
+    #[tokio::test]
     async fn test_consumer_extracts_traceparent_header() {
         use camel_component_api::{ConsumerContext, ExchangeEnvelope};
 
@@ -5258,20 +5412,27 @@ mod otel_tests {
     /// Test server that captures and echoes back the traceparent header
     async fn start_test_server_with_header_capture() -> (String, HttpTestServer) {
         let server = HttpTestServer::start(Responder::route(|request| {
-            // Extract traceparent header from request
+            // Extract traceparent header from request. Echo it only when present, so
+            // the response header signals real injection rather than an empty value.
             let traceparent = request
                 .headers
                 .iter()
                 .find(|(name, _)| name == "traceparent")
-                .map(|(_, value)| value.clone())
-                .unwrap_or_default();
+                .map(|(_, value)| value.clone());
 
-            let body = format!(r#"{{"echo":"ok","traceparent":"{}"}}"#, traceparent);
+            let body = format!(
+                r#"{{"echo":"ok","traceparent":"{}"}}"#,
+                traceparent.as_deref().unwrap_or_default()
+            );
+            let echo_header = traceparent
+                .as_deref()
+                .map(|value| format!("X-Received-Traceparent: {value}\r\n"))
+                .unwrap_or_default();
             Response::raw(
                 format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Received-Traceparent: {}\r\n\r\n{}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}\r\n{}",
                     body.len(),
-                    traceparent,
+                    echo_header,
                     body
                 )
                 .into_bytes(),
