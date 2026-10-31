@@ -1665,41 +1665,48 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
     // request meant for an exact `GET /api/users`). Intra-REST method
     // disambiguation is handled inside `match_endpoint`, not by this
     // ordering. Review C2.
-    let api_sender = {
-        let inner = state.registry.inner.read().await;
-        inner.api_routes.get(&path).cloned()
-    }; // lock released BEFORE any IO
-
-    let (rest_sender, path_params) = if api_sender.is_some() {
+    // One snapshot load serves exact, REST, and the static fallback, so a
+    // single request cannot straddle two registry generations.
+    let snapshot = state.registry.inner.load();
+    let api_sender = snapshot.api_routes.get(&path).cloned();
+    let rest_outcome = if api_sender.is_some() {
         // Exact legacy match won — skip the templated scan entirely.
-        (None, Default::default())
+        None
     } else {
-        let inner = state.registry.inner.read().await;
-        match rest_match::match_endpoint(&method, &path, &inner.rest_endpoints) {
-            rest_match::MatchOutcome::Found(m) => (Some(m.payload), m.path_params),
-            rest_match::MatchOutcome::Ambiguous => {
-                // Ambiguous registration should have been rejected at
-                // lowering time (rest.rs). Reaching here means two
-                // equal-specificity templates matched one request —
-                // surface a loud error rather than a silent 404. Review C3.
-                // log-policy: handler-owned
-                tracing::warn!(
-                    method = %method,
-                    path = %path,
-                    "ambiguous REST template match — returning 500"
-                );
-                return Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(AxumBody::from("Internal Server Error"))
-                    .expect("infallible"); // allow-unwrap
-            }
-            rest_match::MatchOutcome::NotFound => (None, Default::default()),
+        Some(rest_match::match_endpoint(
+            &method,
+            &path,
+            &snapshot.rest_endpoints,
+        ))
+    };
+
+    let (rest_sender, path_params) = match rest_outcome {
+        None => (None, Default::default()),
+        Some(rest_match::MatchOutcome::Found(m)) => (Some(m.payload), m.path_params),
+        Some(rest_match::MatchOutcome::Ambiguous) => {
+            // Ambiguous registration should have been rejected at
+            // lowering time (rest.rs). Reaching here means two
+            // equal-specificity templates matched one request —
+            // surface a loud error rather than a silent 404. Review C3.
+            // log-policy: handler-owned
+            tracing::warn!(
+                method = %method,
+                path = %path,
+                "ambiguous REST template match — returning 500"
+            );
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(AxumBody::from("Internal Server Error"))
+                .expect("infallible"); // allow-unwrap
         }
-    }; // lock released BEFORE any IO
+        Some(rest_match::MatchOutcome::NotFound) => (None, Default::default()),
+    };
 
     let sender = api_sender.or(rest_sender);
 
     if let Some(sender) = sender {
+        // API path owns its sender now; release the snapshot BEFORE any IO.
+        drop(snapshot);
         let query = req.uri().query().unwrap_or("").to_string();
         let headers = req.headers().clone();
 
@@ -1834,8 +1841,10 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
                 .expect("infallible"), // allow-unwrap
         }
     } else {
-        // No API route matched — try static mounts
-        static_dispatch::dispatch_static(&state, req, &path).await
+        // No API route matched — try static mounts. The guard is held across
+        // the static ServeDir awaits so mount selection and serving observe
+        // one registry generation; it is an Arc reference, not a lock.
+        static_dispatch::dispatch_static_with(&snapshot, req, &path).await
     }
 }
 

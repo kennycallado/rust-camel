@@ -1841,6 +1841,7 @@ dependencies = [
 name = "camel-component-http"
 version = "0.62.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "axum",
  "axum-server",
@@ -1852,6 +1853,7 @@ dependencies = [
  "camel-core",
  "camel-language-api",
  "camel-otel",
+ "criterion",
  "flate2",
  "futures",
  "http",

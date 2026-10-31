@@ -464,14 +464,14 @@ mod tests {
         registry.register_static_mount(mount).await.unwrap();
 
         // Verify registered
-        let inner = registry.inner.read().await;
+        let snapshot = registry.inner.load();
         assert_eq!(
-            inner.mounts.len(),
+            snapshot.mounts.len(),
             1,
             "Expected one static mount registered"
         );
-        assert_eq!(inner.mounts[0].dir, canonical_dir);
-        assert_eq!(inner.mounts[0].mount_path, "/");
+        assert_eq!(snapshot.mounts[0].dir, canonical_dir);
+        assert_eq!(snapshot.mounts[0].mount_path, "/");
     }
 
     #[allow(clippy::await_holding_lock)]
@@ -526,17 +526,17 @@ mod tests {
 
         // Verify registered
         {
-            let inner = registry.inner.read().await;
-            assert_eq!(inner.mounts.len(), 1);
+            let snapshot = registry.inner.load();
+            assert_eq!(snapshot.mounts.len(), 1);
         }
 
         // Unregister by mount_path
         registry.unregister_static_mount("/").await;
 
         // Verify unregistered
-        let inner = registry.inner.read().await;
+        let snapshot = registry.inner.load();
         assert_eq!(
-            inner.mounts.len(),
+            snapshot.mounts.len(),
             0,
             "Expected static mount to be unregistered"
         );

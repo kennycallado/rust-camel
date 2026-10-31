@@ -8,8 +8,11 @@ use axum::response::IntoResponse;
 use tower::ServiceExt as TowerServiceExt;
 use tower_http::services::ServeDir;
 
+#[cfg(test)]
 use crate::AppState;
+use crate::registry::HttpRouteRegistryInner;
 use crate::registry::MountMode;
+use crate::registry::StaticMount;
 
 /// Check that `path` starts with `prefix` at a segment boundary.
 /// Mount at `/asset` must NOT match `/assets/file.txt`.
@@ -29,8 +32,25 @@ fn prefix_matches_segment(path: &str, prefix: &str) -> bool {
 /// wins). For each matching mount, ServeDir is tried first; if that fails and
 /// the mount is an SPA mount, the SPA fallback is attempted. Error pages are
 /// scoped to the best-matching mount — not cross-contaminated from other mounts.
+#[cfg(test)]
 pub(crate) async fn dispatch_static(
     state: &AppState,
+    req: Request,
+    path: &str,
+) -> axum::response::Response {
+    let snapshot = state.registry.inner.load();
+    dispatch_static_with(&snapshot, req, path).await
+}
+
+/// Serve a static request against a caller-supplied registry snapshot.
+///
+/// The caller loads the snapshot once per request and passes the same Arc
+/// reference here, so mount selection, ServeDir serving, and the root
+/// error-page fallback all observe one consistent registry generation. The
+/// reference is an `Arc`, not a lock: writers never block readers and vice
+/// versa.
+pub(crate) async fn dispatch_static_with(
+    inner: &HttpRouteRegistryInner,
     req: Request,
     path: &str,
 ) -> axum::response::Response {
@@ -43,52 +63,37 @@ pub(crate) async fn dispatch_static(
     // Extract request parts once so we can rebuild for each mount attempt
     let (parts, _body) = req.into_parts();
 
-    // Collect mount info while lock is held
-    let mounts: Vec<_> = {
-        let inner = state.registry.inner.read().await;
-        inner
-            .mounts
-            .iter()
-            .map(|m| {
-                (
-                    m.mount_path.clone(),
-                    m.mode,
-                    m.serve_dir.clone(),
-                    m.cache_control.clone(),
-                    m.error_pages.clone(),
-                )
-            })
-            .collect()
-    }; // lock released
-
+    // One caller-supplied snapshot serves both mount selection and the root
+    // error-page fallback; it holds no lock, so readers never block a
+    // registering writer.
     // Sort mounts by mount_path length DESC (longest prefix wins)
-    let mut indexed: Vec<_> = mounts.into_iter().collect();
-    indexed.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
+    let mut indexed: Vec<&StaticMount> = inner.mounts.iter().collect();
+    indexed.sort_by_key(|mount| std::cmp::Reverse(mount.mount_path.len()));
 
     // Track best-matching mount for error page scoping (Fix 3)
-    let mut best_match: Option<(String, HashMap<u16, PathBuf>)> = None;
+    let mut best_match: Option<&StaticMount> = None;
 
     // Try each mount — longest prefix first
-    for (mp, mode, serve_dir, cache_control, error_pages) in &indexed {
-        if !prefix_matches_segment(path, mp.as_str()) {
+    for mount in indexed {
+        if !prefix_matches_segment(path, mount.mount_path.as_str()) {
             continue;
         }
 
         // Record best match (only on first/longest match)
         if best_match.is_none() {
-            best_match = Some((mp.clone(), error_pages.clone()));
+            best_match = Some(mount);
         }
 
         // Strip the mount_path prefix and rebuild the request URI for ServeDir
-        let stripped_path = if mp == "/" {
+        let stripped_path = if mount.mount_path == "/" {
             relative.to_string()
         } else {
-            let remainder = path.strip_prefix(mp.as_str()).unwrap_or("");
+            let remainder = path.strip_prefix(mount.mount_path.as_str()).unwrap_or("");
             remainder.trim_start_matches('/').to_string()
         };
 
         let req = rebuild_request_with_path(&parts, &stripped_path);
-        let resp = serve_via_serve_dir(serve_dir.clone(), req, cache_control).await;
+        let resp = serve_via_serve_dir(mount.serve_dir.clone(), req, &mount.cache_control).await;
         // Forward ServeDir's success AND its legitimate 304 Not Modified for
         // conditional GETs (If-None-Match / If-Modified-Since). Without this
         // gate, a matching conditional request falls through to the generic
@@ -104,38 +109,38 @@ pub(crate) async fn dispatch_static(
         // is disabled (MountMode::Static), when the request is not
         // SPA-qualified (e.g., has a file extension), or when the SPA
         // fallback itself fails.
-        if *mode == MountMode::Spa && resp.status() == StatusCode::NOT_FOUND {
+        if mount.mode == MountMode::Spa && resp.status() == StatusCode::NOT_FOUND {
             let spa_req = rebuild_request(&parts);
             if is_spa_qualified(&spa_req) {
-                return serve_spa_index(serve_dir.clone(), spa_req, cache_control).await;
+                return serve_spa_index(mount.serve_dir.clone(), spa_req, &mount.cache_control)
+                    .await;
             }
         }
 
         // Try error page for this mount (for Static mode or non-qualified SPA requests)
-        if let Some(error_resp) = try_serve_error_page(error_pages, resp.status().as_u16()).await {
+        if let Some(error_resp) =
+            try_serve_error_page(&mount.error_pages, resp.status().as_u16()).await
+        {
             return error_resp;
         }
     }
 
     // No mount matched — use best-match error pages only (Fix 3)
-    if let Some((_, error_pages)) = &best_match
+    if let Some(mount) = best_match
         && let Some(error_resp) =
-            try_serve_error_page(error_pages, StatusCode::NOT_FOUND.as_u16()).await
+            try_serve_error_page(&mount.error_pages, StatusCode::NOT_FOUND.as_u16()).await
     {
         return error_resp;
     }
 
     // Optional: try root-mount ("/") error pages as last resort
-    let root_error_pages: Option<HashMap<u16, PathBuf>> = {
-        let inner = state.registry.inner.read().await;
-        inner
-            .mounts
-            .iter()
-            .find(|m| m.mount_path == "/")
-            .map(|m| m.error_pages.clone())
-    };
+    let root_error_pages = inner
+        .mounts
+        .iter()
+        .find(|mount| mount.mount_path == "/")
+        .map(|mount| &mount.error_pages);
     if let Some(pages) = root_error_pages
-        && let Some(error_resp) = try_serve_error_page(&pages, StatusCode::NOT_FOUND.as_u16()).await
+        && let Some(error_resp) = try_serve_error_page(pages, StatusCode::NOT_FOUND.as_u16()).await
     {
         return error_resp;
     }

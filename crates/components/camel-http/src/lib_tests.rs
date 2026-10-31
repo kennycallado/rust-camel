@@ -7207,7 +7207,7 @@ fn debug_lists_all_public_fields() {
 // Static file serving tests (Task 5)
 // -----------------------------------------------------------------------
 
-use crate::registry::{HttpRouteRegistry, MountMode, StaticMount};
+use crate::registry::{HttpRouteRegistry, MountMode, ProbeLookup, StaticMount};
 use tower_http::services::ServeDir;
 
 fn make_test_registry() -> HttpRouteRegistry {
@@ -9880,71 +9880,237 @@ async fn test_duplicate_method_consumer_preserves_original() {
     duplicate_consumer_preserves_original(true).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_duplicate_registry_registration_is_atomic() {
-    use std::future::{Future, poll_fn};
-    use std::task::Poll;
+    for _ in 0..20 {
+        for method_aware in [false, true] {
+            let registry = HttpRouteRegistry::new();
+            let (first_tx, mut first_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(1);
+            let (second_tx, mut second_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(1);
+            let barrier = Arc::new(tokio::sync::Barrier::new(2));
+            let spawn_register = |sender: tokio::sync::mpsc::Sender<RequestEnvelope>| {
+                let registry = registry.clone();
+                let barrier = Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    tokio::time::timeout(Duration::from_secs(2), barrier.wait())
+                        .await
+                        .expect("barrier releases");
+                    if method_aware {
+                        registry
+                            .register_rest_endpoint(
+                                "GET".into(),
+                                rest_match::parse_path_template("/users/{id}"),
+                                sender,
+                            )
+                            .await
+                    } else {
+                        registry
+                            .register_api_route("/duplicate".into(), sender)
+                            .await
+                    }
+                })
+            };
+            // The barrier releases both contenders together; the registry's
+            // writer gate — not a lock held by this test — makes the
+            // check-then-store atomic.
+            let first = spawn_register(first_tx.clone());
+            let second = spawn_register(second_tx.clone());
+            let (first_result, second_result) =
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    tokio::join!(first, second)
+                })
+                .await
+                .expect("concurrent registrations complete");
+            let first_result = first_result.expect("registration task does not panic");
+            let second_result = second_result.expect("registration task does not panic");
+            let (winner, rejected_result, rejected_rx) = match (first_result, second_result) {
+                (Ok(()), Err(error)) => (&first_tx, error, &mut second_rx),
+                (Err(error), Ok(())) => (&second_tx, error, &mut first_rx),
+                _ => panic!("exactly one duplicate registration must succeed"),
+            };
+            assert!(matches!(rejected_result, CamelError::Config(_)));
+            let snapshot = registry.inner.load();
+            let stored = if method_aware {
+                assert_eq!(snapshot.rest_endpoints.len(), 1);
+                assert!(snapshot.api_routes.is_empty());
+                &snapshot.rest_endpoints[0].payload
+            } else {
+                assert_eq!(snapshot.api_routes.len(), 1);
+                assert!(snapshot.rest_endpoints.is_empty());
+                &snapshot.api_routes["/duplicate"]
+            };
+            assert!(stored.same_channel(winner));
+            assert!(matches!(
+                rejected_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+}
 
-    for method_aware in [false, true] {
-        let registry = HttpRouteRegistry::new();
-        let (first_tx, mut first_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(1);
-        let (second_tx, mut second_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(1);
-        let register = |sender| {
-            let registry = &registry;
-            async move {
-                if method_aware {
-                    registry
-                        .register_rest_endpoint(
-                            "GET".into(),
-                            rest_match::parse_path_template("/users/{id}"),
-                            sender,
-                        )
-                        .await
-                } else {
-                    registry
-                        .register_api_route("/duplicate".into(), sender)
-                        .await
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_readers_never_block_on_writer() {
+    let registry = HttpRouteRegistry::new();
+    for index in 0..50 {
+        let (sender, _receiver) = tokio::sync::mpsc::channel::<RequestEnvelope>(1);
+        registry
+            .register_api_route(format!("/legacy{index}"), sender)
+            .await
+            .expect("seed legacy route registration succeeds");
+    }
+
+    // A plain OS thread holds the writer gate for the whole reader phase.
+    // Readers must complete WHILE the gate is held: a reader-lock design
+    // would block them and the timeout around the joins would expire.
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let writer_gate = Arc::clone(&registry.writer_gate);
+    let holder = std::thread::spawn(move || {
+        let _guard = writer_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("held signal sent");
+        release_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("release signal arrives");
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), held_rx)
+        .await
+        .expect("writer gate held signal arrives")
+        .expect("writer gate holder signals held");
+
+    let mut readers = Vec::new();
+    for _ in 0..8 {
+        let registry = registry.clone();
+        readers.push(tokio::spawn(async move {
+            let mut exact = 0usize;
+            for _ in 0..100 {
+                if matches!(
+                    registry.probe_lookup("GET", "/legacy0").await,
+                    ProbeLookup::Exact(_)
+                ) {
+                    exact += 1;
                 }
             }
-        };
-        let guard = registry.inner.write().await;
-        let first = register(first_tx.clone());
-        let second = register(second_tx.clone());
-        tokio::pin!(first, second);
-        // Poll each future while the lock is held: both contenders must
-        // actually wait for the same write lock before either can insert.
-        poll_fn(|cx| {
-            assert!(first.as_mut().poll(cx).is_pending());
-            assert!(second.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-        drop(guard);
-        let (first_result, second_result) = tokio::time::timeout(Duration::from_secs(2), async {
-            tokio::join!(first, second)
-        })
-        .await
-        .expect("concurrent registrations complete");
-        let (winner, rejected_result, rejected_rx) = match (first_result, second_result) {
-            (Ok(()), Err(error)) => (&first_tx, error, &mut second_rx),
-            (Err(error), Ok(())) => (&second_tx, error, &mut first_rx),
-            _ => panic!("exactly one duplicate registration must succeed"),
-        };
-        assert!(matches!(rejected_result, CamelError::Config(_)));
-        let guard = registry.inner.read().await;
-        let stored = if method_aware {
-            assert_eq!(guard.rest_endpoints.len(), 1);
-            assert!(guard.api_routes.is_empty());
-            &guard.rest_endpoints[0].payload
-        } else {
-            assert_eq!(guard.api_routes.len(), 1);
-            assert!(guard.rest_endpoints.is_empty());
-            &guard.api_routes["/duplicate"]
-        };
-        assert!(stored.same_channel(winner));
-        assert!(matches!(
-            rejected_rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        ));
+            exact
+        }));
     }
+
+    let total_exact: usize = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut total = 0usize;
+        for reader in readers {
+            total += reader.await.expect("reader task does not panic");
+        }
+        total
+    })
+    .await
+    .expect("readers complete while the writer gate is held");
+
+    assert_eq!(
+        total_exact, 800,
+        "every probe must observe an Exact hit while the writer gate is held"
+    );
+
+    release_tx.send(()).expect("release signal sent");
+    holder.join().expect("writer gate holder exits");
+}
+
+#[tokio::test]
+async fn test_register_unregister_swap_visibility() {
+    let registry = HttpRouteRegistry::new();
+
+    // Legacy exact route.
+    let (api_tx, _api_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(1);
+    registry
+        .register_api_route("/legacy".to_string(), api_tx.clone())
+        .await
+        .expect("register legacy route");
+    match registry.probe_lookup("GET", "/legacy").await {
+        ProbeLookup::Exact(sender) => assert!(sender.same_channel(&api_tx)),
+        _ => panic!("registered legacy route must probe as Exact"),
+    }
+    registry.unregister_api_route("/legacy").await;
+    assert!(matches!(
+        registry.probe_lookup("GET", "/legacy").await,
+        ProbeLookup::Miss
+    ));
+
+    // Method-aware REST endpoint.
+    let (rest_tx, _rest_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(1);
+    registry
+        .register_rest_endpoint(
+            "GET".to_string(),
+            rest_match::parse_path_template("/users/{id}"),
+            rest_tx.clone(),
+        )
+        .await
+        .expect("register REST endpoint");
+    match registry.probe_lookup("GET", "/users/7").await {
+        ProbeLookup::Rest(sender) => assert!(sender.same_channel(&rest_tx)),
+        _ => panic!("registered REST endpoint must probe as Rest"),
+    }
+    registry
+        .unregister_rest_endpoint("GET", "/users/{id}")
+        .await;
+    assert!(matches!(
+        registry.probe_lookup("GET", "/users/7").await,
+        ProbeLookup::Miss
+    ));
+
+    // Static mount.
+    let mount = StaticMount {
+        mount_path: "/assets".to_string(),
+        mode: MountMode::Static,
+        dir: std::path::PathBuf::from("/nonexistent/rust-camel-test-static"),
+        cache_control: String::new(),
+        error_pages: std::collections::HashMap::new(),
+        serve_dir: ServeDir::new("/nonexistent/rust-camel-test-static"),
+    };
+    registry
+        .register_static_mount(mount)
+        .await
+        .expect("register static mount");
+    assert_eq!(
+        registry.probe_static_select("/assets/file.txt").await,
+        Some((MountMode::Static, "/assets".to_string()))
+    );
+    registry.unregister_static_mount("/assets").await;
+    assert_eq!(registry.probe_static_select("/assets/file.txt").await, None);
+}
+
+#[tokio::test]
+async fn test_static_mount_selection_longest_prefix_and_spa() {
+    let registry = HttpRouteRegistry::new();
+    for (mount_path, mode) in [
+        ("/", MountMode::Static),
+        ("/assets", MountMode::Static),
+        ("/assets/sub", MountMode::Spa),
+    ] {
+        let mount = StaticMount {
+            mount_path: mount_path.to_string(),
+            mode,
+            dir: std::path::PathBuf::from("/nonexistent/rust-camel-test-static"),
+            cache_control: String::new(),
+            error_pages: std::collections::HashMap::new(),
+            serve_dir: ServeDir::new("/nonexistent/rust-camel-test-static"),
+        };
+        registry
+            .register_static_mount(mount)
+            .await
+            .expect("register static mount");
+    }
+
+    assert_eq!(
+        registry.probe_static_select("/assets/sub/x.html").await,
+        Some((MountMode::Spa, "/assets/sub".to_string()))
+    );
+    assert_eq!(
+        registry.probe_static_select("/assets/file.txt").await,
+        Some((MountMode::Static, "/assets".to_string()))
+    );
+    assert_eq!(
+        registry.probe_static_select("/anything").await,
+        Some((MountMode::Static, "/".to_string()))
+    );
 }
