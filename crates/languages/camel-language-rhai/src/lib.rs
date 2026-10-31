@@ -71,6 +71,20 @@
 //! route script, use the explicit Camel components (`file:`, `http:`) with
 //! their own runtime policies — do not attempt to bypass this sandbox.
 //!
+//! # Wall clock
+//!
+//! `now_ms()` returns wall-clock time as milliseconds since the UNIX epoch
+//! (`i64`). It is always registered and opt-in at the call site, and its
+//! result is outbound-storable. Wall-clock adjustments, including NTP
+//! corrections, may cause `now_ms()` to step backward, so do not use it for
+//! elapsed-time measurement or ordering; that remains `timestamp()`'s role
+//! (monotonic `Instant`, inbound-only).
+//!
+//! This is deliberately distinct from `timestamp()`, which remains the
+//! `StandardPackage` monotonic `std::time::Instant` clock. `timestamp()` is
+//! still refused outbound by the converter guard (`source_type: "timestamp"`):
+//! an `Instant` has no meaningful epoch representation.
+//!
 //! # Limitations
 //!
 //! - Resource limits (max operations, string/array/map sizes, expression
@@ -147,6 +161,19 @@ fn extensions_module() -> rhai::Shared<rhai::Module> {
             shared
         })
         .clone()
+}
+
+/// Current wall-clock time as milliseconds since the UNIX epoch.
+///
+/// Saturates at `i64::MAX` if the elapsed time does not fit. Returns `0` if
+/// the system clock is before the UNIX epoch (documented fallback); never
+/// panics. Local copy of the same helper in `camel-language-simple` — language
+/// crates do not depend on each other.
+fn now_epoch_ms() -> i64 {
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_millis()).unwrap_or(i64::MAX),
+        Err(_) => 0,
+    }
 }
 
 // Test-only compile counter. Per-thread (via `thread_local!`) so parallel
@@ -537,6 +564,11 @@ impl RhaiLanguage {
         // trimmed string instead of mutating the subject and returning unit.
         // Both live in one process-wide module composed once.
         engine.register_global_module(extensions_module());
+        // Wall-clock accessor (task 2.1): registered last; no StandardPackage
+        // function is named `now_ms`, so no collision. `timestamp()` remains the
+        // `StandardPackage` monotonic `Instant` clock and stays refused
+        // outbound; `now_ms()` is plain epoch millis and converts as a number.
+        engine.register_fn("now_ms", || -> i64 { now_epoch_ms() });
         engine
     }
 
@@ -3852,5 +3884,79 @@ mod tests {
         let mut ex = empty_exchange();
         expr.evaluate(&mut ex).await.unwrap();
         assert_eq!(ex.input.body.as_text(), Some(r#"{"a":1}"#));
+    }
+
+    fn epoch_ms() -> i64 {
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after the UNIX epoch");
+        i64::try_from(elapsed.as_millis()).expect("epoch millis fit in i64")
+    }
+
+    #[tokio::test]
+    async fn now_ms_returns_plausible_epoch_ms() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("now_ms()").unwrap();
+        let ex = empty_exchange();
+
+        let before = epoch_ms();
+        let first = expr.evaluate(&ex).await.unwrap();
+        let second = expr.evaluate(&ex).await.unwrap();
+        let after = epoch_ms();
+
+        // No ordering assertion: wall clock may step backward on NTP
+        // adjustment. Each reading only has to land inside the window with
+        // scheduling slack on both sides.
+        for value in [first, second] {
+            let ms = match value {
+                Value::Number(n) => n.as_i64().expect("now_ms exits as i64"),
+                other => panic!("now_ms must return a number, got {other:?}"),
+            };
+            assert!(
+                (before - 50..=after + 50).contains(&ms),
+                "now_ms() = {ms} outside [{}, {}]",
+                before - 50,
+                after + 50
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn now_ms_storable_in_mutating_script() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers["t"] = now_ms();"#)
+            .unwrap();
+        let mut ex = empty_exchange();
+        expr.evaluate(&mut ex).await.unwrap();
+        match ex.input.headers.get("t") {
+            Some(Value::Number(_)) => {}
+            other => panic!("now_ms must store as a number, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn timestamp_remains_refused_outbound() {
+        // Regression pin: registering `now_ms` must not loosen the outbound
+        // `std::time::Instant` guard in converter.rs.
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers["t"] = timestamp();"#)
+            .unwrap();
+        let mut ex = empty_exchange();
+        let err = expr
+            .evaluate(&mut ex)
+            .await
+            .expect_err("timestamp must stay refused outbound");
+        match &err {
+            LanguageError::ConversionError { source_type, .. } => {
+                assert_eq!(source_type, "timestamp", "{err:?}");
+            }
+            other => panic!("expected refused timestamp ConversionError, got {other:?}"),
+        }
+        assert!(
+            !ex.input.headers.contains_key("t"),
+            "refused timestamp must not write back"
+        );
     }
 }

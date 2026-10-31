@@ -45,7 +45,9 @@ Comparisons do not chain. Sums are left-associative `+` and `-`; product is `*`;
 and count toward depth. Atoms are literals, lookups, `${language:expr}`, parentheses, and exactly
 five calls: `int(E)`, `string(E)`, `default(a, b)`, `min(E, E)`, and `max(E, E)`. Wrong arity or
 any other function name is a parse error. A bare non-lookup identifier is a parse error, as is
-`now()`: Simple has no clock. Callers inject timestamps through the Exchange (`nowMs` property).
+bare `now()`: the wall-clock surface is the `date:` sub-language, a compile-time-validated UTC
+formatter subset (ADR-0092 as amended); the scalar grammar adds no `now` function. For
+deterministic policy, callers can still inject timestamps through the Exchange (`nowMs` property).
 
 `int` accepts i64, a u64 that fits i64, and strict integer strings `[+-]?[0-9]+`; every other
 operand is `ConversionError`, never a silent 0. `string` keeps strings, serializes numbers and
@@ -57,7 +59,8 @@ operand kinds are `TypeMismatch`. `+` is numeric only. Integer literals are acce
 `-9223372036854775808` is `i64::MIN`; any other literal outside i64 range is a parse error.
 
 Deferred: floats, `/`, `%`, string concat `+`, ternary, `in`, `??`, exponentiation, shifts, JSON
-or map construction. Capped backoff, dynamic assembly, JSON work, mutation, clock stay in rhai.
+or map construction. Capped backoff, dynamic assembly, JSON work, mutation, and clock access
+beyond `date:` (Rhai `now_ms()`) stay in rhai.
 
 ### Limits
 

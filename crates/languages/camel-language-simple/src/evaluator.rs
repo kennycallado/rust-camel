@@ -1,4 +1,5 @@
 use crate::ResolverFn;
+use crate::date::{DateOutput, DateSource};
 use crate::parser::{CallKind, Expr, InterpolatedPart, LogicalOp, Op, PathSegment};
 use camel_api::ExpressionErrorClass;
 use camel_language_api::{Body, Exchange, LanguageError, Value};
@@ -147,6 +148,43 @@ fn conversion_error(source_type: &str, target: &str) -> LanguageError {
     }
 }
 
+/// Evaluate a `${date:...}` slot. Header-backed sources are the deterministic
+/// seam; `Now` reads the wall clock. Header values are converted to epoch
+/// millis without ever embedding the value text in an error.
+fn eval_date(
+    source: &DateSource,
+    output: &DateOutput,
+    exchange: &Exchange,
+) -> Result<Value, LanguageError> {
+    let millis = match source {
+        DateSource::Now => crate::date::now_epoch_ms(),
+        DateSource::Header(name) => {
+            let Some(value) = exchange.input.header(name) else {
+                return Ok(Value::Null);
+            };
+            date_header_millis(value)?
+        }
+    };
+    match output {
+        DateOutput::EpochMillis => Ok(Value::Number(millis.into())),
+        DateOutput::Formatted(pattern) => Ok(Value::String(crate::date::format_epoch_ms(
+            millis, pattern,
+        )?)),
+    }
+}
+
+fn date_header_millis(value: &Value) -> Result<i64, LanguageError> {
+    match value {
+        Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| conversion_error("number", "epoch millis")),
+        Value::String(s) => s
+            .parse::<i64>()
+            .map_err(|_| conversion_error("string", "epoch millis")),
+        other => Err(conversion_error(value_type_name(other), "epoch millis")),
+    }
+}
+
 /// Evaluate atom/leaf variants. The caller is responsible for charging one
 /// work unit. Returns `None` for compound nodes.
 #[inline]
@@ -203,6 +241,7 @@ fn eval_leaf(expr: &Expr, exchange: &Exchange) -> Option<Value> {
 fn contains_delegate(expr: &Expr) -> bool {
     match expr {
         Expr::LanguageDelegate { .. } => true,
+        Expr::Date { .. } => false,
         Expr::BinOp { left, right, .. } | Expr::LogicalOp { left, right, .. } => {
             contains_delegate(left) || contains_delegate(right)
         }
@@ -319,6 +358,8 @@ fn eval_sync_expr(expr: &Expr, ctx: &mut EvalCtx<'_>) -> Result<Value, LanguageE
                 Ok(Value::Number(selected.into()))
             }
         },
+
+        Expr::Date { source, output } => eval_date(source, output, ctx.exchange),
 
         // Leaves were handled by `eval_leaf` before the match.
         _ => Ok(eval_leaf(expr, ctx.exchange).unwrap_or(Value::Null)),
@@ -480,6 +521,11 @@ where
                     .ok_or_else(|| arithmetic_error("i64 overflow"))?;
                 Ok(Value::Number(negated.into()))
             }
+
+            // This async arm IS reachable for mixed Date+delegate ASTs
+            // (`contains_delegate` walks the whole AST); sync handles Date
+            // otherwise.
+            Expr::Date { source, output } => eval_date(source, output, ctx.exchange),
 
             Expr::Call { kind, args } => match kind {
                 CallKind::Int => {
@@ -1445,5 +1491,62 @@ mod tests {
             evaluate(&ast, &ex, &None).await.unwrap(),
             Value::Number((-5i64).into())
         );
+    }
+
+    #[tokio::test]
+    async fn eval_date_header_number_formats() {
+        let ex = ex_with_headers(&[("ts", Value::Number(1_700_000_123_456i64.into()))]);
+        assert_eq!(
+            eval("${date:header.ts:yyyy-MM-dd}", &ex).await.unwrap(),
+            Value::String("2023-11-14".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_date_header_numeric_string_formats() {
+        let ex = ex_with_headers(&[("ts", Value::String("1700000123456".to_string()))]);
+        assert_eq!(
+            eval("${date:header.ts:HH:mm:ss.SSS}", &ex).await.unwrap(),
+            Value::String("22:15:23.456".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_date_header_missing_is_null() {
+        let ex = Exchange::default();
+        assert_eq!(
+            eval("${date:header.ts:yyyy}", &ex).await.unwrap(),
+            Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_date_header_non_numeric_is_conversion_error() {
+        let ex = ex_with_headers(&[("ts", Value::String("abc".to_string()))]);
+        let err = eval("${date:header.ts:yyyy}", &ex).await.unwrap_err();
+        match &err {
+            LanguageError::ConversionError {
+                source_type,
+                target,
+            } => {
+                assert_eq!(source_type, "string");
+                assert_eq!(target, "epoch millis");
+            }
+            other => panic!("expected ConversionError, got {other:?}"),
+        }
+        assert!(
+            !err.to_string().contains("abc"),
+            "error must not embed the header value: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_date_millis_payload_is_number() {
+        let ex = ex_with_headers(&[("ts", Value::Number(1_700_000_123_456i64.into()))]);
+        let value = eval("${date:header.ts:millis}", &ex).await.unwrap();
+        match value {
+            Value::Number(n) => assert_eq!(n.as_i64(), Some(1_700_000_123_456)),
+            other => panic!("expected number, got {other:?}"),
+        }
     }
 }

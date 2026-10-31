@@ -2706,6 +2706,7 @@ dependencies = [
  "async-trait",
  "camel-api",
  "camel-language-api",
+ "chrono",
  "criterion",
  "serde_json",
  "tokio",

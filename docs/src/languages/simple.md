@@ -92,7 +92,7 @@ Lookups are `header.x`, `property.x`, `exchangeProperty.x`, `body`, `body.<path>
 
 `exception` renders `<variant_name>: <Display>`, for example `HttpOperationFailed: HTTP GET http://svc/api failed: 500 Internal Server Error`; `exception.message` renders the error's `Display` text alone. Both are `Value::Null` when the exchange carries no error, and the rendering never includes the HTTP response body or other payload data beyond the message.
 
-A bare identifier that names no lookup and no accepted call is a parse error. `x == 1` is therefore rejected; write `property.x == 1`. `now()` is a parse error because Simple has no clock. Inject a timestamp through the Exchange, for example by mapping the `CamelMessageTimestamp` header to the `nowMs` property, then evaluate `int(property.nowMs)`.
+A bare identifier that names no lookup and no accepted call is a parse error. `x == 1` is therefore rejected; write `property.x == 1`. `now()` is a parse error because the scalar grammar has no `now` function. The wall-clock surface is the separate `date:` sub-language (see [Wall-clock time](#wall-clock-time)). To keep scalar policy deterministic, inject a timestamp through the Exchange, for example by mapping the `CamelMessageTimestamp` header to the `nowMs` property, then evaluate `int(property.nowMs)`.
 
 Integer literals are parsed in u64 range. A unary minus over the literal `9223372036854775808` produces `i64::MIN`. Any other literal outside i64 range is a parse error.
 
@@ -106,7 +106,7 @@ Integer literals are parsed in u64 range. A unary minus over the literal `922337
 | `min(E, E)` | 2 | Converts both operands with the integer rule and returns the smaller i64. |
 | `max(E, E)` | 2 | Converts both operands with the integer rule and returns the larger i64. |
 
-A wrong arity is a parse error. Any other function name, including `now`, is a parse error.
+A wrong arity is a parse error. Any other function name, including `now`, is a parse error; wall-clock access is the separate `date:` sub-language (see [Wall-clock time](#wall-clock-time)).
 
 ### Coercion and arithmetic
 
@@ -182,6 +182,41 @@ For two possibly unset values, use an explicit presence guard. Null stays equal 
 body != null && property.skipXml != null && body == property.skipXml
 ```
 
+## Wall-clock time
+
+Simple's only wall-clock surface is the native `date:` sub-language. It reads the UTC clock and prints it through a documented subset of Java `SimpleDateFormat` patterns. The slot compiles and validates with the rest of the expression: an unsupported pattern fails `create_expression` or `create_predicate` as a parse error, never at evaluation.
+
+```text
+${date:now}
+${date:now:<pattern>}
+${date:now:millis}
+${date:header.<name>:<pattern>}
+```
+
+- `${date:now}` formats the current UTC time with the ISO-8601 default `yyyy-MM-dd'T'HH:mm:ss.SSSX`.
+- `${date:now:<pattern>}` formats the current UTC time with the pattern.
+- `${date:now:millis}` evaluates to epoch milliseconds as a number.
+- `${date:header.<name>:<pattern>}` formats a header holding epoch milliseconds. A missing header evaluates to `null`; a non-numeric header fails with a conversion error that omits the value.
+
+The supported pattern subset:
+
+| Letter | Meaning |
+| --- | --- |
+| `y` | year; 1–4 letters, `yy` is the two-digit year |
+| `M` | month; exactly two letters (`MM`) |
+| `d` | day of month; exactly two letters (`dd`) |
+| `H` | hour of day (`0`–`23`); exactly two letters (`HH`) |
+| `m` | minute; exactly two letters (`mm`) |
+| `s` | second; exactly two letters (`ss`) |
+| `S` | fractional millisecond, Java minimum-width; 1–3 letters |
+| `X` | ISO-8601 offset, `Z` for UTC; 1–3 letters |
+
+Any other pattern letter (`G`, `z`, and so on) is rejected at compile time; no format character is silently dropped. Text between single quotes is literal (`'T'`), and `''` emits one quote. An unterminated quote is a parse error.
+
+For the supported counts (1–3), `S` follows Java minimum-width integer milliseconds: the number of `S` letters is the minimum digit count, zero-padded on the left and never truncated. `SSS` always renders three digits (`.045`); `S` and `SS` render the field at its natural width where it fits (`45` for the field `45`, `04` for the field `4` under `SS`). Every `X` count (`X`, `XX`, `XXX`) renders `Z` for the UTC clock, matching the JDK's zero-offset ISO-8601 rendering. Any other count fails at creation with a parse error naming the offending field (`SSSS`, `MMM`, and so on).
+
+The clock is read per evaluation, so `date:now` slots are not deterministic across runs. Tests should inject a fixed instant through a header (`${date:header.ts:...}`) instead of asserting on the live clock. Bare `now()` stays a parse error: `date:` does not add a function to the scalar grammar.
+
 ## Deferred constructs
 
 These constructs are parse errors today. None is supported syntax:
@@ -204,7 +239,7 @@ These constructs are parse errors today. None is supported syntax:
 - string concatenation and dynamic key assembly beyond template slots;
 - JSON or map construction;
 - mutation of the Exchange;
-- clock access;
+- clock access beyond `date:` (Rhai `now_ms()`);
 - float, division, and modulo arithmetic;
 - anything beyond the bounded scalar grammar.
 

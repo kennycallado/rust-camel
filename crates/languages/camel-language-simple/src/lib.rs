@@ -1,8 +1,12 @@
 //! Simple expression language for rust-camel — lightweight header/body/property expression parser and evaluator.
 //!
 //! Main types: `SimpleLanguage`, `SimpleExpression`, `SimplePredicate`.
-//! Main modules: `parser`, `evaluator`. No scripting dependencies.
+//! Main modules: `parser`, `evaluator`, `date`. No scripting dependencies.
+//!
+//! The `date:` sub-language formats a UTC wall clock with a compile-time-validated
+//! subset of Java `SimpleDateFormat` patterns.
 
+mod date;
 mod evaluator;
 mod parser;
 
@@ -1352,6 +1356,174 @@ mod tests {
         assert_eq!(
             expr.evaluate(&Exchange::default()).await.unwrap(),
             Value::String("x[1]y".to_string())
+        );
+    }
+
+    fn assert_iso_millis_shape(value: &str) {
+        let bytes = value.as_bytes();
+        assert_eq!(bytes.len(), 24, "unexpected ISO shape: {value}");
+        for (index, byte) in bytes.iter().enumerate() {
+            match index {
+                4 | 7 => assert_eq!(*byte, b'-', "unexpected ISO shape: {value}"),
+                10 => assert_eq!(*byte, b'T', "unexpected ISO shape: {value}"),
+                13 | 16 => assert_eq!(*byte, b':', "unexpected ISO shape: {value}"),
+                19 => assert_eq!(*byte, b'.', "unexpected ISO shape: {value}"),
+                23 => assert_eq!(*byte, b'Z', "unexpected ISO shape: {value}"),
+                _ => assert!(
+                    byte.is_ascii_digit(),
+                    "unexpected ISO shape: {value} (byte {index})"
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn eval_date_now_iso_shape() {
+        let lang = SimpleLanguage::new();
+        let expr = lang.create_expression("${date:now}").unwrap();
+        let first = expr.evaluate(&Exchange::default()).await.unwrap();
+        let second = expr.evaluate(&Exchange::default()).await.unwrap();
+        for value in [first, second] {
+            match value {
+                Value::String(rendered) => assert_iso_millis_shape(&rendered),
+                other => panic!("expected ISO string, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn eval_date_now_millis_plausible() {
+        use std::time::SystemTime;
+        use std::time::UNIX_EPOCH;
+
+        let before = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_millis(),
+        )
+        .expect("timestamp fits i64");
+        let lang = SimpleLanguage::new();
+        let expr = lang.create_expression("${date:now:millis}").unwrap();
+        let value = expr.evaluate(&Exchange::default()).await.unwrap();
+        let after = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_millis(),
+        )
+        .expect("timestamp fits i64");
+
+        match value {
+            Value::Number(n) => {
+                let millis = n.as_i64().expect("date millis must be an integer i64");
+                assert!(
+                    millis >= before - 50 && millis <= after + 50,
+                    "date millis {millis} outside [{}, {}]",
+                    before - 50,
+                    after + 50
+                );
+            }
+            other => panic!("expected number, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn predicate_date_millis_compare() {
+        let lang = SimpleLanguage::new();
+        let pred = lang
+            .create_predicate("${date:now:millis} > ${header.low}")
+            .unwrap();
+        let mut msg = Message::default();
+        msg.set_header("low", Value::Number(0i64.into()));
+        let ex = Exchange::new(msg);
+        assert!(pred.matches(&ex).await.unwrap());
+    }
+
+    #[test]
+    fn create_rejects_unsupported_letters() {
+        let lang = SimpleLanguage::new();
+        for (script, letter) in [
+            ("${date:now:yyyy-MM-dd G}", 'G'),
+            ("${date:now:yyyy-MM-dd z}", 'z'),
+        ] {
+            let err = lang
+                .create_expression(script)
+                .err()
+                .expect("unsupported letter must be rejected");
+            assert!(
+                matches!(err, LanguageError::ParseError { .. }),
+                "expected ParseError, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains(letter),
+                "must name the unsupported letter `{letter}`: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_rejects_unterminated_quote() {
+        let lang = SimpleLanguage::new();
+        let err = lang
+            .create_expression("${date:now:yyyy-MM-dd'THH:mm}")
+            .err()
+            .expect("unterminated quote must be rejected");
+        assert!(
+            matches!(err, LanguageError::ParseError { .. }),
+            "expected ParseError, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("unterminated"),
+            "must mention the unterminated quote: {err}"
+        );
+    }
+
+    #[test]
+    fn create_rejects_unknown_command_names_accepted() {
+        let lang = SimpleLanguage::new();
+        let err = lang
+            .create_expression("${date:week:yyyy-MM-dd}")
+            .err()
+            .expect("unknown date command must be rejected");
+        assert!(
+            matches!(err, LanguageError::ParseError { .. }),
+            "expected ParseError, got {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("now") && message.contains("header."),
+            "must list the accepted commands: {err}"
+        );
+    }
+
+    #[test]
+    fn create_rejects_bad_pattern_in_predicate() {
+        let lang = SimpleLanguage::new();
+        let err = lang
+            .create_predicate("${date:now:yyyy-MM-dd G} > ${header.low}")
+            .err()
+            .expect("bad predicate date pattern must be rejected");
+        assert!(
+            matches!(err, LanguageError::ParseError { .. }),
+            "expected ParseError, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains('G'),
+            "must name the unsupported letter: {err}"
+        );
+    }
+
+    #[test]
+    fn create_rejects_bad_pattern_in_expression() {
+        let lang = SimpleLanguage::new();
+        let err = lang
+            .create_expression("${date:now:G}")
+            .err()
+            .expect("bad expression date pattern must be rejected");
+        assert!(
+            matches!(err, LanguageError::ParseError { .. }),
+            "expected ParseError, got {err:?}"
         );
     }
 }

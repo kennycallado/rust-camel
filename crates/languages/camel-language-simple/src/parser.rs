@@ -1,5 +1,10 @@
 use camel_language_api::LanguageError;
 
+use crate::date::DEFAULT_PATTERN;
+use crate::date::DateOutput;
+use crate::date::DatePattern;
+use crate::date::DateSource;
+
 /// Maximum accepted source size, in bytes.
 const MAX_SOURCE_BYTES: usize = 16 * 1024;
 /// Maximum number of AST nodes for one source parse.
@@ -49,6 +54,11 @@ pub enum Expr {
     LanguageDelegate {
         language: String,
         expression: String,
+    },
+    /// `${date:now[:pattern]}` / `${date:header.<name>[:pattern]}`.
+    Date {
+        source: DateSource,
+        output: DateOutput,
     },
     StringLit(String),
     IntLit(i64),
@@ -326,7 +336,12 @@ fn parse_slot_content(
         });
     }
 
-    let (expr, parens) = if let Some(delegate) = parse_delegate_slot(s.trim_start()) {
+    let (expr, parens) = if let Some(payload) = content.strip_prefix("date:") {
+        // `date:` is a native sub-language: every such slot is parsed or
+        // rejected at creation and never falls through to the generic
+        // language-delegate path.
+        (parse_date_slot(payload)?, 0)
+    } else if let Some(delegate) = parse_delegate_slot(s.trim_start()) {
         // A valid `language:payload` prefix is a delegate: the payload is
         // opaque and must never be tokenized as Simple expressions
         // (`${nope:x+1}`). Check this before the atom/expression paths.
@@ -386,6 +401,38 @@ fn parse_slot_content(
     validate_expr(&expr, s, enclosing_grouping + parens)?;
     depth.slot_parens += enclosing_grouping + parens;
     Ok(expr)
+}
+
+/// Parse the payload of a `${date:...}` slot (everything after `date:`).
+///
+/// Grammar: `<command>[:<pattern>]`, where `<command>` is `now` or
+/// `header.<name>`. A missing pattern selects [`DEFAULT_PATTERN`]; the literal
+/// pattern `millis` selects epoch milliseconds. Every failure is a
+/// `ParseError` carrying the payload (never exchange data).
+fn parse_date_slot(payload: &str) -> Result<Expr, LanguageError> {
+    let (command, pattern_text) = match payload.split_once(':') {
+        Some((command, pattern)) => (command, Some(pattern)),
+        None => (payload, None),
+    };
+    let source = if command == "now" {
+        DateSource::Now
+    } else if let Some(name) = command.strip_prefix("header.") {
+        if name.is_empty() {
+            return Err(parse_error(payload, "empty header name in date slot"));
+        }
+        DateSource::Header(name.to_string())
+    } else {
+        return Err(parse_error(
+            payload,
+            format!("unknown date command `{command}` (accepted: now, header.<name>)"),
+        ));
+    };
+    let output = match pattern_text {
+        None => DateOutput::Formatted(DatePattern::compile(DEFAULT_PATTERN)?),
+        Some("millis") => DateOutput::EpochMillis,
+        Some(pattern) => DateOutput::Formatted(DatePattern::compile(pattern)?),
+    };
+    Ok(Expr::Date { source, output })
 }
 
 /// Recognize a `<language>:<payload>` slot before Simple tokenization. The
@@ -1389,6 +1436,127 @@ mod tests {
                 expression: "$.a[0]".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn parse_date_now_default() {
+        assert_eq!(
+            parse("${date:now}").unwrap(),
+            Expr::Date {
+                source: DateSource::Now,
+                output: DateOutput::Formatted(
+                    DatePattern::compile(DEFAULT_PATTERN).expect("default pattern compiles")
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_date_now_millis() {
+        assert_eq!(
+            parse("${date:now:millis}").unwrap(),
+            Expr::Date {
+                source: DateSource::Now,
+                output: DateOutput::EpochMillis,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_date_now_pattern() {
+        assert_eq!(
+            parse("${date:now:yyyy-MM-dd}").unwrap(),
+            Expr::Date {
+                source: DateSource::Now,
+                output: DateOutput::Formatted(
+                    DatePattern::compile("yyyy-MM-dd").expect("pattern compiles")
+                ),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_date_header_variant() {
+        assert_eq!(
+            parse("${date:header.ts:HH:mm}").unwrap(),
+            Expr::Date {
+                source: DateSource::Header("ts".to_string()),
+                output: DateOutput::Formatted(DatePattern::compile("HH:mm").expect("compiles")),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_date_in_template_with_literals() {
+        assert_eq!(
+            parse_template("at ${date:now:yyyy} end").unwrap(),
+            Expr::Interpolated(vec![
+                InterpolatedPart::Literal("at ".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::Date {
+                    source: DateSource::Now,
+                    output: DateOutput::Formatted(
+                        DatePattern::compile("yyyy").expect("pattern compiles")
+                    ),
+                })),
+                InterpolatedPart::Literal(" end".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_date_in_predicate_compare() {
+        assert_eq!(
+            parse("${date:now:millis} > ${header.low}").unwrap(),
+            Expr::BinOp {
+                left: Box::new(Expr::Date {
+                    source: DateSource::Now,
+                    output: DateOutput::EpochMillis,
+                }),
+                op: Op::Gt,
+                right: Box::new(Expr::Header("low".to_string())),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_date_unsupported_letter_fails() {
+        let err = parse("${date:now:yyyy-MM-dd G}").expect_err("G must be rejected");
+        assert!(
+            err.to_string().contains('G'),
+            "must name the unsupported letter: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_date_unknown_command_fails() {
+        let err = parse("${date:week:yyyy-MM-dd}").expect_err("week is not a date command");
+        assert!(
+            err.to_string().contains("week"),
+            "must name the unknown command: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_date_empty_header_name_fails() {
+        let err = parse("${date:header.:HH}").expect_err("empty header name must fail");
+        assert!(
+            err.to_string().contains("empty"),
+            "must mention empty header name: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_date_unterminated_quote_fails() {
+        let err = parse("${date:now:yyyy-MM-dd'THH}").expect_err("open quote must fail");
+        assert!(
+            err.to_string().contains("unterminated"),
+            "must mention unterminated quote: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_date_bare_now_call_still_rejected() {
+        assert!(parse("now() > 1000").is_err());
     }
 
     #[test]

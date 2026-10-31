@@ -1,12 +1,19 @@
 # ADR-0092: Bounded scalar expressions in Simple
 
-- Status: Accepted (decided 2026-10-28)
+- Status: Accepted (amended 2026-10-31)
 - Source: bd `rc-p8aqm`; camel-112 Simple corpus
   (`camel-112-simple-corpus-2026-10-28.md`)
 - Ruling: e_gpt, 2026-10-28 (mission order 428)
 - Cross-refs: ADR-0090 (pre-1.0 compatibility), ADR-0091 (Rust style),
   language value boundary spec
   `openspec/changes/simple-scalar-expressions/specs/language-value-boundary/spec.md`
+
+## Amendment: Simple `date:` wall clock (2026-10-31)
+
+Amended 2026-10-31 (mission 469, bd rc-2yb8q): the `date:` template
+sub-language is the sanctioned Simple clock surface (UTC, compile-time-validated
+subset). `now()` remains a parse error. The "clock access forces rhai" list now
+reads: clock access beyond `date:` / Rhai `now_ms()`.
 
 ## Context
 

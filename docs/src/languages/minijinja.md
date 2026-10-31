@@ -41,4 +41,10 @@ Every template source must wrap in exactly one top-level `{% autoescape "html"|"
 
 Use MiniJinja for template-driven body generation: HTML pages, JSON payloads, and prompt strings assembled from multiple fields. For a body derived from a single expression, the [transform](../eip/transform.md) step is simpler. Phase 1 covers inline templates only. External file loading, `{% include %}`, template inheritance, and hot-reload belong to Phase 2.
 
+## Time
+
+MiniJinja templates have no wall-clock access: there is no `now` function, filter, or context value. The template context is exchange-derived (`body`, `headers`, `exchangeProperty`) and does not grow. The sandbox surface is unchanged.
+
+A route that needs a timestamp computes it upstream with Simple `date:` or Rhai `now_ms()` and passes it as a header or property. Set a header with `${date:now}` and render `{{ headers.renderedAt }}`. `{{ now() }}` fails at evaluation as an unknown function.
+
 **Reference**: [Language SPI](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-api/CONTEXT.md) · [MiniJinja crate](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-minijinja/CONTEXT.md)

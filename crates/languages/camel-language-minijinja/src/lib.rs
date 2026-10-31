@@ -9,6 +9,11 @@
 //! wrapper validator is also re-exported for use by the Component's
 //! startup-time compile pass.
 //!
+//! Templates have no wall-clock access: there is no `now` function, filter,
+//! or context value. A route that needs a timestamp computes it with Simple
+//! `date:` or Rhai `now_ms()` and passes it as a header or property. The
+//! sandbox surface is unchanged.
+//!
 //! See ADR-0047 for the architectural contract.
 
 pub mod autoescape_validator;
@@ -260,6 +265,41 @@ mod expression_tests {
         let src = "{% autoescape \"html\" %}{% autoescape \"json\" %}x{% endautoescape %}{% endautoescape %}";
         let result = MinijinjaExpression::compile(src, ResolvedLimits::default());
         assert!(matches!(result, Err(LanguageError::ParseError { .. })));
+    }
+
+    #[tokio::test]
+    async fn template_now_function_is_not_registered() {
+        use camel_language_api::ExpressionErrorClass;
+
+        // MiniJinja templates have no wall-clock access. The template parses
+        // (the call is syntactically valid) but the unknown function fails at
+        // evaluation. The diagnostic is payload-free and never echoes the
+        // template source.
+        let src = "{% autoescape \"none\" %}<p>{{ now() }}</p>{% endautoescape %}";
+        let expr = MinijinjaExpression::compile(src, ResolvedLimits::default())
+            .expect("creation must succeed");
+
+        let err = expr
+            .evaluate(&Exchange::default())
+            .await
+            .expect_err("now() must not resolve at evaluation");
+        match &err {
+            LanguageError::EvalFailure {
+                class,
+                position,
+                detail,
+            } => {
+                assert_eq!(*class, ExpressionErrorClass::FunctionNotFound);
+                assert!(position.is_some(), "position must be reported");
+                assert!(detail.is_some(), "kind detail must be reported");
+            }
+            other => panic!("expected structured EvalFailure, got: {other:?}"),
+        }
+        let rendered = format!("{err} | {err:?}");
+        assert!(
+            !rendered.contains("<p>"),
+            "template content leaked into diagnostic: {rendered}"
+        );
     }
 
     #[tokio::test]

@@ -65,6 +65,20 @@ A read-only expression or predicate rejects mutation at create time, before the 
 
 The rejection is conservative. No scope analysis runs, so a local that shadows one of those names is rejected too: `let headers = #{}; headers["x"] = 1` fails at create time. A read-only local cannot affect the Exchange, so this is a documented false positive. Reading is unrestricted: `headers["x"]`, `body.len`, and `let x = headers; x` all compile. The read-only engine never registers `set_header()`/`set_property()`, so a dynamic call cannot slip through; the rhai hint names the working map-assignment surface for a `script:` step. Method-call mutations on those roots (`headers.clear()`, `headers.remove(x)`) are a known remaining gap (rc-qpjps), not caught by the create-time walk.
 
+## Wall clock
+
+`now_ms()` returns wall-clock epoch milliseconds as an `i64`. The function is always registered; adoption is opt-in at the call site. Its result crosses the boundary as a number, so it can be stored:
+
+```rhai
+headers["processedAt"] = now_ms();
+```
+
+`now_ms()` reads wall-clock time. It can step backward when the system clock is adjusted (NTP), so do not assume two calls are ordered.
+
+`timestamp()` is different: it returns a monotonic `Instant`, not wall-clock time, and the outbound converter refuses it because it has no JSON representation. Use `timestamp()` for elapsed-time measurement inside one evaluation, and `now_ms()` when a value must be stored or compared with exchange data.
+
+Scripts under test should not assert on `now_ms()` values. Assert a plausible window around the call, not equality, and never sleep to advance the clock.
+
 ## Values across the boundary
 
 Values cross the Rhai boundary through two conversions. The inbound conversion turns exchange JSON values into Rhai values before evaluation. The outbound conversion turns the script result and the mutated scope maps back into JSON values after evaluation. Both conversions are fallible and typed. A value the engine cannot represent fails the step with a `conversion` error that names the source type and the target. There is no `to_string()` fallback. No value is ever converted to its display text.
