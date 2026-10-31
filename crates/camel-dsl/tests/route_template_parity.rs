@@ -21,7 +21,9 @@ use camel_api::CamelError;
 use camel_api::security_policy::Principal;
 use camel_api::template::TemplateError;
 use camel_dsl::{
-    DiscoveryError, SecurityCompileContext, discover_routes_with_threshold_and_security,
+    DeclarativeStep, DiscoveryError, SecurityCompileContext,
+    discover_routes_with_threshold_and_security, materialize_template, parse_yaml_templated_routes,
+    parse_yaml_templates,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -771,5 +773,177 @@ templated_routes:
         ),
         "expected InvalidParameter class at aggregated surface, got: {:?}",
         failures[0].error
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Minijinja template-source skip and literal-brace escape (bd rc-sanz1).
+//
+// Templates are also just strings: a minijinja `source` legitimately contains
+// `{{ ... }}` (its own syntax), and `\{{` is the escape hatch for a literal
+// brace pair in every other template string. These tests pin both behaviors
+// through the real discovery path (YAML file + glob) and byte-level through
+// `materialize_template`.
+// ---------------------------------------------------------------------------
+
+fn materialize_first(yaml: &str) -> Vec<camel_dsl::DeclarativeRoute> {
+    let templates = parse_yaml_templates(yaml).unwrap();
+    let templated = parse_yaml_templated_routes(yaml).unwrap();
+    let (routes, _) = materialize_template(&templates[0], &templated[0]).unwrap();
+    routes
+}
+
+#[test]
+fn minijinja_templated_route_compiles_with_literal_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+routes: []
+templates:
+  - id: mj-tpl
+    parameters: []
+    routes:
+      - id: "mj-route"
+        from: "direct:start"
+        steps:
+          - script:
+              language: minijinja
+              source: "Hello {{ headers.name }}!"
+templated_routes:
+  - route_template_ref: mj-tpl
+    parameters: {}
+"#;
+    let pattern = write_temp_yaml(dir.path(), "minijinja.yaml", yaml);
+
+    let routes = discover_routes_with_threshold_and_security(&[pattern], 1024, real_ctx())
+        .expect("minijinja source must not be treated as template placeholders");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].route_id(), "mj-route");
+
+    let materialized = materialize_first(yaml);
+    assert_eq!(materialized.len(), 1);
+    let DeclarativeStep::Script(script) = &materialized[0].steps[0] else {
+        panic!("expected script step, got: {:?}", materialized[0].steps[0]);
+    };
+    assert_eq!(script.expression.language, "minijinja");
+    assert_eq!(
+        script.expression.source, "Hello {{ headers.name }}!",
+        "minijinja source must be byte-identical after materialization"
+    );
+}
+
+#[test]
+fn minijinja_collision_param_not_substituted() {
+    let dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+routes: []
+templates:
+  - id: relay-tpl
+    parameters:
+      - name: body
+        type: string
+    routes:
+      - id: "relay-{{body}}"
+        from: "direct:start"
+        steps:
+          - script:
+              language: minijinja
+              source: "{{ body }} passthrough"
+          - to: "log:relay-{{body}}"
+templated_routes:
+  - route_template_ref: relay-tpl
+    parameters:
+      body: RELAY
+"#;
+    let pattern = write_temp_yaml(dir.path(), "relay.yaml", yaml);
+
+    let routes = discover_routes_with_threshold_and_security(&[pattern], 1024, real_ctx())
+        .expect("discovery must compile with a minijinja source that collides with a param name");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].route_id(), "relay-RELAY");
+
+    let materialized = materialize_first(yaml);
+    assert_eq!(materialized.len(), 1);
+    assert_eq!(materialized[0].route_id, "relay-RELAY");
+
+    let DeclarativeStep::Script(script) = &materialized[0].steps[0] else {
+        panic!("expected script step, got: {:?}", materialized[0].steps[0]);
+    };
+    assert_eq!(
+        script.expression.source, "{{ body }} passthrough",
+        "minijinja source must not have `body` substituted"
+    );
+
+    let DeclarativeStep::To(to) = &materialized[0].steps[1] else {
+        panic!("expected to step, got: {:?}", materialized[0].steps[1]);
+    };
+    assert_eq!(
+        to.uri, "log:relay-RELAY",
+        "plain strings must still substitute the parameter"
+    );
+}
+
+#[test]
+fn escaped_braces_render_literal_in_template_string() {
+    let dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+routes: []
+templates:
+  - id: esc-tpl
+    parameters: []
+    routes:
+      - id: 'esc-\{{x}}-route'
+        from: "direct:start"
+        steps:
+          - to: "log:info"
+templated_routes:
+  - route_template_ref: esc-tpl
+    parameters: {}
+"#;
+    let pattern = write_temp_yaml(dir.path(), "escaped.yaml", yaml);
+
+    let routes = discover_routes_with_threshold_and_security(&[pattern], 1024, real_ctx())
+        .expect("escaped braces must not be treated as an unknown parameter");
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].route_id(), "esc-{{x}}-route");
+
+    let materialized = materialize_first(yaml);
+    assert_eq!(materialized.len(), 1);
+    assert_eq!(materialized[0].route_id, "esc-{{x}}-route");
+    assert!(
+        !materialized[0].route_id.contains('\\'),
+        "the escape backslash must be consumed: {}",
+        materialized[0].route_id
+    );
+}
+
+#[test]
+fn unknown_placeholder_still_errors_in_normal_string() {
+    let dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+routes: []
+templates:
+  - id: unknown-tpl
+    parameters:
+      - name: known
+        type: string
+    routes:
+      - id: 'bad-{{unknown}}-route'
+        from: "direct:start"
+        steps:
+          - to: "log:info"
+templated_routes:
+  - route_template_ref: unknown-tpl
+    parameters:
+      known: v
+"#;
+    let pattern = write_temp_yaml(dir.path(), "unknown.yaml", yaml);
+
+    let err = match discover_routes_with_threshold_and_security(&[pattern], 1024, real_ctx()) {
+        Ok(_) => panic!("expected undeclared placeholder in a plain string to be rejected"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("unknown parameter: unknown"),
+        "unexpected error: {err}"
     );
 }

@@ -76,11 +76,41 @@ pub(crate) fn whole_node_placeholder(s: &str) -> Option<&str> {
     Some(name)
 }
 
+/// Substitute placeholders in one escape-free segment of a template.
+///
+/// The segment must not contain the `\{{` escape sequence; callers split on
+/// that sequence before invoking this helper.
+fn substitute_segment(
+    segment: &str,
+    values: &BTreeMap<String, String>,
+    declared: &HashSet<&str>,
+) -> Result<String, TemplateError> {
+    for cap in placeholder_regex().captures_iter(segment) {
+        let name = &cap[1];
+        if !declared.contains(name) {
+            return Err(TemplateError::UnknownParameter(name.to_string()));
+        }
+    }
+
+    Ok(placeholder_regex()
+        .replace_all(segment, |caps: &regex::Captures| {
+            let name = &caps[1];
+            values.get(name).cloned().expect("validated above") // allow-unwrap
+        })
+        .into_owned())
+}
+
 /// Replace `{{name}}` placeholders in `input` with values from `values`.
 ///
 /// `declared_params` is the set of parameter names declared by the template.
 /// Unknown parameters in `values` produce [`TemplateError::UnknownParameter`].
 /// Missing required parameters (no default, no value) produce [`TemplateError::MissingParameter`].
+///
+/// The sequence `\{{` always renders as literal `{{` and blocks placeholder
+/// substitution (and whole-node typing) for that brace pair. The rule is
+/// lexical: there is no backslash-escape layer, so a preceding extra backslash
+/// stays as-is — `\\{{name}}` renders `\{{name}}` with `name` not substituted.
+/// Inputs without `\{{` are substituted as a single segment.
 pub fn substitute_placeholders(
     input: &str,
     values: &BTreeMap<String, String>,
@@ -101,19 +131,23 @@ pub fn substitute_placeholders(
         }
     }
 
-    for cap in placeholder_regex().captures_iter(input) {
-        let name = &cap[1];
-        if !declared.contains(name) {
-            return Err(TemplateError::UnknownParameter(name.to_string()));
+    // Scan segment by segment: text before each `\{{` is substituted normally,
+    // the escape emits literal `{{`, and scanning resumes after that pair.
+    let mut result = String::with_capacity(input.len());
+    let mut rest = input;
+    loop {
+        match rest.find("\\{{") {
+            Some(idx) => {
+                result.push_str(&substitute_segment(&rest[..idx], values, &declared)?);
+                result.push_str("{{");
+                rest = &rest[idx + 3..];
+            }
+            None => {
+                result.push_str(&substitute_segment(rest, values, &declared)?);
+                break;
+            }
         }
     }
-
-    let result = placeholder_regex()
-        .replace_all(input, |caps: &regex::Captures| {
-            let name = &caps[1];
-            values.get(name).cloned().expect("validated above") // allow-unwrap
-        })
-        .into_owned();
 
     Ok(result)
 }
@@ -357,6 +391,82 @@ mod tests {
         assert!(!parse_typed_bool("f", "false").unwrap());
         assert!(parse_typed_bool("f", "yes").is_err());
         assert!(parse_typed_bool("f", "True").is_err());
+    }
+
+    // --- Escape hatch for literal braces (6 tests) ---
+
+    #[test]
+    fn escape_renders_literal_braces() {
+        let result = substitute_placeholders(r"\{{typo}}", &vals(&[]), &empty_params()).unwrap();
+        assert_eq!(result, "{{typo}}");
+    }
+
+    #[test]
+    fn escape_blocks_substitution_of_declared_param() {
+        let result = substitute_placeholders(
+            r"\{{name}}",
+            &vals(&[("name", "world")]),
+            &params(&["name"]),
+        )
+        .unwrap();
+        assert_eq!(result, "{{name}}");
+    }
+
+    #[test]
+    fn escape_mixed_with_real_placeholder() {
+        let result = substitute_placeholders(
+            r"{{host}} and \{{literal}}",
+            &vals(&[("host", "localhost")]),
+            &params(&["host"]),
+        )
+        .unwrap();
+        assert_eq!(result, "localhost and {{literal}}");
+    }
+
+    #[test]
+    fn escape_without_closing_brace_stays_literal() {
+        let result = substitute_placeholders(r"\{{broken", &vals(&[]), &empty_params()).unwrap();
+        assert_eq!(result, "{{broken");
+    }
+
+    #[test]
+    fn whole_node_escaped_input_not_typed() {
+        assert_eq!(whole_node_placeholder(r"\{{delay}}"), None);
+    }
+
+    #[test]
+    fn escape_double_occurrence() {
+        let result =
+            substitute_placeholders(r"\{{a}} and \{{b}}", &vals(&[]), &empty_params()).unwrap();
+        assert_eq!(result, "{{a}} and {{b}}");
+    }
+
+    #[test]
+    fn control_char_input_without_escape_untouched() {
+        let result = substitute_placeholders("\u{0}\u{1}", &vals(&[]), &empty_params()).unwrap();
+        assert_eq!(result, "\u{0}\u{1}");
+    }
+
+    #[test]
+    fn control_char_param_value_substitutes_verbatim() {
+        let result = substitute_placeholders(
+            "{{name}}",
+            &vals(&[("name", "\u{0}\u{1}")]),
+            &params(&["name"]),
+        )
+        .unwrap();
+        assert_eq!(result, "\u{0}\u{1}");
+    }
+
+    #[test]
+    fn double_backslash_before_braces_not_substituted() {
+        let result = substitute_placeholders(
+            r"\\{{name}}",
+            &vals(&[("name", "world")]),
+            &params(&["name"]),
+        )
+        .unwrap();
+        assert_eq!(result, r"\{{name}}");
     }
 
     #[test]

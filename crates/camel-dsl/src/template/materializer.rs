@@ -112,11 +112,16 @@ fn substitute_json_value(
     match value {
         serde_json::Value::String(s) => substitute_string_node(s, resolved, specs, declared_names),
         serde_json::Value::Object(map) => {
+            let skip_source = is_minijinja_source(&map);
             let new_map: serde_json::Map<String, serde_json::Value> = map
                 .into_iter()
                 .map(|(k, v)| {
-                    substitute_json_value(v, resolved, specs, declared_names)
-                        .map(|new_v| (k, new_v))
+                    if skip_source && k == "source" {
+                        Ok((k, v))
+                    } else {
+                        substitute_json_value(v, resolved, specs, declared_names)
+                            .map(|new_v| (k, new_v))
+                    }
                 })
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
@@ -133,6 +138,16 @@ fn substitute_json_value(
         // Numbers, booleans, null — no substitution needed.
         other => Ok(other),
     }
+}
+
+/// An expression object whose `source` is minijinja syntax: `language` set
+/// to the exact string `"minijinja"` plus a string `source`. Its source is
+/// exempt from route-template placeholder substitution (bd rc-sanz1).
+fn is_minijinja_source(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+    matches!(
+        map.get("language"),
+        Some(serde_json::Value::String(lang)) if lang == "minijinja"
+    ) && matches!(map.get("source"), Some(serde_json::Value::String(_)))
 }
 
 /// Substitute one string node. Whole-node placeholders for typed
@@ -565,6 +580,184 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result["outer"]["inner"]["uri"], "direct:target");
+    }
+
+    // --- minijinja source skip tests (bd rc-sanz1) ---
+
+    #[test]
+    fn minijinja_source_survives_byte_identically() {
+        let value = serde_json::json!({
+            "steps": [{"script": {
+                "language": "minijinja",
+                "source": "Hello {{ headers.name }} and {{ body }}"
+            }}]
+        });
+        let result = substitute_strings_in_json(
+            value,
+            &resolved(&[("body", "REPLACED")]),
+            &specs(&[("body", TemplateParamType::String)]),
+        )
+        .unwrap();
+        assert_eq!(
+            result["steps"][0]["script"]["source"],
+            "Hello {{ headers.name }} and {{ body }}"
+        );
+    }
+
+    #[test]
+    fn minijinja_collision_param_not_substituted() {
+        let value = serde_json::json!({
+            "script": {"language": "minijinja", "source": "{{ body }}"},
+            "note": "value={{body}}"
+        });
+        let result = substitute_strings_in_json(
+            value,
+            &resolved(&[("body", "REPLACED")]),
+            &specs(&[("body", TemplateParamType::String)]),
+        )
+        .unwrap();
+        assert_eq!(result["script"]["source"], "{{ body }}");
+        assert_eq!(result["note"], "value=REPLACED");
+    }
+
+    #[test]
+    fn non_minijinja_language_source_still_substituted() {
+        let value = serde_json::json!({
+            "script": {"language": "rhai", "source": "x = {{name}};"}
+        });
+        let result = substitute_strings_in_json(
+            value,
+            &resolved(&[("name", "ok")]),
+            &specs(&[("name", TemplateParamType::String)]),
+        )
+        .unwrap();
+        assert_eq!(result["script"]["source"], "x = ok;");
+    }
+
+    #[test]
+    fn language_key_without_minijinja_not_skipped() {
+        let value = serde_json::json!({
+            "language": "minijinja",
+            "expression": "{{p}}"
+        });
+        let result = substitute_strings_in_json(
+            value,
+            &resolved(&[("p", "ok")]),
+            &specs(&[("p", TemplateParamType::String)]),
+        )
+        .unwrap();
+        assert_eq!(result["expression"], "ok");
+    }
+
+    #[test]
+    fn minijinja_in_arrays_and_deep_nesting() {
+        let value = serde_json::json!({
+            "when": [
+                {"script": {"language": "minijinja", "source": "{{ headers.name }}"}},
+                {"to": "log:{{level}}"}
+            ]
+        });
+        let result = substitute_strings_in_json(
+            value,
+            &resolved(&[("level", "info")]),
+            &specs(&[("level", TemplateParamType::String)]),
+        )
+        .unwrap();
+        assert_eq!(result["when"][0]["script"]["source"], "{{ headers.name }}");
+        assert_eq!(result["when"][1]["to"], "log:info");
+    }
+
+    #[test]
+    fn materialize_template_keeps_minijinja_source_literal() {
+        use crate::model::{DeclarativeStep, ScriptStepDef};
+
+        let template = make_template(
+            "minijinja-route",
+            vec![TemplateParameterSpec {
+                name: "body".into(),
+                default_value: None,
+                description: None,
+                parameter_type: TemplateParamType::String,
+            }],
+            vec![serde_json::json!({
+                "id": "route-{{body}}",
+                "from": "direct:start",
+                "steps": [{"script": {
+                    "language": "minijinja",
+                    "source": "{{ body }} and {{ headers.name }}"
+                }}]
+            })],
+        );
+        let templated = make_templated(
+            "minijinja-route",
+            [("body".into(), "RELAY".into())].into_iter().collect(),
+        );
+        let (routes, _) = materialize_template(&template, &templated).unwrap();
+        assert_eq!(routes[0].route_id, "route-RELAY");
+        match &routes[0].steps[0] {
+            DeclarativeStep::Script(ScriptStepDef { expression }) => {
+                assert_eq!(expression.language, "minijinja");
+                assert_eq!(expression.source, "{{ body }} and {{ headers.name }}");
+            }
+            other => panic!("expected script step, got {other:?}"),
+        }
+    }
+
+    // --- minijinja skip / escape interaction tests ---
+
+    #[test]
+    fn escaped_braces_inside_minijinja_source_stay_raw() {
+        let value = serde_json::json!({
+            "script": {
+                "language": "minijinja",
+                "source": r"\{{ body }} literal"
+            }
+        });
+        let result = substitute_strings_in_json(
+            value,
+            &resolved(&[("body", "REPLACED")]),
+            &specs(&[("body", TemplateParamType::String)]),
+        )
+        .unwrap();
+        assert_eq!(
+            result["script"]["source"], r"\{{ body }} literal",
+            "minijinja source must be skipped verbatim, escape included"
+        );
+    }
+
+    #[test]
+    fn escaped_typed_placeholder_stays_literal_string() {
+        let value = serde_json::json!({"delay": r"\{{delay}}"});
+        let result = substitute_strings_in_json(
+            value,
+            &resolved(&[("delay", "5000")]),
+            &specs(&[("delay", TemplateParamType::Number)]),
+        )
+        .unwrap();
+        assert_eq!(
+            result["delay"],
+            serde_json::Value::String("{{delay}}".into())
+        );
+        assert!(!result["delay"].is_number());
+    }
+
+    #[test]
+    fn sibling_key_inside_minijinja_object_substitutes() {
+        let value = serde_json::json!({
+            "script": {
+                "language": "minijinja",
+                "source": "{{ body }}",
+                "fallback": "cf-{{body}}"
+            }
+        });
+        let result = substitute_strings_in_json(
+            value,
+            &resolved(&[("body", "RELAY")]),
+            &specs(&[("body", TemplateParamType::String)]),
+        )
+        .unwrap();
+        assert_eq!(result["script"]["source"], "{{ body }}");
+        assert_eq!(result["script"]["fallback"], "cf-RELAY");
     }
 
     // --- whole-node typed substitution tests ---

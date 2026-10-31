@@ -231,7 +231,7 @@ in camel-dsl (`RouteDslRoute`) lowers to the same `RouteDefinition`.
 _Avoid_: builder, route factory, DSL builder
 
 **RouteTemplate**:
-Parameterized DSL definition that expands into one or more RouteDefinitions before the Runtime sees them. Template parameters are substituted before DSL deserialization.
+Parameterized DSL definition that expands into one or more RouteDefinitions before the Runtime sees them. Template parameters are substituted before DSL deserialization, except the `source` string of an expression object whose `language` is exactly `minijinja` (passed through byte-identically); `\{{` renders a literal `{{` without substitution in any other string.
 _Avoid_: route macro, route generator, reusable route (too vague)
 
 **Step**:

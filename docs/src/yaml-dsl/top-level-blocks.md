@@ -124,6 +124,36 @@ See [MCP component](../components/mcp.md) and the
 | `parameters` | list | no | `[]` | Template parameters |
 | `routes` | list | no | `[]` | Route definitions with `{{param}}` placeholders |
 
+### Placeholders and language expressions
+Route-template `{{param}}` placeholders substitute in template strings, both embedded (`log:relay-{{body}}`) and as a whole node. A whole-node `number` or `boolean` parameter yields a JSON number or boolean; a `string` parameter yields a string.
+
+A `language: minijinja` expression whose `source` is a string is not a substitution target. Its `source` passes through byte-identically, so minijinja syntax such as `{{ headers.name }}` reaches the compiler unchanged and a template parameter named like a minijinja variable never collides. Only `source` is exempt; other fields on the same route substitute normally. Other expression languages (`rhai`, `simple`, `jsonpath`, `xpath`) keep ordinary substitution.
+
+To emit literal `{{...}}` from a normal template string, escape the opening braces: `\{{name}}` renders `{{name}}` with no substitution and no whole-node typing. Write `\{{` in a YAML plain or single-quoted scalar; a double-quoted YAML scalar treats the backslash as an escape and does not carry it literally. In a JSON route body write `\\{{`. An unescaped `{{name}}` naming an undeclared parameter still fails with `UnknownParameter`. `${...}` environment interpolation is unaffected.
+
+```yaml
+templates:
+  - id: relay
+    parameters:
+      - name: body
+        type: string
+    routes:
+      - id: "relay-{{body}}"
+        from: "direct:start"
+        steps:
+          - script:
+              language: minijinja
+              source: "{{ body }} passthrough"
+          - to: "log:relay-{{body}}"
+  - id: escaped
+    parameters: []
+    routes:
+      - id: 'esc-\{{x}}-route'
+        from: "direct:start"
+        steps:
+          - to: "log:info"
+```
+
 ## Templated route instantiation
 | Field | Type | Required | Description |
 |---|---|---|---|
