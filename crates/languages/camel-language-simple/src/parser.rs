@@ -359,7 +359,11 @@ fn parse_slot_content(
         if (!has_grammar || hyphenated_lookup) && !tokens.is_empty() {
             if let [token] = tokens.as_slice() {
                 let expr = match token {
-                    Token::Word(word) => parse_identifier(word, content)?,
+                    // Slots only accept known lookups. A bare unknown word in a
+                    // template is not an atom: keep the template-parser contract
+                    // (`unrecognized token`), not the bare-identifier error.
+                    Token::Word(word) if is_lookup_word(word) => parse_expr_atom(word)?,
+                    Token::Word(_) => return Err(parse_error(content, "unrecognized token")),
                     // A lone text run is not an atom: `${@}` is a compile error.
                     Token::Text(_) => return Err(parse_error(content, "unrecognized token")),
                     other => token_to_atom(other, content, depth)?,
@@ -2182,6 +2186,12 @@ mod tests {
             parse_template("${unknown}"),
             Err(LanguageError::ParseError { .. })
         ));
+    }
+
+    #[test]
+    fn template_looking_unknown_slot_reports_unrecognized_token() {
+        let err = parse_template("echo ${HOME}").unwrap_err();
+        assert!(err.to_string().contains("unrecognized token"), "{err}");
     }
 
     #[test]
