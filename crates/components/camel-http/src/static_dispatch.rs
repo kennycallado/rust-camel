@@ -63,6 +63,11 @@ pub(crate) async fn dispatch_static_with(
     // Extract request parts once so we can rebuild for each mount attempt
     let (parts, _body) = req.into_parts();
 
+    // Content-aware HTML 404 gate (rc-n7bgz): reuse the SPA-qualification rule
+    // (GET/HEAD, Accept text/html or */*, no file extension) so the custom HTML
+    // error page is only served for navigation requests, not missing assets.
+    let html_qualified = is_spa_qualified(&rebuild_request(&parts));
+
     // One caller-supplied snapshot serves both mount selection and the root
     // error-page fallback; it holds no lock, so readers never block a
     // registering writer.
@@ -94,11 +99,18 @@ pub(crate) async fn dispatch_static_with(
 
         let req = rebuild_request_with_path(&parts, &stripped_path);
         let resp = serve_via_serve_dir(mount.serve_dir.clone(), req, &mount.cache_control).await;
-        // Forward ServeDir's success AND its legitimate 304 Not Modified for
-        // conditional GETs (If-None-Match / If-Modified-Since). Without this
-        // gate, a matching conditional request falls through to the generic
-        // 404 at the bottom of dispatch_static. Per RFC 7232 §2.1/§4.1.
-        if resp.status().is_success() || resp.status() == StatusCode::NOT_MODIFIED {
+        // Forward ServeDir's success, its legitimate 304 Not Modified for
+        // conditional GETs, and its 3xx directory redirects. Redirect targets
+        // were built from the prefix-stripped URI, so re-add the mount prefix
+        // before returning them to the client.
+        if resp.status().is_success() || resp.status().is_redirection() {
+            // 304 is in the 3xx class but is not a redirect — return untouched.
+            let resp =
+                if resp.status().is_redirection() && resp.status() != StatusCode::NOT_MODIFIED {
+                    rewrite_redirect_location(resp, &mount.mount_path)
+                } else {
+                    resp
+                };
             return resp;
         }
 
@@ -117,9 +129,12 @@ pub(crate) async fn dispatch_static_with(
             }
         }
 
-        // Try error page for this mount (for Static mode or non-qualified SPA requests)
-        if let Some(error_resp) =
-            try_serve_error_page(&mount.error_pages, resp.status().as_u16()).await
+        // Try error page for this mount (for Static mode or non-qualified SPA
+        // requests). A 404 is content-gated: only HTML navigation gets the
+        // custom page; missing assets get the plain 404 below.
+        if (resp.status() != StatusCode::NOT_FOUND || html_qualified)
+            && let Some(error_resp) =
+                try_serve_error_page(&mount.error_pages, resp.status().as_u16()).await
         {
             return error_resp;
         }
@@ -127,6 +142,7 @@ pub(crate) async fn dispatch_static_with(
 
     // No mount matched — use best-match error pages only (Fix 3)
     if let Some(mount) = best_match
+        && html_qualified
         && let Some(error_resp) =
             try_serve_error_page(&mount.error_pages, StatusCode::NOT_FOUND.as_u16()).await
     {
@@ -140,6 +156,7 @@ pub(crate) async fn dispatch_static_with(
         .find(|mount| mount.mount_path == "/")
         .map(|mount| &mount.error_pages);
     if let Some(pages) = root_error_pages
+        && html_qualified
         && let Some(error_resp) = try_serve_error_page(pages, StatusCode::NOT_FOUND.as_u16()).await
     {
         return error_resp;
@@ -166,8 +183,13 @@ fn rebuild_request(parts: &http::request::Parts) -> Request {
 
 /// Rebuild a request from captured parts, but with a rewritten URI path.
 /// Used when stripping mount_path prefix before delegating to ServeDir.
+/// The original query string is preserved so ServeDir's directory redirect
+/// `Location` already carries it.
 fn rebuild_request_with_path(parts: &http::request::Parts, path: &str) -> Request {
-    let uri = format!("/{path}");
+    let uri = match parts.uri.query() {
+        Some(query) => format!("/{path}?{query}"),
+        None => format!("/{path}"),
+    };
     let mut builder = http::Request::builder()
         .method(parts.method.clone())
         .uri(&uri)
@@ -179,6 +201,55 @@ fn rebuild_request_with_path(parts: &http::request::Parts, path: &str) -> Reques
         .extension(parts.extensions.clone())
         .body(AxumBody::empty())
         .expect("valid request rebuild") // allow-unwrap
+}
+
+/// Rewrite a ServeDir redirect `Location` for the client-facing URL space.
+///
+/// ServeDir built the Location from the request it received, whose path had
+/// the mount prefix stripped. Authority-form (`//host/…`) and absolute-URI
+/// (`scheme://…`) targets are external and forwarded untouched. Every other
+/// Location — root-relative, path-relative, or unparseable by `http::Uri` —
+/// is treated as an internal relative reference and gets the mount prefix
+/// re-added. The query string rides inside the Location value and is
+/// preserved.
+fn rewrite_redirect_location(
+    resp: axum::response::Response,
+    mount_path: &str,
+) -> axum::response::Response {
+    let Some(location) = resp
+        .headers()
+        .get(http::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return resp;
+    };
+    // Authority-form (`//host/…`) is scheme-relative and therefore external.
+    // `http::Uri` cannot distinguish this from a path, so detect it textually.
+    if location.starts_with("//") {
+        return resp;
+    }
+    // An absolute URI (scheme://…) is external. Uri-authority alone is NOT
+    // evidence of externality: `http::Uri` parses path-relative references
+    // such as `about` as an authority, and rejects others such as `about/`.
+    // Both are internal relative references and must fall through to the
+    // rewrite below; parse failure is a crate limitation, not externality.
+    if let Ok(target) = location.parse::<http::Uri>()
+        && target.scheme().is_some()
+    {
+        return resp;
+    }
+    let prefix = if mount_path == "/" { "" } else { mount_path };
+    let rewritten = if location.starts_with('/') {
+        format!("{prefix}{location}")
+    } else {
+        format!("{prefix}/{location}")
+    };
+    let Ok(value) = http::HeaderValue::from_str(&rewritten) else {
+        return resp;
+    };
+    let (mut parts, body) = resp.into_parts();
+    parts.headers.insert(http::header::LOCATION, value);
+    Response::from_parts(parts, body)
 }
 
 /// Serve a static file by delegating to `ServeDir`, adding `Cache-Control` on success.
@@ -288,6 +359,10 @@ async fn try_serve_error_page(
 #[cfg(test)]
 mod tests {
     use super::prefix_matches_segment;
+    use super::rewrite_redirect_location;
+    use axum::body::Body as AxumBody;
+    use axum::http::Response;
+    use axum::http::StatusCode;
 
     #[test]
     fn root_prefix_matches_everything() {
@@ -326,5 +401,81 @@ mod tests {
             "/assets/other/file.txt",
             "/assets/sub"
         ));
+    }
+
+    fn redirect_with_location(location: &str) -> axum::response::Response {
+        Response::builder()
+            .status(StatusCode::TEMPORARY_REDIRECT)
+            .header(http::header::LOCATION, location)
+            .body(AxumBody::empty())
+            .expect("valid redirect response")
+    }
+
+    fn location_of(resp: &axum::response::Response) -> Option<&str> {
+        resp.headers()
+            .get(http::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+    }
+
+    #[test]
+    fn rewrite_adds_mount_prefix_to_root_relative_location() {
+        let resp = rewrite_redirect_location(redirect_with_location("/about/"), "/docs");
+        assert_eq!(location_of(&resp), Some("/docs/about/"));
+    }
+
+    #[test]
+    fn rewrite_preserves_query_string_in_location() {
+        let resp = rewrite_redirect_location(redirect_with_location("/about/?a=1"), "/docs");
+        assert_eq!(location_of(&resp), Some("/docs/about/?a=1"));
+    }
+
+    #[test]
+    fn rewrite_root_mount_does_not_double_prefix() {
+        let resp = rewrite_redirect_location(redirect_with_location("/about/"), "/");
+        assert_eq!(location_of(&resp), Some("/about/"));
+    }
+
+    #[test]
+    fn rewrite_adds_mount_prefix_to_path_relative_location() {
+        // `about` parses as an authority via http::Uri but is path-relative.
+        let resp = rewrite_redirect_location(redirect_with_location("about"), "/docs");
+        assert_eq!(location_of(&resp), Some("/docs/about"));
+    }
+
+    #[test]
+    fn rewrite_adds_mount_prefix_to_path_relative_location_with_query() {
+        // `about/` fails to parse via http::Uri; still an internal relative ref.
+        let resp = rewrite_redirect_location(redirect_with_location("about/?a=1"), "/docs");
+        assert_eq!(location_of(&resp), Some("/docs/about/?a=1"));
+    }
+
+    #[test]
+    fn rewrite_path_relative_location_on_root_mount() {
+        let resp = rewrite_redirect_location(redirect_with_location("about"), "/");
+        assert_eq!(location_of(&resp), Some("/about"));
+    }
+
+    #[test]
+    fn rewrite_leaves_absolute_uri_location_untouched() {
+        let resp =
+            rewrite_redirect_location(redirect_with_location("https://example.com/x/"), "/docs");
+        assert_eq!(location_of(&resp), Some("https://example.com/x/"));
+    }
+
+    #[test]
+    fn rewrite_leaves_authority_form_location_untouched() {
+        let resp = rewrite_redirect_location(redirect_with_location("//example.com/x/"), "/docs");
+        assert_eq!(location_of(&resp), Some("//example.com/x/"));
+    }
+
+    #[test]
+    fn rewrite_without_location_returns_response_untouched() {
+        let resp = Response::builder()
+            .status(StatusCode::TEMPORARY_REDIRECT)
+            .body(AxumBody::empty())
+            .expect("valid redirect response");
+        let resp = rewrite_redirect_location(resp, "/docs");
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(location_of(&resp), None);
     }
 }

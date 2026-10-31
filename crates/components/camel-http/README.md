@@ -390,7 +390,8 @@ A bare `http-static:/` is an error. It needs a `dir`, from the `dir` query param
 - **Co-hosting**: Shares port with `http:` API routes
 - **Mount path prefix**: URI path derived prefix, longest prefix wins
 - **SPA fallback**: GET/HEAD + `Accept: text/html` + no file extension → index.html
-- **Custom error pages**: Per-mount error pages for 404, 500, etc.
+- **Directory redirects**: A directory request without a trailing slash returns `307 Temporary Redirect` with a mount-aware `Location`
+- **Custom error pages**: Per-mount error pages for 404, 500, etc.; the HTML 404 page is served only for HTML-qualified navigation requests
 - **Precompressed serving**: gzip, brotli (`ServeDir`)
 - **Cache-Control headers**: Configurable per mount
 - **Path traversal prevention**: `..` segments are rejected
@@ -419,7 +420,20 @@ dir = "/var/www"
 
 ### Routing Precedence
 
-API exact match → static file (longest prefix) → SPA fallback (if qualified) → custom error page → 404
+API exact match → static file (longest prefix) → directory redirect (307, prefix-aware) → SPA fallback (if qualified) → custom HTML 404 (HTML-qualified requests only) → plain 404
+
+### Redirects and Error Pages
+
+A request for a directory without a trailing slash (for example `/about` when `about/` exists) returns `307 Temporary Redirect`. `ServeDir` builds the `Location` from the mount-stripped path, so the dispatch re-adds the matched mount prefix before returning it. A root mount (`/`) does not double-prefix, and the query string is preserved. Absolute-URI (`scheme://...`) and authority-form (`//host/...`) targets are treated as external and forwarded untouched; 304 Not Modified responses pass through unchanged.
+
+The custom HTML 404 page is content-aware. It is served only for HTML-qualified requests: GET/HEAD with `Accept: text/html` or `*/*` and a path without a file extension, the same rule as the SPA fallback. Missing assets and non-HTML accepts get a plain `404 Not Found`, even when `errorPages` configures a 404 page. Error-page scoping by mount is unchanged.
+
+```text
+http-static:/srv/www  mounted at /   GET /about?a=1     -> 307  Location: /about/?a=1
+http-static:/docs?dir=...            GET /docs/about    -> 307  Location: /docs/about/
+                                     GET /missing.js    -> 404  Not Found (plain)
+                                     GET /missing-page  -> 404  custom 404 page (Accept: text/html)
+```
 
 ## License
 

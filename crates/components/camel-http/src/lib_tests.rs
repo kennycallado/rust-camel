@@ -7585,13 +7585,14 @@ async fn test_error_page_mapping_serves_custom_404() {
 
     let state = make_test_state(registry);
 
-    // Request non-existent file → custom 404 page
+    // Request non-existent page via HTML navigation → custom 404 page
     let req = Request::builder()
         .method("GET")
-        .uri("/missing.html")
+        .uri("/missing-page")
+        .header(http::header::ACCEPT, "text/html")
         .body(AxumBody::empty())
         .unwrap();
-    let resp = static_dispatch::dispatch_static(&state, req, "/missing.html").await;
+    let resp = static_dispatch::dispatch_static(&state, req, "/missing-page").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -7612,6 +7613,284 @@ async fn test_error_page_mapping_serves_custom_404() {
     assert_eq!(&body[..], b"<h1>Home</h1>");
 
     // Cleanup
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_directory_redirect_forwarded_on_root_mount() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("http_dir_redirect_root_{}", std::process::id()));
+    let about_dir = temp_dir.join("about");
+    std::fs::create_dir_all(&about_dir).unwrap();
+    std::fs::write(about_dir.join("index.html"), "<h1>About</h1>").unwrap();
+
+    let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+
+    let registry = make_test_registry();
+    let serve_dir = ServeDir::new(&canonical_dir)
+        .precompressed_gzip()
+        .precompressed_br()
+        .append_index_html_on_directories(true);
+
+    let mount = StaticMount {
+        mount_path: "/".to_string(),
+        mode: MountMode::Static,
+        dir: canonical_dir.clone(),
+        cache_control: "public, max-age=0".to_string(),
+        error_pages: std::collections::HashMap::new(),
+        serve_dir,
+    };
+    registry.register_static_mount(mount).await.unwrap();
+
+    let state = make_test_state(registry);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/about?a=1")
+        .header(http::header::ACCEPT, "text/html")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/about").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::TEMPORARY_REDIRECT,
+        "ServeDir directory redirect must be forwarded, not turned into a 404"
+    );
+    assert_eq!(
+        resp.headers()
+            .get(http::header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/about/?a=1"),
+        "root-mount redirect must keep the query string"
+    );
+    assert!(
+        resp.headers().get(http::header::CACHE_CONTROL).is_none(),
+        "directory redirects must not carry the static-file cache policy"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_directory_redirect_rewrites_mount_prefix() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("http_dir_redirect_docs_{}", std::process::id()));
+    let about_dir = temp_dir.join("about");
+    std::fs::create_dir_all(&about_dir).unwrap();
+    std::fs::write(about_dir.join("index.html"), "<h1>About</h1>").unwrap();
+
+    let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+
+    let registry = make_test_registry();
+    let serve_dir = ServeDir::new(&canonical_dir)
+        .precompressed_gzip()
+        .precompressed_br()
+        .append_index_html_on_directories(true);
+
+    let mount = StaticMount {
+        mount_path: "/docs".to_string(),
+        mode: MountMode::Static,
+        dir: canonical_dir.clone(),
+        cache_control: "public, max-age=0".to_string(),
+        error_pages: std::collections::HashMap::new(),
+        serve_dir,
+    };
+    registry.register_static_mount(mount).await.unwrap();
+
+    let state = make_test_state(registry);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/docs/about")
+        .header(http::header::ACCEPT, "text/html")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/docs/about").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::TEMPORARY_REDIRECT,
+        "non-root mount redirect must be forwarded"
+    );
+    assert_eq!(
+        resp.headers()
+            .get(http::header::LOCATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("/docs/about/"),
+        "redirect Location must re-add the mount prefix exactly once"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_missing_asset_with_extension_gets_plain_404() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+
+    let temp_dir = std::env::temp_dir().join(format!("http_missing_asset_{}", std::process::id()));
+    let errors_dir = temp_dir.join("errors");
+    std::fs::create_dir_all(&errors_dir).unwrap();
+    std::fs::write(temp_dir.join("index.html"), "<h1>Home</h1>").unwrap();
+    std::fs::write(errors_dir.join("404.html"), "<h1>Custom 404</h1>").unwrap();
+
+    let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+    let canonical_404 = std::fs::canonicalize(errors_dir.join("404.html")).unwrap();
+
+    let registry = make_test_registry();
+    let serve_dir = ServeDir::new(&canonical_dir)
+        .precompressed_gzip()
+        .precompressed_br()
+        .append_index_html_on_directories(true);
+
+    let mut error_pages = std::collections::HashMap::new();
+    error_pages.insert(404, canonical_404);
+
+    let mount = StaticMount {
+        mount_path: "/".to_string(),
+        mode: MountMode::Static,
+        dir: canonical_dir.clone(),
+        cache_control: "public, max-age=0".to_string(),
+        error_pages,
+        serve_dir,
+    };
+    registry.register_static_mount(mount).await.unwrap();
+
+    let state = make_test_state(registry);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/missing.js")
+        .header(http::header::ACCEPT, "*/*")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/missing.js").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        &body[..],
+        b"Not Found",
+        "missing asset with an extension must not receive the HTML error page"
+    );
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_html_navigation_miss_gets_custom_404() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+
+    let temp_dir = std::env::temp_dir().join(format!("http_html_miss_{}", std::process::id()));
+    let errors_dir = temp_dir.join("errors");
+    std::fs::create_dir_all(&errors_dir).unwrap();
+    std::fs::write(temp_dir.join("index.html"), "<h1>Home</h1>").unwrap();
+    std::fs::write(errors_dir.join("404.html"), "<h1>Custom 404</h1>").unwrap();
+
+    let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+    let canonical_404 = std::fs::canonicalize(errors_dir.join("404.html")).unwrap();
+
+    let registry = make_test_registry();
+    let serve_dir = ServeDir::new(&canonical_dir)
+        .precompressed_gzip()
+        .precompressed_br()
+        .append_index_html_on_directories(true);
+
+    let mut error_pages = std::collections::HashMap::new();
+    error_pages.insert(404, canonical_404);
+
+    let mount = StaticMount {
+        mount_path: "/".to_string(),
+        mode: MountMode::Static,
+        dir: canonical_dir.clone(),
+        cache_control: "public, max-age=0".to_string(),
+        error_pages,
+        serve_dir,
+    };
+    registry.register_static_mount(mount).await.unwrap();
+
+    let state = make_test_state(registry);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/missing-page")
+        .header(http::header::ACCEPT, "text/html")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/missing-page").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"<h1>Custom 404</h1>");
+
+    std::fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn test_json_accept_without_extension_gets_plain_404() {
+    let _guard = lock_registry_test_mutex();
+    ServerRegistry::reset();
+
+    let temp_dir = std::env::temp_dir().join(format!("http_json_miss_{}", std::process::id()));
+    let errors_dir = temp_dir.join("errors");
+    std::fs::create_dir_all(&errors_dir).unwrap();
+    std::fs::write(temp_dir.join("index.html"), "<h1>Home</h1>").unwrap();
+    std::fs::write(errors_dir.join("404.html"), "<h1>Custom 404</h1>").unwrap();
+
+    let canonical_dir = std::fs::canonicalize(&temp_dir).unwrap();
+    let canonical_404 = std::fs::canonicalize(errors_dir.join("404.html")).unwrap();
+
+    let registry = make_test_registry();
+    let serve_dir = ServeDir::new(&canonical_dir)
+        .precompressed_gzip()
+        .precompressed_br()
+        .append_index_html_on_directories(true);
+
+    let mut error_pages = std::collections::HashMap::new();
+    error_pages.insert(404, canonical_404);
+
+    let mount = StaticMount {
+        mount_path: "/".to_string(),
+        mode: MountMode::Static,
+        dir: canonical_dir.clone(),
+        cache_control: "public, max-age=0".to_string(),
+        error_pages,
+        serve_dir,
+    };
+    registry.register_static_mount(mount).await.unwrap();
+
+    let state = make_test_state(registry);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/missing-page")
+        .header(http::header::ACCEPT, "application/json")
+        .body(AxumBody::empty())
+        .unwrap();
+    let resp = static_dispatch::dispatch_static(&state, req, "/missing-page").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        &body[..],
+        b"Not Found",
+        "JSON-accepting navigation must not receive the HTML error page"
+    );
+
     std::fs::remove_dir_all(&temp_dir).ok();
 }
 
