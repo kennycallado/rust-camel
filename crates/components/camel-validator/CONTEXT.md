@@ -54,6 +54,20 @@ Malformed values, duplicated `schemaAliases` query parameters, or more than 128 
 The Java bridge resolves only from the transmitted in-memory set. Its supplied-key resolver never
 fetches: no network and no filesystem access occur, and the XXE posture is unchanged.
 
+## Negative refusal cache
+
+`XsdBridgeBackend` memoizes only deterministic refusals: a `ValidatorError` that
+`is_deterministic_refusal()` classifies (exactly `CompilationFailed`, from a `COMPILATION_FAILED`
+bridge response). The memo key is `(SchemaId, generation)` — schema-set identity plus bridge
+generation — so a repeated registration of a refused set returns the stored typed error without
+another RPC or recompile. Transient transport errors and all other response kinds are never
+memoized and retry on the next attempt. `launch_and_seed` clears the memo on every generation bump,
+so each refusal is re-attempted once per bridge process. Insertion is generation-fenced under the
+published-channel read guard, which spans the insert. `refusals` and `schemas` share the
+`schema_cache_max_entries` budget: a new refusal at the combined bound clears `refusals`, refusal
+entries yield to new successes, and a success cache already at capacity prevents caching new
+refusals (per-Exchange retry, unchanged behavior). No new configuration.
+
 ## `non_exhaustive` posture
 
 ADR-0049 limits the workspace `#[non_exhaustive]` policy to contract crates. This component is

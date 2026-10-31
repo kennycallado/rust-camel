@@ -46,7 +46,7 @@ selects protobuf).
 | `schemaType` | *(from extension)* | Canonical alias of `type`. Both keys are accepted and must agree when both are set. |
 | `message` | *(none)* | Required for `protobuf`: fully-qualified message name, e.g. `test.v1.Person`. |
 | `maxPayloadBytes` | *(none)* | Reject bodies larger than this. Accepts `maxPayloadBytes=` and `maxPayloadBytes:`. |
-| `schemaCacheMaxEntries` | `256` | Maximum XSD schema entries before the bridge cache is evicted. |
+| `schemaCacheMaxEntries` | `256` | Maximum combined success + refusal cache entries before eviction. |
 | `failOnNullBody` | `true` | Reject empty bodies when `true` |
 | `headerName` | *(none)* | Validate a header value instead of the body |
 | `failOnNullHeader` | `true` | Reject when the named header is missing |
@@ -98,6 +98,18 @@ A missing or empty `message` fails endpoint or route creation with a config erro
 JSON, YAML, and protobuf schemas compile when the Endpoint is created. Invalid schemas fail
 Endpoint creation. XSD registration is deferred until the first validation call so bridge startup runs in
 an async context. The compiled validator remains cached for the Endpoint's lifetime.
+
+## XSD failure caching
+
+The XSD bridge memoizes only deterministic schema refusals: responses whose kind is
+`COMPILATION_FAILED`. A memoized refusal is keyed by schema-set identity and bridge generation, so
+repeated registration of the same refused set returns the same typed error without another send or
+compile. Transient transport errors and every other bridge response kind are never memoized; they
+retry on the next attempt. The memo is cleared when the bridge restarts, so a refusal is re-attempted
+once per bridge process. Refusals share the `schemaCacheMaxEntries` budget with the success cache
+under a combined full-clear eviction, and refusal entries yield to successes. While the success cache
+alone sits at capacity, new refusals are not cached and each Exchange retries as before. No new
+configuration is required.
 
 ## Build requirement
 

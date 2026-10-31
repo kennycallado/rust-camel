@@ -239,6 +239,23 @@ pub struct XsdBridgeBackend {
     /// Full retained snapshots keyed by schema id: root systemId, resource map,
     /// and alias map, so reconnect replay re-supplies the exact same set.
     schemas: Arc<DashMap<SchemaId, Arc<SchemaSet>>>,
+    /// Deterministic refusal memo, keyed by `(schema id, bridge generation)`.
+    ///
+    /// A refusal is a function of the schema bytes against one bridge process,
+    /// so it is memoized only while that generation is published. Entries are
+    /// cleared in `launch_and_seed` on a generation bump.
+    ///
+    /// Eviction policy: `refusals` and `schemas` share one budget of
+    /// `schema_cache_max_entries` entries. Inserting a new refusal at or over
+    /// that combined bound clears the whole refusal cache (a full clear is
+    /// acceptable because every refusal is re-attempted on demand at one RPC
+    /// each); if the success cache alone already fills the budget, the new
+    /// refusal is not cached at all, so every Exchange pays one RPC (the
+    /// status-quo non-regression). Overwrites are size-neutral and bypass the
+    /// check. Refusal entries always yield to successes: a new success insert
+    /// at or over the combined bound clears `refusals` first. Shrinking the
+    /// budget below the refusal count clears the memo immediately.
+    refusals: Arc<DashMap<(SchemaId, usize), ValidatorError>>,
     schema_cache_max_entries: Arc<AtomicUsize>,
     slot: Arc<XmlBridgeSlot>,
     rpc: Arc<dyn XsdBridgeRpc>,
@@ -272,6 +289,7 @@ impl XsdBridgeBackend {
             channel: Arc::new(RwLock::new(None)),
             generation: Arc::new(AtomicUsize::new(0)),
             schemas: Arc::new(DashMap::new()),
+            refusals: Arc::new(DashMap::new()),
             schema_cache_max_entries: Arc::new(AtomicUsize::new(
                 crate::config::DEFAULT_SCHEMA_CACHE_MAX_ENTRIES,
             )),
@@ -303,6 +321,7 @@ impl XsdBridgeBackend {
             }))),
             generation: Arc::new(AtomicUsize::new(1)),
             schemas: Arc::new(DashMap::new()),
+            refusals: Arc::new(DashMap::new()),
             schema_cache_max_entries: Arc::new(AtomicUsize::new(
                 crate::config::DEFAULT_SCHEMA_CACHE_MAX_ENTRIES,
             )),
@@ -332,6 +351,9 @@ impl XsdBridgeBackend {
     pub fn set_schema_cache_max_entries(&self, max_entries: usize) {
         if self.schemas.len() > max_entries {
             self.schemas.clear();
+        }
+        if self.refusals.len() > max_entries {
+            self.refusals.clear();
         }
         self.schema_cache_max_entries
             .store(max_entries, Ordering::Relaxed);
@@ -407,6 +429,14 @@ impl XsdBridgeBackend {
             // Lock order: startup, channel, process. Publication is the final
             // step, after all registrations have completed successfully.
             let mut published = self.channel.write().await;
+            // A new bridge process may accept what the old one refused, so
+            // memoized refusals never survive a generation change.
+            // Defense-in-depth alongside the generation-scoped keys and the
+            // fenced consult. Clearing under the write guard closes the window
+            // where a fenced insert for the retired generation could complete
+            // after the clear but before publication: every fenced insert holds
+            // the read guard, so it finishes before this write guard is taken.
+            self.refusals.clear();
             *self.slot.process.lock().await = process;
             *published = Some(ready.clone());
         }
@@ -469,7 +499,35 @@ impl XsdBridgeBackend {
             .await?;
 
         if let Some(err) = response.error {
-            return Err(ValidatorError::from_bridge_error(&err));
+            let err = ValidatorError::from_bridge_error(&err);
+            // The read guard must stay live across the memo insert: it closes
+            // the check-then-insert gap against `launch_and_seed`'s
+            // `channel.write().take()`, so a retired generation can never
+            // acquire a refusal entry.
+            let published = self.channel.read().await;
+            let generation_current = published
+                .as_ref()
+                .is_some_and(|current| current.generation == ready.generation);
+            if generation_current && err.is_deterministic_refusal() {
+                let key = (schema_id.to_string(), ready.generation);
+                if self.refusals.contains_key(&key) {
+                    // Overwriting an existing key is size-neutral: bypass the
+                    // combined bound.
+                    self.refusals.insert(key, err.clone());
+                } else {
+                    let max_entries = self.schema_cache_max_entries.load(Ordering::Relaxed);
+                    if self.schemas.len() + self.refusals.len() >= max_entries {
+                        self.refusals.clear();
+                    }
+                    // A success cache that alone fills the budget leaves no
+                    // room for refusals; do not cache, so the status quo (one
+                    // RPC per Exchange) is preserved.
+                    if self.schemas.len() < max_entries {
+                        self.refusals.insert(key, err.clone());
+                    }
+                }
+            }
+            return Err(err);
         }
 
         let published = self.channel.read().await;
@@ -486,7 +544,12 @@ impl XsdBridgeBackend {
         // acceptable because schemas are re-registered on demand and also
         // re-seeded after bridge reconnects.
         let max_entries = self.schema_cache_max_entries.load(Ordering::Relaxed);
-        if self.schemas.len() >= max_entries && !self.schemas.contains_key(schema_id) {
+        let new_success_key = !self.schemas.contains_key(schema_id);
+        if new_success_key && self.schemas.len() + self.refusals.len() >= max_entries {
+            // Refusal entries always yield to successes.
+            self.refusals.clear();
+        }
+        if self.schemas.len() >= max_entries && new_success_key {
             self.schemas.clear();
         }
 
@@ -570,12 +633,20 @@ impl XsdBridge for XsdBridgeBackend {
         loop {
             {
                 let published = self.channel.read().await;
-                if published
+                let generation_current = published
                     .as_ref()
-                    .is_some_and(|current| current.generation == ready.generation)
-                    && self.schemas.contains_key(schema_id)
-                {
+                    .is_some_and(|current| current.generation == ready.generation);
+                if generation_current && self.schemas.contains_key(schema_id) {
                     return Ok(schema_id.to_string());
+                }
+                // Same read guard as the local-hit check, so the memo is only
+                // consulted while its generation is still published.
+                if generation_current
+                    && let Some(cached) = self
+                        .refusals
+                        .get(&(schema_id.to_string(), ready.generation))
+                {
+                    return Err(cached.clone());
                 }
             }
             match self.register_with_channel(&ready, schema_id, set).await {
@@ -794,7 +865,7 @@ mod tests {
 
     mod generations {
         use super::*;
-        use std::future::{Future, poll_fn};
+        use std::future::Future;
         use std::pin::Pin;
         use std::task::Poll;
 
@@ -908,7 +979,7 @@ mod tests {
         }
 
         async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
-            poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
+            std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
         }
 
         mod n1 {
@@ -1653,6 +1724,722 @@ mod tests {
             })
             .await
             .expect("cached registration and recovery must finish within deadline");
+        }
+    }
+
+    mod refusal_cache {
+        use super::*;
+        use std::collections::VecDeque;
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::Poll;
+
+        /// Scripted bridge outcome. Retryability is source-keyed:
+        /// `TransportFailed` is a source-less transport error (non-retryable),
+        /// while `TransportUnavailable` carries a tonic `Unavailable` source
+        /// (retryable); `Refused` and `Acknowledged` complete the four shapes.
+        #[derive(Clone, Debug)]
+        enum Outcome {
+            Refused(proto::BridgeError),
+            TransportFailed,
+            TransportUnavailable,
+            Acknowledged,
+        }
+
+        fn bridge_error(kind: proto::bridge_error::Kind, message: &str) -> proto::BridgeError {
+            proto::BridgeError {
+                kind: kind as i32,
+                message: message.to_string(),
+                line: 0,
+                column: 0,
+                detail: String::new(),
+            }
+        }
+
+        struct RefusalScriptRpc {
+            scripted: StdMutex<HashMap<String, VecDeque<Outcome>>>,
+            register_calls: Arc<AtomicUsize>,
+            captured: Arc<StdMutex<Vec<String>>>,
+            calls: AtomicUsize,
+            gated_calls: Vec<usize>,
+            entered: Notify,
+            release: Notify,
+        }
+
+        #[async_trait]
+        impl XsdBridgeRpc for RefusalScriptRpc {
+            async fn register_schema(
+                &self,
+                _channel: Channel,
+                request: RegisterSchemaRequest,
+            ) -> Result<RegisterSchemaResponse, ValidatorError> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if self.gated_calls.contains(&call) {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                let outcome = self
+                    .scripted
+                    .lock()
+                    .expect("script lock")
+                    .get_mut(&request.schema_id)
+                    .and_then(VecDeque::pop_front)
+                    .unwrap_or(Outcome::Acknowledged);
+                self.register_calls.fetch_add(1, Ordering::SeqCst);
+                self.captured
+                    .lock()
+                    .expect("capture lock")
+                    .push(request.schema_id.clone());
+                match outcome {
+                    Outcome::Refused(error) => Ok(RegisterSchemaResponse {
+                        schema_id: request.schema_id,
+                        error: Some(error),
+                    }),
+                    Outcome::TransportFailed => Err(ValidatorError::Transport {
+                        message: "scripted transport failure".to_string(),
+                        source: None,
+                    }),
+                    Outcome::TransportUnavailable => Err(ValidatorError::transport_with_source(
+                        "scripted transport failure",
+                        tonic::Status::unavailable("scripted bridge unavailable"),
+                    )),
+                    Outcome::Acknowledged => Ok(RegisterSchemaResponse {
+                        schema_id: request.schema_id,
+                        error: None,
+                    }),
+                }
+            }
+
+            async fn validate_with(
+                &self,
+                _channel: Channel,
+                _request: ValidateWithRequest,
+            ) -> Result<ValidateResponse, ValidatorError> {
+                Ok(ValidateResponse {
+                    valid: true,
+                    errors: Vec::new(),
+                    error: None,
+                })
+            }
+        }
+
+        fn refusal_rpc_with(
+            scripted: &[(&str, Outcome)],
+            gated_calls: Vec<usize>,
+        ) -> Arc<RefusalScriptRpc> {
+            let mut queues: HashMap<String, VecDeque<Outcome>> = HashMap::new();
+            for (schema_id, outcome) in scripted {
+                queues
+                    .entry((*schema_id).to_string())
+                    .or_default()
+                    .push_back(outcome.clone());
+            }
+            Arc::new(RefusalScriptRpc {
+                scripted: StdMutex::new(queues),
+                register_calls: Arc::new(AtomicUsize::new(0)),
+                captured: Arc::new(StdMutex::new(Vec::new())),
+                calls: AtomicUsize::new(0),
+                gated_calls,
+                entered: Notify::new(),
+                release: Notify::new(),
+            })
+        }
+
+        fn refusal_rpc(scripted: &[(&str, Outcome)]) -> Arc<RefusalScriptRpc> {
+            refusal_rpc_with(scripted, Vec::new())
+        }
+
+        fn refusal_rpc_gated(
+            scripted: &[(&str, Outcome)],
+            gated_calls: Vec<usize>,
+        ) -> Arc<RefusalScriptRpc> {
+            refusal_rpc_with(scripted, gated_calls)
+        }
+
+        fn scripted_backend(rpc: Arc<RefusalScriptRpc>) -> XsdBridgeBackend {
+            XsdBridgeBackend::for_test(rpc as Arc<dyn XsdBridgeRpc>, lazy_channel())
+        }
+
+        struct CountingLauncher {
+            launches: AtomicUsize,
+            stops: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl XsdBridgeLauncher for CountingLauncher {
+            async fn start(
+                &self,
+                _version: &str,
+                _cache_dir: &std::path::Path,
+                _timeout_ms: u64,
+            ) -> Result<(Option<BridgeProcess>, Channel), ValidatorError> {
+                self.launches.fetch_add(1, Ordering::SeqCst);
+                Ok((None, lazy_channel()))
+            }
+
+            async fn stop(&self, process: Option<BridgeProcess>) {
+                assert!(process.is_none(), "tests must not launch a real process");
+                self.stops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn gated_fixture(rpc: &Arc<RefusalScriptRpc>) -> (XsdBridgeBackend, Arc<CountingLauncher>) {
+            let mut backend = XsdBridgeBackend::for_test(rpc.clone(), lazy_channel());
+            let launcher = Arc::new(CountingLauncher {
+                launches: AtomicUsize::new(0),
+                stops: AtomicUsize::new(0),
+            });
+            backend.launcher = launcher.clone();
+            (backend, launcher)
+        }
+
+        async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
+            std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
+        }
+
+        #[tokio::test]
+        async fn first_refusal_costs_one_rpc_subsequent_cost_none() {
+            let rpc = refusal_rpc(&[(
+                "xsd-a",
+                Outcome::Refused(bridge_error(
+                    proto::bridge_error::Kind::CompilationFailed,
+                    "bad schema",
+                )),
+            )]);
+            let backend = scripted_backend(rpc.clone());
+            let set_a = sample_set(b"<xsd:a/>");
+
+            let mut errors = Vec::new();
+            for _ in 0..3 {
+                errors.push(
+                    backend
+                        .register("xsd-a", &set_a)
+                        .await
+                        .expect_err("refusal must surface as an error"),
+                );
+            }
+
+            assert_eq!(
+                rpc.register_calls.load(Ordering::SeqCst),
+                1,
+                "one refusal RPC covers every subsequent registration"
+            );
+            for error in &errors {
+                match error {
+                    ValidatorError::CompilationFailed { message, .. } => {
+                        assert_eq!(message, "bad schema");
+                    }
+                    other => panic!("expected CompilationFailed, got {other:?}"),
+                }
+            }
+            assert!(
+                backend.refusals.contains_key(&("xsd-a".to_string(), 1)),
+                "the refusal must be memoized under the current generation"
+            );
+        }
+
+        #[tokio::test]
+        async fn transient_transport_error_is_not_cached_and_retries() {
+            let rpc = refusal_rpc(&[
+                ("xsd-t", Outcome::TransportFailed),
+                (
+                    "xsd-t",
+                    Outcome::Refused(bridge_error(
+                        proto::bridge_error::Kind::CompilationFailed,
+                        "now refused",
+                    )),
+                ),
+            ]);
+            let backend = scripted_backend(rpc.clone());
+            let set_t = sample_set(b"<xsd:t/>");
+
+            let first = backend
+                .register("xsd-t", &set_t)
+                .await
+                .expect_err("transport failure must surface");
+            assert!(matches!(first, ValidatorError::Transport { .. }));
+            assert_eq!(rpc.register_calls.load(Ordering::SeqCst), 1);
+            assert!(
+                backend.refusals.is_empty(),
+                "a transport failure must not be memoized"
+            );
+
+            let second = backend
+                .register("xsd-t", &set_t)
+                .await
+                .expect_err("the refusal must surface");
+            assert!(matches!(second, ValidatorError::CompilationFailed { .. }));
+            assert_eq!(
+                rpc.register_calls.load(Ordering::SeqCst),
+                2,
+                "the second attempt must perform a fresh RPC, not short-circuit"
+            );
+            assert!(
+                backend.refusals.contains_key(&("xsd-t".to_string(), 1)),
+                "only the deterministic refusal is memoized"
+            );
+        }
+
+        #[tokio::test]
+        async fn non_refusal_response_error_is_not_memoized() {
+            let rpc = refusal_rpc(&[
+                (
+                    "xsd-i",
+                    Outcome::Refused(bridge_error(proto::bridge_error::Kind::Internal, "boom")),
+                ),
+                (
+                    "xsd-i",
+                    Outcome::Refused(bridge_error(proto::bridge_error::Kind::Internal, "boom")),
+                ),
+            ]);
+            let backend = scripted_backend(rpc.clone());
+            let set_i = sample_set(b"<xsd:i/>");
+
+            for _ in 0..2 {
+                let error = backend
+                    .register("xsd-i", &set_i)
+                    .await
+                    .expect_err("INTERNAL must surface as an error");
+                assert!(
+                    matches!(error, ValidatorError::Transport { source: None, .. }),
+                    "INTERNAL maps to a source-less transport error"
+                );
+            }
+
+            assert_eq!(
+                rpc.register_calls.load(Ordering::SeqCst),
+                2,
+                "every attempt must re-RPC; nothing is memoized"
+            );
+            assert!(backend.refusals.is_empty());
+        }
+
+        #[tokio::test]
+        async fn different_schema_ids_do_not_collide() {
+            let rpc = refusal_rpc(&[(
+                "xsd-a",
+                Outcome::Refused(bridge_error(
+                    proto::bridge_error::Kind::CompilationFailed,
+                    "bad a",
+                )),
+            )]);
+            let backend = scripted_backend(rpc.clone());
+            let set_a = sample_set(b"<xsd:a/>");
+            let set_b = sample_set(b"<xsd:b/>");
+
+            let refused = backend
+                .register("xsd-a", &set_a)
+                .await
+                .expect_err("xsd-a must be refused");
+            assert!(matches!(refused, ValidatorError::CompilationFailed { .. }));
+            assert_eq!(
+                backend
+                    .register("xsd-b", &set_b)
+                    .await
+                    .expect("xsd-b is acknowledged"),
+                "xsd-b"
+            );
+            let refused_again = backend
+                .register("xsd-a", &set_a)
+                .await
+                .expect_err("xsd-a refusal must be memoized");
+            assert!(matches!(
+                refused_again,
+                ValidatorError::CompilationFailed { .. }
+            ));
+
+            let captured = rpc.captured.lock().expect("capture lock").clone();
+            assert!(captured.contains(&"xsd-a".to_string()));
+            assert!(captured.contains(&"xsd-b".to_string()));
+            assert_eq!(
+                captured.iter().filter(|id| id.as_str() == "xsd-a").count(),
+                1,
+                "the third xsd-a registration must consult-hit the memo"
+            );
+            assert_eq!(
+                rpc.register_calls.load(Ordering::SeqCst),
+                2,
+                "only the first xsd-a and the xsd-b registration may RPC"
+            );
+            assert!(
+                backend.refusals.contains_key(&("xsd-a".to_string(), 1)),
+                "xsd-a refusal belongs to the refusal cache"
+            );
+            assert!(
+                !backend.refusals.contains_key(&("xsd-b".to_string(), 1)),
+                "an acknowledged set must not enter the refusal cache"
+            );
+            assert!(backend.schemas.contains_key("xsd-b"));
+            assert!(!backend.schemas.contains_key("xsd-a"));
+        }
+
+        #[tokio::test]
+        async fn stale_generation_refusal_is_not_memoized() {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let rpc = refusal_rpc_gated(
+                    &[
+                        (
+                            "xsd-s",
+                            Outcome::Refused(bridge_error(
+                                proto::bridge_error::Kind::CompilationFailed,
+                                "late refusal",
+                            )),
+                        ),
+                        ("xsd-kick", Outcome::TransportUnavailable),
+                    ],
+                    vec![1],
+                );
+                let (backend, launcher) = gated_fixture(&rpc);
+                let set_s = sample_set(b"<xsd:s/>");
+                let set_kick = sample_set(b"<xsd:kick/>");
+
+                let mut registration = Box::pin(backend.register("xsd-s", &set_s));
+                assert!(poll_once(registration.as_mut()).await.is_pending());
+                rpc.entered.notified().await;
+
+                backend
+                    .register("xsd-kick", &set_kick)
+                    .await
+                    .expect("a retryable kick must restart and acknowledge");
+                assert_eq!(
+                    backend
+                        .channel
+                        .read()
+                        .await
+                        .as_ref()
+                        .map(|ready| ready.generation),
+                    Some(2),
+                    "the kick must publish a new generation"
+                );
+
+                rpc.release.notify_one();
+                let refusal = registration
+                    .await
+                    .expect_err("the late refusal must still surface");
+                assert!(matches!(refusal, ValidatorError::CompilationFailed { .. }));
+                assert!(
+                    backend.refusals.is_empty(),
+                    "a refusal from a retired generation must not be memoized"
+                );
+
+                assert_eq!(
+                    backend
+                        .register("xsd-s", &set_s)
+                        .await
+                        .expect("fresh registration on the new generation"),
+                    "xsd-s"
+                );
+                let captured = rpc.captured.lock().expect("capture lock").clone();
+                assert_eq!(
+                    captured.iter().filter(|id| id.as_str() == "xsd-s").count(),
+                    2,
+                    "the third xsd-s registration must perform a fresh RPC"
+                );
+                assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+                assert_eq!(launcher.stops.load(Ordering::SeqCst), 1);
+            })
+            .await
+            .expect("stale refusal isolation must finish within deadline");
+        }
+
+        fn refusal_outcome(message: &str) -> Outcome {
+            Outcome::Refused(bridge_error(
+                proto::bridge_error::Kind::CompilationFailed,
+                message,
+            ))
+        }
+
+        #[tokio::test]
+        async fn restart_clears_negative_cache_and_retries() {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let rpc = refusal_rpc(&[
+                    ("xsd-r", refusal_outcome("bad")),
+                    ("xsd-r", refusal_outcome("still bad")),
+                    ("xsd-a", Outcome::TransportUnavailable),
+                ]);
+                let (backend, launcher) = gated_fixture(&rpc);
+                let set_r = sample_set(b"<xsd:r/>");
+                let set_a = sample_set(b"<xsd:a/>");
+
+                let first = backend
+                    .register("xsd-r", &set_r)
+                    .await
+                    .expect_err("the generation-1 registration must be refused");
+                match &first {
+                    ValidatorError::CompilationFailed { message, .. } => assert_eq!(message, "bad"),
+                    other => panic!("expected CompilationFailed, got {other:?}"),
+                }
+                assert!(
+                    backend.refusals.contains_key(&("xsd-r".to_string(), 1)),
+                    "the generation-1 refusal must be memoized"
+                );
+
+                assert_eq!(
+                    backend
+                        .register("xsd-a", &set_a)
+                        .await
+                        .expect("a retryable kick must restart and acknowledge"),
+                    "xsd-a"
+                );
+                assert_eq!(
+                    backend
+                        .channel
+                        .read()
+                        .await
+                        .as_ref()
+                        .map(|ready| ready.generation),
+                    Some(2),
+                    "the retryable failure must publish a new generation"
+                );
+                assert!(
+                    backend.refusals.is_empty(),
+                    "a generation change must clear the generation-1 refusal memo"
+                );
+                assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+
+                let second = backend
+                    .register("xsd-r", &set_r)
+                    .await
+                    .expect_err("the generation-2 registration must be refused");
+                match &second {
+                    ValidatorError::CompilationFailed { message, .. } => {
+                        assert_eq!(message, "still bad")
+                    }
+                    other => panic!("expected CompilationFailed, got {other:?}"),
+                }
+                assert_eq!(
+                    backend.refusals.len(),
+                    1,
+                    "the restart-cleared memo must hold only the generation-2 refusal"
+                );
+                assert!(
+                    backend.refusals.contains_key(&("xsd-r".to_string(), 2)),
+                    "the generation-2 refusal must be memoized"
+                );
+
+                let calls_before_memo_hit = rpc.register_calls.load(Ordering::SeqCst);
+                let third = backend
+                    .register("xsd-r", &set_r)
+                    .await
+                    .expect_err("the memoized generation-2 refusal must surface");
+                match &third {
+                    ValidatorError::CompilationFailed { message, .. } => {
+                        assert_eq!(message, "still bad")
+                    }
+                    other => panic!("expected CompilationFailed, got {other:?}"),
+                }
+                assert_eq!(
+                    rpc.register_calls.load(Ordering::SeqCst),
+                    calls_before_memo_hit,
+                    "the third generation-2 registration must be a memo hit, not an RPC"
+                );
+
+                let captured = rpc.captured.lock().expect("capture lock").clone();
+                assert_eq!(
+                    captured.iter().filter(|id| id.as_str() == "xsd-r").count(),
+                    2,
+                    "xsd-r must RPC once per generation: the gen-1 memo did not survive the restart"
+                );
+            })
+            .await
+            .expect("restart cache clearing must finish within deadline");
+        }
+
+        #[tokio::test]
+        async fn refusal_insert_full_clears_at_combined_bound() {
+            let rpc = refusal_rpc(&[
+                ("xsd-a", refusal_outcome("bad a")),
+                ("xsd-a", refusal_outcome("bad a")),
+                ("xsd-b", refusal_outcome("bad b")),
+                ("xsd-b", refusal_outcome("bad b")),
+                ("xsd-c", refusal_outcome("bad c")),
+            ]);
+            let backend = scripted_backend(rpc.clone());
+            backend.set_schema_cache_max_entries(2);
+            let set_a = sample_set(b"<xsd:a/>");
+            let set_b = sample_set(b"<xsd:b/>");
+            let set_c = sample_set(b"<xsd:c/>");
+
+            // Explicit walk: a1, b1, c1, a2, c2, b2.
+            let walk = [
+                ("xsd-a", &set_a),
+                ("xsd-b", &set_b),
+                ("xsd-c", &set_c),
+                ("xsd-a", &set_a),
+                ("xsd-c", &set_c),
+                ("xsd-b", &set_b),
+            ];
+            for (step, (id, set)) in walk.into_iter().enumerate() {
+                let error = backend
+                    .register(id, set)
+                    .await
+                    .expect_err("every scripted call must be refused");
+                assert!(
+                    matches!(error, ValidatorError::CompilationFailed { .. }),
+                    "step {step} ({id}) must surface CompilationFailed, got {error:?}"
+                );
+                match step {
+                    2 => {
+                        assert!(
+                            backend.refusals.contains_key(&("xsd-c".to_string(), 1)),
+                            "xsd-c must be cached after its refusal"
+                        );
+                        assert_eq!(
+                            backend.refusals.len(),
+                            1,
+                            "the combined bound clears the cache before caching xsd-c"
+                        );
+                    }
+                    3 => {
+                        assert!(backend.refusals.contains_key(&("xsd-c".to_string(), 1)));
+                        assert!(backend.refusals.contains_key(&("xsd-a".to_string(), 1)));
+                        assert_eq!(
+                            backend.refusals.len(),
+                            2,
+                            "xsd-a joins xsd-c without eviction below the bound"
+                        );
+                    }
+                    5 => {
+                        assert!(
+                            backend.refusals.contains_key(&("xsd-b".to_string(), 1)),
+                            "xsd-b must be cached after its refusal"
+                        );
+                        assert_eq!(
+                            backend.refusals.len(),
+                            1,
+                            "reaching the combined bound clears the cache before caching xsd-b"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                rpc.register_calls.load(Ordering::SeqCst),
+                5,
+                "c2 must consult-hit the memo instead of performing an RPC"
+            );
+        }
+
+        #[tokio::test]
+        async fn success_insert_clears_refusals_at_combined_bound() {
+            let rpc = refusal_rpc(&[
+                ("xsd-b", refusal_outcome("bad b")),
+                ("xsd-b", refusal_outcome("bad b")),
+            ]);
+            let backend = scripted_backend(rpc.clone());
+            backend.set_schema_cache_max_entries(2);
+            let set_a = sample_set(b"<xsd:a/>");
+            let set_b = sample_set(b"<xsd:b/>");
+            let set_c = sample_set(b"<xsd:c/>");
+
+            assert_eq!(
+                backend
+                    .register("xsd-a", &set_a)
+                    .await
+                    .expect("xsd-a is acknowledged"),
+                "xsd-a"
+            );
+            let refused = backend
+                .register("xsd-b", &set_b)
+                .await
+                .expect_err("xsd-b must be refused");
+            assert!(matches!(refused, ValidatorError::CompilationFailed { .. }));
+            assert_eq!(
+                backend.schemas.len() + backend.refusals.len(),
+                2,
+                "xsd-a plus the xsd-b refusal fill the combined budget"
+            );
+            assert_eq!(
+                backend
+                    .register("xsd-c", &set_c)
+                    .await
+                    .expect("xsd-c is acknowledged"),
+                "xsd-c"
+            );
+
+            let refused_again = backend
+                .register("xsd-b", &set_b)
+                .await
+                .expect_err("xsd-b must be refused again after the memo eviction");
+            match (&refused, &refused_again) {
+                (
+                    ValidatorError::CompilationFailed { message: first, .. },
+                    ValidatorError::CompilationFailed {
+                        message: second, ..
+                    },
+                ) => assert_eq!(
+                    first, second,
+                    "the re-attempt must surface the same refusal"
+                ),
+                other => panic!("expected CompilationFailed pairs, got {other:?}"),
+            }
+            assert_eq!(
+                backend
+                    .register("xsd-c", &set_c)
+                    .await
+                    .expect("xsd-c remains acknowledged"),
+                "xsd-c"
+            );
+
+            let captured = rpc.captured.lock().expect("capture lock").clone();
+            assert_eq!(
+                captured.iter().filter(|id| id.as_str() == "xsd-b").count(),
+                2,
+                "the post-clear xsd-b register must perform a fresh RPC"
+            );
+            assert_eq!(
+                captured.iter().filter(|id| id.as_str() == "xsd-c").count(),
+                1,
+                "the second xsd-c register must be a local hit"
+            );
+            assert!(backend.schemas.contains_key("xsd-a"));
+            assert!(backend.schemas.contains_key("xsd-c"));
+            assert!(
+                !backend.refusals.contains_key(&("xsd-b".to_string(), 1)),
+                "the refusal memo must be evicted by the success insert"
+            );
+        }
+
+        #[tokio::test]
+        async fn set_max_entries_shrink_clears_refusals() {
+            let rpc = refusal_rpc(&[
+                ("xsd-a", refusal_outcome("bad a")),
+                ("xsd-b", refusal_outcome("bad b")),
+            ]);
+            let backend = scripted_backend(rpc.clone());
+            let set_a = sample_set(b"<xsd:a/>");
+            let set_b = sample_set(b"<xsd:b/>");
+
+            backend
+                .register("xsd-a", &set_a)
+                .await
+                .expect_err("xsd-a must be refused");
+            backend
+                .register("xsd-b", &set_b)
+                .await
+                .expect_err("xsd-b must be refused");
+            assert_eq!(backend.refusals.len(), 2);
+
+            backend.set_schema_cache_max_entries(1);
+            assert!(
+                backend.refusals.is_empty(),
+                "shrinking below the refusal count clears the memo"
+            );
+
+            backend
+                .register("xsd-a", &set_a)
+                .await
+                .expect("xsd-a re-attempts after the shrink");
+            backend
+                .register("xsd-b", &set_b)
+                .await
+                .expect("xsd-b re-attempts after the shrink");
+
+            assert_eq!(
+                rpc.register_calls.load(Ordering::SeqCst),
+                4,
+                "both re-attempts must perform fresh RPCs after the shrink"
+            );
         }
     }
 
