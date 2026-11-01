@@ -1,0 +1,10 @@
+=== run 1: cargo test -p camel-bridge --lib partial_ready (exit=0) ===
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 102 filtered out; finished in 0.00s
+=== run 2: cargo test -p camel-bridge --lib partial_ready (exit=0) ===
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 102 filtered out; finished in 0.00s
+=== run 3: cargo test -p camel-bridge --lib partial_ready (exit=0) ===
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 102 filtered out; finished in 0.00s
+=== run 4: cargo test -p camel-bridge --lib partial_ready (exit=0) ===
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 102 filtered out; finished in 0.00s
+=== run 5: cargo test -p camel-bridge --lib partial_ready (exit=0) ===
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 102 filtered out; finished in 0.00s

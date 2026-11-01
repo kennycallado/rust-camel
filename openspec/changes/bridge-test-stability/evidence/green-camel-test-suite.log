@@ -1,0 +1,26 @@
+# Wider camel-test suite, both env modes.
+# Host is shared: other worktrees run concurrently, and the HTTP integration tests
+# under crates/camel-test/tests/integration_test.rs bind fixed ports 127.0.0.1:180xx.
+
+=== unset: env -u CAMEL_XML_BRIDGE_BINARY_PATH cargo test -p camel-test (exit=101) ===
+# 28 of 29 test binaries: test result: ok.
+# integration_test: test result: FAILED. 73 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.60s
+failed: http_concurrent_pipeline, http_concurrent_shutdown_drains_inflight,
+        http_consumer_overflow_status_code_fallback_e2e,
+        http_on_exception_handled_false_propagates_e2e,
+        http_on_exception_steps_returns_custom_error_e2e
+cause:  Failed to bind 127.0.0.1:180xx: Address already in use (os error 98)
+
+=== binary: CAMEL_XML_BRIDGE_BINARY_PATH=$PWD/bridges/xml/build/native/xml-bridge cargo test -p camel-test (exit=101) ===
+# 28 of 29 test binaries: test result: ok.
+# integration_test: test result: FAILED. 73 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s
+failed: http_concurrent_with_semaphore_limit, http_consumer_headers_arrive_title_case_e2e,
+        http_consumer_stop_returns_exchange_state_e2e, http_consumer_string_status_code_e2e,
+        http_sequential_override
+cause:  Failed to bind 127.0.0.1:180xx: Address already in use (os error 98)
+
+# Classification: UNRELATED pre-existing environment failures. A different random
+# subset of fixed-port HTTP tests fails on each run because another worktree's test
+# process holds those ports concurrently. No bridge/mtls/xml test fails. The
+# bridge-scope runs (green-camel-bridge-lib-x3.log, green-mtls-with-binary.log) are
+# green, and all other camel-test binaries pass in both modes.

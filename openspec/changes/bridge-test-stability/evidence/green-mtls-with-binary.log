@@ -1,0 +1,4 @@
+=== unset: env -u CAMEL_XML_BRIDGE_BINARY_PATH cargo test -p camel-test --features integration-tests --test mtls_bridge_test (exit=0) ===
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+=== binary: CAMEL_XML_BRIDGE_BINARY_PATH=/home/shared/rust-camel-worktrees/477-bridge-test-stability/bridges/xml/build/native/xml-bridge cargo test -p camel-test --features integration-tests --test mtls_bridge_test (exit=0) ===
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s

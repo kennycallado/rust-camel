@@ -1,0 +1,16 @@
+=== run 1: TMPDIR=/home/shared/tmp cargo test -p camel-bridge --lib (exit=0) ===
+test result: ok. 103 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.04s
+=== run 2: TMPDIR=/home/shared/tmp cargo test -p camel-bridge --lib (exit=0) ===
+test result: ok. 103 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.05s
+=== run 3: TMPDIR=/home/shared/tmp cargo test -p camel-bridge --lib (exit=0) ===
+test result: ok. 103 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.04s
+=== mixed run 1: TMPDIR=/home/shared/tmp cargo test -p camel-bridge --lib -- tls tmpdir system_temp cache_dir process_dual partial_ready malformed (exit=0) ===
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 0.19s
+=== mixed run 2: TMPDIR=/home/shared/tmp cargo test -p camel-bridge --lib -- tls tmpdir system_temp cache_dir process_dual partial_ready malformed (exit=0) ===
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 0.09s
+=== mixed run 3: TMPDIR=/home/shared/tmp cargo test -p camel-bridge --lib -- tls tmpdir system_temp cache_dir process_dual partial_ready malformed (exit=0) ===
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 0.09s
+=== mixed run 4: TMPDIR=/home/shared/tmp cargo test -p camel-bridge --lib -- tls tmpdir system_temp cache_dir process_dual partial_ready malformed (exit=0) ===
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 0.17s
+=== mixed run 5: TMPDIR=/home/shared/tmp cargo test -p camel-bridge --lib -- tls tmpdir system_temp cache_dir process_dual partial_ready malformed (exit=0) ===
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 0.09s

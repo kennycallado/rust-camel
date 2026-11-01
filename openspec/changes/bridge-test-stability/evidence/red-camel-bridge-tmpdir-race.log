@@ -1,0 +1,52 @@
+# RED evidence: camel-bridge TMPDIR race (Task 1.1)
+# Date: 2026-11-01
+# Worktree: /home/shared/rust-camel-worktrees/477-bridge-test-stability
+# Command: for i in 1 2 3 4 5; do TMPDIR=/home/shared/tmp cargo test -p camel-bridge --lib -- tls tmpdir system_temp cache_dir process_dual partial_ready malformed; done
+# Expected signature: NotFound panic from "fake bridge tempdir" while TMPDIR points under /home/shared/tmp/.tmp*/
+# Result: REPRODUCED in iterations 2 and 4 (3/5 PASS, 2/5 FAIL).
+
+## Iteration 1: PASS
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 5.05s
+
+## Iteration 2: FAIL
+test process::tests::malformed_soap_ready_fails_startup ... FAILED
+test tls::tests::tmpdir_rung_wins_when_writable ... ok
+test tls::tests::cache_dir_rung_when_no_tmp_usable ... ok
+test tls::tests::system_temp_rung_when_tmpdir_unset ... ok
+
+---- process::tests::malformed_soap_ready_fails_startup stdout ----
+
+thread 'process::tests::malformed_soap_ready_fails_startup' (153325) panicked at crates/services/camel-bridge/src/process.rs:2302:39:
+fake bridge tempdir: Custom { kind: NotFound, error: PathError { path: "/home/shared/tmp/.tmpr44T1G/no-such-dir/.tmpAnLVMu", err: Os { code: 2, kind: NotFound, message: "No such file or directory" } } }
+
+failures:
+    process::tests::malformed_soap_ready_fails_startup
+
+test result: FAILED. 17 passed; 1 failed; 0 ignored; 0 measured; 84 filtered out; finished in 5.08s
+
+## Iteration 3: PASS
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 5.05s
+
+## Iteration 4: FAIL
+test process::tests::malformed_soap_ready_fails_startup ... FAILED
+test process::tests::process_dual_ready_reordered_is_accepted ... FAILED
+test process::tests::partial_ready_is_bounded_and_completes_in_one_timeout ... ok
+
+---- process::tests::malformed_soap_ready_fails_startup stdout ----
+
+thread 'process::tests::malformed_soap_ready_fails_startup' (156143) panicked at crates/services/camel-bridge/src/process.rs:2302:39:
+fake bridge tempdir: Custom { kind: NotFound, error: PathError { path: "/home/shared/tmp/.tmp4G7MUC/no-such-dir/.tmp4nIyIF", err: Os { code: 2, kind: NotFound, message: "No such file or directory" } } }
+
+---- process::tests::process_dual_ready_reordered_is_accepted stdout ----
+
+thread 'process::tests::process_dual_ready_reordered_is_accepted' (156146) panicked at crates/services/camel-bridge/src/process.rs:2302:39:
+fake bridge tempdir: Custom { kind: NotFound, error: PathError { path: "/home/shared/tmp/.tmp4G7MUC/no-such-dir/.tmpfsUWB7", err: Os { code: 2, kind: NotFound, message: "No such file or directory" } } }
+
+failures:
+    process::tests::malformed_soap_ready_fails_startup
+    process::tests::process_dual_ready_reordered_is_accepted
+
+test result: FAILED. 16 passed; 2 failed; 0 ignored; 0 measured; 84 filtered out; finished in 5.07s
+
+## Iteration 5: PASS
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 5.04s

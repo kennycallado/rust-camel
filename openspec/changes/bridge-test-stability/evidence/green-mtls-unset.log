@@ -1,0 +1,30 @@
+# GREEN evidence: mtls_bridge_test with CAMEL_XML_BRIDGE_BINARY_PATH unset (Task 1.4)
+# Date: 2026-11-01
+# Worktree: /home/shared/rust-camel-worktrees/477-bridge-test-stability
+# Command: env -u CAMEL_XML_BRIDGE_BINARY_PATH cargo test -p camel-test --features integration-tests --test mtls_bridge_test -- --nocapture
+# Result: exit 0
+
+SKIP xml-bridge integration test: CAMEL_XML_BRIDGE_BINARY_PATH is not set. Provision with `cargo xtask build-xml-bridge`, then `export CAMEL_XML_BRIDGE_BINARY_PATH="$PWD/bridges/xml/build/native/xml-bridge"` (unset it to skip).
+SKIP xml-bridge integration test: CAMEL_XML_BRIDGE_BINARY_PATH is not set. Provision with `cargo xtask build-xml-bridge`, then `export CAMEL_XML_BRIDGE_BINARY_PATH="$PWD/bridges/xml/build/native/xml-bridge"` (unset it to skip).
+
+test start_and_connect_mtls_handshake ... ok
+test wrong_ca_handshake_rejected ... ok
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+# set-but-invalid runs (expected failures — proves no weakening)
+# Date: 2026-11-01
+# Worktree: /home/shared/rust-camel-worktrees/477-bridge-test-stability
+
+## Run A: path set but nonexistent (expected failure)
+$ CAMEL_XML_BRIDGE_BINARY_PATH=/nonexistent/x-bridge cargo test -p camel-test --features integration-tests --test mtls_bridge_test
+exit: 101
+test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+failures: start_and_connect_mtls_handshake, wrong_ca_handshake_rejected
+panic: CAMEL_XML_BRIDGE_BINARY_PATH is set to "/nonexistent/x-bridge", which is not an existing file. Provision with `cargo xtask build-xml-bridge`, then `export CAMEL_XML_BRIDGE_BINARY_PATH="$PWD/bridges/xml/build/native/xml-bridge"` (or unset it to skip).
+
+## Run B: empty value (expected failure)
+$ CAMEL_XML_BRIDGE_BINARY_PATH= cargo test -p camel-test --features integration-tests --test mtls_bridge_test
+exit: 101
+test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+failures: start_and_connect_mtls_handshake, wrong_ca_handshake_rejected
+panic: CAMEL_XML_BRIDGE_BINARY_PATH is set to "", which is not an existing file. Provision with `cargo xtask build-xml-bridge`, then `export CAMEL_XML_BRIDGE_BINARY_PATH="$PWD/bridges/xml/build/native/xml-bridge"` (or unset it to skip).

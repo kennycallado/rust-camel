@@ -301,24 +301,136 @@ mod tests {
         assert!(!path.exists(), "temp file should be cleaned up on Drop");
     }
 
+    /// Env marker marking the isolated TMPDIR rung child process.
+    const TLS_RUNG_ISOLATION_CHILD_ENV: &str = "CAMEL_BRIDGE_TLS_RUNG_ISOLATION_CHILD";
+    /// Child scenario selector for the isolated TMPDIR rung tests.
+    const TLS_RUNG_ISOLATION_SCENARIO_ENV: &str = "CAMEL_BRIDGE_TLS_RUNG_SCENARIO";
+    /// Expected resolved TLS base passed to the `tmpdir-writable` child.
+    const TLS_RUNG_ISOLATION_EXPECT_ENV: &str = "CAMEL_BRIDGE_TLS_RUNG_EXPECT";
+    /// Full test path spawned for the isolated TMPDIR rung runs.
+    const TLS_RUNG_ISOLATION_TEST: &str = "tls::tests::tls_rung_isolation_inner";
+
+    /// Spawn the test binary with a single-test envelope so a rung scenario can
+    /// mutate its own process environment without racing the parallel suite.
+    fn spawn_rung_child(scenario: &str, configure: impl FnOnce(&mut std::process::Command)) {
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(e) => panic!("current test executable path: {e}"),
+        };
+        let mut command = std::process::Command::new(exe);
+        command
+            .args([
+                "--exact",
+                TLS_RUNG_ISOLATION_TEST,
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(TLS_RUNG_ISOLATION_CHILD_ENV, "1")
+            .env(TLS_RUNG_ISOLATION_SCENARIO_ENV, scenario);
+        configure(&mut command);
+        let output = match command.output() {
+            Ok(output) => output,
+            Err(e) => panic!("spawn isolated TMPDIR rung test: {e}"),
+        };
+        assert!(
+            output.status.success(),
+            "isolated TMPDIR rung child failed: scenario={scenario} status={:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    /// Child body for the isolated TMPDIR rung scenarios. Inert unless the
+    /// parent set the marker, so it is a no-op in normal suite runs.
+    #[test]
+    fn tls_rung_isolation_inner() {
+        if std::env::var(TLS_RUNG_ISOLATION_CHILD_ENV).ok().as_deref() != Some("1") {
+            return;
+        }
+        let scenario = std::env::var(TLS_RUNG_ISOLATION_SCENARIO_ENV)
+            .unwrap_or_else(|e| panic!("child scenario env: {e}"));
+        match scenario.as_str() {
+            "tmpdir-writable" => {
+                let expected = PathBuf::from(
+                    std::env::var_os(TLS_RUNG_ISOLATION_EXPECT_ENV)
+                        .expect("child expect env missing"),
+                );
+                let resolved = resolve_tls_base().expect("resolve");
+                assert_eq!(resolved, expected);
+            }
+            "tmpdir-unset" => {
+                let resolved = resolve_tls_base().expect("resolve");
+                let expected = std::env::temp_dir();
+                assert_eq!(resolved, expected);
+            }
+            "cache-dir-rung" => {
+                let cache_root = expected_cache_root();
+
+                let base = resolve_tls_base().expect("cache rung");
+                let expected = cache_root.join(env!("CARGO_PKG_VERSION")).join("tls");
+                assert_eq!(base, expected);
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = std::fs::metadata(&base)
+                        .expect("stat tls dir")
+                        .permissions()
+                        .mode();
+                    assert_eq!(mode & 0o777, 0o700, "tls leaf must be 0700");
+                    let version_dir = base.parent().expect("version dir");
+                    let version_mode = std::fs::metadata(version_dir)
+                        .expect("stat version dir")
+                        .permissions()
+                        .mode();
+                    assert_eq!(version_mode & 0o777, 0o700, "version dir must be 0700");
+                    let cache_mode = std::fs::metadata(&cache_root)
+                        .expect("stat cache root")
+                        .permissions()
+                        .mode();
+                    assert_eq!(cache_mode & 0o777, 0o700, "cache root must be 0700");
+                }
+
+                let tls = BridgeTlsMaterial::generate().expect("generate");
+                assert!(tls.server_pem_path.starts_with(&base));
+                let spawn_dir = tls.server_pem_path.parent().expect("spawn dir");
+                assert_ne!(spawn_dir, base.as_path(), "spawn dir must be unique");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = std::fs::metadata(spawn_dir)
+                        .expect("stat spawn dir")
+                        .permissions()
+                        .mode();
+                    assert_eq!(mode & 0o777, 0o700, "spawn dir must be 0700");
+                }
+            }
+            "all-rungs-fail" => {
+                let err = resolve_tls_base().expect_err("all rungs must fail");
+                let message = err.to_string();
+                assert!(message.contains("XDG_CACHE_HOME"), "message: {message}");
+                assert!(message.contains("$TMPDIR"), "message: {message}");
+            }
+            other => panic!("unknown TMPDIR rung scenario: {other}"),
+        }
+    }
+
     #[test]
     fn tmpdir_rung_wins_when_writable() {
-        let mut env = camel_component_api::test_support::EnvGuard::acquire();
         let fresh = tempfile::tempdir().expect("fresh tempdir");
-        env.and_set("TMPDIR", fresh.path().as_os_str());
-        let resolved = resolve_tls_base().expect("resolve");
-        drop(env);
-        assert_eq!(resolved, fresh.path());
+        spawn_rung_child("tmpdir-writable", |command| {
+            command
+                .env("TMPDIR", fresh.path())
+                .env(TLS_RUNG_ISOLATION_EXPECT_ENV, fresh.path());
+        });
     }
 
     #[test]
     fn system_temp_rung_when_tmpdir_unset() {
-        let mut env = camel_component_api::test_support::EnvGuard::acquire();
-        env.and_remove("TMPDIR");
-        let resolved = resolve_tls_base().expect("resolve");
-        let expected = std::env::temp_dir();
-        drop(env);
-        assert_eq!(resolved, expected);
+        spawn_rung_child("tmpdir-unset", |command| {
+            command.env_remove("TMPDIR");
+        });
     }
 
     /// Platform cache root that `resolve_tls_base` must use for the temporary
@@ -330,88 +442,55 @@ mod tests {
         dirs::cache_dir().expect("platform cache directory")
     }
 
-    /// Create the ancestors of `root` that belong to the platform, not to this
-    /// crate (macOS `~/Library`). The rung chain itself
-    /// (`{root}/{version}/tls`) must still be created by the code under test.
-    fn prepare_cache_root(root: &Path) {
-        if let Some(parent) = root.parent() {
-            std::fs::create_dir_all(parent).expect("create platform cache ancestors");
+    /// Cache root a child sees for the `XDG_CACHE_HOME`/`HOME` values the outer
+    /// test exports, mirroring the `dirs` crate rules: Linux honours
+    /// `XDG_CACHE_HOME`, while macOS ignores it and derives
+    /// `$HOME/Library/Caches`.
+    fn child_visible_cache_root(xdg: &Path, home: &Path) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = xdg;
+            home.join("Library/Caches")
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = home;
+            xdg.to_path_buf()
         }
     }
 
     #[test]
     fn cache_dir_rung_when_no_tmp_usable() {
-        let mut env = camel_component_api::test_support::EnvGuard::acquire();
         let fresh = tempfile::tempdir().expect("fresh tempdir");
         let unusable_tmp = fresh.path().join("no-such-dir");
         let home = fresh.path().join("home");
         std::fs::create_dir_all(&home).expect("create synthetic HOME");
-        env.and_set("TMPDIR", unusable_tmp.as_os_str());
-        // Linux uses XDG_CACHE_HOME; macOS uses $HOME/Library/Caches.
-        env.and_set("XDG_CACHE_HOME", fresh.path().join("xdg-cache"));
-        env.and_set("HOME", home.as_os_str());
-
-        let cache_root = expected_cache_root();
-        prepare_cache_root(&cache_root);
-
-        let base = resolve_tls_base().expect("cache rung");
-        let expected = cache_root.join(env!("CARGO_PKG_VERSION")).join("tls");
-        assert_eq!(base, expected);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&base)
-                .expect("stat tls dir")
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o700, "tls leaf must be 0700");
-            let version_dir = base.parent().expect("version dir");
-            let version_mode = std::fs::metadata(version_dir)
-                .expect("stat version dir")
-                .permissions()
-                .mode();
-            assert_eq!(version_mode & 0o777, 0o700, "version dir must be 0700");
-            // The temporary environment makes `cache_root` fresh, so we created
-            // every component in the chain and each must be private.
-            let cache_mode = std::fs::metadata(&cache_root)
-                .expect("stat cache root")
-                .permissions()
-                .mode();
-            assert_eq!(cache_mode & 0o777, 0o700, "cache root must be 0700");
+        let xdg = fresh.path().join("xdg-cache");
+        let cache_root = child_visible_cache_root(&xdg, &home);
+        if let Some(parent) = cache_root.parent() {
+            std::fs::create_dir_all(parent).expect("create platform cache ancestors");
         }
-
-        let tls = BridgeTlsMaterial::generate().expect("generate");
-        assert!(tls.server_pem_path.starts_with(&base));
-        let spawn_dir = tls.server_pem_path.parent().expect("spawn dir");
-        assert_ne!(spawn_dir, base.as_path(), "spawn dir must be unique");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(spawn_dir)
-                .expect("stat spawn dir")
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o700, "spawn dir must be 0700");
-        }
+        spawn_rung_child("cache-dir-rung", |command| {
+            command
+                .env("TMPDIR", &unusable_tmp)
+                // Linux uses XDG_CACHE_HOME; macOS uses $HOME/Library/Caches.
+                .env("XDG_CACHE_HOME", &xdg)
+                .env("HOME", &home);
+        });
     }
 
     #[test]
     fn total_failure_names_xdg_override() {
-        let mut env = camel_component_api::test_support::EnvGuard::acquire();
         let fresh = tempfile::tempdir().expect("fresh tempdir");
         let blocker = fresh.path().join("blocker");
         std::fs::write(&blocker, b"not a directory").expect("write blocker");
         let unusable = blocker.join("child");
         let unusable_tmp = fresh.path().join("no-such-dir");
-        env.and_set("TMPDIR", unusable_tmp.as_os_str());
-        env.and_set("XDG_CACHE_HOME", unusable.as_os_str());
-        env.and_set("HOME", unusable.as_os_str());
-
-        let err = resolve_tls_base().expect_err("all rungs must fail");
-        drop(env);
-        let message = err.to_string();
-        assert!(message.contains("XDG_CACHE_HOME"), "message: {message}");
-        assert!(message.contains("$TMPDIR"), "message: {message}");
+        spawn_rung_child("all-rungs-fail", |command| {
+            command
+                .env("TMPDIR", &unusable_tmp)
+                .env("XDG_CACHE_HOME", &unusable)
+                .env("HOME", &unusable);
+        });
     }
 }

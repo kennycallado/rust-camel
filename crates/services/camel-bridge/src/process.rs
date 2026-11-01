@@ -715,6 +715,37 @@ async fn read_ready_ports<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
+/// Bounds the whole readiness wait with ONE enclosing timeout: the deadline is
+/// never reset per line or per chunk. EOF and every other read error pass
+/// through unchanged so `start` can classify them outside the deadline.
+async fn read_ready_within<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut tokio::io::BufReader<R>,
+    start_timeout_ms: u64,
+    expect_soap_ready: bool,
+    name: &str,
+) -> Result<(u16, Option<u16>), BridgeError> {
+    use tokio::time::{Duration, timeout};
+
+    match timeout(
+        Duration::from_millis(start_timeout_ms),
+        read_ready_ports(reader, expect_soap_ready),
+    )
+    .await
+    {
+        Ok(Ok(ports)) => Ok(ports),
+        Ok(Err(error)) => Err(error),
+        Err(_) => {
+            let msg = format!(
+                "{} failed to start: health check timeout after {}ms",
+                name, start_timeout_ms
+            );
+            // log-policy: system-broken
+            tracing::error!("{msg}");
+            Err(BridgeError::Timeout(msg))
+        }
+    }
+}
+
 #[cfg(test)]
 async fn read_ready_port<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
@@ -823,7 +854,6 @@ impl BridgeProcess {
     /// passed via env vars.
     pub async fn start(config: &BridgeProcessConfig) -> Result<Self, BridgeError> {
         use tokio::process::Command;
-        use tokio::time::{Duration, timeout};
 
         config.validate().map_err(BridgeError::Config)?;
 
@@ -958,14 +988,16 @@ impl BridgeProcess {
         // alone (a `soap-ready` seen before it is still stored when valid).
         // R4-L7: use fill_buf()/consume() instead of Lines::next_line() to avoid
         // unbounded buffer growth on lines without newlines.
-        let ready = timeout(
-            Duration::from_millis(config.start_timeout_ms),
-            read_ready_ports(&mut reader, config.expect_soap_ready),
+        let (port, soap_port) = match read_ready_within(
+            &mut reader,
+            config.start_timeout_ms,
+            config.expect_soap_ready,
+            config.spec.name,
         )
-        .await;
-        let (port, soap_port) = match ready {
-            Ok(Ok(ports)) => ports,
-            Ok(Err(BridgeError::StdoutClosed)) => {
+        .await
+        {
+            Ok(ports) => ports,
+            Err(BridgeError::StdoutClosed) => {
                 // EOF classification must not lose exit 78 to the readiness deadline.
                 #[cfg(unix)]
                 let error = eof_exit_error(&guard).await;
@@ -975,16 +1007,7 @@ impl BridgeProcess {
                 tracing::error!("bridge stdout closed before ready message");
                 return Err(error);
             }
-            Ok(Err(error)) => return Err(error),
-            Err(_) => {
-                let msg = format!(
-                    "{} failed to start: health check timeout after {}ms",
-                    config.spec.name, config.start_timeout_ms
-                );
-                // log-policy: system-broken
-                tracing::error!("{msg}");
-                return Err(BridgeError::Timeout(msg));
-            }
+            Err(error) => return Err(error),
         };
 
         // --- Post-ready bounded stdout drain (R4-L7) ---
@@ -2368,74 +2391,101 @@ mod tests {
         }
     }
 
-    /// Task 2.8: a partial (soap-only) announcement followed by the ready line
-    /// completes within ONE `start_timeout_ms` budget — and the counterexample
-    /// row pins that the budget ENCLOSES the whole wait (it is never reset per
-    /// line). Counterexample layout: two independent gaps BOTH strictly inside
-    /// the budget (2.5s < 4s) whose SUM comfortably exceeds it (5s > 4s), so a
-    /// per-line-reset implementation would return Ok at ~5s while the correct
-    /// one times out at ~4s. A marker file proves the partial soap-ready line
-    /// was really emitted before the deadline — the timeout cannot be excused
-    /// as "the partial never arrived".
-    #[tokio::test]
+    /// A partial (soap-only) announcement followed by the ready line completes
+    /// within ONE `start_timeout_ms` budget. The paused tokio clock proves the
+    /// enclosing-budget property deterministically: `soap-ready` always arrives
+    /// at virtual t=1_000 ms, so a per-line-reset implementation would extend
+    /// the deadline to 5_000 ms while the correct one stays at 4_000 ms. The
+    /// counterexample row's ready line is at t=4_500 ms, and the silent row
+    /// holds the writer open forever — both must time out exactly at the
+    /// single enclosing deadline.
+    #[tokio::test(start_paused = true)]
     async fn partial_ready_is_bounded_and_completes_in_one_timeout() {
-        use std::time::{Duration, Instant};
+        use tokio::io::{AsyncWriteExt, BufReader};
+        use tokio::time::{Duration, Instant};
 
-        for (label, body_template, budget_ms, expect_ok, max_elapsed_ms) in [
-            (
-                "partial soap-ready then ready completes within ONE budget",
-                r#"echo '{"status":"soap-ready","port":23456}'; sleep 1; echo '{"status":"ready","port":12345}'"#,
-                6_000u64,
-                true,
-                6_000u64,
-            ),
-            (
-                "counterexample: TOTAL budget exceeded fires StartTimeout — no per-line reset",
-                r#"sleep 2.5; echo '{"status":"soap-ready","port":23456}'; touch '{marker}'; sleep 2.5; echo '{"status":"ready","port":12345}'"#,
-                4_000u64,
-                false,
-                5_000u64,
-            ),
-        ] {
-            // The counterexample proves the PARTIAL line really was emitted
-            // before the deadline: the fake bridge drops a marker right after
-            // the soap-ready print (test fixture state — no prod test hooks).
-            let marker_dir = tempfile::tempdir().expect("marker tempdir");
-            let marker = marker_dir.path().join("soap-ready-emitted");
-            let body = body_template.replace("{marker}", &marker.display().to_string());
-            let (_dir, script) = fake_bridge_script(&body);
-            let config = fake_bridge_config(&script, true, budget_ms);
-            let started = Instant::now();
-            let result = BridgeProcess::start(&config).await;
-            let elapsed = started.elapsed();
-            assert!(
-                elapsed < Duration::from_millis(max_elapsed_ms),
-                "{label}: must resolve in {max_elapsed_ms}ms (one enclosing budget), took {elapsed:?}"
-            );
-            if expect_ok {
-                let process =
-                    result.unwrap_or_else(|e| panic!("{label}: start must complete: {e}"));
-                assert_eq!(process.grpc_port(), 12345, "{label}: gRPC port");
-                assert_eq!(process.soap_port(), Some(23456), "{label}: soap port");
-                process
-                    .stop()
-                    .await
-                    .unwrap_or_else(|e| panic!("{label}: fake bridge must stop cleanly: {e}"));
-            } else {
-                match result {
-                    Err(BridgeError::Timeout(_)) => {}
-                    Err(e) => panic!("{label}: expected StartTimeout, got {e}"),
-                    Ok(_) => panic!(
-                        "{label}: start must hit the single enclosing budget instead of \
-                         waiting out per-line resets"
-                    ),
+        const BUDGET_MS: u64 = 4_000;
+        let name = fake_bridge_config(std::path::Path::new("unused"), true, BUDGET_MS)
+            .spec
+            .name;
+
+        struct Case {
+            label: &'static str,
+            rows: Vec<(u64, &'static str)>,
+            expected: Option<(u16, Option<u16>)>,
+        }
+
+        let cases = [
+            Case {
+                label: "positive: soap-ready at 1s and ready at 3.5s stay inside one budget",
+                rows: vec![
+                    (1_000, r#"{"status":"soap-ready","port":23456}"#),
+                    (2_500, r#"{"status":"ready","port":12345}"#),
+                ],
+                expected: Some((12345, Some(23456))),
+            },
+            Case {
+                label: "counterexample: ready at 4.5s exceeds the budget (no per-line reset)",
+                rows: vec![
+                    (1_000, r#"{"status":"soap-ready","port":23456}"#),
+                    (3_500, r#"{"status":"ready","port":12345}"#),
+                ],
+                expected: None,
+            },
+            Case {
+                label: "injected negative: silent stdout stays open, so only the budget fires",
+                rows: vec![],
+                expected: None,
+            },
+        ];
+
+        for Case {
+            label,
+            rows,
+            expected,
+        } in cases
+        {
+            let (reader_half, mut writer) = tokio::io::duplex(64);
+            let mut reader = BufReader::new(reader_half);
+            let feeder = tokio::spawn(async move {
+                for (delay_ms, line) in &rows {
+                    // allow-test-sleep: virtual-time feeder pacing under the paused clock
+                    tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
+                    writer
+                        .write_all(format!("{line}\n").as_bytes())
+                        .await
+                        .expect("feed readiness line");
                 }
-                assert!(
-                    marker.exists(),
-                    "{label}: the partial soap-ready line must have been emitted before \
-                     the deadline — the timeout comes from the ENCLOSING budget, not \
-                     from a missing partial line"
-                );
+                if rows.is_empty() {
+                    // Hold the writer open: a silent-but-live child is not EOF.
+                    std::future::pending::<()>().await;
+                }
+            });
+
+            let started = Instant::now();
+            let result = read_ready_within(&mut reader, BUDGET_MS, true, name).await;
+            let elapsed = started.elapsed();
+            feeder.abort();
+
+            match expected {
+                Some((port, soap_port)) => {
+                    assert_eq!(result.ok(), Some((port, soap_port)), "{label}");
+                    assert!(
+                        elapsed < Duration::from_millis(BUDGET_MS),
+                        "{label}: must complete inside one enclosing budget, took {elapsed:?}"
+                    );
+                }
+                None => {
+                    assert!(
+                        matches!(result, Err(BridgeError::Timeout(_))),
+                        "{label}: expected Timeout, got {result:?}"
+                    );
+                    assert_eq!(
+                        elapsed,
+                        Duration::from_millis(BUDGET_MS),
+                        "{label}: the single enclosing budget must fire exactly once"
+                    );
+                }
             }
         }
     }

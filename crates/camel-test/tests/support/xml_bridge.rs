@@ -10,7 +10,10 @@
 ///
 /// Tests call [`require_xml_bridge_binary`], which panics with a clear message
 /// naming the env var if it is absent, making the misconfiguration obvious in
-/// CI logs instead of a cryptic download/connection error.
+/// CI logs instead of a cryptic download/connection error. Tests that can
+/// tolerate an unprovisioned workspace call [`xml_bridge_binary_or_skip`]
+/// instead: an absent env var yields a one-line `SKIP` diagnostic on stderr and
+/// `None`, while a set-but-invalid value (including empty) still panics.
 use std::path::PathBuf;
 
 pub const ENV_CAMEL: &str = "CAMEL_XML_BRIDGE_BINARY_PATH";
@@ -46,6 +49,45 @@ pub fn require_xml_bridge_binary() -> PathBuf {
             ENV_CAMEL, ENV_CAMEL, ENV_CAMEL,
         )
     })
+}
+
+/// Returns the explicit xml-bridge binary override, or `None` with a `SKIP`
+/// diagnostic when the env var is absent.
+///
+/// A missing `CAMEL_XML_BRIDGE_BINARY_PATH` means the workspace has not opted
+/// into these integration tests, so the caller skips them and stderr names the
+/// env var, the provisioning command, and the export instruction. A var that is
+/// present but does not name an existing file — including an empty value — is a
+/// misconfiguration and panics instead of silently skipping, so a typo cannot
+/// masquerade as "no binary available".
+pub fn xml_bridge_binary_or_skip() -> Option<PathBuf> {
+    let value = match std::env::var(ENV_CAMEL) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => {
+            eprintln!(
+                "SKIP xml-bridge integration test: {ENV_CAMEL} is not set. \
+                 Provision with `cargo xtask build-xml-bridge`, then \
+                 `export {ENV_CAMEL}=\"$PWD/bridges/xml/build/native/xml-bridge\"` \
+                 (unset it to skip)."
+            );
+            return None;
+        }
+        Err(std::env::VarError::NotUnicode(_)) => panic!(
+            "{ENV_CAMEL} is set to a non-Unicode value; expected a path to the \
+             xml-bridge binary. Provision with `cargo xtask build-xml-bridge`, \
+             then `export {ENV_CAMEL}=\"$PWD/bridges/xml/build/native/xml-bridge\"`."
+        ),
+    };
+    let path = PathBuf::from(value);
+    assert!(
+        path.is_file(),
+        "{ENV_CAMEL} is set to {:?}, which is not an existing file. \
+         Provision with `cargo xtask build-xml-bridge`, then \
+         `export {ENV_CAMEL}=\"$PWD/bridges/xml/build/native/xml-bridge\"` \
+         (or unset it to skip).",
+        path.display(),
+    );
+    Some(path)
 }
 
 /// Path of the worktree-native xml-bridge built by `cargo xtask build-xml-bridge`.

@@ -1,0 +1,34 @@
+cargo fmt --check --all -> exit=0
+cargo clippy -p camel-bridge --all-targets -- -D warnings -> exit=0
+cargo clippy -p camel-test --features integration-tests --all-targets -- -D warnings -> exit=0
+cargo xtask lint-bridge-versions -> exit=0
+cargo xtask lint-cancel-tokens -> exit=0
+cargo xtask lint-component-deps -> exit=0
+cargo xtask lint-context-citations -> exit=0
+cargo xtask lint-gate-forwarding -> exit=0
+# NOTE: generated gitignored bridges/xml/.gradle-docker-cache (task 1.4 build artifact) temporarily relocated for the walk
+cargo xtask lint-glob-imports -> exit=0
+cargo xtask lint-ignore -> exit=0
+cargo xtask lint-log-levels -> exit=0
+cargo xtask lint-log-redaction -> exit=0
+cargo xtask lint-metric-labels -> exit=0
+cargo xtask lint-missing-docs-ratchet -> exit=0
+cargo xtask lint-no-deprecated -> exit=0
+cargo xtask lint-no-env-mutation-unguarded -> exit=0
+cargo xtask lint-no-free-port -> exit=0
+cargo xtask lint-non-exhaustive -> exit=0
+cargo xtask lint-no-raw-http-test-server -> exit=0
+cargo xtask lint-publish-cycles -> exit=0
+cargo xtask lint-publish-registration -> exit=0
+cargo xtask lint-secrets -> exit=0
+cargo xtask lint-single-source -> exit=0
+cargo xtask lint-test-sleep -> exit=0
+cargo xtask lint-unbounded-wait -> exit=0
+cargo xtask lint-unsafe-safety -> exit=0
+cargo xtask lint-unwrap -> exit=0
+RUSTDOCFLAGS="-D warnings" cargo doc -p camel-api -p camel-core -p camel-builder -p camel-dsl -p camel-endpoint -p camel-bridge -p camel-test --no-deps -> exit=0
+openspec validate --all --strict -> exit=0
+cargo xtask changelog --check --from 151cb9666 --to HEAD -> exit=0
+lint-commits (FETCH_HEAD form) deferred to CI: requires remote fetch; local merge-base equivalent recorded here
+# supersedes partial doc-build line above: now full AGENTS.md set plus touched crates
+RUSTDOCFLAGS="-D warnings" cargo doc -p camel-api -p camel-core -p camel-builder -p camel-dsl -p camel-endpoint -p camel-component-validator -p camel-xslt -p camel-bridge -p camel-test --no-deps -> exit=0

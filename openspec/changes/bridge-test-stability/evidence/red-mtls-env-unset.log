@@ -1,0 +1,43 @@
+# RED evidence: mtls_bridge_test baseline with CAMEL_XML_BRIDGE_BINARY_PATH unset (Task 1.1)
+# Date: 2026-11-01
+# Worktree: /home/shared/rust-camel-worktrees/477-bridge-test-stability
+# Command: env -u CAMEL_XML_BRIDGE_BINARY_PATH cargo test -p camel-test --features integration-tests --test mtls_bridge_test 2>&1
+# Result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+
+running 10 tests
+test start_and_connect_mtls_handshake ... FAILED
+test wrong_ca_handshake_rejected ... FAILED
+test support::tests::direct_not_registered_matcher_is_specific ... ok
+test support::jms_journal::tests::invalid_utf8_id_is_corrupt ... ok
+test support::jms_journal::tests::empty_id_is_corrupt ... ok
+test support::jms_journal::tests::two_reserves_with_rollback_replay_two ... ok
+test support::jms_journal::tests::reserve_then_commit_replays_zero ... ok
+test support::jms_journal::tests::torn_trailing_frame_is_discarded ... ok
+test support::jms_journal::tests::unsupported_record_type_is_corrupt ... ok
+test support::tests::direct_not_registered_retry_eventually_succeeds ... ok
+
+failures:
+
+---- start_and_connect_mtls_handshake stdout ----
+
+thread 'start_and_connect_mtls_handshake' (273970) panicked at crates/camel-test/tests/support/xml_bridge.rs:41:9:
+xml-bridge binary not found: CAMEL_XML_BRIDGE_BINARY_PATH is not set to an existing file.
+Build it with:
+  cd bridges/xml && ./build-native.sh
+Then export CAMEL_XML_BRIDGE_BINARY_PATH to the built binary path.
+Example: CAMEL_XML_BRIDGE_BINARY_PATH bridges/xml/build/native/xml-bridge cargo test ...
+
+---- wrong_ca_handshake_rejected stdout ----
+
+thread 'wrong_ca_handshake_rejected' (273979) panicked at crates/camel-test/tests/support/xml_bridge.rs:41:9:
+xml-bridge binary not found: CAMEL_XML_BRIDGE_BINARY_PATH is not set to an existing file.
+Build it with:
+  cd bridges/xml && ./build-native.sh
+Then export CAMEL_XML_BRIDGE_BINARY_PATH to the built binary path.
+Example: CAMEL_XML_BRIDGE_BINARY_PATH bridges/xml/build/native/xml-bridge cargo test ...
+
+failures:
+    start_and_connect_mtls_handshake
+    wrong_ca_handshake_rejected
+
+test result: FAILED. 8 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

@@ -86,6 +86,32 @@ async fn test_route_fast() {
 | `.with_component(c)` | Registers any custom component |
 | `.with_time_control()` | Activates tokio mock clock; `build()` returns `(harness, TimeController)` |
 
+## xml-bridge integration tests
+
+`tests/mtls_bridge_test.rs` and other bridge-backed suites (`xml_bridge_xj_test`,
+`xml_bridge_xslt_test`) need the native xml-bridge binary. Provision it from the
+workspace root:
+
+```sh
+cargo xtask build-xml-bridge
+export CAMEL_XML_BRIDGE_BINARY_PATH="$PWD/bridges/xml/build/native/xml-bridge"
+cargo test -p camel-test --features integration-tests --test mtls_bridge_test
+```
+
+Semantics of `CAMEL_XML_BRIDGE_BINARY_PATH`:
+
+Only `mtls_bridge_test`'s two tests (`start_and_connect_mtls_handshake`,
+`wrong_ca_handshake_rejected`) skip-with-diagnostic when the variable is absent.
+`xml_bridge_xj_test` and `xml_bridge_xslt_test` call `require_xml_bridge_binary`
+and fail loudly when it is unset — unsetting the variable is not a general skip
+switch for all bridge-backed suites.
+
+| State | Behavior |
+|---|---|
+| Absent | `mtls_bridge_test` prints a `SKIP` line to stderr naming this env var and the provisioning command, then returns early. `xml_bridge_xj_test`/`xml_bridge_xslt_test` panic with the provisioning hint. |
+| Set to an existing file | The test runs its full assertions against that binary. |
+| Set but not an existing file (including empty) | Hard failure with the provisioning hint; a misconfigured value never degrades into a skip. |
+
 ## Installation
 
 Add to your `Cargo.toml`:

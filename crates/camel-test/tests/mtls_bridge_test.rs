@@ -6,14 +6,15 @@ use camel_bridge::process::{BridgeProcess, BridgeProcessConfig};
 use camel_component_api::test_support::timeout_wait;
 use camel_xslt::proto::{HealthCheckRequest, health_client::HealthClient};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
-use support::xml_bridge::require_xml_bridge_binary;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 
 /// Positive: start_and_connect establishes mTLS and the Health RPC works.
 #[tokio::test]
 async fn start_and_connect_mtls_handshake() {
     support::install_crypto_provider();
-    let binary = require_xml_bridge_binary();
+    let Some(binary) = support::xml_bridge::xml_bridge_binary_or_skip() else {
+        return;
+    };
     let config = BridgeProcessConfig::xml(binary, 30_000);
     let (process, channel) = BridgeProcess::start_and_connect(&config)
         .await
@@ -36,7 +37,9 @@ async fn start_and_connect_mtls_handshake() {
 #[tokio::test]
 async fn wrong_ca_handshake_rejected() {
     support::install_crypto_provider();
-    let binary = require_xml_bridge_binary();
+    let Some(binary) = support::xml_bridge::xml_bridge_binary_or_skip() else {
+        return;
+    };
 
     // Start bridge (it generates its own TLS material internally)
     let config = BridgeProcessConfig::xml(binary, 30_000);
