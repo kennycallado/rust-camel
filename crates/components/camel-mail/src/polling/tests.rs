@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use camel_api::{IdempotentRepository, Value};
+use camel_api::{Body, IdempotentRepository, Value};
 use camel_component_api::PollingConsumer;
 use tokio::time::Instant;
 
@@ -10,7 +10,7 @@ use super::MailPollingConsumer;
 use crate::config::ImapEndpointConfig;
 use crate::consumer::tests::TestRepo;
 use crate::error::MailError;
-use crate::headers::CAMEL_MAIL_IN_UID;
+use crate::headers::{CAMEL_MAIL_IN_HTML_BODY, CAMEL_MAIL_IN_UID};
 use crate::poll::Mailbox;
 use crate::store::fake::{Fail, FakeConnector, FakeMailbox, StoreCall, rfc822};
 use crate::store::{MailStore, MailStoreConnector, StoreCapabilities};
@@ -74,6 +74,46 @@ async fn poll_enrich_receives_one_message() {
         .expect("receive");
     assert!(second.is_none());
     assert!(start.elapsed() >= Duration::from_secs(5));
+}
+
+/// A multipart/alternative fixture with both text and HTML parts. In
+/// `raw` mode the exchange body must be these exact `BODY.PEEK[]` bytes and
+/// the derived `CamelMailInHtmlBody` header must not be set.
+const RAW_ALT_EML: &[u8] = b"From: Alice <alice@corp.test>\r\n\
+To: bob@corp.test\r\n\
+Subject: greetings\r\n\
+Message-ID: <m1@corp.test>\r\n\
+Date: Mon, 19 Oct 2026 10:00:00 +0000\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/alternative; boundary=\"b1\"\r\n\
+\r\n\
+--b1\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+hello text\r\n\
+--b1\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+\r\n\
+<b>hello html</b>\r\n\
+--b1--\r\n";
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn polling_consumer_raw_returns_exact_bytes() {
+    let mb = FakeMailbox::new().with_message(4, RAW_ALT_EML.to_vec());
+    let (mut c, _conn) = consumer("&raw=true", mb, None);
+    let ex = receive(&mut c, Duration::ZERO)
+        .await
+        .expect("receive")
+        .expect("message");
+    match &ex.input.body {
+        Body::Bytes(bytes) => assert_eq!(bytes.as_ref(), RAW_ALT_EML),
+        other => panic!("expected raw byte body, got {other:?}"),
+    }
+    assert!(
+        ex.input.header(CAMEL_MAIL_IN_HTML_BODY).is_none(),
+        "HtmlBody header must not be set in raw mode"
+    );
+    assert_eq!(ex.input.header(CAMEL_MAIL_IN_UID), Some(&Value::from(4u32)));
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

@@ -1,0 +1,32 @@
+{
+  "kind": "spec",
+  "change": "mail-attachments",
+  "hash": "sha256:9d64800c081ab166a3e4e849e2ddae195b2191522f4dad5283db4459ae6d9825",
+  "expert": "e_gpt",
+  "verdict": "APPROVE-WITH-FIXES",
+  "verdict_detail": "Round 1: 8 important findings (option naming, parse bounds, malformed input, classification, metadata bounds, disposition scope, allowlist semantics, canonical compat). Round 2: 2 remaining word-level findings in proposal.md acceptance line, prescribed verbatim by the expert. Fixes applied exactly as prescribed; hash recomputed post-fix. Confirmation re-bless dispatch failed: e_gpt usage limit reached ('The usage limit has been reached') — quota guardrail forbids retry and e_opus/e_glm are banned (fleet availability 2026-10-27). Master confirmation requested on the single changed acceptance line.",
+  "rounds": [
+    {"verdict": "APPROVE-WITH-FIXES", "findings": 8},
+    {"verdict": "APPROVE-WITH-FIXES", "findings": 2},
+    {"verdict": "DISPATCH-ERROR", "error": "The usage limit has been reached"}
+  ],
+  "date": "2026-11-01",
+  "plan_bless": {
+    "expert": "e_opus",
+    "hash": "sha256:4f8ab19224c52a45b38e78c3d3f7cf0a7521c2bfb6af9a31044ffa9337cfc9c7",
+    "verdict": "APPROVE",
+    "rounds": [
+      {"verdict": "APPROVE-WITH-FIXES", "findings": 9},
+      {"verdict": "APPROVE-WITH-FIXES", "findings": 3},
+      {"verdict": "APPROVE-WITH-FIXES", "findings": 1, "note": "gate declared the sole finding non-blocking ('This doesn't block anything'); applied verbatim as a Files-list annotation only"},
+      {"verdict": "APPROVE", "note": "final hash 4f8ab192… after the non-blocking Files-list annotation was applied; no open findings"}
+    ],
+    "plan_review": {
+      "reviewer": "r_glm",
+      "status": "DISPATCH-ERROR",
+      "error": "Usage limit reached for 5 hour. Your limit will reset at 2026-11-01 20:27:44",
+      "note": "r_gpt was also quota-exhausted per the mission resume order; both reviewer models unavailable. Not a plan defect. Master may run the r_* loop after reset.",
+      "date": "2026-11-01"
+    }
+  }
+}

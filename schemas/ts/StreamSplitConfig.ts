@@ -25,6 +25,18 @@ batch_size: number,
  */
 chunk_size: number | null, 
 /**
+ * Maximum number of attachment parts to materialize (MIME only).
+ */
+max_parts?: number | null, 
+/**
+ * Maximum size (in bytes) of a single attachment part (MIME only).
+ */
+max_part_size?: number | null, 
+/**
+ * Content types to include when splitting a MIME message (MIME only).
+ */
+content_types?: Array<string> | null, 
+/**
  * Whether to include origin metadata in each fragment.
  */
 include_origin: boolean, };

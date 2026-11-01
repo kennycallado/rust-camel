@@ -3,4 +3,4 @@
 /**
  * The streaming format to use when splitting a stream body.
  */
-export type StreamSplitFormat = "auto" | "ndjson" | "lines" | "chunks" | "zip" | "tar" | "tar.gz";
+export type StreamSplitFormat = "auto" | "ndjson" | "lines" | "chunks" | "zip" | "tar" | "tar.gz" | "mime";

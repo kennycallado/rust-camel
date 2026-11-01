@@ -110,6 +110,9 @@ pub(super) struct ImapMetadataDescriptor {
 
     #[uri_param(name = "idempotentRepository")]
     pub _idempotent_repository: Option<String>,
+
+    #[uri_param(name = "raw", default = "false")]
+    pub _raw: bool,
 }
 
 pub(crate) fn imap_metadata(scheme: MailScheme) -> ComponentMetadata {
@@ -169,6 +172,7 @@ mod tests {
                 "maxMessageSize" => Some("10485760"),
                 "maxAttempts" => Some("3"),
                 "delete" => Some("false"),
+                "raw" => Some("false"),
                 _ => None,
             };
             assert_eq!(o.default_value.as_deref(), d, "{}", o.name);

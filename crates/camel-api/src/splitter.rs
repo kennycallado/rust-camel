@@ -165,6 +165,8 @@ pub enum StreamSplitFormat {
     #[serde(rename = "tar.gz")]
     #[ts(rename = "tar.gz")]
     TarGz,
+    /// Materialized MIME message — one fragment per attachment part.
+    Mime,
 }
 
 /// Configuration for splitting a streaming body into fragments.
@@ -192,6 +194,15 @@ pub struct StreamSplitConfig {
     pub batch_size: usize,
     /// Explicit chunk size in bytes (required when format is [`Chunks`](StreamSplitFormat::Chunks)).
     pub chunk_size: Option<usize>,
+    /// Maximum number of attachment parts to materialize (MIME only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parts: Option<usize>,
+    /// Maximum size (in bytes) of a single attachment part (MIME only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_part_size: Option<usize>,
+    /// Content types to include when splitting a MIME message (MIME only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_types: Option<Vec<String>>,
     /// Whether to include origin metadata in each fragment.
     pub include_origin: bool,
 }
@@ -203,6 +214,9 @@ impl Default for StreamSplitConfig {
             max_record_bytes: 1024 * 1024,
             batch_size: 1,
             chunk_size: None,
+            max_parts: None,
+            max_part_size: None,
+            content_types: None,
             include_origin: true,
         }
     }
@@ -270,6 +284,47 @@ impl StreamSplitConfig {
             return Err(CamelError::Config(
                 "stream split chunk_size must be <= max_record_bytes".into(),
             ));
+        }
+        // MIME materializes attachment parts, not byte chunks or record
+        // batches. The mime-only options are rejected on every other format
+        // so a stray option cannot silently do nothing.
+        if self.format == StreamSplitFormat::Mime {
+            if self.chunk_size.is_some() {
+                return Err(CamelError::Config(
+                    "stream split format=Mime does not support chunk_size".into(),
+                ));
+            }
+            if self.batch_size != 1 {
+                return Err(CamelError::Config(
+                    "stream split format=Mime requires batch_size=1".into(),
+                ));
+            }
+            if self.max_parts == Some(0) {
+                return Err(CamelError::Config(
+                    "stream split max_parts must be > 0".into(),
+                ));
+            }
+            if self.max_part_size == Some(0) {
+                return Err(CamelError::Config(
+                    "stream split max_part_size must be > 0".into(),
+                ));
+            }
+        } else {
+            if self.max_parts.is_some() {
+                return Err(CamelError::Config(
+                    "stream split max_parts is only supported for format=Mime".into(),
+                ));
+            }
+            if self.max_part_size.is_some() {
+                return Err(CamelError::Config(
+                    "stream split max_part_size is only supported for format=Mime".into(),
+                ));
+            }
+            if self.content_types.is_some() {
+                return Err(CamelError::Config(
+                    "stream split content_types is only supported for format=Mime".into(),
+                ));
+            }
         }
         Ok(())
     }

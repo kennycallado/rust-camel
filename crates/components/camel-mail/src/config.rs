@@ -435,6 +435,7 @@ pub(crate) const IMAP_OPTIONS: &[&str] = &[
     "moveTo",
     "copyTo",
     "idempotentRepository",
+    "raw",
 ];
 
 const DEFAULT_FOLDER: &str = "INBOX";
@@ -497,6 +498,8 @@ pub(crate) struct ImapEndpointConfig {
     pub(crate) move_to: Option<String>,
     pub(crate) copy_to: Option<String>,
     pub(crate) idempotent_repository: Option<String>,
+    /// Deliver the exact fetched message bytes as the exchange body.
+    pub(crate) raw: bool,
 }
 
 impl ImapEndpointConfig {
@@ -524,6 +527,7 @@ impl ImapEndpointConfig {
             })?,
         };
         let delete = bool_param(params, "delete")?;
+        let raw = bool_param(params, "raw")?;
         let folder_opt = |key: &str| -> Result<Option<String>, CamelError> {
             params
                 .get(key)
@@ -556,6 +560,7 @@ impl ImapEndpointConfig {
             move_to,
             copy_to,
             idempotent_repository,
+            raw,
             delay: Duration::from_millis(delay),
             initial_delay: Duration::from_millis(initial_delay),
             max_messages_per_poll: parse_min_one(
@@ -850,5 +855,25 @@ mod tests {
     fn lf_in_folder_rejected() {
         let e = imap_err("imap://h?copyTo=a%0Ab");
         assert!(e.contains("copyTo"), "{e}");
+    }
+
+    #[test]
+    fn raw_defaults_to_false() {
+        let c = ImapEndpointConfig::from_uri("imap://h?account=a").unwrap();
+        assert!(!c.raw);
+    }
+
+    #[test]
+    fn raw_true_and_false_parse() {
+        let c = ImapEndpointConfig::from_uri("imap://h?account=a&raw=true").unwrap();
+        assert!(c.raw);
+        let c = ImapEndpointConfig::from_uri("imap://h?account=a&raw=false").unwrap();
+        assert!(!c.raw);
+    }
+
+    #[test]
+    fn raw_invalid_value_rejected() {
+        let e = imap_err("imap://h?account=a&raw=maybe");
+        assert!(e.contains("raw"), "{e}");
     }
 }

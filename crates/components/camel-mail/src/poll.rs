@@ -395,7 +395,7 @@ impl<'a> Cycle<'a> {
             self.skip(uid, "maxMessageSize");
             return Ok(Loaded::Nothing);
         }
-        let Some(message) = inbound::parse_inbound(&raw, uid, &cfg.folder) else {
+        let Some(message) = inbound::parse_inbound(&raw, uid, &cfg.folder, cfg.raw) else {
             self.skip(uid, "unparsable");
             return Ok(Loaded::Nothing);
         };

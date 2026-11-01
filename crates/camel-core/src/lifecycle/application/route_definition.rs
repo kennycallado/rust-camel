@@ -1697,6 +1697,9 @@ mod tests {
                         max_record_bytes: 1024 * 1024,
                         batch_size: 1,
                         chunk_size: None,
+                        max_parts: None,
+                        max_part_size: None,
+                        content_types: None,
                         include_origin: true,
                     },
                     aggregation: AggregationStrategy::Original,
@@ -1704,7 +1707,7 @@ mod tests {
                     steps: vec![BuilderStep::Stop],
                 }
             ),
-            "DeclarativeStreamSplit { stream_config: StreamSplitConfig { format: Ndjson, max_record_bytes: 1048576, batch_size: 1, chunk_size: None, include_origin: true }, aggregation: Original, stop_on_exception: true, steps: [Stop] }"
+            "DeclarativeStreamSplit { stream_config: StreamSplitConfig { format: Ndjson, max_record_bytes: 1048576, batch_size: 1, chunk_size: None, max_parts: None, max_part_size: None, content_types: None, include_origin: true }, aggregation: Original, stop_on_exception: true, steps: [Stop] }"
         );
     }
 

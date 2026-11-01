@@ -778,6 +778,16 @@
           "format": "uint",
           "minimum": 0
         },
+        "content_types": {
+          "description": "Content types to include when splitting a MIME message (MIME only).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
         "format": {
           "description": "The streaming format to use.",
           "$ref": "#/$defs/StreamSplitFormat"
@@ -785,6 +795,24 @@
         "include_origin": {
           "description": "Whether to include origin metadata in each fragment.",
           "type": "boolean"
+        },
+        "max_part_size": {
+          "description": "Maximum size (in bytes) of a single attachment part (MIME only).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_parts": {
+          "description": "Maximum number of attachment parts to materialize (MIME only).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
         },
         "max_record_bytes": {
           "description": "Maximum size (in bytes) of a single record or chunk.",
@@ -837,6 +865,11 @@
           "description": "GZIP-compressed TAR archive — materialized format, each regular-file entry becomes a fragment exchange.",
           "type": "string",
           "const": "tar.gz"
+        },
+        {
+          "description": "Materialized MIME message — one fragment per attachment part.",
+          "type": "string",
+          "const": "mime"
         }
       ]
     }

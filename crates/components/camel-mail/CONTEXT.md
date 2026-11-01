@@ -51,6 +51,10 @@ See ADR-0093 for the full record.
   and `Cycle::delivered` (`add`, then disposition). `MailConsumer` (push) routes each loaded message with `send_and_wait`
   and calls `delivered` only after the route returned `Ok` (at-least-once). `MailPollingConsumer`
   (pull, `pollEnrich`) calls `delivered` right after the fetch (at-most-once).
+- Raw mode. `raw=true` opts into raw-bytes delivery: the body is the exact `BODY.PEEK[]` bytes,
+  every `CamelMailIn*` header is kept except `CamelMailInHtmlBody`, and disposition and delivery
+  semantics do not change. See the IMAP consumer receive requirement in the
+  [mail-component spec](../../../openspec/specs/mail-component/spec.md).
 - Session rule. `MailError::Store` and `Connect` mean the connection is broken (I/O, timeout, lost
   connection, unparsable reply): the session is dropped and the push consumer reconnects under
   `NetworkRetryPolicy` (`mail_reconnect_default`). `MailError::Refused` (tagged `NO`/`BAD`) keeps the

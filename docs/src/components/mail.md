@@ -81,6 +81,8 @@ routes:
 
 The Consumer polls the folder for unread messages. It routes each message as one Exchange. The body is the plain-text part, or the HTML part when the message has no plain-text part.
 
+Set `raw=true` to get the message unparsed. The body is then `Body::Bytes` holding the exact RFC 822 bytes fetched with `BODY.PEEK[]`. All `CamelMailIn*` headers are kept, except `CamelMailInHtmlBody`, which is omitted. Attachments are not split from the body.
+
 | Option | Default | Description |
 |--------|---------|-------------|
 | `account` | none | Account name from `[components.mail.accounts]`. |
@@ -91,6 +93,7 @@ The Consumer polls the folder for unread messages. It routes each message as one
 | `maxMessagesPerPoll` | `100` | Maximum messages whose body is fetched in one poll. |
 | `maxMessageSize` | `10485760` | Maximum message size in bytes. Larger messages are skipped. |
 | `maxAttempts` | `3` | Failed attempts (route, body download, or a disposition that leaves the message unseen) before the message is skipped. |
+| `raw` | `false` | Return the message unparsed as raw RFC 822 bytes. |
 | `delete` | `false` | Delete the message after a successful route. Needs UIDPLUS. |
 | `moveTo` | none | Move the message to this folder after a successful route. |
 | `copyTo` | none | Copy the message to this folder before it is marked `\Seen`. |
@@ -111,6 +114,30 @@ Each Exchange carries these headers. A header is absent when the message does no
 | `CamelMailInDate` | Date header in RFC 3339 format. |
 | `CamelMailInFolder` | Folder the message came from. |
 | `CamelMailInHtmlBody` | HTML part, set only when the message has both a text and an HTML part. |
+
+### DMARC aggregate reports
+
+DMARC aggregate reports usually arrive as one `application/octet-stream` part named `*.xml.gz`. The part name and the declared type are untrusted. This route splits the raw message into attachment parts, decompresses the report and parses the XML:
+
+```yaml
+routes:
+  - id: dmarc-reports
+    from: "imap://mail.example.com?folder=DMARC&raw=true"
+    steps:
+      - split:
+          streaming: true
+          stream:
+            format: mime
+            content_types:
+              - application/octet-stream
+        aggregation: collect_all
+        steps:
+          - unmarshal: gzip
+          - unmarshal: xml
+          - to: "file:data/dmarc"
+```
+
+The `content_types` allowlist selects the report parts. `unmarshal: gzip` decompresses the report, and `unmarshal: xml` parses it into JSON. For a `.zip` report, use `unmarshal: zip` in place of `unmarshal: gzip`. See the [MIME Splitter](../eip/mime-splitter.md) for the options and the emitted headers.
 
 Delivery is at-least-once. The Consumer sets the `\Seen` flag only after the route finishes without an error. A failed route leaves the message unseen, and the next poll delivers it again. If the route succeeds but setting `\Seen` fails, the message is delivered again as well. Make the route idempotent, for example by keying on `CamelMailInMessageId`.
 
@@ -187,6 +214,8 @@ A message that the repository already knows only gets `\Seen`. The Consumer does
 
 The `imap` and `imaps` schemes also serve `poll_enrich`. Each call returns at most one message and waits up to the step timeout. The timeout covers connecting, searching and downloading the message. Once a message is downloaded, its disposition always finishes (each server command has its own I/O timeout) and the message is returned, so the timeout never loses a downloaded message. A timeout of 0 cannot return mail from a real server, because connecting needs network round trips.
 
+A pull honors `raw=true` the same way. The body is the exact RFC 822 bytes, every `CamelMailIn*` header is kept except `CamelMailInHtmlBody`, and the disposition is unchanged.
+
 ```yaml
 routes:
   - id: pull-mail
@@ -216,7 +245,7 @@ A pull shares the receive pipeline of the push Consumer, with these differences:
 
 - XOAUTH2 and other token logins.
 - IMAP IDLE. The Consumer polls.
-- Attachments. The body is text only.
+- Attachments are ignored unless `raw=true`. With `raw=true`, add a [MIME Splitter](../eip/mime-splitter.md) step to route the attachment parts.
 - POP3.
 - The Gmail and Microsoft Graph APIs.
 - DKIM signing.

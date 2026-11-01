@@ -470,6 +470,24 @@ async fn failed_route_leaves_message_untouched() {
     assert!(!h.is_seen(7));
 }
 
+/// On `raw=true` a failing route must still leave the message visible for
+/// redelivery and count the cycle as a failed attempt.
+///
+/// The scripted `Route::Fail` stands in for the spec scenario where a
+/// `split mime` limit fails the route: this component cannot depend on
+/// `camel-processor`, so the splitter's own error path is proven separately
+/// in `camel-processor` and `camel-test`. The observable attempt signal here
+/// is [`PollState::attempts`], keyed by `(uid_validity, uid)`; reaching
+/// `maxAttempts` moves the entry to [`PollState::skipped`].
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn raw_failing_route_leaves_message_unseen() {
+    let mut h = Harness::new(one(7), "&raw=true", Route::Fail).await;
+    h.poll().await;
+    assert_eq!(h.state.attempts.get(&(1, 7)), Some(&1));
+    assert!(!h.calls().contains(&StoreCall::MarkSeen(7)));
+    assert!(!h.is_seen(7));
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn poison_message_bounded() {
     let (_guard, buf) = capture_warnings();
@@ -617,7 +635,7 @@ Subject: greetings\r\n\
 Message-ID: <m1@corp.test>\r\n\
 \r\n\
 hello\r\n";
-    let m = crate::adapter::inbound::parse_inbound(RETARGET_EML, 1, "INBOX").expect("parse");
+    let m = crate::adapter::inbound::parse_inbound(RETARGET_EML, 1, "INBOX", false).expect("parse");
     for h in [
         "CamelMailTo",
         "CamelMailCc",

@@ -26,6 +26,8 @@ pub mod log;
 pub mod loop_eip;
 pub mod map_body;
 pub mod marshal;
+/// Streaming split of a MIME message into attachment fragments.
+pub mod mime_splitter;
 pub mod multicast_segment;
 pub mod recipient_list;
 pub mod remove_header;

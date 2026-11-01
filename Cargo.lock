@@ -2865,6 +2865,7 @@ dependencies = [
  "flate2",
  "futures",
  "jsonschema",
+ "mail-parser",
  "rand 0.10.3",
  "regex",
  "serde",

@@ -977,6 +977,15 @@ pub struct StreamConfigYaml {
     pub batch_size: Option<usize>,
     #[serde(default)]
     pub chunk_size: Option<usize>,
+    /// Maximum number of attachment fragments emitted by the MIME splitter.
+    #[serde(default)]
+    pub max_parts: Option<usize>,
+    /// Maximum decoded size of a single MIME part, in bytes.
+    #[serde(default)]
+    pub max_part_size: Option<usize>,
+    /// Allowlist of declared `type/subtype` attachment types to emit.
+    #[serde(default)]
+    pub content_types: Option<Vec<String>>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

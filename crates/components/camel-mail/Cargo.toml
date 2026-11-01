@@ -28,6 +28,7 @@ lettre              = { workspace = true }
 uuid                = { workspace = true }
 async-imap          = { workspace = true }
 mail-parser         = { workspace = true }
+bytes               = { workspace = true }
 # rustls is reached through `tokio_rustls::rustls`: the workspace entry
 # selects ring and tls12 only, so the crate adds no aws-lc-rs edge.
 tokio-rustls        = { workspace = true }
@@ -40,7 +41,6 @@ tokio               = { workspace = true, features = ["full", "test-util"] }
 camel-component-api = { workspace = true, features = ["test-support"] }
 tempfile            = { workspace = true }
 tracing-subscriber  = { workspace = true }
-bytes               = { workspace = true }
 serde_json          = { workspace = true }
 tokio-util          = { workspace = true }
 # self dev-dependency enables the probe hooks for integration tests

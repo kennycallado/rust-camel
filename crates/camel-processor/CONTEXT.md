@@ -32,6 +32,7 @@ processor compiles from a DSL Step and is composed into the route pipeline.
 | `loop_eip` | Loop | repeated routing | `src/lib.rs:25` (Count(n) clamped to config.max_iterations, default MAX_LOOP_ITERATIONS=10_000 — configurable per-step per ADR-0039) |
 | `map_body` | MapBody | transformation | `src/lib.rs:26` |
 | `marshal` | Marshal / Unmarshal | data format transformation | `src/lib.rs:27` |
+| `mime_splitter` | MIME Splitter | attachment extraction (ADR-0094) | `src/lib.rs:29` (`split_mime_bytes`, `MimeSplitConfig`): one fragment per decoded attachment part, text/HTML bodies and multipart containers skipped; `max_parts` default 100, `max_part_size` default input length, optional `content_types` allowlist applied before the part cap; names/types/IDs sanitized and capped at 255 bytes; `message/rfc822` is one raw fragment without recursion; no decompression. |
 | `multicast_segment` | MulticastSegment | fan-out routing | `src/lib.rs:29` |
 | `recipient_list` | RecipientList | dynamic recipient routing | `src/lib.rs:30` (expression capped to max_recipients, default 1_000 — Batch 1 H13). Zero-success contract: when at least one recipient is called and zero return Ok, the result is `Err(last_error)` (ADR-0058), never `Ok(original)`. |
 | `resequencer` | Resequencer (batch/stream) | stateful reorder; continuation boundary (ADR-0029) | `src/lib.rs:32` |

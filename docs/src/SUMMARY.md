@@ -38,6 +38,7 @@
     - [Streaming Splitter](eip/streaming-splitter.md)
     - [Zip Splitter](eip/zip-splitter.md)
     - [Tar Splitter](eip/tar-splitter.md)
+    - [MIME Splitter](eip/mime-splitter.md)
     - [Sort](eip/sort.md)
     - [Sampling](eip/sampling.md)
     - [Resequencer](eip/resequencer.md)

@@ -3,6 +3,7 @@
 //! Only the documented `CamelMailIn*` headers are set, always from parsed
 //! fields; no inbound header becomes a routing or control header.
 
+use bytes::Bytes;
 use camel_api::{Body, Exchange, Message, Value};
 use mail_parser::{Address, MessageParser, PartType};
 
@@ -38,17 +39,28 @@ fn join_addresses(addr: Option<&Address<'_>>) -> Option<String> {
 
 /// Parse raw RFC 822 bytes into an exchange; `None` when the bytes are not
 /// a message. Never panics on bad input.
-pub(crate) fn parse_inbound(raw: &[u8], uid: u32, folder: &str) -> Option<InboundMessage> {
+pub(crate) fn parse_inbound(
+    raw: &[u8],
+    uid: u32,
+    folder: &str,
+    raw_mode: bool,
+) -> Option<InboundMessage> {
     let parsed = MessageParser::default().parse(raw)?;
 
-    let text = parsed.text_bodies().find_map(|p| match &p.body {
-        PartType::Text(t) => Some(t.to_string()),
-        _ => None,
-    });
-    let html = parsed.html_bodies().find_map(|p| match &p.body {
-        PartType::Html(h) => Some(h.to_string()),
-        _ => None,
-    });
+    let (text, html) = if raw_mode {
+        (None, None)
+    } else {
+        (
+            parsed.text_bodies().find_map(|p| match &p.body {
+                PartType::Text(t) => Some(t.to_string()),
+                _ => None,
+            }),
+            parsed.html_bodies().find_map(|p| match &p.body {
+                PartType::Html(h) => Some(h.to_string()),
+                _ => None,
+            }),
+        )
+    };
 
     let message_id = parsed
         .message_id()
@@ -80,8 +92,12 @@ pub(crate) fn parse_inbound(raw: &[u8], uid: u32, folder: &str) -> Option<Inboun
     }
     headers.push((CAMEL_MAIL_IN_FOLDER, Value::from(folder)));
 
-    let body = text.or(html).unwrap_or_default();
-    let mut message = Message::new(Body::Text(body));
+    let body = if raw_mode {
+        Body::Bytes(Bytes::copy_from_slice(raw))
+    } else {
+        Body::Text(text.or(html).unwrap_or_default())
+    };
+    let mut message = Message::new(body);
     for (k, v) in headers {
         message.set_header(k, v);
     }
@@ -159,7 +175,7 @@ plain\r\n";
 
     #[test]
     fn mapping_alternative_message() {
-        let m = parse_inbound(ALT_EML, 42, "INBOX").expect("parse");
+        let m = parse_inbound(ALT_EML, 42, "INBOX", false).expect("parse");
         let ex = &m.exchange;
         assert_eq!(body(ex).trim(), "hello text");
         assert!(
@@ -196,14 +212,14 @@ plain\r\n";
 
     #[test]
     fn html_only_body_is_html_source() {
-        let m = parse_inbound(HTML_ONLY_EML, 1, "INBOX").expect("parse");
+        let m = parse_inbound(HTML_ONLY_EML, 1, "INBOX", false).expect("parse");
         assert!(body(&m.exchange).contains("<p>only</p>"));
         assert!(m.exchange.input.header(CAMEL_MAIL_IN_HTML_BODY).is_none());
     }
 
     #[test]
     fn attachments_ignored() {
-        let m = parse_inbound(ATTACH_EML, 1, "INBOX").expect("parse");
+        let m = parse_inbound(ATTACH_EML, 1, "INBOX", false).expect("parse");
         assert_eq!(body(&m.exchange).trim(), "see file");
         for v in m.exchange.input.headers.values() {
             assert!(!v.to_string().contains("a.bin"));
@@ -211,15 +227,57 @@ plain\r\n";
     }
 
     #[test]
+    fn raw_body_is_exact_message_bytes() {
+        let m = parse_inbound(ATTACH_EML, 1, "INBOX", true).expect("parse");
+        match &m.exchange.input.body {
+            Body::Bytes(b) => assert_eq!(b.as_ref(), ATTACH_EML),
+            other => panic!("expected byte body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_omits_html_body_header() {
+        let m = parse_inbound(ALT_EML, 42, "INBOX", true).expect("parse");
+        let ex = &m.exchange;
+        assert!(ex.input.header(CAMEL_MAIL_IN_HTML_BODY).is_none());
+        assert_eq!(hdr(ex, CAMEL_MAIL_IN_SUBJECT).as_deref(), Some("greetings"));
+        assert_eq!(
+            hdr(ex, CAMEL_MAIL_IN_MESSAGE_ID).as_deref(),
+            Some("m1@corp.test")
+        );
+        assert_eq!(
+            hdr(ex, CAMEL_MAIL_IN_FROM).as_deref(),
+            Some("Alice <alice@corp.test>")
+        );
+    }
+
+    #[test]
+    fn raw_headers_populated() {
+        let m = parse_inbound(ALT_EML, 42, "INBOX", true).expect("parse");
+        let ex = &m.exchange;
+        for k in [
+            CAMEL_MAIL_IN_SUBJECT,
+            CAMEL_MAIL_IN_FROM,
+            CAMEL_MAIL_IN_MESSAGE_ID,
+        ] {
+            assert!(ex.input.header(k).is_some(), "{k} missing");
+        }
+        assert_eq!(
+            ex.input.header(CAMEL_MAIL_IN_UID),
+            Some(&Value::from(42u32))
+        );
+    }
+
+    #[test]
     fn missing_message_id_absent() {
-        let m = parse_inbound(NO_ID_EML, 1, "INBOX").expect("parse");
+        let m = parse_inbound(NO_ID_EML, 1, "INBOX", false).expect("parse");
         assert!(m.exchange.input.header(CAMEL_MAIL_IN_MESSAGE_ID).is_none());
         assert_eq!(m.message_id, None);
     }
 
     #[test]
     fn inbound_sets_only_in_headers() {
-        let m = parse_inbound(ALT_EML, 42, "INBOX").expect("parse");
+        let m = parse_inbound(ALT_EML, 42, "INBOX", false).expect("parse");
         assert!(!m.exchange.input.headers.is_empty());
         for k in m.exchange.input.headers.keys() {
             assert!(k.starts_with("CamelMailIn"), "unexpected header {k}");
@@ -241,7 +299,7 @@ plain\r\n";
             nested.as_bytes(),
         ];
         for raw in inputs {
-            if let Some(m) = parse_inbound(raw, 1, "INBOX") {
+            if let Some(m) = parse_inbound(raw, 1, "INBOX", false) {
                 assert_eq!(
                     m.exchange.input.header(CAMEL_MAIL_IN_FOLDER),
                     Some(&Value::from("INBOX"))

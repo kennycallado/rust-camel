@@ -3181,10 +3181,41 @@
             "null"
           ]
         },
+        "content_types": {
+          "default": null,
+          "description": "Allowlist of declared `type/subtype` attachment types to emit.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "format": {
           "default": null,
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "max_part_size": {
+          "default": null,
+          "description": "Maximum decoded size of a single MIME part, in bytes.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_parts": {
+          "default": null,
+          "description": "Maximum number of attachment fragments emitted by the MIME splitter.",
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
             "null"
           ]
         },

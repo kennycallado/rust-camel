@@ -273,6 +273,13 @@ impl StepCompiler for SplittingCompiler {
                 let config_clone = stream_config.clone();
                 let zip_config = camel_processor::zip_splitter::ZipSplitConfig::default();
                 let tar_config = camel_processor::tar_splitter::TarSplitConfig::default();
+                let mime_config = camel_processor::mime_splitter::MimeSplitConfig {
+                    max_parts: stream_config
+                        .max_parts
+                        .unwrap_or(camel_processor::mime_splitter::DEFAULT_MAX_PARTS),
+                    max_part_size: stream_config.max_part_size,
+                    content_types: stream_config.content_types.clone(),
+                };
                 let expression: camel_api::StreamingSplitExpression = Arc::new(
                     move |exchange: Exchange| {
                         let config = config_clone.clone();
@@ -436,6 +443,29 @@ impl StepCompiler for SplittingCompiler {
                                                 ))
                                             }
                                         }
+                                    }
+                                }
+                            }
+                            StreamSplitFormat::Mime => {
+                                let mime_config = mime_config.clone();
+                                match extract_bytes_from_body(&exchange, "MIME") {
+                                    Ok((bytes, mut parent)) => {
+                                        parent.set_property(
+                                            "CamelSplitMaterialized",
+                                            Value::Bool(true),
+                                        );
+                                        parent.set_property(
+                                            "CamelSplitMaterializedBytes",
+                                            Value::from(bytes.len() as u64),
+                                        );
+                                        camel_processor::mime_splitter::split_mime_bytes(
+                                            parent,
+                                            bytes,
+                                            mime_config,
+                                        )
+                                    }
+                                    Err(e) => {
+                                        Box::pin(futures::stream::once(async move { Err(e) }))
                                     }
                                 }
                             }

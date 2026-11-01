@@ -1086,6 +1086,7 @@ pub(crate) fn route_step_to_declarative_step(
                         Some("zip") => StreamSplitFormat::Zip,
                         Some("tar") => StreamSplitFormat::Tar,
                         Some("tar.gz") => StreamSplitFormat::TarGz,
+                        Some("mime") => StreamSplitFormat::Mime,
                         Some("auto") | None => StreamSplitFormat::Auto,
                         Some(other) => {
                             return Err(CamelError::RouteError(format!(
@@ -1096,6 +1097,9 @@ pub(crate) fn route_step_to_declarative_step(
                     max_record_bytes: stream_cfg.max_record_bytes.unwrap_or(1024 * 1024),
                     batch_size: stream_cfg.batch_size.unwrap_or(1),
                     chunk_size: stream_cfg.chunk_size,
+                    max_parts: stream_cfg.max_parts,
+                    max_part_size: stream_cfg.max_part_size,
+                    content_types: stream_cfg.content_types,
                     include_origin: true,
                 };
                 config.validate()?;
