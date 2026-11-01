@@ -29,6 +29,19 @@ password = "${env:MAIL_PASSWORD}"
 
 Select an account with `?account=<name>`. With exactly one account, every endpoint without `?account=` uses it, so its credentials are sent to whatever host the URI names; keep the account selection explicit when URIs are built dynamically. With several accounts, `?account=` is required. With no account, `smtp` and `smtps` send without authentication; `imap` and `imaps` need an account and fail at endpoint creation without one.
 
+## Debugging IMAP connections
+
+Set `log_level = "debug"` or `RUST_LOG=camel_component_mail=debug` to see safe
+connection phases: host, port, TLS mode, authentication attempt, and session
+established. The adapter never logs the username, password, or raw protocol
+command. `camel test` scenario documents already print these debug lines.
+
+The underlying `async-imap` crate logs the raw `LOGIN "user" "password"`
+command at TRACE. That target is capped at INFO by the runtime filter and
+dropped from the scenario capture layer, so credentials cannot leak through
+logs. There is no opt-in to the raw command dump; use the adapter phases and
+the typed login/refusal error instead.
+
 ## Sending mail (smtp, smtps)
 
 ```yaml

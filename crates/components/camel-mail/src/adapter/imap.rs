@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
+use tracing::debug;
 
 use crate::config::{
     ImapEndpointConfig, MailAccountConfig, MailServerAddress, SecretString, TlsMode,
@@ -261,6 +262,12 @@ impl MailStoreConnector for AsyncImapConnector {
 
 impl AsyncImapConnector {
     async fn connect_inner(&self) -> Result<Box<dyn MailStore>, MailError> {
+        debug!(
+            host = %self.server.host,
+            port = self.server.port,
+            tls = ?self.tls,
+            "IMAP connecting"
+        );
         let tcp = TcpStream::connect((self.server.host.as_str(), self.server.port))
             .await
             .map_err(connect_err)?;
@@ -300,6 +307,8 @@ impl AsyncImapConnector {
         };
 
         // Constant messages only: the error must not echo the login line.
+        // The credentials are deliberately absent from every log field.
+        debug!("IMAP authenticating (credentials redacted)");
         let session = client
             .login(&self.login.username, self.login.password.expose())
             .await
@@ -313,6 +322,7 @@ impl AsyncImapConnector {
                 ),
                 _ => MailError::Connect("IMAP login failed".to_string()),
             })?;
+        debug!("IMAP session established");
         Ok(Box::new(AsyncImapStore {
             session,
             io_timeout: self.io_timeout,

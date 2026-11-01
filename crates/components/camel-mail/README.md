@@ -62,4 +62,10 @@ and `axllent/mailpit:v1.20.0`). The `Integration Mail` workflow
 (`.github/workflows/integration-mail.yml`) runs the same command nightly at
 04:30 UTC and on `workflow_dispatch`; it is deliberately not run on every push.
 
+For IMAP connection debugging, use `log_level = "debug"` or
+`RUST_LOG=camel_component_mail=debug`: the adapter logs host, port, TLS mode,
+authentication attempt and session established, never credentials. Raw
+`async-imap` `LOGIN` traces are capped/suppressed because the dependency logs
+the password verbatim.
+
 See the guide page `docs/src/components/mail.md` for the semantics, headers, disposition and limits, ADR-0093 for the decisions, and `examples/mail-example` for a runnable send-and-receive route pair against a local GreenMail fixture.
