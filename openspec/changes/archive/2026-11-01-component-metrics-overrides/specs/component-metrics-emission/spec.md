@@ -189,6 +189,17 @@ cxf remainder) SHALL emit this family for errors at minimum.
 - **THEN** both component-operation records carry `component="redis"`
   and no other identity can be supplied at the call site
 
+#### Scenario: registry context honors the components lever
+
+- **GIVEN** a `RegistryComponentContext` constructed with the lever
+  snapshot on and a wired collector
+- **WHEN** `component_metrics_enabled()` is queried and the facade is
+  built through `component_metrics()`
+- **THEN** the lever reports on and the facade emits the
+  component-operations family through the wired collector
+- **AND** constructed with the lever off, the family is suppressed
+  while the error family still flows
+
 #### Scenario: registry context honors the effective switch
 
 - **GIVEN** a context whose levers enable component operations for
