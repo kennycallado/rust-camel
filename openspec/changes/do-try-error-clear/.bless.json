@@ -1,0 +1,69 @@
+{
+  "kind": "plan",
+  "change": "do-try-error-clear",
+  "verdict": "BLESS",
+  "hash": "sha256:5d1ce16977afd5817acd6ee371099299ca822d05e3985201c64f025c018c826d",
+  "expert": "e_opus",
+  "rounds": 2,
+  "history": [
+    {
+      "round": 1,
+      "kind": "spec",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": 6,
+      "summary": "\u00b61/\u00b63 conflict (clear-all vs Propagate); CamelExceptionCaught settled a deferred decision; Propagate claim unobservable + no scenario; design alternative contradicted unconditional clear; E2E path (no change needed); finally scenario did not check derived properties"
+    },
+    {
+      "round": 2,
+      "kind": "spec",
+      "verdict": "BLESS",
+      "hash": "sha256:9c3feb3b1d5faae337e02a44a92f47b3882dad7bddd14ab92aa2b71db6a6da41"
+    },
+    {
+      "round": 1,
+      "kind": "plan",
+      "reviewer": "r_glm",
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "findings": 5,
+      "summary": "missing commit gate before the RED revert; finally test did not count runs; diff-confined acceptance unsatisfiable; wrong helper symbol (send_and_wait); git-status acceptance false-failed on the checkbox"
+    },
+    {
+      "round": 1,
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": 5,
+      "summary": "exact CamelExceptionMessage string wrong (Display prefix); Completed(next) binds immutably; helper could land in production code; unqualified PROPERTY_EXCEPTION_MESSAGE/Value imports; misleading e2e RED text"
+    },
+    {
+      "round": 2,
+      "kind": "plan",
+      "reviewer": "r_glm",
+      "verdict": "APPROVE"
+    },
+    {
+      "round": 2,
+      "kind": "plan",
+      "verdict": "BLESS",
+      "hash": "sha256:5d1ce16977afd5817acd6ee371099299ca822d05e3985201c64f025c018c826d"
+    },
+    {
+      "kind": "stage4-correction",
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "expert": "e_opus",
+      "findings": 3,
+      "summary": "stage-4 pass ordered a design.md wording correction: the sentence 'this change does not alter CamelExceptionCaught' was false (before the fix the property survived a Handled/Continued catch; after it, clear_error() removes it). Sentence replaced per the expert's instruction. Spec and tasks unchanged; code unchanged. Post-bless doc amendment recorded here because it does not change the blessed behavioral contract (the spec already states the derived properties are removed)."
+    }
+  ],
+  "mission": "479-do-try-error-clear",
+  "bd": "rc-v0aoo",
+  "date": "2026-11-01",
+  "quota_deviation": "Mission order approved e_opus for both blessing gates (gpt quota exhausted until ~20:27 UTC). Expert-override channel in effect; recorded.",
+  "post_bless_amendments": [
+    {
+      "what": "design.md CamelExceptionCaught paragraph",
+      "authority": "stage-4 e_opus finding 1 (instructed fix)",
+      "spec_impact": "none",
+      "plan_impact": "none"
+    }
+  ]
+}

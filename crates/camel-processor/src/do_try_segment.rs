@@ -194,14 +194,16 @@ impl OutcomePipeline for DoTrySegment {
                                 return PipelineOutcome::Stopped(stopped_ex);
                             }
                             // Catch handled — exit catch chain with this exchange.
-                            PipelineOutcome::Completed(next) => {
+                            PipelineOutcome::Completed(mut next) => {
                                 match catch.disposition {
                                     ExceptionDisposition::Handled => {
+                                        next.handle_error();
                                         current_ex = next;
                                         catch_matched = true;
                                         break;
                                     }
                                     ExceptionDisposition::Continued => {
+                                        next.clear_error();
                                         current_ex = next;
                                         catch_matched = true;
                                         break;
@@ -283,6 +285,8 @@ mod tests {
     use super::*;
     use crate::do_try::CatchMatcher;
     use crate::test_log_capture::{capture_debugs_with_span_records, captured_field, record_field};
+    use camel_api::Value;
+    use camel_api::exchange::PROPERTY_EXCEPTION_MESSAGE;
     use camel_api::pipeline_outcome::PipelineOutcome;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -353,6 +357,36 @@ mod tests {
     ) -> camel_api::OutcomeSegment {
         camel_api::OutcomeSegment::new(Box::new(MutateThenStop {
             mutator: Arc::new(mutator),
+        }))
+    }
+
+    struct CheckThenComplete {
+        check: Arc<dyn Fn(&Exchange) + Send + Sync>,
+    }
+
+    impl OutcomePipeline for CheckThenComplete {
+        fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+            Box::new(CheckThenComplete {
+                check: Arc::clone(&self.check),
+            })
+        }
+        fn run<'a>(
+            &'a mut self,
+            exchange: Exchange,
+        ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+            let check = Arc::clone(&self.check);
+            Box::pin(async move {
+                check(&exchange);
+                PipelineOutcome::Completed(exchange)
+            })
+        }
+    }
+
+    fn seg_check_then_complete(
+        check: impl Fn(&Exchange) + Send + Sync + 'static,
+    ) -> camel_api::OutcomeSegment {
+        camel_api::OutcomeSegment::new(Box::new(CheckThenComplete {
+            check: Arc::new(check),
         }))
     }
 
@@ -631,6 +665,134 @@ mod tests {
         );
     }
 
+    // ── Catch disposition clears error (mission 479) ──
+
+    #[tokio::test]
+    async fn handled_catch_clears_error_and_marks_handled() {
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("boom".into())),
+            catches: vec![CatchClauseSegment {
+                matcher: CatchMatcher::ByVariant(vec!["ProcessorError".into()]),
+                on_when: None,
+                body: seg_check_then_complete(|ex| {
+                    assert!(ex.has_error(), "catch body must see the try error");
+                    assert!(
+                        matches!(ex.properties.get(PROPERTY_EXCEPTION_MESSAGE), Some(Value::String(s)) if s.contains("boom")),
+                        "catch body must see the derived exception message, got {:?}",
+                        ex.properties.get(PROPERTY_EXCEPTION_MESSAGE)
+                    );
+                }),
+                disposition: ExceptionDisposition::Handled,
+            }],
+            finally: None,
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        match result {
+            PipelineOutcome::Completed(ex) => {
+                assert!(
+                    !ex.has_error(),
+                    "handled catch must clear the exchange error"
+                );
+                assert_eq!(
+                    ex.properties.get(PROPERTY_EXCEPTION_HANDLED),
+                    Some(&Value::Bool(true)),
+                    "handled catch must set CamelExceptionHandled"
+                );
+                assert!(
+                    !ex.properties.contains_key(PROPERTY_EXCEPTION_MESSAGE),
+                    "handled catch must clear the derived exception message"
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn continued_catch_clears_error_without_handled_marker() {
+        let mut ex = Exchange::default();
+        ex.set_property(PROPERTY_EXCEPTION_HANDLED, Value::Bool(true));
+
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("boom".into())),
+            catches: vec![CatchClauseSegment {
+                matcher: CatchMatcher::ByVariant(vec!["ProcessorError".into()]),
+                on_when: None,
+                body: seg_check_then_complete(|ex| {
+                    assert!(ex.has_error(), "catch body must see the try error");
+                    assert!(
+                        matches!(ex.properties.get(PROPERTY_EXCEPTION_MESSAGE), Some(Value::String(s)) if s.contains("boom")),
+                        "catch body must see the derived exception message, got {:?}",
+                        ex.properties.get(PROPERTY_EXCEPTION_MESSAGE)
+                    );
+                }),
+                disposition: ExceptionDisposition::Continued,
+            }],
+            finally: None,
+        };
+
+        let result = seg.run(ex).await;
+        match result {
+            PipelineOutcome::Completed(ex) => {
+                assert!(
+                    !ex.has_error(),
+                    "continued catch must clear the exchange error"
+                );
+                assert!(
+                    !ex.properties.contains_key(PROPERTY_EXCEPTION_HANDLED),
+                    "Continued must not leave the handled marker"
+                );
+                assert!(
+                    !ex.properties.contains_key(PROPERTY_EXCEPTION_MESSAGE),
+                    "continued catch must clear the derived exception message"
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn finally_after_handled_catch_sees_no_error() {
+        let finally_calls = Arc::new(AtomicU32::new(0));
+        let calls = Arc::clone(&finally_calls);
+        let mut seg = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("boom".into())),
+            catches: vec![CatchClauseSegment {
+                matcher: CatchMatcher::ByVariant(vec!["ProcessorError".into()]),
+                on_when: None,
+                body: seg_complete(),
+                disposition: ExceptionDisposition::Handled,
+            }],
+            finally: Some(FinallyClauseSegment {
+                on_when: None,
+                body: seg_check_then_complete(move |ex| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(
+                        !ex.has_error(),
+                        "finally must observe a clean exchange after a handled catch"
+                    );
+                    assert!(
+                        !ex.properties.contains_key(PROPERTY_EXCEPTION_MESSAGE),
+                        "derived exception properties must be cleared"
+                    );
+                }),
+            }),
+        };
+
+        let result = seg.run(Exchange::default()).await;
+        match result {
+            PipelineOutcome::Completed(ex) => {
+                assert!(!ex.has_error(), "handled catch must leave a clean exchange");
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+        assert_eq!(
+            finally_calls.load(Ordering::SeqCst),
+            1,
+            "finally must run exactly once"
+        );
+    }
+
     // ── Catch-body failure envelope (compiled-segment path) ──
 
     fn catch_fails_segment() -> DoTrySegment {
@@ -871,10 +1033,17 @@ mod tests {
         };
 
         let result = seg.run(Exchange::default()).await;
-        assert!(
-            matches!(result, PipelineOutcome::Completed(_)),
-            "Handled must return Completed, got {result:?}"
-        );
+        match result {
+            PipelineOutcome::Completed(ex) => {
+                assert!(!ex.has_error(), "Handled must clear the exchange error");
+                assert_eq!(
+                    ex.properties.get(PROPERTY_EXCEPTION_HANDLED),
+                    Some(&Value::Bool(true)),
+                    "Handled must set CamelExceptionHandled"
+                );
+            }
+            other => panic!("Handled must return Completed, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1039,10 +1208,17 @@ mod tests {
         };
 
         let result = outer.run(Exchange::default()).await;
-        assert!(
-            matches!(result, PipelineOutcome::Completed(_)),
-            "outer must see Completed because inner handled its own error, got {result:?}"
-        );
+        match result {
+            PipelineOutcome::Completed(ex) => {
+                assert!(
+                    !ex.has_error(),
+                    "inner handled error must not leak to the outer exchange"
+                );
+            }
+            other => panic!(
+                "outer must see Completed because inner handled its own error, got {other:?}"
+            ),
+        }
     }
 
     #[tokio::test]

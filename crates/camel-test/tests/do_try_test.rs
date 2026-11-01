@@ -971,3 +971,71 @@ async fn do_try_matching_catch_still_catches() {
 
     h.stop().await;
 }
+
+/// Regression (mission 479): a handled doTry catch must clear the exchange
+/// error, so the Unit-of-Work fires `on_complete` — not `on_failure`.
+///
+/// Setup (2 routes):
+///   - do-try-uow (YAML): doTry calls direct:failing-step, the matching
+///     ProcessorError catch is Handled, and the route declares
+///     `on_complete: "mock:ok"` / `on_failure: "mock:fail"`.
+///   - failing-step (Rust builder): always throws ProcessorError (YAML has no
+///     inline processor step; failure is injected via a real component call).
+///
+/// Expected: the send is Ok, mock:ok receives 1 exchange, mock:fail receives 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn do_try_handled_catch_fires_on_complete_not_on_failure() {
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
+
+    let failing_route = RouteBuilder::from("direct:failing-step")
+        .route_id("failing-step")
+        .process_fn(BoxProcessor::from_fn(|_ex: Exchange| {
+            Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
+        }))
+        .build()
+        .unwrap();
+    h.add_route(failing_route).await.unwrap();
+
+    let yaml = r#"
+routes:
+  - id: "do-try-uow"
+    from: "direct:uow"
+    on_complete: "mock:ok"
+    on_failure: "mock:fail"
+    steps:
+      - do_try:
+          steps:
+            - to: "direct:failing-step"
+          catch:
+            - exception: ["ProcessorError"]
+              disposition: handled
+              steps:
+                - set_body: "caught"
+"#;
+    for route in parse_yaml(yaml).expect("YAML parse failed") {
+        h.add_route(route).await.unwrap();
+    }
+
+    h.start().await;
+
+    let outcome = send_when_registered(&h, "direct:uow", Exchange::default()).await;
+    assert!(
+        outcome.is_ok(),
+        "handled catch must absorb the failure at direct:uow, got: {outcome:?}"
+    );
+
+    let ok = h.mock().get_endpoint("ok").unwrap();
+    ok.await_exchanges(1, Duration::from_secs(5)).await;
+    ok.assert_exchange_count(1).await;
+    h.mock()
+        .get_endpoint("fail")
+        .unwrap()
+        .assert_exchange_count(0)
+        .await;
+
+    h.stop().await;
+}
