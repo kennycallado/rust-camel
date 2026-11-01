@@ -344,12 +344,19 @@ source when there is no text part) and whose headers are
 `CamelMailInFrom`, `CamelMailInTo`, `CamelMailInCc`,
 `CamelMailInSubject`, `CamelMailInMessageId`, `CamelMailInUid`,
 `CamelMailInDate`, `CamelMailInFolder`, plus `CamelMailInHtmlBody` when an
-HTML alternative exists. Attachments SHALL be ignored. Delivery SHALL be
-at-least-once. The consumer SHALL stop on cancellation, SHALL reconnect
-under `NetworkRetryPolicy`, and SHALL NOT restart itself. A login the
-server refuses (tagged `NO` or `BAD` on `LOGIN`) SHALL be permanent: the
-consumer SHALL stop with an error after one attempt and SHALL NOT
-reconnect.
+HTML alternative exists. Attachments SHALL be ignored unless `raw=true`
+is set. With `raw=true` (boolean URI parameter, default `false`) the body
+SHALL be `Body::Bytes` holding the exact RFC 822 bytes fetched with
+`BODY.PEEK[]`, all `CamelMailIn*` headers SHALL be set except
+`CamelMailInHtmlBody`, and the disposition, `maxAttempts`,
+`maxMessageSize`, `idempotentRepository`, and at-least-once semantics
+SHALL be unchanged; no new retry state SHALL be introduced. `pollEnrich`
+SHALL return the same raw mapping when the endpoint URI sets `raw=true`.
+Delivery SHALL be at-least-once. The consumer SHALL stop on cancellation,
+SHALL reconnect under `NetworkRetryPolicy`, and SHALL NOT restart itself.
+A login the server refuses (tagged `NO` or `BAD` on `LOGIN`) SHALL be
+permanent: the consumer SHALL stop with an error after one attempt and
+SHALL NOT reconnect.
 
 #### Scenario: mapping
 
@@ -404,6 +411,43 @@ reconnect.
 - **WHEN** a received message reaches the mail producer
 - **THEN** the exchange carries `CamelMailIn*` headers only, so no class
   B or C header is present
+
+#### Scenario: raw body is the exact message bytes
+
+- **GIVEN** `raw=true` and a multipart message with an attachment on a
+  fake store
+- **WHEN** the consumer polls
+- **THEN** the exchange body is `Body::Bytes` equal to the exact RFC 822
+  bytes the store served for `BODY.PEEK[]`, and the `CamelMailIn*`
+  headers are populated
+
+#### Scenario: raw mode omits the HTML body header
+
+- **GIVEN** `raw=true` and a message with a text and an HTML part
+- **WHEN** the consumer polls
+- **THEN** no `CamelMailInHtmlBody` header is present and the other
+  `CamelMailIn*` headers are populated
+
+#### Scenario: default path ignores attachments unchanged
+
+- **GIVEN** no `raw` parameter and a message with an attachment
+- **WHEN** the consumer polls
+- **THEN** the body is the text part, no attachment bytes are exposed,
+  and `CamelMailInHtmlBody` behaves as before
+
+#### Scenario: failing raw route leaves the message unseen
+
+- **GIVEN** `raw=true` and a route that fails on the message
+- **WHEN** the poll completes
+- **THEN** the message is left UNSEEN, no disposition marks it seen, and
+  the failure counts toward `maxAttempts`
+
+#### Scenario: raw pollEnrich returns raw bytes
+
+- **GIVEN** `pollEnrich` on an `imap` endpoint URI with `raw=true`
+- **WHEN** the enrichment runs against one stored message
+- **THEN** the enriched body is the exact RFC 822 bytes and no
+  `CamelMailInHtmlBody` header is set
 
 ### Requirement: Disposition after route
 
