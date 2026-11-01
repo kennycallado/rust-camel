@@ -842,6 +842,67 @@ mod tests {
     }
 
     #[test]
+    fn xml_binding_openapi_authored_schema() {
+        let mut op = make_op("createUser");
+        op.binding = Some(crate::route_ast::RouteDslRestBinding::Xml);
+        op.consumes = "application/xml".to_string();
+        op.produces = "application/xml".to_string();
+        op.request_schema = Some(json!({ "type": "object" }));
+        op.response = Some(crate::route_ast::RouteDslRestResponse {
+            description: None,
+            schema: Some(json!({ "type": "object" })),
+            headers: BTreeMap::new(),
+        });
+        let rest = make_rest("/api/users", &[("post", op)]);
+        let result = generate_openapi(&[rest], "API", "1.0.0");
+        let post = &result.document["paths"]["/api/users"]["post"];
+        assert_eq!(
+            post["requestBody"]["content"]["application/xml"]["schema"],
+            json!({ "type": "object" }),
+            "xml binding must emit the authored request schema"
+        );
+        assert_eq!(
+            post["responses"]["201"]["content"]["application/xml"]["schema"],
+            json!({ "type": "object" }),
+            "xml binding must emit the authored response schema"
+        );
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("createUser")),
+            "xml op with authored schemas must not warn, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
+    fn xml_binding_openapi_weak_stub_warns() {
+        let mut op = make_op("createUser");
+        op.binding = Some(crate::route_ast::RouteDslRestBinding::Xml);
+        op.consumes = "application/xml".to_string();
+        op.produces = "application/xml".to_string();
+        let rest = make_rest("/api/users", &[("post", op)]);
+        let result = generate_openapi(&[rest], "API", "1.0.0");
+        let post = &result.document["paths"]["/api/users"]["post"];
+        assert_eq!(
+            post["requestBody"]["content"]["application/xml"]["schema"],
+            json!({ "type": "object" }),
+            "xml binding without request_schema must use the weak stub"
+        );
+        assert_eq!(
+            post["responses"]["201"]["content"]["application/xml"]["schema"],
+            json!({ "type": "object" }),
+            "xml binding without response.schema must use the weak stub"
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("weak stub") && w.contains("createUser")),
+            "xml op without schemas must emit a weak-stub warning naming the operation, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
     fn raw_with_response_schema_warns() {
         let mut op = make_op("fetchBlob");
         op.binding = Some(crate::route_ast::RouteDslRestBinding::Raw);

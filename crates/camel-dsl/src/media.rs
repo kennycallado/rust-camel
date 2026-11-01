@@ -43,6 +43,30 @@ pub(crate) fn is_form_media_type(media: &str) -> bool {
             .all(|param| param.trim().eq_ignore_ascii_case("charset=utf-8"))
 }
 
+/// True iff `media` is an XML media type: a valid `type/subtype` whose
+/// subtype is `xml` (e.g. `application/xml`, `text/xml`) or ends with the
+/// `+xml` structured syntax suffix with at least one character before it
+/// (e.g. `application/atom+xml`, `image/svg+xml`), case-insensitive ASCII.
+/// At most one `;`-parameter is allowed, which must be `charset=utf-8`
+/// (case-insensitive); any other parameter disables the match.
+pub(crate) fn is_xml_media_type(media: &str) -> bool {
+    let Some((ty, sub)) = split_media_base(media).split_once('/') else {
+        return false;
+    };
+    if !valid_header_token(ty) || !valid_header_token(sub) {
+        return false;
+    }
+    let sub = sub.to_ascii_lowercase();
+    if !(sub == "xml" || (sub.ends_with("+xml") && sub.len() > "+xml".len())) {
+        return false;
+    }
+    let params: Vec<&str> = media.split(';').skip(1).collect();
+    params.len() <= 1
+        && params
+            .iter()
+            .all(|param| param.trim().eq_ignore_ascii_case("charset=utf-8"))
+}
+
 /// True iff `media` is a JSON media type: a valid `type/subtype` whose
 /// subtype is `json` or ends with `+json` (case-insensitive, ASCII).
 pub(crate) fn is_json_media_type(media: &str) -> bool {
@@ -488,6 +512,58 @@ mod tests {
             assert!(
                 check_request(None, Some(accept), &contract).is_ok(),
                 "malformed Accept must be treated as */*: {accept:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_xml_media_type_accepts_xml_family() {
+        for media in [
+            "application/xml",
+            "text/xml",
+            "application/atom+xml",
+            "image/svg+xml",
+            "APPLICATION/XML",
+            "application/xml; charset=utf-8",
+            "text/xml;charset=UTF-8",
+        ] {
+            assert!(
+                is_xml_media_type(media),
+                "expected XML family acceptance: {media:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_xml_media_type_rejects_non_xml_media() {
+        for media in [
+            "application/json",
+            "text/plain",
+            "application/xmlx",
+            "xml",
+            "application/+xml",
+            "application/x-www-form-urlencoded",
+            "text/xml-plus",
+        ] {
+            assert!(
+                !is_xml_media_type(media),
+                "expected non-XML rejection: {media:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_xml_media_type_rejects_malformed_parameters() {
+        for media in [
+            "application/xml;",
+            "application/xml; charset=iso-8859-1",
+            "application/xml; charset=\"utf-8\"",
+            "application/xml; charset=utf-8; foo=bar",
+            "image / svg+xml",
+        ] {
+            assert!(
+                !is_xml_media_type(media),
+                "expected malformed-parameter rejection: {media:?}"
             );
         }
     }

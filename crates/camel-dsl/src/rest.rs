@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use camel_api::CamelError;
 
-use crate::media::{is_form_media_type, is_json_media_type, is_valid_media_declaration};
+use crate::media::{
+    is_form_media_type, is_json_media_type, is_valid_media_declaration, is_xml_media_type,
+};
 use crate::route_ast::{
     ContentNegotiationStep, MarshalStep, RouteDslRest, RouteDslRestBinding, RouteDslRestOperation,
     RouteDslRoute, RouteDslStep, SetHeaderData, SetHeaderStep, ToStep, UnmarshalStep,
@@ -269,6 +271,24 @@ fn lower_operation(
                 )));
             }
         }
+        RouteDslRestBinding::Xml => {
+            if !is_xml_media_type(&op.consumes) {
+                return Err(CamelError::RouteError(format!(
+                    "rest operation '{op_label}': binding 'xml' requires an XML media \
+                     type (application/xml, text/xml, or */*+xml) for 'consumes' \
+                     (got '{}')",
+                    op.consumes.trim()
+                )));
+            }
+            if !is_xml_media_type(&op.produces) {
+                return Err(CamelError::RouteError(format!(
+                    "rest operation '{op_label}': binding 'xml' requires an XML media \
+                     type (application/xml, text/xml, or */*+xml) for 'produces' \
+                     (got '{}')",
+                    op.produces.trim()
+                )));
+            }
+        }
         RouteDslRestBinding::Raw => {
             if op.request_schema.is_some() {
                 return Err(CamelError::RouteError(format!(
@@ -357,6 +377,7 @@ fn lower_operation(
     // data-format steps at all, so its format name is never consumed.
     let data_format = match binding {
         RouteDslRestBinding::Form => "form",
+        RouteDslRestBinding::Xml => "xml",
         RouteDslRestBinding::Json | RouteDslRestBinding::Raw => "json",
     };
 
@@ -2009,6 +2030,216 @@ rest:
             })
             .expect("POST must inject unmarshal step");
         assert_eq!(unmarshal.unmarshal, "form");
+        assert_eq!(unmarshal.schema, Some(schema));
+    }
+
+    // ── Task 1.2: xml binding media acceptance and lowering ──
+
+    const XML_MEDIA: &str = "application/xml";
+
+    #[test]
+    fn xml_binding_exact_media_loads() {
+        let mut rest = make_rest("createXml", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Xml);
+        rest.operations[0].consumes = XML_MEDIA.to_string();
+        rest.operations[0].produces = XML_MEDIA.to_string();
+        assert!(lower_all_rest_to_routes(&[rest]).is_ok());
+    }
+
+    #[test]
+    fn xml_binding_text_xml_loads() {
+        let mut rest = make_rest("createXml", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Xml);
+        rest.operations[0].consumes = "text/xml".to_string();
+        rest.operations[0].produces = "text/xml".to_string();
+        assert!(lower_all_rest_to_routes(&[rest]).is_ok());
+    }
+
+    #[test]
+    fn xml_binding_structured_suffix_loads() {
+        let mut rest = make_rest("createXml", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Xml);
+        rest.operations[0].consumes = "application/atom+xml".to_string();
+        rest.operations[0].produces = "application/atom+xml".to_string();
+        assert!(lower_all_rest_to_routes(&[rest]).is_ok());
+    }
+
+    #[test]
+    fn xml_binding_charset_utf8_accepted() {
+        let mut rest = make_rest("createXml", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Xml);
+        rest.operations[0].consumes = "application/xml; charset=utf-8".to_string();
+        rest.operations[0].produces = XML_MEDIA.to_string();
+        assert!(lower_all_rest_to_routes(&[rest]).is_ok());
+    }
+
+    #[test]
+    fn xml_binding_non_xml_media_fails() {
+        for offending in ["application/json", "text/plain"] {
+            let mut rest = make_rest("createXml", "post", "/", "bean:create");
+            rest.operations[0].binding = Some(RouteDslRestBinding::Xml);
+            rest.operations[0].consumes = offending.to_string();
+            rest.operations[0].produces = XML_MEDIA.to_string();
+            let err = lower_all_rest_to_routes(&[rest])
+                .err()
+                .expect("non-XML consumes with xml binding must be rejected");
+            assert!(matches!(err, CamelError::RouteError(_)), "got: {err:?}");
+            let msg = err.to_string();
+            for needle in ["createXml", "consumes", offending, "application/xml"] {
+                assert!(
+                    msg.contains(needle),
+                    "message must contain {needle:?}: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn xml_binding_non_utf8_charset_fails() {
+        let mut rest = make_rest("createXml", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Xml);
+        rest.operations[0].consumes = XML_MEDIA.to_string();
+        rest.operations[0].produces = "application/xml; charset=iso-8859-1".to_string();
+        let err = lower_all_rest_to_routes(&[rest])
+            .err()
+            .expect("non-UTF-8 charset with xml binding must be rejected");
+        assert!(matches!(err, CamelError::RouteError(_)), "got: {err:?}");
+        let msg = err.to_string();
+        for needle in ["createXml", "application/xml; charset=iso-8859-1"] {
+            assert!(
+                msg.contains(needle),
+                "message must contain {needle:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn xml_binding_empty_prefix_suffix_fails() {
+        let mut rest = make_rest("createXml", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Xml);
+        rest.operations[0].consumes = "application/+xml".to_string();
+        rest.operations[0].produces = XML_MEDIA.to_string();
+        let err = lower_all_rest_to_routes(&[rest])
+            .err()
+            .expect("'+xml' with an empty prefix must be rejected");
+        assert!(matches!(err, CamelError::RouteError(_)), "got: {err:?}");
+        let msg = err.to_string();
+        for needle in ["createXml", "application/+xml"] {
+            assert!(
+                msg.contains(needle),
+                "message must contain {needle:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn xml_binding_allows_request_and_response_schema() {
+        let mut rest = make_rest("createXml", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Xml);
+        rest.operations[0].consumes = XML_MEDIA.to_string();
+        rest.operations[0].produces = XML_MEDIA.to_string();
+        let schema = serde_json::json!({ "type": "object" });
+        rest.operations[0].request_schema = Some(schema.clone());
+        rest.operations[0].response = Some(RouteDslRestResponse {
+            description: None,
+            schema: Some(serde_json::json!({ "type": "object" })),
+            headers: BTreeMap::new(),
+        });
+        let routes = lower_all_rest_to_routes(&[rest])
+            .expect("xml binding must allow request_schema and response.schema");
+        let unmarshal = routes[0]
+            .steps
+            .iter()
+            .find_map(|s| match s {
+                RouteDslStep::Unmarshal(u) => Some(u),
+                _ => None,
+            })
+            .expect("POST must inject unmarshal step");
+        assert_eq!(unmarshal.schema, Some(schema));
+    }
+
+    #[test]
+    fn xml_post_step_sequence() {
+        let mut rest = make_rest("createXml", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Xml);
+        rest.operations[0].consumes = XML_MEDIA.to_string();
+        rest.operations[0].produces = XML_MEDIA.to_string();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            step_kind_names(&routes[0].steps),
+            vec![
+                "ContentNegotiation",
+                "Unmarshal",
+                "To",
+                "Marshal",
+                "SetHeader",
+                "SetHeaderIfAbsent"
+            ],
+            "xml binding must mirror the form step sequence"
+        );
+        match &routes[0].steps[1] {
+            RouteDslStep::Unmarshal(u) => assert_eq!(u.unmarshal, "xml"),
+            other => panic!("expected Unmarshal(xml) at idx 1, got {other:?}"),
+        }
+        match &routes[0].steps[3] {
+            RouteDslStep::Marshal(m) => assert_eq!(m.marshal, "xml"),
+            other => panic!("expected Marshal(xml) at idx 3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn xml_get_no_unmarshal() {
+        let mut rest = make_rest("getXml", "get", "/{id}", "bean:svc");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Xml);
+        rest.operations[0].consumes = XML_MEDIA.to_string();
+        rest.operations[0].produces = XML_MEDIA.to_string();
+        rest.operations[0].request_schema = Some(serde_json::json!({ "type": "object" }));
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        let steps = &routes[0].steps;
+        assert!(
+            matches!(steps.first(), Some(RouteDslStep::ContentNegotiation(_))),
+            "xml GET must start with the negotiation step, got {steps:?}"
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|s| matches!(s, RouteDslStep::Unmarshal(_))),
+            "GET must not emit an unmarshal step"
+        );
+        let marshal = steps.iter().find_map(|s| match s {
+            RouteDslStep::Marshal(m) => Some(m),
+            _ => None,
+        });
+        assert_eq!(
+            marshal.map(|m| m.marshal.as_str()),
+            Some("xml"),
+            "xml GET must still marshal the response as xml"
+        );
+    }
+
+    #[test]
+    fn xml_request_schema_carried() {
+        let mut rest = make_rest("createXml", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Xml);
+        rest.operations[0].consumes = XML_MEDIA.to_string();
+        rest.operations[0].produces = XML_MEDIA.to_string();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+        });
+        rest.operations[0].request_schema = Some(schema.clone());
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        let unmarshal = routes[0]
+            .steps
+            .iter()
+            .find_map(|s| match s {
+                RouteDslStep::Unmarshal(u) => Some(u),
+                _ => None,
+            })
+            .expect("POST must inject unmarshal step");
+        assert_eq!(unmarshal.unmarshal, "xml");
         assert_eq!(unmarshal.schema, Some(schema));
     }
 

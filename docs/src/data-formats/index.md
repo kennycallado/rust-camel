@@ -11,7 +11,7 @@ The [Marshal and Unmarshal](../eip/marshal-unmarshal.md) EIP page covers route-l
 | `json` | built-in (`camel-processor`) | Text ↔ Json |
 | `csv` | built-in (`camel-processor`) | Text ↔ Json |
 | [`form`](form.md) | built-in (`camel-processor`) | Text (`application/x-www-form-urlencoded`) ↔ Json |
-| `xml` | built-in (`camel-processor`) | Text ↔ Json |
+| [`xml`](xml.md) | built-in (`camel-processor`) | Text/Bytes ↔ Json |
 | `zip` | built-in (`camel-processor`) | Any body → zipped Bytes |
 | `tar` | built-in (`camel-processor`) | Any body → single-entry TAR Bytes |
 | `gzip` | built-in (`camel-processor`) | Any body → gzip-compressed Bytes |

@@ -105,6 +105,7 @@
 - [Data formats](data-formats/index.md)
   - [Protobuf](data-formats/protobuf.md)
   - [Form (urlencoded)](data-formats/form.md)
+  - [XML](data-formats/xml.md)
 - [YAML DSL](yaml-dsl/index.md)
   - [Route structure](yaml-dsl/route-structure.md)
   - [Step verbs reference](yaml-dsl/step-verbs/index.md)

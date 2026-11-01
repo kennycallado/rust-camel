@@ -53,13 +53,17 @@ impl DataFormat for XmlDataFormat {
             Body::Stream(_) => Err(CamelError::TypeConversionFailed(
                 "cannot marshal Body::Stream — add 'stream_cache' or 'convert_body_to' before this step".to_string(),
             )),
-            Body::Empty | Body::Bytes(_) => Err(CamelError::TypeConversionFailed(
-                "XmlDataFormat::marshal only supports Body::Json and Body::Text".to_string(),
+            Body::Bytes(_) => Err(CamelError::TypeConversionFailed(
+                "XmlDataFormat::marshal only supports Body::Json, Body::Text, and Body::Empty"
+                    .to_string(),
             )),
             Body::Xml(_) => Err(CamelError::TypeConversionFailed(
                 "XmlDataFormat::marshal does not accept Body::Xml — use unmarshal to convert XML to JSON"
                     .to_string(),
             )),
+            // Empty-body operations (e.g. REST 204) must not fail marshalling;
+            // matches JsonDataFormat, which passes Body::Empty through.
+            Body::Empty => Ok(Body::Empty),
             _ => Err(CamelError::TypeConversionFailed(
                 "XmlDataFormat::marshal does not support this body type".to_string(),
             )),
@@ -184,10 +188,122 @@ mod tests {
     }
 
     #[test]
-    fn test_marshal_empty_returns_error() {
-        let body = Body::Empty;
+    fn marshal_empty_is_noop() {
+        let result = XmlDataFormat::default().marshal(Body::Empty).unwrap();
+        assert_eq!(result, Body::Empty);
+    }
+
+    #[test]
+    fn unmarshal_empty_fails_closed() {
+        let result = XmlDataFormat::default().unmarshal(Body::Empty);
+        match result {
+            Err(CamelError::TypeConversionFailed(msg)) => {
+                assert!(
+                    msg.contains("XmlDataFormat::unmarshal"),
+                    "message should name the format: {msg}"
+                );
+            }
+            other => panic!("expected TypeConversionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unmarshal_truncated_fails() {
+        let result = XmlDataFormat::default().unmarshal(Body::Text("<user><name>".to_string()));
+        match result {
+            Err(CamelError::TypeConversionFailed(msg)) => {
+                assert!(
+                    msg.contains("unexpected end of XML input"),
+                    "message should name truncated input: {msg}"
+                );
+            }
+            other => panic!("expected TypeConversionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn marshal_output_has_no_declaration() {
+        let body = Body::Json(json!({"user": {"name": "kenny"}}));
+        let result = XmlDataFormat::default().marshal(body).unwrap();
+        assert_eq!(
+            result,
+            Body::Text("<user><name>kenny</name></user>".to_string())
+        );
+    }
+
+    #[test]
+    fn marshal_multi_key_object_fails() {
+        let body = Body::Json(json!({"a": 1, "b": 2}));
+        match XmlDataFormat::default().marshal(body) {
+            Err(CamelError::TypeConversionFailed(msg)) => {
+                assert!(
+                    msg.contains("exactly one root element"),
+                    "message should explain root requirement: {msg}"
+                );
+            }
+            other => panic!("expected TypeConversionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn marshal_top_level_array_fails() {
+        let body = Body::Json(json!([{"a": 1}]));
         let result = XmlDataFormat::default().marshal(body);
         assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
+    }
+
+    #[test]
+    fn marshal_top_level_scalar_fails() {
+        let body = Body::Json(json!("hello"));
+        let result = XmlDataFormat::default().marshal(body);
+        assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
+    }
+
+    #[test]
+    fn unmarshal_leaf_text_is_string() {
+        let result = XmlDataFormat::default()
+            .unmarshal(Body::Text("<n>42</n>".to_string()))
+            .unwrap();
+        assert_eq!(result, Body::Json(json!({"n": "42"})));
+    }
+
+    #[test]
+    fn unmarshal_drops_xmlns_declarations() {
+        let xml = r#"<r xmlns="urn:x" xmlns:p="urn:p"><child>v</child></r>"#;
+        let result = XmlDataFormat::default()
+            .unmarshal(Body::Text(xml.to_string()))
+            .unwrap();
+        assert_eq!(result, Body::Json(json!({"r": {"child": "v"}})));
+    }
+
+    #[test]
+    fn unmarshal_empty_element_is_null() {
+        let result = XmlDataFormat::default()
+            .unmarshal(Body::Text("<r><empty/></r>".to_string()))
+            .unwrap();
+        assert_eq!(result, Body::Json(json!({"r": {"empty": null}})));
+    }
+
+    #[test]
+    fn unmarshal_doctype_entity_ref_fails_closed() {
+        let xml = r#"<!DOCTYPE foo [<!ENTITY x "BOOM">]><foo>&x;</foo>"#;
+        match XmlDataFormat::default().unmarshal(Body::Text(xml.to_string())) {
+            Err(CamelError::TypeConversionFailed(msg)) => {
+                assert!(
+                    msg.contains("unrecognized entity"),
+                    "custom entity should fail closed: {msg}"
+                );
+            }
+            other => panic!("expected TypeConversionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unmarshal_doctype_without_entity_ok() {
+        let result = XmlDataFormat::default()
+            .unmarshal(Body::Text("<!DOCTYPE foo><foo>v</foo>".to_string()))
+            .unwrap();
+        assert_eq!(result, Body::Json(json!({"foo": "v"})));
     }
 
     #[test]

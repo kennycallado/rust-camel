@@ -1599,8 +1599,8 @@ pub struct RouteDslRest {
     pub operations: Vec<RouteDslRestOperation>,
 }
 
-/// Binding mode for a REST operation: automatic JSON data-format binding
-/// (default) or raw passthrough with no automatic binding steps.
+/// Binding mode for a REST operation: automatic structured binding (`json`,
+/// `form`, or `xml`), or `raw` passthrough with no automatic binding steps.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -1609,6 +1609,8 @@ pub enum RouteDslRestBinding {
     Json,
     /// application/x-www-form-urlencoded structured binding (form ⇄ JSON object).
     Form,
+    /// XML structured binding (XML body -> JSON -> XML body).
+    Xml,
     /// No automatic binding steps; declared media used verbatim.
     Raw,
 }
@@ -1639,7 +1641,8 @@ pub struct RouteDslRestOperation {
     /// Default content-type produced by this operation.
     #[serde(default = "default_produces")]
     pub produces: String,
-    /// Optional binding mode: `json` (default) or `raw`. Never inferred from media type.
+    /// Optional binding mode: `json` (default), `raw`, `form`, or `xml`.
+    /// Never inferred from media type.
     #[serde(default)]
     pub binding: Option<RouteDslRestBinding>,
     /// Expected success HTTP status code (e.g. 200, 201).
@@ -2206,6 +2209,21 @@ rest:
         assert!(msg.contains("unknown variant"), "got: {msg}");
         assert!(msg.contains("json"), "got: {msg}");
         assert!(msg.contains("raw"), "got: {msg}");
+    }
+
+    #[test]
+    fn parse_rest_binding_xml() {
+        let yaml = r#"
+rest:
+  - path: /api
+    operations:
+      - method: GET
+        to: direct:handler
+        binding: xml
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        let op = &parsed.rest[0].operations[0];
+        assert_eq!(op.binding, Some(RouteDslRestBinding::Xml));
     }
 
     #[test]

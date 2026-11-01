@@ -2086,7 +2086,7 @@
       "type": "object"
     },
     "RouteDslRestBinding": {
-      "description": "Binding mode for a REST operation: automatic JSON data-format binding\n(default) or raw passthrough with no automatic binding steps.",
+      "description": "Binding mode for a REST operation: automatic structured binding (`json`,\n`form`, or `xml`), or `raw` passthrough with no automatic binding steps.",
       "oneOf": [
         {
           "const": "json",
@@ -2096,6 +2096,11 @@
         {
           "const": "form",
           "description": "application/x-www-form-urlencoded structured binding (form ⇄ JSON object).",
+          "type": "string"
+        },
+        {
+          "const": "xml",
+          "description": "XML structured binding (XML body -> JSON -> XML body).",
           "type": "string"
         },
         {
@@ -2118,7 +2123,7 @@
               "type": "null"
             }
           ],
-          "description": "Optional binding mode: `json` (default) or `raw`. Never inferred from media type."
+          "description": "Optional binding mode: `json` (default), `raw`, `form`, or `xml`.\nNever inferred from media type."
         },
         "consumes": {
           "default": "application/json",

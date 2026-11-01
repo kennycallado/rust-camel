@@ -38,7 +38,8 @@ consumes: string,
  */
 produces: string, 
 /**
- * Optional binding mode: `json` (default) or `raw`. Never inferred from media type.
+ * Optional binding mode: `json` (default), `raw`, `form`, or `xml`.
+ * Never inferred from media type.
  */
 binding: RouteDslRestBinding | null, 
 /**

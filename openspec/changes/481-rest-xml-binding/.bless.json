@@ -1,0 +1,14 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS-WITH-FIXES",
+  "hash": "sha256:eebf9e96bf2fca0a7e6dda64b85645802c3057f3e76fc22d92c53bfa51ab8f85",
+  "expert": "experts/e_opus",
+  "session": "ses_e685cea1fffe6rHl5Oblbgfhmu",
+  "date": "2026-11-01",
+  "notes": [
+    "Eight findings fixed in place before this hash: POST success status corrected to 201; body injection via an Exchange mutator defined; schema artifact regeneration added; exhaustive-match sweep added; marshal output shape pinned; truncated-XML message pinned; test-name collision check added; untrimmed media-part validation stated.",
+    "One-attempt-per-gate budget (mission order): no re-dispatch after applying fixes.",
+    "Prior r_glm plan review (ses_e685fa285ffeKxVRP58v3XqigH) returned APPROVE-WITH-FINDINGS; its four minor test-gap findings were applied first (marshal array/scalar, xmlns/empty-element pins, doc greps, response.schema metadata-only test).",
+    "Post-bless correction during Task 1.4 (no oracle re-dispatch, one-attempt-per-gate budget): the DOCTYPE scenario assumed the entity reference would be silently dropped, but XmlDataFormat::unmarshal fails closed on an entity reference outside quick-xml's predefined set. The scenario is corrected to the observed fail-closed behavior and a DOCTYPE-without-entity scenario was added; design D3d records the observation. No code or scope change."
+  ]
+}
