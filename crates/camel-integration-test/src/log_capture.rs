@@ -139,10 +139,14 @@ pub fn capture_installed() -> bool {
 /// seat; losing the first-wins `try_init` leaves the foreign
 /// subscriber in place and [`capture_installed`] at `false`.
 ///
-/// The subscriber combines unfiltered capture with a console formatter.
-/// Only the formatter filters events: SQLx targets print at INFO and
-/// higher, while other targets print at every level. The fixed policy
-/// does not read ambient configuration (ADR-0069 hermeticity).
+/// The subscriber combines capture with a console formatter. Both
+/// layers cap credential-bearing dependency targets: SQLx and
+/// `async_imap` print/capture at INFO and higher, while other targets
+/// retain TRACE through ERROR. `async_imap` logs the raw IMAP command
+/// (`LOGIN "user" "password"`) at TRACE, so suppressing DEBUG/TRACE is
+/// a credential-redaction guard, not merely verbosity (ADR-0051). The
+/// fixed policy does not read ambient configuration (ADR-0069
+/// hermeticity).
 pub fn ensure_capture_subscriber() {
     if OWN_INSTALL.load(Ordering::Acquire) {
         return;
@@ -163,7 +167,8 @@ where
             .with_filter(
                 Targets::new()
                     .with_default(Level::TRACE)
-                    .with_target("sqlx", Level::INFO),
+                    .with_target("sqlx", Level::INFO)
+                    .with_target("async_imap", Level::INFO),
             ),
     )
 }
@@ -187,6 +192,14 @@ where
     S: tracing::Subscriber,
 {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+        // Credential guard (ADR-0051): async-imap logs the raw IMAP
+        // command, `LOGIN "user" "password"`, at TRACE. Do not retain
+        // DEBUG/TRACE events from that target in any capture window;
+        // the console formatter applies the same cap.
+        let metadata = event.metadata();
+        if metadata.target().starts_with("async_imap") && *metadata.level() > Level::INFO {
+            return;
+        }
         let at = Instant::now();
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
@@ -256,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn console_filters_sqlx_without_filtering_capture() {
+    fn console_and_capture_cap_credential_bearing_targets() {
         let console = tempfile::NamedTempFile::new().expect("console file");
         let dispatch = tracing::Dispatch::new(capture_subscriber(
             console.reopen().expect("reopen console file"),
@@ -268,11 +281,20 @@ mod tests {
             tracing::info!(target: "sqlx::query", "sqlx_info_marker");
             tracing::warn!(target: "sqlx::query", "sqlx_warn_marker");
             tracing::error!(target: "sqlx::query", "sqlx_error_marker");
+            tracing::trace!(target: "async_imap::imap_stream",
+                "encode: input: LOGIN \"basic\" \"pass\"");
+            tracing::debug!(target: "async_imap::imap_stream", "async_imap_debug_marker");
+            tracing::info!(target: "async_imap::imap_stream", "async_imap_info_marker");
             tracing::trace!(target: "scenario_console_test", "other_trace_marker");
         });
         let events = window.close();
         let output = std::fs::read_to_string(console.path()).expect("read console output");
-        for marker in ["sqlx_trace_marker", "sqlx_debug_marker"] {
+        for marker in [
+            "sqlx_trace_marker",
+            "sqlx_debug_marker",
+            "LOGIN \"basic\" \"pass\"",
+            "async_imap_debug_marker",
+        ] {
             assert!(
                 !output.contains(marker),
                 "console must omit {marker}: {output}"
@@ -282,6 +304,7 @@ mod tests {
             "sqlx_info_marker",
             "sqlx_warn_marker",
             "sqlx_error_marker",
+            "async_imap_info_marker",
             "other_trace_marker",
         ] {
             assert!(
@@ -295,11 +318,18 @@ mod tests {
             "sqlx_info_marker",
             "sqlx_warn_marker",
             "sqlx_error_marker",
+            "async_imap_info_marker",
             "other_trace_marker",
         ] {
             assert!(
                 events.iter().any(|event| event.message.contains(marker)),
                 "capture must retain {marker}: {events:?}"
+            );
+        }
+        for marker in ["LOGIN \"basic\" \"pass\"", "async_imap_debug_marker"] {
+            assert!(
+                !events.iter().any(|event| event.message.contains(marker)),
+                "capture must omit credential-bearing {marker}: {events:?}"
             );
         }
     }

@@ -93,9 +93,13 @@ An ordered `rows` assertion over a query without `ORDER BY` depends on the datab
 
 When the scenario harness owns the tracing subscriber, the console shows
 SQLx events at INFO, WARN, and ERROR. It omits SQLx DEBUG and TRACE events,
-including ordinary statement logs. Other targets retain TRACE through ERROR.
-The capture layer retains every level for document-level `logs:` assertions.
-`RUST_LOG` does not change this fixed policy or captured assertions.
+including ordinary statement logs. `async_imap` is capped the same way, and
+its DEBUG/TRACE events are also dropped from the capture layer: that
+dependency logs the raw IMAP command (`LOGIN "user" "password"`) at TRACE,
+so retaining it would leak credentials. Other targets retain TRACE through
+ERROR, and the capture layer retains their full level range for
+document-level `logs:` assertions. `RUST_LOG` does not change this fixed
+policy or captured assertions.
 
 This policy controls verbosity. SQLx WARN events can still contain query
 text. See the [harness console and capture contract](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-integration-test/CONTEXT.md#scenario-console-and-log-capture)

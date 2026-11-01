@@ -348,16 +348,19 @@ document never seeded.
 
 `ensure_capture_subscriber` claims the global tracing subscriber before the
 scenario boot through first-wins installation. When the harness owns that
-subscriber, it sends events to an unfiltered `CaptureLayer` and a console
-formatter. The formatter applies a fixed `Targets` filter: INFO and higher
-for the `sqlx` target prefix, TRACE and higher for all other targets.
-SQLx DEBUG and TRACE events remain available to document-level `logs:`
-assertions, even though the console omits them.
+subscriber, it sends events to a `CaptureLayer` and a console formatter.
+Both apply a fixed policy: INFO and higher for the `sqlx` and `async_imap`
+target prefixes, TRACE and higher for all other targets. SQLx DEBUG and
+TRACE events remain available to document-level `logs:` assertions, even
+though the console omits them. `async_imap` DEBUG and TRACE events are
+dropped from both layers: that dependency logs the raw IMAP command
+(`LOGIN "user" "password"`) at TRACE, so retaining them would leak
+credentials (ADR-0051).
 
 The harness does not read `RUST_LOG` or other ambient configuration for this
-policy, as required by ADR-0069 section 4. This filter controls console
-verbosity. It does not redact SQL statements: SQLx WARN events can still
-contain query text. ADR-0051 governs diagnostic redaction.
+policy, as required by ADR-0069 section 4. This filter controls verbosity.
+It does not redact SQL statements: SQLx WARN events can still contain query
+text. ADR-0051 governs diagnostic redaction.
 
 ### Boot teardown closes the datasource pools
 
