@@ -1,0 +1,89 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "expert": "e_opus",
+  "hash": "sha256:740f1c7bd127f9f9497433c0b2753d8af0002277ff812efac5ba7fb994e00fb4",
+  "date": "2026-11-01",
+  "history": [
+    {
+      "kind": "spec",
+      "verdict": "BLESS-WITH-FIXES",
+      "expert": "e_gpt",
+      "findings": 3
+    },
+    {
+      "kind": "spec",
+      "verdict": "BLESS",
+      "expert": "e_gpt",
+      "hash": "sha256:408bd494b2ce4d60ad24f52cf7ce6f760ce359a2151636ff54993267e566eeda"
+    },
+    {
+      "kind": "plan",
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "expert": "r_glm",
+      "findings": 3
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "expert": "e_opus",
+      "findings": 8
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "expert": "e_opus",
+      "findings": 7
+    },
+    {
+      "kind": "plan",
+      "verdict": "REJECTED",
+      "expert": "e_opus",
+      "findings": 6
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "expert": "e_opus",
+      "findings": 5
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "expert": "e_opus",
+      "findings": 6
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "expert": "e_opus",
+      "findings": 1
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS",
+      "expert": "e_opus",
+      "hash": "sha256:740f1c7bd127f9f9497433c0b2753d8af0002277ff812efac5ba7fb994e00fb4"
+    }
+  ],
+  "notes": [
+    "Spec delta was amended after the spec BLESS when the plan gate found that a nested Handled marker set in a failing try body cannot reach the catch chain (the failed outcome carries no exchange). The corrected requirement and its three scenarios are covered by the plan BLESS above.",
+    "Plan gate round 6 found one stale design sentence; the fix was applied and the gate stated the plan becomes BLESS with that edit. Verdict recorded as BLESS."
+  ],
+  "post_bless_amendments": [
+    {
+      "date": "2026-11-01",
+      "reason": "ADR-0025 provenance wording: cases (a)/(b) are pre-existing canonical scenarios; rc-ud3rl adds only the (c)/(d) scenarios. Found by r_glm task-4 review and fixed in commit 33124f3d9.",
+      "artifacts": [
+        "docs/adr/0025-outcome-aware-structural-eips.md"
+      ]
+    },
+    {
+      "date": "2026-11-01",
+      "reason": "Proposal risk budget said no edit under crates/ outside tests/, contradicting the planned test-only edit in crates/camel-processor/src/do_try_segment.rs. Reworded to 'production-code edit'; fixed in commit b2f44f111.",
+      "artifacts": [
+        "proposal.md"
+      ]
+    }
+  ]
+}

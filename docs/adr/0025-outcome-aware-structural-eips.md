@@ -77,7 +77,7 @@ The two rejected options:
 
 ## Amendment: CamelExceptionHandled canonical rule (2026-11-01)
 
-The `CamelExceptionHandled` exchange property has one canonical rule, and it applies to both doTry and the route-level handler. bd rc-ho9j1 owns the decision. The existing do-try spec scenarios cover the `Handled` and `Continued` cases; rc-ud3rl defers the additional scenarios.
+The `CamelExceptionHandled` exchange property has one canonical rule, and it applies to both doTry and the route-level handler. bd rc-ho9j1 owns the decision. The do-try spec scenarios cover the four cases: (a) a `Handled` catch sets the marker; (b) a `Continued` catch does not; (c) a marker set by a nested `Handled` doTry inside an outer `Continued` catch body survives that outer catch's error clearing, while a marker set in a try body that later fails is discarded with the pre-try snapshot; (d) steps after the block cannot rely on `CamelExceptionCaught`. bd rc-ud3rl added the three scenarios for (c) and (d).
 
 1. Control flow keys off `PipelineOutcome` only.
 2. `CamelExceptionHandled` is Camel-compatibility only; no core logic reads it.

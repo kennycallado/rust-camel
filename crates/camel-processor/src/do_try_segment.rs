@@ -286,7 +286,7 @@ mod tests {
     use crate::do_try::CatchMatcher;
     use crate::test_log_capture::{capture_debugs_with_span_records, captured_field, record_field};
     use camel_api::Value;
-    use camel_api::exchange::PROPERTY_EXCEPTION_MESSAGE;
+    use camel_api::exchange::{PROPERTY_EXCEPTION_CAUGHT, PROPERTY_EXCEPTION_MESSAGE};
     use camel_api::pipeline_outcome::PipelineOutcome;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -1547,6 +1547,141 @@ mod tests {
                 );
             }
             other => panic!("expected ExpressionFailed with caller cause, got {other:?}"),
+        }
+    }
+
+    // ── Handled-marker / caught-property lifetime tests ──
+
+    struct MarkThenFail;
+
+    impl OutcomePipeline for MarkThenFail {
+        fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+            Box::new(MarkThenFail)
+        }
+        fn run<'a>(
+            &'a mut self,
+            mut exchange: Exchange,
+        ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+            Box::pin(async move {
+                exchange.set_property(PROPERTY_EXCEPTION_HANDLED, Value::Bool(true));
+                PipelineOutcome::Failed(CamelError::ProcessorError("try".into()))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_handled_marker_survives_outer_continued() {
+        let inner = DoTrySegment {
+            try_body: seg_fail(CamelError::Io("inner".into())),
+            catches: vec![catch_variant(&["Io"], seg_complete())],
+            finally: None,
+        };
+        let mut outer = DoTrySegment {
+            try_body: seg_fail(CamelError::ProcessorError("outer".into())),
+            catches: vec![catch_variant_with(
+                &["ProcessorError"],
+                camel_api::OutcomeSegment::new(Box::new(inner)),
+                ExceptionDisposition::Continued,
+            )],
+            finally: None,
+        };
+
+        let result = outer.run(Exchange::default()).await;
+        match result {
+            PipelineOutcome::Completed(ex) => {
+                assert!(
+                    !ex.has_error(),
+                    "continued catch must leave a clean exchange"
+                );
+                assert_eq!(
+                    ex.properties.get(PROPERTY_EXCEPTION_HANDLED),
+                    Some(&Value::Bool(true)),
+                    "inner Handled marker must survive the outer Continued exit"
+                );
+                assert!(
+                    !ex.properties.contains_key(PROPERTY_EXCEPTION_CAUGHT),
+                    "continued exit must clear CamelExceptionCaught"
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn failing_try_body_marker_does_not_reach_catch_chain() {
+        let mut outer = DoTrySegment {
+            try_body: camel_api::OutcomeSegment::new(Box::new(MarkThenFail)),
+            catches: vec![catch_variant_with(
+                &["ProcessorError"],
+                seg_complete(),
+                ExceptionDisposition::Continued,
+            )],
+            finally: None,
+        };
+
+        let result = outer.run(Exchange::default()).await;
+        match result {
+            PipelineOutcome::Completed(ex) => {
+                assert!(
+                    !ex.has_error(),
+                    "continued catch must leave a clean exchange"
+                );
+                assert!(
+                    !ex.properties.contains_key(PROPERTY_EXCEPTION_HANDLED),
+                    "a marker set by a failing try body must not reach the catch chain"
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn caught_property_absent_after_handled_and_continued_exit() {
+        for disposition in [
+            ExceptionDisposition::Handled,
+            ExceptionDisposition::Continued,
+        ] {
+            let mut seg = DoTrySegment {
+                try_body: seg_fail(CamelError::ProcessorError("boom".into())),
+                catches: vec![catch_variant_with(
+                    &["ProcessorError"],
+                    seg_check_then_complete(|ex| {
+                        assert!(
+                            ex.properties.contains_key(PROPERTY_EXCEPTION_CAUGHT),
+                            "catch body must see CamelExceptionCaught"
+                        );
+                    }),
+                    disposition,
+                )],
+                finally: None,
+            };
+
+            let result = seg.run(Exchange::default()).await;
+            match result {
+                PipelineOutcome::Completed(ex) => {
+                    assert!(
+                        !ex.has_error(),
+                        "{disposition:?} must clear the exchange error"
+                    );
+                    assert!(
+                        !ex.properties.contains_key(PROPERTY_EXCEPTION_CAUGHT),
+                        "{disposition:?} exit must clear CamelExceptionCaught"
+                    );
+                    if disposition == ExceptionDisposition::Handled {
+                        assert_eq!(
+                            ex.properties.get(PROPERTY_EXCEPTION_HANDLED),
+                            Some(&Value::Bool(true)),
+                            "Handled exit must keep the handled marker"
+                        );
+                    } else {
+                        assert!(
+                            !ex.properties.contains_key(PROPERTY_EXCEPTION_HANDLED),
+                            "Continued exit must not leave the handled marker"
+                        );
+                    }
+                }
+                other => panic!("expected Completed, got {other:?}"),
+            }
         }
     }
 }

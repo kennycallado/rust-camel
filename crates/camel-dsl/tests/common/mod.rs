@@ -6,7 +6,8 @@
 
 //! Shared test rig for the camel-dsl REST e2e binaries
 //! (`rest_negotiation_e2e`, `rest_raw_e2e`,
-//! `rest_stream_contract_e2e`).
+//! `rest_stream_contract_e2e`, `rest_xml_http_e2e`,
+//! `rest_marshal_error_http_e2e`).
 //!
 //! One home for the HTTP-boundary rig that previously lived as three
 //! verbatim per-file copies (pattern precedent:
@@ -26,22 +27,28 @@
 //!   declarative header step into the exact Tower service camel-core
 //!   wires, and [`counting_stream_body`] builds a poll-counting
 //!   `Body::Stream` for never-touched-the-stream proofs.
+//! - Step-drive family: [`compiled_rest_steps`] pins the six-step REST
+//!   layout, [`compile_step_for_drive`] turns one compiled step into
+//!   the Tower service the runtime wires, [`drive_steps`] runs the
+//!   whole pipeline with an optional injection point, and
+//!   [`serve_pipeline`] is the envelope runner for the live HTTP rig.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use camel_api::{Body, CamelError, IdentityProcessor, StreamBody, StreamMetadata};
+use camel_api::{Body, CamelError, Exchange, IdentityProcessor, StreamBody, StreamMetadata};
 use camel_component_api::{Consumer, ConsumerContext, ExchangeEnvelope, NoopRuntimeObservability};
 use camel_component_http::{HttpConsumer, HttpServerConfig};
 use camel_core::route::BuilderStep;
-use camel_dsl::ValueSourceDef;
-use camel_processor::{SetHeader, SetHeaderIfAbsent};
+use camel_dsl::{ValueSourceDef, parse_yaml};
+use camel_processor::{SetBody, SetHeader, SetHeaderIfAbsent};
 use futures::stream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
 
 /// Serializes server tests inside one test binary: the process-global
 /// HTTP `ServerRegistry` is shared by every test, paths are not a
@@ -290,6 +297,126 @@ pub fn compile_header_step(step: &BuilderStep) -> camel_api::BoxProcessor {
             other => panic!("expected literal set_header_if_absent value, got {other:?}"),
         },
         other => panic!("expected declarative header step, got: {other:?}"),
+    }
+}
+
+/// Mutator applied to the exchange immediately before the injected step
+/// index. The step-drive rig runs it after the steps ahead of that index
+/// and before the step at the index itself.
+pub type Mutator<'a> = &'a dyn Fn(Exchange) -> Exchange;
+
+/// Fetch the compiled steps of a REST operation's lowered route and pin
+/// the six-step layout every REST e2e rig assumes:
+/// `[ContentNegotiation, Unmarshal, user, <marshal_label>, SetHeader,
+/// SetHeaderIfAbsent]`.
+pub fn compiled_rest_steps(yaml: &str, op_id: &str, marshal_label: &str) -> Vec<BuilderStep> {
+    let routes = parse_yaml(yaml).expect("REST YAML must parse + compile");
+    let route = routes
+        .iter()
+        .find(|r| r.route_id() == op_id)
+        .unwrap_or_else(|| panic!("operation '{op_id}' must lower to exactly one route"));
+    let steps = route.steps().to_vec();
+    assert_eq!(
+        steps.len(),
+        6,
+        "POST must compile to exactly [ContentNegotiation, Unmarshal, user, {marshal_label}, SetHeader, SetHeaderIfAbsent], got: {steps:?}"
+    );
+    assert!(
+        matches!(&steps[0], BuilderStep::Processor(_)),
+        "step 0 must be the content-negotiation gate, got: {:?}",
+        steps[0]
+    );
+    assert!(
+        matches!(&steps[1], BuilderStep::Processor(_)),
+        "step 1 must be the compiled unmarshal, got: {:?}",
+        steps[1]
+    );
+    assert!(
+        matches!(&steps[2], BuilderStep::DeclarativeSetHeader { .. }),
+        "step 2 must be the user set_header, got: {:?}",
+        steps[2]
+    );
+    assert!(
+        matches!(&steps[3], BuilderStep::Processor(_)),
+        "step 3 must be the compiled {marshal_label}, got: {:?}",
+        steps[3]
+    );
+    steps
+}
+
+/// Compile one compiled route step into the Tower service the runtime
+/// wires: `Processor` steps unwrap to their pre-built service; header
+/// steps compile exactly like camel-core's step compiler (shared helper);
+/// a literal `set_body` compiles exactly like the core declarative
+/// set-body compiler. `To` and friends cannot be resolved without a
+/// `CamelContext` — this document has none.
+pub fn compile_step_for_drive(step: &BuilderStep) -> camel_api::BoxProcessor {
+    match step {
+        BuilderStep::Processor(op) => op.0.clone(),
+        BuilderStep::DeclarativeSetHeader { .. }
+        | BuilderStep::DeclarativeSetHeaderIfAbsent { .. } => compile_header_step(step),
+        BuilderStep::DeclarativeSetBody { value } => match value {
+            ValueSourceDef::Literal(body_value) => {
+                let body_value = body_value.clone();
+                let source = Arc::new(move |_: &Exchange| body_value.clone())
+                    as Arc<dyn Fn(&Exchange) -> serde_json::Value + Send + Sync>;
+                camel_api::BoxProcessor::new(SetBody::new(IdentityProcessor, source))
+            }
+            other => panic!("expected literal set_body value, got {other:?}"),
+        },
+        other => panic!("step cannot be driven in this rig: {other:?}"),
+    }
+}
+
+/// Drive the compiled steps in declared order, propagating the first
+/// error. When `inject` is present, its mutator runs immediately before
+/// the step at the given index (after every earlier step).
+pub async fn drive_steps(
+    steps: &[BuilderStep],
+    mut ex: Exchange,
+    inject: Option<(usize, Mutator<'_>)>,
+) -> Result<Exchange, CamelError> {
+    for (index, step) in steps.iter().enumerate() {
+        if let Some((at, mutate)) = inject
+            && index == at
+        {
+            ex = mutate(ex);
+        }
+        ex = compile_step_for_drive(step).oneshot(ex).await?;
+    }
+    Ok(ex)
+}
+
+/// Stand-in for the downstream runtime: for each envelope, drive the
+/// compiled steps in order. On `Ok` the fulfilled exchange becomes the
+/// reply; on `Err` the typed error goes to the consumer's reply channel,
+/// whose `pipeline_error_to_reply` renders the HTTP status and body.
+pub async fn serve_pipeline(
+    mut rx: mpsc::Receiver<ExchangeEnvelope>,
+    steps: &[BuilderStep],
+    expected: usize,
+    inject: Option<(usize, Mutator<'_>)>,
+) {
+    for _ in 0..expected {
+        // Per-iteration deadline: a stalled pipeline must fail loudly
+        // instead of parking this helper; the channel-closed arm keeps
+        // the original early-EOF panic.
+        let mut envelope = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("envelope receive stalled beyond 10s in serve_pipeline")
+            .expect("envelope must reach the pipeline");
+        let outcome = drive_steps(steps, envelope.exchange, inject).await;
+        match outcome {
+            Ok(passed) => {
+                envelope.exchange = passed;
+                reply_ok(envelope);
+            }
+            Err(e) => {
+                if let Some(reply_tx) = envelope.reply_tx.take() {
+                    let _ = reply_tx.send(Err(e));
+                }
+            }
+        }
     }
 }
 

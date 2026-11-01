@@ -30,20 +30,13 @@
 
 mod common;
 
-use std::time::Duration;
-
 use bytes::Bytes;
-use camel_api::{Body, CamelError, Exchange};
-use camel_component_api::ExchangeEnvelope;
+use camel_api::{Body, Exchange};
 use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
-use camel_core::route::BuilderStep;
-use camel_dsl::parse_yaml;
 use serde_json::json;
-use tokio::sync::mpsc;
-use tower::ServiceExt;
 
 use common::{
-    SERVER_MUTEX, ServerHandle, compile_header_step, http_roundtrip, reply_ok, simple_request,
+    SERVER_MUTEX, ServerHandle, compiled_rest_steps, http_roundtrip, serve_pipeline, simple_request,
 };
 
 const XML_MEDIA: &str = "application/xml";
@@ -74,117 +67,11 @@ rest:
               value: "1"
 "#;
 
-/// Fetch the compiled steps of the operation's lowered route and pin the
-/// layout the marshal injection index assumes.
-fn compiled_steps(yaml: &str, op_id: &str) -> Vec<BuilderStep> {
-    let routes = parse_yaml(yaml).expect("xml REST YAML must parse + compile");
-    let route = routes
-        .iter()
-        .find(|r| r.route_id() == op_id)
-        .unwrap_or_else(|| panic!("operation '{op_id}' must lower to exactly one route"));
-    let steps = route.steps().to_vec();
-    assert_eq!(
-        steps.len(),
-        6,
-        "xml POST must compile to exactly [ContentNegotiation, Unmarshal, user, Marshal, SetHeader, SetHeaderIfAbsent], got: {steps:?}"
-    );
-    assert!(
-        matches!(&steps[0], BuilderStep::Processor(_)),
-        "step 0 must be the content-negotiation gate, got: {:?}",
-        steps[0]
-    );
-    assert!(
-        matches!(&steps[1], BuilderStep::Processor(_)),
-        "step 1 must be the compiled unmarshal, got: {:?}",
-        steps[1]
-    );
-    assert!(
-        matches!(&steps[2], BuilderStep::DeclarativeSetHeader { .. }),
-        "step 2 must be the user set_header, got: {:?}",
-        steps[2]
-    );
-    assert!(
-        matches!(&steps[3], BuilderStep::Processor(_)),
-        "step 3 must be the compiled marshal, got: {:?}",
-        steps[3]
-    );
-    steps
-}
-
-/// Compile one compiled route step into the Tower service the runtime
-/// wires: `Processor` steps unwrap to their pre-built service; header
-/// steps compile exactly like camel-core's step compiler (shared
-/// helper). `To` and friends cannot be resolved without a
-/// `CamelContext` — this document has none.
-fn compile_step_for_drive(step: &BuilderStep) -> camel_api::BoxProcessor {
-    match step {
-        BuilderStep::Processor(op) => op.0.clone(),
-        BuilderStep::DeclarativeSetHeader { .. }
-        | BuilderStep::DeclarativeSetHeaderIfAbsent { .. } => compile_header_step(step),
-        other => panic!("step cannot be driven in this rig: {other:?}"),
-    }
-}
-
-/// Mutator applied to the exchange immediately before the marshal step.
-type Mutator<'a> = &'a dyn Fn(Exchange) -> Exchange;
-
-/// Drive the compiled steps in declared order, propagating the first
-/// error. The optional mutator runs immediately before the marshal step
-/// (after the user steps), the same injection point as Task 1.5.
-async fn drive_steps(
-    steps: &[BuilderStep],
-    mut ex: Exchange,
-    mutator: Option<Mutator<'_>>,
-) -> Result<Exchange, CamelError> {
-    for (index, step) in steps.iter().enumerate() {
-        if index == MARSHAL_STEP_INDEX
-            && let Some(mutate) = mutator
-        {
-            ex = mutate(ex);
-        }
-        ex = compile_step_for_drive(step).oneshot(ex).await?;
-    }
-    Ok(ex)
-}
-
 /// Server rig shared with the sibling REST e2e binaries lives in
 /// `tests/common`; this battery boots the XML POST consumer with fixed
 /// 1 MiB body caps under its own diagnostic label.
 async fn spawn_xml_server(path: &str, method: &str) -> ServerHandle {
     common::spawn_test_server("rest-xml-http-e2e", path, method, 1024 * 1024, 1024 * 1024).await
-}
-
-/// Stand-in for the downstream runtime: for each envelope, drive the
-/// compiled steps in order. On `Ok` the fulfilled exchange becomes the
-/// reply; on `Err` the typed error goes to the consumer's reply channel,
-/// whose `pipeline_error_to_reply` renders the HTTP status and JSON body.
-async fn serve_pipeline(
-    mut rx: mpsc::Receiver<ExchangeEnvelope>,
-    steps: &[BuilderStep],
-    expected: usize,
-    mutator: Option<Mutator<'_>>,
-) {
-    for _ in 0..expected {
-        // Per-iteration deadline: a stalled pipeline must fail loudly
-        // instead of parking this helper; the channel-closed arm keeps
-        // the original early-EOF panic.
-        let mut envelope = tokio::time::timeout(Duration::from_secs(10), rx.recv())
-            .await
-            .expect("envelope receive stalled beyond 10s in serve_pipeline")
-            .expect("envelope must reach the pipeline");
-        let outcome = drive_steps(steps, envelope.exchange, mutator).await;
-        match outcome {
-            Ok(passed) => {
-                envelope.exchange = passed;
-                reply_ok(envelope);
-            }
-            Err(e) => {
-                if let Some(reply_tx) = envelope.reply_tx.take() {
-                    let _ = reply_tx.send(Err(e));
-                }
-            }
-        }
-    }
 }
 
 #[tokio::test]
@@ -196,7 +83,7 @@ async fn e2e_malformed_xml_returns_400() {
     )
     .await;
     let ServerHandle { port, rx, token } = spawn_xml_server("/xml/post", "POST").await;
-    let steps = compiled_steps(XML_HTTP_YAML, "xmlHttpPost");
+    let steps = compiled_rest_steps(XML_HTTP_YAML, "xmlHttpPost", "Marshal");
 
     let req = simple_request(
         "POST",
@@ -238,7 +125,7 @@ async fn e2e_valid_xml_returns_201_xml() {
     )
     .await;
     let ServerHandle { port, rx, token } = spawn_xml_server("/xml/post", "POST").await;
-    let steps = compiled_steps(XML_HTTP_YAML, "xmlHttpPost");
+    let steps = compiled_rest_steps(XML_HTTP_YAML, "xmlHttpPost", "Marshal");
 
     // Pin the exact JSON projection handed to marshal (after the user
     // step), independent of the unmarshal's leaf-type choices.
@@ -255,7 +142,7 @@ async fn e2e_valid_xml_returns_201_xml() {
     );
     let (resp, ()) = tokio::join!(
         http_roundtrip(port, req),
-        serve_pipeline(rx, &steps, 1, Some(&mutator)),
+        serve_pipeline(rx, &steps, 1, Some((MARSHAL_STEP_INDEX, &mutator))),
     );
 
     assert_eq!(

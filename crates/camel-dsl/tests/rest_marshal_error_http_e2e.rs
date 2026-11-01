@@ -24,24 +24,18 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::Bytes;
 use camel_api::{
-    Body, BoxProcessor, CamelError, Exchange, IdentityProcessor, OpaqueProcessor, ProcessorFn,
-    StreamBody, StreamMetadata,
+    Body, BoxProcessor, Exchange, OpaqueProcessor, ProcessorFn, StreamBody, StreamMetadata,
 };
-use camel_component_api::ExchangeEnvelope;
 use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
 use camel_core::route::BuilderStep;
-use camel_dsl::{ValueSourceDef, parse_yaml};
-use camel_processor::SetBody;
+use camel_dsl::parse_yaml;
 use serde_json::json;
-use tokio::sync::mpsc;
-use tower::ServiceExt;
 
 use common::{
-    SERVER_MUTEX, ServerHandle, compile_header_step, http_roundtrip, reply_ok, simple_request,
+    SERVER_MUTEX, ServerHandle, compiled_rest_steps, http_roundtrip, serve_pipeline, simple_request,
 };
 
 const JSON_MEDIA: &str = "application/json";
@@ -148,43 +142,6 @@ rest:
           - marshal: xml
 "#;
 
-/// Fetch the compiled steps of the operation's lowered route and pin the
-/// six-step layout the replacement index assumes.
-fn compiled_steps(yaml: &str, op_id: &str) -> Vec<BuilderStep> {
-    let routes = parse_yaml(yaml).expect("REST YAML must parse + compile");
-    let route = routes
-        .iter()
-        .find(|r| r.route_id() == op_id)
-        .unwrap_or_else(|| panic!("operation '{op_id}' must lower to exactly one route"));
-    let steps = route.steps().to_vec();
-    assert_eq!(
-        steps.len(),
-        6,
-        "POST must compile to exactly [ContentNegotiation, Unmarshal, user, ResponseMarshal, SetHeader, SetHeaderIfAbsent], got: {steps:?}"
-    );
-    assert!(
-        matches!(&steps[0], BuilderStep::Processor(_)),
-        "step 0 must be the content-negotiation gate, got: {:?}",
-        steps[0]
-    );
-    assert!(
-        matches!(&steps[1], BuilderStep::Processor(_)),
-        "step 1 must be the compiled unmarshal, got: {:?}",
-        steps[1]
-    );
-    assert!(
-        matches!(&steps[2], BuilderStep::DeclarativeSetHeader { .. }),
-        "step 2 must be the user set_header, got: {:?}",
-        steps[2]
-    );
-    assert!(
-        matches!(&steps[3], BuilderStep::Processor(_)),
-        "step 3 must be the compiled response marshal, got: {:?}",
-        steps[3]
-    );
-    steps
-}
-
 /// The authored-marshal route carries two user steps, so its layout is
 /// `[ContentNegotiation, Unmarshal, set_body, Marshal(authored),
 /// ResponseMarshal, SetHeader, SetHeaderIfAbsent]`.
@@ -231,69 +188,6 @@ fn replace_user_step(
     )));
 }
 
-/// Compile one compiled route step into the Tower service the runtime
-/// wires: `Processor` steps unwrap to their pre-built service; header
-/// steps compile exactly like camel-core's step compiler (shared helper);
-/// a literal `set_body` compiles exactly like the core declarative
-/// set-body compiler. `To` and friends cannot be resolved without a
-/// `CamelContext` — this document has none.
-fn compile_step_for_drive(step: &BuilderStep) -> camel_api::BoxProcessor {
-    match step {
-        BuilderStep::Processor(op) => op.0.clone(),
-        BuilderStep::DeclarativeSetHeader { .. }
-        | BuilderStep::DeclarativeSetHeaderIfAbsent { .. } => compile_header_step(step),
-        BuilderStep::DeclarativeSetBody { value } => match value {
-            ValueSourceDef::Literal(body_value) => {
-                let body_value = body_value.clone();
-                let source = Arc::new(move |_: &Exchange| body_value.clone())
-                    as Arc<dyn Fn(&Exchange) -> serde_json::Value + Send + Sync>;
-                camel_api::BoxProcessor::new(SetBody::new(IdentityProcessor, source))
-            }
-            other => panic!("expected literal set_body value, got {other:?}"),
-        },
-        other => panic!("step cannot be driven in this rig: {other:?}"),
-    }
-}
-
-/// Drive the compiled steps in declared order, propagating the first
-/// error.
-async fn drive_steps(steps: &[BuilderStep], mut ex: Exchange) -> Result<Exchange, CamelError> {
-    for step in steps {
-        ex = compile_step_for_drive(step).oneshot(ex).await?;
-    }
-    Ok(ex)
-}
-
-/// Stand-in for the downstream runtime: for each envelope, drive the
-/// compiled steps in order. On `Ok` the fulfilled exchange becomes the
-/// reply; on `Err` the typed error goes to the consumer's reply channel,
-/// whose `pipeline_error_to_reply` renders the HTTP status and body.
-async fn serve_pipeline(
-    mut rx: mpsc::Receiver<ExchangeEnvelope>,
-    steps: &[BuilderStep],
-    expected: usize,
-) {
-    for _ in 0..expected {
-        // Per-iteration deadline: a stalled pipeline must fail loudly
-        // instead of parking this helper.
-        let mut envelope = tokio::time::timeout(Duration::from_secs(10), rx.recv())
-            .await
-            .expect("envelope receive stalled beyond 10s in serve_pipeline")
-            .expect("envelope must reach the pipeline");
-        match drive_steps(steps, envelope.exchange).await {
-            Ok(passed) => {
-                envelope.exchange = passed;
-                reply_ok(envelope);
-            }
-            Err(e) => {
-                if let Some(reply_tx) = envelope.reply_tx.take() {
-                    let _ = reply_tx.send(Err(e));
-                }
-            }
-        }
-    }
-}
-
 /// Server rig shared with the sibling REST e2e binaries lives in
 /// `tests/common`; this battery boots each POST consumer with fixed
 /// 1 MiB body caps under its own diagnostic label.
@@ -328,7 +222,7 @@ async fn e2e_json_response_marshal_failure_returns_500() {
     )
     .await;
     let ServerHandle { port, rx, token } = spawn_server("/json-marshal").await;
-    let mut steps = compiled_steps(JSON_MARSHAL_YAML, "jsonMarshal");
+    let mut steps = compiled_rest_steps(JSON_MARSHAL_YAML, "jsonMarshal", "ResponseMarshal");
     replace_user_step(&mut steps, empty_stream_body);
 
     let req = simple_request(
@@ -337,7 +231,10 @@ async fn e2e_json_response_marshal_failure_returns_500() {
         &[("Content-Type", JSON_MEDIA)],
         br#"{"a":1}"#,
     );
-    let (resp, ()) = tokio::join!(http_roundtrip(port, req), serve_pipeline(rx, &steps, 1),);
+    let (resp, ()) = tokio::join!(
+        http_roundtrip(port, req),
+        serve_pipeline(rx, &steps, 1, None),
+    );
 
     assert_eq!(
         resp.status, 500,
@@ -360,7 +257,7 @@ async fn e2e_form_response_marshal_failure_returns_500() {
     )
     .await;
     let ServerHandle { port, rx, token } = spawn_server("/form-marshal").await;
-    let mut steps = compiled_steps(FORM_MARSHAL_YAML, "formMarshal");
+    let mut steps = compiled_rest_steps(FORM_MARSHAL_YAML, "formMarshal", "ResponseMarshal");
     replace_user_step(&mut steps, || Body::Json(json!([1, 2])));
 
     let req = simple_request(
@@ -369,7 +266,10 @@ async fn e2e_form_response_marshal_failure_returns_500() {
         &[("Content-Type", FORM_MEDIA)],
         b"a=1",
     );
-    let (resp, ()) = tokio::join!(http_roundtrip(port, req), serve_pipeline(rx, &steps, 1),);
+    let (resp, ()) = tokio::join!(
+        http_roundtrip(port, req),
+        serve_pipeline(rx, &steps, 1, None),
+    );
 
     assert_eq!(
         resp.status, 500,
@@ -387,7 +287,7 @@ async fn e2e_xml_response_marshal_failure_returns_500() {
     )
     .await;
     let ServerHandle { port, rx, token } = spawn_server("/xml-marshal").await;
-    let mut steps = compiled_steps(XML_MARSHAL_YAML, "xmlMarshal");
+    let mut steps = compiled_rest_steps(XML_MARSHAL_YAML, "xmlMarshal", "ResponseMarshal");
     replace_user_step(&mut steps, || {
         Body::Bytes(Bytes::from_static(&[0xFF, 0xFE]))
     });
@@ -398,7 +298,10 @@ async fn e2e_xml_response_marshal_failure_returns_500() {
         &[("Content-Type", XML_MEDIA)],
         b"<root/>",
     );
-    let (resp, ()) = tokio::join!(http_roundtrip(port, req), serve_pipeline(rx, &steps, 1),);
+    let (resp, ()) = tokio::join!(
+        http_roundtrip(port, req),
+        serve_pipeline(rx, &steps, 1, None),
+    );
 
     assert_eq!(
         resp.status, 500,
@@ -416,7 +319,7 @@ async fn e2e_xml_user_step_body_xml_returns_declared_media() {
     )
     .await;
     let ServerHandle { port, rx, token } = spawn_server("/xml-marshal").await;
-    let mut steps = compiled_steps(XML_MARSHAL_YAML, "xmlMarshal");
+    let mut steps = compiled_rest_steps(XML_MARSHAL_YAML, "xmlMarshal", "ResponseMarshal");
     replace_user_step(&mut steps, || {
         Body::Xml("<user><name>kenny</name></user>".to_string())
     });
@@ -427,7 +330,10 @@ async fn e2e_xml_user_step_body_xml_returns_declared_media() {
         &[("Content-Type", XML_MEDIA)],
         b"<user><name>kenny</name></user>",
     );
-    let (resp, ()) = tokio::join!(http_roundtrip(port, req), serve_pipeline(rx, &steps, 1),);
+    let (resp, ()) = tokio::join!(
+        http_roundtrip(port, req),
+        serve_pipeline(rx, &steps, 1, None),
+    );
 
     assert_eq!(
         resp.status, 201,
@@ -455,7 +361,7 @@ async fn e2e_xml_user_step_body_xml_uses_vnd_media() {
     )
     .await;
     let ServerHandle { port, rx, token } = spawn_server("/xml-vnd-marshal").await;
-    let mut steps = compiled_steps(XML_VND_MARSHAL_YAML, "xmlVndMarshal");
+    let mut steps = compiled_rest_steps(XML_VND_MARSHAL_YAML, "xmlVndMarshal", "ResponseMarshal");
     replace_user_step(&mut steps, || {
         Body::Xml("<user><name>kenny</name></user>".to_string())
     });
@@ -466,7 +372,10 @@ async fn e2e_xml_user_step_body_xml_uses_vnd_media() {
         &[("Content-Type", XML_MEDIA)],
         b"<user><name>kenny</name></user>",
     );
-    let (resp, ()) = tokio::join!(http_roundtrip(port, req), serve_pipeline(rx, &steps, 1),);
+    let (resp, ()) = tokio::join!(
+        http_roundtrip(port, req),
+        serve_pipeline(rx, &steps, 1, None),
+    );
 
     assert_eq!(
         resp.status, 201,
@@ -489,7 +398,7 @@ async fn e2e_json_malformed_request_still_returns_400() {
     )
     .await;
     let ServerHandle { port, rx, token } = spawn_server("/json-marshal").await;
-    let steps = compiled_steps(JSON_MARSHAL_YAML, "jsonMarshal");
+    let steps = compiled_rest_steps(JSON_MARSHAL_YAML, "jsonMarshal", "ResponseMarshal");
 
     let req = simple_request(
         "POST",
@@ -497,7 +406,10 @@ async fn e2e_json_malformed_request_still_returns_400() {
         &[("Content-Type", JSON_MEDIA)],
         br#"{"a="#,
     );
-    let (resp, ()) = tokio::join!(http_roundtrip(port, req), serve_pipeline(rx, &steps, 1),);
+    let (resp, ()) = tokio::join!(
+        http_roundtrip(port, req),
+        serve_pipeline(rx, &steps, 1, None),
+    );
 
     assert_eq!(
         resp.status, 400,
@@ -529,7 +441,10 @@ async fn e2e_authored_marshal_in_rest_user_steps_stays_400() {
         &[("Content-Type", XML_MEDIA)],
         b"<request/>",
     );
-    let (resp, ()) = tokio::join!(http_roundtrip(port, req), serve_pipeline(rx, &steps, 1),);
+    let (resp, ()) = tokio::join!(
+        http_roundtrip(port, req),
+        serve_pipeline(rx, &steps, 1, None),
+    );
 
     assert_eq!(
         resp.status, 400,
