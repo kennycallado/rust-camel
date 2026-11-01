@@ -263,7 +263,7 @@ impl MailStoreConnector for AsyncImapConnector {
 impl AsyncImapConnector {
     async fn connect_inner(&self) -> Result<Box<dyn MailStore>, MailError> {
         debug!(
-            host = %self.server.host,
+            host = %camel_api::redact::redact_host(&self.server.host),
             port = self.server.port,
             tls = ?self.tls,
             "IMAP connecting"
