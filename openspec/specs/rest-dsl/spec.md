@@ -1,20 +1,20 @@
 # rest-dsl Specification
 
 ## Purpose
-REST operation binding in the DSL. Operations declare `json` or `raw` binding,
-JSON binding injects media negotiation, unmarshal, and marshal steps, raw
-binding passes streams through untouched and rejects schemas, and OpenAPI and
-authoring paths stay in parity.
-
+REST operation binding in the DSL. Operations declare `json`, `raw`, or `form`
+binding; JSON binding injects media negotiation, unmarshal, and marshal steps,
+raw binding passes streams through untouched and rejects schemas, form binding
+parses and serialises URL-encoded bodies through the form data format, and
+OpenAPI and authoring paths stay in parity.
 ## Requirements
 ### Requirement: REST operation binding mode declaration
 
 The REST DSL SHALL support an optional `binding` field on each REST operation
-with the closed value set `json` and `raw`. A missing `binding` SHALL mean
-`json`. An unknown `binding` value SHALL fail document deserialization with
-an unknown-variant error. The effective binding mode SHALL be determined
-only by this field; it SHALL NOT be inferred from `consumes`, `produces`, or
-any media type.
+with the closed value set `json`, `raw`, and `form`. A missing `binding`
+SHALL mean `json`. An unknown `binding` value SHALL fail document
+deserialization with an unknown-variant error. The effective binding mode
+SHALL be determined only by this field; it SHALL NOT be inferred from
+`consumes`, `produces`, or any media type.
 
 #### Scenario: omitted binding defaults to json
 
@@ -36,6 +36,15 @@ any media type.
 - **WHEN** the block lowers
 - **THEN** lowering fails with the json-mode media error and does NOT
   silently treat the operation as raw
+
+#### Scenario: form binding declared explicitly
+
+- **GIVEN** a REST operation with `binding: form`,
+  `consumes: application/x-www-form-urlencoded`, and
+  `produces: application/x-www-form-urlencoded`
+- **WHEN** the document deserializes and the block lowers
+- **THEN** lowering succeeds and the operation uses the form binding
+  pipeline
 
 ### Requirement: JSON binding mode media acceptance
 
@@ -233,8 +242,10 @@ validation requires binding `json`. A `response` declaring only
 OpenAPI generation SHALL key request body and response content by the
 declared `consumes` and `produces` strings. In binding `json`, schemas come
 from `request_schema`/`response.schema` with the existing weak-stub
-`type: object` fallback and warnings. In binding `raw`, request and response
-content SHALL use a binary string schema (`type: string`,
+`type: object` fallback and warnings. In binding `form`, request body and
+response content SHALL use authored schemas with the same weak-stub
+fallback and warnings exactly as binding `json`. In binding `raw`, request
+and response content SHALL use a binary string schema (`type: string`,
 `format: binary`), and the weak-stub warnings SHALL NOT be emitted. A raw
 operation carrying `request_schema` or `response.schema` SHALL produce a
 warning that route load rejects that combination. A 204 success response
@@ -280,6 +291,17 @@ SHALL take precedence over the raw-schema warning.
 - **WHEN** OpenAPI is generated
 - **THEN** the recorded warning is the 204-ignores-`response.schema`
   warning, and no raw-schema warning is additionally stacked
+
+#### Scenario: form binding uses authored schemas like json
+
+- **GIVEN** a REST POST operation with `binding: form`,
+  `consumes: application/x-www-form-urlencoded`,
+  `produces: application/x-www-form-urlencoded`, and a `request_schema`
+- **WHEN** OpenAPI is generated
+- **THEN** the request body content under
+  `application/x-www-form-urlencoded` carries the authored schema (not a
+  binary schema), matching binding `json` behavior including the
+  weak-stub fallback and warnings
 
 ### Requirement: REST binding authoring parity
 
@@ -659,4 +681,102 @@ scenarios SHALL remain green under this requirement.
   batteries
 - **WHEN** the full test suite runs with negotiation enforced
 - **THEN** every raw-binding and streaming scenario still passes
+
+### Requirement: Form binding mode media acceptance
+
+In binding `form`, lowering SHALL accept a `consumes` or `produces` value
+whose media base (after outer trimming and removal of `;`-separated
+parameters) is `application/x-www-form-urlencoded`, case-insensitive. Any
+`;`-separated parameter SHALL be at most one `charset` parameter whose value
+is `utf-8`, case-insensitive. A value with any other base, any other
+parameter, or a non-UTF-8 `charset` value SHALL fail route load with a
+`CamelError::RouteError` that names the operation, the offending field and
+value, and the expected media.
+
+#### Scenario: exact form media loads
+
+- **GIVEN** a REST operation in binding `form` with
+  `consumes: application/x-www-form-urlencoded` and
+  `produces: application/x-www-form-urlencoded`
+- **WHEN** the block lowers
+- **THEN** lowering succeeds
+
+#### Scenario: charset parameter accepted
+
+- **GIVEN** a REST operation in binding `form` with
+  `consumes: application/x-www-form-urlencoded; charset=utf-8`
+- **WHEN** the block lowers
+- **THEN** lowering succeeds
+
+#### Scenario: non-form media fails with a precise error
+
+- **GIVEN** a REST operation in binding `form` with
+  `consumes: application/json`
+- **WHEN** the block lowers
+- **THEN** lowering fails with a `RouteError` whose message contains the
+  operation label, the string `consumes`, the offending value, and the
+  expected form media type
+
+#### Scenario: non-UTF-8 charset fails
+
+- **GIVEN** a REST operation in binding `form` with
+  `produces: application/x-www-form-urlencoded; charset=iso-8859-1`
+- **WHEN** the block lowers
+- **THEN** lowering fails with a `RouteError` naming the operation and the
+  offending value
+
+#### Scenario: request charset parameter is gate-opaque and fails at unmarshal
+
+- **GIVEN** a lowered REST operation in binding `form` and a request whose
+  `Content-Type` is
+  `application/x-www-form-urlencoded; charset=iso-8859-1`
+- **WHEN** the request passes the media negotiation gate and is unmarshalled
+- **THEN** the gate accepts (parameters are opaque to it) and the
+  `form` unmarshal fails closed on non-UTF-8 percent-decoded bytes (e.g.
+  `%E9`)
+
+### Requirement: Form binding mode pipeline
+
+In binding `form`, lowering SHALL inject the same step sequence as binding
+`json` except that the data format is `form`: a leading media negotiation
+step carrying the declared `consumes` and `produces`; for body-bearing verbs
+(POST, PUT, PATCH) an `unmarshal: form` step carrying `request_schema` when
+present; user steps (`to` or `steps`); a `marshal: form` step; a `SetHeader`
+step setting `Content-Type` to the trimmed declared `produces`; and a final
+`SetHeaderIfAbsent` step setting the default success status for the verb
+unless `success_status` is declared. `request_schema` and `response.schema`
+SHALL be accepted in binding `form`: the form body becomes a JSON object
+before schema validation, so validation SHALL run on the JSON produced by
+the form unmarshal, ordered form-parse then schema-validate.
+
+#### Scenario: POST step sequence
+
+- **GIVEN** a REST POST operation in binding `form` with a `to` target
+- **WHEN** the block lowers
+- **THEN** the step sequence is exactly
+  `[ContentNegotiation(consumes, produces), Unmarshal(form),
+  To(target), Marshal(form), SetHeader(Content-Type: <produces>),
+  SetHeaderIfAbsent(<verb default status>)]`
+
+#### Scenario: request schema allowed and validated after form parse
+
+- **GIVEN** a REST POST operation in binding `form` with a `request_schema`
+- **WHEN** the block lowers and a request arrives
+- **THEN** lowering succeeds, the unmarshal step carries the schema, and
+  schema validation runs against the JSON object produced by the form
+  unmarshal
+
+#### Scenario: response schema allowed
+
+- **GIVEN** a REST operation in binding `form` with a `response` containing
+  a `schema`
+- **WHEN** the block lowers
+- **THEN** lowering succeeds
+
+#### Scenario: GET receives no unmarshal
+
+- **GIVEN** a REST GET operation in binding `form`
+- **WHEN** the block lowers
+- **THEN** the step sequence starts with the media negotiation step and
+  contains no unmarshal step
 
