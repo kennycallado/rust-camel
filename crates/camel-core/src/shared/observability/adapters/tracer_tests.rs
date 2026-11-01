@@ -766,6 +766,15 @@ impl RecordingMetrics {
             .unwrap_or_else(|e| e.into_inner())
             .push(format!("{method}:{key}"));
     }
+
+    /// `record_counter` calls as `language_eval_failures_total:k=v:...`.
+    fn counter_calls(&self) -> Vec<String> {
+        self.snapshot()
+            .into_iter()
+            .filter(|call| call.starts_with("record_counter:"))
+            .map(|call| call.trim_start_matches("record_counter:").to_string())
+            .collect()
+    }
 }
 
 impl MetricsCollector for RecordingMetrics {
@@ -790,6 +799,80 @@ impl MetricsCollector for RecordingMetrics {
         }
         self.push("record_histogram", &key);
     }
+    fn record_counter(&self, name: &str, value: f64, labels: &[(&str, &str)]) {
+        let mut key = String::from(name);
+        for (k, v) in labels {
+            key.push_str(&format!(":{k}={v}"));
+        }
+        self.push("record_counter", &key);
+        self.push("record_counter_value", &format!("{name}={value}"));
+    }
+}
+
+fn typed_expression_failure() -> CamelError {
+    CamelError::ExpressionFailed {
+        language: "rhai".into(),
+        route_id: "r1".into(),
+        step_id: "set_property#0".into(),
+        verb: "set_property".into(),
+        class: camel_api::ExpressionErrorClass::Arithmetic,
+        position: Some(camel_api::ErrorPosition { line: 3, column: 8 }),
+        conversion: None,
+        cause: None,
+    }
+}
+
+fn recording_metrics() -> Arc<RecordingMetrics> {
+    Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    })
+}
+
+#[test]
+fn record_language_eval_failure_counts_typed_labels() {
+    let recorder = recording_metrics();
+    record_language_eval_failure(recorder.as_ref(), "r1", &typed_expression_failure());
+
+    assert_eq!(
+        recorder.counter_calls(),
+        vec![
+            "language_eval_failures_total:language=rhai:route=r1:verb=set_property:class=arithmetic"
+                .to_string()
+        ],
+        "exactly one counter call with the typed labels"
+    );
+    assert!(
+        recorder
+            .snapshot()
+            .contains(&"record_counter_value:language_eval_failures_total=1".to_string()),
+        "counter value must be 1.0"
+    );
+}
+
+#[test]
+fn record_language_eval_failure_skips_foreign_route() {
+    let recorder = recording_metrics();
+    record_language_eval_failure(recorder.as_ref(), "outer", &typed_expression_failure());
+
+    assert!(
+        recorder.counter_calls().is_empty(),
+        "a foreign route failure must not be counted"
+    );
+}
+
+#[test]
+fn record_language_eval_failure_skips_non_expression_errors() {
+    let recorder = recording_metrics();
+    record_language_eval_failure(
+        recorder.as_ref(),
+        "r1",
+        &CamelError::ProcessorError("x".into()),
+    );
+
+    assert!(
+        recorder.counter_calls().is_empty(),
+        "non-expression errors must not be counted"
+    );
 }
 
 /// An open-breaker fast-fail observed through the tracer adapter counts as

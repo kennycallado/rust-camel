@@ -205,6 +205,53 @@ fn record_step_metrics(
     }
 }
 
+/// Emit the `language_eval_failures_total` counter for a top-level
+/// [`CamelError::ExpressionFailed`] owned by `current_route_id`.
+///
+/// Counting contract (language-value-boundary spec, "Evaluation failure
+/// metrics"):
+/// - A failure that a route error handler recovers after the step failed
+///   still counts — the evaluation failed.
+/// - Handler retries do not re-enter `run_steps`'s `Failed` arm, so one
+///   exhausted retry sequence counts once.
+/// - Failures raised by the handler itself (catch/onWhen predicate) and
+///   `ExpressionFailed` values wrapped inside another error's cause chain
+///   are out of scope: they never reach this helper.
+///
+/// All label values are config-derived: the language name, the route id, the
+/// DSL verb and the closed `ExpressionErrorClass` name. Exchange data, cause
+/// text, conversion detail and position are never labels.
+pub(crate) fn record_language_eval_failure(
+    metrics: &dyn MetricsCollector,
+    current_route_id: &str,
+    error: &CamelError,
+) {
+    let CamelError::ExpressionFailed {
+        language,
+        route_id,
+        verb,
+        class,
+        ..
+    } = error
+    else {
+        return;
+    };
+    if route_id != current_route_id {
+        return;
+    }
+    // allow-open-label rc-5r117 (language/route/verb: operator-authored route config, bounded by route definitions; class: closed ExpressionErrorClass set)
+    metrics.record_counter(
+        "language_eval_failures_total",
+        1.0,
+        &[
+            ("language", language.as_str()),
+            ("route", route_id.as_str()),
+            ("verb", verb.as_str()),
+            ("class", class.as_str()),
+        ],
+    );
+}
+
 impl Service<Exchange> for TracingProcessor {
     type Response = Exchange;
     type Error = CamelError;
@@ -312,6 +359,8 @@ impl Service<Exchange> for TracingProcessor {
             header_2 = tracing::field::Empty,
             error = tracing::field::Empty,
             error_type = tracing::field::Empty,
+            expression_class = tracing::field::Empty,
+            expression_position = tracing::field::Empty,
         );
 
         if self.detail_level >= DetailLevel::Medium {
@@ -397,6 +446,18 @@ impl Service<Exchange> for TracingProcessor {
                         tracing::Span::current().record("status", "error");
                         tracing::Span::current().record("error", e.to_string());
                         tracing::Span::current().record("error_type", error_class);
+                        if let CamelError::ExpressionFailed {
+                            class, position, ..
+                        } = &e
+                        {
+                            tracing::Span::current().record("expression_class", class.as_str());
+                            if let Some(position) = position {
+                                tracing::Span::current().record(
+                                    "expression_position",
+                                    format!("{}:{}", position.line, position.column),
+                                );
+                            }
+                        }
                         Err(e)
                     }
                 }
@@ -456,6 +517,16 @@ pub(crate) fn step_span_attributes(
     ]
 }
 
+/// Record an error on an OTel span: status, `exception` event, and — for
+/// [`CamelError::ExpressionFailed`] — the typed `camel.expression.class`
+/// and, when the language reports one, `camel.expression.position`
+/// (`line:column`, 1-based) attributes.
+///
+/// This helper is shared by process step spans, segment step spans,
+/// `finish_span_outcome`'s route root span and `trace_restart` split-item
+/// spans. The two expression attributes are accepted on all of them on
+/// purpose: they describe the failure carried by that span, and the spec
+/// does not restrict them to step spans.
 pub(crate) fn record_exception(span: &SpanRef<'_>, e: &CamelError) {
     let error_class = e.classify();
     span.set_status(Status::error(e.to_string()));
@@ -466,6 +537,18 @@ pub(crate) fn record_exception(span: &SpanRef<'_>, e: &CamelError) {
             KeyValue::new("exception.message", e.to_string()),
         ],
     );
+    if let CamelError::ExpressionFailed {
+        class, position, ..
+    } = e
+    {
+        span.set_attribute(KeyValue::new("camel.expression.class", class.as_str()));
+        if let Some(position) = position {
+            span.set_attribute(KeyValue::new(
+                "camel.expression.position",
+                format!("{}:{}", position.line, position.column),
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

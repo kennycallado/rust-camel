@@ -747,3 +747,37 @@ expects:
     let er = &result.endpoint_results[0];
     assert!(er.outcome.is_ok(), "expected Ok, got {:?}", er.outcome);
 }
+
+/// A failing language expression surfaces the typed evaluation error class,
+/// verb, step id, and language-reported position, without exchange data.
+#[tokio::test(flavor = "multi_thread")]
+async fn camel_test_reports_typed_filter_evaluation_failure() {
+    let dir = temp_dir("typed-eval-failure");
+    let yaml = r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - filter:
+          rhai: "nonexistent_fn()"
+          steps:
+            - to: "mock:out"
+inputs:
+  - to: "direct:start"
+    body: "SECRET-SENTINEL"
+expects:
+  mock:out:
+    count: 1
+"#;
+    let result = run(yaml, &dir).await;
+    let Some(text) = result.doc_error else {
+        panic!("expected a typed evaluation failure, got none");
+    };
+    assert!(text.contains("function-not-found"), "class missing: {text}");
+    assert!(text.contains("filter#0"), "step id missing: {text}");
+    assert!(text.contains("`filter`"), "verb missing: {text}");
+    assert!(text.contains("rhai"), "language missing: {text}");
+    assert!(text.contains("r1"), "route id missing: {text}");
+    assert!(text.contains(" at 1:"), "position missing: {text}");
+    assert!(!text.contains("SECRET-SENTINEL"), "body leaked: {text}");
+}

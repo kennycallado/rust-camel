@@ -4,6 +4,31 @@ rust-camel records route and exchange metrics through the
 `MetricsCollector` trait. `PrometheusMetrics` is the production
 implementation. You can supply your own.
 
+## Metric families
+
+The Prometheus exporter adds the `camel_` prefix to every collector name.
+The collector surface records the names without the prefix.
+
+| Metric | Type | Labels | Values | Disableable |
+|---|---|---|---|---|
+| `camel_language_eval_failures_total` | counter | `language`, `route`, `verb`, `class` | `language` is the expression language; `route` is the route id; `verb` is the DSL step verb; `class` is the typed `ExpressionErrorClass` name (`runtime`, `arithmetic`, `type-mismatch`, `function-not-found`, `limit`, `timeout`, `conversion`, `parse`). | No |
+| `camel_errors_total` | counter | `route`, `error_type` | `route` is the route id; `error_type` is the closed error class. | No |
+
+Label values come from operator-authored route configuration and from the
+typed error class. Exchange data is never a label value. The cause text,
+the conversion detail, the position, the body, the headers, and the
+properties are not label values.
+
+`camel_language_eval_failures_total` increments once per top-level
+evaluation failure that the route step loop surfaces. A failure that a
+route error handler recovers still counts, because the evaluation failed.
+Retries inside the handler do not increment the counter again. An
+`ExpressionFailed` nested inside another error's cause chain is not
+counted, and neither is one raised by the handler itself.
+
+The language counter is not gated by a metric-family lever. It matches the
+non-disableable error family.
+
 ## Custom metrics collector
 
 Implement `MetricsCollector` to receive route-level metrics. The

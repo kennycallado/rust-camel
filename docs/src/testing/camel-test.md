@@ -181,6 +181,13 @@ Historical note: an interim mitigation set `settle: 50ms` to shorten lean runs (
 
 The contract lives in the mock-testkit spec (`openspec/specs/mock-testkit/spec.md` in the repository — outside the rendered book), requirement "Settling before assertion".
 
+## Typed evaluation failures
+When a language expression fails and the failure propagates, `camel test` reports a document error on stderr and exits with code 2. The document-error line renders the typed `CamelError` display. It names the class, the language, the verb, the step id, the route id, and the position when the language reports one. A typical line starts with `expression failed:` and then names the class and the language, the verb, the step id, and the route id. When the language reports a position, the line ends with a suffix of the form `at <line>:<column>`.
+
+A failure that a route error handler handles does not become a document error. The handler clears `exchange.error` by contract, so the failure is observable only through metrics and spans. The assertion verdict and the exit code stay unchanged.
+
+Rendered output is redacted. It never contains exchange data: no body, header, property, or correlation key.
+
 ## CI output and filters
 `camel test` accepts five flags for CI use: `--junit`, `--filter-file`, `--filter-endpoint`, `--unit`, and `--integration`.
 

@@ -1061,3 +1061,322 @@ async fn records_step_duration_with_route_and_uri_labels() {
         "histogram must carry the route label and the declared to_uri"
     );
 }
+
+// ── Expression failure span attributes (language-failure-observability 1.2) ──
+
+use camel_api::{ErrorPosition, ExpressionErrorClass};
+use std::sync::OnceLock;
+
+fn expression_failed(
+    route_id: &str,
+    class: ExpressionErrorClass,
+    position: Option<ErrorPosition>,
+) -> CamelError {
+    CamelError::ExpressionFailed {
+        language: "rhai".into(),
+        route_id: route_id.into(),
+        step_id: "set_property#0".into(),
+        verb: "set_property".into(),
+        class,
+        position,
+        conversion: None,
+        cause: None,
+    }
+}
+
+/// Process double that fails with the supplied error.
+#[derive(Clone)]
+struct FailingProcessor {
+    error: CamelError,
+}
+
+impl Service<Exchange> for FailingProcessor {
+    type Response = Exchange;
+    type Error = CamelError;
+    type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _exchange: Exchange) -> Self::Future {
+        let error = self.error.clone();
+        Box::pin(async move { Err(error) })
+    }
+}
+
+fn failing_process_step(error: CamelError) -> CompiledStep {
+    CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
+        processor: BoxProcessor::new(FailingProcessor { error }),
+        body_contract: None,
+        lifecycle: None,
+        label: None,
+        to_uri: None,
+    }
+}
+
+/// Segment double that fails with the supplied error.
+#[derive(Clone)]
+struct ExpressionFailSegment {
+    error: CamelError,
+}
+
+impl OutcomePipeline for ExpressionFailSegment {
+    fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+        Box::new(self.clone())
+    }
+
+    fn run<'a>(
+        &'a mut self,
+        _exchange: Exchange,
+    ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+        let error = self.error.clone();
+        Box::pin(async move { PipelineOutcome::Failed(error) })
+    }
+}
+
+fn span_attr(span: &opentelemetry_sdk::trace::SpanData, key: &str) -> Option<String> {
+    span.attributes
+        .iter()
+        .find(|kv| kv.key.as_str() == key)
+        .map(|kv| kv.value.as_str().into_owned())
+}
+
+#[tokio::test]
+async fn process_step_span_carries_expression_class_and_position() {
+    let spans = test_spans().await;
+    let mut pipeline = compose_traced_pipeline(
+        vec![failing_process_step(expression_failed(
+            "rt",
+            ExpressionErrorClass::Arithmetic,
+            Some(ErrorPosition { line: 3, column: 8 }),
+        ))],
+        "rt",
+        true,
+        DetailLevel::Minimal,
+        None,
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
+    let result = pipeline
+        .ready()
+        .await
+        .expect("pipeline ready")
+        .call(Exchange::new(Message::default()))
+        .await;
+    assert!(result.is_err(), "failing step must propagate the error");
+
+    let all = finish(spans);
+    let step = all
+        .iter()
+        .find(|s| s.name == "rt:step-0")
+        .expect("step span exported");
+    assert_eq!(
+        span_attr(step, "camel.expression.class").as_deref(),
+        Some("arithmetic"),
+        "step span must carry the typed class attribute"
+    );
+    assert_eq!(
+        span_attr(step, "camel.expression.position").as_deref(),
+        Some("3:8"),
+        "step span must carry the line:column position attribute"
+    );
+}
+
+#[tokio::test]
+async fn process_step_span_omits_position_when_absent() {
+    let spans = test_spans().await;
+    let mut pipeline = compose_traced_pipeline(
+        vec![failing_process_step(expression_failed(
+            "rt",
+            ExpressionErrorClass::Arithmetic,
+            None,
+        ))],
+        "rt",
+        true,
+        DetailLevel::Minimal,
+        None,
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
+    let result = pipeline
+        .ready()
+        .await
+        .expect("pipeline ready")
+        .call(Exchange::new(Message::default()))
+        .await;
+    assert!(result.is_err(), "failing step must propagate the error");
+
+    let all = finish(spans);
+    let step = all
+        .iter()
+        .find(|s| s.name == "rt:step-0")
+        .expect("step span exported");
+    assert_eq!(
+        span_attr(step, "camel.expression.class").as_deref(),
+        Some("arithmetic"),
+        "class attribute is present even without a position"
+    );
+    assert_eq!(
+        span_attr(step, "camel.expression.position"),
+        None,
+        "no position attribute may be written when the language reports none"
+    );
+}
+
+#[tokio::test]
+async fn segment_step_span_carries_expression_attributes() {
+    let spans = test_spans().await;
+    let steps = vec![segment_step(OutcomeSegment::new(Box::new(
+        ExpressionFailSegment {
+            error: expression_failed(
+                "srt",
+                ExpressionErrorClass::TypeMismatch,
+                Some(ErrorPosition { line: 2, column: 4 }),
+            ),
+        },
+    )))];
+    let outcome = run_steps(
+        SharedSnapshot(Arc::from(steps)),
+        Exchange::new(Message::default()),
+        None,
+        true,
+        "srt",
+        &PipelineRuntimeCtx::compile_time(),
+    )
+    .await;
+    assert!(
+        matches!(outcome, PipelineOutcome::Failed(_)),
+        "segment failure must propagate"
+    );
+
+    let all = finish(spans);
+    let step = all
+        .iter()
+        .find(|s| s.name == "srt:step-0")
+        .expect("segment attempt span exported");
+    assert_eq!(
+        span_attr(step, "camel.expression.class").as_deref(),
+        Some("type-mismatch"),
+        "segment step span must carry the typed class attribute"
+    );
+    assert_eq!(
+        span_attr(step, "camel.expression.position").as_deref(),
+        Some("2:4"),
+        "segment step span must carry the line:column position attribute"
+    );
+}
+
+/// Captured `(span name, field values)` keyed by span id.
+type CapturedSpans = Arc<Mutex<HashMap<tracing::span::Id, (String, HashMap<String, String>)>>>;
+
+/// Records the fields of every `tracing` span, keyed by span id.
+struct StepFieldCapture {
+    spans: CapturedSpans,
+}
+
+impl<C> tracing_subscriber::Layer<C> for StepFieldCapture
+where
+    C: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, C>,
+    ) {
+        let mut fields = HashMap::new();
+        attrs.record(&mut StepFieldVisitor(&mut fields));
+        self.spans
+            .lock()
+            .expect("span fields lock")
+            .insert(id.clone(), (attrs.metadata().name().to_string(), fields));
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, C>,
+    ) {
+        if let Some((_, fields)) = self.spans.lock().expect("span fields lock").get_mut(id) {
+            values.record(&mut StepFieldVisitor(fields));
+        }
+    }
+}
+
+struct StepFieldVisitor<'a>(&'a mut HashMap<String, String>);
+
+impl tracing::field::Visit for StepFieldVisitor<'_> {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0
+            .insert(field.name().to_string(), format!("{value:?}"));
+    }
+}
+
+/// Install a bare registry as the process-global tracing default, once per
+/// test binary, so the `step` callsite interest is not poisoned to `never`
+/// by a sibling test that executes it without a subscriber.
+fn ensure_global_tracing_default() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    if INIT.set(()).is_ok() {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    }
+}
+
+#[tokio::test]
+async fn process_step_tracing_fields_carry_expression_class_and_position() {
+    use tracing_subscriber::prelude::*;
+
+    ensure_global_tracing_default();
+    let captured = Arc::new(Mutex::new(HashMap::new()));
+    let layer = StepFieldCapture {
+        spans: Arc::clone(&captured),
+    };
+    let _guard = tracing_subscriber::registry().with(layer).set_default();
+
+    let spans = test_spans().await;
+    let mut pipeline = compose_traced_pipeline(
+        vec![failing_process_step(expression_failed(
+            "rt",
+            ExpressionErrorClass::Arithmetic,
+            Some(ErrorPosition { line: 3, column: 8 }),
+        ))],
+        "rt",
+        true,
+        DetailLevel::Minimal,
+        None,
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
+    let result = pipeline
+        .ready()
+        .await
+        .expect("pipeline ready")
+        .call(Exchange::new(Message::default()))
+        .await;
+    assert!(result.is_err(), "failing step must propagate the error");
+    let _ = finish(spans);
+
+    let captured = captured.lock().expect("span fields lock");
+    let step_fields = captured
+        .values()
+        .find(|(name, _)| name == "step")
+        .map(|(_, fields)| fields)
+        .expect("step tracing span captured");
+    assert_eq!(
+        step_fields.get("expression_class").map(String::as_str),
+        Some("arithmetic"),
+        "tracing step span must expose the class field"
+    );
+    assert_eq!(
+        step_fields.get("expression_position").map(String::as_str),
+        Some("3:8"),
+        "tracing step span must expose the position field"
+    );
+}

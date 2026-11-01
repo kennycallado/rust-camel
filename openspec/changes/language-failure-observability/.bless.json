@@ -1,0 +1,43 @@
+{
+  "kind": "plan",
+  "change": "language-failure-observability",
+  "verdict": "BLESS-WITH-FIXES",
+  "hash": "sha256:f490e828dd32c48426bb407e1a63aad0faa05e2bbd10cf45d27eee01a810793d",
+  "expert": "e_opus",
+  "rounds": 2,
+  "history": [
+    {
+      "round": 1,
+      "kind": "spec",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": 3,
+      "summary": "handled failures clear the exchange error (dead caused-by clause); retry counting undefined; handler-raised ExpressionFailed exclusion unstated"
+    },
+    {
+      "round": 2,
+      "kind": "spec",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": 1,
+      "summary": "design Affected crates still scheduled the removed camel-cli production change; wording replaced"
+    },
+    {
+      "round": 1,
+      "kind": "plan",
+      "reviewer": "r_glm",
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "findings": 3,
+      "summary": "scenario-tier deliverable had no task; task 1.4 fallback contradicted no-production-code; compose_traced_pipeline gating type unverified (existing tests use the same literal)"
+    },
+    {
+      "round": 1,
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": 3,
+      "summary": "wrong private test double for run_steps tests + compile_time route-id guard; record_exception also feeds root/restart spans (must be documented); metrics.md has no Metric families section to add to"
+    }
+  ],
+  "mission": "482-language-failure-observability",
+  "bd": "rc-5r117",
+  "date": "2026-11-01",
+  "quota_deviation": "Mission order approved e_opus for both blessing gates (gpt quota exhausted until ~20:27 UTC). Expert-override channel in effect; recorded."
+}

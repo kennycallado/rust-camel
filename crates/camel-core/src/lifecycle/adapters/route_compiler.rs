@@ -29,7 +29,8 @@ use crate::lifecycle::adapters::body_coercing::wrap_if_needed;
 use crate::lifecycle::adapters::step_compilers::CompiledStep;
 use crate::shared::observability::adapters::TracingProcessor;
 use crate::shared::observability::adapters::tracer::{
-    SpanEndGuard, capped_correlation_id, record_exception, step_id_for, step_span_attributes,
+    SpanEndGuard, capped_correlation_id, record_exception, record_language_eval_failure,
+    step_id_for, step_span_attributes,
 };
 use crate::shared::observability::domain::{DetailLevel, MetricsLeversConfig};
 
@@ -617,6 +618,9 @@ async fn run_steps(
                 return PipelineOutcome::Stopped(stopped_ex);
             }
             PipelineOutcome::Failed(err) => {
+                // Count the top-level evaluation failure before any handler
+                // recovery/retry decision — retries never re-enter this arm.
+                record_language_eval_failure(ctx.metrics.as_ref(), route_id, &err);
                 let (Some(handler), Some(original)) = (handler.as_ref(), original) else {
                     return PipelineOutcome::Failed(err);
                 };

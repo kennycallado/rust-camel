@@ -3,7 +3,9 @@ use camel_api::SpanKindHint;
 use camel_api::error_handler::{
     BoundaryKind, ExceptionDisposition, ExceptionPolicy, PolicyId, RetryOutcome, StepDisposition,
 };
-use camel_api::{Body, BoxProcessorExt, CircuitBreakerConfig, Message, Value};
+use camel_api::{
+    Body, BoxProcessorExt, CircuitBreakerConfig, Message, OutcomePipeline, OutcomeSegment, Value,
+};
 use camel_processor::RouteErrorHandler;
 use camel_processor::error_handler::DefaultRouteErrorHandler;
 use serde_json::json;
@@ -1458,6 +1460,322 @@ mod cancellation_tests {
 fn shared_snapshot_is_send_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<SharedSnapshot>();
+}
+
+// ── Language evaluation failure metric (language-failure-observability 1.1) ──
+
+/// Records `record_counter` calls as `name:k=v:...` in call order.
+#[derive(Default)]
+struct LanguageMetricRecorder {
+    calls: Mutex<Vec<String>>,
+}
+
+impl LanguageMetricRecorder {
+    /// Calls to the language evaluation-failure counter only (route
+    /// disposition counters use the same `record_counter` surface).
+    fn counter_calls(&self) -> Vec<String> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|call| call.starts_with("language_eval_failures_total:"))
+            .cloned()
+            .collect()
+    }
+}
+
+impl MetricsCollector for LanguageMetricRecorder {
+    fn record_exchange_duration(&self, _route_id: &str, _duration: Duration) {}
+    fn increment_errors(&self, _route_id: &str, _error_type: &str) {}
+    fn increment_exchanges(&self, _route_id: &str) {}
+    fn set_queue_depth(&self, _queue: &str, _depth: usize) {}
+    fn record_circuit_breaker_change(&self, _route_id: &str, _from: &str, _to: &str) {}
+    fn record_counter(&self, name: &str, _value: f64, labels: &[(&str, &str)]) {
+        let mut key = String::from(name);
+        for (k, v) in labels {
+            key.push_str(&format!(":{k}={v}"));
+        }
+        self.calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(key);
+    }
+}
+
+fn expression_failure(
+    language: &str,
+    route_id: &str,
+    verb: &str,
+    class: camel_api::ExpressionErrorClass,
+) -> CamelError {
+    CamelError::ExpressionFailed {
+        language: language.into(),
+        route_id: route_id.into(),
+        step_id: format!("{verb}#0"),
+        verb: verb.into(),
+        class,
+        position: None,
+        conversion: None,
+        cause: None,
+    }
+}
+
+fn runtime_ctx(recorder: Arc<LanguageMetricRecorder>) -> PipelineRuntimeCtx {
+    PipelineRuntimeCtx {
+        metrics: recorder,
+        route_id: "r1".into(),
+    }
+}
+
+#[derive(Clone)]
+struct FailingExpressionSegment {
+    error: CamelError,
+}
+
+impl OutcomePipeline for FailingExpressionSegment {
+    fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+        Box::new(self.clone())
+    }
+
+    fn run<'a>(
+        &'a mut self,
+        _exchange: Exchange,
+    ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+        let error = self.error.clone();
+        Box::pin(async move { PipelineOutcome::Failed(error) })
+    }
+}
+
+fn expression_failing_segment(segment_error: CamelError) -> CompiledStep {
+    CompiledStep::Segment {
+        segment: OutcomeSegment::new(Box::new(FailingExpressionSegment {
+            error: segment_error,
+        })),
+        body_contract: None,
+        lifecycle: None,
+        label: Some("filter".into()),
+    }
+}
+
+fn failing_expression_step(step_error: CamelError) -> CompiledStep {
+    CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
+        processor: BoxProcessor::from_fn(move |_ex| {
+            let error = step_error.clone();
+            Box::pin(async move { Err(error) })
+        }),
+        body_contract: None,
+        lifecycle: None,
+        label: None,
+        to_uri: None,
+    }
+}
+
+#[tokio::test]
+async fn run_steps_emits_language_metric_for_segment_failure() {
+    let recorder = Arc::new(LanguageMetricRecorder::default());
+    let ctx = runtime_ctx(recorder.clone());
+    let steps = vec![expression_failing_segment(expression_failure(
+        "rhai",
+        "r1",
+        "filter",
+        camel_api::ExpressionErrorClass::TypeMismatch,
+    ))];
+
+    let outcome = run_steps(
+        SharedSnapshot(Arc::from(steps)),
+        Exchange::new(Message::new("x")),
+        None,
+        false,
+        "r1",
+        &ctx,
+    )
+    .await;
+
+    assert!(matches!(outcome, PipelineOutcome::Failed(_)));
+    assert_eq!(
+        recorder.counter_calls(),
+        vec![
+            "language_eval_failures_total:language=rhai:route=r1:verb=filter:class=type-mismatch"
+                .to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn run_steps_does_not_emit_for_foreign_route_failure() {
+    let recorder = Arc::new(LanguageMetricRecorder::default());
+    let ctx = runtime_ctx(recorder.clone());
+    let steps = vec![expression_failing_segment(expression_failure(
+        "rhai",
+        "sub",
+        "filter",
+        camel_api::ExpressionErrorClass::TypeMismatch,
+    ))];
+
+    let outcome = run_steps(
+        SharedSnapshot(Arc::from(steps)),
+        Exchange::new(Message::new("x")),
+        None,
+        false,
+        "r1",
+        &ctx,
+    )
+    .await;
+
+    assert!(matches!(outcome, PipelineOutcome::Failed(_)));
+    assert!(
+        recorder.counter_calls().is_empty(),
+        "sub-route failures must not be double-counted by the outer route"
+    );
+}
+
+/// Error handler that exhausts without retrying, then handles the failure so
+/// the exchange continues.
+struct RecoveredExpressionHandler;
+
+#[async_trait::async_trait]
+impl RouteErrorHandler for RecoveredExpressionHandler {
+    fn match_policy(&self, _: &CamelError) -> Option<PolicyId> {
+        Some(PolicyId(0))
+    }
+
+    async fn retry_step(
+        &self,
+        _: Option<PolicyId>,
+        _: &mut dyn camel_api::error_handler::RetryableStep,
+        original: Exchange,
+        error: CamelError,
+    ) -> RetryOutcome {
+        RetryOutcome::Exhausted {
+            exchange: original,
+            error,
+            policy: Some(PolicyId(0)),
+        }
+    }
+
+    async fn handle_step(
+        &self,
+        _: Option<PolicyId>,
+        ex: Exchange,
+        _: CamelError,
+    ) -> Result<StepDisposition, CamelError> {
+        Ok(StepDisposition::Handled(ex))
+    }
+
+    async fn handle_boundary(
+        &self,
+        _: BoundaryKind,
+        ex: Exchange,
+        _: CamelError,
+    ) -> Result<Exchange, CamelError> {
+        Ok(ex)
+    }
+}
+
+#[tokio::test]
+async fn run_steps_emits_once_for_handler_recovered_failure() {
+    let recorder = Arc::new(LanguageMetricRecorder::default());
+    let ctx = runtime_ctx(recorder.clone());
+    let steps = vec![failing_expression_step(expression_failure(
+        "rhai",
+        "r1",
+        "set_property",
+        camel_api::ExpressionErrorClass::Arithmetic,
+    ))];
+    let handler: Arc<dyn RouteErrorHandler> = Arc::new(RecoveredExpressionHandler);
+
+    let outcome = run_steps(
+        SharedSnapshot(Arc::from(steps)),
+        Exchange::new(Message::new("x")),
+        Some(handler),
+        false,
+        "r1",
+        &ctx,
+    )
+    .await;
+
+    assert!(matches!(outcome, PipelineOutcome::Completed(_)));
+    assert_eq!(
+        recorder.counter_calls().len(),
+        1,
+        "a handler-recovered failure counts exactly once"
+    );
+}
+
+/// Error handler that invokes the failing step twice before exhausting the
+/// retry sequence, then propagates the original error.
+struct RetriedExpressionHandler;
+
+#[async_trait::async_trait]
+impl RouteErrorHandler for RetriedExpressionHandler {
+    fn match_policy(&self, _: &CamelError) -> Option<PolicyId> {
+        Some(PolicyId(0))
+    }
+
+    async fn retry_step(
+        &self,
+        _: Option<PolicyId>,
+        step: &mut dyn camel_api::error_handler::RetryableStep,
+        original: Exchange,
+        error: CamelError,
+    ) -> RetryOutcome {
+        let _ = step.invoke(original.clone()).await;
+        let _ = step.invoke(original.clone()).await;
+        RetryOutcome::Exhausted {
+            exchange: original,
+            error,
+            policy: Some(PolicyId(0)),
+        }
+    }
+
+    async fn handle_step(
+        &self,
+        _: Option<PolicyId>,
+        _ex: Exchange,
+        error: CamelError,
+    ) -> Result<StepDisposition, CamelError> {
+        Ok(StepDisposition::Propagate(error))
+    }
+
+    async fn handle_boundary(
+        &self,
+        _: BoundaryKind,
+        ex: Exchange,
+        _: CamelError,
+    ) -> Result<Exchange, CamelError> {
+        Ok(ex)
+    }
+}
+
+#[tokio::test]
+async fn run_steps_emits_once_for_retried_failure() {
+    let recorder = Arc::new(LanguageMetricRecorder::default());
+    let ctx = runtime_ctx(recorder.clone());
+    let steps = vec![failing_expression_step(expression_failure(
+        "rhai",
+        "r1",
+        "set_property",
+        camel_api::ExpressionErrorClass::Arithmetic,
+    ))];
+    let handler: Arc<dyn RouteErrorHandler> = Arc::new(RetriedExpressionHandler);
+
+    let outcome = run_steps(
+        SharedSnapshot(Arc::from(steps)),
+        Exchange::new(Message::new("x")),
+        Some(handler),
+        false,
+        "r1",
+        &ctx,
+    )
+    .await;
+
+    assert!(matches!(outcome, PipelineOutcome::Failed(_)));
+    assert_eq!(
+        recorder.counter_calls().len(),
+        1,
+        "a retried failure counts once, not once per attempt"
+    );
 }
 
 /// Language-value-boundary (task 1.6): route-level error propagation for
