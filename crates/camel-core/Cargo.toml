@@ -51,6 +51,9 @@ humantime.workspace = true
 
 [features]
 default = ["export-internal-adapters"]
+# Test-only watcher barriers (readiness + reconciliation) for downstream
+# integration tests; never enable in production builds.
+test-support = []
 lang-js = ["camel-language-js"]
 lang-minijinja = ["camel-language-minijinja"]
 lang-rhai = ["camel-language-rhai"]
@@ -66,6 +69,8 @@ internal-adapters = ["export-internal-adapters"]
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }
+# `time::pause` / `time::advance` in reload-loop tests require tokio test-util.
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 camel-component-timer.workspace = true
 camel-component-sql.workspace = true

@@ -137,6 +137,7 @@ fn wrapper(dir: &Path) -> NestingGuardedInclude {
         dir.to_path_buf(),
         Arc::new(ImportBudget::default()),
         Arc::new(Mutex::new(None)),
+        Arc::new(Mutex::new(HashMap::new())),
     )
 }
 
@@ -209,15 +210,18 @@ fn resolver_shadow_check_replicates_protox() {
     .expect("write b");
 
     let top = Arc::new(Mutex::new(None));
+    let paths = Arc::new(Mutex::new(HashMap::new()));
     let include_a = NestingGuardedInclude::new(
         dir.path().join("a"),
         Arc::new(ImportBudget::default()),
         Arc::clone(&top),
+        Arc::clone(&paths),
     );
     let include_b = NestingGuardedInclude::new(
         dir.path().join("b"),
         Arc::new(ImportBudget::default()),
         Arc::clone(&top),
+        Arc::clone(&paths),
     );
 
     assert_eq!(

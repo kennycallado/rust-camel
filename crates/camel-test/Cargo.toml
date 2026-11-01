@@ -13,7 +13,7 @@ categories.workspace = true
 
 [dependencies]
 camel-api.workspace = true
-camel-core.workspace = true
+camel-core = { workspace = true, features = ["test-support"] }
 camel-builder.workspace = true
 camel-component-api = { workspace = true, features = ["test-support"] }
 camel-processor.workspace = true
@@ -83,6 +83,8 @@ camel-bean.workspace = true
 camel-function.workspace = true
 camel-component-ws.workspace = true
 camel-prometheus.workspace = true
+camel-template.workspace = true
+camel-component-validator.workspace = true
 camel-component-cron.workspace = true
 camel-component-sql.workspace = true
 camel-component-opensearch.workspace = true

@@ -2262,6 +2262,7 @@ dependencies = [
 name = "camel-component-validator"
 version = "0.63.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "camel-api",
  "camel-bridge",
@@ -3016,6 +3017,7 @@ dependencies = [
  "camel-processor",
  "camel-prometheus",
  "camel-redis-repo",
+ "camel-template",
  "camel-xj",
  "camel-xslt",
  "dashmap 6.2.1",

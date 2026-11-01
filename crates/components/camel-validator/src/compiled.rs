@@ -1,8 +1,13 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
+use arc_swap::ArcSwap;
+use async_trait::async_trait;
+use camel_component_api::template_reload::{TemplateReloadStaged, TemplateReloadTarget};
 use camel_component_api::{Body, CamelError};
 use prost_reflect::MessageDescriptor;
 // serde_yml migrated to noyalib (compat-serde-yaml shim) — closes RUSTSEC-2025-0068.
@@ -69,9 +74,158 @@ pub(crate) enum CompiledValidator {
         max_payload_bytes: Option<usize>,
     },
     Protobuf {
-        descriptor: MessageDescriptor,
+        /// Hot-swappable descriptor set. The protobuf validation arm loads the
+        /// current state per call, so a committed reload is visible to the next
+        /// validation without an endpoint rebuild.
+        state: SharedProtobufState,
         max_payload_bytes: Option<usize>,
     },
+}
+
+/// Committed protobuf descriptor plus the absolute files that produced it.
+pub(crate) struct ProtobufReloadState {
+    descriptor: MessageDescriptor,
+    /// Absolute schema path followed by its local import closure.
+    source_files: Vec<PathBuf>,
+}
+
+type SharedProtobufState = Arc<ArcSwap<ProtobufReloadState>>;
+
+impl TemplateReloadStaged for ProtobufReloadState {
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+}
+
+/// One [`TemplateReloadTarget`] per live protobuf validator producer.
+///
+/// The target shares the [`ArcSwap`] with the compiled validator, so a commit
+/// swaps the descriptor the producer reads on its next validation call.
+pub(crate) struct ProtobufReloadTarget {
+    route_id: String,
+    message: String,
+    state: SharedProtobufState,
+    schema_path: PathBuf,
+    generation: AtomicU64,
+}
+
+impl ProtobufReloadTarget {
+    pub(crate) fn new(
+        route_id: impl Into<String>,
+        message: impl Into<String>,
+        state: SharedProtobufState,
+        schema_path: PathBuf,
+    ) -> Self {
+        Self {
+            route_id: route_id.into(),
+            message: message.into(),
+            state,
+            schema_path,
+            generation: AtomicU64::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl TemplateReloadTarget for ProtobufReloadTarget {
+    fn route_id(&self) -> &str {
+        &self.route_id
+    }
+
+    fn reload_timeout(&self) -> Duration {
+        // Mirrors camel-template's `reload_timeout_ms` default of 5000
+        // (`ResolvedExternalTemplateLimits`), so a route that watches protobuf
+        // and template sources keeps one shared deadline.
+        Duration::from_millis(5000)
+    }
+
+    fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    fn watch_sources(&self) -> Vec<PathBuf> {
+        self.state.load_full().source_files.clone()
+    }
+
+    async fn build(&self) -> Result<(Box<dyn TemplateReloadStaged>, u64), CamelError> {
+        let schema_path = self.schema_path.clone();
+        let message = self.message.clone();
+        // Read the generation before the build so the registry's stale check
+        // compares against the snapshot this staged set was derived from.
+        let read_generation = self.current_generation();
+        let staged =
+            tokio::task::spawn_blocking(move || compile_protobuf_state(&schema_path, &message))
+                .await
+                .map_err(|e| {
+                    CamelError::TemplateReload(format!("protobuf reload task failed: {e}"))
+                })?
+                .map_err(|e| {
+                    CamelError::TemplateReload(format!("protobuf recompile failed: {e}"))
+                })?;
+        Ok((Box::new(staged), read_generation))
+    }
+
+    fn commit(&self, staged: Box<dyn TemplateReloadStaged>) {
+        match staged.into_any().downcast::<ProtobufReloadState>() {
+            Ok(state) => {
+                self.state.store(Arc::new(*state));
+                self.generation.fetch_add(1, Ordering::SeqCst);
+            }
+            Err(_) => {
+                // Unreachable: `build` is the only staged producer and always
+                // yields a `ProtobufReloadState`. Leave the prior state intact.
+                // log-policy: system-broken
+                tracing::error!(
+                    route_id = %self.route_id,
+                    "protobuf reload: unexpected staged payload; keeping prior descriptor"
+                );
+            }
+        }
+    }
+}
+
+/// Absolute form of `path`, falling back to the owned path on failure.
+fn absolute_path(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Absolute, sorted, deduplicated schema + local import closure from the SAME
+/// snapshot that produced the descriptor.
+fn protobuf_source_files(schema_path: &Path, imports: &[PathBuf]) -> Vec<PathBuf> {
+    let mut sources = Vec::with_capacity(imports.len() + 1);
+    sources.push(absolute_path(schema_path));
+    sources.extend(imports.iter().map(|path| absolute_path(path)));
+    sources.sort();
+    sources.dedup();
+    sources
+}
+
+/// Compile the proto schema, select the named message, and snapshot sources.
+///
+/// The descriptor and its source list come from one read of the schema graph:
+/// `compile_proto_with_sources` preloads the import closure once and compiles
+/// only from that snapshot, so an edit landing mid-build cannot commit a
+/// descriptor and a watch list that disagree about which imports exist.
+fn compile_protobuf_state(
+    schema_path: &Path,
+    message: &str,
+) -> Result<ProtobufReloadState, CamelError> {
+    let (pool, imports) =
+        camel_proto_compiler::compile_proto_with_sources(schema_path).map_err(|e| {
+            CamelError::EndpointCreationFailed(format!(
+                "failed to compile proto schema '{}': {e}",
+                schema_path.display()
+            ))
+        })?;
+
+    let descriptor = pool
+        .get_message_by_name(message)
+        .ok_or_else(|| CamelError::Config(format!("message descriptor not found: {message}")))?;
+
+    Ok(ProtobufReloadState {
+        descriptor,
+        source_files: protobuf_source_files(schema_path, &imports),
+    })
 }
 
 impl std::fmt::Debug for CompiledValidator {
@@ -226,6 +380,7 @@ impl CompiledValidator {
     ///
     /// Any compile failure (missing file or invalid proto source) is a
     /// route-build error: it can only be fixed by changing operator config.
+    /// The initial state is hot-swappable so a reload target can replace it.
     fn compile_protobuf(
         path: &Path,
         message: Option<&str>,
@@ -242,23 +397,20 @@ impl CompiledValidator {
                 )
             })?;
 
-        let pool = camel_proto_compiler::compile_proto(path, std::iter::empty::<&Path>()).map_err(
-            |e| {
-                CamelError::EndpointCreationFailed(format!(
-                    "failed to compile proto schema '{}': {e}",
-                    path.display()
-                ))
-            },
-        )?;
-
-        let descriptor = pool.get_message_by_name(message).ok_or_else(|| {
-            CamelError::Config(format!("message descriptor not found: {message}"))
-        })?;
+        let state = compile_protobuf_state(path, message)?;
 
         Ok(CompiledValidator::Protobuf {
-            descriptor,
+            state: Arc::new(ArcSwap::from_pointee(state)),
             max_payload_bytes,
         })
+    }
+
+    /// The shared protobuf reload state for a protobuf validator.
+    pub(crate) fn protobuf_state(&self) -> Option<&SharedProtobufState> {
+        match self {
+            CompiledValidator::Protobuf { state, .. } => Some(state),
+            _ => None,
+        }
     }
 
     pub async fn validate(&self, body: &Body) -> Result<(), CamelError> {
@@ -277,8 +429,12 @@ impl CompiledValidator {
             } => Self::validate_xml(schema_set, backend, body).await,
             CompiledValidator::Json { validator, .. } => Self::validate_json(validator, body),
             CompiledValidator::Yaml { validator, .. } => Self::validate_yaml(validator, body),
-            CompiledValidator::Protobuf { descriptor, .. } => {
-                Self::validate_protobuf(descriptor, body)
+            CompiledValidator::Protobuf { state, .. } => {
+                // Load the current committed state per call: a reload commit is
+                // visible to the very next validation without an endpoint
+                // rebuild. The guard keeps the snapshot alive for this call.
+                let current = state.load_full();
+                Self::validate_protobuf(&current.descriptor, body)
             }
         }
     }
@@ -637,6 +793,54 @@ message Person {
                 .await
                 .is_err(),
             "malformed JSON must fail protobuf validation"
+        );
+    }
+
+    #[test]
+    fn protobuf_state_keeps_descriptor_and_sources_in_step() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let common = dir.path().join("common.proto");
+        std::fs::write(
+            &common,
+            "syntax = \"proto3\";\npackage reload;\nmessage C { string v = 1; }\n",
+        )
+        .expect("write common proto");
+        let root = dir.path().join("root.proto");
+        std::fs::write(
+            &root,
+            "syntax = \"proto3\";\npackage reload;\nmessage M { string a = 1; }\n",
+        )
+        .expect("write root proto");
+
+        let before = compile_protobuf_state(&root, "reload.M").expect("initial state");
+        assert!(before.descriptor.get_field_by_name("c").is_none());
+        assert!(
+            !before
+                .source_files
+                .iter()
+                .any(|p| p.file_name() == Some(std::ffi::OsStr::new("common.proto"))),
+            "pre-edit sources must match the pre-edit descriptor: {:?}",
+            before.source_files
+        );
+
+        std::fs::write(
+            &root,
+            "syntax = \"proto3\";\npackage reload;\nimport \"common.proto\";\nmessage M { string a = 1; C c = 2; }\n",
+        )
+        .expect("grow the import closure");
+
+        let after = compile_protobuf_state(&root, "reload.M").expect("reloaded state");
+        assert!(
+            after.descriptor.get_field_by_name("c").is_some(),
+            "the descriptor must include the new import"
+        );
+        let expected_common = std::path::absolute(&common).expect("absolute common path");
+        let expected_root = std::path::absolute(&root).expect("absolute root path");
+        let mut expected_sources = vec![expected_common, expected_root];
+        expected_sources.sort();
+        assert_eq!(
+            after.source_files, expected_sources,
+            "the watch sources must be exactly the descriptor inputs"
         );
     }
 }

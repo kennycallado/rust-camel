@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::compiler::{
     SourceSnapshot, compile_from_snapshot, compile_proto, compile_proto_embedded,
-    is_descriptor_set, preload_embedded_snapshot, preload_snapshot_contained,
+    is_descriptor_set, preload_embedded_snapshot, preload_local_snapshot_contained,
 };
 use crate::{ProtoCompileError, hash_bytes, hash_proto_content};
 
@@ -215,7 +215,10 @@ impl ProtoCache {
         }
 
         let root_hash = hash_proto_content(proto_path)?;
-        let snapshot = preload_snapshot_contained(proto_path, &include_paths)?;
+        // Shared closure owner: the same preload enumerates local sources for
+        // `local_import_closure`; the cache only needs the snapshot.
+        let (snapshot, _local_sources) =
+            preload_local_snapshot_contained(proto_path, &include_paths)?;
         self.compile_source_snapshot(proto_path, &root_hash, &include_paths, snapshot)
     }
 

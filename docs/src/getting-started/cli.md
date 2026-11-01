@@ -78,7 +78,21 @@ The `development` profile sets `log_level = "DEBUG"` and `watch = true`. The `pr
 
 ### Hot-reload
 
-Hot-reload is off by default. With `--watch`, the CLI monitors route files for changes. The watcher groups rapid edits behind a 300 ms debounce window. Set `watch_debounce_ms` in `Camel.toml` to change it. Edits take effect without a restart.
+Hot-reload is off by default. `camel run --watch` enables the dev-only file watcher; `--no-watch` disables it. Both flags override `watch` in `Camel.toml`. Only `camel run` watches: compiled artifacts and non-watch runs never create a watcher.
+
+Dev watch covers three source classes:
+
+- Route files matched by `routes`.
+- Template files in a rendered template closure: the entry template plus every nested include, import, extends, and from target.
+- Validator protobuf descriptor sources: the `.proto` schema and each resolved local import.
+
+The watcher groups rapid edits behind a debounce window. Set `watch_debounce_ms` in `Camel.toml` to change it (default 300 ms). After the window, route-file changes reload first. Template and proto changes then re-derive their targets and dispatch only for routes whose generation survived without a rebuild. A mixed batch follows the same order.
+
+Reloads are bounded. A template reload build stops at `reload-timeout-ms` under `[components.template.limits]` (default 5000 ms). A validator protobuf recompile has a fixed 5000 ms deadline. Each dispatch is time-bounded, so a stuck build delays later edits by at most one reload bound instead of blocking the watcher indefinitely.
+
+Template and proto reloads swap atomically. In-flight work finishes against the set it entered. A failed or timed-out reload keeps the prior compiled set serving, logs a redacted error, and leaves the route Running. Template and proto edits cause no route restart, no `RouteStatus` change, and no journal events.
+
+On one route, template and protobuf reloads commit all-or-nothing: a broken `.proto` blocks the same-route template reload, and a broken template blocks the protobuf reload. See [Hot reload](../configuration/hot-reload.md) for the swap model and [Validator](../components/validator.md#descriptor-recompile-in-dev-watch) for the proto side and the gRPC non-goal.
 
 ```console
 camel run --watch

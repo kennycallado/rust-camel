@@ -151,6 +151,16 @@ fuel = 100000
 
 The two layers are checked at different times. Acquisition limits apply while building the compiled template set. Render limits apply per Exchange on the hot path. Exhausting any limit fails the operation; no limit truncates and reports success.
 
+## Dev watch
+
+`camel run --watch` watches each rendered template's dependency closure: the entry plus every nested `include`, `import`, `extends`, and `from` target. A closure edit re-derives the affected routes, rebuilds the compiled set, and swaps it atomically. In-flight renders finish against the set they entered.
+
+The rebuild is bounded by `reload-timeout-ms` (default 5000 ms). A failed or timed-out build keeps the prior compiled set, logs a redacted error, and leaves the route Running. It causes no route restart, no `RouteStatus` change, and no journal events. Targets are re-derived after every committed reload and route reload pass, so an added include joins the watch set and a removed one leaves it.
+
+On one route, template and validator protobuf reloads commit all-or-nothing: a broken `.proto` blocks the template reload, and a broken template blocks the proto reload. See [Validator](validator.md#descriptor-recompile-in-dev-watch) and [Hot reload](../configuration/hot-reload.md#dev-watch-for-template-closures).
+
+Dev watch is dev-only. Compiled artifacts and non-watch runs never create a watcher. See the [CLI reference](../getting-started/cli.md#hot-reload).
+
 ## Lifecycle
 
 Templates are compiled once at route startup (fail-closed). A missing file, a syntax error, or an acquisition-limit overflow prevents the route from starting. The compiled set is cached for zero-filesystem-I/O hot-path rendering. A control-plane `ReloadTemplates` command re-acquires the dependency closure, recompiles, and atomically swaps the compiled set without disturbing in-flight renders. A failed reload preserves the prior set.

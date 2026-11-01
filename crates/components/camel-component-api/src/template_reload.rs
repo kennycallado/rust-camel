@@ -12,7 +12,10 @@
 //! generation, then commits — guaranteeing atomicity structurally.
 
 use std::any::Any;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -51,6 +54,14 @@ pub trait TemplateReloadTarget: Send + Sync {
     fn reload_timeout(&self) -> Duration;
     /// Current committed generation (bumped on each successful commit).
     fn current_generation(&self) -> u64;
+    /// Unique absolute FILE paths whose change should reload this target.
+    ///
+    /// Reports the last COMMITTED dependency closure only: a failed build or a
+    /// staged-but-uncommitted set never contributes. Every entry is a file —
+    /// never a directory (a confinement root is not reported) — and entries
+    /// are deduplicated. Callers that merge targets sharing a route apply
+    /// [`TemplateReloadRegistry::route_watch_sources`].
+    fn watch_sources(&self) -> Vec<PathBuf>;
     /// Build a staged set against the current sources. Returns the staged set
     /// and the generation read at build time. May fail (invalid source); the
     /// prior set is retained on failure.
@@ -123,6 +134,29 @@ impl TemplateReloadRegistry {
             .iter()
             .filter(|t| t.target.route_id() == route_id)
             .map(|t| Arc::clone(&t.target))
+            .collect()
+    }
+
+    /// Enumerate every registered target's watch sources, grouped per route.
+    ///
+    /// One entry per route id, sorted by route id. Multiple targets on the
+    /// same route are merged: paths are deduplicated and sorted. Empty when
+    /// no targets are registered.
+    pub fn route_watch_sources(&self) -> Vec<(String, Vec<PathBuf>)> {
+        let guard = self
+            .handlers
+            .lock()
+            .expect("TemplateReloadRegistry handlers lock poisoned"); // allow-unwrap
+        let mut by_route: BTreeMap<String, BTreeSet<PathBuf>> = BTreeMap::new();
+        for registered in guard.iter() {
+            by_route
+                .entry(registered.target.route_id().to_string())
+                .or_default()
+                .extend(registered.target.watch_sources());
+        }
+        by_route
+            .into_iter()
+            .map(|(route, sources)| (route, sources.into_iter().collect()))
             .collect()
     }
 
@@ -275,16 +309,23 @@ mod tests {
         mode: StdMutex<BuildMode>,
         /// Optional event recorder for the serialize test.
         events: Option<Arc<StdMutex<Vec<&'static str>>>>,
+        /// Watch sources reported by this fake.
+        sources: Vec<PathBuf>,
     }
 
     impl FakeTarget {
         fn new(route: &str) -> Arc<Self> {
+            Self::new_with_sources(route, Vec::new())
+        }
+
+        fn new_with_sources(route: &str, sources: Vec<PathBuf>) -> Arc<Self> {
             Arc::new(Self {
                 route: route.to_string(),
                 timeout: Duration::from_secs(5),
                 state: Arc::new(FakeState::default()),
                 mode: StdMutex::new(BuildMode::Ok),
                 events: None,
+                sources,
             })
         }
 
@@ -360,6 +401,9 @@ mod tests {
             self.state.commit_calls.fetch_add(1, Ordering::SeqCst);
             self.state.generation.fetch_add(1, Ordering::SeqCst);
         }
+        fn watch_sources(&self) -> Vec<PathBuf> {
+            self.sources.clone()
+        }
     }
 
     #[test]
@@ -434,6 +478,7 @@ mod tests {
             state: Arc::new(FakeState::default()),
             mode: StdMutex::new(BuildMode::Sleep(Duration::from_millis(2_000))),
             events: None,
+            sources: Vec::new(),
         });
         let g = reg.register(slow.as_dyn());
 
@@ -482,6 +527,7 @@ mod tests {
             state: Arc::new(FakeState::default()),
             mode: StdMutex::new(BuildMode::Ok),
             events: Some(Arc::clone(&events)),
+            sources: Vec::new(),
         });
         let g = reg.register(target.as_dyn());
 
@@ -502,5 +548,67 @@ mod tests {
         );
         assert_eq!(target.state.commit_calls.load(Ordering::SeqCst), 2);
         drop(g);
+    }
+
+    /// A fresh, leaked registry so tests do not observe global registrations
+    /// from other tests running in parallel (`register` needs `&'static self`).
+    fn fresh_registry() -> &'static TemplateReloadRegistry {
+        Box::leak(Box::new(TemplateReloadRegistry::default()))
+    }
+
+    #[test]
+    fn route_watch_sources_merges_and_dedups_per_route() {
+        let reg = fresh_registry();
+        let r1a = FakeTarget::new_with_sources(
+            "r1",
+            vec![PathBuf::from("/tpl/b.jinja"), PathBuf::from("/tpl/a.jinja")],
+        );
+        let r1b = FakeTarget::new_with_sources(
+            "r1",
+            vec![PathBuf::from("/tpl/b.jinja"), PathBuf::from("/tpl/c.jinja")],
+        );
+        let r2 = FakeTarget::new_with_sources("r2", vec![PathBuf::from("/tpl/x.jinja")]);
+        let g1 = reg.register(r1a.as_dyn());
+        let g2 = reg.register(r1b.as_dyn());
+        let g3 = reg.register(r2.as_dyn());
+
+        let sources = reg.route_watch_sources();
+        assert_eq!(sources.len(), 2, "one entry per route id: {sources:?}");
+        assert_eq!(sources[0].0, "r1");
+        assert_eq!(
+            sources[0].1,
+            vec![
+                PathBuf::from("/tpl/a.jinja"),
+                PathBuf::from("/tpl/b.jinja"),
+                PathBuf::from("/tpl/c.jinja"),
+            ],
+            "r1 sources merged, deduplicated and sorted"
+        );
+        assert_eq!(sources[1].0, "r2");
+        assert_eq!(sources[1].1, vec![PathBuf::from("/tpl/x.jinja")]);
+
+        drop(g1);
+        drop(g2);
+        drop(g3);
+    }
+
+    #[test]
+    fn route_watch_sources_empty_when_no_targets() {
+        let reg = TemplateReloadRegistry::default();
+        assert!(reg.route_watch_sources().is_empty());
+    }
+
+    #[test]
+    fn route_watch_sources_excludes_unregistered() {
+        let reg = fresh_registry();
+        let target = FakeTarget::new_with_sources("gone", vec![PathBuf::from("/tpl/a.jinja")]);
+        let guard = reg.register(target.as_dyn());
+        assert_eq!(reg.route_watch_sources().len(), 1);
+
+        drop(guard);
+        assert!(
+            reg.route_watch_sources().is_empty(),
+            "dropped registration must not be enumerated"
+        );
     }
 }

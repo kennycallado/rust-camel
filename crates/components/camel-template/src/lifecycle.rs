@@ -116,6 +116,9 @@ impl StepLifecycle for StartupBuildHandle {
         // Install the ReloadHandler at generation 0; it retains the root
         // handle for the Phase-5 reload loop. Startup is NOT a reload,
         // so `template_reloads_total` is not incremented here (Task 5.4).
+        // Seed the committed watch sources from the startup closure so the
+        // sources exist before the first reload.
+        let committed_sources = crate::reload::closure_sources(&root_path, &snapshot);
         let handler = Arc::new(ReloadHandler {
             shared: Arc::clone(&self.shared),
             entry_name,
@@ -123,6 +126,8 @@ impl StepLifecycle for StartupBuildHandle {
             limits: self.limits,
             generation: Mutex::new(0),
             root: Arc::clone(&root),
+            root_path,
+            committed_sources: Mutex::new(committed_sources),
             route_id: self.route_id.clone(),
             default_autoescape: self.default_autoescape,
         });

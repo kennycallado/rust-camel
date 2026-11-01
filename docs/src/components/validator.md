@@ -96,6 +96,16 @@ The descriptor compiles once at endpoint creation through the hermetic proto com
 
 The `maxPayloadBytes`, `headerName`, `failOnNullBody`, and `failOnNullHeader` options behave as described above and apply to protobuf endpoints.
 
+### Descriptor recompile in dev watch
+
+Under `camel run --watch`, a `.proto` edit recompiles the protobuf descriptor in-process. The watch sources are the schema file and every resolved local import, so an import-only edit also triggers a recompile. A reload that adds an import adds that file to the watch sources.
+
+The watcher groups rapid edits behind the `watch_debounce_ms` window before dispatch. The recompile has a fixed 5000 ms deadline. A failed or timed-out compile keeps the prior descriptor serving, logs a redacted error, and leaves the route Running. It causes no route restart, no `RouteStatus` change, and no journal events.
+
+Reload targets commit together per route. A failed validator target blocks the same-route commit for the template target class, and a failed template target blocks the same-route protobuf commit. Fix or revert the broken file to let the route commit again. See [Template](template.md#dev-watch) and [Hot reload](../configuration/hot-reload.md#dev-watch-for-template-closures).
+
+**Non-goal: gRPC descriptors.** Dev watch covers the [Validator protobuf descriptors](#protobuf-validation) only. gRPC endpoints keep the descriptors they resolved at startup. A `.proto` edit used by a gRPC endpoint requires a route reload or a restart, and the watcher creates no targets for gRPC `protoFile` references.
+
 ## Bridge lifecycle
 
 `CamelContext::stop()` does not clean up the `xml-bridge` child process. The `camel run` CLI registers a `BridgeCleanup` lifecycle service that calls `XsdBridgeBackend::shutdown()` on stop. Library embedders must retain the value from `ValidatorComponent::xsd_bridge_backend()` and call `shutdown().await` when it is `Some`. This requirement only applies after an XSD route starts the bridge. JSON and YAML routes never start it.

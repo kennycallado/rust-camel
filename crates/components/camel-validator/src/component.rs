@@ -6,10 +6,13 @@ use std::task::{Context, Poll};
 use tower::Service;
 use tracing::debug;
 
-use crate::compiled::CompiledValidator;
+use crate::compiled::{CompiledValidator, ProtobufReloadTarget};
 use crate::config::ValidatorConfig;
 use crate::xsd_bridge::{XsdBridge, XsdBridgeBackend};
 use camel_component_api::ComponentContext;
+use camel_component_api::template_reload::{
+    RegistrationGuard, TemplateReloadRegistry, TemplateReloadTarget,
+};
 use camel_component_api::{
     BoxProcessor, CamelError, Component, ComponentMetadata, Consumer, Endpoint, Exchange,
     ProducerContext, RuntimeObservability,
@@ -143,11 +146,47 @@ impl Endpoint for ValidatorEndpoint {
                 ctx.route_id().unwrap_or("validator-bridge").to_string(),
             );
         }
+
+        // The endpoint is dropped during route recompilation, so the reload
+        // registration guard must live on the producer (the long-lived owner
+        // retained by the compiled pipeline). A new producer for the same
+        // route drops its predecessor's guard on replacement; producer
+        // teardown removes the registration.
+        let reload_guard = self.register_protobuf_reload(ctx);
+
         Ok(BoxProcessor::new(ValidatorProducer {
             uri: self.uri.clone(),
             config: self.config.clone(),
             compiled: Arc::clone(&self.compiled),
+            reload_guard: Arc::new(std::sync::Mutex::new(reload_guard)),
         }))
+    }
+}
+
+impl ValidatorEndpoint {
+    /// Register a [`ProtobufReloadTarget`] sharing this endpoint's descriptor
+    /// state. Returns `None` for non-protobuf schemas and for contexts without
+    /// a route id (the `validator-bridge` fallback path).
+    fn register_protobuf_reload(&self, ctx: &ProducerContext) -> Option<RegistrationGuard> {
+        let state = self.compiled.protobuf_state()?;
+        let route_id = match ctx.route_id() {
+            Some(route_id) => route_id,
+            None => {
+                debug!(
+                    uri = %camel_api::redact::redact_url_fail_closed(&self.uri),
+                    "validator protobuf: no route id, skipping descriptor reload registration"
+                );
+                return None;
+            }
+        };
+        let target: Arc<ProtobufReloadTarget> = Arc::new(ProtobufReloadTarget::new(
+            route_id.to_string(),
+            self.config.message.clone().unwrap_or_default(),
+            Arc::clone(state),
+            self.config.schema_path.clone(),
+        ));
+        let target: Arc<dyn TemplateReloadTarget> = target;
+        Some(TemplateReloadRegistry::global().register(target))
     }
 }
 
@@ -156,6 +195,11 @@ struct ValidatorProducer {
     uri: String,
     config: ValidatorConfig,
     compiled: Arc<CompiledValidator>,
+    /// RAII reload registration. Held behind an `Arc<Mutex<_>>` so the
+    /// producer stays `Clone` for `BoxProcessor`; the last clone to drop
+    /// unregisters the target.
+    #[allow(dead_code)] // read only by `Drop`: dropping the guard unregisters
+    reload_guard: Arc<std::sync::Mutex<Option<RegistrationGuard>>>,
 }
 
 impl Service<Exchange> for ValidatorProducer {

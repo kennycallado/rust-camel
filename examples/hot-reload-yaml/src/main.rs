@@ -133,6 +133,8 @@ async fn main() -> Result<(), CamelError> {
                 camel_dsl::discover_routes(&watch_patterns)
                     .map_err(|e| CamelError::RouteError(e.to_string()))
             },
+            // no template/proto reload targets in this example
+            Vec::<(String, Vec<std::path::PathBuf>)>::new,
             Some(shutdown_watcher),
             std::time::Duration::from_secs(10),
             // debounce loaded from Camel.toml → watch_debounce_ms

@@ -315,6 +315,10 @@ struct NestingGuardedInclude {
     dir: PathBuf,
     budget: Arc<ImportBudget>,
     top: Arc<Mutex<Option<(String, PathBuf)>>>,
+    /// Absolute disk paths of files this resolver successfully opened, keyed
+    /// by canonical import name. Filled only by disk includes, so well-known
+    /// and embedded inputs never appear.
+    paths: Arc<Mutex<HashMap<String, PathBuf>>>,
 }
 
 impl NestingGuardedInclude {
@@ -322,8 +326,14 @@ impl NestingGuardedInclude {
         dir: PathBuf,
         budget: Arc<ImportBudget>,
         top: Arc<Mutex<Option<(String, PathBuf)>>>,
+        paths: Arc<Mutex<HashMap<String, PathBuf>>>,
     ) -> Self {
-        Self { dir, budget, top }
+        Self {
+            dir,
+            budget,
+            top,
+            paths,
+        }
     }
 }
 
@@ -411,7 +421,14 @@ impl FileResolver for NestingGuardedInclude {
             }));
         }
         // Parse the SAME validated buffer.
-        File::from_source(name, &text)
+        let file = File::from_source(name, &text)?;
+        let absolute = std::path::absolute(&candidate).unwrap_or(candidate);
+        self.paths
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(name.to_owned())
+            .or_insert(absolute);
+        Ok(file)
     }
 }
 
@@ -909,7 +926,9 @@ fn preload_with(
     Ok(snapshot)
 }
 
-fn build_chain(proto_path: &Path, includes: &[PathBuf]) -> ChainFileResolver {
+type ResolvedPaths = Arc<Mutex<HashMap<String, PathBuf>>>;
+
+fn build_chain(proto_path: &Path, includes: &[PathBuf]) -> (ChainFileResolver, ResolvedPaths) {
     let parent = match proto_path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => PathBuf::from("."),
@@ -917,15 +936,17 @@ fn build_chain(proto_path: &Path, includes: &[PathBuf]) -> ChainFileResolver {
     let mut resolver = ChainFileResolver::new();
     let budget = Arc::new(ImportBudget::default());
     let top = Arc::new(Mutex::new(None));
+    let paths: ResolvedPaths = Arc::new(Mutex::new(HashMap::new()));
     for dir in includes.iter().cloned().chain(std::iter::once(parent)) {
         resolver.add(NestingGuardedInclude::new(
             dir,
             Arc::clone(&budget),
             Arc::clone(&top),
+            Arc::clone(&paths),
         ));
     }
     resolver.add(GoogleFileResolver::new());
-    resolver
+    (resolver, paths)
 }
 
 /// Include resolver over the embedded-source registry (mission 350).
@@ -1012,6 +1033,41 @@ pub(crate) fn compile_proto_embedded(
     })
 }
 
+/// Loads the root and its import closure through the guarded include chain
+/// and enumerates the LOCAL disk files in that closure.
+///
+/// The returned paths are absolute, sorted and unique; the root schema itself,
+/// Google well-known inputs and embedded inputs are excluded. This is the one
+/// owner of closure enumeration: the cache and
+/// [`crate::local_import_closure`] both consume it.
+pub(crate) fn preload_local_snapshot(
+    proto_path: &Path,
+    includes: &[PathBuf],
+) -> Result<(SourceSnapshot, Vec<PathBuf>), ProtoCompileError> {
+    let (chain, paths) = build_chain(proto_path, includes);
+    let snapshot = preload_with(proto_path, &chain)?;
+    let local = collect_local_paths(&snapshot, &paths);
+    Ok((snapshot, local))
+}
+
+/// Enumerates the disk paths recorded for the snapshot's resolved closure.
+///
+/// Only [`NestingGuardedInclude`] records paths, so well-known and embedded
+/// inputs are absent. The root is identified by its canonical import name and
+/// excluded.
+fn collect_local_paths(snapshot: &SourceSnapshot, paths: &ResolvedPaths) -> Vec<PathBuf> {
+    let paths = paths.lock().unwrap_or_else(|p| p.into_inner());
+    let mut local: Vec<PathBuf> = snapshot
+        .order
+        .iter()
+        .filter(|name| name.as_str() != snapshot.root_name())
+        .filter_map(|name| paths.get(name).cloned())
+        .collect();
+    local.sort();
+    local.dedup();
+    local
+}
+
 /// Loads the root and its import closure through the guarded include chain,
 /// without building a protox pool. The returned snapshot is immutable: later
 /// compilation serves only these files.
@@ -1019,16 +1075,15 @@ pub(crate) fn preload_snapshot(
     proto_path: &Path,
     includes: &[PathBuf],
 ) -> Result<SourceSnapshot, ProtoCompileError> {
-    let chain = build_chain(proto_path, includes);
-    preload_with(proto_path, &chain)
+    preload_local_snapshot(proto_path, includes).map(|(snapshot, _)| snapshot)
 }
 
-/// [`preload_snapshot`] inside the compile panic-containment boundary.
-pub(crate) fn preload_snapshot_contained(
+/// [`preload_local_snapshot`] inside the compile panic-containment boundary.
+pub(crate) fn preload_local_snapshot_contained(
     proto_path: &Path,
     includes: &[PathBuf],
-) -> Result<SourceSnapshot, ProtoCompileError> {
-    contained_value(proto_path, || preload_snapshot(proto_path, includes))
+) -> Result<(SourceSnapshot, Vec<PathBuf>), ProtoCompileError> {
+    contained_value(proto_path, || preload_local_snapshot(proto_path, includes))
 }
 
 /// Preloads an embedded source asset inside the compile panic-containment

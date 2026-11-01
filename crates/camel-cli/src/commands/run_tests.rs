@@ -661,3 +661,224 @@ fn function_config_valid_allowlist_roundtrip() {
         vec!["api.example.com:443".to_string()]
     );
 }
+
+// ── Dev-target provider wiring ──────────────────────────────────────────────
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use camel_component_api::template_reload::TemplateReloadRegistry;
+use camel_component_api::template_reload::TemplateReloadStaged;
+use camel_component_api::template_reload::TemplateReloadTarget;
+
+/// Route-id → watch-source snapshot produced by the dev-source provider.
+type DevSources = Vec<(String, Vec<std::path::PathBuf>)>;
+
+/// Staged marker for the fake dev target (coerces to `Box<dyn Any>`).
+struct FakeDevStaged;
+
+impl TemplateReloadStaged for FakeDevStaged {
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+        self
+    }
+}
+
+/// Minimal reload target that reports a fixed source set. The provider under
+/// test only reads `route_id` and `watch_sources`; build/commit are never
+/// invoked by the watcher wiring.
+struct FakeDevTarget {
+    route: String,
+    sources: Vec<std::path::PathBuf>,
+    generation: AtomicU64,
+}
+
+impl FakeDevTarget {
+    fn new(route: &str, sources: Vec<std::path::PathBuf>) -> Arc<Self> {
+        Arc::new(Self {
+            route: route.to_string(),
+            sources,
+            generation: AtomicU64::new(0),
+        })
+    }
+
+    /// Coerce to the erased trait-object Arc that `register` expects.
+    fn as_dyn(self: &Arc<Self>) -> Arc<dyn TemplateReloadTarget> {
+        let concrete: Arc<Self> = Arc::clone(self);
+        concrete
+    }
+}
+
+#[async_trait::async_trait]
+impl TemplateReloadTarget for FakeDevTarget {
+    fn route_id(&self) -> &str {
+        &self.route
+    }
+    fn reload_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(5)
+    }
+    fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+    fn watch_sources(&self) -> Vec<std::path::PathBuf> {
+        self.sources.clone()
+    }
+    async fn build(&self) -> Result<(Box<dyn TemplateReloadStaged>, u64), camel_api::CamelError> {
+        Ok((
+            Box::new(FakeDevStaged),
+            self.generation.load(Ordering::SeqCst),
+        ))
+    }
+    fn commit(&self, _staged: Box<dyn TemplateReloadStaged>) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Drives the production `--watch` entry (`watch_reload_with_dev_sources`)
+/// with a capturing watch function: the sources the CLI actually hands to
+/// `watch_and_reload` must include the registered target's watch sources.
+#[tokio::test]
+async fn run_watch_passes_dev_provider() {
+    let route = "cli-dev-provider-passes";
+    let sources = vec![std::path::PathBuf::from(
+        "/tmp/cli-dev-provider/templates/page.jinja",
+    )];
+    let guard = TemplateReloadRegistry::global()
+        .register(FakeDevTarget::new(route, sources.clone()).as_dyn());
+
+    let ctx = camel_core::CamelContext::builder()
+        .build()
+        .await
+        .expect("test context must build"); // allow-unwrap
+    let captured: std::sync::Arc<std::sync::Mutex<Option<DevSources>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let sink = std::sync::Arc::clone(&captured);
+
+    watch_reload_with_dev_sources(
+        |_watch_dirs, _controller, _discover, provider, _shutdown, _drain, _debounce| {
+            let sink = std::sync::Arc::clone(&sink);
+            async move {
+                *sink.lock().expect("capture lock") = Some(provider());
+                Ok::<(), camel_api::CamelError>(())
+            }
+        },
+        Vec::new(),
+        ctx.runtime_execution_handle(),
+        Box::new(
+            || -> Result<Vec<camel_core::RouteDefinition>, camel_api::CamelError> {
+                Ok(Vec::new())
+            },
+        ),
+        None,
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+    )
+    .await
+    .expect("capturing watch entry must succeed"); // allow-unwrap
+
+    let provided = captured
+        .lock()
+        .expect("capture lock")
+        .take()
+        .expect("watch entry must invoke the provider"); // allow-unwrap
+    let entry = provided
+        .iter()
+        .find(|(id, _)| id == route)
+        .expect("registered fake target must appear in the provider snapshot"); // allow-unwrap
+    assert_eq!(
+        entry.1, sources,
+        "production watch entry must pass through the target's watch sources"
+    );
+
+    drop(guard);
+}
+
+/// Same production harness as [`run_watch_passes_dev_provider`], but the
+/// watcher's discovery callback yields a gRPC route with a local `protoFile=`
+/// reference. Discovery output creates no reload target, so the provider
+/// snapshot still contains only the fake target's sources — no `.proto` path.
+#[tokio::test]
+async fn dev_provider_ignores_route_definitions() {
+    let route = "cli-dev-provider-grpc-ignored";
+    let sources = vec![std::path::PathBuf::from(
+        "/tmp/cli-dev-provider/templates/ignored.jinja",
+    )];
+    let guard = TemplateReloadRegistry::global()
+        .register(FakeDevTarget::new(route, sources.clone()).as_dyn());
+
+    let route_defs = camel_dsl::parse_yaml(
+        r#"routes:
+  - id: cli-dev-provider-grpc-ignored
+    from: "grpc://127.0.0.1:50051/helloworld.Greeter/SayHello?protoFile=protos/helloworld.proto&transport=plaintext"
+    steps:
+      - to: "mock:result"
+"#,
+    )
+    .expect("gRPC route YAML must parse"); // allow-unwrap
+    assert_eq!(route_defs.len(), 1, "discovery output carries one route");
+
+    let ctx = camel_core::CamelContext::builder()
+        .build()
+        .await
+        .expect("test context must build"); // allow-unwrap
+    type Captured = (Vec<String>, Vec<(String, Vec<std::path::PathBuf>)>);
+    let captured: std::sync::Arc<std::sync::Mutex<Option<Captured>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let sink = std::sync::Arc::clone(&captured);
+
+    watch_reload_with_dev_sources(
+        |_watch_dirs, _controller, discover, provider, _shutdown, _drain, _debounce| {
+            let sink = std::sync::Arc::clone(&sink);
+            async move {
+                let defs = discover()?;
+                let ids = defs.iter().map(|def| def.route_id().to_string()).collect();
+                *sink.lock().expect("capture lock") = Some((ids, provider()));
+                Ok::<(), camel_api::CamelError>(())
+            }
+        },
+        Vec::new(),
+        ctx.runtime_execution_handle(),
+        {
+            let defs = std::sync::Arc::new(std::sync::Mutex::new(Some(route_defs)));
+            Box::new(move || {
+                Ok(defs
+                    .lock()
+                    .expect("discovery defs lock")
+                    .take()
+                    .expect("discovery callback called once"))
+            })
+        },
+        None,
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+    )
+    .await
+    .expect("capturing watch entry must succeed"); // allow-unwrap
+
+    let (discovered, provided) = captured
+        .lock()
+        .expect("capture lock")
+        .take()
+        .expect("watch entry must invoke both callbacks"); // allow-unwrap
+    assert_eq!(
+        discovered,
+        vec![route.to_string()],
+        "the gRPC route definition must flow through the watcher's discovery seam"
+    );
+    let entry = provided
+        .iter()
+        .find(|(id, _)| id == route)
+        .expect("registered fake target must appear in the provider snapshot"); // allow-unwrap
+    assert_eq!(
+        entry.1, sources,
+        "provider must track exactly the fake target's sources"
+    );
+    let proto = std::path::PathBuf::from("protos/helloworld.proto");
+    assert!(
+        provided
+            .iter()
+            .flat_map(|(_, target_sources)| target_sources)
+            .all(|source| source != &proto),
+        "gRPC protoFile references must never be parsed into watch sources"
+    );
+
+    drop(guard);
+}

@@ -15,6 +15,7 @@
 //! committed.
 
 use std::any::Any;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,11 +24,25 @@ use camel_api::CamelError;
 use camel_component_api::template_reload::{TemplateReloadStaged, TemplateReloadTarget};
 use camel_language_api::MinijinjaLimitsConfig;
 
-use crate::closure;
+use crate::closure::{self, ClosureSnapshot};
 use crate::config::{AutoescapeMode, ResolvedExternalTemplateLimits};
 use crate::error::TemplateReloadError;
 use crate::path_util::OwnedHandle;
 use crate::template_set::{SharedTemplates, TemplateSet};
+
+/// The unique absolute FILE paths in `snapshot`: `root_path` joined with each
+/// closure entry name, sorted and deduplicated. The root directory itself is
+/// never included (entry names are always files).
+pub(crate) fn closure_sources(root_path: &Path, snapshot: &ClosureSnapshot) -> Vec<PathBuf> {
+    let mut sources: Vec<PathBuf> = snapshot
+        .entries()
+        .keys()
+        .map(|name| root_path.join(name))
+        .collect();
+    sources.sort();
+    sources.dedup();
+    sources
+}
 
 /// Hot-reload handler installed in `StartupBuildHandle::handler` after a
 /// successful startup build (Task 4.4). Drives a generation counter, the
@@ -57,6 +72,12 @@ pub(crate) struct ReloadHandler {
     /// reloads re-acquire snapshots against the same anchor without a second
     /// root open.
     pub(crate) root: Arc<OwnedHandle>,
+    /// Configured root path, resolved where the root `OwnedHandle` was opened.
+    /// Joined with each closure entry name to produce absolute watch sources.
+    pub(crate) root_path: PathBuf,
+    /// Unique absolute file paths of the last COMMITTED dependency closure.
+    /// A failed build never touches this; [`Self::commit`] replaces it.
+    pub(crate) committed_sources: Mutex<Vec<PathBuf>>,
     /// Owning route id (used for log labels and metrics).
     pub(crate) route_id: String,
     /// Configured entry default applied when the entry has no top-level
@@ -88,6 +109,9 @@ impl std::fmt::Debug for ReloadHandler {
 // returned u64 instead.
 pub(crate) struct StagedSet {
     set: TemplateSet,
+    /// Absolute file paths of this staged closure, moved into
+    /// `committed_sources` by [`ReloadHandler::commit`].
+    sources: Vec<PathBuf>,
     read_generation: u64,
 }
 
@@ -124,24 +148,32 @@ impl ReloadHandler {
         // 'static + Send: the root Arc, the entry path, the Copy limits, and
         // the render limits.
         let root = Arc::clone(&self.root);
+        let root_path = self.root_path.clone();
         let entry_name = self.entry_name.clone();
         let limits = self.limits;
         let render_limits = self.render_limits.clone();
         let default_autoescape = self.default_autoescape;
 
-        let join =
-            tokio::task::spawn_blocking(move || -> Result<TemplateSet, TemplateReloadError> {
+        let join = tokio::task::spawn_blocking(
+            move || -> Result<(TemplateSet, Vec<PathBuf>), TemplateReloadError> {
                 let snapshot = closure::build_snapshot(root.as_ref(), &entry_name, limits)?;
                 // The entry name registered into the Environment is the SAME
                 // root-relative name `build_snapshot` keyed the closure under,
                 // so compile's lookup resolves — mirrors
                 // `StartupBuildHandle::start()` exactly.
-                TemplateSet::compile(&snapshot, &entry_name, render_limits, default_autoescape)
-            });
+                let set = TemplateSet::compile(
+                    &snapshot,
+                    &entry_name,
+                    render_limits,
+                    default_autoescape,
+                )?;
+                Ok((set, closure_sources(&root_path, &snapshot)))
+            },
+        );
 
         // Any failure — acquire/compile OR a join error — returns WITHOUT
         // storing; the prior set is retained (all-or-nothing).
-        let set = join
+        let (set, sources) = join
             .await
             .map_err(|e| {
                 CamelError::TemplateReload(format!("reload build spawn_blocking join error: {e}"))
@@ -155,6 +187,7 @@ impl ReloadHandler {
         Ok((
             Box::new(StagedSet {
                 set,
+                sources,
                 read_generation,
             }),
             read_generation,
@@ -165,6 +198,17 @@ impl ReloadHandler {
     /// [`Self::commit`].
     pub fn current_generation(&self) -> u64 {
         *self.generation.lock().expect("generation poisoned") // allow-unwrap
+    }
+
+    /// Unique absolute file paths of the last COMMITTED dependency closure.
+    ///
+    /// Entry and includes are included; the root directory is excluded. A
+    /// failed build or a staged-but-uncommitted set never contributes.
+    pub fn watch_sources(&self) -> Vec<PathBuf> {
+        self.committed_sources
+            .lock()
+            .expect("committed_sources poisoned") // allow-unwrap
+            .clone()
     }
 
     /// Commit a previously-built staged set — INFALLIBLE.
@@ -178,8 +222,13 @@ impl ReloadHandler {
             .into_any()
             .downcast::<StagedSet>()
             .expect("staged type matches its builder"); // allow-unwrap
+        let StagedSet { set, sources, .. } = *concrete;
+        *self
+            .committed_sources
+            .lock()
+            .expect("committed_sources poisoned") = sources; // allow-unwrap
         *self.generation.lock().expect("generation poisoned") += 1; // allow-unwrap
-        self.shared.store(Arc::new(concrete.set));
+        self.shared.store(Arc::new(set));
     }
 }
 
@@ -201,6 +250,10 @@ impl TemplateReloadTarget for ReloadHandler {
         ReloadHandler::current_generation(self)
     }
 
+    fn watch_sources(&self) -> Vec<PathBuf> {
+        ReloadHandler::watch_sources(self)
+    }
+
     async fn build(&self) -> Result<(Box<dyn TemplateReloadStaged>, u64), CamelError> {
         ReloadHandler::build(self).await
     }
@@ -215,17 +268,22 @@ mod tests {
     use super::{ReloadHandler, SharedTemplates};
     use std::collections::BTreeMap;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
     use arc_swap::ArcSwap;
+    use camel_api::StepLifecycle;
+    use camel_component_api::template_reload::TemplateReloadRegistry;
     use camel_language_api::MinijinjaLimitsConfig;
     use camel_language_minijinja::ResolvedLimits;
 
     use crate::closure;
     use crate::config::ResolvedExternalTemplateLimits;
+    use crate::lifecycle::StartupBuildHandle;
     use crate::path_util::OwnedHandle;
+    use crate::root::RootAnchor;
     use crate::template_set::TemplateSet;
+    use crate::uri::TemplateEntry;
 
     fn default_limits() -> ResolvedExternalTemplateLimits {
         ResolvedExternalTemplateLimits {
@@ -277,6 +335,7 @@ mod tests {
         )
         .expect("seed compile");
         let shared: SharedTemplates = Arc::new(ArcSwap::from_pointee(set));
+        let committed_sources = super::closure_sources(dir.path(), &snapshot);
 
         let handler = Arc::new(ReloadHandler {
             shared: Arc::clone(&shared),
@@ -285,10 +344,167 @@ mod tests {
             limits: default_limits(),
             generation: Mutex::new(0),
             root: Arc::clone(&root),
+            root_path: dir.path().to_path_buf(),
+            committed_sources: Mutex::new(committed_sources),
             route_id: "test-reload".to_string(),
             default_autoescape: None,
         });
         (dir, handler, shared, entry)
+    }
+
+    /// Write `content` to `root/rel`, creating parent directories.
+    fn write_source(root: &Path, rel: &str, content: &str) {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create source parent");
+        }
+        fs::write(&path, content).expect("write source");
+    }
+
+    /// Drive the REAL startup build (which constructs + registers the handler)
+    /// for `root/page.jinja`. The returned handle owns the registration guard,
+    /// so the caller MUST keep it alive for the duration of the test.
+    async fn start_handler(root: &Path, route_id: &str) -> StartupBuildHandle {
+        let shared: SharedTemplates = Arc::new(ArcSwap::from_pointee(TemplateSet::empty()));
+        let handle = StartupBuildHandle {
+            shared,
+            entry: TemplateEntry::Absolute(root.join("page.jinja")),
+            root_anchor: RootAnchor::EntryParent,
+            render_limits: MinijinjaLimitsConfig::default(),
+            limits: default_limits(),
+            route_id: route_id.to_string(),
+            default_autoescape: None,
+            handler: Mutex::new(None),
+            guard: Mutex::new(None),
+        };
+        handle.start().await.expect("startup build");
+        handle
+    }
+
+    fn route_sources(route_id: &str) -> Vec<PathBuf> {
+        TemplateReloadRegistry::global()
+            .route_watch_sources()
+            .into_iter()
+            .find(|(route, _)| route == route_id)
+            .map(|(_, sources)| sources)
+            .expect("route has an entry in route_watch_sources")
+    }
+
+    /// Entry + nested includes are reported as absolute files; the root
+    /// directory itself never appears.
+    #[tokio::test]
+    async fn watch_sources_reports_entry_and_nested_includes_not_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        write_source(
+            root,
+            "page.jinja",
+            r#"{% autoescape "none" %}{% include "part/head.jinja" %}{% endautoescape %}"#,
+        );
+        write_source(
+            root,
+            "part/head.jinja",
+            r#"H{% include "part/logo.jinja" %}"#,
+        );
+        write_source(root, "part/logo.jinja", "L");
+
+        let route_id = "t1";
+        let _handle = start_handler(root, route_id).await;
+
+        let sources = route_sources(route_id);
+        assert_eq!(
+            sources,
+            vec![
+                root.join("page.jinja"),
+                root.join("part/head.jinja"),
+                root.join("part/logo.jinja"),
+            ],
+            "watch sources must be the sorted absolute entry+include closure"
+        );
+        assert!(
+            !sources.contains(&root.to_path_buf()),
+            "the root directory is not a watch source"
+        );
+    }
+
+    /// A successful reload commits its closure; the new include is reported
+    /// without re-registering the target.
+    #[tokio::test]
+    async fn watch_sources_refresh_after_closure_grows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        write_source(
+            root,
+            "page.jinja",
+            r#"{% autoescape "none" %}{% include "part/head.jinja" %}{% endautoescape %}"#,
+        );
+        write_source(
+            root,
+            "part/head.jinja",
+            r#"H{% include "part/logo.jinja" %}"#,
+        );
+        write_source(root, "part/logo.jinja", "L");
+
+        let route_id = "t1-closure-grows";
+        let _handle = start_handler(root, route_id).await;
+
+        write_source(
+            root,
+            "page.jinja",
+            r#"{% autoescape "none" %}{% include "part/head.jinja" %}{% include "part/foot.jinja" %}{% endautoescape %}"#,
+        );
+        write_source(root, "part/foot.jinja", "F");
+
+        TemplateReloadRegistry::global()
+            .reload_route(route_id)
+            .await
+            .expect("reload of a grown closure must succeed");
+
+        let targets = TemplateReloadRegistry::global().find_all(route_id);
+        assert_eq!(targets.len(), 1, "reload must not re-register the target");
+        let sources = targets[0].watch_sources();
+        assert!(
+            sources.contains(&root.join("part/foot.jinja")),
+            "the newly committed include must appear in watch sources, got {sources:?}"
+        );
+    }
+
+    /// A failed reload leaves the previously committed closure untouched.
+    #[tokio::test]
+    async fn watch_sources_unchanged_after_failed_reload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        write_source(
+            root,
+            "page.jinja",
+            r#"{% autoescape "none" %}{% include "part/head.jinja" %}{% endautoescape %}"#,
+        );
+        write_source(
+            root,
+            "part/head.jinja",
+            r#"H{% include "part/logo.jinja" %}"#,
+        );
+        write_source(root, "part/logo.jinja", "L");
+
+        let route_id = "t1-failed-keeps-closure";
+        let _handle = start_handler(root, route_id).await;
+        let before = TemplateReloadRegistry::global().find_all(route_id)[0].watch_sources();
+
+        write_source(root, "page.jinja", "{% if broken %}no endif, no wrapper");
+
+        let result = TemplateReloadRegistry::global()
+            .reload_route(route_id)
+            .await;
+        assert!(
+            result.is_err(),
+            "reload of invalid syntax must fail, got {result:?}"
+        );
+
+        let after = TemplateReloadRegistry::global().find_all(route_id)[0].watch_sources();
+        assert_eq!(
+            after, before,
+            "a failed reload must leave the committed watch sources untouched"
+        );
     }
 
     #[tokio::test]

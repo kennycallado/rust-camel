@@ -21,7 +21,7 @@ The fields below live directly under `[default]`. They are the spine of the file
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `routes` | array of strings | `[]` | Glob patterns for route files (YAML or JSON). Discovery runs at startup and on every file change when watch is enabled. |
-| `watch` | bool | `false` | Enable the file watcher. When `true`, route file changes trigger a hot reload. See [Hot reload](hot-reload.md). |
+| `watch` | bool | `false` | Enable the dev-only file watcher. Route file changes trigger a hot reload; the same watcher also covers template closures and validator protobuf descriptor sources. See [Hot reload](hot-reload.md). |
 | `watch_debounce_ms` | integer (ms) | `300` | Delay after the last file event before a reload. Increase if one save triggers several reloads. |
 | `log_level` | string | `"INFO"` | One of `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`. |
 | `timeout_ms` | integer (ms) | `5000` | Per-exchange timeout enforced by the runtime. Must be `> 0`. |

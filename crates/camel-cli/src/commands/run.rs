@@ -582,10 +582,25 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
             // initially-empty routes dir must still yield a watched root so
             // newly created files trigger reload.
             let watch_dirs = camel_core::reload_watcher::resolve_watch_dirs(&watch_patterns);
-            let result = camel_core::reload_watcher::watch_and_reload(
+            // Distinguish the two watch classes at debug level only: route
+            // roots are watched recursively, asset parents non-recursively.
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let asset_parents: Vec<std::path::PathBuf> = dev_target_sources()
+                    .into_iter()
+                    .flat_map(|(_, sources)| sources)
+                    .filter_map(|source| source.parent().map(std::path::Path::to_path_buf))
+                    .collect();
+                tracing::debug!(
+                    "camel-cli: hot-reload route dirs {:?}, asset parents {:?}",
+                    watch_dirs,
+                    asset_parents
+                );
+            }
+            let result = watch_reload_with_dev_sources(
+                camel_core::reload_watcher::watch_and_reload,
                 watch_dirs,
                 ctrl,
-                move || {
+                Box::new(move || {
                     // Re-resolve patterns on every reload pass so discovery
                     // re-globs newly created/deleted files and re-applies
                     // the test-document skip per pass.
@@ -597,7 +612,7 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
                         watch_security_compile_context.clone(),
                     )
                     .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
-                },
+                }),
                 Some(watcher_token),
                 drain_timeout,
                 debounce,
@@ -857,6 +872,65 @@ fn resolve_route_patterns_with(
     } else {
         defaults.to_vec()
     }
+}
+
+/// Snapshot of committed template reload targets as `(route_id, sources)`.
+///
+/// `camel run --watch` consults this on every reload pass to watch template
+/// and proto asset parents. It reads only the registry: route definitions are
+/// never parsed here, so a gRPC `protoFile=` reference creates no target and
+/// contributes no asset parent.
+fn dev_target_sources() -> Vec<(String, Vec<std::path::PathBuf>)> {
+    camel_component_api::template_reload::TemplateReloadRegistry::global().route_watch_sources()
+}
+
+/// Production `--watch` entry, generic over the watch implementation so tests
+/// can substitute a capturing function.
+///
+/// The provider argument is part of THIS call shape: removing
+/// `dev_target_sources` from the watcher invocation is visible to a test that
+/// drives the helper with a capturing watch function, instead of the test
+/// re-deriving the snapshot itself.
+/// Discovery callback handed to the reload watcher.
+type WatchDiscoverFn = Box<
+    dyn Fn() -> Result<Vec<camel_core::RouteDefinition>, camel_api::CamelError>
+        + Send
+        + Sync
+        + 'static,
+>;
+
+#[allow(clippy::too_many_arguments)]
+async fn watch_reload_with_dev_sources<W, Fut>(
+    watch: W,
+    watch_dirs: Vec<std::path::PathBuf>,
+    controller: camel_core::context::RuntimeExecutionHandle,
+    discover_fn: WatchDiscoverFn,
+    shutdown: Option<CancellationToken>,
+    drain_timeout: std::time::Duration,
+    debounce: std::time::Duration,
+) -> Fut::Output
+where
+    W: FnOnce(
+        Vec<std::path::PathBuf>,
+        camel_core::context::RuntimeExecutionHandle,
+        WatchDiscoverFn,
+        fn() -> Vec<(String, Vec<std::path::PathBuf>)>,
+        Option<CancellationToken>,
+        std::time::Duration,
+        std::time::Duration,
+    ) -> Fut,
+    Fut: std::future::Future,
+{
+    watch(
+        watch_dirs,
+        controller,
+        discover_fn,
+        dev_target_sources,
+        shutdown,
+        drain_timeout,
+        debounce,
+    )
+    .await
 }
 
 /// Production entry: resolve the route patterns `camel run` loads routes from.

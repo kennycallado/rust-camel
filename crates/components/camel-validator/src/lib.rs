@@ -29,6 +29,9 @@ mod bridge_client_test;
 #[cfg(test)]
 mod component_protobuf_tests;
 
+#[cfg(test)]
+mod protobuf_reload_tests;
+
 pub mod proto {
     tonic::include_proto!("xml_bridge");
 }

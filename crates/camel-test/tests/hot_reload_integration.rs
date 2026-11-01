@@ -101,6 +101,7 @@ async fn test_watcher_swaps_pipeline_on_file_change() {
                 camel_dsl::discover_routes(&patterns_clone)
                     .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
             },
+            Vec::<(String, Vec<std::path::PathBuf>)>::new,
             Some(shutdown_clone),
             std::time::Duration::from_secs(10),
             std::time::Duration::from_millis(50),
@@ -188,6 +189,7 @@ async fn test_watcher_removes_route_on_file_deletion() {
                 camel_dsl::discover_routes(&patterns_clone)
                     .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
             },
+            Vec::<(String, Vec<std::path::PathBuf>)>::new,
             Some(shutdown_clone),
             std::time::Duration::from_secs(10),
             std::time::Duration::from_millis(50),
@@ -291,6 +293,7 @@ async fn test_watcher_restart_preserves_non_running_route_state() {
                 camel_dsl::discover_routes(&patterns_clone)
                     .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
             },
+            Vec::<(String, Vec<std::path::PathBuf>)>::new,
             Some(shutdown_clone),
             std::time::Duration::from_secs(10),
             std::time::Duration::from_millis(50),
@@ -381,6 +384,7 @@ async fn test_restart_with_from_uri_change_processes_exchanges_via_new_endpoint(
                 camel_dsl::discover_routes(&patterns_clone)
                     .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
             },
+            Vec::<(String, Vec<std::path::PathBuf>)>::new,
             Some(shutdown_clone),
             Duration::from_secs(10),
             Duration::from_millis(50),

@@ -338,6 +338,8 @@ watch_and_reload(
     handle,
     || camel_dsl::discover_routes(&patterns)
         .map_err(|e| CamelError::RouteError(e.to_string())),
+    // no template/proto reload targets in this example
+    Vec::<(String, Vec<std::path::PathBuf>)>::new,
     Some(cancel_token),
     Duration::from_secs(10),
     Duration::from_millis(300),

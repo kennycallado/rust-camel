@@ -78,6 +78,9 @@ impl TemplateReloadTarget for FakeTarget {
     fn reload_timeout(&self) -> Duration {
         Duration::from_secs(5)
     }
+    fn watch_sources(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
     fn current_generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
