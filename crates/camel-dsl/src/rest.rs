@@ -422,7 +422,7 @@ fn lower_operation(
     //    below. Skipped under raw binding — the handler's body is already in
     //    its declared wire form and must not be re-encoded.
     if !raw_binding {
-        steps.push(RouteDslStep::Marshal(MarshalStep {
+        steps.push(RouteDslStep::ResponseMarshal(MarshalStep {
             marshal: data_format.to_string(),
             config: None,
         }));
@@ -1031,7 +1031,7 @@ mod tests {
         let steps = &lower_all_rest_to_routes(&[rest]).unwrap()[0].steps;
         let marshal_idx = steps
             .iter()
-            .position(|s| matches!(s, RouteDslStep::Marshal(_)))
+            .position(|s| matches!(s, RouteDslStep::ResponseMarshal(_)))
             .expect("marshal step present");
         let ct_idx = steps
             .iter()
@@ -1529,7 +1529,7 @@ rest:
             vec![
                 "ContentNegotiation",
                 "To",
-                "Marshal",
+                "ResponseMarshal",
                 "SetHeader",
                 "SetHeaderIfAbsent"
             ]
@@ -1568,7 +1568,7 @@ rest:
                 "ContentNegotiation",
                 "Unmarshal",
                 "To",
-                "Marshal",
+                "ResponseMarshal",
                 "SetHeader",
                 "SetHeaderIfAbsent"
             ]
@@ -1614,6 +1614,45 @@ rest:
                 .any(|name| name == "Unmarshal"),
             "GET must not emit unmarshal even with a request schema"
         );
+    }
+
+    #[test]
+    fn response_binding_uses_response_marshal_step() {
+        // The automatic response-encoding step must be tagged with the
+        // internal ResponseMarshal variant so the compiler can pick the
+        // response-side error wrapping (500 instead of 400).
+        for binding in [
+            RouteDslRestBinding::Json,
+            RouteDslRestBinding::Form,
+            RouteDslRestBinding::Xml,
+        ] {
+            let mut rest = make_rest("createUser", "post", "/", "bean:create");
+            rest.operations[0].binding = Some(binding);
+            let media = match binding {
+                RouteDslRestBinding::Form => FORM_MEDIA,
+                RouteDslRestBinding::Xml => XML_MEDIA,
+                _ => "application/json",
+            };
+            rest.operations[0].consumes = media.to_string();
+            rest.operations[0].produces = media.to_string();
+            let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+            assert_eq!(
+                step_kind_names(&routes[0].steps),
+                vec![
+                    "ContentNegotiation",
+                    "Unmarshal",
+                    "To",
+                    "ResponseMarshal",
+                    "SetHeader",
+                    "SetHeaderIfAbsent"
+                ],
+                "binding {binding:?} must tag the response marshal step"
+            );
+            assert!(
+                matches!(&routes[0].steps[3], RouteDslStep::ResponseMarshal(_)),
+                "response marshal must not be the authored Marshal variant"
+            );
+        }
     }
 
     // ── Task 1.4: raw-mode lowering ──
@@ -1930,7 +1969,7 @@ rest:
                 "ContentNegotiation",
                 "Unmarshal",
                 "To",
-                "Marshal",
+                "ResponseMarshal",
                 "SetHeader",
                 "SetHeaderIfAbsent"
             ],
@@ -1957,7 +1996,7 @@ rest:
             other => panic!("expected To at idx 2, got {other:?}"),
         }
         match &routes[0].steps[3] {
-            RouteDslStep::Marshal(m) => {
+            RouteDslStep::ResponseMarshal(m) => {
                 assert_eq!(m.marshal, "form");
                 assert!(m.config.is_none());
             }
@@ -1992,7 +2031,7 @@ rest:
             "form GET must start with the negotiation step, got {steps:?}"
         );
         let marshal = steps.iter().find_map(|s| match s {
-            RouteDslStep::Marshal(m) => Some(m),
+            RouteDslStep::ResponseMarshal(m) => Some(m),
             _ => None,
         });
         assert_eq!(
@@ -2172,7 +2211,7 @@ rest:
                 "ContentNegotiation",
                 "Unmarshal",
                 "To",
-                "Marshal",
+                "ResponseMarshal",
                 "SetHeader",
                 "SetHeaderIfAbsent"
             ],
@@ -2183,7 +2222,7 @@ rest:
             other => panic!("expected Unmarshal(xml) at idx 1, got {other:?}"),
         }
         match &routes[0].steps[3] {
-            RouteDslStep::Marshal(m) => assert_eq!(m.marshal, "xml"),
+            RouteDslStep::ResponseMarshal(m) => assert_eq!(m.marshal, "xml"),
             other => panic!("expected Marshal(xml) at idx 3, got {other:?}"),
         }
     }
@@ -2208,7 +2247,7 @@ rest:
             "GET must not emit an unmarshal step"
         );
         let marshal = steps.iter().find_map(|s| match s {
-            RouteDslStep::Marshal(m) => Some(m),
+            RouteDslStep::ResponseMarshal(m) => Some(m),
             _ => None,
         });
         assert_eq!(
@@ -2274,7 +2313,7 @@ rest:
                 "ContentNegotiation",
                 "Unmarshal",
                 "To",
-                "Marshal",
+                "ResponseMarshal",
                 "SetHeader",
                 "SetHeaderIfAbsent"
             ]
@@ -2302,7 +2341,7 @@ rest:
             other => panic!("expected To(direct:t) at idx 2, got {other:?}"),
         }
         match &routes[0].steps[3] {
-            RouteDslStep::Marshal(m) => assert_eq!(m.marshal, "json"),
+            RouteDslStep::ResponseMarshal(m) => assert_eq!(m.marshal, "json"),
             other => panic!("expected Marshal(json) at idx 3, got {other:?}"),
         }
         match &routes[0].steps[4] {

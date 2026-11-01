@@ -752,6 +752,11 @@ pub enum DeclarativeStep {
     Script(ScriptStepDef),
     StreamCache(StreamCacheStepDef),
     Marshal(DataFormatDef),
+    /// Internal REST response-encoding step. Constructed by REST lowering
+    /// only; behaves like [`DeclarativeStep::Marshal`] but wraps failures in
+    /// [`camel_api::CamelError::ProcessorErrorWithSource`] so the HTTP
+    /// finaliser maps them to 500 rather than 400.
+    ResponseMarshal(DataFormatDef),
     Unmarshal(DataFormatDef),
     Validate(ValidateStepDef),
     Bean(BeanStepDef),
@@ -813,7 +818,9 @@ impl DeclarativeStep {
             DeclarativeStep::Throttle(_) => crate::contract::DeclarativeStepKind::Throttle,
             DeclarativeStep::Script(_) => crate::contract::DeclarativeStepKind::Script,
             DeclarativeStep::StreamCache(_) => crate::contract::DeclarativeStepKind::StreamCache,
-            DeclarativeStep::Marshal(_) => crate::contract::DeclarativeStepKind::Marshal,
+            DeclarativeStep::Marshal(_) | DeclarativeStep::ResponseMarshal(_) => {
+                crate::contract::DeclarativeStepKind::Marshal
+            }
             DeclarativeStep::Unmarshal(_) => crate::contract::DeclarativeStepKind::Unmarshal,
             DeclarativeStep::Validate(_) => crate::contract::DeclarativeStepKind::Validate,
             DeclarativeStep::Bean(_) => crate::contract::DeclarativeStepKind::Bean,

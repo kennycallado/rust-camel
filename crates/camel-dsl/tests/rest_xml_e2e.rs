@@ -434,10 +434,22 @@ async fn xml_multi_root_response_fails() {
         .await
         .expect_err("a multi-root projection must fail the xml marshal");
 
-    assert!(
-        matches!(err, CamelError::TypeConversionFailed(_)),
-        "expected TypeConversionFailed from the xml marshal, got: {err:?}"
-    );
+    match err {
+        CamelError::ProcessorErrorWithSource(msg, source) => {
+            assert!(
+                msg.contains("response marshal failed"),
+                "message must name the response-side failure, got: {msg:?}"
+            );
+            assert!(
+                matches!(
+                    source.downcast_ref::<CamelError>(),
+                    Some(CamelError::TypeConversionFailed(_))
+                ),
+                "source must preserve the original TypeConversionFailed, got: {source:?}"
+            );
+        }
+        other => panic!("expected ProcessorErrorWithSource from the xml marshal, got: {other:?}"),
+    }
 }
 
 #[tokio::test]

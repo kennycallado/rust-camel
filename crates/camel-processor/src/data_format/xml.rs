@@ -43,6 +43,13 @@ impl DataFormat for XmlDataFormat {
         "xml"
     }
 
+    /// Marshal a body into XML.
+    ///
+    /// `Body::Json` is serialized to XML text. `Body::Xml` and valid-UTF-8
+    /// `Body::Bytes` are already-serialized XML and pass through unchanged;
+    /// invalid UTF-8 fails closed. There is no content sniffing, no
+    /// well-formedness re-parse, and no re-encoding. UTF-8-only mirrors the
+    /// REST XML charset gate.
     fn marshal(&self, body: Body) -> Result<Body, CamelError> {
         match body {
             Body::Json(v) => {
@@ -53,14 +60,16 @@ impl DataFormat for XmlDataFormat {
             Body::Stream(_) => Err(CamelError::TypeConversionFailed(
                 "cannot marshal Body::Stream — add 'stream_cache' or 'convert_body_to' before this step".to_string(),
             )),
-            Body::Bytes(_) => Err(CamelError::TypeConversionFailed(
-                "XmlDataFormat::marshal only supports Body::Json, Body::Text, and Body::Empty"
-                    .to_string(),
-            )),
-            Body::Xml(_) => Err(CamelError::TypeConversionFailed(
-                "XmlDataFormat::marshal does not accept Body::Xml — use unmarshal to convert XML to JSON"
-                    .to_string(),
-            )),
+            Body::Bytes(b) => {
+                if let Err(e) = std::str::from_utf8(&b) {
+                    return Err(CamelError::TypeConversionFailed(format!(
+                        "XmlDataFormat::marshal: Body::Bytes is not valid UTF-8 (first invalid byte offset {})",
+                        e.valid_up_to()
+                    )));
+                }
+                Ok(Body::Bytes(b))
+            }
+            Body::Xml(s) => Ok(Body::Xml(s)),
             // Empty-body operations (e.g. REST 204) must not fail marshalling;
             // matches JsonDataFormat, which passes Body::Empty through.
             Body::Empty => Ok(Body::Empty),
@@ -307,10 +316,60 @@ mod tests {
     }
 
     #[test]
-    fn test_marshal_xml_body_rejected() {
-        let body = Body::Xml("<root/>".to_string());
-        let result = XmlDataFormat::default().marshal(body);
-        assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
+    fn marshal_xml_body_passes_through() {
+        let body = Body::Xml("<user><name>kenny</name></user>".to_string());
+        let result = XmlDataFormat::default().marshal(body).unwrap();
+        assert_eq!(
+            result,
+            Body::Xml("<user><name>kenny</name></user>".to_string())
+        );
+    }
+
+    #[test]
+    fn marshal_valid_utf8_bytes_passes_through() {
+        let body = Body::Bytes(Bytes::from_static(b"<user/>"));
+        let result = XmlDataFormat::default().marshal(body).unwrap();
+        match result {
+            Body::Bytes(b) => assert_eq!(b, Bytes::from_static(b"<user/>")),
+            other => panic!("expected Body::Bytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn marshal_invalid_utf8_bytes_fails_naming_body_bytes() {
+        let body = Body::Bytes(Bytes::from_static(&[0xFF, 0xFE]));
+        match XmlDataFormat::default().marshal(body) {
+            Err(CamelError::TypeConversionFailed(msg)) => {
+                assert!(
+                    msg.contains("Body::Bytes"),
+                    "should name the variant: {msg}"
+                );
+                assert!(msg.contains("UTF-8"), "should name the charset: {msg}");
+                assert!(msg.contains('0'), "should name the invalid offset: {msg}");
+            }
+            other => panic!("expected TypeConversionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn marshal_stream_still_fails_closed() {
+        use camel_api::body::{StreamBody, StreamMetadata};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        let body = Body::Stream(StreamBody {
+            stream: Arc::new(Mutex::new(Some(Box::pin(futures::stream::empty())))),
+            metadata: StreamMetadata::default(),
+        });
+        match XmlDataFormat::default().marshal(body) {
+            Err(CamelError::TypeConversionFailed(msg)) => {
+                assert!(
+                    msg.contains("stream_cache"),
+                    "message should point at stream_cache: {msg}"
+                );
+            }
+            other => panic!("expected TypeConversionFailed, got {other:?}"),
+        }
     }
 
     #[test]

@@ -53,6 +53,9 @@ fn _assert_all_variants_covered(step: &RouteDslStep) {
         // Skip-deserializing variant (like SetHeaderIfAbsent): no parity
         // case possible — it never round-trips through YAML/JSON.
         RouteDslStep::ContentNegotiation(_) => (),
+        // Skip-deserializing internal variant: REST lowering only, never
+        // authored YAML/JSON, so no parity case exists.
+        RouteDslStep::ResponseMarshal(_) => (),
         RouteDslStep::RemoveHeader(_) => (),
         RouteDslStep::SetProperty(_) => (),
         RouteDslStep::SetBody(_) => (),

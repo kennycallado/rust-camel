@@ -1275,6 +1275,18 @@ pub(crate) fn route_step_to_declarative_step(
                 config,
             }))
         }
+        RouteDslStep::ResponseMarshal(MarshalStep { marshal, config }) => {
+            if marshal.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "marshal: format must not be empty".into(),
+                ));
+            }
+            Ok(DeclarativeStep::ResponseMarshal(DataFormatDef {
+                format: marshal,
+                schema: None,
+                config,
+            }))
+        }
         RouteDslStep::Unmarshal(UnmarshalStep {
             unmarshal,
             schema,
@@ -6377,6 +6389,54 @@ routes:
         assert!(
             result.is_err(),
             "content_negotiation YAML key must be rejected at deserialization"
+        );
+    }
+
+    #[test]
+    fn response_marshal_is_not_authorable_from_yaml() {
+        // `response_marshal` is an internal REST-lowering variant only: the
+        // RouteDslStep arm is skip_deserializing, so an authored key of that
+        // name matches no untagged candidate.
+        let yaml = r#"
+routes:
+  - id: response-marshal-guard
+    from: "direct:start"
+    steps:
+      - response_marshal:
+          marshal: json
+"#;
+        let err = parse_yaml(yaml)
+            .err()
+            .expect("response_marshal YAML key must be rejected");
+        assert!(
+            err.to_string().contains("did not match any variant"),
+            "expected untagged-enum rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn authored_marshal_step_stays_marshal() {
+        // A user-authored `marshal:` step must keep the step-side Marshal
+        // semantics, never the internal ResponseMarshal variant.
+        let yaml = r#"
+routes:
+  - id: authored-marshal
+    from: "direct:start"
+    steps:
+      - marshal: json
+"#;
+        let routes = parse_yaml_to_declarative(yaml).unwrap();
+        assert!(
+            matches!(
+                &routes[0].steps[0],
+                DeclarativeStep::Marshal(DataFormatDef { format, .. }) if format == "json"
+            ),
+            "authored marshal must lower to DeclarativeStep::Marshal, got {:?}",
+            routes[0].steps[0]
+        );
+        assert!(
+            !matches!(&routes[0].steps[0], DeclarativeStep::ResponseMarshal(_)),
+            "authored marshal must not become ResponseMarshal"
         );
     }
 

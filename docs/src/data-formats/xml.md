@@ -2,7 +2,7 @@
 
 The XML data format converts an XML document into a JSON object and converts a JSON object back into XML text. It is built into `camel-processor`, is registered by default under the name `xml`, and needs no separate crate. See [Data Formats](index.md) for the full format catalog.
 
-Unmarshal parses the wire text and returns `Body::Json`. Marshal reverses the conversion and returns `Body::Text`. The format never touches headers or exchange metadata.
+Unmarshal parses the wire text and returns `Body::Json`. Marshal converts JSON to XML text; `Body::Xml` and valid-UTF-8 `Body::Bytes` pass through unchanged. The format never touches headers or exchange metadata.
 
 ## Usage
 
@@ -66,12 +66,14 @@ Number and boolean leaves are stringified. A round trip through XML therefore tu
 
 A `Body::Text` body passes through unchanged.
 
+A `Body::Xml` body is accepted as already-serialized XML and passes through unchanged with no re-parse. A `Body::Bytes` body is accepted only when it is valid UTF-8 and passes through unchanged; invalid UTF-8 fails with `CamelError::TypeConversionFailed` naming `Body::Bytes` and the byte offset. Marshal performs no content sniffing and no well-formedness validation.
+
 ## Empty body
 
 `Body::Empty` marshal is a no-op and keeps the body as `Body::Empty`, matching the `json` format. `Body::Empty` unmarshal fails closed with `CamelError::TypeConversionFailed`. This is a deliberate divergence from `json` and `form`, which skip empty bodies.
 
 ## REST binding
 
-In REST `binding: xml`, the request order is XML to JSON, then JSON Schema validation, then the user steps. The response order is user JSON, then the declared response schema as OpenAPI metadata only, then XML text. XML REST binding is not multipart.
+In REST `binding: xml`, the request order is XML to JSON, then JSON Schema validation, then the user steps. The response order is user JSON, then the declared response schema as OpenAPI metadata only, then XML text. A response-marshal failure is a server error reported as HTTP 500, while a request-side XML parse failure stays HTTP 400. A `Body::Xml` or valid-UTF-8 `Body::Bytes` produced by a user step passes through the response marshal and is returned with the declared `produces` Content-Type. XML REST binding is not multipart.
 
 **Reference**: [xml data format source](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-processor/src/data_format/xml.rs)

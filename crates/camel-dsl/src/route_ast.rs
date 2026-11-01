@@ -569,6 +569,13 @@ pub enum RouteDslStep {
     #[cfg_attr(feature = "schema", schemars(skip))]
     #[cfg_attr(feature = "schema", ts(skip))]
     ContentNegotiation(ContentNegotiationStep),
+    #[serde(skip_deserializing)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    #[cfg_attr(feature = "schema", ts(skip))]
+    /// Internal REST response-encoding step. Injected by REST lowering only;
+    /// not authorable in YAML. Behaves like [`RouteDslStep::Marshal`] but
+    /// compiles to a response-side marshal whose failures map to HTTP 500.
+    ResponseMarshal(MarshalStep),
     RemoveHeader(RemoveHeaderStep),
     SetProperty(SetPropertyStep),
     SetBody(SetBodyStep),

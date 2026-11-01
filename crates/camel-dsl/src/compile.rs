@@ -1276,6 +1276,11 @@ fn compile_declarative_step_with_threshold(
             format: _,
             schema: Some(_),
             ..
+        })
+        | DeclarativeStep::ResponseMarshal(DataFormatDef {
+            format: _,
+            schema: Some(_),
+            ..
         }) => {
             // `schema` is meaningful only for Unmarshal — Marshal serialises a
             // body to the wire format, it never validates input. Reject
@@ -1291,27 +1296,22 @@ fn compile_declarative_step_with_threshold(
             schema: None,
             config,
         }) => {
-            let df = if format.strip_prefix("protobuf:").is_some() {
-                reject_protobuf_config(&config)?;
-                #[cfg(feature = "protobuf")]
-                {
-                    let rest = format.strip_prefix("protobuf:").expect("checked prefix"); // allow-unwrap
-                    resolve_protobuf_dataformat(rest)?
-                }
-                #[cfg(not(feature = "protobuf"))]
-                {
-                    return Err(CamelError::RouteError(
-                        "protobuf data format requires the 'protobuf' feature flag".to_string(),
-                    ));
-                }
-            } else {
-                builtin_data_format_with_config(&format, config.as_ref().unwrap_or(&serde_json::Value::Null))?
-                    .ok_or_else(|| CamelError::Config(format!(
-                        "unknown data format: '{format}'. Expected: json, xml, zip, protobuf:<path>#<Message>"
-                    )))?
-            };
+            let df = resolve_marshal_data_format(&format, &config)?;
             Ok(BuilderStep::Processor(camel_api::OpaqueProcessor(
                 camel_api::BoxProcessor::new(MarshalService::new(camel_api::IdentityProcessor, df)),
+            )))
+        }
+        DeclarativeStep::ResponseMarshal(DataFormatDef {
+            format,
+            schema: None,
+            config,
+        }) => {
+            let df = resolve_marshal_data_format(&format, &config)?;
+            Ok(BuilderStep::Processor(camel_api::OpaqueProcessor(
+                camel_api::BoxProcessor::new(MarshalService::for_response(
+                    camel_api::IdentityProcessor,
+                    df,
+                )),
             )))
         }
         DeclarativeStep::Unmarshal(DataFormatDef {
@@ -1569,6 +1569,36 @@ fn compile_idempotent_consumer_step(
     })
 }
 
+fn resolve_marshal_data_format(
+    format: &str,
+    config: &Option<serde_json::Value>,
+) -> Result<std::sync::Arc<dyn camel_api::DataFormat>, CamelError> {
+    if format.strip_prefix("protobuf:").is_some() {
+        reject_protobuf_config(config)?;
+        #[cfg(feature = "protobuf")]
+        {
+            let rest = format.strip_prefix("protobuf:").expect("checked prefix"); // allow-unwrap
+            resolve_protobuf_dataformat(rest)
+        }
+        #[cfg(not(feature = "protobuf"))]
+        {
+            Err(CamelError::RouteError(
+                "protobuf data format requires the 'protobuf' feature flag".to_string(),
+            ))
+        }
+    } else {
+        builtin_data_format_with_config(
+            format,
+            config.as_ref().unwrap_or(&serde_json::Value::Null),
+        )?
+        .ok_or_else(|| {
+            CamelError::Config(format!(
+                "unknown data format: '{format}'. Expected: json, xml, zip, protobuf:<path>#<Message>"
+            ))
+        })
+    }
+}
+
 #[cfg(feature = "protobuf")]
 static PROTO_CACHE: std::sync::OnceLock<camel_proto_compiler::ProtoCache> =
     std::sync::OnceLock::new();
@@ -1802,6 +1832,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::ConvertBodyTo(_) => "convert_body_to",
         DeclarativeStep::Bean(_) => "bean",
         DeclarativeStep::Marshal(_) => "marshal",
+        DeclarativeStep::ResponseMarshal(_) => "marshal",
         DeclarativeStep::Unmarshal(_) => "unmarshal",
         DeclarativeStep::Delay(_) => "delay",
         DeclarativeStep::Validate(_) => "validate",
@@ -2212,6 +2243,7 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
         | DeclarativeStep::ConvertBodyTo(_)
         | DeclarativeStep::Bean(_)
         | DeclarativeStep::Marshal(_)
+        | DeclarativeStep::ResponseMarshal(_)
         | DeclarativeStep::Unmarshal(_)
         | DeclarativeStep::Validate(_)
         | DeclarativeStep::Function(_)
@@ -3626,6 +3658,145 @@ mod tests {
             result.is_ok(),
             "marshal with no schema should compile, got: {result:?}"
         );
+    }
+
+    #[test]
+    fn compile_response_marshal_json_to_processor() {
+        let step = DeclarativeStep::ResponseMarshal(DataFormatDef {
+            format: "json".to_string(),
+            schema: None,
+            config: None,
+        });
+        let result = compile_declarative_step(step);
+        assert!(
+            matches!(result, Ok(BuilderStep::Processor(_))),
+            "response marshal must compile to a processor, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compile_response_marshal_wraps_xml_multi_root_error() {
+        // Guards the compile wiring: a silent switch from `for_response` back
+        // to `new` would leave the suite green while response-side failures
+        // regressed from 500 to 400.
+        let step = DeclarativeStep::ResponseMarshal(DataFormatDef {
+            format: "xml".to_string(),
+            schema: None,
+            config: None,
+        });
+        let BuilderStep::Processor(op) =
+            compile_declarative_step(step).expect("compile response marshal")
+        else {
+            panic!("expected a processor step");
+        };
+        let camel_api::OpaqueProcessor(processor) = op;
+
+        use tower::ServiceExt;
+        let exchange = camel_api::Exchange::new(camel_api::Message::new(camel_api::Body::Json(
+            serde_json::json!({"a": 1, "b": 2}),
+        )));
+        let err = processor
+            .oneshot(exchange)
+            .await
+            .expect_err("xml multi-root must fail response marshal");
+        match &err {
+            CamelError::ProcessorErrorWithSource(msg, _) => assert!(
+                msg.contains("response marshal failed"),
+                "message must name the response-side failure, got {msg:?}"
+            ),
+            other => panic!("expected ProcessorErrorWithSource, got {other:?}"),
+        }
+        assert_eq!(err.variant_name(), "ProcessorError");
+    }
+
+    #[test]
+    fn compile_response_marshal_rejects_schema() {
+        let step = DeclarativeStep::ResponseMarshal(DataFormatDef {
+            format: "json".to_string(),
+            schema: Some(serde_json::json!({ "type": "object" })),
+            config: None,
+        });
+        let err = compile_declarative_step(step)
+            .expect_err("ResponseMarshal with schema must be rejected at compile time");
+        match err {
+            CamelError::RouteError(msg) => assert!(
+                msg.contains("does not support 'schema'"),
+                "error should mention schema is unsupported on marshal, got: {msg}"
+            ),
+            other => panic!("expected CamelError::RouteError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn compile_authored_marshal_xml_multi_root_is_type_conversion_failed() {
+        // Step-side Marshal keeps the raw TypeConversionFailed (→ 400).
+        let BuilderStep::Processor(op) =
+            compile_declarative_step(DeclarativeStep::Marshal(DataFormatDef {
+                format: "xml".to_string(),
+                schema: None,
+                config: None,
+            }))
+            .expect("authored marshal(xml) must compile")
+        else {
+            panic!("expected a processor step");
+        };
+        let camel_api::OpaqueProcessor(processor) = op;
+
+        use tower::ServiceExt;
+        let mut exchange = camel_api::Exchange::new(camel_api::Message::default());
+        exchange.input.body = camel_api::Body::Json(serde_json::json!({"a": 1, "b": 2}));
+        let result = processor.oneshot(exchange).await;
+        assert!(
+            matches!(result, Err(CamelError::TypeConversionFailed(_))),
+            "authored Marshal must surface TypeConversionFailed, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn response_marshal_error_does_not_match_type_conversion_kind() {
+        let err = CamelError::ProcessorErrorWithSource(
+            "response marshal failed (xml)".into(),
+            std::sync::Arc::new(CamelError::TypeConversionFailed("two roots".into())),
+        );
+
+        let make = |kind: &str| {
+            compile_error_handler(DeclarativeErrorHandler {
+                dead_letter_channel: None,
+                retry: None,
+                on_exceptions: Some(vec![DeclarativeOnException {
+                    kind: Some(kind.into()),
+                    message_contains: None,
+                    retry: None,
+                    steps: vec![],
+                    handled: None,
+                    continued: None,
+                    handled_by: None,
+                }]),
+                use_original_message: false,
+            })
+            .expect("compile should succeed")
+        };
+
+        let type_conversion = make("TypeConversionFailed");
+        assert!(
+            !(type_conversion.policies[0].matches)(&err),
+            "a wrapped response marshal error must not match TypeConversionFailed"
+        );
+
+        let processor = make("ProcessorErrorWithSource");
+        assert!(
+            (processor.policies[0].matches)(&err),
+            "a wrapped response marshal error must match ProcessorErrorWithSource"
+        );
+    }
+
+    #[test]
+    fn wrapped_response_marshal_error_variant_name_is_processor_error() {
+        let err = CamelError::ProcessorErrorWithSource(
+            "response marshal failed (xml)".into(),
+            std::sync::Arc::new(CamelError::TypeConversionFailed("two roots".into())),
+        );
+        assert_eq!(err.variant_name(), "ProcessorError");
     }
 
     #[test]

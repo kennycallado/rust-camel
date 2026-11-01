@@ -1,0 +1,15 @@
+{
+  "kind": "plan",
+  "verdict": "APPROVE-WITH-FIXES",
+  "hash": "sha256:f338da3fadbe37ba47923002bfb35c0559fcc6d050a497b6201c4cb9e4eea786",
+  "expert": "experts/e_opus",
+  "session": "ses_e67fb7db0ffe25L1eXa0PDfjIM",
+  "date": "2026-11-01",
+  "notes": [
+    "First plan pass (ses_e67fdb560ffesSjohAMNEgNleW) returned APPROVE-WITH-FIXES with 8 findings; all applied before the approving re-read: from_utf8 borrow fix, XmlDataFormat/JsonDataFormat test doubles instead of FailingDataFormat, rest_xml_e2e multi-root expectation update, untagged-enum error assertion, real Body::Stream for the json 500 case, runtime authored-marshal tests, variant_name do_try pin, design contract.rs correction.",
+    "Second pass concluded 'only minor fixes, none blocking': three cosmetic items (missing modified-file entry for rest_xml_e2e.rs, a missing backtick, docs yaml-dsl bullet in design). Applied post-bless; no code, test, or scope change.",
+    "r_glm plan review (ses_e6803a493ffeIBo0R7K9rPSYp3) returned APPROVE-WITH-FINDINGS; its two findings (vnd.x+xml Content-Type discriminator, on_exceptions/do_try identity pin) were applied before the plan bless.",
+    "Pre-flight expert (ses_e680cbe63ffegUZqLPZ9L6Csev) ruled to reuse CamelError::ProcessorErrorWithSource instead of a new variant.",
+    "Order budget: e_opus blessing specified by the mission order (master-approved deviation while gpt quota is exhausted); each dispatch was a single attempt."
+  ]
+}

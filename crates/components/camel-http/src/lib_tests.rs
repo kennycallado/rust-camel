@@ -8582,6 +8582,33 @@ fn other_error_still_maps_to_500() {
 }
 
 #[test]
+fn processor_error_with_source_maps_to_500_and_hides_detail() {
+    let reply = pipeline_error_to_reply(
+        CamelError::ProcessorErrorWithSource(
+            "response marshal failed (xml)".to_string(),
+            Arc::new(CamelError::TypeConversionFailed(
+                "two root keys".to_string(),
+            )),
+        ),
+        "/api/x",
+    );
+    assert_eq!(reply.status, 500);
+    let body = match &reply.body {
+        HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        _ => panic!("expected bytes body"),
+    };
+    assert_eq!(body, "Internal Server Error");
+    assert!(
+        !body.contains("response marshal failed"),
+        "500 body must not leak the marshal detail; got {body:?}"
+    );
+    assert!(
+        !body.contains("two root keys"),
+        "500 body must not leak the source detail; got {body:?}"
+    );
+}
+
+#[test]
 fn unauthenticated_maps_to_401() {
     let reply = pipeline_error_to_reply(
         CamelError::Unauthenticated("no token".to_string()),

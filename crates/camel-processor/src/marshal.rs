@@ -9,17 +9,48 @@ use camel_api::body::Body;
 use camel_api::data_format::DataFormat;
 use camel_api::{CamelError, Exchange};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarshalSide {
+    Step,
+    Response,
+}
+
 #[derive(Clone)]
 pub struct MarshalService<P> {
     inner: P,
     format: Arc<dyn DataFormat>,
+    side: MarshalSide,
 }
 
 impl<P> MarshalService<P> {
     pub fn new(inner: P, format: Arc<dyn DataFormat>) -> Self {
-        Self { inner, format }
+        Self {
+            inner,
+            format,
+            side: MarshalSide::Step,
+        }
+    }
+
+    /// Build a marshal step for the response side of an exchange.
+    ///
+    /// Response-side marshal failures are deliberately wrapped in
+    /// [`CamelError::ProcessorErrorWithSource`] so the HTTP finalizer maps the
+    /// failure to 500, while request-side [`UnmarshalService`] keeps
+    /// [`CamelError::TypeConversionFailed`] → 400. The source chain preserves
+    /// the original error.
+    pub fn for_response(inner: P, format: Arc<dyn DataFormat>) -> Self {
+        Self {
+            inner,
+            format,
+            side: MarshalSide::Response,
+        }
     }
 }
+
+const _: fn() = || {
+    fn assert_send_sync_static<T: Send + Sync + 'static>() {}
+    assert_send_sync_static::<CamelError>();
+};
 
 #[derive(Clone)]
 pub struct UnmarshalService<P> {
@@ -55,7 +86,19 @@ where
                 let fut = self.inner.call(exchange);
                 Box::pin(fut)
             }
-            Err(e) => Box::pin(async move { Err(e) }),
+            Err(e) => {
+                if self.side == MarshalSide::Response {
+                    let format_name = self.format.name().to_string();
+                    Box::pin(async move {
+                        Err(CamelError::ProcessorErrorWithSource(
+                            format!("response marshal failed ({format_name})"),
+                            Arc::new(e),
+                        ))
+                    })
+                } else {
+                    Box::pin(async move { Err(e) })
+                }
+            }
         }
     }
 }
@@ -90,6 +133,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_format::JsonDataFormat;
+    use crate::data_format::XmlDataFormat;
     use crate::data_format::builtin_data_format;
     use camel_api::{IdentityProcessor, Message, Value};
     use serde_json::json;
@@ -271,5 +316,46 @@ mod tests {
             result.input.headers.get(UNMARSHAL_HOOK_KEY),
             Some(&serde_json::Value::Bool(true))
         );
+    }
+
+    #[tokio::test]
+    async fn for_response_wraps_marshal_error_with_source() {
+        let svc =
+            MarshalService::for_response(IdentityProcessor, Arc::new(XmlDataFormat::default()));
+        let exchange = Exchange::new(Message::new(Body::Json(json!({"a": 1, "b": 2}))));
+        let result = svc.oneshot(exchange).await;
+        match result {
+            Err(CamelError::ProcessorErrorWithSource(msg, source)) => {
+                assert!(
+                    msg.contains("response marshal failed"),
+                    "message must name the response-side failure, got {msg:?}"
+                );
+                assert!(
+                    matches!(
+                        source.downcast_ref::<CamelError>(),
+                        Some(CamelError::TypeConversionFailed(_))
+                    ),
+                    "source must preserve the original TypeConversionFailed, got {source:?}"
+                );
+            }
+            other => panic!("expected ProcessorErrorWithSource, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn new_keeps_type_conversion_failure() {
+        let svc = MarshalService::new(IdentityProcessor, Arc::new(XmlDataFormat::default()));
+        let exchange = Exchange::new(Message::new(Body::Json(json!({"a": 1, "b": 2}))));
+        let result = svc.oneshot(exchange).await;
+        assert!(matches!(result, Err(CamelError::TypeConversionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn for_response_passes_success_through() {
+        let svc =
+            MarshalService::for_response(IdentityProcessor, Arc::new(JsonDataFormat::default()));
+        let exchange = Exchange::new(Message::new(Body::Json(json!({"a": 1}))));
+        let result = svc.oneshot(exchange).await.unwrap();
+        assert_eq!(result.input.body, Body::Text("{\"a\":1}".to_string()));
     }
 }
