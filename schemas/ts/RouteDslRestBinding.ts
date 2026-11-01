@@ -4,4 +4,4 @@
  * Binding mode for a REST operation: automatic JSON data-format binding
  * (default) or raw passthrough with no automatic binding steps.
  */
-export type RouteDslRestBinding = "json" | "raw";
+export type RouteDslRestBinding = "json" | "form" | "raw";

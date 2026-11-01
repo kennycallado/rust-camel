@@ -1,4 +1,5 @@
 mod csv;
+mod form;
 // `pub(crate)` so the TAR.GZ stream splitter can reuse the bounded
 // single-member GZIP decoder without widening the public data-format API.
 pub(crate) mod gzip;
@@ -11,6 +12,7 @@ mod xml;
 mod zip;
 
 pub use csv::{CAMEL_CSV_HEADER_RECORD, CsvConfig, CsvDataFormat, QuoteMode, RecordSeparator};
+pub use form::{FormConfig, FormDataFormat};
 pub use gzip::{GzipConfig, GzipDataFormat};
 pub use json::{JsonConfig, JsonDataFormat};
 pub use tar::{TarConfig, TarDataFormat};
@@ -33,6 +35,7 @@ pub fn builtin_data_format_with_config(
     let df: Arc<dyn DataFormat> = match name {
         "json" => Arc::new(JsonDataFormat::new(parse_cfg::<JsonConfig>(name, config)?)),
         "csv" => Arc::new(CsvDataFormat::new(parse_cfg::<CsvConfig>(name, config)?)),
+        "form" => Arc::new(FormDataFormat::new(parse_cfg::<FormConfig>(name, config)?)),
         "xml" => Arc::new(XmlDataFormat::new(parse_cfg::<XmlConfig>(name, config)?)),
         "zip" => Arc::new(ZipDataFormat::new(parse_cfg::<ZipConfig>(name, config)?)),
         "tar" => Arc::new(TarDataFormat::new(parse_cfg::<TarConfig>(name, config)?)),

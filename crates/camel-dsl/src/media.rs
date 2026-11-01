@@ -28,6 +28,21 @@ pub(crate) fn is_valid_media_declaration(media: &str) -> bool {
     }
 }
 
+/// True iff `media` is the form media type: base
+/// `application/x-www-form-urlencoded` (case-insensitive) with at most one
+/// `;`-parameter, which must be `charset=utf-8` (case-insensitive). Any
+/// other base, parameter, or more than one parameter is rejected.
+pub(crate) fn is_form_media_type(media: &str) -> bool {
+    if !split_media_base(media).eq_ignore_ascii_case("application/x-www-form-urlencoded") {
+        return false;
+    }
+    let params: Vec<&str> = media.split(';').skip(1).collect();
+    params.len() <= 1
+        && params
+            .iter()
+            .all(|param| param.trim().eq_ignore_ascii_case("charset=utf-8"))
+}
+
 /// True iff `media` is a JSON media type: a valid `type/subtype` whose
 /// subtype is `json` or ends with `+json` (case-insensitive, ASCII).
 pub(crate) fn is_json_media_type(media: &str) -> bool {

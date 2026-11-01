@@ -815,6 +815,33 @@ mod tests {
     }
 
     #[test]
+    fn form_binding_openapi_authored_schema() {
+        let mut op = make_op("createUser");
+        op.binding = Some(crate::route_ast::RouteDslRestBinding::Form);
+        op.consumes = "application/x-www-form-urlencoded".to_string();
+        op.produces = "application/x-www-form-urlencoded".to_string();
+        op.request_schema = Some(json!({ "type": "object" }));
+        op.response = Some(crate::route_ast::RouteDslRestResponse {
+            description: None,
+            schema: Some(json!({ "type": "object" })),
+            headers: BTreeMap::new(),
+        });
+        let rest = make_rest("/api/users", &[("post", op)]);
+        let result = generate_openapi(&[rest], "API", "1.0.0");
+        let post = &result.document["paths"]["/api/users"]["post"];
+        assert_eq!(
+            post["requestBody"]["content"]["application/x-www-form-urlencoded"]["schema"],
+            json!({ "type": "object" }),
+            "form binding must emit the authored schema, not binary"
+        );
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("createUser")),
+            "form op with authored schemas must not warn, got: {:?}",
+            result.warnings
+        );
+    }
+
+    #[test]
     fn raw_with_response_schema_warns() {
         let mut op = make_op("fetchBlob");
         op.binding = Some(crate::route_ast::RouteDslRestBinding::Raw);

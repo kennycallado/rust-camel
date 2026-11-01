@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use camel_api::CamelError;
 
-use crate::media::{is_json_media_type, is_valid_media_declaration};
+use crate::media::{is_form_media_type, is_json_media_type, is_valid_media_declaration};
 use crate::route_ast::{
     ContentNegotiationStep, MarshalStep, RouteDslRest, RouteDslRestBinding, RouteDslRestOperation,
     RouteDslRoute, RouteDslStep, SetHeaderData, SetHeaderStep, ToStep, UnmarshalStep,
@@ -253,6 +253,22 @@ fn lower_operation(
                 )));
             }
         }
+        RouteDslRestBinding::Form => {
+            if !is_form_media_type(&op.consumes) {
+                return Err(CamelError::RouteError(format!(
+                    "rest operation '{op_label}': binding 'form' requires \
+                     'application/x-www-form-urlencoded' for 'consumes' (got '{}')",
+                    op.consumes.trim()
+                )));
+            }
+            if !is_form_media_type(&op.produces) {
+                return Err(CamelError::RouteError(format!(
+                    "rest operation '{op_label}': binding 'form' requires \
+                     'application/x-www-form-urlencoded' for 'produces' (got '{}')",
+                    op.produces.trim()
+                )));
+            }
+        }
         RouteDslRestBinding::Raw => {
             if op.request_schema.is_some() {
                 return Err(CamelError::RouteError(format!(
@@ -335,6 +351,15 @@ fn lower_operation(
     // binding-independent.
     let raw_binding = binding == RouteDslRestBinding::Raw;
 
+    // Binding `form` mirrors the `json` pipeline exactly except for the data
+    // format name: the form body is parsed into a JSON object before schema
+    // validation, and the response is encoded back to form. Raw emits no
+    // data-format steps at all, so its format name is never consumed.
+    let data_format = match binding {
+        RouteDslRestBinding::Form => "form",
+        RouteDslRestBinding::Json | RouteDslRestBinding::Raw => "json",
+    };
+
     // 0. Content-negotiation gate (change add-rest-strict-negotiation):
     //    pushed FIRST for BOTH bindings and ALL verbs — the declared
     //    `consumes`/`produces` (trimmed) drive the 406 Accept gate, and the
@@ -350,7 +375,7 @@ fn lower_operation(
     //    Skipped entirely under raw binding — the body is consumed as-is.
     if !raw_binding && verb_has_body(&verb_lc) {
         steps.push(RouteDslStep::Unmarshal(UnmarshalStep {
-            unmarshal: "json".to_string(),
+            unmarshal: data_format.to_string(),
             // When `request_schema` is set, the step compiler wraps the
             // JSON unmarshal with a JsonSchemaValidateService; mismatches
             // surface as CamelError::ValidationError → 400 Bad Request
@@ -377,7 +402,7 @@ fn lower_operation(
     //    its declared wire form and must not be re-encoded.
     if !raw_binding {
         steps.push(RouteDslStep::Marshal(MarshalStep {
-            marshal: "json".to_string(),
+            marshal: data_format.to_string(),
             config: None,
         }));
     }
@@ -1778,6 +1803,231 @@ rest:
         rest.operations[0].consumes = "application/octet-stream".to_string();
         rest.operations[0].produces = "image/png".to_string();
         assert!(lower_all_rest_to_routes(&[rest]).is_ok());
+    }
+
+    // ── Task 2.1: form binding media acceptance ──
+
+    const FORM_MEDIA: &str = "application/x-www-form-urlencoded";
+
+    #[test]
+    fn form_binding_exact_media_loads() {
+        let mut rest = make_rest("createUser", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Form);
+        rest.operations[0].consumes = FORM_MEDIA.to_string();
+        rest.operations[0].produces = FORM_MEDIA.to_string();
+        assert!(lower_all_rest_to_routes(&[rest]).is_ok());
+    }
+
+    #[test]
+    fn form_binding_charset_utf8_accepted() {
+        let mut rest = make_rest("createUser", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Form);
+        rest.operations[0].consumes =
+            "application/x-www-form-urlencoded; charset=utf-8".to_string();
+        rest.operations[0].produces = FORM_MEDIA.to_string();
+        assert!(lower_all_rest_to_routes(&[rest]).is_ok());
+    }
+
+    #[test]
+    fn form_binding_non_form_media_fails() {
+        let mut rest = make_rest("createUser", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Form);
+        rest.operations[0].consumes = "application/json".to_string();
+        rest.operations[0].produces = FORM_MEDIA.to_string();
+        let err = lower_all_rest_to_routes(&[rest])
+            .err()
+            .expect("non-form consumes with form binding must be rejected");
+        assert!(matches!(err, CamelError::RouteError(_)), "got: {err:?}");
+        let msg = err.to_string();
+        for needle in [
+            "createUser",
+            "consumes",
+            "application/json",
+            "application/x-www-form-urlencoded",
+        ] {
+            assert!(
+                msg.contains(needle),
+                "message must contain {needle:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn form_binding_non_utf8_charset_fails() {
+        let mut rest = make_rest("createUser", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Form);
+        rest.operations[0].consumes = FORM_MEDIA.to_string();
+        rest.operations[0].produces =
+            "application/x-www-form-urlencoded; charset=iso-8859-1".to_string();
+        let err = lower_all_rest_to_routes(&[rest])
+            .err()
+            .expect("non-UTF-8 charset with form binding must be rejected");
+        assert!(matches!(err, CamelError::RouteError(_)), "got: {err:?}");
+        let msg = err.to_string();
+        for needle in [
+            "createUser",
+            "application/x-www-form-urlencoded; charset=iso-8859-1",
+        ] {
+            assert!(
+                msg.contains(needle),
+                "message must contain {needle:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn form_binding_allows_request_and_response_schema() {
+        let mut rest = make_rest("createUser", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Form);
+        rest.operations[0].consumes = FORM_MEDIA.to_string();
+        rest.operations[0].produces = FORM_MEDIA.to_string();
+        rest.operations[0].request_schema = Some(serde_json::json!({ "type": "object" }));
+        rest.operations[0].response = Some(RouteDslRestResponse {
+            description: None,
+            schema: Some(serde_json::json!({ "type": "object" })),
+            headers: BTreeMap::new(),
+        });
+        assert!(
+            lower_all_rest_to_routes(&[rest]).is_ok(),
+            "form binding must allow request_schema and response.schema"
+        );
+    }
+
+    // ── Task 2.2: form binding pipeline lowering ──
+
+    #[test]
+    fn form_post_step_sequence() {
+        let mut rest = make_rest("createUser", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Form);
+        rest.operations[0].consumes = FORM_MEDIA.to_string();
+        rest.operations[0].produces = FORM_MEDIA.to_string();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            step_kind_names(&routes[0].steps),
+            vec![
+                "ContentNegotiation",
+                "Unmarshal",
+                "To",
+                "Marshal",
+                "SetHeader",
+                "SetHeaderIfAbsent"
+            ],
+            "form binding must mirror the json step sequence"
+        );
+        match &routes[0].steps[0] {
+            RouteDslStep::ContentNegotiation(n) => {
+                assert_eq!(n.consumes, FORM_MEDIA);
+                assert_eq!(n.produces, FORM_MEDIA);
+                assert!(n.check_content_type, "POST carries a body: 415 gate on");
+            }
+            other => panic!("expected ContentNegotiation at idx 0, got {other:?}"),
+        }
+        match &routes[0].steps[1] {
+            RouteDslStep::Unmarshal(u) => {
+                assert_eq!(u.unmarshal, "form");
+                assert!(u.schema.is_none(), "no request_schema declared");
+                assert!(u.config.is_none());
+            }
+            other => panic!("expected Unmarshal at idx 1, got {other:?}"),
+        }
+        match &routes[0].steps[2] {
+            RouteDslStep::To(t) => assert_eq!(t.to, "bean:create"),
+            other => panic!("expected To at idx 2, got {other:?}"),
+        }
+        match &routes[0].steps[3] {
+            RouteDslStep::Marshal(m) => {
+                assert_eq!(m.marshal, "form");
+                assert!(m.config.is_none());
+            }
+            other => panic!("expected Marshal at idx 3, got {other:?}"),
+        }
+        match &routes[0].steps[4] {
+            RouteDslStep::SetHeader(h) => {
+                assert_eq!(h.set_header.key, "Content-Type");
+                assert_eq!(h.set_header.value, Some(serde_json::json!(FORM_MEDIA)));
+            }
+            other => panic!("expected SetHeader at idx 4, got {other:?}"),
+        }
+        match routes[0].steps.last().unwrap() {
+            RouteDslStep::SetHeaderIfAbsent(h) => {
+                assert_eq!(h.set_header.key, "CamelHttpResponseCode");
+                assert_eq!(h.set_header.value, Some(serde_json::json!(201)));
+            }
+            other => panic!("expected SetHeaderIfAbsent last, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn form_get_no_unmarshal() {
+        let mut rest = make_rest("getUser", "get", "/{id}", "bean:svc");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Form);
+        rest.operations[0].consumes = FORM_MEDIA.to_string();
+        rest.operations[0].produces = FORM_MEDIA.to_string();
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        let steps = &routes[0].steps;
+        assert!(
+            matches!(steps.first(), Some(RouteDslStep::ContentNegotiation(_))),
+            "form GET must start with the negotiation step, got {steps:?}"
+        );
+        let marshal = steps.iter().find_map(|s| match s {
+            RouteDslStep::Marshal(m) => Some(m),
+            _ => None,
+        });
+        assert_eq!(
+            marshal.map(|m| m.marshal.as_str()),
+            Some("form"),
+            "form GET must still marshal the response as form"
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|s| matches!(s, RouteDslStep::Unmarshal(_))),
+            "GET must not emit an unmarshal step"
+        );
+    }
+
+    #[test]
+    fn form_request_schema_carried() {
+        let mut rest = make_rest("createUser", "post", "/", "bean:create");
+        rest.operations[0].binding = Some(RouteDslRestBinding::Form);
+        rest.operations[0].consumes = FORM_MEDIA.to_string();
+        rest.operations[0].produces = FORM_MEDIA.to_string();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+        });
+        rest.operations[0].request_schema = Some(schema.clone());
+        let routes = lower_all_rest_to_routes(&[rest]).unwrap();
+        let unmarshal = routes[0]
+            .steps
+            .iter()
+            .find_map(|s| match s {
+                RouteDslStep::Unmarshal(u) => Some(u),
+                _ => None,
+            })
+            .expect("POST must inject unmarshal step");
+        assert_eq!(unmarshal.unmarshal, "form");
+        assert_eq!(unmarshal.schema, Some(schema));
+    }
+
+    #[test]
+    fn unknown_binding_still_fails_deserialize() {
+        let yaml = r#"
+rest:
+  - path: /api
+    operations:
+      - method: GET
+        to: direct:handler
+        binding: multipart
+"#;
+        let err = noyalib::compat::serde_yaml::from_str::<crate::route_ast::RouteDslRoutes>(yaml)
+            .err()
+            .expect("unknown binding value must fail deserialization");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown variant"), "got: {msg}");
+        assert!(msg.contains("form"), "got: {msg}");
     }
 
     // ── Task 3.3: strict content-negotiation lowering ──

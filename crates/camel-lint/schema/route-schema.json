@@ -2094,6 +2094,11 @@
           "type": "string"
         },
         {
+          "const": "form",
+          "description": "application/x-www-form-urlencoded structured binding (form ⇄ JSON object).",
+          "type": "string"
+        },
+        {
           "const": "raw",
           "description": "No automatic binding steps; declared media used verbatim.",
           "type": "string"

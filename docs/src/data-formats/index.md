@@ -10,6 +10,7 @@ The [Marshal and Unmarshal](../eip/marshal-unmarshal.md) EIP page covers route-l
 | --- | --- | --- |
 | `json` | built-in (`camel-processor`) | Text ↔ Json |
 | `csv` | built-in (`camel-processor`) | Text ↔ Json |
+| [`form`](form.md) | built-in (`camel-processor`) | Text (`application/x-www-form-urlencoded`) ↔ Json |
 | `xml` | built-in (`camel-processor`) | Text ↔ Json |
 | `zip` | built-in (`camel-processor`) | Any body → zipped Bytes |
 | `tar` | built-in (`camel-processor`) | Any body → single-entry TAR Bytes |
@@ -17,7 +18,7 @@ The [Marshal and Unmarshal](../eip/marshal-unmarshal.md) EIP page covers route-l
 | `tar.gz` | built-in (`camel-processor`) | Any body → gzipped single-entry TAR Bytes |
 | `protobuf` | [camel-dataformat-protobuf](protobuf.md) | Json ↔ Bytes |
 
-JSON, CSV, XML, ZIP, `tar`, `gzip`, and `tar.gz` are registered by default. Protobuf ships as a separate crate.
+JSON, CSV, XML, `form`, ZIP, `tar`, `gzip`, and `tar.gz` are registered by default. Protobuf ships as a separate crate.
 
 ## Archive formats
 

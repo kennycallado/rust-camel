@@ -1598,6 +1598,8 @@ pub struct RouteDslRest {
 pub enum RouteDslRestBinding {
     /// Automatic JSON unmarshal/marshal pipeline (v1 behavior; default).
     Json,
+    /// application/x-www-form-urlencoded structured binding (form ⇄ JSON object).
+    Form,
     /// No automatic binding steps; declared media used verbatim.
     Raw,
 }
