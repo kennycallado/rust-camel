@@ -1,0 +1,27 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "expert": "e_opus",
+  "hash": "sha256:82c8ef38414ebd41e47b3b61fcb52eafd210ce319e060551053464adbc0b6431",
+  "date": "2026-11-01",
+  "history": [
+    {"kind": "spec", "verdict": "BLESS-WITH-FIXES", "expert": "e_gpt", "findings": 5},
+    {"kind": "spec", "verdict": "BLESS-WITH-FIXES", "expert": "e_gpt", "findings": 1},
+    {"kind": "spec", "verdict": "BLESS", "expert": "e_gpt", "hash": "sha256:877415ca818b9986b919e0e26cb676ad65eac2e768da3b869d2b88eee13d007d"},
+    {"kind": "plan", "verdict": "BLESS-WITH-FIXES", "expert": "e_opus", "findings": 3},
+    {"kind": "plan", "verdict": "BLESS", "expert": "e_opus", "hash": "sha256:82c8ef38414ebd41e47b3b61fcb52eafd210ce319e060551053464adbc0b6431"}
+  ],
+  "post_bless_amendments": [
+    {
+      "date": "2026-11-01",
+      "reason": "STAGE 3/4 accuracy fixes: (1) pin where CamelExceptionHandled is set across the four handle_error() sites and both dead-letter dispatch paths; (2) qualify that step-level Continued clears the caught property while boundary Continued maps to Propagate; (3) state the marker rule semantically instead of enumerating internal variants. Found by conductor cross-check against crates/camel-processor/src/error_handler.rs and by r_glm holistic review; approved by the e_gpt stage-4 expert.",
+      "artifacts": [
+        "design.md",
+        "tasks.md",
+        "docs/adr/0025-outcome-aware-structural-eips.md",
+        "docs/src/concepts/error-handling.md"
+      ],
+      "review": "r_glm holistic APPROVE-WITH-FINDINGS (fixed), then e_gpt stage-4 APPROVE"
+    }
+  ]
+}

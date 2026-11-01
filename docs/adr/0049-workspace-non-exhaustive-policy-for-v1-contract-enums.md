@@ -188,3 +188,32 @@ because adding it after the freeze is itself the kind of change we want to stop 
 (rejecting the blanket Option B), deliberate closed-set enums carved out as documented
 exceptions, execution delegated to finding I2's code stream.
 **Self-grill mode:** self-grill-proposals skill
+
+## Scope clarification: camel-dsl ASTs (2026-11-01)
+
+This section clarifies scope only. It does not amend the contract-crate rule above.
+`camel-dsl` is not one of the three contract crates in the scope table, and the policy
+of `#[non_exhaustive]` by default does not extend to it.
+
+`RouteDslStep` (`crates/camel-dsl/src/route_ast.rs`) and `DeclarativeStep`
+(`crates/camel-dsl/src/model.rs`) are intentionally exhaustive. They are authoring
+ASTs, not contract-crate enums. Their out-of-crate exhaustive matches are the
+compile-time guard that every new DSL step is wired through compile, lint, and CLI.
+Adding a variant therefore fails the build until each consumer handles it, which is
+the intended behavior. This ruling is recorded under bd rc-b48du.
+
+The release rule follows from that design. A new AST variant, whether authorable or
+internal and doc-hidden, is a breaking change for external exhaustive matchers and
+must appear in release notes. `DeclarativeStepKind`
+(`crates/camel-dsl/src/contract.rs:2-51`) is the intended external discriminant: it
+names the authorable kinds and omits internal-only variants such as `ResponseMarshal`.
+It is also an exhaustive public enum, so adding a kind breaks downstream exhaustive
+matches and needs the same breaking-change release discipline. The internal
+`ResponseMarshal` variants stay undocumented for construction; `#[doc(hidden)]` is
+deferred to a code PR. Note that no versioned CHANGELOG file exists; `cargo xtask
+changelog` renders release notes from commit subjects, so this rule is enforced by
+release discipline recorded here.
+
+As the rationale above notes, `#[non_exhaustive]` has no effect inside the defining
+crate. It only forces `_ =>` arms in other crates. Applying it to the DSL ASTs would
+remove the guard this section preserves without gaining any in-crate protection.

@@ -67,6 +67,24 @@ the exchange to the dead-letter channel, it then applies the disposition. See
 The default disposition for a route-level `onException` clause is `Propagate`.
 The default for a `do_try` catch clause is `Handled`.
 
+## Divergence from Apache Camel
+
+When a `Handled` or step-level `Continued` disposition clears the error, this
+runtime also clears `CamelExceptionCaught`. At a route boundary `Continued` maps
+to `Propagate` and keeps the error. Java Camel keeps `EXCEPTION_CAUGHT` on the
+exchange after a handled catch. To keep the caught exception, copy it inside the
+catch body, for example into a user property. See
+[ADR-0025](../adr/0025-outcome-aware-structural-eips.md).
+
+`CamelExceptionHandled` is a Camel-compatibility marker; no core logic reads
+it. Only a `Handled` disposition can set it, and only where it runs
+`on_exception` steps through `handle_error()`: the `doTry` block and the
+route-level `Handled` paths that execute `on_exception` steps. A `Handled` arm
+that dispatches to the dead-letter channel clears the error without setting the
+marker. `Continued` never sets it. An outer `Continued` does not remove a marker
+that a nested `Handled` block set. See
+[ADR-0025](../adr/0025-outcome-aware-structural-eips.md).
+
 ## Route-level error handler
 
 The route-level `error_handler` wraps every step in a route. It is the safety

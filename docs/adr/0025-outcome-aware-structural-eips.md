@@ -63,3 +63,25 @@ The fix restores Java try/catch/finally parity (JLS §14.20.2). The finally body
 The island property is unchanged. The catch chain is not re-entered. The outer handler sees only the unhandled failure.
 
 Traceability: corrected under bd rc-h3i8d. The declarative runtime is `DoTrySegment` since the `DoTryService` deletion (see the 2026-10-27 update).
+
+## Amendment: exception property retention (2026-11-01)
+
+`Exchange::clear_error()` removes `CamelExceptionMessage`, `CamelExceptionKind`, and `CamelExceptionCaught` together with the error. Any path that clears a disposition through `clear_error()` therefore drops those properties: `Handled` everywhere, and `Continued` at step level. At a route boundary `Continued` maps to `Propagate` and keeps the error. This intentionally diverges from Java Camel, where `Exchange.EXCEPTION_CAUGHT` survives a handled catch. The divergence is recorded here under bd rc-zaqjd; it is not an implementation accident.
+
+The supported workaround is to read or copy the exception inside the catch body, for example into a user property or header. Steps after a `Handled` or `Continued` exit SHALL NOT rely on `CamelExceptionCaught`.
+
+The two rejected options:
+
+- Rejected — restore in `DoTrySegment`: splits doTry from the route-level handler.
+- Rejected — restore in `clear_error()`: leaves stale exception state across redelivery and exchange reuse.
+
+## Amendment: CamelExceptionHandled canonical rule (2026-11-01)
+
+The `CamelExceptionHandled` exchange property has one canonical rule, and it applies to both doTry and the route-level handler. bd rc-ho9j1 owns the decision. The existing do-try spec scenarios cover the `Handled` and `Continued` cases; rc-ud3rl defers the additional scenarios.
+
+1. Control flow keys off `PipelineOutcome` only.
+2. `CamelExceptionHandled` is Camel-compatibility only; no core logic reads it.
+3. Only a `Handled` arm can set it, and only where that arm calls `Exchange::handle_error()`: the doTry `Handled` arm and the route-level `Handled` paths that execute `on_exception` steps (step, boundary, and retry-service variants). A `Handled` arm that dispatches to the dead-letter channel clears with `clear_error()` and does not set it. `Continued` never sets the marker. Neither does the dead-letter-channel dispatch path.
+4. `Handled` stops the block while `Continued` advances past it.
+5. `DoTrySegment` removes a stale marker on entry, so an absent marker, a marker removed on entry, and a marker retained from a nested `Handled` block are three distinct states; only the third is observable after the block.
+6. `clear_error()` does not touch the marker, so an outer `Continued` does not clear a marker that a nested `Handled` block set.
