@@ -27,6 +27,8 @@ password = "${env:MAIL_PASSWORD}"
 # caFile = "/etc/ssl/mail-ca.pem"
 ```
 
+When `Camel.toml` has profile sections, the accounts live under `[default.components.mail.accounts.<name>]`. The flat `[components.mail.accounts.<name>]` form shown here is for a config that has no `[default]` or `[<profile>]` section.
+
 Select an account with `?account=<name>`. With exactly one account, every endpoint without `?account=` uses it, so its credentials are sent to whatever host the URI names; keep the account selection explicit when URIs are built dynamically. With several accounts, `?account=` is required. With no account, `smtp` and `smtps` send without authentication; `imap` and `imaps` need an account and fail at endpoint creation without one.
 
 ## Debugging IMAP connections
@@ -67,7 +69,7 @@ routes:
 | `maxRecipients` | `50` | Maximum total recipient count. |
 | `allowCleartext` | `false` | Allow a server without TLS. Not valid on `smtps`. |
 
-The body must be a string (a text body, or a JSON string such as the one `set_body` and a DSL `constant` produce) or UTF-8 bytes. Other JSON values, XML and an empty body fail the Exchange. The send needs a `from` address and at least one recipient. After an accepted send, the Producer sets the header `CamelMailMessageId`. The Producer does not retry. It never resends a message after an ambiguous failure past the SMTP DATA command.
+The body must be a string (a text body, or a JSON string such as the one `set_body` and a DSL `constant` produce) or UTF-8 bytes. Other JSON values, XML and an absent body (`Body::Empty`) fail the Exchange. A `set_body` step with `value: ""` sets an empty `Body::Text`, so the Producer sends a 0-byte `text/plain` body. The send needs a `from` address and at least one recipient. After an accepted send, the Producer sets the header `CamelMailMessageId`. The Producer does not retry. It never resends a message after an ambiguous failure past the SMTP DATA command.
 
 ## Receiving mail (imap, imaps)
 
@@ -212,7 +214,9 @@ A message that the repository already knows only gets `\Seen`. The Consumer does
 
 ## pollEnrich
 
-The `imap` and `imaps` schemes also serve `poll_enrich`. Each call returns at most one message and waits up to the step timeout. The timeout covers connecting, searching and downloading the message. Once a message is downloaded, its disposition always finishes (each server command has its own I/O timeout) and the message is returned, so the timeout never loses a downloaded message. A timeout of 0 cannot return mail from a real server, because connecting needs network round trips.
+The `imap` and `imaps` schemes also serve `poll_enrich`. The default `UseEnrichedBody` strategy copies only the body into the original Exchange. It keeps the original headers and properties and discards every polled `CamelMailIn*` header. A route that needs those headers must use a custom enrichment strategy.
+
+Each call returns at most one message and waits up to the step timeout. The timeout covers connecting, searching and downloading the message. Once a message is downloaded, its disposition always finishes (each server command has its own I/O timeout) and the message is returned, so the timeout never loses a downloaded message. A timeout of 0 cannot return mail from a real server, because connecting needs network round trips.
 
 A pull honors `raw=true` the same way. The body is the exact RFC 822 bytes, every `CamelMailIn*` header is kept except `CamelMailInHtmlBody`, and the disposition is unchanged.
 
@@ -237,8 +241,8 @@ A pull shares the receive pipeline of the push Consumer, with these differences:
 
 ## Metrics and health
 
-- `camel_component_operations_total{component="mail",operation="send"}` counts SMTP sends. The `operation="poll"` series counts IMAP poll cycles. Both split into success and failure.
-- Error labels: `b-prime:mail:skip` (a message skipped), `b-prime:mail:dispose` (a failed disposition), `b-prime:mail:idempotent` (a failed repository read or `add`). Only the push Consumer counts them.
+- `camel_component_operations_total{component="mail",operation="send"}` counts SMTP sends. The `operation="poll"` series counts IMAP poll cycles. Both split into success and failure. Both series are emitted only when `[observability.metrics] components = true`; the default is `false`.
+- Error labels: `b-prime:mail:skip` (a message skipped), `b-prime:mail:dispose` (a failed disposition), `b-prime:mail:idempotent` (a failed repository read or `add`). Only the push Consumer counts them. These labels come from the error family, so they are always emitted, also when `components = false`.
 - Each IMAP endpoint registers one health check named `mail`. It reports healthy until a push Consumer is created for the endpoint, so an endpoint used only by `poll_enrich` is never probed. It then reports the outcome of the latest poll, including a poll the server refused. When that outcome is older than twice the `delay`, the check opens a probe connection with a 5 s timeout. After the Consumer stopped for good (a missing capability, a refused login or exhausted reconnects), the check stays unhealthy until the route starts again and connects.
 
 ## Not supported
@@ -262,6 +266,9 @@ Class A headers set content:
 - `CamelMailContentType` selects `text/plain` or `text/html`.
 - `CamelMailHtmlBody` adds an HTML alternative to a `text/plain` body.
 - `X-*` headers pass through to the message (the `X-` prefix is matched case-insensitively).
+- `CamelMailListUnsubscribe` sets the `List-Unsubscribe` header. The value must be a comma-separated list of `<mailto:...>` or `<https://...>` URIs. A bare `List-Unsubscribe` header name is ignored; only the `CamelMail*` name is read.
+- `CamelMailListUnsubscribePost` sets the `List-Unsubscribe-Post` header. The value must be exactly `List-Unsubscribe=One-Click`. It needs `CamelMailListUnsubscribe` with at least one `https://` URI (RFC 8058).
+- RFC 8058 one-click unsubscribe needs a DKIM signature over both headers. This component does not produce that signature.
 
 The component rejects a value with CR, LF or NUL, and a value longer than 998 bytes. `CamelMailHtmlBody` rejects NUL only.
 
@@ -271,7 +278,7 @@ An http-to-mail route also passes request headers such as `X-Api-Key` into the m
 
 ## TLS
 
-STARTTLS is required by default. A server that does not offer STARTTLS is refused before any login is sent. `smtps` uses implicit TLS. Set `allowCleartext=true` to allow cleartext on `smtp`; this applies to private hosts as well. Certificates verify against the webpki roots plus the account `caFile`. There is no option to turn verification off. Cleartext is stricter here than in ADR-0081: that ADR allows cleartext to private targets by default, and the mail flag covers them too.
+STARTTLS is required by default. A server that does not offer STARTTLS is refused before any login is sent. `smtps` uses implicit TLS. Set `allowCleartext=true` to allow cleartext on `smtp`; this applies to private hosts as well. Certificates verify against the webpki roots plus the account `caFile`. A relative `caFile` resolves against the process working directory, not against the directory that holds `Camel.toml`. There is no option to turn verification off. Cleartext is stricter here than in ADR-0081: that ADR allows cleartext to private targets by default, and the mail flag covers them too.
 
 The IMAP side builds its own TLS configuration with the ring provider only. The SMTP library (`lettre` 0.11) cannot take an explicit provider or TLS configuration. It uses the process default rustls provider and falls back to ring. `camel-cli` installs ring at startup. A process that installs aws-lc as the default, for example through the gRPC component, makes SMTP use that provider. The process-level fix is tracked in bd rc-2bofp.
 

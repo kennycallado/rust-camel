@@ -1,0 +1,53 @@
+{
+  "kind": "plan",
+  "change": "mail-followups",
+  "hash": "sha256:3a9607135a81d7003a50605f29e5412c4b76ead4603d58b6f2667842799082d9",
+  "expert": "experts/e_opus",
+  "verdict": "BLESS",
+  "date": "2026-11-01",
+  "supersedes_spec_hash": "sha256:19a7beb1c3b5828bffacab9beff535e4ba6be27006be360c528d9619141d64c5",
+  "note": "Mission 480 master-approved deviation: blessing gates on e_opus (gpt window exhausted until ~20:27). One attempt per dispatch; no quota aborts.",
+  "reviewer_loop": {
+    "reviewer": "reviewers/r_glm",
+    "rounds": [
+      "APPROVE-WITH-FINDINGS (case-sensitivity false alarm caused by a paraphrased brief; single-parser reuse requested)",
+      "APPROVE"
+    ]
+  },
+  "spec_rounds": [
+    {
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:d249eed0e1397862f08f7ed6b40d3aa3c0d2bd06dbd63563b859316ce70ffc8a",
+      "findings": 7
+    },
+    {
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:0cb8070fbf0611a9dd58b6b8a5dc0ff22595f24570990a46b53c005a974f92d3",
+      "findings": 1
+    },
+    {
+      "verdict": "BLESS",
+      "hash": "sha256:19a7beb1c3b5828bffacab9beff535e4ba6be27006be360c528d9619141d64c5",
+      "findings": 0
+    }
+  ],
+  "plan_rounds": [
+    {
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:4d32e32f6bda59c6ce8cf6d0a61c422cf43bd544da4f65a3bf11360ff78f062f",
+      "findings": 8,
+      "note": "clippy dead-code timing (1.1-1.3), transport.rs OutboundMessage literal, (header, reason) pinning, exact ignored spellings, single ASCII check, CONTEXT.md amendment, exact doc greps, retained-test names"
+    },
+    {
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:1618826cb88f55de95c3dab8a887b0c04ee7f37537d57363e504aa74fffe70c1",
+      "findings": 1,
+      "note": "string log fields are Debug-quoted by the fmt formatter"
+    },
+    {
+      "verdict": "BLESS",
+      "hash": "sha256:3a9607135a81d7003a50605f29e5412c4b76ead4603d58b6f2667842799082d9",
+      "findings": 0
+    }
+  ]
+}

@@ -52,8 +52,16 @@ type Received = Arc<Mutex<Vec<Exchange>>>;
 enum Route {
     Succeed,
     Fail,
+    /// Succeed after setting an error on the exchange.
+    ErrorReply,
     /// Succeed after setting would-be class C headers.
     Retarget,
+}
+
+fn route_error() -> CamelError {
+    CamelError::ProcessorError(
+        "route failed at https://secret.example/token?password=hunter2 body SECRETBODY".into(),
+    )
 }
 
 fn spawn_route(
@@ -71,7 +79,11 @@ fn spawn_route(
             let mut ex = env.exchange;
             let reply = match route {
                 Route::Succeed => Ok(ex),
-                Route::Fail => Err(CamelError::ProcessorError("route failed".into())),
+                Route::Fail => Err(route_error()),
+                Route::ErrorReply => {
+                    ex.set_error(route_error());
+                    Ok(ex)
+                }
                 Route::Retarget => {
                     ex.input
                         .set_header("CamelMailMoveTo", serde_json::json!("Evil"));
@@ -489,6 +501,54 @@ async fn raw_failing_route_leaves_message_unseen() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn failed_route_attempt_is_logged() {
+    let (_guard, buf) = capture_warnings();
+    let mut h = Harness::new(one(7), "", Route::Fail).await;
+    h.poll().await;
+    let log = log_text(&buf);
+    assert!(log.contains("uid=7"), "{log}");
+    assert!(log.contains("uid_validity=1"), "{log}");
+    assert!(log.contains("attempt=1"), "{log}");
+    assert!(log.contains("max_attempts=3"), "{log}");
+    assert!(log.contains("error_kind=\"ProcessorError\""), "{log}");
+    assert!(log.contains("mail route failed"), "{log}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn final_attempt_logs_true_attempt_number() {
+    let (_guard, buf) = capture_warnings();
+    let mut h = Harness::new(one(7), "&maxAttempts=3", Route::Fail).await;
+    for _ in 0..3 {
+        h.poll().await;
+    }
+    let log = log_text(&buf);
+    assert!(log.contains("attempt=3"), "{log}");
+    assert!(log.contains("max_attempts=3"), "{log}");
+    assert!(log.contains("skipped for the process lifetime"), "{log}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn error_bearing_success_is_a_failed_attempt() {
+    let (_guard, buf) = capture_warnings();
+    let mut h = Harness::new(one(7), "", Route::ErrorReply).await;
+    h.poll().await;
+    assert_eq!(h.state.attempts.get(&(1, 7)), Some(&1));
+    assert!(!h.is_seen(7));
+    assert!(log_text(&buf).contains("error_kind=\"ProcessorError\""));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn logged_cause_is_redacted() {
+    let (_guard, buf) = capture_warnings();
+    let mut h = Harness::new(one(7), "", Route::Fail).await;
+    h.poll().await;
+    let log = log_text(&buf);
+    assert!(!log.contains("secret.example"), "{log}");
+    assert!(!log.contains("hunter2"), "{log}");
+    assert!(!log.contains("SECRETBODY"), "{log}");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn poison_message_bounded() {
     let (_guard, buf) = capture_warnings();
     let mut h = Harness::new(one(7), "&maxAttempts=2", Route::Fail).await;
@@ -588,6 +648,7 @@ async fn vanished_message_is_not_an_attempt() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn route_channel_closed_stops_poll() {
+    let (_guard, buf) = capture_warnings();
     let conn = FakeConnector::new(one(7));
     let mailbox = mailbox("", &conn, None);
     let mut session = mailbox.open().await.expect("open");
@@ -605,6 +666,11 @@ async fn route_channel_closed_stops_poll() {
     assert_eq!(polled, Polled::RouteClosed);
     assert!(!calls(&conn).contains(&StoreCall::MarkSeen(7)));
     assert!(state.attempts.is_empty());
+    assert!(
+        !log_text(&buf).contains("mail route failed"),
+        "{}",
+        log_text(&buf)
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

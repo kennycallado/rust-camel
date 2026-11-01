@@ -68,6 +68,8 @@ mod tests {
             html_alternative: None,
             extra_headers: Vec::new(),
             message_id: "<id@corp.test>".to_string(),
+            list_unsubscribe: None,
+            list_unsubscribe_post: None,
         }
     }
 

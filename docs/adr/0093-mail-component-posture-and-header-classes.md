@@ -1,6 +1,6 @@
 # ADR-0093: Mail component TLS posture, header classes and send semantics
 
-- Status: Accepted (2026-10-25; bd rc-q8zur)
+- Status: Accepted (2026-10-25; bd rc-q8zur); amended 2026-11-01: List-Unsubscribe class-A headers (bd rc-dhd1k)
 - Source: openspec change `mail-component`
 - Cross-refs: ADR-0007, ADR-0012, ADR-0013, ADR-0015, ADR-0020, ADR-0023,
   ADR-0032, ADR-0034, ADR-0051, ADR-0060, ADR-0063, ADR-0066, ADR-0071,
@@ -64,13 +64,18 @@ The names do not collide with the Title-Case headers the HTTP consumer
 copies.
 
 **Class A, content.** `CamelMailSubject`, `CamelMailContentType`,
-`CamelMailHtmlBody` and `X-*` headers.
+`CamelMailHtmlBody`, `CamelMailListUnsubscribe`,
+`CamelMailListUnsubscribePost` and `X-*` headers.
 
 - The component rejects a value that contains CR, LF or NUL, or that is
   longer than 998 bytes, in its own code.
 - `CamelMailHtmlBody` is body content, not a header line, so it rejects
   NUL only.
 - `CamelMailSubject` overrides the `subject` option.
+- `CamelMailListUnsubscribe` and `CamelMailListUnsubscribePost` render as
+  `List-Unsubscribe` and `List-Unsubscribe-Post`. Both are string-only. The
+  Post header follows the RFC 8058 pairing rule: an `https` URI is required
+  in `CamelMailListUnsubscribe` when the Post header is present.
 
 **Class B, routing.** `CamelMailTo`, `CamelMailCc`, `CamelMailBcc`.
 

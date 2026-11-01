@@ -8,7 +8,10 @@ use crate::error::MailError;
 use crate::fence;
 use crate::fence::Recipients;
 use crate::headers;
-use crate::headers::{CAMEL_MAIL_CONTENT_TYPE, CAMEL_MAIL_HTML_BODY, CAMEL_MAIL_SUBJECT};
+use crate::headers::{
+    CAMEL_MAIL_CONTENT_TYPE, CAMEL_MAIL_HTML_BODY, CAMEL_MAIL_LIST_UNSUBSCRIBE,
+    CAMEL_MAIL_LIST_UNSUBSCRIBE_POST, CAMEL_MAIL_SUBJECT,
+};
 
 /// A fully validated outgoing message, ready for the transport adapter.
 #[derive(Clone, Debug)]
@@ -21,6 +24,8 @@ pub(crate) struct OutboundMessage {
     pub(crate) html_alternative: Option<String>,
     pub(crate) extra_headers: Vec<(String, String)>,
     pub(crate) message_id: String,
+    pub(crate) list_unsubscribe: Option<String>,
+    pub(crate) list_unsubscribe_post: Option<String>,
 }
 
 fn string_header<'a>(
@@ -40,6 +45,110 @@ fn string_header<'a>(
 
 fn valid_header_name(name: &str) -> bool {
     (1..=76).contains(&name.len()) && name.bytes().all(|b| (33..=126).contains(&b) && b != b':')
+}
+
+struct UnsubscribeList {
+    value: String,
+    has_https: bool,
+}
+
+fn unsubscribe_list_value(exchange: &Exchange) -> Result<Option<UnsubscribeList>, MailError> {
+    let Some(value) = string_header(exchange, CAMEL_MAIL_LIST_UNSUBSCRIBE, "must be a string")?
+    else {
+        return Ok(None);
+    };
+    headers::validate_header_value(CAMEL_MAIL_LIST_UNSUBSCRIBE, value)?;
+    if !value.is_ascii() {
+        return Err(MailError::HeaderValidation {
+            header: CAMEL_MAIL_LIST_UNSUBSCRIBE.to_string(),
+            reason: "must be ASCII",
+        });
+    }
+    let has_https = unsubscribe_uris(value)?;
+    Ok(Some(UnsubscribeList {
+        value: value.to_string(),
+        has_https,
+    }))
+}
+
+fn unsubscribe_uris(value: &str) -> Result<bool, MailError> {
+    fn invalid() -> MailError {
+        MailError::HeaderValidation {
+            header: CAMEL_MAIL_LIST_UNSUBSCRIBE.to_string(),
+            reason: "must contain only mailto: or https: angle-bracket URIs",
+        }
+    }
+
+    let mut has_https = false;
+    for element in value.split(',') {
+        let element = element.trim_matches(|c: char| c.is_ascii_whitespace());
+        let inner = element
+            .strip_prefix('<')
+            .and_then(|rest| rest.strip_suffix('>'))
+            .ok_or_else(invalid)?;
+        if inner.is_empty()
+            || inner
+                .chars()
+                .any(|c| c.is_whitespace() || c == '<' || c == '>')
+        {
+            return Err(invalid());
+        }
+        let is_mailto = inner
+            .get(.."mailto:".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("mailto:"));
+        let is_https = inner
+            .get(.."https://".len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
+        if is_mailto {
+            if inner.len() <= "mailto:".len() {
+                return Err(invalid());
+            }
+        } else if is_https {
+            let rest = &inner["https://".len()..];
+            let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+            if host.is_empty() {
+                return Err(invalid());
+            }
+            has_https = true;
+        } else {
+            return Err(invalid());
+        }
+    }
+    Ok(has_https)
+}
+
+fn unsubscribe_post_value(
+    exchange: &Exchange,
+    list: Option<&UnsubscribeList>,
+) -> Result<Option<String>, MailError> {
+    let Some(value) = string_header(
+        exchange,
+        CAMEL_MAIL_LIST_UNSUBSCRIBE_POST,
+        "must be a string",
+    )?
+    else {
+        return Ok(None);
+    };
+    headers::validate_header_value(CAMEL_MAIL_LIST_UNSUBSCRIBE_POST, value)?;
+    let Some(list) = list else {
+        return Err(MailError::HeaderValidation {
+            header: CAMEL_MAIL_LIST_UNSUBSCRIBE_POST.to_string(),
+            reason: "requires CamelMailListUnsubscribe",
+        });
+    };
+    if value != headers::ONE_CLICK_TOKEN {
+        return Err(MailError::HeaderValidation {
+            header: CAMEL_MAIL_LIST_UNSUBSCRIBE_POST.to_string(),
+            reason: "must be exactly List-Unsubscribe=One-Click",
+        });
+    }
+    if !list.has_https {
+        return Err(MailError::HeaderValidation {
+            header: CAMEL_MAIL_LIST_UNSUBSCRIBE_POST.to_string(),
+            reason: "requires an https URI in CamelMailListUnsubscribe (RFC 8058)",
+        });
+    }
+    Ok(Some(value.to_string()))
 }
 
 /// Map an exchange to an outgoing message; no I/O happens here.
@@ -107,6 +216,9 @@ pub(crate) fn build_outbound(
         None => cfg.subject.clone(),
     };
 
+    let list_unsubscribe = unsubscribe_list_value(exchange)?;
+    let list_unsubscribe_post = unsubscribe_post_value(exchange, list_unsubscribe.as_ref())?;
+
     let mut extra_headers = Vec::new();
     for (name, value) in &exchange.input.headers {
         if !(name.starts_with("X-") || name.starts_with("x-")) {
@@ -146,6 +258,8 @@ pub(crate) fn build_outbound(
         html_alternative,
         extra_headers,
         message_id,
+        list_unsubscribe: list_unsubscribe.map(|l| l.value),
+        list_unsubscribe_post,
     })
 }
 
@@ -325,5 +439,383 @@ mod tests {
         let m = build_outbound(&cfg(BASE), &ex(text("x"), &[])).expect("ok");
         assert!(m.message_id.starts_with('<'));
         assert!(m.message_id.ends_with("@corp.test>"));
+    }
+
+    #[test]
+    fn list_unsubscribe_accepts_multiple_uris() {
+        let value = "<mailto:u@example.com>, <https://example.com/u/1>, <https://example.com/u/2>";
+        let e = ex(text("x"), &[("CamelMailListUnsubscribe", s(value))]);
+        let m = build_outbound(&cfg(BASE), &e).expect("ok");
+        assert_eq!(m.list_unsubscribe.as_deref(), Some(value));
+    }
+
+    #[test]
+    fn list_unsubscribe_accepts_https_only() {
+        let e = ex(
+            text("x"),
+            &[("CamelMailListUnsubscribe", s("<https://example.com/u/1>"))],
+        );
+        let m = build_outbound(&cfg(BASE), &e).expect("ok");
+        assert_eq!(
+            m.list_unsubscribe.as_deref(),
+            Some("<https://example.com/u/1>")
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_rejects_non_string() {
+        let e = ex(text("x"), &[("CamelMailListUnsubscribe", Value::from(7))]);
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            ("CamelMailListUnsubscribe".to_string(), "must be a string")
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_rejects_cr() {
+        let e = ex(
+            text("x"),
+            &[("CamelMailListUnsubscribe", s("<mailto:a@x.test\r>"))],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            ("CamelMailListUnsubscribe".to_string(), "contains CR")
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_rejects_lf() {
+        let e = ex(
+            text("x"),
+            &[("CamelMailListUnsubscribe", s("<mailto:a@x.test\n>"))],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            ("CamelMailListUnsubscribe".to_string(), "contains LF")
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_rejects_nul() {
+        let e = ex(
+            text("x"),
+            &[("CamelMailListUnsubscribe", s("<mailto:a@x.test\0>"))],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            ("CamelMailListUnsubscribe".to_string(), "contains NUL")
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_rejects_over_998() {
+        let value = format!("<mailto:{}>", "a".repeat(999));
+        let e = ex(text("x"), &[("CamelMailListUnsubscribe", s(&value))]);
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribe".to_string(),
+                "longer than 998 bytes"
+            )
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_rejects_non_ascii() {
+        let e = ex(
+            text("x"),
+            &[(
+                "CamelMailListUnsubscribe",
+                s("<mailto:a@b.test?subject=café>"),
+            )],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            ("CamelMailListUnsubscribe".to_string(), "must be ASCII")
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_rejects_unbracketed() {
+        let e = ex(
+            text("x"),
+            &[("CamelMailListUnsubscribe", s("https://example.com/u/1"))],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribe".to_string(),
+                "must contain only mailto: or https: angle-bracket URIs"
+            )
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_rejects_empty_brackets() {
+        let e = ex(text("x"), &[("CamelMailListUnsubscribe", s("<>"))]);
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribe".to_string(),
+                "must contain only mailto: or https: angle-bracket URIs"
+            )
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_rejects_unsupported_scheme() {
+        let e = ex(
+            text("x"),
+            &[("CamelMailListUnsubscribe", s("<ftp://example.com/u>"))],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribe".to_string(),
+                "must contain only mailto: or https: angle-bracket URIs"
+            )
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_rejects_unsupported_element_in_list() {
+        let e = ex(
+            text("x"),
+            &[(
+                "CamelMailListUnsubscribe",
+                s("<mailto:a@x.test>, <http://x.test>"),
+            )],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribe".to_string(),
+                "must contain only mailto: or https: angle-bracket URIs"
+            )
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_rejects_https_without_host() {
+        let e = ex(
+            text("x"),
+            &[("CamelMailListUnsubscribe", s("<https:///p>"))],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribe".to_string(),
+                "must contain only mailto: or https: angle-bracket URIs"
+            )
+        );
+    }
+
+    #[test]
+    fn bare_list_unsubscribe_ignored() {
+        let e = ex(
+            text("x"),
+            &[
+                ("list-unsubscribe", s("<mailto:a@x.test>")),
+                ("LIST-UNSUBSCRIBE", s("<mailto:a@x.test>")),
+                ("camelmaillistunsubscribe", s("<mailto:a@x.test>")),
+                (
+                    "CAMELMAILLISTUNSUBSCRIBEPOST",
+                    s("List-Unsubscribe=One-Click"),
+                ),
+            ],
+        );
+        let m = build_outbound(&cfg(BASE), &e).expect("ok");
+        assert!(m.list_unsubscribe.is_none());
+        assert!(m.list_unsubscribe_post.is_none());
+        assert!(m.extra_headers.is_empty());
+    }
+
+    #[test]
+    fn http_copied_list_unsubscribe_ignored() {
+        let e = ex(
+            text("x"),
+            &[
+                ("List-Unsubscribe", s("<https://x.test/u>")),
+                ("List-Unsubscribe-Post", s("List-Unsubscribe=One-Click")),
+            ],
+        );
+        let m = build_outbound(&cfg(BASE), &e).expect("ok");
+        assert!(m.list_unsubscribe.is_none());
+        assert!(m.list_unsubscribe_post.is_none());
+        assert!(m.extra_headers.is_empty());
+    }
+
+    #[test]
+    fn list_unsubscribe_rejects_mailto_without_value() {
+        let e = ex(text("x"), &[("CamelMailListUnsubscribe", s("<mailto:>"))]);
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribe".to_string(),
+                "must contain only mailto: or https: angle-bracket URIs"
+            )
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_accepts_uppercase_schemes() {
+        let value = "<MAILTO:U@EXAMPLE.COM>, <HTTPS://EXAMPLE.COM/U/1>";
+        let e = ex(text("x"), &[("CamelMailListUnsubscribe", s(value))]);
+        let m = build_outbound(&cfg(BASE), &e).expect("ok");
+        assert_eq!(m.list_unsubscribe.as_deref(), Some(value));
+    }
+
+    #[test]
+    fn list_unsubscribe_post_accepted_with_https_list() {
+        let e = ex(
+            text("x"),
+            &[
+                ("CamelMailListUnsubscribe", s("<https://example.com/u/1>")),
+                (
+                    "CamelMailListUnsubscribePost",
+                    s("List-Unsubscribe=One-Click"),
+                ),
+            ],
+        );
+        let m = build_outbound(&cfg(BASE), &e).expect("ok");
+        assert_eq!(
+            m.list_unsubscribe_post.as_deref(),
+            Some("List-Unsubscribe=One-Click")
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_post_requires_list() {
+        let e = ex(
+            text("x"),
+            &[(
+                "CamelMailListUnsubscribePost",
+                s("List-Unsubscribe=One-Click"),
+            )],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribePost".to_string(),
+                "requires CamelMailListUnsubscribe"
+            )
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_post_rejects_lowercase_token() {
+        let e = ex(
+            text("x"),
+            &[
+                ("CamelMailListUnsubscribe", s("<https://example.com/u/1>")),
+                (
+                    "CamelMailListUnsubscribePost",
+                    s("list-unsubscribe=one-click"),
+                ),
+            ],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribePost".to_string(),
+                "must be exactly List-Unsubscribe=One-Click"
+            )
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_post_rejects_trailing_space() {
+        let e = ex(
+            text("x"),
+            &[
+                ("CamelMailListUnsubscribe", s("<https://example.com/u/1>")),
+                (
+                    "CamelMailListUnsubscribePost",
+                    s("List-Unsubscribe=One-Click "),
+                ),
+            ],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribePost".to_string(),
+                "must be exactly List-Unsubscribe=One-Click"
+            )
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_post_rejects_mailto_only_list() {
+        let e = ex(
+            text("x"),
+            &[
+                ("CamelMailListUnsubscribe", s("<mailto:u@example.com>")),
+                (
+                    "CamelMailListUnsubscribePost",
+                    s("List-Unsubscribe=One-Click"),
+                ),
+            ],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribePost".to_string(),
+                "requires an https URI in CamelMailListUnsubscribe (RFC 8058)"
+            )
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_post_with_empty_host_list_names_the_list() {
+        let e = ex(
+            text("x"),
+            &[
+                ("CamelMailListUnsubscribe", s("<https:///p>")),
+                (
+                    "CamelMailListUnsubscribePost",
+                    s("List-Unsubscribe=One-Click"),
+                ),
+            ],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribe".to_string(),
+                "must contain only mailto: or https: angle-bracket URIs"
+            )
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_post_rejects_non_string() {
+        let e = ex(
+            text("x"),
+            &[("CamelMailListUnsubscribePost", Value::Bool(true))],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            (
+                "CamelMailListUnsubscribePost".to_string(),
+                "must be a string"
+            )
+        );
+    }
+
+    #[test]
+    fn list_unsubscribe_post_rejects_nul() {
+        let e = ex(
+            text("x"),
+            &[
+                ("CamelMailListUnsubscribe", s("<https://example.com/u/1>")),
+                (
+                    "CamelMailListUnsubscribePost",
+                    s("List-Unsubscribe=One-Click\0"),
+                ),
+            ],
+        );
+        assert_eq!(
+            hv_header(build_outbound(&cfg(BASE), &e)),
+            ("CamelMailListUnsubscribePost".to_string(), "contains NUL")
+        );
     }
 }

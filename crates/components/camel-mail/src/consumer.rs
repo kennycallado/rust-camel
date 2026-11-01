@@ -54,8 +54,12 @@ pub(crate) async fn poll_once(
         };
         match ctx.send_and_wait(exchange).await {
             Ok(ex) if !ex.has_error() => cycle.delivered(uid, message_id.as_deref()).await?,
+            Ok(ex) => cycle.warn_failed_attempt(
+                uid,
+                ex.error.as_ref().map_or("unknown", |e| e.variant_name()),
+            ),
             Err(CamelError::ChannelClosed) => return Ok(Polled::RouteClosed),
-            _ => cycle.failed(uid),
+            Err(e) => cycle.warn_failed_attempt(uid, e.variant_name()),
         }
     }
     Ok(Polled::Done)

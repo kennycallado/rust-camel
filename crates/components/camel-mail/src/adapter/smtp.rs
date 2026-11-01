@@ -13,6 +13,7 @@ use tracing::debug;
 use crate::address::MailAddress;
 use crate::config::{ContentKind, MailAccountConfig, SmtpEndpointConfig, TlsMode};
 use crate::error::MailError;
+use crate::headers;
 use crate::message::OutboundMessage;
 use crate::tls;
 use crate::transport::MailTransport;
@@ -86,6 +87,18 @@ pub(crate) fn render_mime(msg: &OutboundMessage) -> Result<Vec<u8>, MailError> {
     for (name, value) in &msg.extra_headers {
         let name = HeaderName::new_from_ascii(name.clone()).map_err(transport_err)?;
         builder = builder.raw_header(HeaderValue::new(name, value.clone()));
+    }
+    for (wire, value) in [
+        (headers::WIRE_LIST_UNSUBSCRIBE, &msg.list_unsubscribe),
+        (
+            headers::WIRE_LIST_UNSUBSCRIBE_POST,
+            &msg.list_unsubscribe_post,
+        ),
+    ] {
+        if let Some(value) = value {
+            let name = HeaderName::new_from_ascii(wire.to_string()).map_err(transport_err)?;
+            builder = builder.raw_header(HeaderValue::new(name, value.clone()));
+        }
     }
     let message = match (&msg.content, &msg.html_alternative) {
         (ContentKind::Html, _) => builder.singlepart(SinglePart::html(msg.body.clone())),
@@ -243,6 +256,49 @@ mod tests {
     fn render_emits_x_header() {
         let out = render(&outbound("&to=a@corp.test", "x", &[("X-Trace", "abc")]));
         assert!(out.contains("X-Trace: abc"), "{out}");
+    }
+
+    #[test]
+    fn render_emits_list_unsubscribe() {
+        let m = outbound(
+            "&to=a@corp.test",
+            "x",
+            &[("CamelMailListUnsubscribe", "<https://example.com/u/1>")],
+        );
+        let out = render(&m);
+        assert_eq!(
+            out.matches("List-Unsubscribe: <https://example.com/u/1>")
+                .count(),
+            1,
+            "{out}"
+        );
+        assert!(!out.contains("X-CamelMailListUnsubscribe"), "{out}");
+    }
+
+    #[test]
+    fn render_emits_list_unsubscribe_post() {
+        let m = outbound(
+            "&to=a@corp.test",
+            "x",
+            &[
+                ("CamelMailListUnsubscribe", "<https://example.com/u/1>"),
+                ("CamelMailListUnsubscribePost", "List-Unsubscribe=One-Click"),
+            ],
+        );
+        let out = render(&m);
+        assert_eq!(
+            out.matches("List-Unsubscribe-Post: List-Unsubscribe=One-Click")
+                .count(),
+            1,
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn render_omits_both_when_absent() {
+        let out = render(&outbound("&to=a@corp.test", "x", &[]));
+        assert!(!out.contains("List-Unsubscribe:"), "{out}");
+        assert!(!out.contains("List-Unsubscribe-Post:"), "{out}");
     }
 
     #[test]

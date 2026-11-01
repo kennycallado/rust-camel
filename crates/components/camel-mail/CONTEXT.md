@@ -28,9 +28,11 @@ type appears in a public signature (ADR-0020, ADR-0060). Unit tests use a fake t
   rustls through the workspace `tokio-rustls` entry. `lettre` 0.11 has no provider injection point
   and takes the process default provider (bd rc-2bofp).
 - Header classes. Headers use exact CamelCase names, because the HTTP consumer copies Title-Case
-  request headers. Class A (content) is validated and `X-*` passes through. Class B (routing) is
-  endpoint-only unless `allowedRecipients` arms the fence. Class C (mailbox mutation) is
-  endpoint-only. `SmtpEndpointConfig` holds the parsed endpoint options.
+  request headers. Class A (content) is validated and names `CamelMailSubject`,
+  `CamelMailContentType`, `CamelMailHtmlBody`, `CamelMailListUnsubscribe` and
+  `CamelMailListUnsubscribePost`; `X-*` passes through. Class B (routing) is endpoint-only unless
+  `allowedRecipients` arms the fence. Class C (mailbox mutation) is endpoint-only.
+  `SmtpEndpointConfig` holds the parsed endpoint options.
 - Body. A text body, a JSON string body (what `set_body` and a DSL `constant` produce) or UTF-8 bytes
   is sent as text; any other body fails the exchange.
 - Message id. After an accepted send the producer sets `CamelMailMessageId`.
@@ -106,5 +108,5 @@ See ADR-0093 for the full record.
   fence accepts class B routing headers, and it rejects any address outside the list. An unarmed
   endpoint rejects the headers.
 - **Class A/B/C header:** The three header classes of the mail component. A is content (subject,
-  content type, HTML body, `X-*`), B is routing (`CamelMailTo`, `CamelMailCc`, `CamelMailBcc`), and C
-  is mailbox mutation (endpoint-only).
+  content type, HTML body, `CamelMailListUnsubscribe`, `CamelMailListUnsubscribePost`, `X-*`), B is
+  routing (`CamelMailTo`, `CamelMailCc`, `CamelMailBcc`), and C is mailbox mutation (endpoint-only).

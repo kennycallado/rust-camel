@@ -43,6 +43,32 @@ Credentials never go in the URI.
 | `copyTo` | none |
 | `idempotentRepository` | none |
 
+## Behaviour notes
+
+- Component operation metrics need `[observability.metrics] components = true`. The `b-prime:mail:*` error labels come from the error family, which that lever does not gate. Only the push Consumer counts them; a `pollEnrich` call logs and does not count.
+- `Body::Empty` fails the send. `set_body` with `value: ""` sends a 0-byte `text/plain` body.
+- `pollEnrich` with the default `UseEnrichedBody` copies only the body into the original Exchange. The polled `CamelMailIn*` headers are dropped.
+- A relative `caFile` resolves against the process working directory, not against the directory that holds `Camel.toml`.
+- With profile sections, the accounts live under `[default.components.mail.accounts.<name>]`. The flat `[components.mail.accounts.<name>]` form is for a config with no `[default]` or `[<profile>]` section.
+
+## Exchange headers
+
+Header names are exact and case-sensitive.
+
+Class A headers set content: `CamelMailSubject`, `CamelMailContentType`, `CamelMailHtmlBody`, `CamelMailListUnsubscribe`, `CamelMailListUnsubscribePost`, and `X-*`.
+
+Class B headers set recipients. The endpoint accepts them only when it sets `allowedRecipients`:
+
+```
+CamelMailTo
+CamelMailCc
+CamelMailBcc
+```
+
+Class C is endpoint-only. No Exchange header sets `delete`, `moveTo`, `copyTo`, or `folder`.
+
+`CamelMailListUnsubscribePost` must equal `List-Unsubscribe=One-Click`. It needs an `https` URI in `CamelMailListUnsubscribe`. A bare `List-Unsubscribe` header is ignored, and only the `CamelMail*` name is read.
+
 ## Integration tests (Docker tier)
 
 The GreenMail and Mailpit integration tiers are gated: they run only when

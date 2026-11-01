@@ -432,14 +432,31 @@ impl<'a> Cycle<'a> {
 
     /// Count one failed delivery attempt; at `maxAttempts` the message is
     /// skipped.
-    pub(crate) fn failed(&mut self, uid: u32) {
+    pub(crate) fn failed(&mut self, uid: u32) -> u32 {
         let key = (self.uid_validity, uid);
         let attempts = self.state.attempts.entry(key).or_insert(0);
         *attempts += 1;
-        if *attempts >= self.mailbox.config.max_attempts {
+        let attempt = *attempts;
+        if attempt >= self.mailbox.config.max_attempts {
             self.state.attempts.remove(&key);
             self.skip(uid, "maxAttempts");
         }
+        attempt
+    }
+
+    /// Count one failed route attempt and log its cause. Only the error
+    /// variant name is recorded: the error `Display`/`Debug` text can carry
+    /// credentials and message bodies.
+    pub(crate) fn warn_failed_attempt(&mut self, uid: u32, error_kind: &'static str) {
+        let attempt = self.failed(uid);
+        warn!(
+            uid,
+            uid_validity = self.uid_validity,
+            attempt,
+            max_attempts = self.mailbox.config.max_attempts,
+            error_kind,
+            "mail route failed; message left unseen"
+        );
     }
 
     /// The message was delivered: `add` the Message-ID, then run the
