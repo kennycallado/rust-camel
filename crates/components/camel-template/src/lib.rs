@@ -27,6 +27,8 @@ pub(crate) mod reload;
 pub(crate) mod root;
 #[cfg(feature = "default")]
 pub(crate) mod template_set;
+#[cfg(all(test, feature = "default"))]
+pub(crate) mod test_support;
 pub(crate) mod uri;
 
 pub mod config;

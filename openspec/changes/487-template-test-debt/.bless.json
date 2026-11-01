@@ -1,0 +1,43 @@
+{
+  "kind": "plan",
+  "change": "487-template-test-debt",
+  "hash": "sha256:ba28c91123de5d6111d5a89ac21048df398a5d6885276cc3bf1d6806969fb58a",
+  "expert": "experts/e_opus",
+  "verdict": "BLESS",
+  "date": "2026-11-01",
+  "spec_gate": "skipped per mission order (skip_specs: true; test/docs-only, no normative behavior)",
+  "plan_review": {
+    "reviewer": "reviewers/r_glm",
+    "rounds": [
+      {
+        "verdict": "APPROVE-WITH-FINDINGS",
+        "findings": 5,
+        "note": "2 retracted by reviewer on evidence (28 vs 27 template_set test count; skip_specs file existence); 3 applied (rg acceptance patterns, Arc import, path/lint wording)"
+      }
+    ],
+    "final": "APPROVE-WITH-FINDINGS (remaining minor on lint count resolved by conductor policy: 24 locally runnable lint gates = 25 minus lint-commits)"
+  },
+  "bless_passes": [
+    {
+      "pass": 1,
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": 3,
+      "note": "gate-command regexes (doubled backslash), no-default-features expected count (23, not 0), proposal wording"
+    },
+    {
+      "pass": 2,
+      "verdict": "BLESS",
+      "findings": 0,
+      "hash": "sha256:ba28c91123de5d6111d5a89ac21048df398a5d6885276cc3bf1d6806969fb58a"
+    }
+  ],
+  "pre_flight_expert": {
+    "expert": "experts/e_opus",
+    "rulings": [
+      "child tests module inherits the parent feature gate; no extra cfg needed",
+      "extraction to crate-level src/test_support.rs with #[cfg(all(test, feature = \"default\"))]",
+      "full docs re-inventory at 30 bodies / 28 files rather than 22 -> 23",
+      "dump fixture pins the contract, does not prove the filter resorts"
+    ]
+  }
+}
