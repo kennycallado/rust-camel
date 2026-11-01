@@ -118,7 +118,7 @@ impl Service<Exchange> for RedisProducer {
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         let config = self.config.clone();
         let mut executor = self.executor.clone();
-        let component_metrics = self.runtime.component_metrics();
+        let component_metrics = self.runtime.component_metrics("redis");
 
         Box::pin(async move {
             // 1. Resolve command from header or config
@@ -142,7 +142,7 @@ impl Service<Exchange> for RedisProducer {
                 &config.reconnect,
             )
             .await;
-            component_metrics.observe("redis", "command", command_outcome.is_err());
+            component_metrics.observe("command", command_outcome.is_err());
             command_outcome?;
 
             Ok(exchange)

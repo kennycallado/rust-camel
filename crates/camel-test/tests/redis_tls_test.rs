@@ -98,7 +98,7 @@ async fn rediss_round_trip_through_cache_repository() {
             "tlstest",
             Duration::from_secs(300),
             // Live suite: lever-off facade, compile-only wiring.
-            ComponentMetrics::new(std::sync::Arc::new(MetricsHandle::new()), false),
+            ComponentMetrics::new(std::sync::Arc::new(MetricsHandle::new()), "redis", false),
         ),
     )
     .await
@@ -196,7 +196,7 @@ async fn wrong_ca_is_rejected() {
             "tlstest",
             Duration::from_secs(300),
             // Live suite: lever-off facade, compile-only wiring.
-            ComponentMetrics::new(std::sync::Arc::new(MetricsHandle::new()), false),
+            ComponentMetrics::new(std::sync::Arc::new(MetricsHandle::new()), "redis", false),
         ),
     )
     .await

@@ -1,3 +1,4 @@
+use camel_api::ComponentMetricsLevers;
 use serde::{Deserialize, Deserializer};
 
 /// Configuration for the Tracer EIP (Enterprise Integration Pattern).
@@ -141,17 +142,22 @@ pub enum OutputFormat {
 /// Metric-family levers for `[observability.metrics]` in Camel.toml
 /// (dashboard-observability D3).
 ///
-/// `enabled` is the master switch for the non-error families; `exchange`,
-/// `duration`, and `components` are per-family opt-outs (a family flows
-/// only when `enabled && <family>`). No lever exists for the error family —
-/// `camel_errors_total` is structurally non-disableable
-/// (metrics-configuration Req 2).
+/// A non-error family flows only when `enabled && <family>`, where
+/// `<family>` is `exchange`, `duration`, or `components`.
+/// `component_overrides` narrows the component-operations family per
+/// component: a component without an override inherits `components`, and
+/// the master `enabled` switch is applied last, so it always wins. No lever
+/// exists for the error family — `camel_errors_total` is structurally
+/// non-disableable (metrics-configuration Req 2).
 #[derive(Clone, Debug, PartialEq)]
 pub struct MetricsLeversConfig {
     pub enabled: bool,
     pub exchange: bool,
     pub duration: bool,
     pub components: bool,
+    /// Per-component enablement for the component-operations family,
+    /// keyed by component name. An absent key inherits `components`.
+    pub component_overrides: std::collections::BTreeMap<String, bool>,
 }
 
 impl MetricsLeversConfig {
@@ -171,6 +177,31 @@ impl MetricsLeversConfig {
     pub fn components_enabled(&self) -> bool {
         self.enabled && self.components
     }
+
+    /// Whether the component-operations family may flow for `component`.
+    ///
+    /// Precedence: a per-component override wins over `components`; an
+    /// absent override inherits `components`; the master `enabled` switch
+    /// applies last and can veto every component.
+    pub fn component_enabled(&self, component: &str) -> bool {
+        self.enabled
+            && self
+                .component_overrides
+                .get(component)
+                .copied()
+                .unwrap_or(self.components)
+    }
+
+    /// Snapshots the component-operations levers into the scoped identity
+    /// handed to components through
+    /// [`ComponentContext::component_metric_levers`](camel_component_api::ComponentContext::component_metric_levers).
+    pub fn component_metrics_levers(&self) -> ComponentMetricsLevers {
+        ComponentMetricsLevers::new(
+            self.enabled,
+            self.components,
+            self.component_overrides.clone(),
+        )
+    }
 }
 
 impl Default for MetricsLeversConfig {
@@ -180,6 +211,7 @@ impl Default for MetricsLeversConfig {
             exchange: true,
             duration: true,
             components: false,
+            component_overrides: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -204,6 +236,8 @@ impl<'de> Deserialize<'de> for MetricsLeversConfig {
             duration: Option<bool>,
             #[serde(default)]
             components: Option<bool>,
+            #[serde(default)]
+            component_overrides: Option<std::collections::BTreeMap<String, bool>>,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -212,6 +246,7 @@ impl<'de> Deserialize<'de> for MetricsLeversConfig {
             exchange: raw.exchange.unwrap_or(true),
             duration: raw.duration.unwrap_or(true),
             components: raw.components.unwrap_or(false),
+            component_overrides: raw.component_overrides.unwrap_or_default(),
         })
     }
 }
@@ -228,7 +263,86 @@ fn default_true() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
+
+    #[test]
+    fn metrics_levers_precedence_matrix() {
+        let cases = [
+            (false, None, false),
+            (false, Some(false), false),
+            (false, Some(true), true),
+            (true, None, true),
+            (true, Some(false), false),
+            (true, Some(true), true),
+        ];
+
+        for (components, override_value, expected) in cases {
+            let mut overrides = BTreeMap::new();
+            if let Some(value) = override_value {
+                overrides.insert("http".to_string(), value);
+            }
+            let levers = MetricsLeversConfig {
+                enabled: true,
+                exchange: true,
+                duration: true,
+                components,
+                component_overrides: overrides,
+            };
+            assert_eq!(
+                levers.component_enabled("http"),
+                expected,
+                "components={components}, override={override_value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn metrics_levers_master_switch_beats_override() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert("http".to_string(), true);
+        let levers = MetricsLeversConfig {
+            enabled: false,
+            exchange: true,
+            duration: true,
+            components: false,
+            component_overrides: overrides,
+        };
+        assert!(!levers.component_enabled("http"));
+    }
+
+    #[test]
+    fn metrics_levers_defaults_have_no_overrides() {
+        let levers = MetricsLeversConfig::default();
+        assert!(levers.component_overrides.is_empty());
+        assert!(!levers.component_enabled("http"));
+    }
+
+    #[test]
+    fn metrics_levers_deserializes_component_overrides() {
+        let levers: MetricsLeversConfig = serde_json::from_str(
+            r#"{"enabled":true,"components":false,"component_overrides":{"http":true,"kafka":false}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(levers.component_overrides.len(), 2);
+        assert!(levers.component_enabled("http"));
+        assert!(!levers.component_enabled("kafka"));
+    }
+
+    #[test]
+    fn metrics_levers_absent_override_inherits_components() {
+        let levers: MetricsLeversConfig = serde_json::from_str(r#"{"components":true}"#).unwrap();
+        assert!(levers.component_enabled("http"));
+    }
+
+    #[test]
+    fn metrics_levers_rejects_unknown_keys() {
+        let result: Result<MetricsLeversConfig, _> =
+            serde_json::from_str(r#"{"component_override":{"http":true}}"#);
+        assert!(result.is_err());
+    }
 
     #[test]
     fn tracer_config_defaults_are_stable() {

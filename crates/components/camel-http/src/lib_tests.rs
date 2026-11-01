@@ -2,6 +2,8 @@
 //! Pure move (mission 272, bd rc-ax1vl): one-level dedent, no other edits.
 
 use camel_component_api::test_support::NoopRuntimeObservability;
+use camel_component_api::test_support::RecordingRuntimeObservability;
+use camel_component_api::test_support::timeout_wait;
 
 #[test]
 fn test_metadata_authmethod_enum_covers_runtime_vocab() {
@@ -39,6 +41,12 @@ fn rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
 }
 fn noop_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
     std::sync::Arc::new(NoopRuntimeObservability)
+}
+
+/// Route-entry metrics for registration-only tests: `http` identity with the
+/// component-operation family off, so handling a request emits nothing.
+fn test_component_metrics() -> camel_api::ComponentMetrics {
+    camel_api::ComponentMetrics::new(std::sync::Arc::new(camel_api::NoOpMetrics), "http", false)
 }
 
 use super::*;
@@ -1731,6 +1739,48 @@ async fn test_http_producer_throw_exception_on_failure() {
         }
         e => panic!("Expected HttpOperationFailed, got: {e}"),
     }
+}
+
+#[tokio::test]
+async fn producer_http_request_unchanged() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_status_server(500).await;
+    let ctx = test_producer_ctx();
+    let runtime = RecordingRuntimeObservability::new(true);
+    let rt: std::sync::Arc<dyn camel_component_api::RuntimeObservability> = runtime.clone();
+
+    let component = HttpComponent::new();
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}/error?allowInternal=true"),
+            &NoOpComponentContext,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt, &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await;
+    assert!(result.is_err(), "500 must fail the producer call");
+
+    assert_eq!(
+        runtime.ops(),
+        vec![(
+            "http".to_string(),
+            "request".to_string(),
+            "failure".to_string()
+        )],
+        "the scoped handle must record the failed request under `http`"
+    );
+    assert!(
+        !runtime.ops().iter().any(|(_, op, _)| op == "consume"),
+        "the http producer must not emit a consume operation"
+    );
+    assert_eq!(
+        runtime.errors(),
+        vec![("http".to_string(), "e:http:request".to_string())],
+        "the failure must still reach the error family"
+    );
 }
 
 #[tokio::test]
@@ -8101,6 +8151,7 @@ fn spawn_responder(
                     status,
                     headers: vec![],
                     body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
+                    failed: false,
                 });
             }
             Ok(None) => {}
@@ -8123,6 +8174,7 @@ async fn method_aware_dispatch_same_path_different_verbs() {
             "GET".into(),
             vec![PathSegment::Literal("users".into())],
             get_tx,
+            test_component_metrics(),
         )
         .await
         .expect("unique HTTP registration");
@@ -8133,6 +8185,7 @@ async fn method_aware_dispatch_same_path_different_verbs() {
             "POST".into(),
             vec![PathSegment::Literal("users".into())],
             post_tx,
+            test_component_metrics(),
         )
         .await
         .expect("unique HTTP registration");
@@ -8183,6 +8236,7 @@ async fn method_aware_dispatch_templated_path_extracts_params() {
                 PathSegment::Param("id".into()),
             ],
             tx,
+            test_component_metrics(),
         )
         .await
         .expect("unique HTTP registration");
@@ -8197,6 +8251,7 @@ async fn method_aware_dispatch_templated_path_extracts_params() {
                     status: 200,
                     headers: vec![],
                     body: HttpReplyBody::Bytes(bytes::Bytes::from(format!("id={id}"))),
+                    failed: false,
                 });
             }
             // Channel closed: task ends as today.
@@ -8234,6 +8289,7 @@ async fn method_aware_dispatch_unmatched_method_falls_through() {
             "GET".into(),
             vec![PathSegment::Literal("users".into())],
             get_tx,
+            test_component_metrics(),
         )
         .await
         .expect("unique HTTP registration");
@@ -8272,7 +8328,7 @@ async fn regression_legacy_exact_api_route_still_works() {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
     registry
-        .register_api_route("/legacy/path".into(), tx)
+        .register_api_route("/legacy/path".into(), tx, test_component_metrics())
         .await
         .expect("unique HTTP registration");
 
@@ -8283,6 +8339,7 @@ async fn regression_legacy_exact_api_route_still_works() {
                     status: 200,
                     headers: vec![],
                     body: HttpReplyBody::Bytes(bytes::Bytes::from("legacy ok")),
+                    failed: false,
                 });
             }
             // Channel closed: task ends as today.
@@ -8370,6 +8427,7 @@ async fn deregister_one_method_keeps_sibling_verbs() {
             "GET".into(),
             vec![PathSegment::Literal("users".into())],
             get_tx,
+            test_component_metrics(),
         )
         .await
         .expect("unique HTTP registration");
@@ -8380,6 +8438,7 @@ async fn deregister_one_method_keeps_sibling_verbs() {
             "POST".into(),
             vec![PathSegment::Literal("users".into())],
             post_tx,
+            test_component_metrics(),
         )
         .await
         .expect("unique HTTP registration");
@@ -8428,7 +8487,7 @@ async fn dispatch_exact_legacy_beats_rest_template() {
     // Exact legacy route.
     let (exact_tx, exact_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
     registry
-        .register_api_route("/api/users".into(), exact_tx)
+        .register_api_route("/api/users".into(), exact_tx, test_component_metrics())
         .await
         .expect("unique HTTP registration");
     let exact_handle = spawn_responder(exact_rx, 200, "exact".into());
@@ -8443,6 +8502,7 @@ async fn dispatch_exact_legacy_beats_rest_template() {
                 PathSegment::Param("resource".into()),
             ],
             tpl_tx,
+            test_component_metrics(),
         )
         .await
         .expect("unique HTTP registration");
@@ -8459,6 +8519,7 @@ async fn dispatch_exact_legacy_beats_rest_template() {
                     status: 200,
                     headers: vec![],
                     body: HttpReplyBody::Bytes(bytes::Bytes::from("template-leak")),
+                    failed: false,
                 });
             }
             // Channel closed: task ends as today.
@@ -8500,6 +8561,7 @@ async fn ambiguous_rest_templates_return_500_not_silent_404() {
                 PathSegment::Param("id".into()),
             ],
             a_tx,
+            test_component_metrics(),
         )
         .await
         .expect("unique HTTP registration");
@@ -8513,6 +8575,7 @@ async fn ambiguous_rest_templates_return_500_not_silent_404() {
                 PathSegment::Param("name".into()),
             ],
             b_tx,
+            test_component_metrics(),
         )
         .await
         .expect("unique HTTP registration");
@@ -9543,7 +9606,7 @@ async fn spawn_failing_auth_route(
     ));
     let (tx, mut rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(8);
     registry
-        .register_api_route(path.to_string(), tx)
+        .register_api_route(path.to_string(), tx, test_component_metrics())
         .await
         .expect("unique HTTP registration");
     let path_owned = path.to_string();
@@ -9573,6 +9636,7 @@ async fn spawn_failing_auth_route(
                                     status: 200,
                                     headers: vec![],
                                     body: HttpReplyBody::Bytes(bytes::Bytes::from("ok")),
+                                    failed: false,
                                 },
                                 Ok(Err(e)) => pipeline_error_to_reply(e, &path_owned),
                                 Err(_) => pipeline_error_to_reply(
@@ -10368,11 +10432,16 @@ async fn test_duplicate_registry_registration_is_atomic() {
                                 "GET".into(),
                                 rest_match::parse_path_template("/users/{id}"),
                                 sender,
+                                test_component_metrics(),
                             )
                             .await
                     } else {
                         registry
-                            .register_api_route("/duplicate".into(), sender)
+                            .register_api_route(
+                                "/duplicate".into(),
+                                sender,
+                                test_component_metrics(),
+                            )
                             .await
                     }
                 })
@@ -10406,7 +10475,7 @@ async fn test_duplicate_registry_registration_is_atomic() {
                 assert!(snapshot.rest_endpoints.is_empty());
                 &snapshot.api_routes["/duplicate"]
             };
-            assert!(stored.same_channel(winner));
+            assert!(stored.sender.same_channel(winner));
             assert!(matches!(
                 rejected_rx.try_recv(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
@@ -10421,7 +10490,7 @@ async fn test_readers_never_block_on_writer() {
     for index in 0..50 {
         let (sender, _receiver) = tokio::sync::mpsc::channel::<RequestEnvelope>(1);
         registry
-            .register_api_route(format!("/legacy{index}"), sender)
+            .register_api_route(format!("/legacy{index}"), sender, test_component_metrics())
             .await
             .expect("seed legacy route registration succeeds");
     }
@@ -10490,11 +10559,15 @@ async fn test_register_unregister_swap_visibility() {
     // Legacy exact route.
     let (api_tx, _api_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(1);
     registry
-        .register_api_route("/legacy".to_string(), api_tx.clone())
+        .register_api_route(
+            "/legacy".to_string(),
+            api_tx.clone(),
+            test_component_metrics(),
+        )
         .await
         .expect("register legacy route");
     match registry.probe_lookup("GET", "/legacy").await {
-        ProbeLookup::Exact(sender) => assert!(sender.same_channel(&api_tx)),
+        ProbeLookup::Exact(entry) => assert!(entry.sender.same_channel(&api_tx)),
         _ => panic!("registered legacy route must probe as Exact"),
     }
     registry.unregister_api_route("/legacy").await;
@@ -10510,11 +10583,12 @@ async fn test_register_unregister_swap_visibility() {
             "GET".to_string(),
             rest_match::parse_path_template("/users/{id}"),
             rest_tx.clone(),
+            test_component_metrics(),
         )
         .await
         .expect("register REST endpoint");
     match registry.probe_lookup("GET", "/users/7").await {
-        ProbeLookup::Rest(sender) => assert!(sender.same_channel(&rest_tx)),
+        ProbeLookup::Rest(entry) => assert!(entry.sender.same_channel(&rest_tx)),
         _ => panic!("registered REST endpoint must probe as Rest"),
     }
     registry
@@ -10580,4 +10654,1090 @@ async fn test_static_mount_selection_longest_prefix_and_spa() {
         registry.probe_static_select("/anything").await,
         Some((MountMode::Static, "/".to_string()))
     );
+}
+
+// -----------------------------------------------------------------------
+// Consume metric scenarios (component-metrics-overrides Task 9.2)
+// -----------------------------------------------------------------------
+
+/// Every await in these scenarios is bounded: a stalled route, server, or
+/// body must fail the test loudly instead of parking the binary.
+const CONSUME_WAIT: Duration = Duration::from_secs(10);
+
+const CONSUME_MAX_REQUEST_BODY: usize = 2 * 1024 * 1024;
+const CONSUME_MAX_RESPONSE_BODY: usize = 10 * 1024 * 1024;
+const CONSUME_MAX_INFLIGHT: usize = 1024;
+
+fn consume_op(outcome: &str) -> (String, String, String) {
+    (
+        "http".to_string(),
+        "consume".to_string(),
+        outcome.to_string(),
+    )
+}
+
+fn consume_error() -> (String, String) {
+    ("http".to_string(), "e:http:consume".to_string())
+}
+
+fn consume_route_metrics(recorder: &RecordingRuntimeObservability) -> camel_api::ComponentMetrics {
+    camel_component_api::RuntimeObservability::component_metrics(recorder, "http")
+}
+
+/// Stages a pre-bound listener in the process-global registry. The caller
+/// holds `REGISTRY_TEST_LOCK` so the staged slot cannot be reset away.
+async fn stage_consume_listener() -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind consume test listener");
+    let port = listener.local_addr().expect("listener addr").port();
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consume test listener");
+    port
+}
+
+type ConsumeConsumer = (
+    tokio_util::sync::CancellationToken,
+    tokio::sync::mpsc::Receiver<camel_component_api::ExchangeEnvelope>,
+);
+
+/// Starts one path-only consumer on `port` with `runtime` and waits for the
+/// `mark_ready` signal (no wall-clock sleep).
+async fn start_consume_consumer(
+    port: u16,
+    path: &str,
+    runtime: Arc<dyn camel_component_api::RuntimeObservability>,
+    max_request_body: usize,
+    max_response_body: usize,
+    max_inflight_requests: usize,
+) -> ConsumeConsumer {
+    use camel_component_api::ConsumerContext;
+    use camel_component_api::StartupSignal;
+
+    let cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        path: path.to_string(),
+        max_request_body,
+        max_response_body,
+        max_inflight_requests,
+        method: None,
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(cfg, runtime);
+    let (tx, rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(
+        envelope_channel_capacity(max_inflight_requests),
+    );
+    let token = tokio_util::sync::CancellationToken::new();
+    let (signal, ready) = StartupSignal::pair();
+    let ctx =
+        ConsumerContext::new(tx, token.clone(), format!("consume-{path}")).with_startup(signal);
+    tokio::spawn(async move {
+        consumer
+            .start(ctx)
+            .await
+            .expect("consume consumer must start");
+    });
+    timeout_wait(
+        "consume consumer startup",
+        CONSUME_WAIT,
+        ready.await_ready(),
+    )
+    .await
+    .expect("consume consumer must become ready");
+    (token, rx)
+}
+
+/// One pipeline responder: consumes exactly one envelope and answers it.
+fn spawn_consume_route(
+    mut rx: tokio::sync::mpsc::Receiver<camel_component_api::ExchangeEnvelope>,
+    respond: impl FnOnce(
+        camel_component_api::Exchange,
+    ) -> Result<camel_component_api::Exchange, CamelError>
+    + Send
+    + 'static,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut envelope = timeout_wait("consume route envelope", CONSUME_WAIT, rx.recv())
+            .await
+            .expect("route must receive one envelope");
+        let reply_tx = envelope.reply_tx.take().expect("reply channel must be set");
+        reply_tx
+            .send(respond(envelope.exchange))
+            .expect("reply receiver must be live");
+    })
+}
+
+fn consume_app_state(
+    registry: HttpRouteRegistry,
+    max_request_body: usize,
+    max_response_body: usize,
+    max_inflight_requests: usize,
+) -> AppState {
+    AppState {
+        registry,
+        max_request_body,
+        max_response_body,
+        inflight: Arc::new(tokio::sync::Semaphore::new(max_inflight_requests)),
+    }
+}
+
+fn consume_request(method: &str, path: &str) -> Request {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .body(AxumBody::empty())
+        .expect("consume test request")
+}
+
+async fn dispatch_consume_request(state: AppState, req: Request) -> axum::response::Response {
+    axum::response::IntoResponse::into_response(dispatch_handler(State(state), req).await)
+}
+
+/// Registers one raw dispatcher route and returns its `AppState`.
+async fn consume_dispatch_state(
+    path: &str,
+    metrics: camel_api::ComponentMetrics,
+    max_request_body: usize,
+    max_response_body: usize,
+    max_inflight_requests: usize,
+) -> (AppState, tokio::sync::mpsc::Receiver<RequestEnvelope>) {
+    let registry = HttpRouteRegistry::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(4);
+    registry
+        .register_api_route(path.to_string(), tx, metrics)
+        .await
+        .expect("register consume test route");
+    (
+        consume_app_state(
+            registry,
+            max_request_body,
+            max_response_body,
+            max_inflight_requests,
+        ),
+        rx,
+    )
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn consume_success_recorded_on_body_completion() {
+    let _guard = lock_registry_test_mutex();
+    let recorder = RecordingRuntimeObservability::new(true);
+    let port = stage_consume_listener().await;
+    let (token, rx) = start_consume_consumer(
+        port,
+        "/consume-ok",
+        recorder.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+    let route = spawn_consume_route(rx, |mut exchange| {
+        exchange.input.body = Body::Text("ok".to_string());
+        Ok(exchange)
+    });
+
+    let client = plain_http_test_client();
+    let resp = timeout_wait(
+        "consume ok request",
+        CONSUME_WAIT,
+        client
+            .get(format!("http://127.0.0.1:{port}/consume-ok"))
+            .send(),
+    )
+    .await
+    .expect("request must complete");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = timeout_wait("consume ok body", CONSUME_WAIT, resp.text())
+        .await
+        .expect("body must complete");
+    assert_eq!(body, "ok");
+
+    timeout_wait("consume ok route", CONSUME_WAIT, route)
+        .await
+        .expect("route task must not panic");
+    assert_eq!(recorder.ops(), vec![consume_op("success")]);
+    assert!(recorder.errors().is_empty());
+
+    token.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn consume_failure_on_pipeline_error() {
+    let _guard = lock_registry_test_mutex();
+    let recorder = RecordingRuntimeObservability::new(true);
+    let port = stage_consume_listener().await;
+    let (token, rx) = start_consume_consumer(
+        port,
+        "/consume-pipeline-error",
+        recorder.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+    let route = spawn_consume_route(rx, |_exchange| {
+        Err(CamelError::ProcessorError("consume boom".to_string()))
+    });
+
+    let client = plain_http_test_client();
+    let resp = timeout_wait(
+        "consume error request",
+        CONSUME_WAIT,
+        client
+            .get(format!("http://127.0.0.1:{port}/consume-pipeline-error"))
+            .send(),
+    )
+    .await
+    .expect("request must complete");
+    assert_eq!(resp.status().as_u16(), 500);
+    let body = timeout_wait("consume error body", CONSUME_WAIT, resp.text())
+        .await
+        .expect("body must complete");
+    assert_eq!(body, "Internal Server Error");
+
+    timeout_wait("consume error route", CONSUME_WAIT, route)
+        .await
+        .expect("route task must not panic");
+    assert_eq!(recorder.ops(), vec![consume_op("failure")]);
+    assert_eq!(recorder.errors(), vec![consume_error()]);
+
+    token.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn consume_route_selected_error_status_is_success() {
+    let _guard = lock_registry_test_mutex();
+    let recorder = RecordingRuntimeObservability::new(true);
+    let port = stage_consume_listener().await;
+    let (token, rx) = start_consume_consumer(
+        port,
+        "/consume-503",
+        recorder.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+    let route = spawn_consume_route(rx, |mut exchange| {
+        exchange.input.set_header(
+            "CamelHttpResponseCode",
+            serde_json::Value::Number(503.into()),
+        );
+        exchange.input.body = Body::Text("route failed on purpose".to_string());
+        Ok(exchange)
+    });
+
+    let client = plain_http_test_client();
+    let resp = timeout_wait(
+        "consume 503 request",
+        CONSUME_WAIT,
+        client
+            .get(format!("http://127.0.0.1:{port}/consume-503"))
+            .send(),
+    )
+    .await
+    .expect("request must complete");
+    assert_eq!(resp.status().as_u16(), 503);
+    let body = timeout_wait("consume 503 body", CONSUME_WAIT, resp.text())
+        .await
+        .expect("body must complete");
+    assert_eq!(body, "route failed on purpose");
+
+    timeout_wait("consume 503 route", CONSUME_WAIT, route)
+        .await
+        .expect("route task must not panic");
+    assert_eq!(recorder.ops(), vec![consume_op("success")]);
+    assert!(recorder.errors().is_empty());
+
+    token.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn consume_empty_get_is_success() {
+    let _guard = lock_registry_test_mutex();
+    let recorder = RecordingRuntimeObservability::new(true);
+    let port = stage_consume_listener().await;
+    let (token, rx) = start_consume_consumer(
+        port,
+        "/consume-empty",
+        recorder.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+    let route = spawn_consume_route(rx, |mut exchange| {
+        exchange.input.body = Body::Empty;
+        Ok(exchange)
+    });
+
+    let client = plain_http_test_client();
+    let resp = timeout_wait(
+        "consume empty request",
+        CONSUME_WAIT,
+        client
+            .get(format!("http://127.0.0.1:{port}/consume-empty"))
+            .send(),
+    )
+    .await
+    .expect("request must complete");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = timeout_wait("consume empty body", CONSUME_WAIT, resp.bytes())
+        .await
+        .expect("body must complete");
+    assert!(body.is_empty());
+
+    timeout_wait("consume empty route", CONSUME_WAIT, route)
+        .await
+        .expect("route task must not panic");
+    let ops = recorder.ops();
+    assert_eq!(
+        ops.iter()
+            .filter(|(_, _, outcome)| outcome == "success")
+            .count(),
+        1
+    );
+    assert_eq!(
+        ops.iter()
+            .filter(|(_, _, outcome)| outcome == "failure")
+            .count(),
+        0
+    );
+    assert!(recorder.errors().is_empty());
+
+    token.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn consume_head_and_204_and_304_are_success() {
+    let _guard = lock_registry_test_mutex();
+    let recorder = RecordingRuntimeObservability::new(true);
+    let port = stage_consume_listener().await;
+
+    let (token_head, rx_head) = start_consume_consumer(
+        port,
+        "/consume-head",
+        recorder.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+    let (token_nc, rx_nc) = start_consume_consumer(
+        port,
+        "/consume-204",
+        recorder.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+    let (token_nm, rx_nm) = start_consume_consumer(
+        port,
+        "/consume-304",
+        recorder.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+
+    let head_route = spawn_consume_route(rx_head, |mut exchange| {
+        exchange.input.body = Body::Text("suppressed".to_string());
+        Ok(exchange)
+    });
+    let nc_route = spawn_consume_route(rx_nc, |mut exchange| {
+        exchange.input.set_header(
+            "CamelHttpResponseCode",
+            serde_json::Value::Number(204.into()),
+        );
+        exchange.input.body = Body::Empty;
+        Ok(exchange)
+    });
+    let nm_route = spawn_consume_route(rx_nm, |mut exchange| {
+        exchange.input.set_header(
+            "CamelHttpResponseCode",
+            serde_json::Value::Number(304.into()),
+        );
+        exchange.input.body = Body::Empty;
+        Ok(exchange)
+    });
+
+    let client = plain_http_test_client();
+    let head = timeout_wait(
+        "consume HEAD request",
+        CONSUME_WAIT,
+        client
+            .head(format!("http://127.0.0.1:{port}/consume-head"))
+            .send(),
+    )
+    .await
+    .expect("HEAD request must complete");
+    assert_eq!(head.status().as_u16(), 200);
+    let head_body = timeout_wait("consume HEAD body", CONSUME_WAIT, head.bytes())
+        .await
+        .expect("HEAD body must complete");
+    assert!(head_body.is_empty());
+
+    let nc = timeout_wait(
+        "consume 204 request",
+        CONSUME_WAIT,
+        client
+            .get(format!("http://127.0.0.1:{port}/consume-204"))
+            .send(),
+    )
+    .await
+    .expect("204 request must complete");
+    assert_eq!(nc.status().as_u16(), 204);
+    let nc_body = timeout_wait("consume 204 body", CONSUME_WAIT, nc.bytes())
+        .await
+        .expect("204 body must complete");
+    assert!(nc_body.is_empty());
+
+    let nm = timeout_wait(
+        "consume 304 request",
+        CONSUME_WAIT,
+        client
+            .get(format!("http://127.0.0.1:{port}/consume-304"))
+            .send(),
+    )
+    .await
+    .expect("304 request must complete");
+    assert_eq!(nm.status().as_u16(), 304);
+    let nm_body = timeout_wait("consume 304 body", CONSUME_WAIT, nm.bytes())
+        .await
+        .expect("304 body must complete");
+    assert!(nm_body.is_empty());
+
+    timeout_wait("consume HEAD route", CONSUME_WAIT, head_route)
+        .await
+        .expect("HEAD route task must not panic");
+    timeout_wait("consume 204 route", CONSUME_WAIT, nc_route)
+        .await
+        .expect("204 route task must not panic");
+    timeout_wait("consume 304 route", CONSUME_WAIT, nm_route)
+        .await
+        .expect("304 route task must not panic");
+
+    let ops = recorder.ops();
+    assert_eq!(
+        ops.iter()
+            .filter(|(_, _, outcome)| outcome == "success")
+            .count(),
+        3
+    );
+    assert_eq!(
+        ops.iter()
+            .filter(|(_, _, outcome)| outcome == "failure")
+            .count(),
+        0
+    );
+    assert!(recorder.errors().is_empty());
+
+    token_head.cancel();
+    token_nc.cancel();
+    token_nm.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn consume_streaming_reply_completes() {
+    use camel_component_api::{StreamBody, StreamMetadata};
+    use futures::stream;
+
+    let _guard = lock_registry_test_mutex();
+    let recorder = RecordingRuntimeObservability::new(true);
+    let port = stage_consume_listener().await;
+    let (token, rx) = start_consume_consumer(
+        port,
+        "/consume-stream",
+        recorder.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+    let route = spawn_consume_route(rx, |mut exchange| {
+        let frames: Vec<Result<bytes::Bytes, CamelError>> = vec![
+            Ok(bytes::Bytes::from_static(b"one-")),
+            Ok(bytes::Bytes::from_static(b"two")),
+        ];
+        exchange.input.body = Body::Stream(StreamBody {
+            stream: Arc::new(tokio::sync::Mutex::new(Some(Box::pin(stream::iter(
+                frames,
+            ))))),
+            metadata: StreamMetadata {
+                size_hint: None,
+                content_type: None,
+                origin: None,
+            },
+        });
+        Ok(exchange)
+    });
+
+    let client = plain_http_test_client();
+    let resp = timeout_wait(
+        "consume stream request",
+        CONSUME_WAIT,
+        client
+            .get(format!("http://127.0.0.1:{port}/consume-stream"))
+            .send(),
+    )
+    .await
+    .expect("request must complete");
+    assert_eq!(resp.status().as_u16(), 200);
+    let body = timeout_wait("consume stream body", CONSUME_WAIT, resp.text())
+        .await
+        .expect("body must complete");
+    assert_eq!(body, "one-two");
+
+    timeout_wait("consume stream route", CONSUME_WAIT, route)
+        .await
+        .expect("route task must not panic");
+    assert_eq!(recorder.ops(), vec![consume_op("success")]);
+    assert!(recorder.errors().is_empty());
+
+    token.cancel();
+}
+
+#[tokio::test]
+async fn consume_streaming_reply_aborted_early() {
+    let recorder = RecordingRuntimeObservability::new(true);
+    let metrics = consume_route_metrics(&recorder);
+    let (state, mut rx) = consume_dispatch_state(
+        "/consume-gated",
+        metrics,
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+
+    // The first frame is gated on a oneshot the test never releases; the
+    // stream therefore never yields and the body stays mid-flight.
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+    let gated = futures::stream::once(async move {
+        let _ = gate_rx.await;
+        Ok::<bytes::Bytes, CamelError>(bytes::Bytes::from_static(b"late"))
+    });
+    let route = tokio::spawn(async move {
+        let envelope = timeout_wait("gated route envelope", CONSUME_WAIT, rx.recv())
+            .await
+            .expect("gated route must receive one envelope");
+        assert!(
+            envelope
+                .reply_tx
+                .send(HttpReply {
+                    status: 200,
+                    headers: vec![],
+                    body: HttpReplyBody::Stream(Box::pin(gated)),
+                    failed: false,
+                })
+                .is_ok(),
+            "gated reply must be received"
+        );
+    });
+
+    let resp = timeout_wait(
+        "gated dispatch",
+        CONSUME_WAIT,
+        dispatch_consume_request(state, consume_request("GET", "/consume-gated")),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let mut body = resp.into_body();
+    let waker = futures::task::noop_waker_ref();
+    let mut cx = std::task::Context::from_waker(waker);
+    let first = http_body::Body::poll_frame(std::pin::Pin::new(&mut body), &mut cx);
+    assert!(
+        matches!(first, std::task::Poll::Pending),
+        "the gated stream must not yield a frame"
+    );
+    drop(body);
+
+    timeout_wait("gated route", CONSUME_WAIT, route)
+        .await
+        .expect("gated route task must not panic");
+    // Held until here: the gate is never released in this scenario.
+    drop(gate_tx);
+
+    assert_eq!(recorder.ops(), vec![consume_op("failure")]);
+    assert_eq!(recorder.errors(), vec![consume_error()]);
+    assert!(
+        !recorder
+            .ops()
+            .iter()
+            .any(|(_, _, outcome)| outcome == "success"),
+        "an aborted streaming reply must never record success"
+    );
+}
+
+#[tokio::test]
+async fn consume_stream_error_is_failure_once() {
+    let recorder = RecordingRuntimeObservability::new(true);
+    let metrics = consume_route_metrics(&recorder);
+    let (state, mut rx) = consume_dispatch_state(
+        "/consume-stream-error",
+        metrics,
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+
+    let route = tokio::spawn(async move {
+        let envelope = timeout_wait("stream error route envelope", CONSUME_WAIT, rx.recv())
+            .await
+            .expect("stream error route must receive one envelope");
+        let frames: Vec<Result<bytes::Bytes, CamelError>> = vec![
+            Ok(bytes::Bytes::from_static(b"one")),
+            Err(CamelError::ProcessorError("stream boom".to_string())),
+        ];
+        assert!(
+            envelope
+                .reply_tx
+                .send(HttpReply {
+                    status: 200,
+                    headers: vec![],
+                    body: HttpReplyBody::Stream(Box::pin(futures::stream::iter(frames))),
+                    failed: false,
+                })
+                .is_ok(),
+            "stream error reply must be received"
+        );
+    });
+
+    let resp = timeout_wait(
+        "stream error dispatch",
+        CONSUME_WAIT,
+        dispatch_consume_request(state, consume_request("GET", "/consume-stream-error")),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 200);
+
+    let mut body = resp.into_body();
+    let waker = futures::task::noop_waker_ref();
+    let mut cx = std::task::Context::from_waker(waker);
+    let first = http_body::Body::poll_frame(std::pin::Pin::new(&mut body), &mut cx);
+    assert!(
+        matches!(first, std::task::Poll::Ready(Some(Ok(_)))),
+        "first frame must be data"
+    );
+    let second = http_body::Body::poll_frame(std::pin::Pin::new(&mut body), &mut cx);
+    assert!(
+        matches!(second, std::task::Poll::Ready(Some(Err(_)))),
+        "second frame must surface the stream error"
+    );
+    drop(body);
+
+    timeout_wait("stream error route", CONSUME_WAIT, route)
+        .await
+        .expect("stream error route task must not panic");
+    assert_eq!(recorder.ops(), vec![consume_op("failure")]);
+    assert_eq!(recorder.errors(), vec![consume_error()]);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn consume_oversized_response_is_failure() {
+    let _guard = lock_registry_test_mutex();
+    let recorder = RecordingRuntimeObservability::new(true);
+    let port = stage_consume_listener().await;
+    let (token, rx) = start_consume_consumer(
+        port,
+        "/consume-oversize",
+        recorder.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        4,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+    let route = spawn_consume_route(rx, |mut exchange| {
+        exchange.input.body = Body::Text("0123456789".to_string());
+        Ok(exchange)
+    });
+
+    let client = plain_http_test_client();
+    let resp = timeout_wait(
+        "oversized response request",
+        CONSUME_WAIT,
+        client
+            .get(format!("http://127.0.0.1:{port}/consume-oversize"))
+            .send(),
+    )
+    .await
+    .expect("request must complete");
+    assert_eq!(resp.status().as_u16(), 500);
+    let body = timeout_wait("oversized response body", CONSUME_WAIT, resp.text())
+        .await
+        .expect("body must complete");
+    assert_eq!(body, "Response body exceeds configured limit");
+
+    timeout_wait("oversized response route", CONSUME_WAIT, route)
+        .await
+        .expect("route task must not panic");
+    assert_eq!(recorder.ops(), vec![consume_op("failure")]);
+    assert_eq!(recorder.errors(), vec![consume_error()]);
+
+    token.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn consume_payload_too_large_is_failure() {
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    let _guard = lock_registry_test_mutex();
+    let recorder = RecordingRuntimeObservability::new(true);
+    let port = stage_consume_listener().await;
+    let (token, mut rx) = start_consume_consumer(
+        port,
+        "/consume-payload",
+        recorder.clone(),
+        4,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+
+    let client = plain_http_test_client();
+    let resp = timeout_wait(
+        "oversized request",
+        CONSUME_WAIT,
+        client
+            .post(format!("http://127.0.0.1:{port}/consume-payload"))
+            .body("0123456789")
+            .send(),
+    )
+    .await
+    .expect("request must complete");
+    assert_eq!(resp.status().as_u16(), 413);
+    let body = timeout_wait("oversized request body", CONSUME_WAIT, resp.text())
+        .await
+        .expect("body must complete");
+    assert_eq!(body, "Request body exceeds configured limit");
+
+    assert!(
+        matches!(rx.try_recv(), Err(TryRecvError::Empty)),
+        "a payload-too-large rejection must never reach the route"
+    );
+    assert_eq!(recorder.ops(), vec![consume_op("failure")]);
+    assert_eq!(recorder.errors(), vec![consume_error()]);
+
+    token.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn consume_inflight_exhaustion_is_failure() {
+    let _guard = lock_registry_test_mutex();
+    let recorder = RecordingRuntimeObservability::new(true);
+    let port = stage_consume_listener().await;
+    let (token, mut rx) = start_consume_consumer(
+        port,
+        "/consume-inflight",
+        recorder.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        1,
+    )
+    .await;
+
+    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let route = tokio::spawn(async move {
+        let mut envelope = timeout_wait("inflight route envelope", CONSUME_WAIT, rx.recv())
+            .await
+            .expect("slow route must receive one envelope");
+        let _ = seen_tx.send(());
+        timeout_wait("inflight release", CONSUME_WAIT, release_rx)
+            .await
+            .expect("test must release the slow route");
+        let reply_tx = envelope.reply_tx.take().expect("reply channel must be set");
+        envelope.exchange.input.body = Body::Text("slow done".to_string());
+        reply_tx
+            .send(Ok(envelope.exchange))
+            .expect("slow reply must be received");
+    });
+
+    let client = plain_http_test_client();
+    let first_client = client.clone();
+    let first = tokio::spawn(async move {
+        timeout_wait(
+            "first inflight request",
+            CONSUME_WAIT,
+            first_client
+                .get(format!("http://127.0.0.1:{port}/consume-inflight"))
+                .send(),
+        )
+        .await
+    });
+
+    // The first dispatch holds the only permit once its envelope reaches
+    // the route; only then is the second request guaranteed to be rejected.
+    timeout_wait("first inflight route", CONSUME_WAIT, seen_rx)
+        .await
+        .expect("slow route must observe the first request");
+
+    let rejected = timeout_wait(
+        "second inflight request",
+        CONSUME_WAIT,
+        client
+            .get(format!("http://127.0.0.1:{port}/consume-inflight"))
+            .send(),
+    )
+    .await
+    .expect("second request must complete");
+    assert_eq!(rejected.status().as_u16(), 503);
+    let rejected_body = timeout_wait("second inflight body", CONSUME_WAIT, rejected.text())
+        .await
+        .expect("second body must complete");
+    assert_eq!(rejected_body, "Service Unavailable");
+
+    release_tx.send(()).expect("release the slow route");
+    let first_resp = timeout_wait("first inflight response", CONSUME_WAIT, first)
+        .await
+        .expect("first request task must not panic")
+        .expect("first request must complete");
+    assert_eq!(first_resp.status().as_u16(), 200);
+    let first_body = timeout_wait("first inflight body", CONSUME_WAIT, first_resp.text())
+        .await
+        .expect("first body must complete");
+    assert_eq!(first_body, "slow done");
+
+    timeout_wait("inflight route", CONSUME_WAIT, route)
+        .await
+        .expect("slow route task must not panic");
+
+    let ops = recorder.ops();
+    assert_eq!(ops.len(), 2, "exactly one success and one failure");
+    assert_eq!(
+        ops.iter()
+            .filter(|(_, _, outcome)| outcome == "failure")
+            .count(),
+        1
+    );
+    assert_eq!(
+        ops.iter()
+            .filter(|(_, _, outcome)| outcome == "success")
+            .count(),
+        1
+    );
+    assert_eq!(recorder.errors(), vec![consume_error()]);
+
+    token.cancel();
+}
+
+#[tokio::test]
+async fn consume_closed_channel_is_failure() {
+    let recorder = RecordingRuntimeObservability::new(true);
+    let metrics = consume_route_metrics(&recorder);
+    let registry = HttpRouteRegistry::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(4);
+    registry
+        .register_api_route("/consume-closed".to_string(), tx, metrics)
+        .await
+        .expect("register consume test route");
+    // No receiver: the dispatcher's send must fail closed.
+    drop(rx);
+    let state = consume_app_state(
+        registry,
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    );
+
+    let resp = timeout_wait(
+        "closed channel dispatch",
+        CONSUME_WAIT,
+        dispatch_consume_request(state, consume_request("GET", "/consume-closed")),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 503);
+
+    assert_eq!(recorder.ops(), vec![consume_op("failure")]);
+    assert_eq!(recorder.errors(), vec![consume_error()]);
+}
+
+#[tokio::test]
+async fn consume_dispatch_cancelled_while_awaiting_is_failure() {
+    let recorder = RecordingRuntimeObservability::new(true);
+    let metrics = consume_route_metrics(&recorder);
+    let registry = HttpRouteRegistry::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(4);
+    registry
+        .register_api_route("/consume-park".to_string(), tx, metrics)
+        .await
+        .expect("register consume test route");
+    let state = consume_app_state(
+        registry,
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    );
+
+    // The receiver is held but never answers, so the dispatch parks on the
+    // reply oneshot after its envelope is queued.
+    let mut dispatch = Box::pin(dispatch_handler(
+        State(state),
+        consume_request("GET", "/consume-park"),
+    ));
+    let waker = futures::task::noop_waker_ref();
+    let mut cx = std::task::Context::from_waker(waker);
+    match std::future::Future::poll(dispatch.as_mut(), &mut cx) {
+        std::task::Poll::Pending => {}
+        std::task::Poll::Ready(_) => panic!("dispatch must park awaiting the route reply"),
+    }
+    drop(dispatch);
+    drop(rx);
+
+    assert_eq!(recorder.ops(), vec![consume_op("failure")]);
+    assert_eq!(recorder.errors(), vec![consume_error()]);
+    assert!(
+        !recorder
+            .ops()
+            .iter()
+            .any(|(_, _, outcome)| outcome == "success"),
+        "a cancelled dispatch must never record success"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn consume_shared_listener_uses_route_metrics() {
+    let _guard = lock_registry_test_mutex();
+    let recorder_on = RecordingRuntimeObservability::new(true);
+    let recorder_off = RecordingRuntimeObservability::new(false);
+    let port = stage_consume_listener().await;
+
+    let (token_on, rx_on) = start_consume_consumer(
+        port,
+        "/consume-on",
+        recorder_on.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+    let (token_off, rx_off) = start_consume_consumer(
+        port,
+        "/consume-off",
+        recorder_off.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+
+    let on_route = spawn_consume_route(rx_on, |mut exchange| {
+        exchange.input.body = Body::Text("on".to_string());
+        Ok(exchange)
+    });
+    let off_route = spawn_consume_route(rx_off, |_exchange| {
+        Err(CamelError::ProcessorError("off boom".to_string()))
+    });
+
+    let client = plain_http_test_client();
+    let on_resp = timeout_wait(
+        "shared listener on request",
+        CONSUME_WAIT,
+        client
+            .get(format!("http://127.0.0.1:{port}/consume-on"))
+            .send(),
+    )
+    .await
+    .expect("on request must complete");
+    assert_eq!(on_resp.status().as_u16(), 200);
+    let on_body = timeout_wait("shared listener on body", CONSUME_WAIT, on_resp.text())
+        .await
+        .expect("on body must complete");
+    assert_eq!(on_body, "on");
+
+    let off_resp = timeout_wait(
+        "shared listener off request",
+        CONSUME_WAIT,
+        client
+            .get(format!("http://127.0.0.1:{port}/consume-off"))
+            .send(),
+    )
+    .await
+    .expect("off request must complete");
+    assert_eq!(off_resp.status().as_u16(), 500);
+    let off_body = timeout_wait("shared listener off body", CONSUME_WAIT, off_resp.text())
+        .await
+        .expect("off body must complete");
+    assert_eq!(off_body, "Internal Server Error");
+
+    timeout_wait("shared listener on route", CONSUME_WAIT, on_route)
+        .await
+        .expect("on route task must not panic");
+    timeout_wait("shared listener off route", CONSUME_WAIT, off_route)
+        .await
+        .expect("off route task must not panic");
+
+    assert_eq!(recorder_on.ops(), vec![consume_op("success")]);
+    assert!(recorder_on.errors().is_empty());
+    assert!(recorder_off.ops().is_empty());
+    assert_eq!(recorder_off.errors(), vec![consume_error()]);
+
+    token_on.cancel();
+    token_off.cancel();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn consume_switched_off_still_forwards_errors() {
+    let _guard = lock_registry_test_mutex();
+    let recorder = RecordingRuntimeObservability::new(false);
+    let port = stage_consume_listener().await;
+    let (token, rx) = start_consume_consumer(
+        port,
+        "/consume-off-error",
+        recorder.clone(),
+        CONSUME_MAX_REQUEST_BODY,
+        CONSUME_MAX_RESPONSE_BODY,
+        CONSUME_MAX_INFLIGHT,
+    )
+    .await;
+    let route = spawn_consume_route(rx, |_exchange| {
+        Err(CamelError::ProcessorError("off boom".to_string()))
+    });
+
+    let client = plain_http_test_client();
+    let resp = timeout_wait(
+        "switched off error request",
+        CONSUME_WAIT,
+        client
+            .get(format!("http://127.0.0.1:{port}/consume-off-error"))
+            .send(),
+    )
+    .await
+    .expect("request must complete");
+    assert_eq!(resp.status().as_u16(), 500);
+    let body = timeout_wait("switched off error body", CONSUME_WAIT, resp.text())
+        .await
+        .expect("body must complete");
+    assert_eq!(body, "Internal Server Error");
+
+    timeout_wait("switched off error route", CONSUME_WAIT, route)
+        .await
+        .expect("route task must not panic");
+    assert!(
+        recorder.ops().is_empty(),
+        "lever off must emit no operations"
+    );
+    assert_eq!(recorder.errors(), vec![consume_error()]);
+
+    token.cancel();
 }

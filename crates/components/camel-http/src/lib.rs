@@ -1,6 +1,7 @@
 pub mod bundle;
 pub(crate) mod client_cache;
 pub mod config;
+mod consume_meter;
 mod header_policy;
 pub mod health;
 #[cfg(test)]
@@ -25,6 +26,9 @@ pub use config::HttpConfig;
 pub use health::HttpHealthCheck;
 use health::ListenerGate;
 pub use registry::HttpRouteRegistry;
+
+use crate::consume_meter::{ConsumeGuard, ConsumeOutcome, MeterBody};
+use crate::registry::RouteEntry;
 pub use static_config::HttpStaticConfig;
 pub use static_endpoint::{HttpStaticComponent, HttpStaticConsumer, HttpStaticEndpoint};
 #[cfg(test)]
@@ -886,6 +890,11 @@ pub struct HttpReply {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: HttpReplyBody,
+    /// Set by the consumer for replies that represent a failed consume:
+    /// cancellation, authentication denial, an unconsumable body, or a
+    /// pipeline error. The dispatcher records `consume` failure at receipt
+    /// and never meters the error-rendering body.
+    pub failed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1668,8 +1677,8 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
     // One snapshot load serves exact, REST, and the static fallback, so a
     // single request cannot straddle two registry generations.
     let snapshot = state.registry.inner.load();
-    let api_sender = snapshot.api_routes.get(&path).cloned();
-    let rest_outcome = if api_sender.is_some() {
+    let api_entry = snapshot.api_routes.get(&path).cloned();
+    let rest_outcome = if api_entry.is_some() {
         // Exact legacy match won — skip the templated scan entirely.
         None
     } else {
@@ -1680,7 +1689,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
         ))
     };
 
-    let (rest_sender, path_params) = match rest_outcome {
+    let (rest_entry, path_params) = match rest_outcome {
         None => (None, Default::default()),
         Some(rest_match::MatchOutcome::Found(m)) => (Some(m.payload), m.path_params),
         Some(rest_match::MatchOutcome::Ambiguous) => {
@@ -1702,13 +1711,21 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
         Some(rest_match::MatchOutcome::NotFound) => (None, Default::default()),
     };
 
-    let sender = api_sender.or(rest_sender);
+    let entry = api_entry.or(rest_entry);
 
-    if let Some(sender) = sender {
+    if let Some(RouteEntry { sender, metrics }) = entry {
         // API path owns its sender now; release the snapshot BEFORE any IO.
         drop(snapshot);
+        // Exactly-once accounting. The guard records failure only while the
+        // outcome is still `Unrecorded`, which covers handler cancellation
+        // while awaiting the channel or the reply, and every rejection
+        // below. Delegation (or an explicit terminal record) disarms it.
+        let outcome = ConsumeOutcome::new();
+        let _guard = ConsumeGuard::new(outcome.clone(), metrics.clone());
+
         let query = req.uri().query().unwrap_or("").to_string();
         let headers = req.headers().clone();
+        let method_is_head = method.eq_ignore_ascii_case("HEAD");
 
         // Check Content-Length against limit BEFORE opening the stream
         let content_length: Option<u64> = headers
@@ -1719,6 +1736,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
         if let Some(len) = content_length
             && len > state.max_request_body as u64
         {
+            outcome.record_failure_before_delegation(&metrics);
             return Response::builder()
                 .status(StatusCode::PAYLOAD_TOO_LARGE)
                 .body(AxumBody::from("Request body exceeds configured limit"))
@@ -1728,6 +1746,7 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
         let _permit = match Arc::clone(&state.inflight).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
+                outcome.record_failure_before_delegation(&metrics);
                 return Response::builder()
                     .status(StatusCode::SERVICE_UNAVAILABLE)
                     .body(AxumBody::from("Service Unavailable"))
@@ -1787,59 +1806,107 @@ async fn dispatch_handler(State(state): State<AppState>, req: Request) -> impl I
         };
 
         if sender.send(envelope).await.is_err() {
+            outcome.record_failure_before_delegation(&metrics);
             return Response::builder()
                 .status(StatusCode::SERVICE_UNAVAILABLE)
                 .body(AxumBody::from("Consumer unavailable"))
                 .expect("infallible"); // allow-unwrap
         }
 
-        match reply_rx.await {
-            Ok(reply) => {
-                let reply = match reply.body {
-                    HttpReplyBody::Bytes(b)
-                        if exceeds_max_response_body(b.len(), state.max_response_body) =>
-                    {
-                        HttpReply {
-                            status: 500,
-                            headers: vec![],
-                            body: HttpReplyBody::Bytes(bytes::Bytes::from(
-                                "Response body exceeds configured limit",
-                            )),
-                        }
-                    }
-                    _ => reply,
-                };
+        let reply = match reply_rx.await {
+            Ok(reply) => reply,
+            Err(_) => {
+                outcome.record_failure_before_delegation(&metrics);
+                return Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(AxumBody::from("Pipeline error"))
+                    .expect("infallible"); // allow-unwrap
+            }
+        };
 
-                let status =
-                    StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                let mut builder = Response::builder().status(status);
-                for (k, v) in &reply.headers {
-                    builder = builder.header(k.as_str(), v.as_str());
-                }
-                match reply.body {
-                    HttpReplyBody::Bytes(b) => {
-                        builder.body(AxumBody::from(b)).unwrap_or_else(|_| {
-                            Response::builder()
-                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                .body(AxumBody::from("Invalid response headers from consumer"))
-                                .expect("infallible") // allow-unwrap
-                        })
-                    }
-                    HttpReplyBody::Stream(stream) => builder
-                        .body(AxumBody::from_stream(stream))
-                        .unwrap_or_else(|_| {
-                            Response::builder()
-                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                .body(AxumBody::from("Invalid response headers from consumer"))
-                                .expect("infallible") // allow-unwrap
-                        }),
+        // A buffered body over the configured limit is replaced by a fresh
+        // limit-exceeded response — never metered, always a failure.
+        let reply = match reply.body {
+            HttpReplyBody::Bytes(b)
+                if exceeds_max_response_body(b.len(), state.max_response_body) =>
+            {
+                HttpReply {
+                    status: 500,
+                    headers: vec![],
+                    body: HttpReplyBody::Bytes(bytes::Bytes::from(
+                        "Response body exceeds configured limit",
+                    )),
+                    failed: true,
                 }
             }
-            Err(_) => Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(AxumBody::from("Pipeline error"))
-                .expect("infallible"), // allow-unwrap
+            _ => reply,
+        };
+
+        if reply.failed {
+            // Classified failure: record at receipt and leave the outcome
+            // terminal. The error-rendering body is not metered, so
+            // exhausting it can never turn this into a success.
+            outcome.record_failure_before_delegation(&metrics);
         }
+
+        let status =
+            StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let mut builder = Response::builder().status(status);
+        for (k, v) in &reply.headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+
+        // Protocol-suppressed bodies (`HEAD`, `204`, `304`, `1xx`) are never
+        // sent, so they complete at response construction rather than in a
+        // body meter.
+        let body_is_protocol_suppressed = method_is_head
+            || status == StatusCode::NO_CONTENT
+            || status == StatusCode::NOT_MODIFIED
+            || status.is_informational();
+
+        let inner_body = match reply.body {
+            HttpReplyBody::Bytes(b) => AxumBody::from(b),
+            HttpReplyBody::Stream(stream) => AxumBody::from_stream(stream),
+        };
+
+        if reply.failed || body_is_protocol_suppressed {
+            let response = match builder.body(inner_body) {
+                Ok(response) => response,
+                Err(_) => {
+                    outcome.record_failure_before_delegation(&metrics);
+                    return Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(AxumBody::from("Invalid response headers from consumer"))
+                        .expect("infallible"); // allow-unwrap
+                }
+            };
+            if !reply.failed {
+                outcome.delegate();
+                outcome.record_success_after_delegation(&metrics);
+            }
+            return response;
+        }
+
+        let meter = MeterBody::new(inner_body, outcome.clone(), metrics.clone());
+        // An end-of-stream-at-construction body (empty reply) never needs a
+        // poll: complete it at delegation.
+        let inner_is_end_stream = meter.inner_is_end_stream();
+        let parts = match builder.body(()) {
+            Ok(response) => response.into_parts().0,
+            Err(_) => {
+                outcome.record_failure_before_delegation(&metrics);
+                return Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(AxumBody::from("Invalid response headers from consumer"))
+                    .expect("infallible"); // allow-unwrap
+            }
+        };
+
+        outcome.delegate();
+        if inner_is_end_stream {
+            outcome.record_success_after_delegation(&metrics);
+        }
+        Response::from_parts(parts, AxumBody::new(meter))
     } else {
         // No API route matched — try static mounts. The guard is held across
         // the static ServeDir awaits so mount selection and serving observe
@@ -1990,6 +2057,10 @@ impl Consumer for HttpConsumer {
         let (env_tx, mut env_rx) = tokio::sync::mpsc::channel::<RequestEnvelope>(
             envelope_channel_capacity(self.config.max_inflight_requests),
         );
+        // Per-route `http` metrics facade: built from THIS consumer's
+        // runtime so a listener shared by several contexts still charges
+        // each request to the correct collector and effective switch.
+        let route_metrics = self.runtime.component_metrics("http");
         // When the from-URI carries `httpMethod=...` (REST-lowered
         // route), register the consumer as a method-aware REST endpoint
         // so the dispatcher can route by (method, path template).
@@ -1999,11 +2070,11 @@ impl Consumer for HttpConsumer {
         if let Some(method) = self.config.method.clone() {
             let segments = rest_match::parse_path_template(&self.config.path);
             registry
-                .register_rest_endpoint(method, segments, env_tx)
+                .register_rest_endpoint(method, segments, env_tx, route_metrics)
                 .await?;
         } else {
             registry
-                .register_api_route(self.config.path.clone(), env_tx)
+                .register_api_route(self.config.path.clone(), env_tx, route_metrics)
                 .await?;
         }
 
@@ -2165,6 +2236,7 @@ impl Consumer for HttpConsumer {
                                 status: 503,
                                 headers: vec![],
                                 body: HttpReplyBody::Bytes(bytes::Bytes::from("Service Unavailable")),
+                                failed: true,
                             });
                             return;
                         }
@@ -2290,6 +2362,7 @@ impl Consumer for HttpConsumer {
                                                     status: 500,
                                                     headers: vec![],
                                                     body: HttpReplyBody::Bytes(bytes::Bytes::new()),
+                                                    failed: true,
                                                 };
                                                 if reply_tx.send(error_reply).is_err() {
                                                     debug!("reply_tx dropped before error reply could be sent");
@@ -2312,6 +2385,7 @@ impl Consumer for HttpConsumer {
                                     status,
                                     headers: resp_headers,
                                     body: reply_body,
+                                    failed: false,
                                 }
                             }
                             Err(e) => {
@@ -3150,7 +3224,7 @@ impl Service<Exchange> for HttpProducer {
         let shared_client = self.client.clone();
         let pinned_cache = std::sync::Arc::clone(&self.pinned_cache);
         let http_config = self.http_config.clone();
-        let component_metrics = self.runtime.component_metrics();
+        let component_metrics = self.runtime.component_metrics("http");
 
         Box::pin(async move {
             let mut exchange = exchange;
@@ -3528,7 +3602,7 @@ impl Service<Exchange> for HttpProducer {
             // status gate. http runs no retry_async and the producer
             // previously emitted nothing, so no label collides with
             // e:http:request.
-            component_metrics.observe("http", "request", outcome.is_err());
+            component_metrics.observe("request", outcome.is_err());
             outcome
         })
     }
@@ -3581,6 +3655,7 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
                 status: 401,
                 headers: vec![("WWW-Authenticate".to_string(), "Bearer".to_string())],
                 body: HttpReplyBody::Bytes(bytes::Bytes::from("Unauthorized")),
+                failed: true,
             }
         }
         CamelError::Unauthorized(msg) => {
@@ -3589,6 +3664,7 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
                 status: 403,
                 headers: vec![],
                 body: HttpReplyBody::Bytes(bytes::Bytes::from("Forbidden")),
+                failed: true,
             }
         }
         CamelError::TypeConversionFailed(msg) => {
@@ -3605,6 +3681,7 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
                 status: 503,
                 headers: vec![],
                 body: HttpReplyBody::Bytes(bytes::Bytes::from("Service Unavailable")),
+                failed: true,
             }
         }
         CamelError::UnsupportedMediaType { consumed, declared } => {
@@ -3630,6 +3707,7 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
                 status: 500,
                 headers: vec![],
                 body: HttpReplyBody::Bytes(bytes::Bytes::from("Internal Server Error")),
+                failed: true,
             }
         }
     }
@@ -3652,6 +3730,7 @@ fn json_error_reply(status: u16, code: &str, message: String) -> HttpReply {
         status,
         headers: vec![("Content-Type".to_string(), "application/json".to_string())],
         body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
+        failed: true,
     }
 }
 

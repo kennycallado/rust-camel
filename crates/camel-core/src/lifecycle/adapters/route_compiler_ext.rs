@@ -203,7 +203,7 @@ pub(crate) fn build_eh_config_pipeline(
                 platform_service,
                 health_registry,
                 Some(route_id.to_string()),
-                tracer_gating.levers.components_enabled(),
+                tracer_gating.levers.component_metrics_levers(),
             )
             .with_in_flight(in_flight_total),
         );
@@ -355,7 +355,7 @@ impl RouteCompilerExt<'_> {
                 Arc::clone(self.platform_service),
                 self.health_registry(),
                 route_id.map(|s| s.to_string()),
-                self.tracer_gating.levers.components_enabled(),
+                self.tracer_gating.levers.component_metrics_levers(),
             )
             .with_in_flight(Arc::clone(&self.in_flight_total)),
         );
@@ -764,7 +764,7 @@ impl RouteCompilerExt<'_> {
                     Arc::clone(self.platform_service),
                     self.health_registry(),
                     Some(route_id.clone()),
-                    self.tracer_gating.levers.components_enabled(),
+                    self.tracer_gating.levers.component_metrics_levers(),
                 )
                 .with_in_flight(Arc::clone(&self.in_flight_total)),
             );

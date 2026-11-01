@@ -38,7 +38,7 @@ impl SmtpProducer {
 
 /// Emit one `component="mail", operation="send"` observation.
 pub(crate) fn record_send(rt: &dyn RuntimeObservability, failed: bool) {
-    rt.component_metrics().observe("mail", "send", failed);
+    rt.component_metrics("mail").observe("send", failed);
 }
 
 impl Service<Exchange> for SmtpProducer {

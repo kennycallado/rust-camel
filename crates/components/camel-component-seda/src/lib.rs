@@ -1040,7 +1040,7 @@ impl Consumer for SedaConsumer {
                     let cancel = self.cancel_token.clone();
                     let ctx = ctx.clone();
                     let depth = Arc::clone(&depth);
-                    let component_metrics = self.runtime.component_metrics();
+                    let component_metrics = self.runtime.component_metrics("seda");
                     let handle = tokio::spawn(async move {
                         loop {
                             let envelope = {
@@ -1099,7 +1099,7 @@ impl Consumer for SedaConsumer {
                 self.shared_rx = Some(Arc::clone(&shared_rx));
                 let forwarder_rx = Arc::clone(&shared_rx);
                 let forwarder_ctx = ctx.clone();
-                let component_metrics = self.runtime.component_metrics();
+                let component_metrics = self.runtime.component_metrics("seda");
                 let handle = tokio::spawn(async move {
                     loop {
                         let envelope = {
@@ -1258,13 +1258,13 @@ async fn forward_envelope(
 ) {
     if let Some(reply_tx) = envelope.reply_tx {
         let result = ctx.send_and_wait(envelope.exchange).await;
-        component_metrics.observe("seda", "consume", result.is_err());
+        component_metrics.observe("consume", result.is_err());
         let _ = reply_tx.send(result);
     } else if let Err(e) = ctx.send(envelope.exchange).await {
-        component_metrics.observe("seda", "consume", true);
+        component_metrics.observe("consume", true);
         warn!(error = %e, "SEDA consumer send failed");
     } else {
-        component_metrics.observe("seda", "consume", false);
+        component_metrics.observe("consume", false);
     }
 }
 
@@ -1276,7 +1276,7 @@ async fn forward_envelope(
 struct SedaProducer {
     state: Arc<SedaEndpointState>,
     producer_config: ProducerConfig,
-    /// Observability handle: `component_metrics()` powers the uniform
+    /// Observability handle: `component_metrics(component)` powers the uniform
     /// `seda:produce` emission (dashboard-observability Task 4.2).
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
     /// Context-global accepted-not-completed gauge (drainclaim),
@@ -1319,7 +1319,7 @@ impl Service<Exchange> for SedaProducer {
         let state = Arc::clone(&self.state);
         let producer_config = self.producer_config.clone();
         let original = exchange.clone();
-        let component_metrics = self.runtime.component_metrics();
+        let component_metrics = self.runtime.component_metrics("seda");
         let in_flight = self.in_flight.clone();
         Box::pin(async move {
             // The produce operation covers the whole enqueue outcome
@@ -1535,7 +1535,7 @@ impl Service<Exchange> for SedaProducer {
             .await;
             // Uniform component-operations emission (Task 4.2): failures
             // always reach the error family, component series lever-gated.
-            component_metrics.observe("seda", "produce", result.is_err());
+            component_metrics.observe("produce", result.is_err());
             result
         })
     }
@@ -3708,6 +3708,72 @@ mod consumer_producer_tests {
         );
 
         b.stop().await.unwrap();
+    }
+
+    /// Shared log of `record_component_operation` calls.
+    #[derive(Clone, Default)]
+    struct ScopedOpsRecorder(Arc<Mutex<Vec<(String, String, String)>>>);
+
+    impl camel_api::MetricsCollector for ScopedOpsRecorder {
+        fn record_exchange_duration(&self, _: &str, _: std::time::Duration) {}
+        fn increment_errors(&self, _: &str, _: &str) {}
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+        fn record_component_operation(&self, component: &str, operation: &str, outcome: &str) {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).push((
+                component.to_string(),
+                operation.to_string(),
+                outcome.to_string(),
+            ));
+        }
+    }
+
+    struct ScopedRecordingRuntime(ScopedOpsRecorder);
+
+    impl camel_component_api::RuntimeObservability for ScopedRecordingRuntime {
+        fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
+            let collector: Arc<dyn camel_api::MetricsCollector> = Arc::new(self.0.clone());
+            collector
+        }
+        fn health(&self) -> Arc<dyn camel_component_api::HealthCheckRegistry> {
+            Arc::new(NoopRuntimeObservability)
+        }
+        fn component_metrics(&self, component: &str) -> camel_api::ComponentMetrics {
+            camel_api::ComponentMetrics::new(self.metrics(), component, true)
+        }
+    }
+
+    /// Migration guard: the producer acquires a scoped handle once and the
+    /// `observe` call no longer supplies a component, so the emitted series
+    /// must still carry `component="seda"` with `operation="produce"`.
+    #[tokio::test]
+    async fn scoped_identity_survives_migration() {
+        let recorder = ScopedOpsRecorder::default();
+        let ops = Arc::clone(&recorder.0);
+        let runtime: Arc<dyn camel_component_api::RuntimeObservability> =
+            Arc::new(ScopedRecordingRuntime(recorder));
+
+        let comp = create_component();
+        let ep = comp
+            .create_endpoint("seda:scoped", &NoOpComponentContext)
+            .unwrap();
+        let producer = ep.create_producer(runtime, &test_producer_ctx()).unwrap();
+        let _ = producer
+            .oneshot(Exchange::new(Message::new("scoped")))
+            .await;
+
+        let recorded = ops.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "one producer call must emit exactly one component operation"
+        );
+        assert_eq!(
+            (recorded[0].0.as_str(), recorded[0].1.as_str()),
+            ("seda", "produce"),
+            "scoped handle must preserve component identity and operation"
+        );
     }
 }
 

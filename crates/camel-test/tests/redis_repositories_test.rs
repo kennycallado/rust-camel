@@ -476,7 +476,7 @@ async fn direct_redis_cache_repo(name: &str, url: &str) -> RedisCacheRepository 
         "camel:cache",
         Duration::from_secs(30),
         // Live suite: lever-off metrics facade, compile-only wiring.
-        ComponentMetrics::new(Arc::new(MetricsHandle::new()), false),
+        ComponentMetrics::new(Arc::new(MetricsHandle::new()), "redis", false),
     )
     .await
     .expect("redis cache repository connects directly")

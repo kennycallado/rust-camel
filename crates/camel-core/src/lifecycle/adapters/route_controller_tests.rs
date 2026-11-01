@@ -6468,6 +6468,7 @@ fn set_tracer_config_derives_gating() {
             exchange: false,
             duration: false,
             components: true,
+            component_overrides: std::collections::BTreeMap::new(),
         },
     });
     assert!(

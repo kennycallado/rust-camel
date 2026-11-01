@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use camel_api::{ComponentMetrics, NoOpMetrics};
 use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
 use camel_component_api::{
     Component, ComponentBundle, Consumer, ConsumerContext, ExchangeEnvelope, NoOpComponentContext,
@@ -147,6 +148,7 @@ async fn http_static_shared_port_api_and_static() {
                         body: camel_component_http::HttpReplyBody::Bytes(bytes::Bytes::from(
                             "hello from api",
                         )),
+                        failed: false,
                     };
                     let _ = envelope.reply_tx.send(reply);
                 }
@@ -157,7 +159,11 @@ async fn http_static_shared_port_api_and_static() {
     });
 
     registry
-        .register_api_route("/api/hello".to_string(), api_tx)
+        .register_api_route(
+            "/api/hello".to_string(),
+            api_tx,
+            ComponentMetrics::new(Arc::new(NoOpMetrics), "http", false),
+        )
         .await
         .expect("register API route");
 

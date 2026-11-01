@@ -3,7 +3,7 @@
 //!
 //! The five swept components (wasm, opensearch, seda, surrealdb, cxf)
 //! now emit through the `ComponentMetrics` facade
-//! (`RuntimeObservability::component_metrics()`) at their principal
+//! (`RuntimeObservability::component_metrics(component)`) at their principal
 //! operation boundaries. `AUDIT` below is the authoritative table.
 //!
 //! Double-count notes (ADR-0066 contract): retained specific labels
@@ -39,7 +39,9 @@
 //!   failure leg runs with the lever OFF and asserts `e:kafka:produce`
 //!   on the never-gated error family. Kafka topic/group names are
 //!   unique per run (`std::process::id`) so a stale broker state can
-//!   never satisfy the consume leg.
+//!   never satisfy the consume leg. http carries both facade operations:
+//!   the producer emits `request` (proven here) and the consumer emits
+//!   `consume` (proven in the component crate, `camel-component-http`).
 //! - **Failure legs run, success legs need backends** (compiled under
 //!   `integration-tests`, no `#[ignore]`): opensearch and surrealdb —
 //!   the failure legs (refused port / dead datasource) are deterministic
@@ -600,7 +602,7 @@ mod deferred {
 const COMPONENT_OP_SETS: &[(&str, &[&str])] = &[
     ("kafka", &["consume", "produce", "recv"]),
     ("redis", &["command"]),
-    ("http", &["request"]),
+    ("http", &["request", "consume"]),
     ("seda", &["consume", "produce"]),
     ("opensearch", &["execute"]),
     ("surrealdb", &["query", "connect", "setup"]),
@@ -650,6 +652,27 @@ fn retry_scheme_matches_operation_set() {
         .find(|(s, _)| *s == "kafka")
         .expect("kafka op set present");
     assert!(kafka.1.contains(&"recv"));
+}
+
+/// Unit: the http vocabulary carries both legs — the producer
+/// (`request`, driven by `http_roundtrip_observed`) and the consumer
+/// (`consume`, proven in the component crate).
+#[test]
+fn audit_vocabulary_covers_http_consume() {
+    let http = COMPONENT_OP_SETS
+        .iter()
+        .find(|(s, _)| *s == "http")
+        .expect("http op set present");
+    assert!(
+        http.1.contains(&"request"),
+        "http op set must carry the producer operation: {:?}",
+        http.1
+    );
+    assert!(
+        http.1.contains(&"consume"),
+        "http op set must carry the consumer operation: {:?}",
+        http.1
+    );
 }
 
 /// HTTP round-trip: 200 → `http:request:success`, 5xx (with

@@ -249,6 +249,7 @@ http = "1"
 # builds never compile them.
 hyper = { version = "1", default-features = false }
 hyper-util = { version = "0.1", default-features = false }
+http-body = "1"
 http-body-util = { version = "0.1", default-features = false }
 url = "2"
 libc = "0.2"

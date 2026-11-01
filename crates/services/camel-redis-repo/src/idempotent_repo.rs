@@ -135,7 +135,7 @@ impl IdempotentRepository for RedisIdempotentRepository {
                 // SET NX is never re-issued (see the doc comment above).
                 self.transient_refreshes
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.metrics.observe("redis", "add", true);
+                self.metrics.observe("add", true);
                 tracing::debug!(
                     repository = %self.name,
                     error = %err,
@@ -218,6 +218,7 @@ mod tests {
     fn test_facade() -> ComponentMetrics {
         ComponentMetrics::new(
             std::sync::Arc::new(camel_api::metrics::MetricsHandle::new()),
+            "redis",
             false,
         )
     }
@@ -464,7 +465,11 @@ mod tests {
             "default",
             "camel:idem",
             fake.clone(),
-            ComponentMetrics::new(Arc::clone(&recorder) as Arc<dyn MetricsCollector>, true),
+            ComponentMetrics::new(
+                Arc::clone(&recorder) as Arc<dyn MetricsCollector>,
+                "redis",
+                true,
+            ),
         )
         .expect("valid constructor arguments");
         fake.push_result(Err(CamelError::Io("connection reset by peer".into())));

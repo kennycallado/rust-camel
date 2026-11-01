@@ -500,7 +500,7 @@ impl DefaultRouteController {
             Arc::clone(&self.platform_service),
             self.health_registry(),
             route_id.map(|s| s.to_string()),
-            self.tracer_gating.levers.components_enabled(),
+            self.tracer_gating.levers.component_metrics_levers(),
         ));
         let rt: Arc<dyn camel_component_api::RuntimeObservability> =
             Arc::clone(&component_ctx) as Arc<_>;
@@ -676,7 +676,7 @@ impl DefaultRouteController {
                     Arc::clone(&self.platform_service),
                     self.health_registry(),
                     Some(route_id.clone()),
-                    self.tracer_gating.levers.components_enabled(),
+                    self.tracer_gating.levers.component_metrics_levers(),
                 )
                 .with_in_flight(Arc::clone(&self.in_flight_total)),
             );

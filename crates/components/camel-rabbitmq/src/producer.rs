@@ -76,8 +76,8 @@ pub(crate) fn build_properties(
 /// Emit one `camel_component_operations_total{component="rabbitmq",
 /// operation="publish"}` observation through `rt`.
 pub(crate) fn record_publish(rt: &dyn RuntimeObservability, outcome: PublishOutcome) {
-    rt.component_metrics()
-        .observe("rabbitmq", "publish", outcome == PublishOutcome::Failure);
+    rt.component_metrics("rabbitmq")
+        .observe("publish", outcome == PublishOutcome::Failure);
 }
 
 /// Map a camel [`Body`] onto the AMQP payload bytes (same shape as the JMS

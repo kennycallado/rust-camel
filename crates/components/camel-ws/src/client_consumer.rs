@@ -431,13 +431,13 @@ async fn receive_until_disconnect(
                 }
             } => match send {
                 Ok(()) => {
-                    runtime.component_metrics().observe("ws", "frame", false);
+                    runtime.component_metrics("ws").observe("frame", false);
                 }
                 Err(_) => {
                     // Category (b′) per ADR-0012: locally terminal dispatch
                     // failure — the pipeline receiver is gone and this return
                     // is the only signal.
-                    runtime.component_metrics().observe("ws", "frame", true);
+                    runtime.component_metrics("ws").observe("frame", true);
                     runtime
                         .metrics()
                         .increment_errors(route_id, "b-prime:ws:client-dispatch");

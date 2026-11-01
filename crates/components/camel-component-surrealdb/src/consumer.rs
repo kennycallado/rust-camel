@@ -120,7 +120,7 @@ impl Consumer for SurrealDbConsumer {
         // `e:surrealdb:query` (never equal to the b-prime label, so a
         // pipeline rejection does NOT double-count here); the component
         // series flows only with the lever on (dashboard-observability 4.2).
-        let component_metrics = self.runtime.component_metrics();
+        let component_metrics = self.runtime.component_metrics("surrealdb");
         let established = async {
             let client = self.resolve_client().await.map_err(CamelError::from)?;
             let table = self.config.table.clone().ok_or_else(|| {
@@ -144,11 +144,11 @@ impl Consumer for SurrealDbConsumer {
 
         let (client, table, mut stream) = match established {
             Ok(established) => {
-                component_metrics.observe("surrealdb", "query", false);
+                component_metrics.observe("query", false);
                 established
             }
             Err(e) => {
-                component_metrics.observe("surrealdb", "query", true);
+                component_metrics.observe("query", true);
                 return Err(e);
             }
         };

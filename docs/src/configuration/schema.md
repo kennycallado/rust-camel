@@ -122,6 +122,7 @@ Metric-family levers. Unknown keys fail at load, consistent with the sibling obs
 | `exchange` | bool | `true` | Opt-out for the `camel_exchanges_total` family. Only takes effect when `enabled` is `true`. |
 | `duration` | bool | `true` | Opt-out for the `camel_exchange_duration_seconds` family. Only takes effect when `enabled` is `true`. |
 | `components` | bool | `false` | Opt-in for the component-operations metric family (`camel_component_operations_total`). |
+| `component_overrides` | table | `{}` (empty) | Per-component switch overrides for `camel_component_operations_total`. The effective switch is `enabled && component_overrides.get(component).unwrap_or(components)`. Keys must be non-empty ASCII component identities matching `[a-z0-9][a-z0-9_-]*`; an invalid key fails load. An override for an unregistered component is inert. Profiles and includes merge the table key by key. |
 
 ### [observability.otel]
 

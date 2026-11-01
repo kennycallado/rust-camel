@@ -73,6 +73,7 @@ pub use cache::{CacheEntry, CacheRepository, CacheStats, ContentType};
 pub use circuit_breaker::CircuitBreakerConfig;
 pub use claim_check::ClaimCheckRepository;
 pub use component_metrics::ComponentMetrics;
+pub use component_metrics::ComponentMetricsLevers;
 pub use data_format::DataFormat;
 pub use datasource::{
     DatasourceCatalog, DatasourceConfig, DatasourceHandle, PoolFactory, ResourceRef,

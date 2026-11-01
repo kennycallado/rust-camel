@@ -371,7 +371,7 @@ async fn dispatch_message(
     route_id: &str,
 ) -> Result<(), CamelError> {
     let mut exchange = build_exchange(&owned, &config.group_id)?;
-    let component_metrics = runtime.component_metrics();
+    let component_metrics = runtime.component_metrics("kafka");
 
     if let Some(tx) = commit_tx {
         // Manual commit mode: store handle in extensions, user commits.
@@ -383,7 +383,7 @@ async fn dispatch_message(
         );
         exchange.set_extension("kafka.manual_commit", Arc::new(handle));
         let send_outcome = ctx.send(exchange).await;
-        component_metrics.observe("kafka", "consume", send_outcome.is_err());
+        component_metrics.observe("consume", send_outcome.is_err());
         if let Err(e) = send_outcome {
             runtime
                 .metrics()
@@ -407,7 +407,7 @@ async fn dispatch_message(
             route_id,
         )
         .await;
-        component_metrics.observe("kafka", "consume", step_outcome.is_err());
+        component_metrics.observe("consume", step_outcome.is_err());
         step_outcome
     }
 }

@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use camel_api::metrics::MetricsCollector;
-use camel_api::{AsyncHealthCheck, InFlightGauge, PlatformService};
+use camel_api::{AsyncHealthCheck, ComponentMetricsLevers, InFlightGauge, PlatformService};
 use camel_component_api::ComponentContext;
 use camel_processor::aggregator::SharedLanguageRegistry;
 
@@ -20,10 +20,10 @@ pub(crate) struct ControllerComponentContext {
     platform_service: Arc<dyn PlatformService>,
     health_registry: Arc<HealthCheckRegistry>,
     route_id: Option<String>,
-    /// Snapshot of `[observability.metrics].components` at pipeline
-    /// assembly — the production seam for
+    /// Snapshot of the `[observability.metrics].components` levers at
+    /// pipeline assembly — the production seam for
     /// [`RuntimeObservability::component_metrics`] (lever-gated family).
-    component_metrics_enabled: bool,
+    component_metric_levers: ComponentMetricsLevers,
     /// Context-global accepted-not-completed gauge (drainclaim):
     /// `Some` on production paths whose `Arc<dyn RuntimeObservability>`
     /// reaches `create_producer`, so producers can mint `InFlightClaim`s.
@@ -39,7 +39,7 @@ impl ControllerComponentContext {
         platform_service: Arc<dyn PlatformService>,
         health_registry: Arc<HealthCheckRegistry>,
         route_id: Option<String>,
-        component_metrics_enabled: bool,
+        component_metric_levers: ComponentMetricsLevers,
     ) -> Self {
         Self {
             registry,
@@ -48,7 +48,7 @@ impl ControllerComponentContext {
             platform_service,
             health_registry,
             route_id,
-            component_metrics_enabled,
+            component_metric_levers,
             in_flight: None,
         }
     }
@@ -101,8 +101,8 @@ impl ComponentContext for ControllerComponentContext {
         self.route_id.as_deref()
     }
 
-    fn component_metrics_enabled(&self) -> bool {
-        self.component_metrics_enabled
+    fn component_metric_levers(&self) -> ComponentMetricsLevers {
+        self.component_metric_levers.clone()
     }
 
     fn in_flight_counter(&self) -> Option<Arc<InFlightGauge>> {

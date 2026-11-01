@@ -290,7 +290,7 @@ async fn rediss_sentinel_round_trip_through_cache_repository() {
             "sentlstls",
             Duration::from_secs(300),
             // Live suite: lever-off facade, compile-only wiring.
-            ComponentMetrics::new(Arc::new(MetricsHandle::new()), false),
+            ComponentMetrics::new(Arc::new(MetricsHandle::new()), "redis", false),
         ),
     )
     .await

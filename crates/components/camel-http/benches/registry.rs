@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use camel_api::ComponentMetrics;
+use camel_api::NoOpMetrics;
 use camel_component_http::RequestEnvelope;
 use camel_component_http::registry::{
     HttpRouteRegistry, MountMode, PathSegment, ProbeLookup, StaticMount,
@@ -21,6 +23,11 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tower_http::services::ServeDir;
+
+/// Registration-only metrics: the bench never handles a request.
+fn bench_metrics() -> ComponentMetrics {
+    ComponentMetrics::new(Arc::new(NoOpMetrics), "http", false)
+}
 
 /// Registry with `n` legacy exact-path routes (`/legacy0` .. `/legacy{n-1}`).
 ///
@@ -33,7 +40,7 @@ fn registry_with_legacy(rt: &Runtime, n: usize) -> HttpRouteRegistry {
         for i in 0..n {
             let (tx, _rx) = mpsc::channel(1);
             registry
-                .register_api_route(format!("/legacy{i}"), tx)
+                .register_api_route(format!("/legacy{i}"), tx, bench_metrics())
                 .await
                 .expect("legacy bench route registration succeeds");
         }
@@ -55,6 +62,7 @@ fn registry_with_rest(rt: &Runtime, n: usize) -> HttpRouteRegistry {
                         PathSegment::Literal(format!("r{i}")),
                     ],
                     tx,
+                    bench_metrics(),
                 )
                 .await
                 .expect("REST bench endpoint registration succeeds");
@@ -174,7 +182,7 @@ fn bench_concurrent_readers_one_writer(c: &mut Criterion) {
         writer_rt.block_on(async {
             while !writer_stop.load(Ordering::Relaxed) {
                 if writer_registry
-                    .register_api_route("/writer-key".to_string(), tx.clone())
+                    .register_api_route("/writer-key".to_string(), tx.clone(), bench_metrics())
                     .await
                     .is_ok()
                 {

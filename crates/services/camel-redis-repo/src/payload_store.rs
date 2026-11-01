@@ -146,7 +146,11 @@ mod tests {
             "camel:cache",
             "default",
             executor,
-            ComponentMetrics::new(Arc::new(camel_api::metrics::MetricsHandle::new()), false),
+            ComponentMetrics::new(
+                Arc::new(camel_api::metrics::MetricsHandle::new()),
+                "redis",
+                false,
+            ),
         )
         .expect("valid constructor arguments")
     }

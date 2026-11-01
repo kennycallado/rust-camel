@@ -67,6 +67,18 @@ duration histogram, and component-operations families are gateable
 independently. The pipeline tracer never gates `increment_errors`
 (`crates/camel-core/src/shared/observability/adapters/tracer.rs:159`).
 
+The component-operations family resolves one effective switch per
+component (Decision 16):
+
+```text
+effective(component) = enabled && component_overrides.get(component).unwrap_or(components)
+```
+
+The switch gates `record_component_operation` only. `increment_errors`
+runs before the check, so a switched-off component still forwards
+failures. The master `enabled` switch is applied last and therefore
+vetoes every override.
+
 ### Decision 6: retry accounting (amends ADR-0012)
 
 One `increment_errors` per exhausted `NetworkRetryPolicy` sequence,
@@ -167,10 +179,16 @@ multi-backend contract.
 |---|---|
 | kafka | consume, produce |
 | redis | command (producer only) |
+| http | request (producer), consume (consumer) |
 
 Kafka emits both consume and produce. Redis emits command (producer)
-only. The redis consumer stays outside the family vocabulary. D5 names
-the producer operation only.
+only; the redis consumer stays outside the family vocabulary, and D5
+names the producer operation only. HTTP emits `request` from its
+producer and `consume` from its consumer route. The HTTP `consume`
+outcome is decided at response completion or abort through the HTTP
+body contract, not at envelope handoff: body exhaustion is success, a
+body error or a drop before exhaustion is failure, and a status code
+selected by the route does not classify the request.
 
 ### Decision 15: recording-double debt
 
@@ -178,6 +196,56 @@ About ten recording doubles exist across crates, growing per trait
 method. Consolidation is bd-tracked (rc-4dvi). This ADR records the
 intent: the doubles are known, counted, and scheduled for consolidation,
 not silent drift.
+
+### Decision 16: per-component override switch
+
+`[observability.metrics] component_overrides` maps a component identity
+to a boolean and narrows the component-operations family per component.
+Precedence is owned by `MetricsLeversConfig::component_enabled`
+(`crates/camel-core/src/shared/observability/domain/config.rs`):
+
+```text
+effective(component) = enabled && component_overrides.get(component).unwrap_or(components)
+```
+
+An absent key inherits `components`; an explicit override wins over
+`components` in both directions. The master `enabled` switch is applied
+last, so `enabled = false` suppresses every component series regardless
+of overrides. The error family has no lever and is forwarded before the
+switch check (Decision 5).
+
+Override keys are validated at configuration load as component
+identities: non-empty ASCII matching `[a-z0-9][a-z0-9_-]*`. An invalid
+key fails the load with an error naming the offending key and the
+`observability.metrics.component_overrides` path
+(`crates/camel-config/src/config.rs`). Registration is runtime state, so
+an override for an unregistered component is inert: it loads, and no
+series or error is produced for that identity.
+
+A scoped handle fixes the identity. `ComponentMetrics::new(collector,
+component, enabled)` stores the component once; `observe(operation,
+failed)` cannot rename it. Because `camel-api` cannot depend on
+`camel-core`, `camel-api` owns the `ComponentMetricsLevers` snapshot
+(`enabled`, `components`, `overrides: Arc<BTreeMap<String,bool>>`) and
+its `enabled_for` method. `RuntimeObservability::component_metrics(component)`
+builds the handle from the late-bound collector and the snapshot, so
+one boundary cannot observe under a different identity or a stale
+switch. The handle is cheap to clone and may be shared by objects built
+from one connection, such as a repository and its payload store.
+
+Profiles and includes use the existing recursive TOML merge: tables
+merge key by key, scalars and arrays replace. A profile section
+overrides only the keys it names, and a nested `component_overrides`
+table merges per component. An include contributes its own entries.
+
+Schema regeneration is not applicable to this configuration.
+`cargo xtask schema` generates the canonical route spec, the DSL route
+schema, the component-metadata schema, and the TypeScript types only;
+the metrics configuration is not among its artifacts. The executable
+schema is `crates/camel-config/src/config.rs` plus the validation tests,
+and `docs/src/configuration/schema.md` is the documentation. This ADR
+therefore discharges the schema step as N/A for generated files; the
+load-time validation and the documentation cover it.
 
 ## Rejected alternatives
 

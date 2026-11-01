@@ -372,7 +372,13 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
                     camel_core::RegistryComponentContext::new(
                         component_registry.clone(),
                         Some(ctx.metrics()),
-                        camel_component_api::ComponentContext::component_metrics_enabled(&ctx),
+                        camel_config.observability.metrics.components_enabled(),
+                    )
+                    .with_component_metric_levers(
+                        camel_config
+                            .observability
+                            .metrics
+                            .component_metrics_levers(),
                     )
                     // Bind to the context's shutdown-token slot so wasm
                     // beans resolve the CURRENT boot's token per call

@@ -504,9 +504,10 @@ fn default_max_dynamic_collectors_is_1024() {
 #[test]
 fn prometheus_renders_family() {
     let concrete = Arc::new(PrometheusMetrics::new());
-    let facade = ComponentMetrics::new(concrete.clone() as Arc<dyn MetricsCollector>, true);
-    facade.observe("redis", "command", false);
-    facade.observe("redis", "command", true);
+    let facade =
+        ComponentMetrics::new(concrete.clone() as Arc<dyn MetricsCollector>, "redis", true);
+    facade.observe("command", false);
+    facade.observe("command", true);
     let body = concrete.gather();
     assert!(
         body.contains(
@@ -527,21 +528,44 @@ fn prometheus_renders_family() {
 fn components_lever_suppresses_family_render() {
     let concrete = Arc::new(PrometheusMetrics::new());
 
-    let off = ComponentMetrics::new(concrete.clone() as Arc<dyn MetricsCollector>, false);
-    off.observe("redis", "command", true);
-    off.observe("redis", "command", false);
+    let off = ComponentMetrics::new(
+        concrete.clone() as Arc<dyn MetricsCollector>,
+        "redis",
+        false,
+    );
+    off.observe("command", true);
+    off.observe("command", false);
     let body = concrete.gather();
     assert!(
         !body.contains("camel_component_operations_total"),
         "lever off must keep the family out of the render: {body}"
     );
 
-    let on = ComponentMetrics::new(concrete.clone() as Arc<dyn MetricsCollector>, true);
-    on.observe("redis", "command", false);
+    let on = ComponentMetrics::new(concrete.clone() as Arc<dyn MetricsCollector>, "redis", true);
+    on.observe("command", false);
     let body = concrete.gather();
     assert!(
         body.contains("camel_component_operations_total"),
         "lever on must render the family: {body}"
+    );
+}
+
+/// Default levers leave the component family off; a scoped facade for
+/// `http` resolves that default and keeps the family out of `gather()`.
+#[test]
+fn default_exposition_excludes_component_family() {
+    let levers = camel_core::MetricsLeversConfig::default();
+    let concrete = Arc::new(PrometheusMetrics::new());
+    let facade = ComponentMetrics::new(
+        concrete.clone() as Arc<dyn MetricsCollector>,
+        "http",
+        levers.component_enabled("http"),
+    );
+    facade.observe("request", false);
+    let body = concrete.gather();
+    assert!(
+        !body.contains("camel_component_operations_total"),
+        "default levers must keep the component family out of the render: {body}"
     );
 }
 

@@ -323,7 +323,7 @@ impl camel_api::RouteController for DefaultRouteController {
                 Arc::clone(&self.platform_service),
                 self.health_registry(),
                 Some(route_id.to_string()),
-                self.tracer_gating.levers.components_enabled(),
+                self.tracer_gating.levers.component_metrics_levers(),
             )
             .with_in_flight(Arc::clone(&self.in_flight_total)),
         );
@@ -944,7 +944,7 @@ impl camel_api::RouteController for DefaultRouteController {
                 Arc::clone(&self.platform_service),
                 self.health_registry(),
                 Some(route_id.to_string()),
-                self.tracer_gating.levers.components_enabled(),
+                self.tracer_gating.levers.component_metrics_levers(),
             )
             .with_in_flight(Arc::clone(&self.in_flight_total)),
         );

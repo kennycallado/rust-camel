@@ -1073,7 +1073,7 @@ mod tests {
                 std::time::Duration::from_secs(5),
             )),
             None,
-            false,
+            camel_api::ComponentMetricsLevers::uniform(false),
         ));
         let rt: Arc<dyn RuntimeObservability> = Arc::clone(&component_ctx) as Arc<_>;
 

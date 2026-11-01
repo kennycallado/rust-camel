@@ -1638,3 +1638,63 @@ async fn registry_slot_tracks_fresh_token_across_boot() {
         "the fresh token resolved through the registry must be the Runtime's current token"
     );
 }
+
+#[tokio::test]
+async fn context_reports_configured_component_levers() {
+    let mut ctx = CamelContext::builder()
+        .build()
+        .await
+        .expect("build context");
+    let mut component_overrides = std::collections::BTreeMap::new();
+    component_overrides.insert("http".to_string(), true);
+    ctx.set_tracer_config(TracerConfig {
+        metrics_levers: MetricsLeversConfig {
+            enabled: true,
+            components: false,
+            component_overrides,
+            ..MetricsLeversConfig::default()
+        },
+        ..TracerConfig::default()
+    })
+    .await;
+
+    let levers = ComponentContext::component_metric_levers(&ctx);
+    assert!(
+        levers.enabled_for("http"),
+        "the http override must enable the component family"
+    );
+    assert!(
+        !levers.enabled_for("kafka"),
+        "a component without an override inherits the coarse false default"
+    );
+}
+
+#[tokio::test]
+async fn context_master_switch_reports_every_component_off() {
+    let mut ctx = CamelContext::builder()
+        .build()
+        .await
+        .expect("build context");
+    let mut component_overrides = std::collections::BTreeMap::new();
+    component_overrides.insert("http".to_string(), true);
+    ctx.set_tracer_config(TracerConfig {
+        metrics_levers: MetricsLeversConfig {
+            enabled: false,
+            components: true,
+            component_overrides,
+            ..MetricsLeversConfig::default()
+        },
+        ..TracerConfig::default()
+    })
+    .await;
+
+    let levers = ComponentContext::component_metric_levers(&ctx);
+    assert!(
+        !levers.enabled_for("http"),
+        "the master switch must veto a per-component override"
+    );
+    assert!(
+        !levers.enabled_for("kafka"),
+        "the master switch must disable every component, including unlisted ones"
+    );
+}

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use camel_api::CamelError;
+use camel_api::ComponentMetricsLevers;
 use camel_api::component_metadata::ComponentMetadata;
 use camel_component_api::Component;
 use tokio_util::sync::CancellationToken;
@@ -116,13 +117,16 @@ impl Default for Registry {
 pub struct RegistryComponentContext {
     registry: std::sync::Weak<std::sync::Mutex<Registry>>,
     metrics: Arc<dyn camel_api::MetricsCollector>,
-    components_enabled: bool,
+    component_metric_levers: ComponentMetricsLevers,
     shutdown_slot: Option<Arc<std::sync::Mutex<CancellationToken>>>,
 }
 
 impl RegistryComponentContext {
     /// Builds the context, resolving the collector once: `metrics` when
-    /// wired, `NoOpMetrics` otherwise.
+    /// wired, `NoOpMetrics` otherwise. `components_enabled` seeds a uniform
+    /// component-metric lever snapshot; call
+    /// [`with_component_metric_levers`](Self::with_component_metric_levers)
+    /// to install a scoped snapshot with per-component overrides.
     pub fn new(
         registry: Arc<std::sync::Mutex<Registry>>,
         metrics: Option<Arc<dyn camel_api::MetricsCollector>>,
@@ -131,9 +135,16 @@ impl RegistryComponentContext {
         Self {
             registry: Arc::downgrade(&registry),
             metrics: metrics.unwrap_or_else(|| Arc::new(camel_api::NoOpMetrics)),
-            components_enabled,
+            component_metric_levers: ComponentMetricsLevers::uniform(components_enabled),
             shutdown_slot: None,
         }
+    }
+
+    /// Replaces the uniform lever snapshot with a scoped one carrying
+    /// per-component overrides.
+    pub fn with_component_metric_levers(mut self, levers: ComponentMetricsLevers) -> Self {
+        self.component_metric_levers = levers;
+        self
     }
 
     /// Binds this context to a shutdown-token slot that mirrors the
@@ -171,8 +182,8 @@ impl camel_component_api::ComponentContext for RegistryComponentContext {
         self.metrics.clone()
     }
 
-    fn component_metrics_enabled(&self) -> bool {
-        self.components_enabled
+    fn component_metric_levers(&self) -> ComponentMetricsLevers {
+        self.component_metric_levers.clone()
     }
 
     fn platform_service(&self) -> Arc<dyn camel_api::PlatformService> {
@@ -390,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn component_metrics_enabled_reflects_constructor_lever() {
+    fn component_metric_levers_reflects_constructor_lever() {
         let on = RegistryComponentContext::new(
             Arc::new(std::sync::Mutex::new(Registry::new())),
             None,
@@ -402,8 +413,44 @@ mod tests {
             false,
         );
 
-        assert!(ComponentContext::component_metrics_enabled(&on));
-        assert!(!ComponentContext::component_metrics_enabled(&off));
+        assert!(
+            ComponentContext::component_metric_levers(&on).enabled_for("http"),
+            "components=true seeds a uniform lever snapshot"
+        );
+        assert!(
+            !ComponentContext::component_metric_levers(&off).enabled_for("http"),
+            "components=false seeds a uniform off snapshot"
+        );
+    }
+
+    #[test]
+    fn registry_context_default_and_override() {
+        let registry = Arc::new(std::sync::Mutex::new(Registry::new()));
+        let default = RegistryComponentContext::new(registry.clone(), None, true);
+        assert!(
+            ComponentContext::component_metric_levers(&default).enabled_for("http"),
+            "new(_, _, true) must enable every component"
+        );
+
+        let disabled = RegistryComponentContext::new(registry.clone(), None, true)
+            .with_component_metric_levers(ComponentMetricsLevers::uniform(false));
+        assert!(
+            !ComponentContext::component_metric_levers(&disabled).enabled_for("http"),
+            "with_component_metric_levers must replace the uniform snapshot"
+        );
+
+        let scoped = RegistryComponentContext::new(registry, None, false)
+            .with_component_metric_levers(ComponentMetricsLevers::new(
+                true,
+                false,
+                std::collections::BTreeMap::from([("wasm".to_string(), true)]),
+            ));
+        let levers = ComponentContext::component_metric_levers(&scoped);
+        assert!(levers.enabled_for("wasm"), "override must enable wasm");
+        assert!(
+            !levers.enabled_for("http"),
+            "absent override inherits false"
+        );
     }
 
     #[test]
@@ -412,8 +459,8 @@ mod tests {
         let collector = Arc::new(RecordingMetrics::new());
         let ctx = RegistryComponentContext::new(registry, Some(collector.clone()), false);
 
-        let facade = RuntimeObservability::component_metrics(&ctx);
-        facade.observe("wasm", "invoke", true);
+        let facade = RuntimeObservability::component_metrics(&ctx, "wasm");
+        facade.observe("invoke", true);
 
         assert_eq!(
             collector.recorded_errors(),
@@ -428,8 +475,8 @@ mod tests {
         let ctx_on = RegistryComponentContext::new(registry.clone(), Some(collector.clone()), true);
         let ctx_off = RegistryComponentContext::new(registry, Some(collector.clone()), false);
 
-        RuntimeObservability::component_metrics(&ctx_on).observe("wasm", "invoke", false);
-        RuntimeObservability::component_metrics(&ctx_off).observe("wasm", "invoke", false);
+        RuntimeObservability::component_metrics(&ctx_on, "wasm").observe("invoke", false);
+        RuntimeObservability::component_metrics(&ctx_off, "wasm").observe("invoke", false);
 
         assert_eq!(
             collector.recorded_component_operations(),
@@ -469,9 +516,9 @@ mod tests {
         // collector, the facade builds over it, and the error flows into
         // NoOp silently.
         ComponentContext::metrics(&ctx);
-        RuntimeObservability::component_metrics(&ctx).observe("wasm", "invoke", true);
+        RuntimeObservability::component_metrics(&ctx, "wasm").observe("invoke", true);
 
-        assert!(!ComponentContext::component_metrics_enabled(&ctx));
+        assert!(!ComponentContext::component_metric_levers(&ctx).enabled_for("http"));
     }
 
     #[test]

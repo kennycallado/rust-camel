@@ -17,7 +17,7 @@ impl MetricsCollector for OpsRecorder {
     }
 }
 
-fn build_ctx(enabled: bool) -> Arc<ControllerComponentContext> {
+fn build_ctx(levers: ComponentMetricsLevers) -> Arc<ControllerComponentContext> {
     Arc::new(ControllerComponentContext::new(
         Arc::new(std::sync::Mutex::new(Registry::new())),
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -27,25 +27,28 @@ fn build_ctx(enabled: bool) -> Arc<ControllerComponentContext> {
             std::time::Duration::from_secs(30),
         )),
         Some("r".to_string()),
-        enabled,
+        levers,
     ))
 }
 
 /// Task 4.1 review finding: the production controller path must thread
 /// the `[observability.metrics].components` lever snapshot through
-/// `ControllerComponentContext` — endpoints reach `component_metrics()`
+/// `ControllerComponentContext` — endpoints reach `component_metrics(component)`
 /// through this impl, not through `CamelContext`.
 #[test]
 fn controller_path_component_metrics_reflects_lever() {
-    let on = build_ctx(true);
+    let on = build_ctx(ComponentMetricsLevers::uniform(true));
     assert!(
-        on.component_metrics_enabled(),
+        on.component_metric_levers().enabled_for("wasm"),
         "enabled snapshot must surface on the ComponentContext seam"
     );
     let recorder = Arc::new(OpsRecorder(std::sync::Mutex::new(Vec::new())));
-    let facade =
-        camel_api::ComponentMetrics::new(Arc::clone(&recorder) as Arc<dyn MetricsCollector>, true);
-    facade.observe("wasm", "invoke", true);
+    let facade = camel_api::ComponentMetrics::new(
+        Arc::clone(&recorder) as Arc<dyn MetricsCollector>,
+        "wasm",
+        true,
+    );
+    facade.observe("invoke", true);
     let calls = recorder.0.lock().expect("ops lock").clone();
     assert_eq!(
         calls,
@@ -53,10 +56,25 @@ fn controller_path_component_metrics_reflects_lever() {
         "lever-on facade must record the component operation"
     );
 
-    let off = build_ctx(false);
+    let off = build_ctx(ComponentMetricsLevers::uniform(false));
     assert!(
-        !off.component_metrics_enabled(),
+        !off.component_metric_levers().enabled_for("wasm"),
         "disabled snapshot must stay off (opt-in default)"
+    );
+}
+
+#[test]
+fn controller_context_reports_injected_levers() {
+    let ctx = build_ctx(ComponentMetricsLevers::new(
+        true,
+        false,
+        std::collections::BTreeMap::from([("wasm".to_string(), true)]),
+    ));
+    let levers = ComponentContext::component_metric_levers(&*ctx);
+    assert!(levers.enabled_for("wasm"), "override must enable wasm");
+    assert!(
+        !levers.enabled_for("http"),
+        "absent override inherits false"
     );
 }
 
@@ -65,7 +83,7 @@ fn controller_path_component_metrics_reflects_lever() {
 /// impl-block doc in `controller_component_context.rs`.
 #[test]
 fn shutdown_token_is_none_boundary_lock() {
-    let ctx = build_ctx(false);
+    let ctx = build_ctx(ComponentMetricsLevers::uniform(false));
     let token = ComponentContext::shutdown_token(&*ctx);
     assert!(
         token.is_none(),

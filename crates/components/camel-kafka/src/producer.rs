@@ -194,7 +194,7 @@ impl Service<Exchange> for KafkaProducer {
         let config = self.config.clone();
         let producer = self.producer.clone();
         let semaphore = Arc::clone(&self.semaphore);
-        let component_metrics = self.runtime.component_metrics();
+        let component_metrics = self.runtime.component_metrics("kafka");
 
         Box::pin(async move {
             let mut exchange = exchange;
@@ -283,7 +283,7 @@ impl Service<Exchange> for KafkaProducer {
             // topic/key resolution, serialization, broker ack. kafka runs no
             // retry_async on this path and previously emitted nothing, so no
             // label collides with e:kafka:produce.
-            component_metrics.observe("kafka", "produce", outcome.is_err());
+            component_metrics.observe("produce", outcome.is_err());
             outcome
         })
     }

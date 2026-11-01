@@ -371,7 +371,11 @@ fn redis_repo_component_metrics(
     metrics: std::sync::Arc<dyn camel_api::MetricsCollector>,
     config: &CamelConfig,
 ) -> ComponentMetrics {
-    ComponentMetrics::new(metrics, config.observability.metrics.components_enabled())
+    ComponentMetrics::new(
+        metrics,
+        "redis",
+        config.observability.metrics.component_enabled("redis"),
+    )
 }
 
 /// Resolve the connection parameters shared by every redis cache-repo
@@ -2680,6 +2684,7 @@ mod tests {
             exchange: true,
             duration: true,
             components: components_on,
+            component_overrides: std::collections::BTreeMap::new(),
         };
         config
     }
@@ -2703,7 +2708,7 @@ mod tests {
             let collector = Arc::new(RecordingCollector::new());
             handle.register(Arc::clone(&collector) as Arc<dyn camel_api::MetricsCollector>);
 
-            facade.observe("redis", "get", true);
+            facade.observe("get", true);
 
             assert_eq!(
                 collector.errors.lock().expect("errors lock").clone(),

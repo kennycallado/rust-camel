@@ -207,13 +207,7 @@ double-count rules live in ADR-0066.
 _Avoid_: metrics sink, metrics interface (vague)
 
 **ComponentMetrics**:
-Lever-gated facade (`component_metrics.rs`) over a collector handle plus a
-`components_enabled` snapshot. `observe(component, operation, failed)` emits
-`camel_component_operations_total{component,operation,outcome}` only with the
-`[observability.metrics] components` lever on; failures ALWAYS forward to the
-non-disableable error family as `e:{component}:{operation}`. Components obtain
-it via `RuntimeObservability::component_metrics()`; wiring BOTH this facade
-and `retry_async(metrics=Some)` at one boundary is forbidden (ADR-0066).
+Component-scoped facade (`component_metrics.rs`) over a late-bound collector handle. The component identity is fixed at construction (`Arc<str>`), so `observe(operation, failed)` cannot rename it. `enabled` is the per-component effective switch snapshot taken at construction: when it is true, `observe` emits `camel_component_operations_total{component,operation,outcome}`; failures ALWAYS forward to the non-disableable error family as `e:{component}:{operation}`, even when the switch is off. `ComponentMetricsLevers` (`enabled`, `components`, `overrides: Arc<BTreeMap<String,bool>>`) owns the precedence `enabled && overrides.get(component).unwrap_or(components)` and lives in camel-api because camel-api cannot depend on camel-core. Components obtain a handle via `RuntimeObservability::component_metrics(component)`; one handle is cheap to clone and may be shared by objects built from one connection. Wiring BOTH this facade and `retry_async(metrics=Some)` at one boundary is forbidden (ADR-0066).
 _Avoid_: component metrics helper, metrics facade (say ComponentMetrics)
 
 **MetricsHandle**:

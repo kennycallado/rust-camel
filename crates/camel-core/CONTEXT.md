@@ -55,7 +55,7 @@ ADR-0041.
 _Avoid_: container, application context, context (unqualified)
 
 **RuntimeObservability**:
-Narrow trait implemented by the runtime and injected into Component Endpoints at `create_consumer` / `create_producer` time. Provides `metrics()` (counter increments for categories b′/e), `health()` (forced-unhealthy signalling for category g), and `component_metrics()` (the `ComponentMetrics` facade carrying the components-lever snapshot; controller-wired contexts override it, defaults lever-off) so Component code can record failures and opt-in success-path telemetry without taking a hard dependency on metrics/health infrastructure. Established by ADR-0012 Phase A; facade per ADR-0066.
+Narrow trait implemented by the runtime and injected into Component Endpoints at `create_consumer` / `create_producer` time. Provides `metrics()` (counter increments for categories b′/e), `health()` (forced-unhealthy signalling for category g), and `component_metrics(component)` (a scoped `ComponentMetrics` handle that fixes the component identity and carries the per-component effective switch resolved from `component_metric_levers()`; controller-wired contexts resolve overrides, defaults lever-off) so Component code can record failures and opt-in success-path telemetry without taking a hard dependency on metrics/health infrastructure. Established by ADR-0012 Phase A; scoped facade and per-component switch per ADR-0066.
 _Avoid_: metrics handle, observability service, runtime hook (use RuntimeObservability when describing the trait)
 
 **UnitOfWorkConfig**:

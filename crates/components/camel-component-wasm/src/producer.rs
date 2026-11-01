@@ -81,7 +81,7 @@ pub struct WasmProducer {
     load_state: crate::health::WasmLoadState,
     sem: Arc<Semaphore>,
     /// Observability handle powering the uniform `wasm:invoke`
-    /// emission via `component_metrics()` (dashboard-observability 4.2).
+    /// emission via `component_metrics(component)` (dashboard-observability 4.2).
     /// Named `observability` (not `runtime`) to avoid collision with the
     /// existing `runtime: Arc<Mutex<Option<Arc<WasmRuntime>>>>` field above
     /// which holds the WASM runtime instance, not the observability surface.
@@ -200,7 +200,7 @@ impl Service<Exchange> for WasmProducer {
         let no_progress_timeout = self.no_progress_timeout;
         let observability = Arc::clone(&self.observability);
         Box::pin(async move {
-            let component_metrics = observability.component_metrics();
+            let component_metrics = observability.component_metrics("wasm");
             // The invoke operation covers the whole producer call
             // (runtime init + guest invocation): failures ALWAYS reach
             // the error family as `e:wasm:invoke`, the component series
@@ -302,7 +302,7 @@ impl Service<Exchange> for WasmProducer {
                 }
             }
             .await;
-            component_metrics.observe("wasm", "invoke", outcome.is_err());
+            component_metrics.observe("invoke", outcome.is_err());
             outcome
         })
     }
@@ -314,7 +314,7 @@ mod tests {
     use crate::config::WasmConfig;
     use camel_component_api::test_support::NoopRuntimeObservability;
     // Noop (not Panic) double: since dashboard-observability Task 4.2 the
-    // producer legitimately calls `component_metrics()` on every call —
+    // producer legitimately calls `component_metrics(component)` on every call —
     // the old "never touches observability" panic contract no longer holds.
     fn test_rt() -> std::sync::Arc<dyn camel_component_api::RuntimeObservability> {
         std::sync::Arc::new(NoopRuntimeObservability)

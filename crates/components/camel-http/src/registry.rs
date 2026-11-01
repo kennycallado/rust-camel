@@ -44,16 +44,32 @@ impl std::fmt::Debug for StaticMount {
     }
 }
 
+/// One registered consumer route: its envelope sender and the `http`-scoped
+/// metrics facade built from the consumer's own runtime at `start()`.
+///
+/// The shared Axum server is process-global and keyed by host/port, so the
+/// metrics handle must travel with the route entry rather than live on the
+/// server: a server-level handle would charge requests from another context
+/// to the wrong collector and the wrong effective switch.
+///
+/// **Internal plumbing** — subject to change without notice.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct RouteEntry {
+    pub sender: mpsc::Sender<RequestEnvelope>,
+    pub metrics: camel_api::ComponentMetrics,
+}
+
 #[derive(Clone)]
 pub(crate) struct HttpRouteRegistryInner {
     /// Legacy path-keyed API route registry. Used for `http:` routes
     /// registered without an `httpMethod=` URI param. Paths must be unique.
-    pub api_routes: HashMap<String, mpsc::Sender<RequestEnvelope>>,
+    pub api_routes: HashMap<String, RouteEntry>,
     /// Method-aware REST endpoint registry. Populated by REST-lowered
     /// `http:` routes (those whose URI carries `httpMethod=...`). Allows
     /// GET and POST on the same path to coexist, and supports path
     /// templates like `/users/{id}`. Per plan expert guidance E1.
-    pub rest_endpoints: Vec<RestEndpoint<mpsc::Sender<RequestEnvelope>>>,
+    pub rest_endpoints: Vec<RestEndpoint<RouteEntry>>,
     pub mounts: Vec<StaticMount>,
 }
 
@@ -111,8 +127,8 @@ pub use crate::rest_match::PathSegment;
 /// read path: exact legacy hit, REST hit, ambiguous template match, or miss.
 #[doc(hidden)]
 pub enum ProbeLookup {
-    Exact(mpsc::Sender<RequestEnvelope>),
-    Rest(mpsc::Sender<RequestEnvelope>),
+    Exact(RouteEntry),
+    Rest(RouteEntry),
     Ambiguous,
     Miss,
 }
@@ -140,6 +156,7 @@ impl HttpRouteRegistry {
         &self,
         path: String,
         sender: mpsc::Sender<RequestEnvelope>,
+        metrics: camel_api::ComponentMetrics,
     ) -> Result<(), CamelError> {
         let _gate = self
             .writer_gate
@@ -153,7 +170,7 @@ impl HttpRouteRegistry {
         }
         let mut next = HttpRouteRegistryInner::clone(&current);
         drop(current);
-        next.api_routes.insert(path, sender);
+        next.api_routes.insert(path, RouteEntry { sender, metrics });
         self.inner.store(Arc::new(next));
         Ok(())
     }
@@ -178,6 +195,7 @@ impl HttpRouteRegistry {
         method: String,
         segments: Vec<crate::rest_match::PathSegment>,
         sender: mpsc::Sender<RequestEnvelope>,
+        metrics: camel_api::ComponentMetrics,
     ) -> Result<(), CamelError> {
         let _gate = self
             .writer_gate
@@ -206,7 +224,7 @@ impl HttpRouteRegistry {
         next.rest_endpoints.push(RestEndpoint {
             method,
             segments,
-            payload: sender,
+            payload: RouteEntry { sender, metrics },
         });
         self.inner.store(Arc::new(next));
         Ok(())

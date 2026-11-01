@@ -61,7 +61,7 @@ pub struct CamelContext {
     metrics: Arc<MetricsHandle>,
     /// Snapshot of the metric-family levers from the last
     /// `set_tracer_config` call (default: components off). Read
-    /// synchronously by `ComponentContext::component_metrics_enabled`
+    /// synchronously by `ComponentContext::component_metric_levers`
     /// — the controller actor holds its own copy for pipeline gating,
     /// which is not reachable from a sync context method.
     metrics_levers: MetricsLeversConfig,
@@ -519,7 +519,7 @@ impl CamelContext {
 
     /// Configure tracing with full config.
     pub async fn set_tracer_config(&mut self, config: TracerConfig) {
-        // Snapshot the levers for the sync `component_metrics_enabled`
+        // Snapshot the levers for the sync `component_metric_levers`
         // surface before the config moves into the controller actor.
         self.metrics_levers = config.metrics_levers.clone();
         let _ = self.route_controller.set_tracer_config(config).await;
@@ -1085,13 +1085,13 @@ impl ComponentContext for CamelContext {
         Arc::clone(&self.metrics) as Arc<dyn MetricsCollector>
     }
 
-    /// Snapshot of the `[observability.metrics].components` lever
+    /// Snapshot of the `[observability.metrics].components` levers
     /// (dashboard-observability Task 4.1): gates only the uniform
     /// component-operations family offered through
-    /// `RuntimeObservability::component_metrics()`. Error-family
+    /// `RuntimeObservability::component_metrics(component)`. Error-family
     /// emission is never lever-gated, so it is not part of this flag.
-    fn component_metrics_enabled(&self) -> bool {
-        self.metrics_levers.components_enabled()
+    fn component_metric_levers(&self) -> camel_api::ComponentMetricsLevers {
+        self.metrics_levers.component_metrics_levers()
     }
 
     fn health(&self) -> Arc<dyn camel_component_api::HealthCheckRegistry> {

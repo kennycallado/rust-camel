@@ -106,8 +106,12 @@ The optional `test-support` feature exposes the `test_support` module (including
 submodule), `NoopRuntimeObservability`, `PanicRuntimeObservability`,
 `RecordingRuntimeObservability`, `acquire_deadline`, and
 `TEST_LOCK_DEADLINE`. The recording double captures error-family and
-component-ops emissions for crate-internal emission proofs (bd rc-xlo0);
-its components lever is set at construction. `acquire_deadline` bounds global test-lock acquisition so a stalled holder
+component-operation emissions for crate-internal emission proofs (bd rc-xlo0).
+Each `component_metrics(component)` call returns a scoped `ComponentMetrics`
+handle whose identity is fixed. The double's `ComponentMetricsLevers` snapshot
+is uniform and set at construction, so every component resolves to the same
+switch; recorded rows include operations such as the http consumer `consume`
+and the never-gated `e:{component}:{operation}` errors. `acquire_deadline` bounds global test-lock acquisition so a stalled holder
 fails one test instead of wedging the binary (bd rc-88old). `TEST_LOCK_DEADLINE` is the 900 s
 default deadline. The panic stub is only for downstream
 tests. Production builds must not enable this feature. The feature also enables optional `rcgen`

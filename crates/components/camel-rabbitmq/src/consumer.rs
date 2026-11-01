@@ -183,8 +183,8 @@ pub(crate) enum ConsumeOutcome {
 /// operation="consume"}` observation through `rt` (the producer 1.4 emission
 /// shape, shared through [`RuntimeObservability`]).
 pub(crate) fn record_consume(rt: &dyn RuntimeObservability, outcome: ConsumeOutcome) {
-    rt.component_metrics()
-        .observe("rabbitmq", "consume", outcome == ConsumeOutcome::Failure);
+    rt.component_metrics("rabbitmq")
+        .observe("consume", outcome == ConsumeOutcome::Failure);
 }
 
 /// Why one connection's delivery loop ended.

@@ -664,8 +664,8 @@ impl Service<Exchange> for OpenSearchProducer {
             // `e:opensearch:execute`, the component series only with the
             // lever on (dashboard-observability 4.2).
             runtime
-                .component_metrics()
-                .observe("opensearch", "execute", result.is_err());
+                .component_metrics("opensearch")
+                .observe("execute", result.is_err());
             let result = result.map_err(CamelError::from)?;
 
             Ok(Self::build_response(req, result))

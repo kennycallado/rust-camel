@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use camel_api::{AsyncHealthCheck, InFlightGauge, MetricsCollector, PlatformService};
+use camel_api::{
+    AsyncHealthCheck, ComponentMetricsLevers, InFlightGauge, MetricsCollector, PlatformService,
+};
 use camel_language_api::Language;
 use tokio_util::sync::CancellationToken;
 
@@ -26,14 +28,19 @@ pub trait ComponentContext: Send + Sync {
         None
     }
 
-    /// Snapshot of the `[observability.metrics].components` lever —
-    /// gates only the uniform component-operations family served through
-    /// `RuntimeObservability::component_metrics()`; error-family
-    /// emission is never lever-gated. Default false (opt-in);
-    /// `CamelContext` overrides this with its `MetricsLeversConfig`
-    /// snapshot.
-    fn component_metrics_enabled(&self) -> bool {
-        false
+    /// Snapshot of the `[observability.metrics].components` configuration —
+    /// resolved per component by
+    /// `RuntimeObservability::component_metrics(component)`. The scoped
+    /// identity (not a global bool) lets an override enable one component
+    /// series while the coarse `components` default stays off.
+    ///
+    /// The snapshot gates only the uniform component-operations family;
+    /// error-family emission is never lever-gated. Default: all off
+    /// (opt-in), so unconfigured contexts keep the component series
+    /// suppressed. `CamelContext` overrides this with its
+    /// `MetricsLeversConfig` snapshot.
+    fn component_metric_levers(&self) -> ComponentMetricsLevers {
+        ComponentMetricsLevers::default()
     }
 
     /// Access the active health-check registry.
@@ -124,6 +131,15 @@ mod tests {
         let h = ctx.health();
         // Must not panic.
         h.force_unhealthy_for_route("any", "any", "any");
+    }
+
+    #[test]
+    fn default_component_metric_levers_are_off() {
+        let ctx = NoOpComponentContext;
+        assert!(
+            !ctx.component_metric_levers().enabled_for("http"),
+            "default levers must keep the component series off"
+        );
     }
 
     #[test]

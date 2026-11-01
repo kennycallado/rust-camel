@@ -36,19 +36,23 @@ pub trait RuntimeObservability: Send + Sync {
 
     /// Facade for the uniform component-operations family
     /// (`camel_component_operations_total{component,operation,outcome}`,
-    /// dashboard-observability Task 4.1). The lever snapshot is baked in
-    /// at facade construction: the component series flow only with the
-    /// `[observability.metrics].components` lever on, while failures
-    /// always reach the non-disableable error family.
+    /// dashboard-observability Task 4.1), scoped to `component` so the
+    /// handle carries both the identity and the resolved switch.
+    ///
+    /// The per-component lever snapshot is baked in at facade
+    /// construction: the component series flow only when
+    /// `component_metric_levers().enabled_for(component)` is true, while
+    /// failures always reach the non-disableable error family — error
+    /// emission is never lever-gated.
     ///
     /// Default: lever off — impls that do not override
-    /// `component_metrics_enabled()` (manual test runtimes AND any
-    /// context wired without a levers snapshot) keep the component
-    /// series suppressed and only forward errors. In production the
-    /// controller-path `ControllerComponentContext` overrides it with
-    /// the levers snapshot taken at pipeline assembly.
-    fn component_metrics(&self) -> ComponentMetrics {
-        ComponentMetrics::new(self.metrics(), false)
+    /// `component_metric_levers()` (manual test runtimes AND any context
+    /// wired without a levers snapshot) keep the component series
+    /// suppressed and only forward errors. In production the blanket impl
+    /// resolves the context's `MetricsLeversConfig` snapshot per
+    /// component.
+    fn component_metrics(&self, component: &str) -> ComponentMetrics {
+        ComponentMetrics::new(self.metrics(), component, false)
     }
 
     /// Context-global gauge of accepted-not-completed exchanges
@@ -75,10 +79,13 @@ impl<T: ComponentContext> RuntimeObservability for T {
         <Self as ComponentContext>::health(self)
     }
 
-    fn component_metrics(&self) -> ComponentMetrics {
+    fn component_metrics(&self, component: &str) -> ComponentMetrics {
+        let enabled =
+            <Self as ComponentContext>::component_metric_levers(self).enabled_for(component);
         ComponentMetrics::new(
             <Self as ComponentContext>::metrics(self),
-            <Self as ComponentContext>::component_metrics_enabled(self),
+            component,
+            enabled,
         )
     }
 
@@ -89,11 +96,128 @@ impl<T: ComponentContext> RuntimeObservability for T {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use camel_api::{ComponentMetricsLevers, MetricsCollector, PlatformService};
+    use camel_language_api::Language;
+
     use super::*;
+    use crate::{Component, NoOpComponentContext};
+
+    /// `MetricsCollector` capturing both emission families.
+    #[derive(Default)]
+    struct RecordingCollector {
+        errors: Mutex<Vec<(String, String)>>,
+        ops: Mutex<Vec<(String, String, String)>>,
+    }
+
+    impl RecordingCollector {
+        fn errors(&self) -> Vec<(String, String)> {
+            self.errors.lock().expect("errors lock").clone()
+        }
+
+        fn ops(&self) -> Vec<(String, String, String)> {
+            self.ops.lock().expect("ops lock").clone()
+        }
+    }
+
+    impl MetricsCollector for RecordingCollector {
+        fn record_exchange_duration(&self, _: &str, _: Duration) {}
+        fn increment_errors(&self, component: &str, error_type: &str) {
+            self.errors
+                .lock()
+                .expect("errors lock")
+                .push((component.to_string(), error_type.to_string()));
+        }
+        fn increment_exchanges(&self, _: &str) {}
+        fn set_queue_depth(&self, _: &str, _: usize) {}
+        fn record_circuit_breaker_change(&self, _: &str, _: &str, _: &str) {}
+        fn record_component_operation(&self, component: &str, operation: &str, outcome: &str) {
+            self.ops.lock().expect("ops lock").push((
+                component.to_string(),
+                operation.to_string(),
+                outcome.to_string(),
+            ));
+        }
+    }
+
+    /// Test context whose levers enable only `wasm`.
+    struct ScopedLeverContext {
+        inner: NoOpComponentContext,
+        collector: Arc<RecordingCollector>,
+    }
+
+    impl ComponentContext for ScopedLeverContext {
+        fn resolve_component(&self, scheme: &str) -> Option<Arc<dyn Component>> {
+            self.inner.resolve_component(scheme)
+        }
+
+        fn resolve_language(&self, name: &str) -> Option<Arc<dyn Language>> {
+            self.inner.resolve_language(name)
+        }
+
+        fn metrics(&self) -> Arc<dyn MetricsCollector> {
+            Arc::clone(&self.collector) as Arc<dyn MetricsCollector>
+        }
+
+        fn component_metric_levers(&self) -> ComponentMetricsLevers {
+            ComponentMetricsLevers::new(true, false, BTreeMap::from([("wasm".to_string(), true)]))
+        }
+
+        fn platform_service(&self) -> Arc<dyn PlatformService> {
+            self.inner.platform_service()
+        }
+
+        fn register_route_health_check(
+            &self,
+            route_id: &str,
+            check: Arc<dyn camel_api::AsyncHealthCheck>,
+        ) {
+            self.inner.register_route_health_check(route_id, check);
+        }
+
+        fn unregister_route_health_check(&self, route_id: &str) {
+            self.inner.unregister_route_health_check(route_id);
+        }
+    }
 
     #[test]
     fn runtime_observability_is_send_sync() {
         fn assert_send_sync<T: Send + Sync + ?Sized>() {}
         assert_send_sync::<dyn RuntimeObservability>();
+    }
+
+    #[test]
+    fn blanket_impl_uses_context_levers() {
+        let collector = Arc::new(RecordingCollector::default());
+        let ctx = ScopedLeverContext {
+            inner: NoOpComponentContext,
+            collector: Arc::clone(&collector),
+        };
+
+        RuntimeObservability::component_metrics(&ctx, "wasm").observe("invoke", false);
+        assert_eq!(
+            collector.ops(),
+            vec![(
+                "wasm".to_string(),
+                "invoke".to_string(),
+                "success".to_string()
+            )],
+            "the override must enable the wasm component series"
+        );
+
+        RuntimeObservability::component_metrics(&ctx, "kafka").observe("consume", true);
+        assert_eq!(
+            collector.ops().len(),
+            1,
+            "kafka inherits components=false, so no operation is recorded"
+        );
+        assert_eq!(
+            collector.errors(),
+            vec![("kafka".to_string(), "e:kafka:consume".to_string())],
+            "errors must flow regardless of the per-component lever"
+        );
     }
 }

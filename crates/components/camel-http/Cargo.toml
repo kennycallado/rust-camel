@@ -28,6 +28,7 @@ bytes.workspace = true
 moka.workspace = true
 axum.workspace = true
 http.workspace = true
+http-body.workspace = true
 tokio-util.workspace = true
 url = { workspace = true }
 camel-otel = { workspace = true, optional = true }

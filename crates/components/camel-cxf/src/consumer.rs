@@ -464,8 +464,8 @@ impl Consumer for CxfConsumer {
                                     // sums count that failure twice —
                                     // intended per design D5).
                                     runtime
-                                        .component_metrics()
-                                        .observe("cxf", "consume", response.fault);
+                                        .component_metrics("cxf")
+                                        .observe("consume", response.fault);
 
                                     if let Err(send_err) = response_tx.send(response).await {
                                         warn!("Failed to send CXF consumer response: {send_err}");

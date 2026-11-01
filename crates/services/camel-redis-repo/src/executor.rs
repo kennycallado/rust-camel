@@ -107,7 +107,7 @@ pub(crate) async fn execute_retry_safe(
     match ex.execute(cmd.clone()).await {
         Ok(value) => Ok(value),
         Err(err) if is_transient_redis_error(&err) => {
-            metrics.observe("redis", operation, true);
+            metrics.observe(operation, true);
             ex.refresh().await?;
             ex.execute(cmd).await
         }
@@ -632,6 +632,7 @@ mod tests {
     fn test_facade() -> ComponentMetrics {
         ComponentMetrics::new(
             std::sync::Arc::new(camel_api::metrics::MetricsHandle::new()),
+            "redis",
             false,
         )
     }

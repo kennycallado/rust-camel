@@ -149,8 +149,8 @@ impl MailConsumer {
                 r = poll_once(&mut session, &self.mailbox, state, ctx, &*self.rt) => r,
             };
             self.rt
-                .component_metrics()
-                .observe("mail", "poll", polled.is_err());
+                .component_metrics("mail")
+                .observe("poll", polled.is_err());
             match polled {
                 Ok(Polled::RouteClosed) => {
                     session.close().await;

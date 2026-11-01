@@ -13,11 +13,13 @@ The collector surface records the names without the prefix.
 |---|---|---|---|---|
 | `camel_language_eval_failures_total` | counter | `language`, `route`, `verb`, `class` | `language` is the expression language; `route` is the route id; `verb` is the DSL step verb; `class` is the typed `ExpressionErrorClass` name (`runtime`, `arithmetic`, `type-mismatch`, `function-not-found`, `limit`, `timeout`, `conversion`, `parse`). | No |
 | `camel_errors_total` | counter | `route`, `error_type` | `route` is the route id; `error_type` is the closed error class. | No |
+| `camel_component_operations_total` | counter | `component`, `operation`, `outcome` | `component` is the component identity; `operation` is the component operation name; `outcome` is `success` or `failure`. | Yes (`components`, `component_overrides`; success/failure series only — errors are never gated) |
 
-Label values come from operator-authored route configuration and from the
-typed error class. Exchange data is never a label value. The cause text,
-the conversion detail, the position, the body, the headers, and the
-properties are not label values.
+Label values come from operator-authored route configuration, from the
+typed error class, and from closed code-owned vocabularies. Exchange
+data is never a label value. The cause text, the conversion detail, the
+position, the body, the headers, the properties, the request URL, and
+the host are not label values.
 
 `camel_language_eval_failures_total` increments once per top-level
 evaluation failure that the route step loop surfaces. A failure that a
@@ -28,6 +30,81 @@ counted, and neither is one raised by the handler itself.
 
 The language counter is not gated by a metric-family lever. It matches the
 non-disableable error family.
+
+## Component operations
+
+Components opt in to the `camel_component_operations_total` family. The
+family is off by default. Each component records a small, closed set of
+operations:
+
+| Component | Operations |
+|---|---|
+| kafka | `consume`, `produce` |
+| redis | `command` (producer only) |
+| http | `request` (producer), `consume` (consumer) |
+
+Component-specific pages list the operations of other components. A
+failure also increments `camel_errors_total` as
+`e:{component}:{operation}`. The error family is never gated, so a
+switched-off component still reports failures.
+
+### HTTP consumer completion
+
+The HTTP consumer records `http:consume` once per handled request on a
+`from: http:` route. The outcome is decided at response completion or
+abort, not when the exchange enters the route channel:
+
+- The outcome is `success` when the reply is not classified as failed
+  and the response body is exhausted under the HTTP body contract. A
+  body that is already end-of-stream, or a response whose body the
+  protocol suppresses (`HEAD`, `204`, `304`, `1xx`), counts as exhausted.
+- The outcome is `failure` when the consumer classifies the reply as
+  failed (pipeline error, authentication denial, cancellation reply,
+  unconsumable response body), the body returns an error, the body is
+  dropped before exhaustion, the reply headers cannot build a valid
+  response, the dispatcher replaces an oversized response, or the
+  request never completes a route round-trip (request body over the
+  limit, in-flight limit reached, closed route or reply channel, handler
+  cancellation including the dispatch timeout).
+- A classified failed reply keeps its failure through body
+  finalization. Exhausting or dropping its error-rendering body does not
+  turn it into a success.
+- A status code selected by the route, including 4xx and 5xx, is not a
+  failure by itself. The route completed and produced a well-formed
+  response.
+- A transport write error after the body is exhausted is outside this
+  metric. Static mounts served by the `http-static` endpoint are outside
+  it too.
+
+### Per-component overrides
+
+`[observability.metrics] components` sets the default for every
+component. `[observability.metrics.component_overrides]` changes it for
+named components:
+
+```toml
+[observability.metrics]
+enabled = true
+components = false
+
+[observability.metrics.component_overrides]
+http = true
+kafka = false
+```
+
+The effective switch for a component is:
+
+```text
+enabled && component_overrides.get(component).unwrap_or(components)
+```
+
+An absent override inherits `components`. An explicit override wins over
+`components` in both directions. `enabled = false` suppresses every
+component series regardless of overrides. An override for a component
+that is not registered has no effect. Override keys must be non-empty
+ASCII identities matching `[a-z0-9][a-z0-9_-]*`; an invalid key fails
+configuration load. Profiles and includes merge the table key by key, so
+a profile overrides only the components it names.
 
 ## Custom metrics collector
 

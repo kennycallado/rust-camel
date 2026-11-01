@@ -769,6 +769,21 @@ fn validate_repo_registration_name(field: &str, name: &str) -> Result<(), CamelE
     }
 }
 
+/// A metric component override key must be a component identity: non-empty,
+/// starting with an ASCII lowercase letter or digit, and otherwise limited
+/// to lowercase letters, digits, `_`, and `-` (the same namespace-token
+/// shape used elsewhere in component registration).
+fn is_component_identity(key: &str) -> bool {
+    let mut bytes = key.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return false;
+    }
+    bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+}
+
 fn default_idempotent_backend() -> String {
     "redb".to_string()
 }
@@ -1314,6 +1329,10 @@ mod components_config_tests;
 #[cfg(test)]
 #[path = "config_tests/prometheus_config_tests.rs"]
 mod prometheus_config_tests;
+
+#[cfg(test)]
+#[path = "config_tests/component_overrides_tests.rs"]
+mod component_overrides_tests;
 
 #[cfg(test)]
 #[path = "config_tests/platform_config_tests.rs"]
@@ -2000,6 +2019,13 @@ impl CamelConfig {
             return Err(CamelError::Config(
                 "watch_debounce_ms must be > 0".to_string(),
             ));
+        }
+        for key in self.observability.metrics.component_overrides.keys() {
+            if !is_component_identity(key) {
+                return Err(CamelError::Config(format!(
+                    "observability.metrics.component_overrides.{key}: invalid component identity"
+                )));
+            }
         }
         if let Some(ref journal) = self.runtime_journal {
             if journal.path.as_os_str().is_empty() {

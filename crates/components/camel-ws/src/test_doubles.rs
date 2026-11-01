@@ -78,8 +78,8 @@ impl camel_component_api::RuntimeObservability for CountingRuntime {
     fn health(&self) -> Arc<dyn camel_component_api::HealthCheckRegistry> {
         Arc::new(camel_component_api::NoOpHealthCheckRegistry)
     }
-    fn component_metrics(&self) -> camel_api::ComponentMetrics {
+    fn component_metrics(&self, component: &str) -> camel_api::ComponentMetrics {
         let collector: Arc<dyn camel_api::MetricsCollector> = self.metrics.clone();
-        camel_api::ComponentMetrics::new(collector, true)
+        camel_api::ComponentMetrics::new(collector, component, true)
     }
 }

@@ -573,9 +573,11 @@ mod tests {
     use crate::test_metrics::RecordingMetrics;
     use camel_api::CamelError;
     use camel_api::ComponentMetrics;
+    use camel_api::ComponentMetricsLevers;
     use camel_api::cache::CacheEntry;
     use camel_api::cache::ContentType;
     use camel_api::metrics::MetricsCollector;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::Duration;
     use std::time::SystemTime;
@@ -586,6 +588,7 @@ mod tests {
     fn test_facade() -> ComponentMetrics {
         ComponentMetrics::new(
             std::sync::Arc::new(camel_api::metrics::MetricsHandle::new()),
+            "redis",
             false,
         )
     }
@@ -1030,7 +1033,11 @@ mod tests {
             Duration::from_secs(10),
             default_clock(),
             executor,
-            ComponentMetrics::new(Arc::clone(recorder) as Arc<dyn MetricsCollector>, lever),
+            ComponentMetrics::new(
+                Arc::clone(recorder) as Arc<dyn MetricsCollector>,
+                "redis",
+                lever,
+            ),
         )
         .expect("valid constructor arguments")
     }
@@ -1134,6 +1141,46 @@ mod tests {
             recorder.errors(),
             vec![("redis".to_string(), "e:redis:get".to_string())],
             "error-family forwarding is never lever-gated"
+        );
+    }
+
+    // The redis facade resolves its switch from the scoped levers snapshot:
+    // an explicit redis override wins over the coarse default, and an
+    // absent override inherits the default while failures still reach the
+    // unconditional error family.
+    #[test]
+    fn redis_facade_resolves_per_component_switch() {
+        let recorder = Arc::new(RecordingMetrics::new());
+        let levers =
+            ComponentMetricsLevers::new(true, false, BTreeMap::from([("redis".to_string(), true)]));
+        ComponentMetrics::new(
+            Arc::clone(&recorder) as Arc<dyn MetricsCollector>,
+            "redis",
+            levers.enabled_for("redis"),
+        )
+        .observe("get", false);
+        assert_eq!(
+            recorder.ops(),
+            vec!["redis:get:success".to_string()],
+            "the redis override must enable the component family"
+        );
+
+        let recorder = Arc::new(RecordingMetrics::new());
+        let levers = ComponentMetricsLevers::new(true, false, BTreeMap::new());
+        ComponentMetrics::new(
+            Arc::clone(&recorder) as Arc<dyn MetricsCollector>,
+            "redis",
+            levers.enabled_for("redis"),
+        )
+        .observe("get", true);
+        assert!(
+            recorder.ops().is_empty(),
+            "an absent override inherits the default (off)"
+        );
+        assert_eq!(
+            recorder.errors(),
+            vec![("redis".to_string(), "e:redis:get".to_string())],
+            "failures forward to the error family regardless of the lever"
         );
     }
 
