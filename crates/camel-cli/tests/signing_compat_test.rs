@@ -96,7 +96,7 @@ fn envelope_checksum(envelope: &[u8; signature::ENVELOPE_LEN]) -> [u8; 32] {
 /// to reproduce the frozen fixture, or on 3.x to prove the vector is
 /// unchanged. Writes `tests/fixtures/ed25519ph_envelope_dalek_2_2.hex`.
 #[test]
-#[ignore = "regeneration helper; run explicitly with --ignored"]
+#[ignore = "slow test: fixture regeneration helper, overwrites the fixture file; run explicitly with --ignored"]
 fn regenerate_fixture() {
     let key = SigningKey::from_bytes(&FIXTURE_SEED);
     let envelope = signature::encode_envelope(&key, &FIXTURE_PREHASH);
