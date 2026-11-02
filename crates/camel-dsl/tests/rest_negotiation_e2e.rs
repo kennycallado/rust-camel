@@ -932,10 +932,13 @@ async fn e2e_absent_headers_permissive_pinned_bytes() {
     );
 
     assert_2xx(resp.status, "absent Accept + matching Content-Type");
+    // The route sets the same Content-Type as the request, so the finalizer
+    // treats it as inherited and omits it (the documented provenance
+    // boundary in message-header-semantics).
     assert_eq!(
         resp.header("content-type"),
-        Some("application/json"),
-        "the reply must advertise the JSON media"
+        None,
+        "an equal route Content-Type is inherited and suppressed"
     );
     // The pin (lives HERE): the permissive pass-through must put exactly
     // these bytes on the wire — no re-wrapping, no re-serialisation, no
