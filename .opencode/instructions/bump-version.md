@@ -16,6 +16,12 @@ Verified against the v0.48.0 precedent (`0f67ee5d`) and the v0.49.0 bump
    Bump ALL of them: `sed -i 's/0\.X\.0/0.Y.0/g' Cargo.toml`.
    A one-line workspace-only edit is INCOMPLETE and breaks the build.
 2. **Lock regen** (metadata-only, no compile): `cargo update --workspace`.
+2b. **Fuzz lock regen** (2026-11-02, rc-0qjhk): the version bump invalidates
+   `fuzz/Cargo.lock` (path-dep versions + deps added since the last bump).
+   Run `cargo metadata --format-version 1 --manifest-path fuzz/Cargo.toml`
+   (no `--locked`) and commit the refreshed lock. CI `fuzz-lock-drift` fails
+   otherwise. Precedent: the 0.62.0->0.64.0 bump left it stale and broke
+   fuzz-smoke on main and every PR.
 3. **Audit the lock diff** (non-negotiable): every changed line must be a
    version swap; ZERO dependency-name changes; transitive deps held.
    Verify: `git diff Cargo.lock | grep '^[-+]version' | grep -vc '<old|new>'`
