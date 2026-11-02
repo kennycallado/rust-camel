@@ -299,10 +299,14 @@ mod tests {
                 self.eval_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(JsEvalResult {
                     return_value: json!("writable"),
+                    headers_snapshot: exchange.headers.clone(),
                     headers: exchange.headers,
                     body_snapshot: exchange.body.clone(),
                     body: exchange.body,
+                    properties_snapshot: exchange.properties.clone(),
                     properties: exchange.properties,
+                    body_unread_stream: false,
+                    body_stream_replaced: false,
                 })
             }
 

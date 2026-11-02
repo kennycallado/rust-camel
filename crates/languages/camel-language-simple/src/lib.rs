@@ -1526,6 +1526,82 @@ mod tests {
             "expected ParseError, got {err:?}"
         );
     }
+    #[tokio::test]
+    async fn has_header_absent_is_false() {
+        let lang = SimpleLanguage::new();
+        let expr = lang.create_expression("${has_header(\"flag\")}").unwrap();
+        let ex = Exchange::default();
+        assert_eq!(expr.evaluate(&ex).await.unwrap(), Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn has_header_stored_null_is_true() {
+        let lang = SimpleLanguage::new();
+        let presence = lang.create_expression("${has_header(\"flag\")}").unwrap();
+        let value = lang.create_expression("${header.flag}").unwrap();
+        let mut msg = Message::default();
+        msg.set_header("flag", Value::Null);
+        let ex = Exchange::new(msg);
+        assert_eq!(presence.evaluate(&ex).await.unwrap(), Value::Bool(true));
+        assert_eq!(value.evaluate(&ex).await.unwrap(), Value::Null);
+    }
+
+    #[tokio::test]
+    async fn has_property_absent_and_null() {
+        let lang = SimpleLanguage::new();
+        let present = lang.create_expression("${has_property(\"q\")}").unwrap();
+        let absent = lang.create_expression("${has_property(\"p\")}").unwrap();
+        let missing_value = lang.create_expression("${exchangeProperty.p}").unwrap();
+        let null_value = lang.create_expression("${exchangeProperty.q}").unwrap();
+        let mut ex = Exchange::default();
+        ex.set_property("q".to_string(), Value::Null);
+        assert_eq!(present.evaluate(&ex).await.unwrap(), Value::Bool(true));
+        assert_eq!(absent.evaluate(&ex).await.unwrap(), Value::Bool(false));
+        assert_eq!(missing_value.evaluate(&ex).await.unwrap(), Value::Null);
+        assert_eq!(null_value.evaluate(&ex).await.unwrap(), Value::Null);
+    }
+
+    #[tokio::test]
+    async fn has_header_non_string_arg_is_type_mismatch() {
+        let lang = SimpleLanguage::new();
+        let expr = lang.create_expression("${has_header(1)}").unwrap();
+        let ex = Exchange::default();
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("expected type mismatch");
+        match &err {
+            LanguageError::TypeMismatch {
+                expected,
+                actual,
+                position,
+            } => {
+                assert_eq!(expected, "string");
+                assert_eq!(actual, "number");
+                assert_eq!(*position, None);
+            }
+            other => panic!("expected TypeMismatch, got {other:?}"),
+        }
+        assert_eq!(
+            format!("{err}"),
+            "type mismatch: expected string, actual number"
+        );
+    }
+
+    #[tokio::test]
+    async fn has_header_arity_errors() {
+        let lang = SimpleLanguage::new();
+        for source in ["${has_header()}", "${has_header(\"a\", \"b\")}"] {
+            let err = lang
+                .create_expression(source)
+                .err()
+                .expect("expected parse error");
+            assert!(
+                matches!(err, LanguageError::ParseError { .. }),
+                "{source}: expected ParseError, got {err:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1898,23 +1974,30 @@ mod body_field_eval_tests {
     }
 
     #[tokio::test]
-    async fn body_bytes_utf8_returns_string() {
-        // Body::Bytes with valid UTF-8 content should be readable via ${body}
+    async fn body_bytes_returns_byte_array() {
+        // Body::Bytes is exposed as a native array of byte numbers.
         let lang = SimpleLanguage::new();
         let mut ex = Exchange::default();
-        ex.input.body = Body::from(b"hello from bytes".to_vec());
+        ex.input.body = Body::from(vec![0u8, 128, 255]);
         let val = lang
             .create_expression("${body}")
             .unwrap()
             .evaluate(&ex)
             .await
             .unwrap();
-        assert_eq!(val, Value::String("hello from bytes".to_string()));
+        assert_eq!(
+            val,
+            Value::Array(vec![
+                Value::Number(0.into()),
+                Value::Number(128.into()),
+                Value::Number(255.into()),
+            ])
+        );
     }
 
     #[tokio::test]
-    async fn body_json_returns_serialized_string() {
-        // Body::Json should be serialized to a JSON string when accessed via ${body}
+    async fn body_json_returns_native_value() {
+        // Body::Json is exposed as its native JSON value, not a serialized string.
         let lang = SimpleLanguage::new();
         let mut ex = Exchange::default();
         ex.input.body = Body::Json(json!({"msg": "world"}));
@@ -1924,19 +2007,35 @@ mod body_field_eval_tests {
             .evaluate(&ex)
             .await
             .unwrap();
-        // The result should be the JSON serialization, not empty
-        let s = match val {
-            Value::String(s) => s,
-            other => panic!("expected String, got {other:?}"),
+        let Value::Object(map) = &val else {
+            panic!("expected native Object, got {val:?}");
         };
-        assert!(!s.is_empty(), "${{body}} on Body::Json should not be empty");
-        let parsed: serde_json::Value = serde_json::from_str(&s).unwrap();
-        assert_eq!(parsed["msg"], "world");
+        assert_eq!(map.get("msg"), Some(&Value::String("world".to_string())));
+    }
+
+    #[tokio::test]
+    async fn r3_body_preserves_json_object() {
+        // R3 flip: ${body} exposes the native object so it can round-trip
+        // back into Body::Json instead of degrading to Body::Text.
+        let lang = SimpleLanguage::new();
+        let mut ex = Exchange::default();
+        ex.input.body = Body::Json(json!({"a": 1}));
+        let value = lang
+            .create_expression("${body}")
+            .unwrap()
+            .evaluate(&ex)
+            .await
+            .unwrap();
+        let Value::Object(map) = &value else {
+            panic!("expected native object, got {value:?}");
+        };
+        assert_eq!(map.get("a"), Some(&json!(1)));
+        assert_eq!(Body::from(value), Body::Json(json!({"a": 1})));
     }
 
     #[tokio::test]
     async fn body_bytes_in_interpolation() {
-        // Body::Bytes should work in interpolated expressions like "Received: ${body}"
+        // Body::Bytes renders as a byte array inside an interpolated expression.
         let lang = SimpleLanguage::new();
         let mut ex = Exchange::default();
         ex.input.body = Body::from(b"ping".to_vec());
@@ -1946,7 +2045,10 @@ mod body_field_eval_tests {
             .evaluate(&ex)
             .await
             .unwrap();
-        assert_eq!(val, Value::String("Received: ping".to_string()));
+        assert_eq!(
+            val,
+            Value::String("Received: [112,105,110,103]".to_string())
+        );
     }
 
     // --- XML→Json→Simple integration tests ---
@@ -2101,5 +2203,103 @@ mod public_api_tests {
         let expr = lang.create_expression("${boollang:yes}").unwrap();
         let val = expr.evaluate(&Exchange::default()).await.unwrap();
         assert_eq!(val, Value::Bool(true));
+    }
+}
+
+#[cfg(test)]
+mod stream_body_tests {
+    use crate::SimpleLanguage;
+    use camel_api::{StreamBody, StreamMetadata};
+    use camel_language_api::{Body, Exchange, Language, LanguageError, Message, Value};
+    use std::sync::Arc;
+
+    fn stream_body() -> Body {
+        Body::Stream(StreamBody {
+            stream: Arc::new(tokio::sync::Mutex::new(None)),
+            metadata: StreamMetadata::default(),
+        })
+    }
+
+    fn stream_exchange() -> Exchange {
+        let mut ex = Exchange::default();
+        ex.input.body = stream_body();
+        ex
+    }
+
+    fn header_stream_exchange() -> Exchange {
+        let mut msg = Message::default();
+        msg.set_header("type", Value::String("order".to_string()));
+        let mut ex = Exchange::new(msg);
+        ex.input.body = stream_body();
+        ex
+    }
+
+    #[tokio::test]
+    async fn stream_body_read_is_conversion_error() {
+        let lang = SimpleLanguage::new();
+        let ex = stream_exchange();
+        let err = lang
+            .create_expression("${body}")
+            .unwrap()
+            .evaluate(&ex)
+            .await
+            .expect_err("stream body read must fail");
+        match &err {
+            LanguageError::ConversionError {
+                source_type,
+                target,
+            } => {
+                assert_eq!(source_type, "Body::Stream");
+                assert_eq!(target, "body");
+            }
+            other => panic!("expected ConversionError, got {other:?}"),
+        }
+        assert!(matches!(ex.input.body, Body::Stream(_)));
+    }
+
+    #[tokio::test]
+    async fn stream_body_field_read_is_conversion_error() {
+        let lang = SimpleLanguage::new();
+        let ex = stream_exchange();
+        let err = lang
+            .create_expression("${body.x}")
+            .unwrap()
+            .evaluate(&ex)
+            .await
+            .expect_err("stream body field read must fail");
+        match &err {
+            LanguageError::ConversionError {
+                source_type,
+                target,
+            } => {
+                assert_eq!(source_type, "Body::Stream");
+                assert_eq!(target, "body");
+            }
+            other => panic!("expected ConversionError, got {other:?}"),
+        }
+        assert!(matches!(ex.input.body, Body::Stream(_)));
+    }
+
+    #[tokio::test]
+    async fn header_only_filter_passes_stream_body() {
+        let lang = SimpleLanguage::new();
+        let ex = header_stream_exchange();
+        let pred = lang.create_predicate("${header.type} == 'order'").unwrap();
+        assert!(pred.matches(&ex).await.unwrap());
+        assert!(matches!(ex.input.body, Body::Stream(_)));
+    }
+
+    #[tokio::test]
+    async fn header_only_interpolation_passes_stream_body() {
+        let lang = SimpleLanguage::new();
+        let ex = header_stream_exchange();
+        let val = lang
+            .create_expression("Hello ${header.type}")
+            .unwrap()
+            .evaluate(&ex)
+            .await
+            .unwrap();
+        assert_eq!(val, Value::String("Hello order".to_string()));
+        assert!(matches!(ex.input.body, Body::Stream(_)));
     }
 }

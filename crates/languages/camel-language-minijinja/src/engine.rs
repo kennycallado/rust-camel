@@ -22,6 +22,14 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// Refusal text for a `Body::Stream` reaching a consuming template operation.
+///
+/// The `body` context value carries a `minijinja::Error` so only operations
+/// that actually consume the body (interpolation, filters, comparison,
+/// iteration, member access) fail. Header-only templates and unexecuted
+/// branches render normally.
+pub(crate) const STREAM_REFUSAL: &str = "minijinja cannot render a Body::Stream directly; add `stream_cache` upstream (crates/camel-processor/src/stream_cache.rs:37-54)";
+
 /// Process-wide counter of [`MinijinjaExpression::compile`] invocations.
 ///
 /// Bumped exactly once per successful compile. Exposed for the regression
@@ -165,6 +173,22 @@ impl MinijinjaExpression {
                 reason: e.to_string(),
             })?;
 
+        // A `Body::Stream` is carried as an invalid value. Formatting it must
+        // surface our refusal (kind + hint), not a generic "invalid value"
+        // rendering. The check is against the static refusal constant only.
+        env.set_formatter(move |out, state, value| {
+            if value.kind() == minijinja::value::ValueKind::Invalid
+                && value.to_string().contains(STREAM_REFUSAL)
+            {
+                Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    STREAM_REFUSAL,
+                ))
+            } else {
+                minijinja::escape_formatter(out, state, value)
+            }
+        });
+
         // Probe counters — see `COMPILE_INVOCATIONS` doc.
         // Compiled out of non-test builds so production `compile` pays
         // ZERO cost for test observability (no atomic bump, no hash, no
@@ -243,6 +267,11 @@ fn template_name_for(source: &str) -> String {
 /// retained. `Error::line()` is 1-based; MiniJinja exposes no column, so the
 /// column is reported as `0` ("top of line"), mirroring the rhai mapping.
 fn map_render_error(e: &minijinja::Error) -> LanguageError {
+    // Our own stream refusal keeps its runtime class and hint (see
+    // `STREAM_REFUSAL`), instead of the generic TypeMismatch mapping below.
+    if e.kind() == minijinja::ErrorKind::InvalidOperation && e.detail() == Some(STREAM_REFUSAL) {
+        return LanguageError::EvalError(STREAM_REFUSAL.to_string());
+    }
     let class = match e.kind() {
         minijinja::ErrorKind::SyntaxError => ExpressionErrorClass::Parse,
         minijinja::ErrorKind::UnknownFunction
@@ -271,13 +300,17 @@ fn map_render_error(e: &minijinja::Error) -> LanguageError {
 #[async_trait]
 impl Expression for MinijinjaExpression {
     async fn evaluate(&self, exchange: &Exchange) -> Result<Value, LanguageError> {
-        // S4 (kept verbatim from Task 11)
-        if matches!(&exchange.input.body, Body::Stream(_)) {
-            return Err(LanguageError::EvalError(
-                "minijinja cannot render a Body::Stream directly; add `stream_cache` upstream \
-                 (crates/camel-processor/src/stream_cache.rs:37-54)"
-                    .to_string(),
-            ));
+        // Inline-only refusal: the shared `build_context_bounded` is also used
+        // by the external `camel-template` component, whose contract renders
+        // non-UTF-8 bytes lossily (ADR-0047). The inline language instead
+        // rejects them deterministically as a conversion failure.
+        if let Body::Bytes(b) = &exchange.input.body
+            && std::str::from_utf8(b).is_err()
+        {
+            return Err(LanguageError::ConversionError {
+                source_type: "Body::Bytes".into(),
+                target: "body".into(),
+            });
         }
 
         // S9: bounded context — measure into io::sink() via LimitedWriter, then
@@ -328,10 +361,17 @@ impl Expression for MinijinjaExpression {
 
 /// S9: bounded context build. Performs a measurement pass via `serde_json` into
 /// a `LimitedWriter` (bound = `max_context_size` bytes) before allocating the
-/// `minijinja::Value`. The pre-bound check on `Body::Bytes` exists because
-/// `String::from_utf8_lossy` would otherwise allocate a full body-sized
-/// intermediate buffer — defeating the S9 "no unbounded pre-measurement
-/// allocation" rule when bytes alone exceed the limit.
+/// `minijinja::Value`. The pre-bound check on `Body::Bytes` exists so the
+/// measurement pass never allocates a full body-sized lossy decoded copy —
+/// defeating the S9 "no unbounded pre-measurement allocation" rule when bytes
+/// alone exceed the limit.
+///
+/// A `Body::Stream` is not materialised: the measurement pass serializes it as
+/// an empty string and the rendered context carries an invalid value that
+/// refuses only when a template operation consumes it (see the private
+/// `STREAM_REFUSAL` constant).
+/// Non-UTF-8 `Body::Bytes` are projected lossily here; the inline
+/// `MinijinjaExpression::evaluate` rejects them before calling this helper.
 ///
 /// `pub` so the external `camel-template` Component can reuse the exact
 /// same bounded build (ADR-0047 Stage 2 invariant: templates written
@@ -352,6 +392,10 @@ pub fn build_context_bounded(
         )));
     }
 
+    // Deterministic conversion mapping for non-UTF-8 bytes lives in
+    // `MinijinjaExpression::evaluate`, not here: this helper is shared with
+    // the external component, which renders such bytes lossily.
+
     let body_view = BodyAsJson::from(&exchange.input.body);
     let measurement = serde_json::to_writer(
         LimitedWriter::new(std::io::sink(), max_context_size as u64),
@@ -368,10 +412,27 @@ pub fn build_context_bounded(
     })?;
 
     // Happy path: build the minijinja::Value directly via from_serialize.
+    // The header/property maps are cloned once per context build (no
+    // per-eval borrow is possible into `ContextReader::call`).
+    let headers = Arc::new(exchange.input.headers.clone());
+    let properties = Arc::new(exchange.properties.clone());
+    let reader = |kind: ReaderKind| {
+        minijinja::Value::from_object(ContextReader {
+            kind,
+            headers: Arc::clone(&headers),
+            properties: Arc::clone(&properties),
+        })
+    };
     let map: BTreeMap<String, minijinja::Value> = BTreeMap::from([
         (
             "body".to_string(),
-            minijinja::Value::from_serialize(&body_view),
+            match &exchange.input.body {
+                Body::Stream(_) => minijinja::Value::from(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    STREAM_REFUSAL,
+                )),
+                _ => minijinja::Value::from_serialize(&body_view),
+            },
         ),
         (
             "headers".to_string(),
@@ -381,14 +442,70 @@ pub fn build_context_bounded(
             "exchangeProperty".to_string(),
             minijinja::Value::from_serialize(&exchange.properties),
         ),
+        ("header".to_string(), reader(ReaderKind::Header)),
+        ("property".to_string(), reader(ReaderKind::Property)),
+        ("has_header".to_string(), reader(ReaderKind::HasHeader)),
+        ("has_property".to_string(), reader(ReaderKind::HasProperty)),
     ]);
     Ok(minijinja::Value::from_serialize(&map))
 }
 
+/// Which exchange map a [`ContextReader`] callable reads.
+#[derive(Debug)]
+enum ReaderKind {
+    Header,
+    Property,
+    HasHeader,
+    HasProperty,
+}
+
+/// Callable exposing one of the four `header`/`property`/`has_*` template
+/// functions. Holds owned snapshot maps because `Object::call` cannot borrow
+/// the exchange.
+#[derive(Debug)]
+struct ContextReader {
+    kind: ReaderKind,
+    headers: Arc<HashMap<String, Value>>,
+    properties: Arc<HashMap<String, Value>>,
+}
+
+impl minijinja::value::Object for ContextReader {
+    fn call(
+        self: &Arc<Self>,
+        _state: &minijinja::State<'_, '_>,
+        args: &[minijinja::value::Value],
+    ) -> Result<minijinja::value::Value, minijinja::Error> {
+        let invalid = || {
+            minijinja::Error::new(
+                minijinja::ErrorKind::InvalidOperation,
+                "reader expects one string argument",
+            )
+        };
+        if args.len() != 1 {
+            return Err(invalid());
+        }
+        let key = args[0].as_str().ok_or_else(invalid)?;
+        let map = match self.kind {
+            ReaderKind::Header | ReaderKind::HasHeader => &self.headers,
+            ReaderKind::Property | ReaderKind::HasProperty => &self.properties,
+        };
+        Ok(match self.kind {
+            ReaderKind::HasHeader | ReaderKind::HasProperty => {
+                minijinja::Value::from(map.contains_key(key))
+            }
+            ReaderKind::Header | ReaderKind::Property => match map.get(key) {
+                Some(v) => minijinja::Value::from_serialize(v),
+                None => minijinja::Value::from(()),
+            },
+        })
+    }
+}
+
 /// Zero-allocation `&Body` → JSON view. Used for both the S9 measurement
-/// pass and the happy-path minijinja::Value build. `Stream` is unreachable
-/// because the S4 guard rejects it earlier in `evaluate`. `Bytes` is
-/// pre-bounded by the caller (see `build_context_bounded`).
+/// pass and the happy-path minijinja::Value build. `Stream` is serialized as
+/// an empty string in the measurement pass; the rendered context carries an
+/// invalid value instead (see [`STREAM_REFUSAL`]). `Bytes` is pre-bounded by
+/// the caller (see `build_context_bounded`) and projected lossily.
 struct BodyAsJson<'a> {
     inner: &'a Body,
 }
@@ -415,7 +532,9 @@ impl<'a> serde::Serialize for BodyAsJson<'a> {
             Body::Json(v) => v.serialize(s),
             Body::Xml(x) => s.serialize_str(x),
             Body::Bytes(b) => s.serialize_str(&String::from_utf8_lossy(b)),
-            Body::Stream(_) => unreachable!("S4 rejects Body::Stream before context build"),
+            // The rendered context never serializes a stream (it carries an
+            // invalid value). The measurement pass only needs a placeholder.
+            Body::Stream(_) => s.serialize_str(""),
             // Future Body variants cannot be meaningfully serialized into the
             // template context — surface a serializer error instead of guessing.
             _ => Err(<S::Error as serde::ser::Error>::custom(

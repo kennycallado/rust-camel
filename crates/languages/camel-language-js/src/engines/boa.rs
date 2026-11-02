@@ -166,7 +166,7 @@ impl BoaEngine {
 
         self.dispatch(|reply| JsJob::Eval {
             source: Arc::from(source),
-            exchange,
+            exchange: Box::new(exchange),
             // Queuing-deadline backstop: a job that sits in the queue past its
             // budget is skipped. The wall-clock execution timeout itself is
             // still applied at the Language level via `eval_async`.

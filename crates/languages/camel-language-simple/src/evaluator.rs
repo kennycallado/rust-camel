@@ -133,6 +133,21 @@ fn type_error(expected: &str, actual: &str) -> LanguageError {
     }
 }
 
+/// Presence check for `has_header(key)` / `has_property(key)`. The key must
+/// evaluate to a string; diagnostics carry the type name only.
+fn presence_of(kind: &CallKind, value: &Value, exchange: &Exchange) -> Result<bool, LanguageError> {
+    let Value::String(key) = value else {
+        return Err(type_error("string", value_type_name(value)));
+    };
+    match kind {
+        CallKind::HasHeader => Ok(exchange.input.headers.contains_key(key)),
+        CallKind::HasProperty => Ok(exchange.properties.contains_key(key)),
+        _ => Err(LanguageError::EvalError(
+            "invalid presence-check kind".to_string(),
+        )),
+    }
+}
+
 fn delegate_failure(language: &str) -> LanguageError {
     LanguageError::EvalFailure {
         class: ExpressionErrorClass::Runtime,
@@ -185,23 +200,35 @@ fn date_header_millis(value: &Value) -> Result<i64, LanguageError> {
     }
 }
 
-/// Evaluate atom/leaf variants. The caller is responsible for charging one
-/// work unit. Returns `None` for compound nodes.
-#[inline]
-fn eval_leaf(expr: &Expr, exchange: &Exchange) -> Option<Value> {
-    let value = match expr {
-        Expr::Header(key) => exchange.input.header(key).cloned().unwrap_or(Value::Null),
-        Expr::Body => match &exchange.input.body {
-            Body::Text(s) => Value::String(s.clone()),
-            Body::Bytes(b) => Value::String(String::from_utf8_lossy(b).into_owned()),
-            Body::Json(v) => Value::String(v.to_string()),
-            Body::Xml(s) => Value::String(s.clone()),
-            _ => Value::Null,
-        },
-        Expr::BodyField(segments) => {
-            let Body::Json(root) = &exchange.input.body else {
-                return Some(Value::Null);
-            };
+fn stream_body_error() -> LanguageError {
+    LanguageError::ConversionError {
+        source_type: "Body::Stream".to_string(),
+        target: "body".to_string(),
+    }
+}
+
+/// Render a whole body as a [`Value`]. Stream bodies are single-consumption and
+/// never readable here, so they fail instead of silently rendering as null.
+fn body_value(exchange: &Exchange) -> Result<Value, LanguageError> {
+    match &exchange.input.body {
+        Body::Text(s) | Body::Xml(s) => Ok(Value::String(s.clone())),
+        Body::Json(v) => Ok(v.clone()),
+        Body::Bytes(b) => Ok(Value::Array(
+            b.iter().map(|byte| Value::Number((*byte).into())).collect(),
+        )),
+        Body::Empty => Ok(Value::Null),
+        Body::Stream(_) => Err(stream_body_error()),
+        _ => Ok(Value::Null),
+    }
+}
+
+/// Read a field path from a structured body. Only JSON has addressable fields;
+/// stream bodies fail because their content cannot be inspected without
+/// consuming it.
+fn body_field_value(exchange: &Exchange, segments: &[PathSegment]) -> Result<Value, LanguageError> {
+    match &exchange.input.body {
+        Body::Stream(_) => Err(stream_body_error()),
+        Body::Json(root) => {
             let mut current: &serde_json::Value = root;
             for seg in segments {
                 let next = match seg {
@@ -211,11 +238,21 @@ fn eval_leaf(expr: &Expr, exchange: &Exchange) -> Option<Value> {
                 };
                 match next {
                     Some(v) => current = v,
-                    None => return Some(Value::Null),
+                    None => return Ok(Value::Null),
                 }
             }
-            current.clone()
+            Ok(current.clone())
         }
+        _ => Ok(Value::Null),
+    }
+}
+
+/// Evaluate atom/leaf variants. The caller is responsible for charging one
+/// work unit. Returns `None` for compound nodes.
+#[inline]
+fn eval_leaf(expr: &Expr, exchange: &Exchange) -> Option<Value> {
+    let value = match expr {
+        Expr::Header(key) => exchange.input.header(key).cloned().unwrap_or(Value::Null),
         Expr::ExchangeProperty(key) => exchange.property(key).cloned().unwrap_or(Value::Null),
         Expr::ExceptionMessage => match &exchange.error {
             Some(err) => Value::String(err.to_string()),
@@ -357,9 +394,17 @@ fn eval_sync_expr(expr: &Expr, ctx: &mut EvalCtx<'_>) -> Result<Value, LanguageE
                 };
                 Ok(Value::Number(selected.into()))
             }
+            CallKind::HasHeader | CallKind::HasProperty => {
+                let value = eval_sync_expr(call_arg(args, 0)?, ctx)?;
+                Ok(Value::Bool(presence_of(kind, &value, ctx.exchange)?))
+            }
         },
 
         Expr::Date { source, output } => eval_date(source, output, ctx.exchange),
+
+        Expr::Body => body_value(ctx.exchange),
+
+        Expr::BodyField(segments) => body_field_value(ctx.exchange, segments),
 
         // Leaves were handled by `eval_leaf` before the match.
         _ => Ok(eval_leaf(expr, ctx.exchange).unwrap_or(Value::Null)),
@@ -383,35 +428,9 @@ where
                 .cloned()
                 .unwrap_or(Value::Null)),
 
-            Expr::Body => match &ctx.exchange.input.body {
-                Body::Text(s) => Ok(Value::String(s.clone())),
-                Body::Bytes(b) => Ok(Value::String(String::from_utf8_lossy(b).into_owned())),
-                Body::Json(v) => Ok(Value::String(v.to_string())),
-                Body::Xml(s) => Ok(Value::String(s.clone())),
-                // Empty, Stream, and any future variant render as JSON null.
-                _ => Ok(Value::Null),
-            },
+            Expr::Body => body_value(ctx.exchange),
 
-            Expr::BodyField(segments) => {
-                if let Body::Json(root) = &ctx.exchange.input.body {
-                    let mut current: &serde_json::Value = root;
-                    for seg in segments {
-                        let next = match seg {
-                            PathSegment::Key(k) => current.get(k.as_str()),
-                            PathSegment::Index(i) => current.get(*i),
-                            // Future PathSegment variants can't index JSON → absent.
-                            _ => None,
-                        };
-                        match next {
-                            Some(v) => current = v,
-                            None => return Ok(Value::Null),
-                        }
-                    }
-                    Ok(current.clone())
-                } else {
-                    Ok(Value::Null)
-                }
-            }
+            Expr::BodyField(segments) => body_field_value(ctx.exchange, segments),
 
             Expr::ExchangeProperty(key) => {
                 Ok(ctx.exchange.property(key).cloned().unwrap_or(Value::Null))
@@ -555,6 +574,10 @@ where
                         i64::max(x, y)
                     };
                     Ok(Value::Number(selected.into()))
+                }
+                CallKind::HasHeader | CallKind::HasProperty => {
+                    let value = eval_async_expr(call_arg(args, 0)?, &mut *ctx).await?;
+                    Ok(Value::Bool(presence_of(kind, &value, ctx.exchange)?))
                 }
             },
         }
@@ -785,6 +808,7 @@ pub(crate) fn value_type_name(v: &Value) -> &'static str {
 mod tests {
     use super::*;
     use camel_api::error::CamelError;
+    use camel_api::{StreamBody, StreamMetadata};
     use camel_language_api::{Expression, Language, Message};
     use serde_json::json;
     use std::sync::Arc;
@@ -863,7 +887,11 @@ mod tests {
             )
             .await
             .unwrap(),
-            Value::String("abc".to_string())
+            Value::Array(vec![
+                Value::Number(97.into()),
+                Value::Number(98.into()),
+                Value::Number(99.into()),
+            ])
         );
         assert_eq!(
             evaluate(
@@ -873,8 +901,44 @@ mod tests {
             )
             .await
             .unwrap(),
-            Value::String("{\"a\":1}".to_string())
+            json!({"a": 1})
         );
+    }
+
+    #[tokio::test]
+    async fn body_json_returns_native_value_in_delegated_walk() {
+        let expr = delegated_body_expr();
+        let ex = exchange_with_body(Body::Json(json!({"a": 1})));
+        let value = evaluate(&expr, &ex, &mock_resolver()).await.unwrap();
+        assert_eq!(value, json!({"a": 1}));
+    }
+
+    #[tokio::test]
+    async fn body_bytes_returns_byte_array_in_delegated_walk() {
+        let expr = delegated_body_expr();
+        let ex = exchange_with_body(Body::from(vec![0u8, 128, 255]));
+        let value = evaluate(&expr, &ex, &mock_resolver()).await.unwrap();
+        assert_eq!(
+            value,
+            Value::Array(vec![
+                Value::Number(0.into()),
+                Value::Number(128.into()),
+                Value::Number(255.into()),
+            ])
+        );
+    }
+
+    fn delegated_body_expr() -> Expr {
+        Expr::Call {
+            kind: CallKind::Default,
+            args: vec![
+                Expr::Body,
+                Expr::LanguageDelegate {
+                    language: "mock".to_string(),
+                    expression: "true".to_string(),
+                },
+            ],
+        }
     }
 
     #[tokio::test]
@@ -925,6 +989,90 @@ mod tests {
 
         let missing_resolver: Option<ResolverFn> = Some(Arc::new(|_| None));
         assert!(evaluate(&expr, &ex, &missing_resolver).await.is_err());
+    }
+
+    fn mixed_call(kind: CallKind, key: &str) -> Expr {
+        Expr::Call {
+            kind: CallKind::Default,
+            args: vec![
+                Expr::Call {
+                    kind,
+                    args: vec![Expr::StringLit(key.to_string())],
+                },
+                Expr::LanguageDelegate {
+                    language: "mock".to_string(),
+                    expression: "true".to_string(),
+                },
+            ],
+        }
+    }
+
+    fn mock_resolver() -> Option<ResolverFn> {
+        Some(Arc::new(|n| {
+            if n == "mock" {
+                Some(Arc::new(MockLanguage) as Arc<dyn Language>)
+            } else {
+                None
+            }
+        }))
+    }
+
+    #[tokio::test]
+    async fn has_header_delegated_walk_is_consistent() {
+        let mut msg = Message::default();
+        msg.set_header("p", Value::String("v".to_string()));
+        let ex = Exchange::new(msg);
+        let resolver = mock_resolver();
+        let delegated = evaluate(&mixed_call(CallKind::HasHeader, "p"), &ex, &resolver)
+            .await
+            .unwrap();
+        let parsed = crate::SimpleLanguage::new()
+            .create_expression("${has_header('p')}")
+            .unwrap()
+            .evaluate(&ex)
+            .await
+            .unwrap();
+        assert_eq!(delegated, Value::Bool(true));
+        assert_eq!(delegated, parsed);
+    }
+
+    #[tokio::test]
+    async fn has_property_delegated_walk_is_consistent() {
+        let mut ex = Exchange::default();
+        ex.set_property("p".to_string(), Value::String("v".to_string()));
+        let resolver = mock_resolver();
+        let delegated = evaluate(&mixed_call(CallKind::HasProperty, "p"), &ex, &resolver)
+            .await
+            .unwrap();
+        let parsed = crate::SimpleLanguage::new()
+            .create_expression("${has_property('p')}")
+            .unwrap()
+            .evaluate(&ex)
+            .await
+            .unwrap();
+        assert_eq!(delegated, Value::Bool(true));
+        assert_eq!(delegated, parsed);
+    }
+
+    #[tokio::test]
+    async fn has_header_nested_call_arg_is_evaluated() {
+        let mut msg = Message::default();
+        msg.set_header("k", Value::String("v".to_string()));
+        let ex = Exchange::new(msg);
+        let expr = Expr::Call {
+            kind: CallKind::HasHeader,
+            args: vec![Expr::Call {
+                kind: CallKind::Default,
+                args: vec![
+                    Expr::StringLit("k".to_string()),
+                    Expr::StringLit("k".to_string()),
+                ],
+            }],
+        };
+        assert_eq!(
+            evaluate(&expr, &ex, &None).await.unwrap(),
+            Value::Bool(true)
+        );
     }
 
     #[tokio::test]
@@ -1548,5 +1696,64 @@ mod tests {
             Value::Number(n) => assert_eq!(n.as_i64(), Some(1_700_000_123_456)),
             other => panic!("expected number, got {other:?}"),
         }
+    }
+
+    fn stream_body() -> Body {
+        Body::Stream(StreamBody {
+            stream: Arc::new(tokio::sync::Mutex::new(None)),
+            metadata: StreamMetadata::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn stream_body_read_is_conversion_error_in_delegated_walk() {
+        let expr = Expr::Call {
+            kind: CallKind::Default,
+            args: vec![
+                Expr::Body,
+                Expr::LanguageDelegate {
+                    language: "mock".to_string(),
+                    expression: "true".to_string(),
+                },
+            ],
+        };
+        let ex = exchange_with_body(stream_body());
+        let err = evaluate(&expr, &ex, &mock_resolver())
+            .await
+            .expect_err("delegated walk must reject stream body reads");
+        match &err {
+            LanguageError::ConversionError {
+                source_type,
+                target,
+            } => {
+                assert_eq!(source_type, "Body::Stream");
+                assert_eq!(target, "body");
+            }
+            other => panic!("expected ConversionError, got {other:?}"),
+        }
+        assert!(matches!(ex.input.body, Body::Stream(_)));
+    }
+
+    #[tokio::test]
+    async fn header_only_filter_passes_stream_body_delegated() {
+        let expr = Expr::LogicalOp {
+            left: Box::new(Expr::BinOp {
+                left: Box::new(Expr::Header("type".to_string())),
+                op: Op::Eq,
+                right: Box::new(Expr::StringLit("order".to_string())),
+            }),
+            op: LogicalOp::And,
+            right: Box::new(Expr::LanguageDelegate {
+                language: "mock".to_string(),
+                expression: "true".to_string(),
+            }),
+        };
+        let mut msg = Message::new("");
+        msg.set_header("type", Value::String("order".to_string()));
+        let mut ex = Exchange::new(msg);
+        ex.input.body = stream_body();
+        let value = evaluate(&expr, &ex, &mock_resolver()).await.unwrap();
+        assert_eq!(value, Value::Bool(true));
+        assert!(matches!(ex.input.body, Body::Stream(_)));
     }
 }

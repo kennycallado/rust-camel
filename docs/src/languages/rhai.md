@@ -52,13 +52,13 @@ When a Choice has two or more `when` clauses that all use Rhai, rust-camel compi
 
 ## Read surface
 
-Read-only expressions and predicates expose `body`, `headers`, and `properties` variables plus the `header()` and `property()` readers. A `MutatingExpression` (a `script:` step) exposes `body`, `headers`, and `properties` as mutable scope variables and also provides `header()` and `property()`. Its write-back is a validate-all-then-commit transaction: only changed entries and an assigned body are written, and the Exchange is untouched unless the whole evaluation succeeds.
+Read-only expressions and predicates expose `body`, `headers`, and `properties` variables plus the `header()`, `property()`, `has_header()`, and `has_property()` readers. A `MutatingExpression` (a `script:` step) exposes `body`, `headers`, and `properties` as mutable scope variables and also provides the same four readers. Its write-back is a validate-all-then-commit transaction: only changed entries and an assigned body are written, and the Exchange is untouched unless the whole evaluation succeeds.
 
-Both modes expose the same five names. The `script:` readers differ in freshness:
+Both modes expose the same names. The `script:` readers differ in freshness:
 
 - Read-only mode rejects mutation at create time (see [Read-only mutation rejection](#read-only-mutation-rejection)).
 - Script-step `header(name)` and `property(name)` read the **pre-run snapshot** of the maps. After `headers["k"] = "new"`, a later `header("k")` still returns the pre-run value, while the mutated map propagates back to the Exchange. JavaScript is different: `camel.headers.get("k")` observes the live mutated map.
-- `has_header(name)` and `has_property(name)` are not registered (rc-w1mds). Distinguish an absent key from a stored `null` through the map surface, for example `"k" in headers`.
+- `has_header(name)` and `has_property(name)` test key containment, not value truthiness: a key whose stored value is `null` is present. In a script step they read the same pre-run snapshot as `header(name)` and `property(name)`; in read-only mode they read the current Exchange.
 
 ### Read-only mutation rejection
 
@@ -137,7 +137,7 @@ Two Rhai types change type on the way out. The conversion is one-way and lossles
 
 ### Stream bodies
 
-A `Stream` body is not copied into the script. Both read-only expressions and predicates and mutating expressions bind `body` as an access-aware reference. Any value read through `body` on a Stream body fails the step with a `conversion` error that names `Body::Stream`; the stream itself is never touched, so an untouched stream body stays identical and unconsumed. The registered guard surface is `to_string`, `to_debug`, and the operators `==`, `!=`, `<`, `>`, `+`, `-`, `*`, `/`. What the guard surface determines is suppressibility: a failure on the registered guard surface is an ordinary suppressible script error, while a materializing operation outside the guard set is a boundary refusal that still fails the step even when caught in-script. Two exceptions are documented: `type_of(body)` does not count as a read and returns exactly the string `"StreamBodyRef"`, and a bare discarded `body;` statement is optimized away. In a mutating expression, `body = "replacement"` is allowed without reading the marker: assignment replaces the reference without materializing it, so a read later in the same script sees the replacement value. The residue split after `try`/`catch`: a caught materializing operation outside the guard set still fails the step; a caught pre-clone failure, such as indexing, is an ordinary suppressible script error.
+A `Stream` body is not copied into the script. Both read-only expressions and predicates and mutating expressions bind `body` as an access-aware reference. Any value read through `body` on a Stream body fails the step with a `conversion` error that names `Body::Stream`; the stream itself is never touched, so an untouched stream body stays identical and unconsumed. A header-only filter or script therefore passes a stream body unconsumed, and only a value read refuses. The registered guard surface is `to_string`, `to_debug`, and the operators `==`, `!=`, `<`, `>`, `+`, `-`, `*`, `/`. What the guard surface determines is suppressibility: a failure on the registered guard surface is an ordinary suppressible script error, while a materializing operation outside the guard set is a boundary refusal that still fails the step even when caught in-script. Two exceptions are documented: `type_of(body)` does not count as a read and returns exactly the string `"StreamBodyRef"`, and a bare discarded `body;` statement is optimized away. In a mutating expression, `body = "replacement"` is allowed without reading the marker: assignment replaces the reference without materializing it, so a read later in the same script sees the replacement value. The residue split after `try`/`catch`: a caught materializing operation outside the guard set still fails the step; a caught pre-clone failure, such as indexing, is an ordinary suppressible script error.
 
 ### Two-AST compile discipline
 

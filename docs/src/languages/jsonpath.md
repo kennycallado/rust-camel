@@ -49,6 +49,8 @@ In `Matches` mode a JSONPath predicate coerces its raw match sequence: zero matc
 
 The query is trusted operator configuration. The JSON body is untrusted, adversary-controlled data under ADR-0032. Exchange data never enters the query string. The implementation stores the operator query and passes body content separately to `jsonpath-rust`. Resource bounds protect against large or deeply nested input. `max_input_bytes` bounds a text body before JSON parsing. The default is 16 MiB. `max_depth` bounds JSON nesting. The default is 64 levels. Evaluation has no wall-clock timeout. The query is trusted, and the untrusted JSON input has byte and depth bounds.
 
+JSONPath is body-only. It exposes no header or property readers: `has_header(...)` and `has_property(...)` are parse errors. Use [Simple](simple.md) for header or property access.
+
 Use JSONPath when the body contains structured JSON and you need to extract nested fields or test conditions. For flat header and body access, [Simple](simple.md) is lighter and needs no JSON parsing.
 
 **Reference**: [Language SPI](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-api/CONTEXT.md) · [JSONPath crate](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-jsonpath/CONTEXT.md)

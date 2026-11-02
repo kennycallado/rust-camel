@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 
 use boa_engine::{
-    Context, JsValue, js_string,
+    Context, JsError, JsResult, JsValue, js_string,
     native_function::NativeFunction,
     object::{JsObject, builtins::JsArray},
-    property::PropertyKey,
+    property::{PropertyDescriptor, PropertyKey},
 };
 use serde_json::Value;
 
@@ -17,11 +17,59 @@ use crate::{
     value::{ArrayDetector, js_to_value_with_detector, value_to_js},
 };
 
+/// A per-evaluation private marker thrown by the `camel.body` getter when the
+/// inbound body is a stream.
+///
+/// It mirrors [`ReadOnlySentinel`]: an opaque null-prototype object the script
+/// cannot forge, matched by identity so no rendered message participates.
+pub(crate) struct StreamSentinel(pub JsObject);
+
+impl StreamSentinel {
+    /// Create a fresh sentinel object on the active realm.
+    pub(crate) fn new() -> Self {
+        Self(JsObject::with_null_proto())
+    }
+
+    /// True when `err` is exactly this sentinel (identity, not message).
+    pub(crate) fn matches(&self, err: &JsError) -> bool {
+        err.as_opaque()
+            .is_some_and(|value| value.strict_equals(&JsValue::from(self.0.clone())))
+    }
+}
+
+/// Result of installing the `camel` global.
+pub(crate) struct CamelGlobal {
+    pub camel: JsObject,
+    /// Present only for a stream body: the sentinel the getter throws.
+    pub stream_sentinel: Option<JsObject>,
+    /// Present only for a stream body: the installed getter function, used to
+    /// recognize an unread stream from the property descriptor.
+    pub stream_getter: Option<JsValue>,
+}
+
 /// Map a Boa error from host-object construction into the typed language error.
 fn host_error(e: boa_engine::JsError) -> JsLanguageError {
     JsLanguageError::Execution {
         message: e.to_string(),
     }
+}
+
+/// Render the first call argument as a string (missing becomes `"undefined"`).
+fn key_arg(args: &[JsValue], ctx: &mut Context) -> JsResult<String> {
+    Ok(args
+        .first()
+        .unwrap_or(&JsValue::undefined())
+        .to_string(ctx)?
+        .to_std_string_escaped())
+}
+
+/// Resolve the `__data` backing object of a map object, through a read-only
+/// proxy when present. `label` names the map in the typed error.
+fn map_data(map_obj: &JsObject, label: &str, ctx: &mut Context) -> JsResult<JsObject> {
+    let data = map_obj.get(js_string!("__data"), ctx)?;
+    Ok(data.as_object().ok_or_else(|| {
+        boa_engine::JsNativeError::typ().with_message(format!("{label}.__data missing"))
+    })?)
 }
 
 macro_rules! make_console_fn {
@@ -88,10 +136,11 @@ pub fn build_camel_global(
     exchange: &JsExchange,
     read_only: Option<&ReadOnlySentinel>,
     ctx: &mut Context,
-) -> Result<JsObject, JsLanguageError> {
+) -> Result<CamelGlobal, JsLanguageError> {
     let camel = JsObject::with_null_proto();
 
     let headers = build_map_object(&exchange.headers, read_only, ctx)?;
+    let headers_reader = headers.clone();
     camel
         .set(js_string!("headers"), JsValue::from(headers), false, ctx)
         .map_err(host_error)?;
@@ -113,15 +162,8 @@ pub fn build_camel_global(
     let properties_get = properties.clone();
     let property_fn = NativeFunction::from_copy_closure_with_captures(
         move |_this, args, props, ctx| {
-            let key = args
-                .first()
-                .unwrap_or(&JsValue::undefined())
-                .to_string(ctx)?
-                .to_std_string_escaped();
-            let data = props.get(js_string!("__data"), ctx)?;
-            let data_obj = data.as_object().ok_or_else(|| {
-                boa_engine::JsNativeError::typ().with_message("properties.__data missing")
-            })?;
+            let key = key_arg(args, ctx)?;
+            let data_obj = map_data(props, "properties", ctx)?;
             data_obj.get(js_string!(key.as_str()), ctx)
         },
         properties_get,
@@ -136,6 +178,66 @@ pub fn build_camel_global(
         )
         .map_err(host_error)?;
 
+    // `header(name)` mirrors `property(name)` against `camel.headers`. In
+    // read-only mode the captured map is a proxy, so `__data` resolves through
+    // the proxy to the read-only-wrapped backing object.
+    let headers_get = headers_reader.clone();
+    let header_fn = NativeFunction::from_copy_closure_with_captures(
+        move |_this, args, headers, ctx| {
+            let key = key_arg(args, ctx)?;
+            let data_obj = map_data(headers, "headers", ctx)?;
+            data_obj.get(js_string!(key.as_str()), ctx)
+        },
+        headers_get,
+    );
+    let header_js = header_fn.to_js_function(ctx.realm());
+    camel
+        .set(js_string!("header"), JsValue::from(header_js), false, ctx)
+        .map_err(host_error)?;
+
+    // `has_header(name)` / `has_property(name)` are presence readers, not
+    // mutators, so they are installed in both modes. They distinguish an
+    // absent key from a key whose value is `null`/`undefined`.
+    let headers_has = headers_reader.clone();
+    let has_header_fn = NativeFunction::from_copy_closure_with_captures(
+        move |_this, args, headers, ctx| {
+            let key = key_arg(args, ctx)?;
+            let data_obj = map_data(headers, "headers", ctx)?;
+            let has = data_obj.has_own_property(js_string!(key.as_str()), ctx)?;
+            Ok(JsValue::from(has))
+        },
+        headers_has,
+    );
+    let has_header_js = has_header_fn.to_js_function(ctx.realm());
+    camel
+        .set(
+            js_string!("has_header"),
+            JsValue::from(has_header_js),
+            false,
+            ctx,
+        )
+        .map_err(host_error)?;
+
+    let properties_has = properties.clone();
+    let has_property_fn = NativeFunction::from_copy_closure_with_captures(
+        move |_this, args, props, ctx| {
+            let key = key_arg(args, ctx)?;
+            let data_obj = map_data(props, "properties", ctx)?;
+            let has = data_obj.has_own_property(js_string!(key.as_str()), ctx)?;
+            Ok(JsValue::from(has))
+        },
+        properties_has,
+    );
+    let has_property_js = has_property_fn.to_js_function(ctx.realm());
+    camel
+        .set(
+            js_string!("has_property"),
+            JsValue::from(has_property_js),
+            false,
+            ctx,
+        )
+        .map_err(host_error)?;
+
     // `set_property(name, value)`: a throwing mutator in read-only mode, the
     // real writer otherwise.
     let set_property_js = match read_only {
@@ -144,16 +246,9 @@ pub fn build_camel_global(
             let properties_set = properties.clone();
             let set_property_fn = NativeFunction::from_copy_closure_with_captures(
                 move |_this, args, props, ctx| {
-                    let key = args
-                        .first()
-                        .unwrap_or(&JsValue::undefined())
-                        .to_string(ctx)?
-                        .to_std_string_escaped();
+                    let key = key_arg(args, ctx)?;
                     let val = args.get(1).cloned().unwrap_or(JsValue::undefined());
-                    let data = props.get(js_string!("__data"), ctx)?;
-                    let data_obj = data.as_object().ok_or_else(|| {
-                        boa_engine::JsNativeError::typ().with_message("properties.__data missing")
-                    })?;
+                    let data_obj = map_data(props, "properties", ctx)?;
                     data_obj.set(js_string!(key.as_str()), val, false, ctx)?;
                     Ok(JsValue::undefined())
                 },
@@ -166,19 +261,77 @@ pub fn build_camel_global(
         .set(js_string!("set_property"), set_property_js, false, ctx)
         .map_err(host_error)?;
 
-    let body_val = value_to_js(&exchange.body, ctx)?;
-    let body_val = match read_only {
-        Some(sentinel) => deep_readonly_wrap(body_val, sentinel, ctx).map_err(host_error)?,
-        None => body_val,
+    // A stream body is exposed as an accessor, never a data property. Reading
+    // it throws the private sentinel; assigning replaces the accessor with a
+    // data property on the `camel` object itself. A header-only script never
+    // touches the accessor, so the inbound `Body::Stream` survives.
+    let (stream_sentinel, stream_getter) = if exchange.body_is_stream {
+        let sentinel = StreamSentinel::new();
+        let sentinel_obj = sentinel.0.clone();
+        let getter_fn = NativeFunction::from_copy_closure_with_captures(
+            |_this, _args, sentinel: &JsObject, _ctx| {
+                Err(JsError::from_opaque(JsValue::from(sentinel.clone())))
+            },
+            sentinel_obj.clone(),
+        );
+        let getter_js = JsValue::from(getter_fn.to_js_function(ctx.realm()));
+        let setter_js = match read_only {
+            Some(readonly) => throwing_mutator(readonly, ctx),
+            None => {
+                let setter_fn = NativeFunction::from_copy_closure(|this, args, ctx| {
+                    let val = args.first().cloned().unwrap_or(JsValue::undefined());
+                    let obj = this.as_object().ok_or_else(|| {
+                        boa_engine::JsNativeError::typ().with_message("camel.body setter receiver")
+                    })?;
+                    obj.define_property_or_throw(
+                        js_string!("body"),
+                        PropertyDescriptor::builder()
+                            .value(val)
+                            .writable(true)
+                            .enumerable(true)
+                            .configurable(true)
+                            .build(),
+                        ctx,
+                    )?;
+                    Ok(JsValue::undefined())
+                });
+                JsValue::from(setter_fn.to_js_function(ctx.realm()))
+            }
+        };
+        camel
+            .define_property_or_throw(
+                js_string!("body"),
+                PropertyDescriptor::builder()
+                    .get(getter_js.clone())
+                    .set(setter_js)
+                    .enumerable(true)
+                    .configurable(true)
+                    .build(),
+                ctx,
+            )
+            .map_err(host_error)?;
+        (Some(sentinel_obj), Some(getter_js))
+    } else {
+        let body_val = value_to_js(&exchange.body, ctx)?;
+        let body_val = match read_only {
+            Some(sentinel) => deep_readonly_wrap(body_val, sentinel, ctx).map_err(host_error)?,
+            None => body_val,
+        };
+        camel
+            .set(js_string!("body"), body_val, false, ctx)
+            .map_err(host_error)?;
+        (None, None)
     };
-    camel
-        .set(js_string!("body"), body_val, false, ctx)
-        .map_err(host_error)?;
 
-    match read_only {
-        Some(sentinel) => readonly_proxy(camel, sentinel, ctx).map_err(host_error),
-        None => Ok(camel),
-    }
+    let camel = match read_only {
+        Some(sentinel) => readonly_proxy(camel, sentinel, ctx).map_err(host_error)?,
+        None => camel,
+    };
+    Ok(CamelGlobal {
+        camel,
+        stream_sentinel,
+        stream_getter,
+    })
 }
 
 /// Build a map-like JS object with get/set/has/remove/keys methods backed by a `__data` object.
@@ -329,30 +482,136 @@ fn build_map_object(
     }
 }
 
+/// Exchange state extracted from the `camel` global after a run.
+pub(crate) struct ExtractedState {
+    pub headers: HashMap<String, Value>,
+    pub body: Value,
+    pub properties: HashMap<String, Value>,
+    /// `true` when the inbound body was a stream left unread and unreplaced.
+    pub body_unread_stream: bool,
+    /// `true` when the script replaced or deleted a stream body.
+    pub body_stream_replaced: bool,
+}
+
 /// Extract the (possibly mutated) exchange state from the `camel` global.
 ///
 /// `detector` is the privately-retained pristine `Array.isArray` used to
 /// identify read-only proxy arrays during conversion.
-pub fn extract_camel_state(
+///
+/// A non-stream body is read through the `camel.body` property. A stream body
+/// is never materialized: it is unread when the installed throwing accessor is
+/// still in place (read-only evaluation can never replace it), refused when a
+/// different accessor was installed, and replaced when the accessor was
+/// overwritten with a data property or deleted.
+pub(crate) fn extract_camel_state(
     ctx: &mut Context,
     detector: Option<&ArrayDetector>,
-) -> Result<JsExchange, JsLanguageError> {
+    body_is_stream: bool,
+    read_only: bool,
+    stream_getter: Option<&JsValue>,
+) -> Result<ExtractedState, JsLanguageError> {
+    let camel = camel_object(ctx)?;
+    let (headers, properties) = extract_maps_from(&camel, ctx, detector)?;
+
+    if !body_is_stream {
+        let body_js =
+            camel
+                .get(js_string!("body"), ctx)
+                .map_err(|e| JsLanguageError::ExchangeAccess {
+                    message: e.to_string(),
+                })?;
+        let body = js_to_value_with_detector(&body_js, ctx, detector)?;
+        return Ok(ExtractedState {
+            headers,
+            body,
+            properties,
+            body_unread_stream: false,
+            body_stream_replaced: false,
+        });
+    }
+
+    if read_only {
+        // Read-only evaluation cannot replace the body, so it is always
+        // unread here.
+        return Ok(ExtractedState {
+            headers,
+            body: Value::Null,
+            properties,
+            body_unread_stream: true,
+            body_stream_replaced: false,
+        });
+    }
+
+    let descriptor = camel
+        .borrow()
+        .properties()
+        .get(&PropertyKey::from(js_string!("body")));
+    match descriptor {
+        Some(desc) if desc.is_accessor_descriptor() => {
+            let unread = stream_getter
+                .is_some_and(|getter| desc.get().is_some_and(|d| d.strict_equals(getter)));
+            if unread {
+                Ok(ExtractedState {
+                    headers,
+                    body: Value::Null,
+                    properties,
+                    body_unread_stream: true,
+                    body_stream_replaced: false,
+                })
+            } else {
+                Err(JsLanguageError::Execution {
+                    message:
+                        "camel.body was replaced with an accessor; assign a plain value instead"
+                            .to_string(),
+                })
+            }
+        }
+        Some(desc) => {
+            let body = match desc.value() {
+                Some(value) => js_to_value_with_detector(value, ctx, detector)?,
+                None => Value::Null,
+            };
+            Ok(ExtractedState {
+                headers,
+                body,
+                properties,
+                body_unread_stream: false,
+                body_stream_replaced: true,
+            })
+        }
+        None => Ok(ExtractedState {
+            headers,
+            body: Value::Null,
+            properties,
+            body_unread_stream: false,
+            body_stream_replaced: true,
+        }),
+    }
+}
+
+/// Resolve the installed global `camel` object.
+pub(crate) fn camel_object(ctx: &mut Context) -> Result<JsObject, JsLanguageError> {
     let camel_val = ctx
         .global_object()
         .get(js_string!("camel"), ctx)
         .map_err(|e| JsLanguageError::ExchangeAccess {
             message: e.to_string(),
         })?;
+    camel_val
+        .as_object()
+        .ok_or_else(|| JsLanguageError::ExchangeAccess {
+            message: "camel global is not an object".to_string(),
+        })
+}
 
-    let camel = match camel_val.as_object() {
-        Some(obj) => obj,
-        None => {
-            return Err(JsLanguageError::ExchangeAccess {
-                message: "camel global is not an object".to_string(),
-            });
-        }
-    };
+type ExtractedMaps = (HashMap<String, Value>, HashMap<String, Value>);
 
+/// Extract the maps from an already-resolved `camel` object.
+fn extract_maps_from(
+    camel: &JsObject,
+    ctx: &mut Context,
+    detector: Option<&ArrayDetector>,
+) -> Result<ExtractedMaps, JsLanguageError> {
     let headers = extract_map(
         &camel
             .get(js_string!("headers"), ctx)
@@ -372,20 +631,7 @@ pub fn extract_camel_state(
         ctx,
         detector,
     )?;
-
-    let body_js =
-        camel
-            .get(js_string!("body"), ctx)
-            .map_err(|e| JsLanguageError::ExchangeAccess {
-                message: e.to_string(),
-            })?;
-    let body = js_to_value_with_detector(&body_js, ctx, detector)?;
-
-    Ok(JsExchange {
-        headers,
-        body,
-        properties,
-    })
+    Ok((headers, properties))
 }
 
 /// Extract the installed `camel.body` alone, converted with the SAME
@@ -426,7 +672,7 @@ pub fn extract_body_snapshot(
 }
 
 /// Extract `HashMap<String, Value>` from a map object (reads its `__data` property).
-fn extract_map(
+pub(crate) fn extract_map(
     map_val: &JsValue,
     ctx: &mut Context,
     detector: Option<&ArrayDetector>,

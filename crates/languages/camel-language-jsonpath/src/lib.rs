@@ -397,6 +397,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn jsonpath_reads_body_not_headers() {
+        let lang = default_lang().await;
+        let expr = lang.create_expression("$.header").unwrap();
+        let body: JsonValue = serde_json::from_str(r#"{"header":"from-body"}"#).unwrap();
+        let mut message = Message::new(Body::Json(body));
+        message.set_header("header", Value::String("from-header".to_string()));
+        let ex = Exchange::new(message);
+        let result = expr.evaluate(&ex).await.unwrap();
+        assert_eq!(result, JsonValue::String("from-body".to_string()));
+    }
+
+    #[tokio::test]
+    async fn jsonpath_has_no_header_reader() {
+        let lang = default_lang().await;
+        match lang.create_expression("has_header('x')") {
+            Err(LanguageError::ParseError { .. }) => {}
+            Ok(_) => panic!("expected ParseError for has_header('x')"),
+            Err(other) => panic!("expected ParseError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn expression_empty_body_is_error() {
         let lang = default_lang().await;
         let expr = lang.create_expression("$.x").unwrap();

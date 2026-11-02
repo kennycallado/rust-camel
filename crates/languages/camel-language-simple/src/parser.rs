@@ -94,6 +94,8 @@ pub enum CallKind {
     Default,
     Min,
     Max,
+    HasHeader,
+    HasProperty,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1143,6 +1145,8 @@ fn parse_call(
         "default" => CallKind::Default,
         "min" => CallKind::Min,
         "max" => CallKind::Max,
+        "has_header" => CallKind::HasHeader,
+        "has_property" => CallKind::HasProperty,
         _ => return Err(parse_error(input, "unknown function")),
     };
     *pos += 2; // consume the function name and '('
@@ -1167,7 +1171,10 @@ fn parse_call(
         }
     }
 
-    let expected = if matches!(kind, CallKind::Int | CallKind::String) {
+    let expected = if matches!(
+        kind,
+        CallKind::Int | CallKind::String | CallKind::HasHeader | CallKind::HasProperty
+    ) {
         1
     } else {
         2

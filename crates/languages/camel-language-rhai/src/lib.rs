@@ -1,9 +1,10 @@
 //! camel-language-rhai — Rhai script language for Camel Rust.
 //!
 //! Main types: `RhaiLanguage`, `RhaiExpression`, `RhaiPredicate`, `RhaiMutatingExpression`.
-//! Read-only scripts access `body`, `headers`, `properties`, `header()`, and
-//! `property()`; `set_header()`/`set_property()` calls are rejected at create
-//! time — use a mutating script expression (`headers["k"] = ...`) instead.
+//! Read-only scripts access `body`, `headers`, `properties`, `header()`,
+//! `property()`, `has_header()`, and `has_property()`; `set_header()`/
+//! `set_property()` calls are rejected at create time — use a mutating script
+//! expression (`headers["k"] = ...`) instead.
 //!
 //! # Resource Limits
 //!
@@ -688,7 +689,11 @@ impl RhaiLanguage {
     fn register_snapshot_readers(engine: &mut Engine, headers: rhai::Map, properties: rhai::Map) {
         // The snapshot maps are immutable after registration, so the readers
         // own them directly (no `Arc`/`RwLock` indirection). Each closure is
-        // `Fn` and only reads.
+        // `Fn` and only reads. Presence readers get their own clones so a
+        // present-but-null entry is distinguishable from an absent one.
+        let presence_headers = headers.clone();
+        let presence_properties = properties.clone();
+
         engine.register_fn("header", move |name: String| -> rhai::Dynamic {
             headers
                 .get(name.as_str())
@@ -701,6 +706,14 @@ impl RhaiLanguage {
                 .get(name.as_str())
                 .cloned()
                 .unwrap_or(rhai::Dynamic::UNIT)
+        });
+
+        engine.register_fn("has_header", move |name: String| -> bool {
+            presence_headers.contains_key(name.as_str())
+        });
+
+        engine.register_fn("has_property", move |name: String| -> bool {
+            presence_properties.contains_key(name.as_str())
         });
     }
 
@@ -1478,6 +1491,76 @@ mod tests {
         let ex = exchange_with_body("test");
         let val = expr.evaluate(&ex).await.unwrap();
         assert_eq!(val, Value::Null);
+    }
+
+    #[tokio::test]
+    async fn has_property_separates_absent_and_null_read_only() {
+        let lang = RhaiLanguage::new();
+        let pred = lang
+            .create_predicate(r#"has_property("p") == false && has_property("q") == true"#)
+            .expect("predicate compiles");
+        let mut ex = exchange_with_body("test");
+        ex.set_property("q", Value::Null);
+        assert!(pred.matches(&ex).await.expect("predicate evaluates"));
+    }
+
+    #[tokio::test]
+    async fn has_header_separates_absent_and_null_read_only() {
+        let lang = RhaiLanguage::new();
+        let present = lang
+            .create_expression(r#"has_header("flag")"#)
+            .expect("expression compiles");
+        let absent = lang
+            .create_expression(r#"has_header("nope")"#)
+            .expect("expression compiles");
+
+        let mut msg = Message::default();
+        msg.set_header("flag", Value::Null);
+        let ex = Exchange::new(msg);
+
+        assert_eq!(
+            present.evaluate(&ex).await.expect("evaluates"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            absent.evaluate(&ex).await.expect("evaluates"),
+            Value::Bool(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn has_header_and_property_work_in_script_step() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers["x"] = "1"; has_header("x")"#)
+            .expect("mutating script compiles");
+        let mut ex = Exchange::new(Message::default());
+        let val = expr.evaluate(&mut ex).await.expect("script evaluates");
+        assert_eq!(
+            val,
+            Value::Bool(false),
+            "readers are snapshot-backed, so the pre-step absence is reported"
+        );
+        assert_eq!(ex.input.headers.get("x"), Some(&Value::String("1".into())));
+
+        let both = lang
+            .create_mutating_expression(r#"has_header("k") && has_property("p")"#)
+            .expect("mutating script compiles");
+        let mut msg = Message::default();
+        msg.set_header("k", Value::String("v".into()));
+        let mut ex = Exchange::new(msg);
+        ex.set_property("p", Value::String("v".into()));
+        assert_eq!(
+            both.evaluate(&mut ex).await.expect("script evaluates"),
+            Value::Bool(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn has_header_is_not_a_read_only_mutation() {
+        let lang = RhaiLanguage::new();
+        lang.create_predicate(r#"has_header("x")"#)
+            .expect("presence readers are not read-only mutations");
     }
 
     #[tokio::test]
@@ -2590,6 +2673,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn header_only_predicate_passes_stream_body() {
+        // A read-only predicate that only reads a header must not probe the
+        // stream marker: the body stays the same unconsumed stream.
+        let lang = RhaiLanguage::new();
+        let pred = lang
+            .create_predicate(r#"header("type") == "order""#)
+            .unwrap();
+        let (mut ex, handle) = stream_exchange();
+        ex.input
+            .set_header("type", Value::String("order".to_string()));
+        assert!(
+            pred.matches(&ex)
+                .await
+                .expect("header-only predicate must not touch the stream"),
+            "header-only predicate must match"
+        );
+        assert_body_still_stream(&ex, &handle);
+    }
+
+    #[tokio::test]
+    async fn header_only_script_passes_stream_body() {
+        // `set_header()` is not registered; map assignment is the mutation
+        // surface. A header-only script must not materialize the marker.
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"headers["x"] = "1""#)
+            .unwrap();
+        let (mut ex, handle) = stream_exchange();
+        expr.evaluate(&mut ex)
+            .await
+            .expect("header-only script must not touch the stream");
+        assert_eq!(ex.input.headers.get("x").and_then(Value::as_str), Some("1"));
+        assert_body_still_stream(&ex, &handle);
+    }
+
+    #[tokio::test]
     async fn stream_body_index_and_arithmetic_fail_loudly() {
         // `body[0]`: indexing raises ErrorIndexingType (type list names the
         // marker); `body + 1` and `body == body`: registered guard sentinel.
@@ -2977,6 +3096,32 @@ mod tests {
             Body::Json(v) => assert_eq!(v.to_string(), before),
             other => panic!("body must stay Json, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn rhai_unit_assignment_on_bytes_becomes_empty() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_mutating_expression("body = ()").unwrap();
+        let mut ex = Exchange::new(Message::new(Body::Bytes(Bytes::from(vec![1_u8, 2]))));
+        expr.evaluate(&mut ex).await.unwrap();
+        assert!(
+            matches!(ex.input.body, Body::Empty),
+            "unit assignment on a Bytes body must become Body::Empty, got {:?}",
+            ex.input.body
+        );
+    }
+
+    #[tokio::test]
+    async fn rhai_unit_assignment_on_empty_is_unchanged() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_mutating_expression("body = ()").unwrap();
+        let mut ex = Exchange::new(Message::default());
+        expr.evaluate(&mut ex).await.unwrap();
+        assert!(
+            matches!(ex.input.body, Body::Empty),
+            "unit assignment on an Empty body must stay Body::Empty, got {:?}",
+            ex.input.body
+        );
     }
 
     #[tokio::test]

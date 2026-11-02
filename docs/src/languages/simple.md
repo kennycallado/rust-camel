@@ -60,7 +60,9 @@ A predicate must evaluate to a real boolean. Any other result is a `type mismatc
 
 `==` compares by value and coerces between a string and a number. It parses the string as a strict integer, so `${header.count} == 10` matches when the header is the string `"10"`. It does not coerce a string to a boolean. `${header.approved} == true` is false when the header is the string `"true"`. Compare against `'true'` or store a boolean header instead.
 
-In template mode a source that is exactly one `${...}` slot returns the slot's existing value. Numbers, arrays, or `null` from a header or body-field slot stay native. A whole `${body}` slot renders a JSON body as serialized text. Any other source returns a string. A source with no slot is raw text: `'abc'`, `true`, `42`, and `null` evaluate to the strings `'abc'`, `true`, `42`, and `null`. A missing slot in a mixed template renders as an empty string. A whole missing slot returns `null`.
+In template mode a source that is exactly one `${...}` slot returns the slot's existing value. Numbers, arrays, or `null` from a header or body-field slot stay native. A whole `${body}` slot returns the native body value: `Json` as the structured value, not serialized text; `Text` and `Xml` as a string; `Bytes` as a JSON array of integers 0-255; and `Empty` as `null`. Any other source returns a string. A source with no slot is raw text: `'abc'`, `true`, `42`, and `null` evaluate to the strings `'abc'`, `true`, `42`, and `null`. A missing slot in a mixed template renders as an empty string. A whole missing slot returns `null`.
+
+A `Body::Stream` is never materialized. A whole `${body}` slot or a `body.<path>` read fails with a `conversion` error naming `Body::Stream`; this replaces the old silent `null`. A `body.<path>` read refuses only on a stream: on any other body variant a path that is not a JSON field returns `null`. An expression that never reads `body`, such as a header-only filter, evaluates normally and leaves the stream unconsumed.
 
 A `${` that is never closed is a compile-time parse error, never literal text: `Got ${name` fails at creation with a message naming `unclosed interpolation` and the byte offset of the `${` in the trimmed source. An empty `${}` slot and a `${` nested inside slot content are parse errors too. A lone `$`, `{`, or `}` outside a `${` stays verbatim literal text.
 
@@ -88,7 +90,7 @@ The precedence chain, from lowest to highest:
 | unary minus | `-E` | Negates one integer operand. |
 | atom | literals, lookups, calls, delegation, `( E )` | Parentheses group and count toward the depth limit. |
 
-Lookups are `header.x`, `property.x`, `exchangeProperty.x`, `body`, `body.<path>`, `exception`, and `exception.message`. A lookup key may contain hyphens when each hyphen is directly followed by a letter or an underscore and the key is written without spaces (`header.some-key`), in standalone and compound positions. A hyphen followed by a digit or whitespace is the subtraction operator, so `header.n-1` is `header.n - 1`. `header.some - key` is therefore a parse error, and the message names the unspaced form. Atoms also include `${language:expr}` delegation and the five calls below.
+Lookups are `header.x`, `property.x`, `exchangeProperty.x`, `body`, `body.<path>`, `exception`, and `exception.message`. A lookup key may contain hyphens when each hyphen is directly followed by a letter or an underscore and the key is written without spaces (`header.some-key`), in standalone and compound positions. A hyphen followed by a digit or whitespace is the subtraction operator, so `header.n-1` is `header.n - 1`. `header.some - key` is therefore a parse error, and the message names the unspaced form. Atoms also include `${language:expr}` delegation and the calls below.
 
 `exception` renders `<variant_name>: <Display>`, for example `HttpOperationFailed: HTTP GET http://svc/api failed: 500 Internal Server Error`; `exception.message` renders the error's `Display` text alone. Both are `Value::Null` when the exchange carries no error, and the rendering never includes the HTTP response body or other payload data beyond the message.
 
@@ -96,7 +98,7 @@ A bare identifier that names no lookup and no accepted call is a parse error. `x
 
 Integer literals are parsed in u64 range. A unary minus over the literal `9223372036854775808` produces `i64::MIN`. Any other literal outside i64 range is a parse error.
 
-### The five calls
+### The calls
 
 | Call | Arity | Behaviour |
 | --- | --- | --- |
@@ -105,6 +107,8 @@ Integer literals are parsed in u64 range. A unary minus over the literal `922337
 | `default(a, b)` | 2 | Returns `a` unless `a` is null, `""`, or `"null"`. Then returns `b`. `b` is evaluated lazily. Errors from `a` propagate. `false` and `0` are present values. |
 | `min(E, E)` | 2 | Converts both operands with the integer rule and returns the smaller i64. |
 | `max(E, E)` | 2 | Converts both operands with the integer rule and returns the larger i64. |
+| `has_header(name)` | 1 | Returns `true` when the header key exists. Presence is key containment, so a stored `null` is present. An absent key returns `false`; a non-string argument is a `TypeMismatch`. |
+| `has_property(name)` | 1 | Returns `true` when the exchange property key exists. Presence is key containment, so a stored `null` is present. An absent key returns `false`; a non-string argument is a `TypeMismatch`. |
 
 A wrong arity is a parse error. Any other function name, including `now`, is a parse error; wall-clock access is the separate `date:` sub-language (see [Wall-clock time](#wall-clock-time)).
 

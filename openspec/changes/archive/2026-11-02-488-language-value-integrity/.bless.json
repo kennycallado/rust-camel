@@ -1,0 +1,57 @@
+{
+  "kind": "plan",
+  "change": "488-language-value-integrity",
+  "verdict": "BLESS",
+  "hash": "sha256:294d6b25ffebb36e02b2f758c594f116c0af5e0ab3176071606157a4bf764dc5",
+  "expert": "e_gpt",
+  "rounds": 4,
+  "history": [
+    {
+      "kind": "spec",
+      "verdict": "REJECTED",
+      "findings": 7
+    },
+    {
+      "kind": "spec",
+      "verdict": "REJECTED",
+      "findings": 4
+    },
+    {
+      "kind": "spec",
+      "verdict": "BLESSED",
+      "hash": "sha256:7743912071f4a4a94e31238f94b1f4feaa400b955c6b099518b2458ac6d4614c"
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": 3
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": 3
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": 2
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESSED"
+    },
+    {
+      "kind": "plan-amendment",
+      "verdict": "BLESSED",
+      "reason": "minijinja validates invalid values at variable lookup; stream refusal now fires at capture/truth test (read definition amended)"
+    },
+    {
+      "kind": "plan-amendment",
+      "verdict": "BLESSED",
+      "reason": "non-UTF-8 Bytes refusal scoped to inline minijinja language; shared build_context_bounded + camel-template keep lossy ADR-0047 contract"
+    }
+  ],
+  "reviewer_loop": "r_glm APPROVE-WITH-FINDINGS twice; all findings resolved (5 + 2)",
+  "note": "Mission order named e_opus for plan blessing; PATTERN-V2 (2026-10-27) forbids e_opus dispatch (no quota), so e_gpt was used for both gates.",
+  "date": "2026-11-01"
+}

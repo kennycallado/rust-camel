@@ -1,5 +1,6 @@
 //! Expression, MutatingExpression, and Predicate implementations for JS.
 
+use std::collections::HashMap;
 use std::{ops::ControlFlow, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
@@ -94,6 +95,9 @@ fn js_err_to_lang_err(_source: &str, e: JsLanguageError) -> LanguageError {
             position: None,
             detail: Some(READ_ONLY_UNSUPPORTED_REASON.to_string()),
         },
+        // A stream body was read. The hint is static (it names no exchange
+        // data) and points at the fix: cache or convert the body first.
+        JsLanguageError::StreamBodyRead => LanguageError::EvalError(STREAM_HINT.to_string()),
     }
 }
 
@@ -373,28 +377,42 @@ impl<'ast> Visitor<'ast> for ReadOnlyMutationWalker {
     }
 }
 
+/// Static refusal hint for reading a stream body from JS.
+pub(crate) const STREAM_HINT: &str =
+    "Body::Stream cannot be used in JS — add 'stream_cache' or 'convert_body_to' before this step";
+
 /// Build a [`JsExchange`] snapshot from an [`Exchange`] reference.
 fn snapshot_exchange(exchange: &Exchange) -> Result<JsExchange, LanguageError> {
-    let body = match &exchange.input.body {
-        Body::Json(v) => v.clone(),
-        Body::Text(s) | Body::Xml(s) => Value::String(s.clone()),
-        Body::Stream(_) => {
-            return Err(LanguageError::EvalError(
-                "Body::Stream cannot be used in JS — add 'stream_cache' or 'convert_body_to' before this step".to_string(),
-            ));
-        }
-        // Empty, Bytes, and any future variant expose no value to JS → null.
-        _ => Value::Null,
+    let (body, body_is_stream) = match &exchange.input.body {
+        Body::Json(v) => (v.clone(), false),
+        Body::Text(s) | Body::Xml(s) => (Value::String(s.clone()), false),
+        // A stream is not materialized. The bindings expose `camel.body` as a
+        // throwing accessor; a readable body value is never produced.
+        Body::Stream(_) => (Value::Null, true),
+        // Raw bytes are exposed as an array of integer byte values.
+        Body::Bytes(b) => (
+            Value::Array(b.iter().map(|byte| Value::Number((*byte).into())).collect()),
+            false,
+        ),
+        // Empty and any future variant expose no value to JS → null.
+        _ => (Value::Null, false),
     };
 
-    Ok(JsExchange::from_headers_body_properties(
-        exchange.input.headers.clone(),
+    Ok(JsExchange {
+        headers: exchange.input.headers.clone(),
         body,
-        exchange.properties.clone(),
-    ))
+        properties: exchange.properties.clone(),
+        body_is_stream,
+    })
 }
 
 /// Apply [`JsEvalResult`] mutations back onto a mutable [`Exchange`].
+///
+/// Maps use changed-only write-back: the pre-run snapshot is compared entry by
+/// entry against the post-run map, so an untouched value keeps its exact
+/// inbound representation (for example a JSON `10.0` that JavaScript
+/// represents as an integral number). Changed entries are written and keys
+/// removed by the script are removed; everything else is left bit-identical.
 ///
 /// The body is written back only when the post-run body differs from the
 /// normalized pre-run [`JsEvalResult::body_snapshot`]. An unchanged value that
@@ -402,19 +420,62 @@ fn snapshot_exchange(exchange: &Exchange) -> Result<JsExchange, LanguageError> {
 /// JavaScript as an integral number) compares equal and leaves the original
 /// [`Body`] variant bit-identical.
 fn apply_result_to_exchange(result: &JsEvalResult, exchange: &mut Exchange) {
-    exchange.input.headers = result.headers.clone();
-    exchange.properties = result.properties.clone();
+    apply_map_changes(
+        &result.headers_snapshot,
+        &result.headers,
+        &mut exchange.input.headers,
+    );
+    apply_map_changes(
+        &result.properties_snapshot,
+        &result.properties,
+        &mut exchange.properties,
+    );
+
+    // A stream body the script never touched stays the original `Body::Stream`
+    // bit-identical; it was never materialized.
+    if result.body_unread_stream {
+        return;
+    }
+    if result.body_stream_replaced {
+        exchange.input.body = value_to_body(&result.body);
+        return;
+    }
 
     if result.body != result.body_snapshot {
         exchange.input.body = value_to_body(&result.body);
     }
 }
 
+/// Write entry-level map changes from `post` over `target`, using `snapshot`
+/// to decide which entries actually changed.
+///
+/// - a key present in `post` whose value differs from `snapshot` is inserted;
+/// - a key present in `snapshot` but absent from `post` is removed;
+/// - every other key in `target` is left exactly as it was.
+fn apply_map_changes(
+    snapshot: &HashMap<String, Value>,
+    post: &HashMap<String, Value>,
+    target: &mut HashMap<String, Value>,
+) {
+    for (key, value) in post {
+        if snapshot.get(key) != Some(value) {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    for key in snapshot.keys() {
+        if !post.contains_key(key) {
+            target.remove(key);
+        }
+    }
+}
+
 /// Convert a `Value` to a `Body`.
 ///
-/// A JS `null` body maps to [`Body::Empty`] (not `Body::Json(Null)`); on a JS
-/// `Bytes`/`Empty` body the null snapshot compares equal, so this conversion is
-/// never reached for those variants.
+/// A JS `null` body maps to [`Body::Empty`] (not `Body::Json(Null)`). A `Bytes`
+/// body is exposed to JS as an integer array, so a script that leaves it
+/// untouched compares equal to the pre-run snapshot and is never rewritten; a
+/// script that sets it to `null` yields [`Body::Empty`]. An `Empty` body is
+/// exposed as null, so the same null assignment compares equal and is a no-op.
 fn value_to_body(v: &Value) -> Body {
     match v {
         Value::Null => Body::Empty,
@@ -633,10 +694,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(500));
             Ok(JsEvalResult {
                 return_value: json!("done"),
+                headers_snapshot: exchange.headers.clone(),
                 headers: exchange.headers,
                 body_snapshot: exchange.body.clone(),
                 body: exchange.body,
+                properties_snapshot: exchange.properties.clone(),
                 properties: exchange.properties,
+                body_unread_stream: false,
+                body_stream_replaced: false,
             })
         }
 
@@ -772,6 +837,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn header_reader_reads_value_and_null_for_absent() {
+        let mut ex = make_exchange();
+        ex.input.headers.insert("k".to_string(), json!("v"));
+
+        let expr = JsExpression::new("camel.header('k')".to_string(), engine(), 5_000);
+        let result = expr.evaluate(&ex).await.unwrap();
+        assert_eq!(result, Value::String("v".to_string()));
+
+        let expr = JsExpression::new("camel.header('nope')".to_string(), engine(), 5_000);
+        let result = expr.evaluate(&ex).await.unwrap();
+        assert_eq!(result, Value::Null, "absent header must read as null");
+    }
+
+    #[tokio::test]
+    async fn has_header_separates_absent_and_null() {
+        let mut ex = make_exchange();
+        ex.input.headers.insert("nil".to_string(), Value::Null);
+
+        let expr = JsExpression::new(
+            "[camel.has_header('flag'), camel.has_header('nil')]".to_string(),
+            engine(),
+            5_000,
+        );
+        let result = expr.evaluate(&ex).await.unwrap();
+        assert_eq!(result, json!([false, true]));
+    }
+
+    #[tokio::test]
+    async fn has_property_separates_absent_and_null_mutating() {
+        let mut ex = make_exchange();
+        ex.properties.insert("p".to_string(), Value::Null);
+
+        let expr =
+            JsMutatingExpression::new("camel.has_property('p')".to_string(), engine(), 5_000);
+        let result = expr.evaluate(&mut ex).await.unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        let mut ex = make_exchange();
+        let expr =
+            JsMutatingExpression::new("camel.has_property('absent')".to_string(), engine(), 5_000);
+        let result = expr.evaluate(&mut ex).await.unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn has_header_is_allowed_in_read_only() {
+        let lang = crate::language::JsLanguage::new();
+        let pred = lang
+            .create_predicate("camel.has_header('x')")
+            .expect("has_header must compile in read-only mode");
+
+        let mut ex = make_exchange();
+        ex.input.headers.insert("x".to_string(), json!(1));
+        assert!(pred.matches(&ex).await.unwrap());
+
+        let pred = lang
+            .create_predicate("camel.has_header('x')")
+            .expect("has_header must compile in read-only mode");
+        let ex = make_exchange();
+        assert!(!pred.matches(&ex).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn has_property_is_allowed_in_read_only() {
+        let lang = crate::language::JsLanguage::new();
+        let mut ex = make_exchange();
+        ex.properties.insert("p".to_string(), Value::Null);
+
+        let pred = lang
+            .create_predicate("camel.has_property('p')")
+            .expect("has_property must compile in read-only mode");
+        assert!(pred.matches(&ex).await.unwrap());
+
+        let pred = lang
+            .create_predicate("camel.has_property('q')")
+            .expect("has_property must compile in read-only mode");
+        assert!(!pred.matches(&ex).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn has_header_sees_live_mutation() {
+        // The presence reader must read the backing map on each call, not a
+        // snapshot taken when `camel` was built.
+        let expr = JsMutatingExpression::new(
+            "camel.headers.set('k', 1); camel.has_header('k')".to_string(),
+            engine(),
+            5_000,
+        );
+        let mut ex = make_exchange();
+        assert!(!ex.input.headers.contains_key("k"));
+        let result = expr.evaluate(&mut ex).await.unwrap();
+        assert_eq!(result, Value::Bool(true));
+
+        // Read-only: `has_header` resolves the same `__data` backing map as
+        // the map's own `has`.
+        for (key, expected) in [("foo", true), ("absent", false)] {
+            let expr = JsExpression::new(
+                format!("camel.has_header('{key}') === camel.headers.has('{key}')"),
+                engine(),
+                5_000,
+            );
+            let ex = make_exchange();
+            let result = expr.evaluate(&ex).await.unwrap();
+            assert_eq!(result, Value::Bool(true));
+            let expr = JsExpression::new(format!("camel.has_header('{key}')"), engine(), 5_000);
+            assert_eq!(expr.evaluate(&ex).await.unwrap(), Value::Bool(expected));
+        }
+    }
+
+    #[tokio::test]
     async fn test_mutating_expression_propagates_body() {
         let expr = JsMutatingExpression::new(
             "camel.body = 'modified'; camel.body".to_string(),
@@ -801,6 +976,49 @@ mod tests {
         );
     }
 
+    /// A JSON object body is readable in a read-only expression, including
+    /// member access.
+    #[tokio::test]
+    async fn js_json_body_reads_as_object() {
+        let expr = JsExpression::new("camel.body.n".to_string(), engine(), 5_000);
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::Json(json!({"n": 1}));
+
+        let result = expr.evaluate(&ex).await.unwrap();
+
+        assert_eq!(result, Value::Number(1.into()));
+    }
+
+    /// A `Bytes` body is exposed to JavaScript as an array of integer byte
+    /// values, so indexed reads return numbers.
+    #[tokio::test]
+    async fn js_bytes_body_reads_as_integer_array() {
+        let expr = JsExpression::new("camel.body[1]".to_string(), engine(), 5_000);
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::from(vec![0u8, 128, 255]);
+
+        let result = expr.evaluate(&ex).await.unwrap();
+
+        assert_eq!(result, Value::Number(128.into()));
+    }
+
+    /// A header-only mutation leaves the exposed integer array untouched, so
+    /// the original `Bytes` body is preserved bit-identically.
+    #[tokio::test]
+    async fn js_header_only_preserves_bytes_body() {
+        let expr =
+            JsMutatingExpression::new("camel.headers.set('x','1')".to_string(), engine(), 5_000);
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::from(vec![1u8, 2]);
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        match &ex.input.body {
+            Body::Bytes(bytes) => assert_eq!(bytes.as_ref(), &[1u8, 2]),
+            other => panic!("header-only JS must preserve the Bytes body, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn test_mutating_expression_preserves_empty_body() {
         let expr = JsMutatingExpression::new(
@@ -820,7 +1038,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mutating_expression_rejects_stream_body() {
+    async fn test_mutating_expression_header_only_on_stream_succeeds() {
         let expr = JsMutatingExpression::new(
             "camel.headers.set('x', '1'); 'done'".to_string(),
             engine(),
@@ -833,7 +1051,193 @@ mod tests {
         });
 
         let result = expr.evaluate(&mut ex).await;
-        assert!(result.is_err(), "JS should reject Body::Stream with error");
+        assert!(
+            result.is_ok(),
+            "header-only JS must run against a stream body, got {result:?}"
+        );
+        assert_eq!(ex.input.headers.get("x"), Some(&json!("1")));
+        assert!(
+            matches!(ex.input.body, Body::Stream(_)),
+            "an unread stream body must be preserved"
+        );
+    }
+
+    fn stream_exchange() -> Exchange {
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::Stream(camel_api::StreamBody {
+            stream: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            metadata: camel_api::StreamMetadata::default(),
+        });
+        ex
+    }
+
+    #[tokio::test]
+    async fn js_header_only_predicate_passes_stream_body() {
+        let pred = JsPredicate::new(
+            "camel.header('type') === 'order'".to_string(),
+            engine(),
+            5_000,
+        );
+        let mut ex = stream_exchange();
+        ex.input.headers.insert("type".to_string(), json!("order"));
+
+        let matched = pred.matches(&ex).await.unwrap();
+        assert!(matched, "header-only predicate must see the header");
+        assert!(
+            matches!(ex.input.body, Body::Stream(_)),
+            "a predicate never materializes the stream body"
+        );
+    }
+
+    #[tokio::test]
+    async fn js_header_only_script_passes_stream_body() {
+        let expr =
+            JsMutatingExpression::new("camel.headers.set('x','1')".to_string(), engine(), 5_000);
+        let mut ex = stream_exchange();
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        assert_eq!(ex.input.headers.get("x"), Some(&json!("1")));
+        assert!(
+            matches!(ex.input.body, Body::Stream(_)),
+            "an unread stream body must be preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn js_reading_stream_body_refuses() {
+        let expr = JsExpression::new("camel.body".to_string(), engine(), 5_000);
+        let ex = stream_exchange();
+
+        match expr.evaluate(&ex).await {
+            Err(LanguageError::EvalError(msg)) => {
+                assert!(
+                    msg.contains("stream_cache"),
+                    "refusal must point at stream_cache, got: {msg}"
+                );
+            }
+            other => panic!("expected a stream-read refusal, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn js_reading_stream_body_in_script_refuses() {
+        let expr = JsMutatingExpression::new("camel.body".to_string(), engine(), 5_000);
+        let mut ex = stream_exchange();
+        ex.input.headers.insert("keep".to_string(), json!("yes"));
+
+        assert!(expr.evaluate(&mut ex).await.is_err());
+        assert!(
+            matches!(ex.input.body, Body::Stream(_)),
+            "a refused stream read must leave the body untouched"
+        );
+        assert_eq!(ex.input.headers.get("keep"), Some(&json!("yes")));
+    }
+
+    #[tokio::test]
+    async fn js_stream_body_assignment_writes_text() {
+        let expr = JsMutatingExpression::new("camel.body = 'done'".to_string(), engine(), 5_000);
+        let mut ex = stream_exchange();
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        assert_eq!(ex.input.body.as_text(), Some("done"));
+    }
+
+    #[tokio::test]
+    async fn js_stream_body_define_property_value_writes_text() {
+        let script = "Object.defineProperty(camel, 'body', {value: 'x', writable: true, \
+                      configurable: true, enumerable: true})";
+        let expr = JsMutatingExpression::new(script.to_string(), engine(), 5_000);
+        let mut ex = stream_exchange();
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        assert_eq!(ex.input.body.as_text(), Some("x"));
+    }
+
+    #[tokio::test]
+    async fn js_stream_body_custom_accessor_is_refused() {
+        let script = "Object.defineProperty(camel, 'body', {get() { return 'x' }})";
+        let expr = JsMutatingExpression::new(script.to_string(), engine(), 5_000);
+        let mut ex = stream_exchange();
+
+        match expr.evaluate(&mut ex).await {
+            Err(LanguageError::EvalFailure {
+                class: ExpressionErrorClass::Runtime,
+                position: None,
+                detail: None,
+            }) => {}
+            other => panic!("expected a payload-free runtime refusal, got: {other:?}"),
+        }
+        assert!(
+            matches!(ex.input.body, Body::Stream(_)),
+            "a refused accessor replacement must leave the stream untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn js_stream_body_setter_only_accessor_is_refused() {
+        let script = "Object.defineProperty(camel, 'body', {get: undefined, set(v) {}})";
+        let expr = JsMutatingExpression::new(script.to_string(), engine(), 5_000);
+        let mut ex = stream_exchange();
+
+        match expr.evaluate(&mut ex).await {
+            Err(LanguageError::EvalFailure {
+                class: ExpressionErrorClass::Runtime,
+                position: None,
+                detail: None,
+            }) => {}
+            other => panic!("expected a payload-free runtime refusal, got: {other:?}"),
+        }
+        assert!(
+            matches!(ex.input.body, Body::Stream(_)),
+            "a refused setter-only accessor must leave the stream untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn js_stream_body_delete_yields_empty() {
+        let expr = JsMutatingExpression::new("delete camel.body".to_string(), engine(), 5_000);
+        let mut ex = stream_exchange();
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        assert!(
+            matches!(ex.input.body, Body::Empty),
+            "a deleted stream body must become Body::Empty, got {:?}",
+            ex.input.body
+        );
+    }
+
+    #[tokio::test]
+    async fn js_caught_stream_body_read_is_suppressed() {
+        let script = "try { camel.body } catch (e) {} 'ok'";
+        let expr = JsMutatingExpression::new(script.to_string(), engine(), 5_000);
+        let mut ex = stream_exchange();
+
+        let result = expr.evaluate(&mut ex).await.unwrap();
+
+        assert_eq!(result, json!("ok"));
+        assert!(
+            matches!(ex.input.body, Body::Stream(_)),
+            "a caught stream read must leave the body untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn js_stream_body_unread_is_preserved() {
+        let expr =
+            JsMutatingExpression::new("camel.headers.set('x', '1')".to_string(), engine(), 5_000);
+        let mut ex = stream_exchange();
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        assert_eq!(ex.input.headers.get("x"), Some(&json!("1")));
+        assert!(
+            matches!(ex.input.body, Body::Stream(_)),
+            "an unread stream body must be preserved"
+        );
     }
 
     #[tokio::test]
@@ -891,6 +1295,112 @@ mod tests {
         }
     }
 
+    /// An untouched header keeps its exact inbound representation even though
+    /// the snapshot conversion represents the same value as an integer.
+    #[tokio::test]
+    async fn js_untouched_float_header_keeps_representation() {
+        let expr = JsMutatingExpression::new(
+            "camel.headers.set('other','1')".to_string(),
+            engine(),
+            5_000,
+        );
+        let mut ex = Exchange::new(Message::default());
+        ex.input.headers.insert("n".to_string(), json!(10.0));
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        assert_eq!(ex.input.headers.get("n"), Some(&json!(10.0)));
+        assert_ne!(ex.input.headers.get("n"), Some(&json!(10)));
+        assert_eq!(ex.input.headers.get("other"), Some(&json!("1")));
+    }
+
+    /// A header the script actually changes is written back.
+    #[tokio::test]
+    async fn js_changed_header_is_written() {
+        let expr =
+            JsMutatingExpression::new("camel.headers.set('n', 2)".to_string(), engine(), 5_000);
+        let mut ex = Exchange::new(Message::default());
+        ex.input.headers.insert("n".to_string(), json!(1));
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        assert_eq!(ex.input.headers.get("n"), Some(&json!(2)));
+    }
+
+    /// A header the script removes is removed from the exchange.
+    #[tokio::test]
+    async fn js_removed_header_is_removed() {
+        let expr =
+            JsMutatingExpression::new("camel.headers.remove('drop')".to_string(), engine(), 5_000);
+        let mut ex = Exchange::new(Message::default());
+        ex.input.headers.insert("drop".to_string(), json!("x"));
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        assert!(!ex.input.headers.contains_key("drop"));
+    }
+
+    /// An untouched nested property keeps its exact inbound value while a
+    /// different property is written.
+    #[tokio::test]
+    async fn js_untouched_nested_property_preserved() {
+        let expr = JsMutatingExpression::new(
+            "camel.properties.set('q', '1')".to_string(),
+            engine(),
+            5_000,
+        );
+        let mut ex = Exchange::new(Message::default());
+        ex.properties.insert("p".to_string(), json!({"a": [1, 2]}));
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        assert_eq!(ex.properties.get("p"), Some(&json!({"a": [1, 2]})));
+        assert_eq!(ex.properties.get("q"), Some(&json!("1")));
+    }
+
+    /// A conversion failure after partial script mutations commits nothing:
+    /// the failing extraction aborts the result and the original maps are
+    /// restored.
+    #[tokio::test]
+    async fn js_conversion_failure_commits_nothing() {
+        let expr = JsMutatingExpression::new(
+            "camel.headers.set('ok', '1'); camel.headers.set('bad', NaN)".to_string(),
+            engine(),
+            5_000,
+        );
+        let mut ex = Exchange::new(Message::default());
+        ex.input
+            .headers
+            .insert("keep".to_string(), json!("untouched"));
+
+        let result = expr.evaluate(&mut ex).await;
+
+        assert!(result.is_err(), "NaN conversion must fail the evaluation");
+        assert!(!ex.input.headers.contains_key("ok"));
+        assert!(!ex.input.headers.contains_key("bad"));
+        assert_eq!(ex.input.headers.get("keep"), Some(&json!("untouched")));
+    }
+
+    /// The property path has the same transactional contract: a conversion
+    /// failure after partial property mutations commits nothing.
+    #[tokio::test]
+    async fn js_property_conversion_failure_commits_nothing() {
+        let expr = JsMutatingExpression::new(
+            "camel.properties.set('ok', '1'); camel.properties.set('bad', NaN)".to_string(),
+            engine(),
+            5_000,
+        );
+        let mut ex = Exchange::new(Message::default());
+        ex.properties.insert("keep".to_string(), json!("untouched"));
+
+        let result = expr.evaluate(&mut ex).await;
+
+        assert!(result.is_err(), "NaN conversion must fail the evaluation");
+        assert!(!ex.properties.contains_key("ok"));
+        assert!(!ex.properties.contains_key("bad"));
+        assert_eq!(ex.properties.get("keep"), Some(&json!("untouched")));
+    }
+
     /// A nested in-place mutation on an object body is a real change and is
     /// written back.
     #[tokio::test]
@@ -923,21 +1433,37 @@ mod tests {
         );
     }
 
-    /// JavaScript exposes `Bytes` as `null`, so `camel.body = null` on a
-    /// `Bytes` body compares equal to the snapshot and is a no-op.
+    /// JavaScript exposes `Bytes` as an integer array, so assigning `null`
+    /// differs from the pre-run snapshot and yields `Body::Empty`.
     #[tokio::test]
-    async fn js_null_on_bytes_is_noop() {
+    async fn js_null_on_bytes_becomes_empty() {
         let expr = JsMutatingExpression::new("camel.body = null".to_string(), engine(), 5_000);
         let mut ex = Exchange::new(Message::default());
-        ex.input.body = Body::from(b"binary".to_vec());
+        ex.input.body = Body::from(vec![1u8, 2]);
 
         let _ = expr.evaluate(&mut ex).await.unwrap();
 
         assert!(
-            matches!(ex.input.body, Body::Bytes(_)),
-            "null on a Bytes body must be a no-op, got {:?}",
+            matches!(ex.input.body, Body::Empty),
+            "null on a Bytes body must become Body::Empty, got {:?}",
             ex.input.body
         );
+    }
+
+    /// A nested in-place mutation on a Bytes body is a real change and is
+    /// written back as a JSON array (one-way `Bytes` → `Json`).
+    #[tokio::test]
+    async fn js_bytes_array_mutation_writes_json_body() {
+        let expr = JsMutatingExpression::new("camel.body[1] = 5".to_string(), engine(), 5_000);
+        let mut ex = Exchange::new(Message::default());
+        ex.input.body = Body::from(vec![1u8, 2]);
+
+        let _ = expr.evaluate(&mut ex).await.unwrap();
+
+        match &ex.input.body {
+            Body::Json(v) => assert_eq!(v, &json!([1, 5])),
+            other => panic!("expected Body::Json([1, 5]) after Bytes mutation, got {other:?}"),
+        }
     }
 
     /// JavaScript exposes `Empty` as `null` too, so the same assignment on an

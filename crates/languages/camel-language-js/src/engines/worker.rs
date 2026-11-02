@@ -88,7 +88,9 @@ const SCRIPT_CACHE_CAPACITY: usize = 256;
 pub(super) enum JsJob {
     Eval {
         source: Arc<str>,
-        exchange: JsExchange,
+        /// Boxed to keep the enum small: `JsExchange` is much larger than
+        /// every other variant's payload.
+        exchange: Box<JsExchange>,
         timeout_ms: u64,
         enqueued: Instant,
         /// `true` installs the throwing read-only snapshot (expression and
@@ -166,11 +168,20 @@ pub(super) fn worker_unavailable() -> JsLanguageError {
 /// thrown value is exactly that sentinel is a refused mutation, classified as
 /// [`JsLanguageError::ReadOnlyMutation`] by identity — never by message text,
 /// so no exchange-derived string can spoof it.
-fn classify_eval_error(e: JsError, sentinel: Option<&ReadOnlySentinel>) -> JsLanguageError {
+fn classify_eval_error(
+    e: JsError,
+    sentinel: Option<&ReadOnlySentinel>,
+    stream_sentinel: Option<&JsObject>,
+) -> JsLanguageError {
     if let Some(sentinel) = sentinel
         && sentinel.matches(&e)
     {
         return JsLanguageError::ReadOnlyMutation;
+    }
+    if let Some(stream_sentinel) = stream_sentinel
+        && bindings::StreamSentinel(stream_sentinel.clone()).matches(&e)
+    {
+        return JsLanguageError::StreamBodyRead;
     }
     if let Some(EngineError::RuntimeLimit(_)) = e.as_engine() {
         return JsLanguageError::Limit;
@@ -290,6 +301,10 @@ impl ScriptCache {
 struct InstalledGlobals {
     console: JsObject,
     camel: JsObject,
+    /// Present only for a stream body: the sentinel thrown by the getter.
+    stream_sentinel: Option<JsObject>,
+    /// Present only for a stream body: the installed getter function identity.
+    stream_getter: Option<JsValue>,
 }
 
 /// Why an [`install_bindings`] attempt failed.
@@ -317,8 +332,11 @@ fn install_bindings(
     // Preserve the typed variant (e.g. `TypeConversion` for unsafe integers)
     // so the redaction boundary can classify it as a `conversion` error
     // instead of collapsing it into `Execution`.
-    let camel_obj =
-        bindings::build_camel_global(exchange, read_only, ctx).map_err(InstallError::Data)?;
+    let bindings::CamelGlobal {
+        camel: camel_obj,
+        stream_sentinel,
+        stream_getter,
+    } = bindings::build_camel_global(exchange, read_only, ctx).map_err(InstallError::Data)?;
     ctx.global_object()
         .set(
             js_string!("camel"),
@@ -330,6 +348,8 @@ fn install_bindings(
     Ok(InstalledGlobals {
         console,
         camel: camel_obj,
+        stream_sentinel,
+        stream_getter,
     })
 }
 
@@ -482,6 +502,8 @@ impl WorkerState {
         // per install attempt; the one that survives verification is the
         // identity anchor for classification after the eval.
         let mut sentinel: Option<ReadOnlySentinel> = None;
+        let mut stream_sentinel: Option<JsObject> = None;
+        let mut stream_getter: Option<JsValue> = None;
         let mut verified = false;
         for attempt in 0..2 {
             self.scrub_globals();
@@ -490,6 +512,8 @@ impl WorkerState {
                 Ok(installed) => {
                     if self.install_verify(&installed) {
                         sentinel = attempt_sentinel;
+                        stream_sentinel = installed.stream_sentinel;
+                        stream_getter = installed.stream_getter;
                         verified = true;
                         break;
                     }
@@ -510,7 +534,14 @@ impl WorkerState {
             });
         }
 
-        let outcome = self.eval_cached(source, sentinel.as_ref(), inbound_body);
+        let outcome = self.eval_cached(
+            source,
+            sentinel.as_ref(),
+            inbound_body,
+            exchange.body_is_stream,
+            stream_sentinel.as_ref(),
+            stream_getter.as_ref(),
+        );
 
         // Integrity verification runs after the eval regardless of its
         // outcome; drift recycles the realm for the NEXT job. The current
@@ -533,6 +564,9 @@ impl WorkerState {
         source: &str,
         sentinel: Option<&ReadOnlySentinel>,
         inbound_body: Value,
+        body_is_stream: bool,
+        stream_sentinel: Option<&JsObject>,
+        stream_getter: Option<&JsValue>,
     ) -> Result<JsEvalResult, JsLanguageError> {
         // Field split so the cache, the context, and the detector can be
         // borrowed disjointly.
@@ -548,9 +582,22 @@ impl WorkerState {
         // `None`), immediately before the script runs, using the same
         // conversion the post-run body passes through. Read-only evaluation
         // does not capture and falls back to the inbound body.
-        let body_snapshot = match sentinel {
-            None => bindings::extract_body_snapshot(ctx, array_detector.as_ref())?,
-            Some(_) => inbound_body,
+        let body_snapshot = if body_is_stream {
+            Value::Null
+        } else {
+            match sentinel {
+                None => bindings::extract_body_snapshot(ctx, array_detector.as_ref())?,
+                Some(_) => inbound_body,
+            }
+        };
+
+        // Map write-back uses the same changed-only contract: capture the
+        // installed maps immediately before the script for mutating
+        // evaluation. Read-only evaluation never writes back, so it records
+        // empty maps.
+        let (headers_snapshot, properties_snapshot) = match sentinel {
+            None => extract_maps_snapshot(ctx, array_detector.as_ref())?,
+            Some(_) => (HashMap::new(), HashMap::new()),
         };
 
         let key: Arc<str> = Arc::from(source);
@@ -569,19 +616,28 @@ impl WorkerState {
             }
         };
 
-        let result = outcome.map_err(|e| classify_eval_error(e, sentinel))?;
+        let result = outcome.map_err(|e| classify_eval_error(e, sentinel, stream_sentinel))?;
 
         let return_value = js_to_value_with_detector(&result, ctx, array_detector.as_ref())?;
 
-        // Extract modified exchange state.
-        let modified = bindings::extract_camel_state(ctx, array_detector.as_ref())?;
+        let extracted = bindings::extract_camel_state(
+            ctx,
+            array_detector.as_ref(),
+            body_is_stream,
+            sentinel.is_some(),
+            stream_getter,
+        )?;
 
         Ok(JsEvalResult {
             return_value,
-            headers: modified.headers,
-            body: modified.body,
-            properties: modified.properties,
+            headers: extracted.headers,
+            body: extracted.body,
+            properties: extracted.properties,
+            headers_snapshot,
+            properties_snapshot,
             body_snapshot,
+            body_unread_stream: extracted.body_unread_stream,
+            body_stream_replaced: extracted.body_stream_replaced,
         })
     }
 
@@ -719,7 +775,11 @@ impl WorkerState {
             headers: HashMap::new(),
             body: Value::Null,
             properties: HashMap::new(),
+            headers_snapshot: HashMap::new(),
+            properties_snapshot: HashMap::new(),
             body_snapshot: Value::Null,
+            body_unread_stream: false,
+            body_stream_replaced: false,
         })
     }
 
@@ -728,6 +788,41 @@ impl WorkerState {
     fn run_test_panic(&self) -> Result<JsEvalResult, JsLanguageError> {
         panic!("TestPanic: deliberate worker panic for the self-heal test");
     }
+}
+
+/// Pre-run `(headers, properties)` pair used for changed-only map write-back.
+type MapSnapshot = (HashMap<String, Value>, HashMap<String, Value>);
+
+/// Capture the pre-run `headers` and `properties` maps from the installed
+/// `camel` global, converting each entry with the SAME
+/// [`extract_map`](bindings::extract_map) conversion the post-run state uses.
+///
+/// This is the map counterpart of `extract_body_snapshot`: it runs
+/// immediately before the script (mutating evaluation only) so the expression
+/// layer can write back entry-level changes without disturbing untouched
+/// entries. Because both sides share one conversion, a value whose
+/// representation changes round-trip (for example JSON `10.0` surviving
+/// JavaScript as an integral number) compares equal and is left untouched.
+fn extract_maps_snapshot(
+    ctx: &mut Context,
+    detector: Option<&ArrayDetector>,
+) -> Result<MapSnapshot, JsLanguageError> {
+    let camel = bindings::camel_object(ctx)?;
+    let headers_val =
+        camel
+            .get(js_string!("headers"), ctx)
+            .map_err(|e| JsLanguageError::ExchangeAccess {
+                message: e.to_string(),
+            })?;
+    let headers = bindings::extract_map(&headers_val, ctx, detector)?;
+    let properties_val =
+        camel
+            .get(js_string!("properties"), ctx)
+            .map_err(|e| JsLanguageError::ExchangeAccess {
+                message: e.to_string(),
+            })?;
+    let properties = bindings::extract_map(&properties_val, ctx, detector)?;
+    Ok((headers, properties))
 }
 
 /// Apply the resolved runtime limits to a context.
@@ -760,7 +855,7 @@ fn worker_loop(rx: mpsc::Receiver<JsJob>, limits: camel_language_api::JsLimitsCo
                 }
                 let deadline = enqueued + Duration::from_millis(timeout_ms);
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    state.run_eval(&source, exchange, deadline, read_only)
+                    state.run_eval(&source, *exchange, deadline, read_only)
                 }));
                 reply_outcome(&reply, attempt)
             }
@@ -882,7 +977,7 @@ mod tests {
             .tx
             .send(JsJob::Eval {
                 source: Arc::from("1+1"),
-                exchange: JsExchange::default(),
+                exchange: Box::new(JsExchange::default()),
                 timeout_ms: 1,
                 enqueued: Instant::now(),
                 read_only: false,
@@ -903,7 +998,7 @@ mod tests {
             .tx
             .send(JsJob::Eval {
                 source: Arc::from("1+1"),
-                exchange: JsExchange::default(),
+                exchange: Box::new(JsExchange::default()),
                 timeout_ms: 5_000,
                 enqueued: Instant::now(),
                 read_only: false,
@@ -933,7 +1028,7 @@ mod tests {
             .tx
             .send(JsJob::Eval {
                 source: Arc::from("1+1"),
-                exchange: JsExchange::default(),
+                exchange: Box::new(JsExchange::default()),
                 timeout_ms: 5_000,
                 enqueued: Instant::now(),
                 read_only: false,

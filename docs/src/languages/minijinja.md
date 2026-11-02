@@ -35,11 +35,22 @@ let expr = lang.create_expression(
 
 </details>
 
-Each `MinijinjaExpression` owns an `Arc<minijinja::Environment<'static>>`. Templates are added once during construction and compiled immediately. Subsequent evaluations look up templates by name with no recompilation. At evaluation time, the expression renders the template against the exchange context and returns the output as the expression value. The template context exposes `body`, `headers`, and `exchangeProperty`. Exchange headers are available as `headers.name` inside the template. An XML body renders as a flat string.
+Each `MinijinjaExpression` owns an `Arc<minijinja::Environment<'static>>`. Templates are added once during construction and compiled immediately. Subsequent evaluations look up templates by name with no recompilation. At evaluation time, the expression renders the template against the exchange context and returns the output as the expression value. The template context exposes `body`, `headers`, and `exchangeProperty`. Exchange headers are available as `headers.name` inside the template. The context also exposes the callable readers `header(name)`, `property(name)`, `has_header(name)`, and `has_property(name)`. The presence readers test key containment: a key whose stored value is `null` is present. The reader maps are a per-evaluation snapshot, and templates cannot mutate the Exchange. An XML body renders as a flat string.
 
 Every template source must wrap in exactly one top-level `{% autoescape "html"|"json"|"none" %}...{% endautoescape %}` block. A lexical validator enforces this at compile time and rejects malformed templates immediately. This gives render output a declared escape strategy before any data interpolation occurs. Synchronous MiniJinja rendering runs on a Tokio blocking thread via `spawn_blocking`. The route future wraps the join handle in `tokio::time::timeout` for the configured render deadline. MiniJinja fuel provides an instruction budget that stops runaway templates, infinite loops, and algorithmic-complexity attacks.
 
 Use MiniJinja for template-driven body generation: HTML pages, JSON payloads, and prompt strings assembled from multiple fields. For a body derived from a single expression, the [transform](../eip/transform.md) step is simpler. Phase 1 covers inline templates only. External file loading, `{% include %}`, template inheritance, and hot-reload belong to Phase 2.
+
+## Body values and streams
+
+The `body` context value is projected per body variant:
+
+- `Body::Empty` renders as an empty string, not `null`.
+- `Body::Text` and `Body::Xml` render as a string.
+- `Body::Json` renders as the structured value.
+- `Body::Bytes` renders as UTF-8 text. Bytes that are not valid UTF-8 fail with a `conversion` error; they are never replaced with U+FFFD.
+
+A `Body::Stream` is carried as an invalid value that is validated at lookup. Any lookup of `body` refuses immediately with the stream refusal: interpolation, filter or function coercion, comparison, iteration, member access, a `{% set %}` capture, and a truth test. A template that never reads `body`, such as a header-only template, renders normally and leaves the stream unconsumed. A `body` reference in an unexecuted branch is never looked up, so it does not refuse.
 
 ## Time
 

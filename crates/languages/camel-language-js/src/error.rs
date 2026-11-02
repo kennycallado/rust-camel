@@ -42,6 +42,11 @@ pub enum JsLanguageError {
     #[error("JS read-only mutation refused")]
     ReadOnlyMutation,
 
+    /// A script read a stream body. The stream is exposed as a throwing
+    /// accessor, so the refusal is classified by sentinel identity.
+    #[error("JS stream body read refused")]
+    StreamBodyRead,
+
     /// The JS source could not be compiled/parsed.
     #[error("JS parse error: {message}")]
     Parse { message: String },

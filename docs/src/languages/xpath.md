@@ -47,6 +47,8 @@ Finite numbers split by integrality and interval. A finite integral result in `[
 
 Predicates accept XPath boolean results only. There is no truthiness coercion: a nodeset, string, or number does not pass or fail a filter by non-emptiness or non-zero value. Write the test explicitly, for example `boolean(/catalog/book[@in-stock='true'])`.
 
+XPath is body-only. It exposes no header or property readers: `has_header(...)` and `has_property(...)` are not available. Use [Simple](simple.md) for header or property access.
+
 Use XPath when the body carries XML and you need to select elements or test attributes. For structured JSON bodies, use [JSONPath](jsonpath.md).
 
 **Reference**: [Language SPI](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-api/CONTEXT.md) · [XPath crate](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-xpath/CONTEXT.md)

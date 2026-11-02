@@ -12,6 +12,13 @@ pub struct JsExchange {
     pub headers: HashMap<String, Value>,
     pub body: Value,
     pub properties: HashMap<String, Value>,
+    /// `true` when the inbound body is a [`camel_language_api::Body::Stream`].
+    ///
+    /// The stream is not materialized; `body` is `Value::Null` and the
+    /// bindings install `camel.body` as an accessor instead of a data
+    /// property. Header-only scripts therefore run without reading the
+    /// stream, while an actual read refuses.
+    pub body_is_stream: bool,
 }
 
 impl JsExchange {
@@ -24,6 +31,7 @@ impl JsExchange {
             headers,
             body,
             properties,
+            body_is_stream: false,
         }
     }
 }
@@ -39,6 +47,25 @@ pub struct JsEvalResult {
     pub body: Value,
     /// Possibly-modified properties after execution.
     pub properties: HashMap<String, Value>,
+    /// The headers as they were immediately before the script ran, converted
+    /// with the SAME value conversion [`headers`](Self::headers) passes
+    /// through.
+    ///
+    /// The expression layer writes only entry-level changes against this
+    /// snapshot: untouched entries keep their exact inbound representation
+    /// (for example a JSON `10.0` that JavaScript represents as an integral
+    /// number), changed entries are written, and keys present in the snapshot
+    /// but absent afterwards are removed.
+    ///
+    /// This field is meaningful only for mutating evaluation. Read-only
+    /// evaluation sets it to an empty map. An external [`JsEngine`]
+    /// implementation that cannot reproduce the conversion SHALL set it to the
+    /// inbound headers; the worst case is then an extra write-back that is
+    /// equivalent to the pre-existing wholesale replacement.
+    pub headers_snapshot: HashMap<String, Value>,
+    /// The properties as they were immediately before the script ran, with
+    /// the same contract as [`headers_snapshot`](Self::headers_snapshot).
+    pub properties_snapshot: HashMap<String, Value>,
     /// The body as it was immediately before the script ran, converted with
     /// the SAME value conversion [`body`](Self::body) passes through.
     ///
@@ -55,6 +82,12 @@ pub struct JsEvalResult {
     /// conversion SHALL set `body_snapshot` to the inbound body. The worst
     /// case is then an extra write-back; it is never data loss.
     pub body_snapshot: Value,
+    /// `true` when a stream body was neither read nor replaced. The
+    /// expression layer keeps the inbound `Body::Stream` untouched.
+    pub body_unread_stream: bool,
+    /// `true` when the script replaced (or deleted) a stream body. The
+    /// expression layer writes the extracted body value back.
+    pub body_stream_replaced: bool,
 }
 
 /// Abstraction over a JavaScript engine capable of evaluating expressions

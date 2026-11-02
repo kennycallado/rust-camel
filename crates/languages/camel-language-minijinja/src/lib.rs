@@ -459,6 +459,81 @@ mod happy_path_tests {
 }
 
 #[cfg(test)]
+mod reader_callable_tests {
+    use super::*;
+    use camel_api::Exchange;
+
+    async fn render(src: &str, exchange: &Exchange) -> String {
+        let expr = MinijinjaExpression::compile(src, ResolvedLimits::default()).expect("compile");
+        let v = expr.evaluate(exchange).await.expect("render");
+        match v {
+            Value::String(s) => s,
+            other => panic!("expected String, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn has_header_absent_vs_null() {
+        let src = "{% autoescape \"none\" %}{% if has_header(\"flag\") %}T{% else %}F{% endif %}|{% if has_header(\"nil\") %}T{% else %}F{% endif %}{% endautoescape %}";
+        let mut ex = Exchange::default();
+        ex.input.headers.insert("nil".into(), Value::Null);
+        assert_eq!(render(src, &ex).await, "F|T");
+
+        let null_read = "{% autoescape \"none\" %}{% if header(\"nil\") is none %}Q{% endif %}{% endautoescape %}";
+        assert_eq!(render(null_read, &ex).await, "Q");
+    }
+
+    #[tokio::test]
+    async fn has_property_absent_vs_null() {
+        let src = "{% autoescape \"none\" %}{% if has_property(\"q\") %}T{% else %}F{% endif %}|{% if has_property(\"p\") %}T{% else %}F{% endif %}{% endautoescape %}";
+        let mut ex = Exchange::default();
+        ex.properties.insert("q".into(), Value::Null);
+        assert_eq!(render(src, &ex).await, "T|F");
+
+        let null_read = "{% autoescape \"none\" %}{% if property(\"q\") is none %}Q{% endif %}{% endautoescape %}";
+        assert_eq!(render(null_read, &ex).await, "Q");
+    }
+
+    #[tokio::test]
+    async fn header_and_property_readers() {
+        let src =
+            "{% autoescape \"none\" %}{{ header(\"k\") }}-{{ property(\"p\") }}{% endautoescape %}";
+        let mut ex = Exchange::default();
+        ex.input
+            .headers
+            .insert("k".into(), Value::String("v".into()));
+        ex.properties.insert("p".into(), Value::String("w".into()));
+        assert_eq!(render(src, &ex).await, "v-w");
+
+        let header_absent = "{% autoescape \"none\" %}{% if header(\"nope\") is none %}N{% endif %}{% endautoescape %}";
+        assert_eq!(render(header_absent, &ex).await, "N");
+
+        let property_absent = "{% autoescape \"none\" %}{% if property(\"nope\") is none %}N{% endif %}{% endautoescape %}";
+        assert_eq!(render(property_absent, &ex).await, "N");
+    }
+
+    #[tokio::test]
+    async fn reader_rejects_non_string_arg() {
+        let src = "{% autoescape \"none\" %}{{ has_header(1) }}{% endautoescape %}";
+        let expr = MinijinjaExpression::compile(src, ResolvedLimits::default()).expect("compile");
+        let mut ex = Exchange::default();
+        ex.input
+            .headers
+            .insert("secret".into(), Value::String("TOPSECRET".into()));
+
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("must reject non-string arg");
+        let display = err.to_string();
+        assert!(
+            !display.contains("TOPSECRET"),
+            "error must not leak exchange data: {display}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod context_exposure_tests {
     use super::*;
     use camel_api::Exchange;
@@ -537,35 +612,169 @@ mod body_stream_rejection_test {
     use bytes::Bytes;
     use camel_api::body::{StreamBody, StreamMetadata};
     use camel_api::error::CamelError;
+    use camel_language_api::ExpressionErrorClass;
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    #[tokio::test]
-    async fn stream_body_rejected_with_stream_cache_hint() {
-        let expr = MinijinjaExpression::compile(
-            "{% autoescape \"none\" %}{{ body }}{% endautoescape %}",
-            ResolvedLimits::default(),
-        )
-        .expect("compile");
-
+    fn stream_body() -> Body {
         let stream = futures::stream::empty::<Result<Bytes, CamelError>>();
-        let body_stream = Body::Stream(StreamBody {
+        Body::Stream(StreamBody {
             stream: Arc::new(Mutex::new(Some(Box::pin(stream)))),
             metadata: StreamMetadata {
                 size_hint: None,
                 content_type: None,
                 origin: None,
             },
-        });
-        let mut ex = Exchange::default();
-        ex.input.body = body_stream;
+        })
+    }
 
-        let result = expr.evaluate(&ex).await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
+    fn stream_exchange() -> Exchange {
+        let mut ex = Exchange::default();
+        ex.input.body = stream_body();
+        ex
+    }
+
+    async fn render_stream(src: &str) -> Result<Value, LanguageError> {
+        let expr = MinijinjaExpression::compile(src, ResolvedLimits::default()).expect("compile");
+        expr.evaluate(&stream_exchange()).await
+    }
+
+    #[tokio::test]
+    async fn stream_body_rejected_with_stream_cache_hint() {
+        let result = render_stream("{% autoescape \"none\" %}{{ body }}{% endautoescape %}").await;
+        let err = result.expect_err("stream body must be refused");
+        let msg = err.to_string();
         assert!(
             msg.contains("stream_cache"),
             "error must mention stream_cache: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn header_only_template_passes_stream_body() {
+        let mut ex = stream_exchange();
+        ex.input
+            .headers
+            .insert("type".into(), Value::String("order".into()));
+        let expr = MinijinjaExpression::compile(
+            "{% autoescape \"none\" %}{{ headers.type }}{% endautoescape %}",
+            ResolvedLimits::default(),
+        )
+        .expect("compile");
+        let v = expr.evaluate(&ex).await.expect("header-only render");
+        assert_eq!(v, Value::String("order".into()));
+        assert!(
+            matches!(ex.input.body, Body::Stream(_)),
+            "body must remain a Stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn unexecuted_body_branch_passes_stream_body() {
+        let v = render_stream(
+            "{% autoescape \"none\" %}{% if false %}{{ body }}{% endif %}ok{% endautoescape %}",
+        )
+        .await
+        .expect("unexecuted branch must render");
+        assert_eq!(v, Value::String("ok".into()));
+    }
+
+    #[tokio::test]
+    async fn captured_stream_body_refuses_at_capture() {
+        let err = render_stream(
+            "{% autoescape \"none\" %}{% set captured = body %}ok{% endautoescape %}",
+        )
+        .await
+        .expect_err("capturing a stream must be refused at the variable read");
+        assert!(
+            err.to_string().contains("stream_cache"),
+            "error must mention stream_cache: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_body_truth_test_refuses() {
+        let err =
+            render_stream("{% autoescape \"none\" %}{% if body %}x{% endif %}{% endautoescape %}")
+                .await
+                .expect_err("truth-testing a stream must be refused");
+        assert!(
+            err.to_string().contains("stream_cache"),
+            "error must mention stream_cache: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_body_filter_refuses() {
+        let err = render_stream("{% autoescape \"none\" %}{{ body|upper }}{% endautoescape %}")
+            .await
+            .expect_err("filtering a stream must be refused");
+        assert!(
+            err.to_string().contains("stream_cache"),
+            "error must mention stream_cache: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_body_comparison_refuses() {
+        let err = render_stream(
+            "{% autoescape \"none\" %}{% if body == 1 %}x{% endif %}{% endautoescape %}",
+        )
+        .await
+        .expect_err("comparing a stream must be refused");
+        assert!(
+            err.to_string().contains("stream_cache"),
+            "error must mention stream_cache: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_body_iteration_refuses() {
+        let err = render_stream(
+            "{% autoescape \"none\" %}{% for x in body %}{{ x }}{% endfor %}{% endautoescape %}",
+        )
+        .await
+        .expect_err("iterating a stream must be refused");
+        assert!(
+            err.to_string().contains("stream_cache"),
+            "error must mention stream_cache: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_body_member_access_refuses() {
+        let err = render_stream("{% autoescape \"none\" %}{{ body.x }}{% endautoescape %}")
+            .await
+            .expect_err("member access on a stream must be refused");
+        assert!(
+            err.to_string().contains("stream_cache"),
+            "error must mention stream_cache: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mini_non_utf8_bytes_is_conversion_error() {
+        let expr = MinijinjaExpression::compile(
+            "{% autoescape \"none\" %}{{ body }}{% endautoescape %}",
+            ResolvedLimits::default(),
+        )
+        .expect("compile");
+        let mut ex = Exchange::default();
+        ex.input.body = Body::Bytes(bytes::Bytes::from(vec![0xff, 0xfe]));
+
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("non-UTF-8 bytes must be refused");
+        assert_eq!(
+            err.class(),
+            Some(ExpressionErrorClass::Conversion),
+            "non-UTF-8 bytes must map to Conversion: {err:?}"
+        );
+        let rendered = format!("{err} | {err:?}");
+        assert!(
+            !rendered.contains('\u{FFFD}'),
+            "replacement character leaked: {rendered}"
         );
     }
 }

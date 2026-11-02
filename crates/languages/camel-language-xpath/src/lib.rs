@@ -443,6 +443,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn xpath_reads_body_not_headers() {
+        let lang = XPathLanguage::new();
+        let expr = lang.create_expression("/r/header/text()").unwrap();
+        let mut message = Message::new(Body::Xml("<r><header>from-body</header></r>".to_string()));
+        message.set_header("header", Value::String("from-header".to_string()));
+        let ex = Exchange::new(message);
+        let result = expr.evaluate(&ex).await.unwrap();
+        assert_eq!(result, JsonValue::String("from-body".to_string()));
+    }
+
+    #[tokio::test]
+    async fn xpath_has_no_header_reader() {
+        let lang = XPathLanguage::new();
+        let expr = lang
+            .create_expression("header('x')")
+            .expect("header('x') should compile as an unknown function");
+        let ex = exchange_with_xml("<r><header>from-body</header></r>").await;
+        let err = match expr.evaluate(&ex).await {
+            Err(err) => err,
+            Ok(value) => panic!("expected evaluation error, got {value:?}"),
+        };
+        let detail = match &err {
+            LanguageError::EvalFailure { detail, .. } => detail.clone().unwrap_or_default(),
+            other => panic!("expected EvalFailure, got {other:?}"),
+        };
+        assert!(!detail.contains("from-body"), "detail leaks body: {detail}");
+        assert!(
+            !detail.contains("from-header"),
+            "detail leaks header: {detail}"
+        );
+    }
+
+    #[tokio::test]
     async fn expression_text_body_with_invalid_xml() {
         let lang = XPathLanguage::new();
         let expr = lang.create_expression("/root").unwrap();
