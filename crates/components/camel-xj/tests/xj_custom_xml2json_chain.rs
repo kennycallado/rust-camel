@@ -22,7 +22,7 @@ use tower::{Service, ServiceExt};
 const CUSTOM_XSLT_BYTES: &[u8] = include_bytes!("fixtures/custom-xml2json/custom.xslt");
 const INPUT_XML_BYTES: &[u8] = include_bytes!("fixtures/custom-xml2json/input.xml");
 const CUSTOM_OUTPUT_XML_BYTES: &[u8] = include_bytes!("fixtures/custom-xml2json/custom-output.xml");
-const EXPECTED_JSON_BYTES: &[u8] = include_bytes!("fixtures/custom-xml2json/expected.json");
+const EXPECTED_JSON_BYTES: &[u8] = include_bytes!("data/custom-xml2json/expected.json");
 
 fn custom_stylesheet_uri() -> String {
     format!(

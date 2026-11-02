@@ -770,14 +770,16 @@ impl DevTargetMap {
     }
 }
 
-/// Lexically normalize a path to an absolute path.
+/// Normalize a path to an absolute, canonical path when possible.
 ///
-/// `fs::canonicalize` is intentionally avoided: notify reports `Remove`
-/// events for files that no longer exist, and canonicalization would fail
-/// there. Instead relative paths are joined onto the current directory and
-/// `.`/`..` components are resolved textually, so classification stays
-/// deterministic for deleted files. Task 2.2 must pass `watch_dirs` through
-/// the same normalization (here) rather than mixing raw and canonical roots.
+/// Relative paths are first joined onto the current directory. Existing
+/// paths are canonicalized so watcher events and registered sources compare
+/// equal across symlinked roots (notably macOS `/var` vs `/private/var`,
+/// where `tempfile` and notify disagree). For paths that no longer exist,
+/// including notify `Remove` events, canonicalization fails; in that case
+/// `.`/`..` are resolved textually as a deterministic fallback. Task 2.2
+/// must pass `watch_dirs` through the same normalization (here) rather than
+/// mixing raw and canonical roots.
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the extracted loop (Task 2.2)
 fn normalize_path(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
@@ -788,6 +790,10 @@ fn normalize_path(path: &Path) -> PathBuf {
             Err(_) => path.to_path_buf(),
         }
     };
+
+    if let Ok(canonical) = std::fs::canonicalize(&absolute) {
+        return canonical;
+    }
 
     let mut normalized = PathBuf::new();
     for component in absolute.components() {
@@ -926,9 +932,9 @@ mod tests {
 
     use super::{
         DevTargetMap, EventClass, ReloadWatcher, bounded_dispatch, classify_event,
-        derive_rebuilt_route_ids, is_reload_kind, is_route_file_path, publish_parents,
-        reload_dispatch_bound, resolve_watch_dirs, run_reload_loop, watch_and_reload,
-        watch_and_reload_with_barriers,
+        derive_rebuilt_route_ids, is_reload_kind, is_route_file_path, normalize_path,
+        publish_parents, reload_dispatch_bound, resolve_watch_dirs, run_reload_loop,
+        watch_and_reload, watch_and_reload_with_barriers,
     };
 
     type ReloadPass =
@@ -1171,6 +1177,20 @@ mod tests {
             paths: paths.iter().map(PathBuf::from).collect(),
             attrs: Default::default(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_path_resolves_symlinked_existing_paths() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let real = tmp.path().join("real");
+        let link = tmp.path().join("link");
+        fs::create_dir(&real).expect("create real dir");
+        symlink(&real, &link).expect("create symlink");
+
+        assert_eq!(normalize_path(&link), normalize_path(&real));
     }
 
     #[test]
