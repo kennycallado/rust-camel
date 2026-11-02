@@ -4,6 +4,7 @@ description = "Static fake JMS bridge fixture for shell-less container smoke tes
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish = false
 

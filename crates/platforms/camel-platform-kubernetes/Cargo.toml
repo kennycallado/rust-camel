@@ -2,6 +2,7 @@
 name = "camel-platform-kubernetes"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Kubernetes platform integration for Apache Camel Rust"
 readme = "README.md"

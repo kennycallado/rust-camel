@@ -3,6 +3,7 @@ name = "camel-integration-test"
 description = "Scenario document model, parser, and integration-tier test harness for rust-camel"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

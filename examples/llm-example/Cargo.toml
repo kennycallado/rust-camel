@@ -3,6 +3,7 @@ name = "llm-example"
 description = "LLM chat component example for rust-camel (materialized, streaming, tool-calling)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

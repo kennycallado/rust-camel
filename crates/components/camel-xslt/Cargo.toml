@@ -2,6 +2,7 @@
 name = "camel-xslt"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "XSLT Component for rust-camel (via xml-bridge)"
 readme = "README.md"

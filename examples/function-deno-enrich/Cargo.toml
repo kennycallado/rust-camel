@@ -3,6 +3,7 @@ name = "function-deno-enrich"
 description = "Function step example — enrich messages via Deno/TypeScript"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

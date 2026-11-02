@@ -3,6 +3,7 @@ name = "opensearch-example"
 description = "OpenSearch component example for rust-camel"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

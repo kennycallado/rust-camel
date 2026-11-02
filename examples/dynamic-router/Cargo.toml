@@ -3,6 +3,7 @@ name = "dynamic-router"
 description = "Dynamic Router EIP example — route messages based on header values at runtime"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

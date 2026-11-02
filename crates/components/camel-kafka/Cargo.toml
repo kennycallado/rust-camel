@@ -3,6 +3,7 @@ name = "camel-component-kafka"
 description = "Kafka component for rust-camel integration framework"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

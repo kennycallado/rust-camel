@@ -3,6 +3,7 @@ name = "camel-component-keycloak"
 description = "Keycloak integration for rust-camel — claim presets, URL builders (Admin API and event consumer in future phases)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

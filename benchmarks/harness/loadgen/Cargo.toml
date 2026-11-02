@@ -2,6 +2,7 @@
 name = "bench-loadgen"
 version = "0.0.0"
 edition = "2021"
+rust-version.workspace = true
 publish = false
 description = """\
 M2 benchmark harness load generator (spec §4.5). Persistent HTTP client \

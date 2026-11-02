@@ -3,6 +3,7 @@ name = "hot-reload"
 description = "Hot reload example demonstrating zero-downtime pipeline swapping"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

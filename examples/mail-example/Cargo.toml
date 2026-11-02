@@ -3,6 +3,7 @@ name = "mail-example"
 description = "Mail component example for rust-camel (local GreenMail fixture)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

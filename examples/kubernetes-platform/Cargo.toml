@@ -3,6 +3,7 @@ name = "camel-platform-kubernetes-example"
 description = "Platform SPI with Kubernetes leader election/readiness example"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

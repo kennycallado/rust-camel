@@ -3,6 +3,7 @@ name = "wasm-example"
 description = "WASM plugin processor example for rust-camel (Phase 4 hardening)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

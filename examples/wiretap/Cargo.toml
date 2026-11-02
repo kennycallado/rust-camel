@@ -3,6 +3,7 @@ name = "wiretap"
 description = "WireTap EIP example — tap a copy of exchanges to a side endpoint"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

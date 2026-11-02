@@ -3,6 +3,7 @@ name = "file-p1-features"
 description = "Demonstrates P1 file component features: doneFileName, sortBy, filtering, TryRename"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

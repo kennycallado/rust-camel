@@ -3,6 +3,7 @@ name = "routing-slip"
 description = "Routing Slip EIP example — route messages through a dynamic sequence of endpoints"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

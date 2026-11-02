@@ -3,6 +3,7 @@ name = "multicast"
 description = "Multicast EIP example — route the same message to multiple endpoints"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

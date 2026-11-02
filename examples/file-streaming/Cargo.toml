@@ -3,6 +3,7 @@ name = "file-streaming"
 description = "File streaming example - demonstrates zero-copy streaming writes"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [[bin]]

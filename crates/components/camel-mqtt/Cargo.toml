@@ -3,6 +3,7 @@ name = "camel-component-mqtt"
 description = "MQTT 3.1.1 component for rust-camel (rumqttc-v4-next)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

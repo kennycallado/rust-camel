@@ -3,6 +3,7 @@ name = "mcp-example"
 description = "MCP component example for rust-camel (shared-listener server role + client role, self-contained loopback)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

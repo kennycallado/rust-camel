@@ -3,6 +3,7 @@ name = "tracer-demo"
 description = "Tracer EIP example — automatic message flow tracing with JSON spans"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

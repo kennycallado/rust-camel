@@ -3,6 +3,7 @@ name = "camel-redis-repo"
 description = "Redis-backed CacheRepository and IdempotentRepository for rust-camel"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

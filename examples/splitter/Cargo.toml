@@ -3,6 +3,7 @@ name = "splitter"
 description = "Splitter EIP example — split, process per-fragment, aggregate"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

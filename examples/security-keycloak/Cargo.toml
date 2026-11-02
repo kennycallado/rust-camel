@@ -3,6 +3,7 @@ name = "security-keycloak"
 description = "Keycloak-style security example — native auth pipeline with role-based access"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

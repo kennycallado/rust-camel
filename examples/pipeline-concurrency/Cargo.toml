@@ -3,6 +3,7 @@ name = "pipeline-concurrency"
 description = "Demonstrates pipeline concurrency modes: auto-concurrent, bounded, and sequential"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

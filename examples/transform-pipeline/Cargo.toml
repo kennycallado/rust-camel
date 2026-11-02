@@ -3,6 +3,7 @@ name = "transform-pipeline"
 description = "Transform pipeline example for rust-camel"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

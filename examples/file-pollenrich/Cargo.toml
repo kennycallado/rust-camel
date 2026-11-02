@@ -3,6 +3,7 @@ name = "file-pollenrich"
 description = "EIP-7 pollEnrich example - read a config file mid-route"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

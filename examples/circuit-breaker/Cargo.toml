@@ -3,6 +3,7 @@ name = "circuit-breaker"
 description = "Circuit Breaker EIP example — resilient service calls with fallback"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

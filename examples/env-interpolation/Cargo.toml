@@ -3,6 +3,7 @@ name = "env-interpolation"
 description = "Environment variable interpolation in YAML routes using ${env:VAR_NAME}"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

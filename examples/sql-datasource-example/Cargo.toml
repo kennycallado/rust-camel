@@ -3,6 +3,7 @@ name = "sql-datasource-example"
 description = "SQL component example with named datasources from Camel.toml"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

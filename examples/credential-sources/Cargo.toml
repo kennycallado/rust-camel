@@ -2,6 +2,7 @@
 name = "credential-sources"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 camel-api.workspace = true

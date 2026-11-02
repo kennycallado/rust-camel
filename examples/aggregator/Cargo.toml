@@ -3,6 +3,7 @@ name = "aggregator"
 description = "Aggregator EIP example — batch orders by correlation key"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

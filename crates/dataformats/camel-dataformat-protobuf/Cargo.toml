@@ -3,6 +3,7 @@ name = "camel-dataformat-protobuf"
 description = "Protobuf DataFormat for rust-camel (JSON <-> protobuf wire format)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

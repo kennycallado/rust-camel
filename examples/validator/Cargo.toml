@@ -3,6 +3,7 @@ name = "validator"
 description = "Validator component example for rust-camel (XSD, JSON Schema, YAML)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

@@ -3,6 +3,7 @@ name = "camel-component-grpc"
 description = "gRPC component for rust-camel (dynamic producer and consumer)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

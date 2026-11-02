@@ -3,6 +3,7 @@ name = "jms-example"
 description = "JMS component example for rust-camel"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

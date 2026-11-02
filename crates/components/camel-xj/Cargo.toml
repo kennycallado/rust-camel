@@ -2,6 +2,7 @@
 name = "camel-xj"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "XJ (XML <-> JSON) Data Format for Rust Camel (via xml-bridge)"
 readme = "README.md"

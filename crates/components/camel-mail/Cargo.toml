@@ -4,6 +4,7 @@ description = "SMTP and IMAP mail component for rust-camel"
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

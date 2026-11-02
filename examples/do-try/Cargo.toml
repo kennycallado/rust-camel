@@ -3,6 +3,7 @@ name = "do-try"
 description = "doTry/doCatch/doFinally EIP patterns tour"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

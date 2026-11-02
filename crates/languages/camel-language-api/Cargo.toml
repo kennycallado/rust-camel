@@ -3,6 +3,7 @@ name = "camel-language-api"
 description = "Language trait API for rust-camel (Expression, Predicate)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

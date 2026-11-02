@@ -3,6 +3,7 @@ name = "stream-echo"
 description = "Interactive stdio echo example for rust-camel (stream:in to stream:out)"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

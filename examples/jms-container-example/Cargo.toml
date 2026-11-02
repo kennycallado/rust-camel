@@ -3,6 +3,7 @@ name = "jms-container-example"
 description = "JMS component example using camel-component-container to manage the broker"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

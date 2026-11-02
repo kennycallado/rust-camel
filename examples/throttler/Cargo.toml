@@ -3,6 +3,7 @@ name = "throttler"
 description = "Throttler EIP example — rate limit message processing"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

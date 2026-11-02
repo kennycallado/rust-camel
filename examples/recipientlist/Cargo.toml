@@ -3,6 +3,7 @@ name = "recipientlist"
 description = "RecipientList EIP example — dynamically resolve endpoints from an expression at runtime"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

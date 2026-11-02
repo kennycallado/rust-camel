@@ -3,6 +3,7 @@ name = "sql-streaming"
 description = "SQL component streaming example - StreamList with NDJSON output"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

@@ -3,6 +3,7 @@ name = "language-rhai"
 description = "Rhai scripting language example for rust-camel"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

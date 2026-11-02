@@ -2,6 +2,7 @@
 name = "camel-master"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Master/leader-election component — wraps a delegate Consumer with distributed lock-based leadership coordination via LeadershipService"

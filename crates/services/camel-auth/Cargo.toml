@@ -3,6 +3,7 @@ name = "camel-auth"
 description = "Provider-neutral authentication and claim mapping for rust-camel"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

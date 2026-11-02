@@ -3,6 +3,7 @@ name = "camel-component-container"
 version.workspace = true
 description = "Docker/Container component for rust-camel — run, manage and listen to container events via the Camel routing engine"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

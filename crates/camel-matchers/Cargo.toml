@@ -3,6 +3,7 @@ name = "camel-matchers"
 description = "Pure matcher algebra shared by the rust-camel test tiers"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 

@@ -2,7 +2,7 @@
 name = "camel-fuzz"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.96"
 
 [package.metadata]
 cargo-fuzz = true

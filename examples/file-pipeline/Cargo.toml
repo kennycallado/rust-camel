@@ -3,6 +3,7 @@ name = "file-pipeline"
 description = "File pipeline example - read, transform, and write files"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

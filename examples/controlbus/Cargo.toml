@@ -3,6 +3,7 @@ name = "controlbus"
 description = "ControlBus example — runtime route control from within routes"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

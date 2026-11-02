@@ -3,6 +3,7 @@ name = "template-basic"
 description = "Minimal example showing external template rendering with rust-camel"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]

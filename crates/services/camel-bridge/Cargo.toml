@@ -4,6 +4,7 @@ description = "Bridge process lifecycle management for rust-camel (spawn, health
 readme = "README.md"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
