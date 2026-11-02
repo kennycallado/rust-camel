@@ -134,10 +134,15 @@ async fn e2e_valid_xml_returns_201_xml() {
         ex
     };
 
+    // 489 boundary: a route Content-Type equal to the inbound value is
+    // inherited and omitted (body inference then wins). Use a parameterized
+    // inbound value so the route's exact `application/xml` is distinct and
+    // must be emitted. The equal-value boundary is pinned in
+    // rest_negotiation_e2e.
     let req = simple_request(
         "POST",
         "/xml/post",
-        &[("Content-Type", XML_MEDIA)],
+        &[("Content-Type", "application/xml; charset=utf-8")],
         b"<user><name>kenny</name></user>",
     );
     let (resp, ()) = tokio::join!(
