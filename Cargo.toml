@@ -209,7 +209,7 @@ regex = "1"
 moka = { version = "0.12", features = ["future"] }
 redb = "4"
 redis = "1"
-rumqttc = { version = "0.33.3", package = "rumqttc-v4-next", default-features = false }
+rumqttc = { version = "0.34", package = "rumqttc-v4-next", default-features = false }
 # RabbitMQ AMQP client. Feature list verified against lapin 4.12.0's feature
 # table (task 1.3): `tokio` = tokio runtime integration, `rustls--ring` = rustls
 # with the ring provider, `rustls-native-certs` = system root store. The bare

@@ -7944,9 +7944,9 @@ dependencies = [
 
 [[package]]
 name = "mqttbytes-core-next"
-version = "0.33.3"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ff7ae19c74aba9e0ed6e4071cd52aa364e020076fa3cc6ef17e43662f756f3c"
+checksum = "366b6ba2b4209ca4bc5ac731ccddf570d09831981eed07e5fbd63564cf0cf1aa"
 dependencies = [
  "bytes",
  "thiserror 2.0.21",
@@ -10401,9 +10401,9 @@ dependencies = [
 
 [[package]]
 name = "rumqttc-core-next"
-version = "0.33.3"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d7d9205738dd41a2546e82d27a634d07d8b303dcf7558565ff70caf3ceb0f9c"
+checksum = "249896ab27ed630590971738264baa8f722f18965d2e387c706c40a3c2a572cc"
 dependencies = [
  "async-tungstenite",
  "rustls-native-certs",
@@ -10416,9 +10416,9 @@ dependencies = [
 
 [[package]]
 name = "rumqttc-v4-next"
-version = "0.33.3"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e803e2f95f2524785826773092f0a14340ea4891bdb18de1d832ad276380c390"
+checksum = "b3767dde22a804ea806107d0f4331e33cb794d1b8468b11c86fb0c1366f07054"
 dependencies = [
  "async-tungstenite",
  "bytes",

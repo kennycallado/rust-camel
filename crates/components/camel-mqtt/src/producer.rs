@@ -13,7 +13,7 @@ use tracing::warn;
 
 use camel_api::{Body, CamelError, Exchange, Value};
 use camel_component_api::NetworkRetryPolicy;
-use rumqttc::{AsyncClient, MqttOptions, NetworkOptions, QoS};
+use rumqttc::{AsyncClient, MqttOptions, NetworkOptions, PublishOptions, QoS};
 
 use crate::client_id::build_client_id_with_override;
 use crate::config::{MqttBrokerConfig, MqttEndpointConfig, check_payload_len};
@@ -225,9 +225,8 @@ impl Service<Exchange> for MqttProducer {
             let payload = body_to_bytes(&exchange.input.body)?;
             check_payload_len(payload.len(), config.max_payload_bytes)?;
 
-            // rumqttc publish signature: topic, qos, retain, payload
             client
-                .publish(topic, qos, retain, payload)
+                .publish(topic, payload, PublishOptions::new(qos).retain(retain))
                 .await
                 .map_err(|e| CamelError::ProcessorError(e.to_string()))?;
 

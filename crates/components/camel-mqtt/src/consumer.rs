@@ -215,8 +215,11 @@ async fn run_consumer_loop(
     let mut mqtt_opts = MqttOptions::new(&client_id, (host, port));
     mqtt_opts.set_keep_alive(config.keep_alive_secs as u16);
     mqtt_opts.set_clean_session(config.clean_session);
-    // set_manual_acks MUST be set before the client builder consumes MqttOptions.
-    mqtt_opts.set_manual_acks(config.ack_mode == AckMode::Manual);
+    // The ack mode MUST be set before the client builder consumes MqttOptions.
+    mqtt_opts.set_ack_mode(match config.ack_mode {
+        AckMode::Manual => rumqttc::AckMode::Manual,
+        AckMode::Auto => rumqttc::AckMode::Automatic,
+    });
 
     if let (Some(user), Some(pass)) = (&broker.username, &broker.password) {
         mqtt_opts.set_credentials(user, pass.as_bytes().to_vec());
