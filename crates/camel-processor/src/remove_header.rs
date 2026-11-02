@@ -57,7 +57,7 @@ where
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
-        exchange.input.headers.remove(&self.key);
+        exchange.input.remove_header(&self.key);
         let fut = self.inner.call(exchange);
         Box::pin(fut)
     }
@@ -109,6 +109,20 @@ mod tests {
         assert_eq!(result.input.header("X"), Some(&Value::from(1)));
         assert_eq!(result.input.header("Z"), Some(&Value::from(3)));
         assert!(!result.input.headers.contains_key("Y"));
+    }
+
+    #[tokio::test]
+    async fn remove_header_removes_different_case() {
+        let mut exchange = Exchange::new(Message::default());
+        exchange
+            .input
+            .set_header("X-Flag", Value::String("old".into()));
+
+        let processor = RemoveHeader::new(IdentityProcessor, "x-flag");
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(result.input.header("X-Flag"), None);
+        assert_eq!(result.input.header_ic("x-flag"), None);
     }
 
     #[tokio::test]

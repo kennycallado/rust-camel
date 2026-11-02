@@ -1,0 +1,68 @@
+{
+  "change": "http-header-case-semantics",
+  "mission": "489",
+  "bd": "rc-qtpq1",
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:65315f91a31cc003c01a41567fdec19bec7878449f3b31f06616108a1eac21b4",
+  "expert": "e_opus",
+  "hash_note": "conductor gate hash from scripts/bless-hash.sh (xtask hash-artifacts, whole change dir, tasks.md included). The expert additionally recorded the raw sha256 of tasks.md as ac91732e14ea31d30bed6f4b47b93fbb830b0a0a5825c63ecb66df5ddf75da95.",
+  "supersedes_spec_bless": "sha256:85b75d2a5c2428a73445e247ef67d51bfe3e4fc1a82fd737d242986ec833f87f",
+  "spec_bless": {
+    "kind": "spec",
+    "verdict": "BLESS",
+    "hash": "sha256:85b75d2a5c2428a73445e247ef67d51bfe3e4fc1a82fd737d242986ec833f87f",
+    "expert": "e_gpt",
+    "rounds": 2
+  },
+  "plan_review_history": [
+    {
+      "round": 1,
+      "reviewer": "r_glm",
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "findings_fixed": [
+        "absent-remove Message test missing",
+        "determinism loop must rebuild map per iteration",
+        "command-count mismatch in Task 1.6"
+      ]
+    },
+    {
+      "round": 2,
+      "reviewer": "r_glm",
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "findings_fixed": [
+        "header_ic fallback expectation contradicted min-key rule",
+        "exact-match precedence unasserted"
+      ]
+    },
+    {
+      "round": 3,
+      "reviewer": "r_glm",
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "note": "only residual minor: exact-match precedence assertion; applied verbatim"
+    }
+  ],
+  "plan_bless_rounds": [
+    {
+      "round": 1,
+      "expert": "e_opus",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings_fixed": [
+        "sweep must cover workspace lib tests",
+        "add composed ingress->finalizer wiring tests",
+        "pin identical-value equality boundary",
+        "define non-UTF-8 content-type behavior",
+        "set_header as single retain + insert, O(n) note",
+        "if-absent tests must see raw-map different spelling"
+      ]
+    },
+    {
+      "round": 2,
+      "expert": "e_opus",
+      "verdict": "BLESS",
+      "optional_nit_not_applied": "Task 1.6 step 1 could name the mission test command; acceptance already lists all six commands explicitly."
+    }
+  ],
+  "expert_deviation_note": "Mission order named e_opus for the plan gate; PATTERN-V2-BLOCK says e_opus has no quota. One attempt was made per dispatch as ordered and succeeded; no fallback needed. e_opus also served the plan gate as the mission directed.",
+  "date": "2026-11-01"
+}

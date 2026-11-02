@@ -65,8 +65,7 @@ where
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         exchange
             .input
-            .headers
-            .insert(self.key.clone(), self.value.clone());
+            .set_header(self.key.clone(), self.value.clone());
         let fut = self.inner.call(exchange);
         Box::pin(fut)
     }
@@ -107,11 +106,11 @@ where
     }
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
-        exchange
-            .input
-            .headers
-            .entry(self.key.clone())
-            .or_insert(self.value.clone());
+        if exchange.input.header_ic(&self.key).is_none() {
+            exchange
+                .input
+                .set_header(self.key.clone(), self.value.clone());
+        }
         let fut = self.inner.call(exchange);
         Box::pin(fut)
     }
@@ -150,6 +149,24 @@ mod tests {
             result.input.header("key"),
             Some(&Value::String("new".into()))
         );
+    }
+
+    #[tokio::test]
+    async fn set_header_replaces_different_case() {
+        let mut exchange = Exchange::new(Message::default());
+        exchange
+            .input
+            .set_header("X-Flag", Value::String("old".into()));
+
+        let processor = SetHeader::new(IdentityProcessor, "x-flag", Value::String("new".into()));
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.input.header("x-flag"),
+            Some(&Value::String("new".into()))
+        );
+        assert_eq!(result.input.header("X-Flag"), None);
+        assert_eq!(result.input.headers.len(), 1);
     }
 
     #[tokio::test]
@@ -213,6 +230,45 @@ mod tests {
             result.input.header("key"),
             Some(&Value::String("old".into()))
         );
+    }
+
+    #[tokio::test]
+    async fn set_header_if_absent_respects_different_case() {
+        let mut exchange = Exchange::new(Message::default());
+        exchange
+            .input
+            .set_header("X-Flag", Value::String("old".into()));
+
+        let processor =
+            SetHeaderIfAbsent::new(IdentityProcessor, "x-flag", Value::String("new".into()));
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.input.header_ic("x-flag"),
+            Some(&Value::String("old".into()))
+        );
+        assert_eq!(result.input.header("x-flag"), None);
+        assert_eq!(result.input.headers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn set_header_if_absent_sees_raw_map_different_case() {
+        let mut exchange = Exchange::new(Message::default());
+        exchange
+            .input
+            .headers
+            .insert("X-Flag".into(), Value::String("old".into()));
+
+        let processor =
+            SetHeaderIfAbsent::new(IdentityProcessor, "x-flag", Value::String("new".into()));
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.input.header_ic("x-flag"),
+            Some(&Value::String("old".into()))
+        );
+        assert_eq!(result.input.header("x-flag"), None);
+        assert_eq!(result.input.headers.len(), 1);
     }
 
     #[tokio::test]

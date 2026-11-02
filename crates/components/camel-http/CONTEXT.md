@@ -267,6 +267,10 @@ Per ADR-0057 (headers) and ADR-0024 (status/body/Stop). Documents the accepted a
 - `Body::Json(v)` → JSON-serialised bytes, `Content-Type: application/json`.
 - `Body::Stream(s)` → streamed; `Content-Type` from `s.metadata.content_type`. Body MUST NOT be already consumed (system-broken `error!` if it is).
 
+The `Body::Stream` metadata content type is suppressed when it equals the inbound request
+`Content-Type` recorded at ingress in `CamelHttpRequestContentType`; the request value is never
+echoed through stream inference.
+
 ### Accepted — reply headers
 
 The reply finaliser copies an Exchange header to the HTTP response unless a
@@ -309,7 +313,15 @@ Emitted (valid response headers, NOT excluded):
   these for server-to-client communication. A bridging proxy passes them
   through.
 
-- User-supplied `Content-Type` header on the Exchange overrides the inferred content type.
+- The route's response content type is resolved case-insensitively from the Exchange, so
+  `content-type`, `Content-Type`, and mixed-case spellings all control the reply. The inbound
+  request value recorded in `CamelHttpRequestContentType` at ingress is not echoed: a content
+  type whose current value equals that recorded value is treated as inherited and omitted,
+  leaving body inference in charge. Equality is the provenance boundary — a route value that
+  happens to equal the request value is indistinguishable and is also omitted. A value that
+  differs from the recorded request value overrides body inference. Every raw content-type key
+  is dropped before emission, and exactly one `Content-Type` is appended when a content type is
+  resolved (route value or body inference), and none otherwise.
 
 ### Accepted — producer outbound headers
 

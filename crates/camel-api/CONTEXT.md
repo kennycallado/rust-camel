@@ -45,7 +45,13 @@ _Avoid_: message (for the whole envelope), event, request, packet
 
 **Message**:
 The body+headers container inside an Exchange (`message.rs`). `exchange.input` is always present;
-`exchange.output` is set for `InOut` replies.
+`exchange.output` is set for `InOut` replies. Header-key semantics are the
+`message-header-semantics` capability: `header()` matches the stored key exactly; `header_ic()`
+matches ASCII case-insensitively with an exact-case winner first and, absent one, the
+byte-order-minimum stored key; `set_header()` removes every case-insensitive duplicate and keeps
+the caller's spelling verbatim; `remove_header()` removes every case-insensitive duplicate and
+returns only the exact-case entry's value; the public `headers` map is a raw escape hatch whose
+direct writes bypass normalization, so readers that need case folding use `header_ic()`.
 _Avoid_: exchange, payload (the payload is the Message *body*, not the Message), envelope
 
 **Body**:

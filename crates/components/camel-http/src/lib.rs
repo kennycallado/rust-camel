@@ -62,7 +62,9 @@ use camel_api::component_metadata::ComponentMetadata;
 use camel_auth::bearer_token_layer::BearerTokenLayer;
 use camel_auth::oauth2::TokenProvider;
 use camel_component_api::tls_source::ServerTlsSource;
-use camel_component_api::{Body, BoxProcessor, CamelError, Exchange, StreamBody, StreamMetadata};
+use camel_component_api::{
+    Body, BoxProcessor, CamelError, Exchange, Message, StreamBody, StreamMetadata, Value,
+};
 use camel_component_api::{Component, Consumer, Endpoint, ProducerContext, RuntimeObservability};
 use camel_component_api::{UriComponents, UriConfig, parse_uri, raw_query_pairs};
 use futures::StreamExt;
@@ -2169,6 +2171,7 @@ impl Consumer for HttpConsumer {
 
                     #[allow(unused_mut)]
                     let mut exchange = Exchange::new(msg);
+                    record_request_content_type(&mut exchange, &envelope.headers);
 
                     // Extract W3C TraceContext headers for distributed tracing (opt-in via "otel" feature)
                     #[cfg(feature = "otel")]
@@ -2334,10 +2337,13 @@ impl Consumer for HttpConsumer {
                                     })
                                     .unwrap_or(200);
 
-                                let user_content_type = out
-                                    .input
-                                    .header("Content-Type")
-                                    .and_then(|v| v.as_str().map(|s| s.to_string()));
+                                let inherited_ct = out
+                                    .property(PROPERTY_REQUEST_CONTENT_TYPE)
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string);
+
+                                let user_content_type =
+                                    response_content_type(&out.input, inherited_ct.as_deref());
 
                                 let (reply_body, inferred_content_type): (HttpReplyBody, Option<String>) = match out.input.body {
                                     Body::Bytes(b) => (HttpReplyBody::Bytes(b), None),
@@ -2347,7 +2353,10 @@ impl Consumer for HttpConsumer {
                                         v.to_string().into_bytes(),
                                     )), Some("application/json".to_string())),
                                     Body::Stream(s) => {
-                                        let ct = s.metadata.content_type.clone();
+                                        let ct = response_stream_content_type(
+                                            s.metadata.content_type.clone(),
+                                            inherited_ct.as_deref(),
+                                        );
                                         match s.stream.lock().await.take() {
                                             Some(stream) => (
                                                 HttpReplyBody::Stream(stream),
@@ -3759,6 +3768,44 @@ fn scalar_string_form(v: &serde_json::Value) -> Option<String> {
         serde_json::Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
+}
+
+/// Exchange property carrying the inbound request `Content-Type` recorded at
+/// ingress; the reply finaliser suppresses a response content type equal to
+/// this inherited value.
+const PROPERTY_REQUEST_CONTENT_TYPE: &str = "CamelHttpRequestContentType";
+
+/// Record the inbound request `Content-Type` on the exchange so the reply
+/// finaliser can suppress a response content type that merely echoes it.
+/// A missing header or a non-UTF-8 value leaves properties untouched.
+fn record_request_content_type(exchange: &mut Exchange, headers: &http::HeaderMap) {
+    if let Some(value) = headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+    {
+        exchange.set_property(
+            PROPERTY_REQUEST_CONTENT_TYPE,
+            Value::String(value.to_string()),
+        );
+    }
+}
+
+/// Resolve the route's response content type with case-insensitive lookup,
+/// dropping it when it still equals the inherited request value.
+fn response_content_type(msg: &Message, inherited: Option<&str>) -> Option<String> {
+    msg.header_ic("Content-Type")
+        .and_then(Value::as_str)
+        .filter(|value| Some(*value) != inherited)
+        .map(str::to_string)
+}
+
+/// Resolve a `Body::Stream` metadata content type, dropping it when it equals
+/// the inherited request value.
+fn response_stream_content_type(
+    metadata: Option<String>,
+    inherited: Option<&str>,
+) -> Option<String> {
+    metadata.filter(|value| Some(value.as_str()) != inherited)
 }
 
 /// Select the HTTP response headers emitted by the consumer reply finaliser

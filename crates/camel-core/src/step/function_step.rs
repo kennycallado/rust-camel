@@ -151,10 +151,10 @@ fn apply_patch(ex: &mut Exchange, patch: ExchangePatch) {
         };
     }
     for (k, v) in patch.headers_set {
-        ex.input.headers.insert(k, v);
+        ex.input.set_header(k, v);
     }
     for k in patch.headers_removed {
-        ex.input.headers.remove(&k);
+        ex.input.remove_header(&k);
     }
     for (k, v) in patch.properties_set {
         ex.properties.insert(k, v);
@@ -310,6 +310,51 @@ mod tests {
             Some("val")
         );
         assert!(!result.input.headers.contains_key("x-old"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_header_set_replaces_different_case() {
+        let invoker = Arc::new(MockInvoker::new(vec![Ok(ExchangePatch {
+            headers_set: vec![("content-type".into(), serde_json::json!("application/json"))],
+            ..Default::default()
+        })]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let mut ex = Exchange::default();
+        ex.input
+            .headers
+            .insert("Content-Type".into(), serde_json::json!("application/xml"));
+        let result = step.call(ex).await.unwrap();
+
+        let matching = result
+            .input
+            .headers
+            .keys()
+            .filter(|k| k.eq_ignore_ascii_case("content-type"))
+            .count();
+        assert_eq!(matching, 1, "expected a single content-type entry");
+        assert_eq!(
+            result.input.headers.get("content-type"),
+            Some(&serde_json::json!("application/json"))
+        );
+        assert_eq!(
+            result.input.header_ic("Content-Type"),
+            Some(&serde_json::json!("application/json"))
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_header_remove_is_case_insensitive() {
+        let invoker = Arc::new(MockInvoker::new(vec![Ok(ExchangePatch {
+            headers_removed: vec!["x-flag".into()],
+            ..Default::default()
+        })]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let mut ex = Exchange::default();
+        ex.input
+            .headers
+            .insert("X-Flag".into(), serde_json::json!("on"));
+        let result = step.call(ex).await.unwrap();
+        assert_eq!(result.input.header_ic("x-flag"), None);
     }
 
     #[tokio::test]

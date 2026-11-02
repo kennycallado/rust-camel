@@ -9107,6 +9107,221 @@ fn response_re_derives_content_type() {
 }
 
 #[test]
+fn response_content_type_reads_lowercase_header() {
+    let mut msg = Message::default();
+    msg.set_header("content-type", "application/vnd.acme+json");
+    assert_eq!(
+        response_content_type(&msg, None).as_deref(),
+        Some("application/vnd.acme+json")
+    );
+}
+
+#[test]
+fn response_content_type_reads_mixed_case_header() {
+    let mut msg = Message::default();
+    msg.set_header("CoNtEnT-TyPe", "application/vnd.acme+json");
+    assert_eq!(
+        response_content_type(&msg, None).as_deref(),
+        Some("application/vnd.acme+json")
+    );
+}
+
+#[test]
+fn response_content_type_drops_inherited_equal_value() {
+    let mut msg = Message::default();
+    msg.set_header("Content-Type", "application/xml");
+    assert_eq!(response_content_type(&msg, Some("application/xml")), None);
+}
+
+#[test]
+fn response_content_type_keeps_changed_value() {
+    let mut msg = Message::default();
+    msg.set_header("content-type", "application/json");
+    assert_eq!(
+        response_content_type(&msg, Some("application/xml")).as_deref(),
+        Some("application/json")
+    );
+}
+
+#[test]
+fn record_request_content_type_sets_property() {
+    let mut exchange = Exchange::new(Message::default());
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/xml"),
+    );
+    record_request_content_type(&mut exchange, &headers);
+    assert_eq!(
+        exchange.property(PROPERTY_REQUEST_CONTENT_TYPE),
+        Some(&Value::String("application/xml".to_string()))
+    );
+}
+
+#[test]
+fn record_request_content_type_absent_leaves_properties_empty() {
+    let mut exchange = Exchange::new(Message::default());
+    let headers = http::HeaderMap::new();
+    record_request_content_type(&mut exchange, &headers);
+    assert_eq!(exchange.property(PROPERTY_REQUEST_CONTENT_TYPE), None);
+}
+
+#[test]
+fn record_request_content_type_skips_non_utf8_value() {
+    let mut exchange = Exchange::new(Message::default());
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_bytes(b"\xff").expect("0xFF is valid obs-text"),
+    );
+    record_request_content_type(&mut exchange, &headers);
+    assert_eq!(exchange.property(PROPERTY_REQUEST_CONTENT_TYPE), None);
+}
+
+#[test]
+fn record_request_content_type_keeps_message_header() {
+    let mut message = Message::default();
+    message.set_header("Content-Type", "application/xml");
+    let mut exchange = Exchange::new(message);
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/xml"),
+    );
+    record_request_content_type(&mut exchange, &headers);
+    assert_eq!(
+        exchange.input.header_ic("content-type"),
+        Some(&Value::String("application/xml".to_string()))
+    );
+}
+
+#[test]
+fn reply_content_type_round_trip_no_echo() {
+    let mut message = Message::default();
+    message.set_header("Content-Type", "application/xml");
+    let mut exchange = Exchange::new(message);
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/xml"),
+    );
+    record_request_content_type(&mut exchange, &headers);
+    let inherited = exchange
+        .property(PROPERTY_REQUEST_CONTENT_TYPE)
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    assert_eq!(
+        response_content_type(&exchange.input, inherited.as_deref()),
+        None
+    );
+}
+
+#[test]
+fn reply_content_type_round_trip_lowercase_override() {
+    let mut message = Message::default();
+    message.set_header("Content-Type", "application/xml");
+    let mut exchange = Exchange::new(message);
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/xml"),
+    );
+    record_request_content_type(&mut exchange, &headers);
+    let inherited = exchange
+        .property(PROPERTY_REQUEST_CONTENT_TYPE)
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    exchange
+        .input
+        .set_header("content-type", "application/json");
+    assert_eq!(
+        response_content_type(&exchange.input, inherited.as_deref()).as_deref(),
+        Some("application/json")
+    );
+}
+
+#[test]
+fn reply_content_type_round_trip_identical_is_inherited() {
+    let mut message = Message::default();
+    message.set_header("Content-Type", "application/xml");
+    let mut exchange = Exchange::new(message);
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/xml"),
+    );
+    record_request_content_type(&mut exchange, &headers);
+    let inherited = exchange
+        .property(PROPERTY_REQUEST_CONTENT_TYPE)
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    exchange.input.set_header("content-type", "application/xml");
+    assert_eq!(
+        response_content_type(&exchange.input, inherited.as_deref()),
+        None
+    );
+}
+
+#[test]
+fn response_stream_content_type_drops_inherited_value() {
+    assert_eq!(
+        response_stream_content_type(Some("application/xml".to_string()), Some("application/xml"),),
+        None
+    );
+}
+
+#[test]
+fn response_stream_content_type_keeps_changed_value() {
+    assert_eq!(
+        response_stream_content_type(Some("text/csv".to_string()), Some("application/xml")),
+        Some("text/csv".to_string())
+    );
+}
+
+#[test]
+fn select_response_headers_drops_all_content_type_spellings() {
+    let headers = make_headers(&[
+        ("Content-Type", "application/xml"),
+        ("content-type", "application/xml"),
+    ]);
+    let selected = select_response_headers(&headers, None, None);
+    assert!(
+        selected
+            .iter()
+            .all(|(k, _)| !k.eq_ignore_ascii_case("Content-Type")),
+        "every content-type spelling must be dropped: {selected:?}"
+    );
+}
+
+#[test]
+fn select_response_headers_appends_single_resolved_content_type() {
+    let headers = make_headers(&[("content-type", "application/xml")]);
+    let selected = select_response_headers(&headers, Some("text/csv".into()), None);
+    let ct_entries: Vec<&str> = selected
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
+        .map(|(_, v)| v.as_str())
+        .collect();
+    assert_eq!(
+        ct_entries,
+        ["text/csv"],
+        "exactly one resolved Content-Type entry"
+    );
+}
+
+#[test]
+fn select_response_headers_emits_no_content_type_when_unresolved() {
+    let headers = HashMap::new();
+    let selected = select_response_headers(&headers, None, None);
+    assert!(
+        selected
+            .iter()
+            .all(|(k, _)| !k.eq_ignore_ascii_case("Content-Type")),
+        "no Content-Type may be emitted when unresolved: {selected:?}"
+    );
+}
+
+#[test]
 fn response_excludes_camel_headers() {
     let headers = make_headers(&[("CamelHttpPath", "/foo"), ("Cache-Control", "public")]);
     let selected = select_response_headers(&headers, None, None);

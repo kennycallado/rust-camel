@@ -77,7 +77,7 @@ where
         let mut inner = std::mem::replace(&mut self.inner, clone);
         Box::pin(async move {
             let value = source.evaluate(&exchange).await?;
-            exchange.input.headers.insert(key, value);
+            exchange.input.set_header(key, value);
             inner.call(exchange).await
         })
     }
@@ -120,7 +120,7 @@ where
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         // Check BEFORE evaluating the expression: a present header skips
         // evaluation entirely (today's semantics).
-        if exchange.input.headers.contains_key(&self.key) {
+        if exchange.input.header_ic(&self.key).is_some() {
             let clone = self.inner.clone();
             let mut inner = std::mem::replace(&mut self.inner, clone);
             return Box::pin(inner.call(exchange));
@@ -133,7 +133,7 @@ where
         let mut inner = std::mem::replace(&mut self.inner, clone);
         Box::pin(async move {
             let value = source.evaluate(&exchange).await?;
-            exchange.input.headers.insert(key, value);
+            exchange.input.set_header(key, value);
             inner.call(exchange).await
         })
     }
@@ -294,6 +294,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dynamic_set_header_replaces_different_case() {
+        let mut msg = Message::default();
+        msg.set_header("X-Flag", Value::String("old".into()));
+
+        let svc = DynamicSetHeader::new(
+            IdentityProcessor,
+            "x-flag",
+            sync_source(|_ex: &Exchange| Value::String("raw".into())),
+        );
+
+        let result = svc.oneshot(Exchange::new(msg)).await.unwrap();
+        assert_eq!(
+            result.input.header("x-flag"),
+            Some(&Value::String("raw".into()))
+        );
+        assert_eq!(result.input.header("X-Flag"), None);
+        assert_eq!(result.input.headers.len(), 1);
+    }
+
+    #[tokio::test]
     async fn test_dynamic_set_header_preserves_body() {
         let exchange = Exchange::new(Message::new("body content"));
 
@@ -380,6 +400,63 @@ mod tests {
             call_count.load(Ordering::SeqCst),
             0,
             "expression must NOT be evaluated when header is present"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_set_header_if_absent_respects_different_case() {
+        let evals = Arc::new(AtomicUsize::new(0));
+        let evals_clone = Arc::clone(&evals);
+        let source = sync_source(move |_ex: &Exchange| {
+            evals_clone.fetch_add(1, Ordering::SeqCst);
+            Value::String("new".into())
+        });
+
+        let mut msg = Message::default();
+        msg.set_header("X-Flag", Value::String("old".into()));
+
+        let svc = DynamicSetHeaderIfAbsent::new(IdentityProcessor, "x-flag", source);
+        let result = svc.oneshot(Exchange::new(msg)).await.unwrap();
+
+        assert_eq!(
+            result.input.header("X-Flag"),
+            Some(&Value::String("old".into()))
+        );
+        assert_eq!(result.input.header("x-flag"), None);
+        assert_eq!(result.input.headers.len(), 1);
+        assert_eq!(
+            evals.load(Ordering::SeqCst),
+            0,
+            "expression must NOT be evaluated when a different-case header is present"
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_set_header_if_absent_sees_raw_map_different_case() {
+        let evals = Arc::new(AtomicUsize::new(0));
+        let evals_clone = Arc::clone(&evals);
+        let source = sync_source(move |_ex: &Exchange| {
+            evals_clone.fetch_add(1, Ordering::SeqCst);
+            Value::String("new".into())
+        });
+
+        let mut msg = Message::default();
+        msg.headers
+            .insert("X-Flag".into(), Value::String("old".into()));
+
+        let svc = DynamicSetHeaderIfAbsent::new(IdentityProcessor, "x-flag", source);
+        let result = svc.oneshot(Exchange::new(msg)).await.unwrap();
+
+        assert_eq!(
+            result.input.header("X-Flag"),
+            Some(&Value::String("old".into()))
+        );
+        assert_eq!(result.input.header("x-flag"), None);
+        assert_eq!(result.input.headers.len(), 1);
+        assert_eq!(
+            evals.load(Ordering::SeqCst),
+            0,
+            "expression must NOT be evaluated when a raw-map case variant is present"
         );
     }
 
