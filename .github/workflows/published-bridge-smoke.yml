@@ -76,7 +76,7 @@ jobs:
       # The published asset is a GraalVM native image, but keep the JDK in the
       # environment: it matches the toolchain used to build the bridge and
       # catches any JVM-dependent path the native image might still take.
-      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           java-version: '21'
           distribution: 'temurin'
@@ -85,7 +85,7 @@ jobs:
         with:
           toolchain: stable
 
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
 
       - name: Install libclang for bindgen
         run: sudo apt-get install -y libclang-dev
