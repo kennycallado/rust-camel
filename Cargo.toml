@@ -154,7 +154,6 @@ tonic = { version = "0.14", features = ["transport", "tls-native-roots"] }
 prost = { version = "0.14" }
 prost-reflect = { version = "0.16", features = ["serde"] }
 protox = "=0.9.1"
-tonic-build = { version = "0.14" }
 tonic-prost-build = { version = "0.14" }
 tonic-prost = { version = "0.14" }
 tower = { version = "0.5", features = ["util"] }
@@ -289,9 +288,6 @@ prometheus = "0.14"
 quick-xml = "0.42"
 quote = "1.0"
 base64 = "0.23"
-pkcs1 = { version = "0.7", features = ["pem"] }
-pkcs8 = { version = "0.11", features = ["pem"] }
-serde_urlencoded = "0.7"
 zeroize = "1"
 rand = "0.10"
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
@@ -308,7 +304,6 @@ schemars = "1"
 ts-rs = "12"
 
 # WASM dependencies
-wit-bindgen = "0.61"
 wasmtime = { version = "49.0.4", default-features = false, features = ["anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null", "wat", "profiling", "parallel-compilation", "cranelift", "pooling-allocator", "demangle", "addr2line", "coredump", "debug-builtins", "runtime", "component-model", "component-model-async", "threads", "stack-switching", "std", "debug", "compile-time-builtins", "wit-parser"] }
 wasmtime-wasi = "49.0.4"
 
