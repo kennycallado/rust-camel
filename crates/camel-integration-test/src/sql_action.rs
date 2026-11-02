@@ -161,12 +161,15 @@ pub async fn execute_sql_prepare(
     let (pool, db_url) =
         crate::steering::resolve_datasource::<sqlx::AnyPool>(catalog, name, "sql action").await?;
     for (i, stmt) in action.prepare.iter().enumerate() {
-        sqlx::query(stmt).execute(&*pool).await.map_err(|e| {
-            format!(
-                "datasource '{name}' statement [{i}]: {}",
-                sanitize_db_error(&e.to_string(), &db_url)
-            )
-        })?;
+        sqlx::query(sqlx::AssertSqlSafe(stmt.as_str()))
+            .execute(&*pool)
+            .await
+            .map_err(|e| {
+                format!(
+                    "datasource '{name}' statement [{i}]: {}",
+                    sanitize_db_error(&e.to_string(), &db_url)
+                )
+            })?;
     }
     Ok(())
 }

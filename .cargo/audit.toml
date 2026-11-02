@@ -1,11 +1,14 @@
 [advisories]
 # RUSTSEC-2023-0071 (rsa, Marvin Attack) — non-applicable in rust-camel.
-# `rsa` is pulled only by sqlx-mysql (camel-component-sql's sqlx `mysql` feature),
-# used for client-side RSA public-key encryption in MySQL caching_sha2_password auth.
-# Marvin is a private-key timing leak; the rust-camel side is the MySQL client and
-# holds no RSA private key, so the vector does not apply. The auth-issuance path
-# (camel-auth) was migrated off `rsa` to pkcs1/pkcs8 (bd rc-ayu). To fully drop rsa,
-# remove MySQL support from camel-component-sql.
+# Since sqlx 0.9, MySQL caching_sha2_password RSA auth is behind the opt-in
+# `mysql-rsa` feature; rust-camel does not enable it, so sqlx-mysql no longer
+# pulls `rsa`. The crate remains in the lock only via surrealdb-core 3.2.4 ->
+# jsonwebtoken 10.4.0's `rust_crypto` feature (wasm target). There it verifies
+# RS256 tokens with public material against an operator-configured, trusted
+# SurrealDB instance; rust-camel holds no RSA private key, so the Marvin
+# private-key timing vector does not apply. The auth-issuance path (camel-auth)
+# was migrated off `rsa` to pkcs1/pkcs8 (bd rc-ayu). Remove this entry once
+# surrealdb's jsonwebtoken moves to 11 (or drops the rust_crypto feature).
 #
 # RUSTSEC-2026-0235 (rkyv, OOB read on archives containing Rc/Arc) — transitive,
 # non-applicable in rust-camel. `rkyv 0.7.46` is pulled by `rust_decimal` (optional

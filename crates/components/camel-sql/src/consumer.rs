@@ -108,7 +108,10 @@ impl SqlConsumer {
             return self.poll_database_stream(pool, context, &prepared).await;
         }
 
-        let query = bind_json_values(sqlx::query(&prepared.sql), &prepared.bindings);
+        let query = bind_json_values(
+            sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str())),
+            &prepared.bindings,
+        );
         let rows: Vec<AnyRow> = query.fetch_all(pool).await.map_err(|e| {
             warn!(error = %e, "SQL consumer poll query failed");
             CamelError::ProcessorError(format!("Query execution failed: {}", e))
@@ -237,7 +240,7 @@ impl SqlConsumer {
         let bindings = prepared.bindings.clone();
 
         let byte_stream = async_stream::try_stream! {
-            let mut q = sqlx::query(&sql_str);
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql_str.as_str()));
             q = bind_json_values(q, &bindings);
             let mut rows = q.fetch(&pool_clone);
             while let Some(row) = rows.try_next().await.map_err(|e| {
@@ -329,7 +332,10 @@ impl SqlConsumer {
         let prepared = resolve_params(&template, &temp_exchange, &self.config.in_separator)?;
 
         // Build and execute the query
-        let query = bind_json_values(sqlx::query(&prepared.sql), &prepared.bindings);
+        let query = bind_json_values(
+            sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str())),
+            &prepared.bindings,
+        );
         let result = query.execute(pool).await.map_err(|e| {
             CamelError::ProcessorError(format!("Post-query execution failed: {}", e))
         })?;

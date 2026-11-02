@@ -291,7 +291,7 @@ base64 = "0.23"
 zeroize = "1"
 rand = "0.10"
 rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
-sqlx = "0.8"
+sqlx = "0.9"
 sxd-document = "0.3"
 syn = "3"
 jsonschema = { version = "0.60", default-features = false, features = ["resolve-file"] }

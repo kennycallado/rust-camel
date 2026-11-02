@@ -323,7 +323,7 @@ async fn execute_select(
     match config.output_type {
         SqlOutputType::SelectOne => {
             // fetch_all and take first row
-            let mut query = sqlx::query(&prepared.sql);
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str()));
             query = bind_json_values(query, &prepared.bindings);
 
             let rows: Vec<AnyRow> = query.fetch_all(pool).await.map_err(|e| {
@@ -350,7 +350,7 @@ async fn execute_select(
         }
         SqlOutputType::SelectList => {
             // fetch_all for list output
-            let mut query = sqlx::query(&prepared.sql);
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str()));
             query = bind_json_values(query, &prepared.bindings);
 
             let rows: Vec<AnyRow> = query.fetch_all(pool).await.map_err(|e| {
@@ -381,7 +381,7 @@ async fn execute_select(
 
             // Build the stream that reads rows on demand and serializes to NDJSON bytes
             let byte_stream = async_stream::try_stream! {
-                let mut q = sqlx::query(&sql_str);
+                let mut q = sqlx::query(sqlx::AssertSqlSafe(sql_str.as_str()));
                 q = bind_json_values(q, &bindings);
                 let mut rows = q.fetch(&pool_clone);
                 while let Some(row) = rows.try_next().await.map_err(|e| {
@@ -420,7 +420,7 @@ async fn execute_modify(
     config: &SqlEndpointConfig,
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
-    let mut query = sqlx::query(&prepared.sql);
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str()));
     query = bind_json_values(query, &prepared.bindings);
 
     let result = query.execute(pool).await.map_err(|e| {
@@ -509,7 +509,7 @@ async fn execute_batch(
         let prepared = resolve_params(&template, &temp_exchange, &config.in_separator)?;
 
         // Execute against transaction
-        let mut query = sqlx::query(&prepared.sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str()));
         query = bind_json_values(query, &prepared.bindings);
 
         let result = query.execute(&mut *tx).await.map_err(|e| {

@@ -60,15 +60,18 @@ async fn wait_for_mock_exchanges(mock: &MockComponent, endpoint_name: &str, min_
 }
 
 async fn setup_test_table(pool: &AnyPool, table_name: &str) {
-    sqlx::query(&format!("DROP TABLE IF EXISTS {}", table_name))
-        .execute(pool)
-        .await
-        .ok();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP TABLE IF EXISTS {}",
+        table_name
+    )))
+    .execute(pool)
+    .await
+    .ok();
 
-    sqlx::query(&format!(
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         "CREATE TABLE {} (id SERIAL PRIMARY KEY, name VARCHAR(255), value INTEGER)",
         table_name
-    ))
+    )))
     .execute(pool)
     .await
     .expect("Failed to create table");

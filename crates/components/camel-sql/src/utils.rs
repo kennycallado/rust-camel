@@ -74,9 +74,9 @@ pub(crate) fn row_to_json(row: &AnyRow) -> Result<serde_json::Value, CamelError>
 ///
 /// Handles: Null, Bool, Number (i64/f64), String, Array/Object (serialized to JSON string).
 pub(crate) fn bind_json_values<'q>(
-    mut query: Query<'q, Any, AnyArguments<'q>>,
+    mut query: Query<'q, Any, AnyArguments>,
     values: &'q [serde_json::Value],
-) -> Query<'q, Any, AnyArguments<'q>> {
+) -> Query<'q, Any, AnyArguments> {
     for value in values {
         query = match value {
             serde_json::Value::Null => query.bind(Option::<String>::None),

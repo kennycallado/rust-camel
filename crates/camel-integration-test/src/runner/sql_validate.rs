@@ -169,7 +169,7 @@ async fn snapshot(
     pool: &sqlx::AnyPool,
     db_url: &str,
 ) -> Result<Snapshot, ScenarioFailure> {
-    let rows = sqlx::query(&target.query)
+    let rows = sqlx::query(sqlx::AssertSqlSafe(target.query.as_str()))
         .fetch_all(pool)
         .await
         .map_err(|e| {
