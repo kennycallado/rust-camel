@@ -561,7 +561,7 @@ csv-core v0.1.13
 curve25519-dalek feature "digest"
 curve25519-dalek feature "precomputed-tables"
 curve25519-dalek feature "zeroize"
-curve25519-dalek v4.1.3
+curve25519-dalek v5.0.0
 curve25519-dalek-derive feature "default"
 curve25519-dalek-derive v0.1.1 (proc-macro)
 darling feature "default"
@@ -647,14 +647,14 @@ dynify feature "macros"
 dynify v0.1.2
 dynify-macros feature "default"
 dynify-macros v0.1.2 (proc-macro)
-ed25519 v2.2.3
+ed25519 v3.0.0
 ed25519-dalek feature "default"
 ed25519-dalek feature "digest"
 ed25519-dalek feature "fast"
 ed25519-dalek feature "hazmat"
 ed25519-dalek feature "signature"
 ed25519-dalek feature "zeroize"
-ed25519-dalek v2.2.0
+ed25519-dalek v3.0.0
 educe feature "Clone"
 educe feature "Debug"
 educe feature "Hash"
@@ -1932,6 +1932,7 @@ signature feature "digest"
 signature feature "rand_core"
 signature feature "std"
 signature v2.2.0
+signature v3.0.0
 simd-adler32 feature "std"
 simd-adler32 v0.3.10
 simple_asn1 feature "default"
