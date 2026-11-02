@@ -411,7 +411,7 @@ pub fn build_context_bounded(
         ))
     })?;
 
-    // Happy path: build the minijinja::Value directly via from_serialize.
+    // Happy path: build the minijinja::Value directly via the serde wrapper.
     // The header/property maps are cloned once per context build (no
     // per-eval borrow is possible into `ContextReader::call`).
     let headers = Arc::new(exchange.input.headers.clone());
@@ -431,23 +431,23 @@ pub fn build_context_bounded(
                     minijinja::ErrorKind::InvalidOperation,
                     STREAM_REFUSAL,
                 )),
-                _ => minijinja::Value::from_serialize(&body_view),
+                _ => minijinja::Value::from(minijinja::value::Serde(&body_view)),
             },
         ),
         (
             "headers".to_string(),
-            minijinja::Value::from_serialize(&exchange.input.headers),
+            minijinja::Value::from(minijinja::value::Serde(&exchange.input.headers)),
         ),
         (
             "exchangeProperty".to_string(),
-            minijinja::Value::from_serialize(&exchange.properties),
+            minijinja::Value::from(minijinja::value::Serde(&exchange.properties)),
         ),
         ("header".to_string(), reader(ReaderKind::Header)),
         ("property".to_string(), reader(ReaderKind::Property)),
         ("has_header".to_string(), reader(ReaderKind::HasHeader)),
         ("has_property".to_string(), reader(ReaderKind::HasProperty)),
     ]);
-    Ok(minijinja::Value::from_serialize(&map))
+    Ok(minijinja::Value::from(minijinja::value::Serde(&map)))
 }
 
 /// Which exchange map a [`ContextReader`] callable reads.
@@ -472,7 +472,7 @@ struct ContextReader {
 impl minijinja::value::Object for ContextReader {
     fn call(
         self: &Arc<Self>,
-        _state: &minijinja::State<'_, '_>,
+        _state: &mut minijinja::State<'_, '_>,
         args: &[minijinja::value::Value],
     ) -> Result<minijinja::value::Value, minijinja::Error> {
         let invalid = || {
@@ -494,7 +494,7 @@ impl minijinja::value::Object for ContextReader {
                 minijinja::Value::from(map.contains_key(key))
             }
             ReaderKind::Header | ReaderKind::Property => match map.get(key) {
-                Some(v) => minijinja::Value::from_serialize(v),
+                Some(v) => minijinja::Value::from(minijinja::value::Serde(v)),
                 None => minijinja::Value::from(()),
             },
         })

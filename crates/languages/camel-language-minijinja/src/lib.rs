@@ -1016,7 +1016,7 @@ mod engine_render_public_path {
 
     #[tokio::test]
     async fn engine_render_is_public() {
-        let value = MjValue::from_serialize(serde_json::json!({ "x": "y" }));
+        let value = MjValue::from(minijinja::value::Serde(serde_json::json!({ "x": "y" })));
         let rendered = engine::render(
             "{% autoescape \"none\" %}{{x}}{% endautoescape %}",
             &value,

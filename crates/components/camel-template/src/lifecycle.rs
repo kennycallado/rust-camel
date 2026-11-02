@@ -184,7 +184,7 @@ mod tests {
     fn ctx_name(k: &str) -> minijinja::Value {
         let mut m: BTreeMap<&str, &str> = BTreeMap::new();
         m.insert("name", k);
-        minijinja::Value::from_serialize(&m)
+        minijinja::Value::from(minijinja::value::Serde(&m))
     }
 
     #[tokio::test]

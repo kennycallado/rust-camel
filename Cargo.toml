@@ -258,7 +258,7 @@ rhai = { version = "1", features = ["sync", "no_module"] }
 # - fuel: required for set_fuel() (S5 resource limit, see ADR-0047 §4).
 # - json: enables {% autoescape "json" %} via AutoEscape::Json (spec §4 S7).
 # - urlencode: enables the |urlencode filter (used by HTTP query templates).
-minijinja = { version = "2", features = ["fuel", "json", "urlencode"] }
+minijinja = { version = "3", features = ["fuel", "json", "serde", "urlencode"] }
 # Pin to 0.21: Context is !Send + !Sync
 boa_engine = { version = "0.22", features = [] }
 arc-swap = "1"

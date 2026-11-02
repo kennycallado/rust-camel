@@ -14,12 +14,12 @@ fn snapshot(entry: &str, source: &str) -> ClosureSnapshot {
 fn ctx_name(k: &str) -> minijinja::Value {
     let mut m: BTreeMap<&str, &str> = BTreeMap::new();
     m.insert("name", k);
-    minijinja::Value::from_serialize(&m)
+    minijinja::Value::from(minijinja::value::Serde(&m))
 }
 
 /// An empty-but-defined context object.
 fn ctx_empty() -> minijinja::Value {
-    minijinja::Value::from_serialize(BTreeMap::<&str, &str>::new())
+    minijinja::Value::from(minijinja::value::Serde(BTreeMap::<&str, &str>::new()))
 }
 
 #[tokio::test]
@@ -561,7 +561,7 @@ async fn truncate_custom_end_only_on_truncation() {
     m.insert("short", "abc");
     let rendered = set
         .render_entry(
-            minijinja::Value::from_serialize(&m),
+            minijinja::Value::from(minijinja::value::Serde(&m)),
             ResolvedLimits::default(),
         )
         .await
@@ -656,7 +656,7 @@ async fn dump_serializes_object_array_scalar_deterministically() {
     m.insert("obj", serde_json::json!({"b": 1, "a": 2}));
     m.insert("items", serde_json::json!([1, 2, 3]));
     m.insert("title", serde_json::json!("Ada"));
-    let ctx = minijinja::Value::from_serialize(&m);
+    let ctx = minijinja::Value::from(minijinja::value::Serde(&m));
     let first = set
         .render_entry(ctx.clone(), ResolvedLimits::default())
         .await
@@ -680,11 +680,12 @@ async fn dump_serializes_object_array_scalar_deterministically() {
 /// silently lossy-converting.
 #[test]
 fn dump_filter_fails_on_unserializable_map() {
-    let fixture = std::iter::once((
-        minijinja::Value::from(vec![1i64, 2]),
-        minijinja::Value::from("x"),
-    ))
-    .collect::<minijinja::Value>();
+    // minijinja 3's `FromIterator for Value` builds a sequence, so construct
+    // the sequence-keyed map explicitly through the serde wrapper.
+    let fixture = minijinja::Value::from(minijinja::value::Serde(BTreeMap::from([(
+        vec![1i64, 2],
+        "x",
+    )])));
     assert!(
         serde_json::to_string(&fixture).is_err(),
         "fixture precondition: a sequence-keyed map has no JSON object form"
@@ -706,12 +707,13 @@ async fn dump_unserializable_value_is_render_error() {
     );
     let set = TemplateSet::compile(&snap, "dump.html", MinijinjaLimitsConfig::default(), None)
         .expect("compile must succeed — the filter is resolved at render time");
-    let broken = std::iter::once((
-        minijinja::Value::from(vec![1i64, 2]),
-        minijinja::Value::from("x"),
-    ))
-    .collect::<minijinja::Value>();
-    let ctx: minijinja::Value = std::iter::once(("broken", broken)).collect();
+    let broken = minijinja::Value::from(minijinja::value::Serde(BTreeMap::from([(
+        vec![1i64, 2],
+        "x",
+    )])));
+    let ctx = minijinja::Value::from(minijinja::value::Serde(BTreeMap::from([(
+        "broken", broken,
+    )])));
     let result = set.render_entry(ctx, ResolvedLimits::default()).await;
     match &result {
         Err(TemplateReloadError::Render(_)) => {}
@@ -736,7 +738,7 @@ async fn dump_output_stays_subject_to_autoescape() {
     m.insert("obj", serde_json::json!({"path": "a/b"}));
     let rendered = set
         .render_entry(
-            minijinja::Value::from_serialize(&m),
+            minijinja::Value::from(minijinja::value::Serde(&m)),
             ResolvedLimits::default(),
         )
         .await
@@ -816,7 +818,7 @@ async fn slash_escapes_under_html_autoescape() {
     m.insert("path", "a/b");
     let rendered = set
         .render_entry(
-            minijinja::Value::from_serialize(&m),
+            minijinja::Value::from(minijinja::value::Serde(&m)),
             ResolvedLimits::default(),
         )
         .await
