@@ -132,11 +132,11 @@ routes:
             format: mime
             content_types:
               - application/octet-stream
-        aggregation: collect_all
-        steps:
-          - unmarshal: gzip
-          - unmarshal: xml
-          - to: "file:data/dmarc"
+          aggregation: collect_all
+          steps:
+            - unmarshal: gzip
+            - unmarshal: xml
+            - to: "file:data/dmarc"
 ```
 
 The `content_types` allowlist selects the report parts. `unmarshal: gzip` decompresses the report, and `unmarshal: xml` parses it into JSON. For a `.zip` report, use `unmarshal: zip` in place of `unmarshal: gzip`. See the [MIME Splitter](../eip/mime-splitter.md) for the options and the emitted headers.

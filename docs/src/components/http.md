@@ -103,7 +103,8 @@ The inherited path appends to the endpoint path. This route sends the request to
 
 ```yaml
 routes:
-  - from: "http://0.0.0.0:8080/_forms/contact"
+  - id: http-inherited-path-append
+    from: "http://0.0.0.0:8080/_forms/contact"
     steps:
       - to: "http://host/_actions/contact"
 ```
@@ -112,7 +113,8 @@ Remove the header before the producer call to keep the configured path:
 
 ```yaml
 routes:
-  - from: "http://0.0.0.0:8080/_forms/contact"
+  - id: http-inherited-path-remove
+    from: "http://0.0.0.0:8080/_forms/contact"
     steps:
       - remove_header:
           key: CamelHttpPath
