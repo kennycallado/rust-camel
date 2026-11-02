@@ -83,7 +83,7 @@ jobs:
           sudo docker image prune -af || true
           sudo apt-get clean
           df -h /
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned MSRV floor (ADR-0095)
         with:
           toolchain: "1.96.0"
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
