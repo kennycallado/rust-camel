@@ -905,13 +905,21 @@ fn envelope_path(exe: &Path) -> PathBuf {
 }
 
 /// Stream `artifact` through `Sha512` exactly once and return the
-/// finalized 64-byte Ed25519ph prehash. Flat memory: `io::copy` feeds
-/// the file through the hasher in bounded chunks — the artifact is
-/// never buffered.
+/// finalized 64-byte Ed25519ph prehash. Flat memory: bounded reads feed
+/// the file through the hasher — the artifact is never buffered.
 fn stream_sha512(artifact: &Path) -> std::io::Result<[u8; 64]> {
+    use std::io::Read as _;
+
     let mut file = std::fs::File::open(artifact)?;
     let mut hasher = Sha512::new();
-    std::io::copy(&mut file, &mut hasher)?;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     Ok(hasher.finalize().into())
 }
 

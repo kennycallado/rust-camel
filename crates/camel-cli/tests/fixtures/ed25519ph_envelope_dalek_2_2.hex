@@ -1,0 +1,17 @@
+# Provenance: generated with ed25519-dalek 2.2.0 via encode_envelope at
+# mission-490 family-3, generator steps: seed -> SigningKey::from_bytes ->
+# sign_prehashed(RawPrehash(prehash), None) -> encode_envelope.
+#
+# Regeneration: on any ed25519-dalek version (2.2.0 or 3.x), from the
+# workspace root run:
+#   cargo test -p camel-cli --test signing_compat_test \
+#     regenerate_fixture -- --ignored --exact
+# The 148-byte envelope is byte-identical across versions by contract;
+# a diff means the prehashed plumbing changed and ADR-0083 is at risk.
+#
+# Public synthetic inputs, never key material.
+seed = 72347369676e2d636f6d7061742d666978747572652d736565642d3030303030
+prehash = 72347369676e2d6d697373696f6e2d3439302d66616d696c792d332d707265686173682d666978747572652d303132333435363738396162636465666768696a
+public_key = 0d5779516a3e848aeb2f7e87051235663ed65a65c423848d35ef34557dff1ecb
+signature = 1dc58e6b7d7862b0ea202d49733ab7e9f38dd693b3027fda9dba5ce30a3f31055df3f3fbcaa2667bfbbc0d1351d2854ba248c41e42845a35bbc7b7758b06fb08
+envelope = 43414d454c534731010001000d5779516a3e848aeb2f7e87051235663ed65a65c423848d35ef34557dff1ecb1dc58e6b7d7862b0ea202d49733ab7e9f38dd693b3027fda9dba5ce30a3f31055df3f3fbcaa2667bfbbc0d1351d2854ba248c41e42845a35bbc7b7758b06fb0884fd700c14b4c3e6303bf2f3b5ef4832a5f621ef4eaf2fc08c789cedfefdc0b943414d454c534731

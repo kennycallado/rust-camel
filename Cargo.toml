@@ -175,9 +175,9 @@ dashmap = "6"
 indexmap = "2"
 blake3 = "1"
 # Artifact signing envelope (r4sign). `digest` is required: ed25519-dalek
-# 2.2 gates the prehashed (Ed25519ph) API behind it — `hazmat` alone is an
-# empty feature and the crate defaults do not include `digest`.
-ed25519-dalek = { version = "2.2", features = ["hazmat", "digest"] }
+# 3.x still gates the prehashed (Ed25519ph) API behind it — `hazmat` alone
+# is an empty feature and the crate defaults do not include `digest`.
+ed25519-dalek = { version = "3", features = ["hazmat", "digest"] }
 # truststore lockfile critical section, keypin
 fs4 = "1.1"
 filetime = "0.2"
