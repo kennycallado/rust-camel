@@ -177,6 +177,7 @@ appending. SSL options set alongside a SQLite URL are ignored; the diagnostic is
 `pool_factory.rs`, and `utils.rs`. No project-owned adapter trait wraps it.
 
 This pattern is deliberate. ADR-0020, Context, records why the SQL component
-keeps direct `sqlx` dependencies while the LLM component isolates `siumai`.
+keeps direct `sqlx` dependencies while the LLM component isolates `genai`
+behind `provider/genai_adapter.rs`.
 ADR-0020 owns that justification. Reassess this boundary if its assumptions
 about `sqlx` API stability or database-domain stability no longer hold.

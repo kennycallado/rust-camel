@@ -477,7 +477,7 @@ fn diagnostic_for(span: Span, message: String) -> Diagnostic {
 ///
 /// jsonschema's `Display` echoes the instance via `serde_json`, whose
 /// map ordering depends on the `preserve_order` feature. Workspace-wide
-/// builds unify that feature ON through unrelated crates (the siumai
+/// builds unify that feature ON through unrelated crates (the genai
 /// stack), which echoes instances in authored key order and makes the
 /// lint diagnostics depend on the build graph. Canonical sorting keeps
 /// every diagnostic byte-identical across build configurations; the

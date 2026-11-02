@@ -274,7 +274,7 @@ The component rejects a value with CR, LF or NUL, and a value longer than 998 by
 
 Class B headers set recipients: `CamelMailTo`, `CamelMailCc` and `CamelMailBcc`. They are accepted only on an endpoint that sets `allowedRecipients`. Any address outside the list is rejected. Header recipients replace the endpoint's recipients of the same kind. `From`, `Sender` and `Reply-To` cannot be set from a header.
 
-An http-to-mail route also passes request headers such as `X-Api-Key` into the mail. Add a `removeHeaders` step before the mail endpoint to drop them.
+An http-to-mail route also passes request headers such as `X-Api-Key` into the mail. Add a `remove_header` step with `key:` set to the header name before the mail endpoint to drop it. The step takes a single `key:` and has no wildcard support, so add one step per header.
 
 ## TLS
 

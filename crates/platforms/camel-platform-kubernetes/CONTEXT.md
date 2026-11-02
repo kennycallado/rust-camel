@@ -38,4 +38,4 @@ pre-reset epoch can outrank the current leader's writes.
 
 The implementation uses `kube` types in `platform_service.rs` and `readiness_gate.rs`. It maps Kubernetes failures to `PlatformError` or `CamelError` before they cross the platform contracts.
 
-ADR-0020 makes a different choice for the beta `siumai` dependency. It confines that dependency because its API churn and provider-specific types would otherwise spread through a general component. A project-owned wrapper around `kube::Client` here would duplicate the platform client's API without creating a second implementation boundary.
+ADR-0020 makes a different choice for the `genai` dependency. It confines that dependency behind `provider/genai_adapter.rs` because its provider-specific types would otherwise spread through a general component. A project-owned wrapper around `kube::Client` here would duplicate the platform client's API without creating a second implementation boundary.

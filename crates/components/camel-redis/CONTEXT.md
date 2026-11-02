@@ -239,8 +239,8 @@ The `redis` crate is a direct dependency in 11 production source files:
 `producer.rs`, `consumer.rs`, `health.rs`, and the eight files under
 `commands/`. No project-owned adapter trait wraps it.
 
-ADR-0020 does not govern this boundary. That ADR isolates the beta `siumai` SDK
-because LLM provider APIs can change rapidly. camel-redis uses `redis` as its
+ADR-0020 does not govern this boundary. That ADR isolates the `genai` SDK behind
+`provider/genai_adapter.rs` because LLM provider APIs can change rapidly. camel-redis uses `redis` as its
 protocol driver, and its command modules intentionally use the driver types
 directly. Reassess this boundary if driver API churn makes changes spread beyond
 the component's Redis-specific modules.

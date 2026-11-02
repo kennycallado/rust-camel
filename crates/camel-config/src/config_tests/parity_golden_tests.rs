@@ -15,7 +15,7 @@
 //! serialized through a std `BTreeMap` (never `serde_json::Map`): the
 //! latter's backing store flips between `BTreeMap` and insertion-ordered
 //! `IndexMap` depending on whether workspace feature unification enables
-//! serde_json's `preserve_order` (the `siumai` dependency family does,
+//! serde_json's `preserve_order` (the `genai` dependency family does,
 //! under combined multi-crate `-p` resolution), which would make the
 //! golden key order flip between runs (Bd rc-io2zl, rc-k6dln).
 //!
