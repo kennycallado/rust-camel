@@ -4728,7 +4728,11 @@ mod tests {
         let timeout = Duration::from_millis(TIMEOUT_MS);
         let target = timeout.mul_f64(0.6);
         let per_clause_bound = timeout.mul_f64(0.8);
-        let sum_floor = timeout.mul_f64(1.1);
+        // A shared budget cuts the pair once it exceeds one full timeout; with
+        // per-clause budgets each clause runs near `target`, so the sum clears
+        // the timeout itself. Keep the floor at the timeout, not a multiple:
+        // otherwise the property degrades into a machine-speed assertion.
+        let sum_floor = timeout;
 
         // Non-binding timeout for natural-runtime measurements; the group's
         // per-clause timeout is the only limiter in the assertion language.
@@ -4739,7 +4743,7 @@ mod tests {
             calibrate_loop_count_for_duration(&calibration_lang, &exchange, target).await;
         let mut measurements = String::new();
 
-        for attempt in 0..2 {
+        for attempt in 0..4 {
             let script = budget_loop_script(count);
             let (first_elapsed, first_outcome) = timed_standalone(&lang, &script, &exchange).await;
             let (second_elapsed, second_outcome) =
@@ -4770,17 +4774,16 @@ mod tests {
                 return;
             }
 
-            if attempt == 0 {
-                // Re-scale once from the slower observed clause.
-                let observed_ns = first_elapsed.max(second_elapsed).as_nanos().max(1);
-                let target_ns = target.as_nanos().max(1);
-                let rescaled = u128::from(count) * target_ns / observed_ns;
-                count = u64::try_from(rescaled.max(1)).expect("rescaled count fits u64");
-            }
+            // Re-scale from the slower observed clause; the loop retries until
+            // the workload lands between the target and the per-clause bound.
+            let observed_ns = first_elapsed.max(second_elapsed).as_nanos().max(1);
+            let target_ns = target.as_nanos().max(1);
+            let rescaled = u128::from(count) * target_ns / observed_ns;
+            count = u64::try_from(rescaled.max(1)).expect("rescaled count fits u64");
         }
 
         panic!(
-            "independent-timeout workload validation failed after one recalibration; \
+            "independent-timeout workload validation failed after four attempts; \
              required each < {per_clause_bound:?} and sum > {sum_floor:?}; {measurements}"
         );
     }
