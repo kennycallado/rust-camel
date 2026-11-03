@@ -99,13 +99,15 @@ async fn template_whole_slot_native_array() {
 }
 
 #[tokio::test]
-async fn template_whole_body_slot_serializes_json() {
+async fn template_whole_body_slot_keeps_json_native() {
     let lang = SimpleLanguage::new();
     let expr = lang.create_expression("${body}").unwrap();
     let mut ex = Exchange::default();
     ex.input.body = Body::Json(json!({"a": 1}));
     let val = expr.evaluate(&ex).await.unwrap();
-    assert_eq!(val, Value::String("{\"a\":1}".to_string()));
+    // A whole `${body}` slot exposes the native body value: `Json` stays
+    // structured, never serialized text (language-value-boundary spec).
+    assert_eq!(val, json!({"a": 1}));
 }
 
 #[tokio::test]
