@@ -452,7 +452,14 @@ class JmsBridgeServiceHealthTest {
   void shutdownCapturesCacheBeingConstructed() throws Exception {
     CountDownLatch factoryEntered = new CountDownLatch(1);
     CountDownLatch releaseFactory = new CountDownLatch(1);
-    JmsBrokerProbe probe = jmsProbe("activemq", diagnosticFactory(new AtomicInteger()));
+    // The cache runs its first refresh immediately, so the probe must stay
+    // blocked: otherwise a fast probe publishes a checked snapshot before the
+    // health read and the UNKNOWN assertion becomes a scheduling race.
+    CountDownLatch probeEntered = new CountDownLatch(1);
+    CountDownLatch releaseProbe = new CountDownLatch(1);
+    JmsBrokerProbe probe =
+        jmsProbe(
+            "activemq", blockingDiagnosticFactory(new AtomicInteger(), probeEntered, releaseProbe));
     when(clientFactory.healthProbe())
         .thenAnswer(
             invocation -> {
@@ -485,6 +492,7 @@ class JmsBridgeServiceHealthTest {
       verify(clientFactory, times(1)).healthProbe();
     } finally {
       releaseFactory.countDown();
+      releaseProbe.countDown();
       pool.shutdownNow();
     }
   }
