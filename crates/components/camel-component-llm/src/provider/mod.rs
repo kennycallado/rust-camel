@@ -10,6 +10,14 @@
     feature = "all-providers"
 ))]
 pub mod genai_adapter;
+#[cfg(any(
+    feature = "decisions",
+    feature = "openai",
+    feature = "ollama",
+    feature = "generic-providers",
+    feature = "all-providers"
+))]
+pub(crate) mod http_errors;
 pub mod mock;
 
 use async_trait::async_trait;

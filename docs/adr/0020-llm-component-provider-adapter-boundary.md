@@ -128,3 +128,45 @@ configured `network_retry` policy. `max_attempts = 0` is unlimited unless
 `max_attempts_absolute` sets a cap. `QuotaExceeded` remains the separate
 OpenAI-style `insufficient_quota` mapping and fails fast. The component does not
 claim that every vendor quota response becomes `QuotaExceeded`.
+
+## Addendum 2026-11-03: Decision provider seam
+
+The boundary decision stands. Typed decisions (`llm:decide`) add a second
+provider seam beside `LlmProvider`. They add no SDK type to the public surface.
+
+### Decision
+
+Add a separate `DecisionProvider` trait with one `decide()` call. The call
+answers a batch of named questions about one input. The trait is not a
+`LlmProvider` extension, for two reasons. Decisions have no streaming
+semantics. Chat adapters must not carry stub decision methods that they cannot
+honor.
+
+Providers are `openai`, `typesafe`, `ollama`, and `mock`:
+
+- `openai` POSTs to `{base}/decisions`.
+- `typesafe` and `ollama` share the System One codec. The codec POSTs to
+  `{base}/v1/systemone`.
+- `mock` is the test and offline provider.
+
+The direct reqwest adapters for OpenAI Decisions and System One live behind the
+`decisions` feature. `all-providers` includes that feature. The shared
+`provider/http_errors.rs` has no SDK import, and the decision adapters use it.
+
+Error bodies go whole, up to the 8 MiB response cap, to `map_status`. The
+insufficient-quota check needs the full body. Error text still carries at most
+200 body bytes, and every arm truncates the text it puts in the error.
+
+Question sets are trusted operator config under ADR-0032. Exchange data does
+not define them.
+
+### genai status
+
+No released genai version supports decisions. The versions checked on
+2026-11-03 were 0.6.5, 0.7.0-rc.8, and 0.7.2. None of them has decisions
+support, so the adapters stay on reqwest.
+
+### Replacement trigger
+
+When a released genai supports decisions, add a genai `DecisionProvider` in an
+allowlisted adapter file. Config `type` values and routes stay unchanged.

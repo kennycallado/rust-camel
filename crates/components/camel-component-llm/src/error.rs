@@ -109,6 +109,21 @@ impl LlmError {
     pub fn provider(msg: impl Into<String>) -> Self {
         LlmError::Provider(truncate_for_display(&msg.into()))
     }
+
+    /// Create a protocol error from text that may carry provider-supplied
+    /// values (answer names, choice values, score keys).
+    ///
+    /// Control characters become `?` so provider data cannot inject log
+    /// lines, and the message is truncated to 200 bytes at a UTF-8 safe
+    /// boundary.
+    pub fn protocol(msg: impl Into<String>) -> Self {
+        let cleaned: String = msg
+            .into()
+            .chars()
+            .map(|c| if c.is_control() { '?' } else { c })
+            .collect();
+        LlmError::Protocol(truncate_for_display(&cleaned))
+    }
 }
 
 /// Returns `true` if the error is transient and the operation may succeed
@@ -233,6 +248,24 @@ mod tests {
             CamelError::from(LlmError::InvalidRequest("bad json".into())),
             CamelError::ProcessorError(_)
         ));
+    }
+
+    #[test]
+    fn protocol_constructor_truncates_and_strips_control_chars() {
+        let err = LlmError::protocol(format!("unknown answer '{}\n{}'", "x".repeat(300), "y"));
+        let LlmError::Protocol(msg) = &err else {
+            panic!("expected Protocol, got {err:?}");
+        };
+        assert!(!msg.contains('\n'), "control chars must be replaced: {msg}");
+        assert!(
+            msg.contains("[truncated]"),
+            "long text must be truncated: {msg}"
+        );
+        assert!(
+            msg.len() <= 200 + 20,
+            "message too long: {} bytes",
+            msg.len()
+        );
     }
 
     #[test]

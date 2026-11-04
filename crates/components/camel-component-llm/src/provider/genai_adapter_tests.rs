@@ -6,6 +6,7 @@ use super::*;
 use crate::error::LlmError;
 #[cfg(any(feature = "openai", feature = "ollama", feature = "all-providers"))]
 use crate::provider::LlmProvider;
+use crate::provider::http_errors::is_insufficient_quota;
 use crate::provider::{
     ChatMessage, ChatRole, EmbedRequest, EmittedToolCall, FinishReason, LlmUsage, ToolChoice,
     ToolDefinition,

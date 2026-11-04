@@ -16,6 +16,10 @@ pub const CAMEL_LLM_TOOL_CALLS: &str = "CamelLlmToolCalls";
 pub const CAMEL_LLM_ESTIMATED_COST_USD: &str = "CamelLlmEstimatedCostUsd";
 pub const CAMEL_LLM_MESSAGES: &str = "CamelLlmMessages";
 pub const CAMEL_LLM_TEXT: &str = "CamelLlmText";
+/// Cached input tokens reported by a decision provider.
+pub const CAMEL_LLM_CACHED_TOKENS_IN: &str = "CamelLlmCachedTokensIn";
+/// Cache-write input tokens reported by a decision provider.
+pub const CAMEL_LLM_CACHE_WRITE_TOKENS_IN: &str = "CamelLlmCacheWriteTokensIn";
 
 #[cfg(test)]
 mod tests {
@@ -39,5 +43,10 @@ mod tests {
         assert_eq!(CAMEL_LLM_ESTIMATED_COST_USD, "CamelLlmEstimatedCostUsd");
         assert_eq!(CAMEL_LLM_MESSAGES, "CamelLlmMessages");
         assert_eq!(CAMEL_LLM_TEXT, "CamelLlmText");
+        assert_eq!(CAMEL_LLM_CACHED_TOKENS_IN, "CamelLlmCachedTokensIn");
+        assert_eq!(
+            CAMEL_LLM_CACHE_WRITE_TOKENS_IN,
+            "CamelLlmCacheWriteTokensIn"
+        );
     }
 }

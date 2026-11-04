@@ -36,10 +36,11 @@ genai = { version = "=0.6.5", optional = true }
 [features]
 default = ["mock"]
 mock = []
+decisions = []
 openai = ["dep:genai"]
 ollama = ["dep:genai"]
 generic-providers = ["dep:genai"]
-all-providers = ["openai", "ollama", "generic-providers"]
+all-providers = ["openai", "ollama", "generic-providers", "decisions"]
 
 [dev-dependencies]
 camel-component-api = { workspace = true, features = ["test-support"] }

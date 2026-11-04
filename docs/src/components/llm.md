@@ -66,6 +66,149 @@ Cost observability tracks spending per request. A config-driven `PricingTable` m
 
 The response cache deduplicates materialized requests. It sits at the producer level, not the provider level. A single-flight mechanism built on `dashmap` and `tokio::sync::watch` collapses concurrent lookups. Entries expire by TTL and evict by LRU. The cache stores usage, not cost. The cache lookup runs before the semaphore, retry, and timeout layers.
 
+## Typed decisions (llm:decide)
+
+`llm:decide` asks a model a named set of questions. It returns typed answers with probabilities or confidence values. A typed answer can still be wrong. The producer does not check whether an answer is correct.
+
+Decision providers need the `decisions` feature. The `all-providers` feature includes it. Loopback and private addresses, such as a local Ollama, need `allow_internal = true`. A question set has 1 to 400 questions. With an Ollama provider the limit is 64, and endpoint creation rejects a larger set.
+
+The Ollama path is verified live against a local `tev1:0.8b` model. The OpenAI and TypeSafe codecs are verified against recorded wire fixtures only; hosted access was not tested. The model names in the example below are placeholders: check each provider's current model list.
+
+```toml
+default_decision_provider = "local"
+allow_internal = true
+
+[decision_providers.oai]
+type = "openai"             # api_key and default_model are required; base_url is optional
+api_key = "replace-with-openai-api-key"
+default_model = "gpt-6-luna"
+
+[decision_providers.ts]
+type = "typesafe"           # api_key and default_model are required; base_url is optional
+api_key = "replace-with-typesafe-api-key"
+default_model = "jev-latest"
+
+[decision_providers.local]
+type = "ollama"             # base_url and default_model are required; no api_key
+base_url = "http://127.0.0.1:11434"
+default_model = "tev1:0.8b"
+
+[decision_providers.fake]
+type = "mock"               # all fields are optional
+predicate_probability = 1.0
+refuse = ["dept"]
+
+[[decision_question_sets.triage.questions]]
+name = "is_billing"
+type = "predicate"
+instructions = "Is this a billing issue?"
+threshold = 0.8
+
+[[decision_question_sets.triage.questions]]
+name = "dept"
+type = "choice"
+instructions = "Which department?"
+choices = [{ value = "billing", description = "payments" }, { value = "tech" }]
+
+[[decision_question_sets.triage.questions]]
+name = "urgency"
+type = "score"
+instructions = "How urgent?"
+levels = [{ label = "low" }, { label = "medium" }, { label = "high", description = "outage" }]
+```
+
+The `openai`, `typesafe`, and `ollama` types accept the optional fields `timeout_secs`, `max_concurrency`, and `network_retry`. Unknown fields are rejected.
+
+### Decide URI
+
+```text
+llm:decide?questions=<set>[&provider=<name>][&model=<id>]
+```
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `questions` | — | Question set name under `decision_question_sets`. Required. |
+| `provider` | `default_decision_provider` | Name of a `decision_providers` key. It is not a `providers` key. |
+| `model` | provider `default_model` | Override model |
+
+`llm:decide` rejects `stream`, `temperature`, `max_tokens`, and `system_prompt` with `InvalidUri`. `llm:chat` and `llm:embed` reject `questions`.
+
+The producer maps the Exchange body to the decision state before any I/O:
+
+| Body | State |
+| --- | --- |
+| `Text`, `Xml`, UTF-8 `Bytes`, `Json` string | Text |
+| `Json` object or array | Json |
+| `Json` number, bool, or null; empty; stream; invalid UTF-8 | Rejected with `InvalidRequest` |
+
+The state size must not exceed `max_prompt_bytes`.
+
+### Output
+
+The producer replaces the body with a JSON object. It has the model name and one entry per question, keyed by question name:
+
+```json
+{
+  "model": "tev1:0.8b",
+  "answers": {
+    "is_billing": { "type": "predicate", "probability": 0.97, "meets_threshold": true },
+    "dept": {
+      "type": "choice",
+      "choice": "billing",
+      "confidence": 0.99,
+      "probabilities": { "billing": 0.99, "tech": 0.01 }
+    }
+  }
+}
+```
+
+Each answer has one of these shapes:
+
+| Answer `type` | Fields |
+| --- | --- |
+| `predicate` | `probability`. `meets_threshold` is set when the question has a `threshold`. |
+| `choice` | `choice`, `confidence`, and `probabilities` (object keyed by value). `meets_min_confidence` is set when the question has a `min_confidence`. |
+| `score` | `score`, `confidence`, and `probabilities` (array of `level`, `label`, and `probability`). `meets_min_confidence` is set when the question has a `min_confidence`. |
+| `refusal` | Only `type`. |
+
+`meets_threshold` is `probability >= threshold`. `meets_min_confidence` is `confidence >= min_confidence`.
+
+**Warning:** A refusal has no `meets_*` key. A route that tests `== true` does not match a refusal, so the route falls through to `otherwise`. Add an `otherwise` branch to handle refusals.
+
+### Headers
+
+| Header | Value |
+| --- | --- |
+| `CamelLlmProvider` | Decision provider name |
+| `CamelLlmModel` | Model that answered |
+| `CamelLlmUsageAvailable` | `true` |
+| `CamelLlmTokensIn` | Input tokens, when the provider reports them |
+| `CamelLlmTokensOut` | Output tokens, when the provider reports them |
+| `CamelLlmCachedTokensIn` | Cached input tokens, when the provider reports them |
+| `CamelLlmCacheWriteTokensIn` | Cache-write input tokens, when the provider reports them |
+
+`llm:decide` does not write `CamelLlmEstimatedCostUsd`.
+
+### Routing example
+
+```yaml
+routes:
+  - id: triage
+    from: "timer:tick?period=3000"
+    steps:
+      - set_body: "My invoice was charged twice, please refund"
+      - to: "llm:decide?provider=local&questions=triage"
+      - choice:
+          when:
+            - simple: "${body.answers.dept.choice} == 'billing'"
+              steps:
+                - to: "log:billing?showBody=true"
+          otherwise:
+            - to: "log:other?showBody=true"
+```
+
+Simple has no float comparisons. Compare the `meets_*` booleans with `== true`. To read raw probabilities, use Rhai or JSONPath.
+
 ## Providers
 
 The Mock provider ships in the default build. OpenAI, Ollama, Anthropic, and Gemini require cargo features. Use `--features openai`, `--features ollama`, or `--features generic-providers`. The `all-providers` feature enables all four. The `GenaiProvider` adapter isolates the genai SDK. If genai breaks, only `provider/genai_adapter.rs` changes (ADR-0020).

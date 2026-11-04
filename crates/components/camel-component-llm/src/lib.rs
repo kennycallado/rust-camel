@@ -12,6 +12,7 @@
 pub mod bundle;
 pub mod config;
 pub mod cost;
+pub mod decision;
 pub mod endpoint;
 pub mod error;
 pub mod headers;
@@ -27,6 +28,11 @@ pub use config::{
     LlmServiceKind, MockProviderConfig, OllamaProviderConfig, OpenaiProviderConfig,
 };
 pub use cost::PricingTable;
+pub use decision::{
+    ChoiceOption, ChoiceProbability, DecisionAnswer, DecisionCapabilities, DecisionProvider,
+    DecisionQuestion, DecisionRequest, DecisionResponse, DecisionState, DecisionUsage, NamedAnswer,
+    QuestionKind, ScoreLevel, ScoreProbability,
+};
 pub use error::LlmError;
 pub use provider::{
     ChatEvent, ChatMessage, ChatRequest, ChatRole, EmbedRequest, EmbedResponse, EmittedToolCall,
@@ -37,6 +43,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use camel_component_api::{CamelError, Component, ComponentContext, ComponentMetadata, Endpoint};
+use decision::endpoint::DecisionEndpoint;
+use decision::factory;
+use decision::factory::DecisionProviderMap;
 use metadata::LlmMetadataDescriptor;
 use provider_factory::ProviderMap;
 
@@ -81,31 +90,111 @@ pub fn hardened_http_client() -> Result<reqwest::Client, CamelError> {
 
 pub struct LlmComponent {
     providers: Arc<ProviderMap>,
+    decision_providers: Arc<DecisionProviderMap>,
     config: Arc<LlmGlobalConfig>,
 }
 
 impl LlmComponent {
     pub fn new(config: LlmGlobalConfig) -> Result<Self, CamelError> {
+        config.validate()?;
         let providers = provider_factory::build_provider_map(&config).map_err(CamelError::from)?;
+        let decision_providers =
+            factory::build_decision_provider_map(&config).map_err(CamelError::from)?;
         Ok(Self {
             providers: Arc::new(providers),
+            decision_providers: Arc::new(decision_providers),
             config: Arc::new(config),
         })
     }
 
+    /// Decision providers start empty; chain `with_decision_providers`.
     pub fn from_parts(config: LlmGlobalConfig, providers: ProviderMap) -> Self {
         Self {
             providers: Arc::new(providers),
+            decision_providers: Arc::new(DecisionProviderMap::new()),
             config: Arc::new(config),
         }
+    }
+
+    /// Replaces the decision provider map used by `llm:decide` endpoints.
+    pub fn with_decision_providers(mut self, map: DecisionProviderMap) -> Self {
+        self.decision_providers = Arc::new(map);
+        self
     }
 
     pub fn providers(&self) -> &ProviderMap {
         &self.providers
     }
 
+    /// Decision providers keyed by their configured name.
+    pub fn decision_providers(&self) -> &DecisionProviderMap {
+        self.decision_providers.as_ref()
+    }
+
     pub fn config(&self) -> &LlmGlobalConfig {
         &self.config
+    }
+
+    fn create_decide_endpoint(
+        &self,
+        uri: &str,
+        endpoint_config: LlmEndpointConfig,
+    ) -> Result<Box<dyn Endpoint>, CamelError> {
+        // `from_parts` skips `validate()`; producers rely on validated sets.
+        crate::decision::config::validate_decision_config(&self.config)?;
+        let provider_name = endpoint_config
+            .provider
+            .as_deref()
+            .or(self.config.default_decision_provider.as_deref())
+            .ok_or_else(|| {
+                CamelError::InvalidUri(
+                    "no decision provider specified and no default_decision_provider configured"
+                        .into(),
+                )
+            })?
+            .to_string();
+
+        let provider = self.decision_providers.get(&provider_name).ok_or_else(|| {
+            if self.config.decision_providers.contains_key(&provider_name) {
+                CamelError::InvalidUri(format!(
+                    "decision provider '{provider_name}' is configured but not registered \
+                     (build the component with LlmComponent::new or call with_decision_providers)"
+                ))
+            } else {
+                CamelError::InvalidUri(format!(
+                    "decision provider '{provider_name}' not found in config"
+                ))
+            }
+        })?;
+
+        let set_name = endpoint_config
+            .questions
+            .as_deref()
+            .ok_or_else(|| CamelError::InvalidUri("llm:decide requires 'questions'".into()))?;
+        let set = self
+            .config
+            .decision_question_sets
+            .get(set_name)
+            .ok_or_else(|| {
+                CamelError::InvalidUri(format!("question set '{set_name}' not found in config"))
+            })?;
+
+        let max_questions = provider.capabilities().max_questions;
+        if set.questions.len() > max_questions {
+            return Err(CamelError::InvalidUri(format!(
+                "question set '{set_name}' has {} questions; decision provider '{provider_name}' accepts at most {max_questions}",
+                set.questions.len()
+            )));
+        }
+
+        Ok(Box::new(DecisionEndpoint::new(
+            uri.to_string(),
+            endpoint_config,
+            provider_name,
+            Arc::clone(provider),
+            Arc::new(set.clone()),
+            Arc::clone(&self.config),
+        )))
     }
 }
 
@@ -124,6 +213,10 @@ impl Component for LlmComponent {
         _ctx: &dyn ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let endpoint_config = LlmEndpointConfig::from_uri(uri)?;
+
+        if endpoint_config.operation == LlmOperation::Decide {
+            return self.create_decide_endpoint(uri, endpoint_config);
+        }
 
         // Fail-fast: validate provider exists and supports the operation
         let provider_name = endpoint::resolve_provider_name(&endpoint_config, &self.config)?;

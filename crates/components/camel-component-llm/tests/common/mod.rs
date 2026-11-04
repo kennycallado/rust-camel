@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+pub mod decision;
+
 use camel_component_llm::{
     LlmComponent, LlmGlobalConfig, LlmProviderConfig, config::MockProviderConfig,
 };
@@ -45,6 +47,7 @@ pub fn make_test_component_with_error(error_msg: &str) -> LlmComponent {
     .expect("component")
 }
 
+#[allow(dead_code)]
 pub fn make_producer_ctx() -> camel_component_api::ProducerContext {
     camel_component_api::ProducerContext::new().with_route_id("route-1")
 }

@@ -11,6 +11,7 @@ fn rejects_zero_global_timeout() {
         max_header_json_bytes: 65_536,
         providers: HashMap::new(),
         allow_internal: false,
+        ..Default::default()
     };
     assert!(
         cfg.validate().is_err(),
@@ -27,6 +28,7 @@ fn accepts_none_global_timeout() {
         max_header_json_bytes: 65_536,
         providers: HashMap::new(),
         allow_internal: false,
+        ..Default::default()
     };
     assert!(
         cfg.validate().is_ok(),
@@ -58,6 +60,7 @@ fn rejects_zero_provider_timeout() {
         max_header_json_bytes: 65_536,
         providers,
         allow_internal: false,
+        ..Default::default()
     };
     assert!(
         cfg.validate().is_err(),
@@ -89,6 +92,7 @@ fn rejects_zero_max_concurrency() {
         max_header_json_bytes: 65_536,
         providers,
         allow_internal: false,
+        ..Default::default()
     };
     assert!(
         cfg.validate().is_err(),
@@ -119,6 +123,7 @@ fn rejects_zero_ollama_timeout() {
         max_header_json_bytes: 65_536,
         providers,
         allow_internal: false,
+        ..Default::default()
     };
     assert!(
         cfg.validate().is_err(),
@@ -153,6 +158,7 @@ fn rejects_negative_pricing() {
         max_header_json_bytes: 65_536,
         providers,
         allow_internal: false,
+        ..Default::default()
     };
     assert!(
         cfg.validate().is_err(),
@@ -184,6 +190,7 @@ fn rejects_zero_cache_ttl() {
         max_header_json_bytes: 65_536,
         providers,
         allow_internal: false,
+        ..Default::default()
     };
     assert!(
         cfg.validate().is_err(),
@@ -215,6 +222,7 @@ fn rejects_zero_cache_max_entries() {
         max_header_json_bytes: 65_536,
         providers,
         allow_internal: false,
+        ..Default::default()
     };
     assert!(
         cfg.validate().is_err(),
@@ -246,6 +254,7 @@ fn accepts_valid_provider_config() {
         max_header_json_bytes: 65_536,
         providers,
         allow_internal: false,
+        ..Default::default()
     };
     assert!(
         cfg.validate().is_ok(),
@@ -277,6 +286,7 @@ fn validate_error_contains_provider_name() {
         max_header_json_bytes: 65_536,
         providers,
         allow_internal: false,
+        ..Default::default()
     };
     let err = cfg.validate().unwrap_err();
     let msg = err.to_string();
@@ -408,6 +418,52 @@ fn from_uri_stream_parsing() {
     // Default (no param)
     let ec = LlmEndpointConfig::from_uri("llm:chat").unwrap();
     assert!(ec.stream);
+}
+
+#[test]
+fn decide_uri_parses() {
+    let ec = LlmEndpointConfig::from_uri("llm:decide?questions=triage&provider=fake&model=m")
+        .expect("parse");
+    assert_eq!(ec.operation, LlmOperation::Decide);
+    assert_eq!(ec.questions.as_deref(), Some("triage"));
+    assert_eq!(ec.provider.as_deref(), Some("fake"));
+    assert_eq!(ec.model.as_deref(), Some("m"));
+}
+
+#[test]
+fn decide_requires_questions() {
+    let result = LlmEndpointConfig::from_uri("llm:decide");
+    match result {
+        Err(CamelError::InvalidUri(m)) => assert!(m.contains("questions"), "message: {m}"),
+        other => panic!("expected InvalidUri, got {other:?}"),
+    }
+}
+
+#[test]
+fn decide_rejects_temperature() {
+    let result = LlmEndpointConfig::from_uri("llm:decide?questions=t&temperature=0.2");
+    match result {
+        Err(e) => assert!(e.to_string().contains("temperature"), "error: {e}"),
+        Ok(_) => panic!("expected error for temperature on llm:decide"),
+    }
+}
+
+#[test]
+fn decide_rejects_stream() {
+    let result = LlmEndpointConfig::from_uri("llm:decide?questions=t&stream=false");
+    match result {
+        Err(e) => assert!(e.to_string().contains("stream"), "error: {e}"),
+        Ok(_) => panic!("expected error for stream on llm:decide"),
+    }
+}
+
+#[test]
+fn chat_rejects_questions() {
+    let result = LlmEndpointConfig::from_uri("llm:chat?questions=t");
+    match result {
+        Err(e) => assert!(e.to_string().contains("questions"), "error: {e}"),
+        Ok(_) => panic!("expected error for questions on llm:chat"),
+    }
 }
 
 // -----------------------------------------------------------------------

@@ -108,6 +108,98 @@ fn check_header_json_size(name: &str, value: &Value, max: usize) -> Result<(), L
     Ok(())
 }
 
+/// Wrap a future with the configured total deadline timeout.
+/// When `timeout` is `None`, runs without wrapping.
+///
+/// ## Composition: single total deadline (no nested timeouts)
+/// This helper wraps ONCE. The retry loop is wrapped inside
+/// `apply_timeout`, so do NOT nest timeouts (see ADR-0021).
+pub(crate) async fn apply_timeout<F, T>(timeout: Option<Duration>, fut: F) -> Result<T, LlmError>
+where
+    F: std::future::Future<Output = Result<T, LlmError>>,
+{
+    match timeout {
+        Some(d) => match tokio::time::timeout(d, fut).await {
+            Ok(inner) => inner,
+            Err(_) => Err(LlmError::Timeout(d)),
+        },
+        None => fut.await,
+    }
+}
+
+/// Manual retry loop that honors `RateLimit.retry_after` over exponential
+/// backoff. Only runs when `retry` is `Some`. Does NOT retry after
+/// content-start (first non-empty Delta).
+///
+/// ## Composition
+/// - NO inner timeout — the total deadline wraps `run_with_retry`
+///   from outside, so one deadline covers all attempts + backoff.
+/// - Semaphore permit is acquired PER ATTEMPT and released during backoff
+///   sleep (see ADR-0021).
+///
+/// This is a free function (not `&self`) so the returned future
+/// does not borrow the producer, allowing it to be passed to `apply_timeout`.
+pub(crate) async fn run_with_retry<F, Fut, T>(
+    semaphore: Option<Arc<Semaphore>>,
+    retry: Option<NetworkRetryPolicy>,
+    content_started: Arc<AtomicBool>,
+    route_id: &str,
+    mut op: F,
+) -> Result<T, LlmError>
+where
+    F: FnMut(Arc<AtomicBool>) -> Fut,
+    Fut: std::future::Future<Output = Result<T, LlmError>>,
+{
+    let policy = retry;
+    let mut attempt: u32 = 0;
+    loop {
+        // Acquire permit per attempt — released during backoff (dropped
+        // before sleep). Using .ok() is intentional (lint-unwrap gate).
+        // Permit is acquired even when retry is disabled (semaphore lives
+        // outside the retry decision).
+        let _permit = match &semaphore {
+            Some(sem) => sem.clone().acquire_owned().await.ok(),
+            None => None,
+        };
+        let result = op(Arc::clone(&content_started)).await;
+        match result {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                // No retry policy configured — surface error immediately.
+                let Some(ref policy) = policy else {
+                    return Err(e);
+                };
+                // Do not retry after content-started (first non-empty Delta).
+                if content_started.load(Ordering::SeqCst) {
+                    return Err(e);
+                }
+                // 0-indexed: attempt 0 = first try. should_retry(attempt+1) per ADR-0013.
+                if !is_retryable(&e) || !policy.should_retry(attempt + 1) {
+                    return Err(e);
+                }
+                // Compute delay: retry_after wins over exponential backoff.
+                let delay = match &e {
+                    LlmError::RateLimit {
+                        retry_after: Some(ra),
+                    } => *ra,
+                    _ => policy.delay_for(attempt),
+                };
+                tracing::warn!(
+                    route_id = %route_id,
+                    attempt,
+                    delay_ms = delay.as_millis() as u64,
+                    error = %e,
+                    "llm: transient error — retrying"
+                );
+                // Release permit during backoff (dropped here; re-acquired next loop).
+                drop(_permit);
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
 impl LlmProducer {
     pub fn new(
         config: LlmEndpointConfig,
@@ -352,96 +444,13 @@ impl LlmProducer {
         }
     }
 
-    /// Wrap a future with the configured total deadline timeout.
-    /// When `self.timeout` is `None`, runs without wrapping.
-    ///
-    /// ## Composition: single total deadline (no nested timeouts)
-    /// This helper wraps ONCE. The retry loop is wrapped inside
-    /// `apply_timeout`, so do NOT nest timeouts (see ADR-0021).
+    /// Delegates to [`crate::producer::apply_timeout`] with this producer's
+    /// configured deadline. See that function for composition rules.
     async fn apply_timeout<F, T>(&self, fut: F) -> Result<T, LlmError>
     where
         F: std::future::Future<Output = Result<T, LlmError>>,
     {
-        match self.timeout {
-            Some(d) => match tokio::time::timeout(d, fut).await {
-                Ok(inner) => inner,
-                Err(_) => Err(LlmError::Timeout(d)),
-            },
-            None => fut.await,
-        }
-    }
-
-    /// Manual retry loop that honors `RateLimit.retry_after` over exponential
-    /// backoff. Only runs when `retry` is `Some`. Does NOT retry after
-    /// content-start (first non-empty Delta).
-    ///
-    /// ## Composition
-    /// - NO inner timeout — the total deadline wraps `run_with_retry`
-    ///   from outside, so one deadline covers all attempts + backoff.
-    /// - Semaphore permit is acquired PER ATTEMPT and released during backoff
-    ///   sleep (see ADR-0021).
-    ///
-    /// This is an associated function (not `&self`) so the returned future
-    /// does not borrow `self`, allowing it to be passed to `apply_timeout`.
-    async fn run_with_retry<F, Fut, T>(
-        semaphore: Option<Arc<Semaphore>>,
-        retry: Option<NetworkRetryPolicy>,
-        content_started: Arc<AtomicBool>,
-        route_id: &str,
-        mut op: F,
-    ) -> Result<T, LlmError>
-    where
-        F: FnMut(Arc<AtomicBool>) -> Fut,
-        Fut: std::future::Future<Output = Result<T, LlmError>>,
-    {
-        let policy = retry;
-        let mut attempt: u32 = 0;
-        loop {
-            // Acquire permit per attempt — released during backoff (dropped
-            // before sleep). Using .ok() is intentional (lint-unwrap gate).
-            // Permit is acquired even when retry is disabled (semaphore lives
-            // outside the retry decision).
-            let _permit = match &semaphore {
-                Some(sem) => sem.clone().acquire_owned().await.ok(),
-                None => None,
-            };
-            let result = op(Arc::clone(&content_started)).await;
-            match result {
-                Ok(v) => return Ok(v),
-                Err(e) => {
-                    // No retry policy configured — surface error immediately.
-                    let Some(ref policy) = policy else {
-                        return Err(e);
-                    };
-                    // Do not retry after content-started (first non-empty Delta).
-                    if content_started.load(Ordering::SeqCst) {
-                        return Err(e);
-                    }
-                    // 0-indexed: attempt 0 = first try. should_retry(attempt+1) per ADR-0013.
-                    if !is_retryable(&e) || !policy.should_retry(attempt + 1) {
-                        return Err(e);
-                    }
-                    // Compute delay: retry_after wins over exponential backoff.
-                    let delay = match &e {
-                        LlmError::RateLimit {
-                            retry_after: Some(ra),
-                        } => *ra,
-                        _ => policy.delay_for(attempt),
-                    };
-                    tracing::warn!(
-                        route_id = %route_id,
-                        attempt,
-                        delay_ms = delay.as_millis() as u64,
-                        error = %e,
-                        "llm: transient error — retrying"
-                    );
-                    // Release permit during backoff (dropped here; re-acquired next loop).
-                    drop(_permit);
-                    tokio::time::sleep(delay).await;
-                    attempt += 1;
-                }
-            }
-        }
+        crate::producer::apply_timeout(self.timeout, fut).await
     }
 
     async fn handle_chat(&self, exchange: &mut Exchange) -> Result<(), LlmError> {
@@ -800,7 +809,8 @@ impl LlmProducer {
 
         let semaphore = self.semaphore.clone();
         let retry = self.retry.clone();
-        let fut = Self::run_with_retry(semaphore, retry, content_started, &self.route_id, op);
+        let fut =
+            crate::producer::run_with_retry(semaphore, retry, content_started, &self.route_id, op);
         let result = self.apply_timeout(fut).await;
 
         // Leader handle: complete BEFORE propagating to caller.
@@ -888,7 +898,8 @@ impl LlmProducer {
         let semaphore = self.semaphore.clone();
         let retry = self.retry.clone();
         let content_started = Arc::new(AtomicBool::new(false));
-        let fut = Self::run_with_retry(semaphore, retry, content_started, &self.route_id, op);
+        let fut =
+            crate::producer::run_with_retry(semaphore, retry, content_started, &self.route_id, op);
         let response = self.apply_timeout(fut).await?;
 
         exchange.input.body = Body::Json(
@@ -955,6 +966,9 @@ impl Service<Exchange> for LlmProducer {
             let result = match producer.config.operation {
                 LlmOperation::Chat => producer.handle_chat(&mut exchange).await,
                 LlmOperation::Embed => producer.handle_embed(&mut exchange).await,
+                LlmOperation::Decide => Err(LlmError::UnsupportedCapability(
+                    "decide is handled by DecisionProducer".into(),
+                )),
             };
 
             match result {

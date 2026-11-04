@@ -5,7 +5,11 @@ use camel_component_api::UriConfig;
 #[uri_scheme = "llm"]
 #[uri_config(
     skip_impl,
-    metadata(scheme = "llm", description = "LLM chat / embed producer", producer),
+    metadata(
+        scheme = "llm",
+        description = "LLM chat / embed / decide producer",
+        producer
+    ),
     crate = "camel_component_api"
 )]
 pub(super) struct LlmMetadataDescriptor {
@@ -21,6 +25,8 @@ pub(super) struct LlmMetadataDescriptor {
     pub _max_tokens: Option<u32>,
     #[uri_param(name = "system_prompt")]
     pub _system_prompt: Option<String>,
+    #[uri_param(name = "questions")]
+    pub _questions: Option<String>,
 }
 
 #[cfg(test)]
@@ -40,6 +46,7 @@ mod tests {
             "temperature",
             "max_tokens",
             "system_prompt",
+            "questions",
         ]
         .into_iter()
         .collect();

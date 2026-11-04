@@ -74,8 +74,25 @@ _Avoid_: response cache, query cache
 Config-driven pricing (input/output per 1k tokens). Producer computes cost from final usage and emits `CamelLlmEstimatedCostUsd` header (materialized) + `tracing::info!` (both modes). Missing pricing → no cost, no failure.
 _Avoid_: billing, accounting
 
+**DecisionProvider**:
+Trait for typed decisions: one `decide()` call answers a batch of named questions about one input. It is separate from `LlmProvider` because it has no streaming semantics, and chat adapters carry no stub decision methods. `LlmComponent` owns the decision providers next to the `ProviderMap`. Providers: `openai` (POST `{base}/decisions`), `typesafe` and `ollama` (System One codec, POST `{base}/v1/systemone`), and `mock`. The direct reqwest adapters sit behind the `decisions` feature, which `all-providers` includes. Established by ADR-0020 addendum 2026-11-03. (camel-component-llm)
+_Avoid_: LlmProvider (chat and embed only), decision client, classifier
+
+**Question set**:
+Named list of questions under `[decision_question_sets.<name>]` in `LlmGlobalConfig`, selected by `llm:decide?questions=<name>`. Question sets are trusted operator config under ADR-0032. Exchange data never defines them. Validated when the endpoint is created, before any network I/O.
+_Avoid_: prompt, prompt template, question list
+
+**Decision answer**:
+Typed answer to one question in a `DecisionResponse`, shaped by the question kind: a predicate probability, a chosen option with per-option probabilities, or a score level with per-level probabilities. `DecisionAnswer` is `#[non_exhaustive]`.
+_Avoid_: result, response (use DecisionResponse for the whole batch)
+
+**System One codec**:
+Request and response codec for the System One Decisions wire format, shared by the `typesafe` and `ollama` providers. It lives in `decision/system_one.rs` and POSTs to `{base}/v1/systemone`. Raw answers pass through `decision/validate.rs` before they become `DecisionAnswer`s.
+_Avoid_: TypeSafe client, Ollama client (those are provider names, not codecs)
+
 ## Breaking changes (0.x)
 
+- Accepted 0.x trade-off: `DecisionRequest`, `DecisionResponse`, and `DecisionUsage` are not `#[non_exhaustive]`, so external `DecisionProvider` implementors can construct them. New fields (for example image inputs) are breaking changes and land in a minor release. `DecisionCapabilities` is `#[non_exhaustive]`; implementors build it with `DecisionCapabilities::new(max_questions)`.
 - `LlmGlobalConfig.timeout_secs`: `u64` → `Option<u64>` (use `None` for no timeout)
 - `OpenaiProviderConfig`/`OllamaProviderConfig`: new `network_retry` field (`Option<NetworkRetryPolicy>`)
 - `LlmProducer::new`: now takes 4 positional args (`config`, `provider`, `max_prompt_bytes`, `route_id`) + fluent builder `.with_semaphore/.with_timeout/.with_retry/.with_pricing/.with_cache/.with_observability/.with_max_header_json_bytes().build()` (was 9 positional params pre-0.16)
@@ -87,6 +104,10 @@ _Avoid_: billing, accounting
 - `build_chat_request`: return type changed from `ChatRequest` to `Result<ChatRequest, LlmError>`
 - `MetricsCollector` trait: new default method `record_histogram` (non-breaking; default no-op)
 - `LlmError::Timeout`: now carries the configured `Duration` (genai transport timeout maps here, not to `Network`)
+- `LlmOperation` gains `Decide` and becomes `#[non_exhaustive]`.
+- `LlmGlobalConfig` gains `default_decision_provider`, `decision_providers`, and `decision_question_sets`.
+- `LlmEndpointConfig` gains `questions`.
+- `LlmComponent::new` now runs `validate()`.
 
 ## Error mapping
 
@@ -108,3 +129,5 @@ _Avoid_: billing, accounting
 | Cache hit | `debug!` | Operational signal, not route-relevant |
 | Cache miss | `debug!` | Operational signal, not route-relevant |
 | Tool call delta without prior start | `warn!` | Provider protocol violation |
+| Decision provider construction failed | `error!` | Startup failure; no route handler running |
+| Decide producer error | `warn!` | Operational signal; route handler owns `error!` |

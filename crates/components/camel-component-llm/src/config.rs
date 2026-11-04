@@ -5,6 +5,8 @@ use camel_component_api::CamelError;
 use camel_component_api::NetworkRetryPolicy;
 
 use crate::cost::PricingTable;
+use crate::decision::config::DecisionProviderConfig;
+use crate::decision::config::QuestionSetConfig;
 
 fn default_max_prompt_bytes() -> usize {
     32768
@@ -51,6 +53,18 @@ pub struct LlmGlobalConfig {
     /// Allow internal/private/loopback addresses and HTTP for local development.
     #[serde(default)]
     pub allow_internal: bool,
+
+    /// Default decision provider name to use when none is specified.
+    #[serde(default)]
+    pub default_decision_provider: Option<String>,
+
+    /// Map of decision provider name to decision provider configuration.
+    #[serde(default)]
+    pub decision_providers: HashMap<String, DecisionProviderConfig>,
+
+    /// Map of question set name to decision question set configuration.
+    #[serde(default)]
+    pub decision_question_sets: HashMap<String, QuestionSetConfig>,
 }
 
 impl Default for LlmGlobalConfig {
@@ -62,6 +76,9 @@ impl Default for LlmGlobalConfig {
             max_header_json_bytes: default_max_header_json_bytes(),
             providers: HashMap::new(),
             allow_internal: false,
+            default_decision_provider: None,
+            decision_providers: HashMap::new(),
+            decision_question_sets: HashMap::new(),
         }
     }
 }
@@ -393,12 +410,16 @@ pub struct MockProviderConfig {
 }
 
 /// The type of LLM operation to perform.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LlmOperation {
     /// Chat completion (streaming or non-streaming).
     Chat,
     /// Text embedding generation.
     Embed,
+    /// Structured decision over a named question set (`llm:decide?questions=...`).
+    /// Handled by `DecisionProducer`, not by `LlmProducer`.
+    Decide,
 }
 
 impl LlmGlobalConfig {
@@ -462,6 +483,8 @@ impl LlmGlobalConfig {
             }
         }
 
+        crate::decision::config::validate_decision_config(self)?;
+
         Ok(())
     }
 }
@@ -489,6 +512,9 @@ pub struct LlmEndpointConfig {
 
     /// System prompt override.
     pub system_prompt: Option<String>,
+
+    /// Name of the decision question set (`llm:decide` only).
+    pub questions: Option<String>,
 }
 
 impl Default for LlmEndpointConfig {
@@ -501,6 +527,7 @@ impl Default for LlmEndpointConfig {
             max_tokens: None,
             stream: true,
             system_prompt: None,
+            questions: None,
         }
     }
 }
@@ -518,9 +545,16 @@ impl LlmEndpointConfig {
     /// - `max_tokens` — Maximum tokens to generate (parseable integer).
     /// - `stream` — Whether to stream the response (default: `true`, also accepts `1`/`0`).
     /// - `system_prompt` — System prompt override.
+    /// - `questions` — Question set name. Required by `llm:decide`; rejected by
+    ///   `chat` and `embed`.
+    ///
+    /// `llm:decide` rejects `stream`, `temperature`, `max_tokens`, and
+    /// `system_prompt`.
     ///
     /// # Errors
-    /// Returns [`CamelError::InvalidUri`] if the operation is not recognized.
+    /// Returns [`CamelError::InvalidUri`] if the operation is not recognized, if
+    /// `llm:decide` lacks `questions` or carries a chat-only parameter, or if
+    /// `chat`/`embed` carries `questions`.
     pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
         let (operation_str, query) = match uri.split_once('?') {
             Some((path, q)) => (path, q),
@@ -530,9 +564,10 @@ impl LlmEndpointConfig {
         let operation = match operation_str.trim_start_matches("llm:") {
             "chat" => LlmOperation::Chat,
             "embed" => LlmOperation::Embed,
+            "decide" => LlmOperation::Decide,
             other => {
                 return Err(CamelError::InvalidUri(format!(
-                    "unknown llm operation: '{other}' (expected 'chat' or 'embed')"
+                    "unknown llm operation: '{other}' (expected 'chat', 'embed' or 'decide')"
                 )));
             }
         };
@@ -540,6 +575,32 @@ impl LlmEndpointConfig {
         let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes())
             .into_owned()
             .collect();
+
+        // Presence is checked with `contains_key`: the parsed `stream` defaults to true,
+        // so its value cannot distinguish "absent" from "explicitly true".
+        match operation {
+            LlmOperation::Decide => {
+                for name in ["stream", "temperature", "max_tokens", "system_prompt"] {
+                    if params.contains_key(name) {
+                        return Err(CamelError::InvalidUri(format!(
+                            "parameter '{name}' is not supported by llm:decide"
+                        )));
+                    }
+                }
+                if !params.contains_key("questions") {
+                    return Err(CamelError::InvalidUri(
+                        "llm:decide requires 'questions'".into(),
+                    ));
+                }
+            }
+            LlmOperation::Chat | LlmOperation::Embed => {
+                if params.contains_key("questions") {
+                    return Err(CamelError::InvalidUri(
+                        "parameter 'questions' is only supported by llm:decide".into(),
+                    ));
+                }
+            }
+        }
 
         let stream = params
             .get("stream")
@@ -554,6 +615,7 @@ impl LlmEndpointConfig {
             max_tokens: params.get("max_tokens").and_then(|v| v.parse().ok()),
             stream,
             system_prompt: params.get("system_prompt").cloned(),
+            questions: params.get("questions").cloned(),
         })
     }
 }
