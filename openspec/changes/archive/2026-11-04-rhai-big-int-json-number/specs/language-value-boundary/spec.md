@@ -35,6 +35,14 @@ the `type-mismatch` class; no implicit coercion SHALL exist.
 - **THEN** the later script SHALL see a map equal to the stored value, and the
   reported type SHALL be `map`
 
+#### Scenario: Large unsigned integer is refused
+
+- **GIVEN** an exchange property holding a JSON integer greater than
+  `i64::MAX`
+- **WHEN** a language other than rhai reads that property
+- **THEN** the evaluation SHALL fail with a typed conversion error; the engine
+  SHALL NOT store a lossy float
+
 #### Scenario: Large unsigned integer binds as json number
 
 - **GIVEN** an exchange property holding a JSON integer greater than
@@ -82,6 +90,14 @@ round-trip bit-identically. Every other `json number` SHALL refuse with the
 stable label `json number`, and `JsonValue` SHALL refuse with `json value`.
 The transaction diff SHALL compare `json number` values by token: an untouched
 entry SHALL produce no delta and SHALL keep its original value handle.
+
+#### Scenario: Exchange inbound behavior is unchanged
+
+- **GIVEN** an exchange property holding a JSON integer at or below
+  `i64::MAX`, and any `parse_json`-produced wrapper
+- **WHEN** a Rhai script reads those values
+- **THEN** they SHALL bind exactly as before this change; the rc-141om
+  interval is the only inbound behavior that moved
 
 #### Scenario: Exchange inbound behavior binds large integers as json number
 
