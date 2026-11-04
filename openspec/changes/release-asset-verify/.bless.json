@@ -1,0 +1,17 @@
+{
+  "kind": "plan",
+  "verdict": "APPROVED",
+  "expert": "e_gpt",
+  "hash": "sha256:d23b5ddc416120657be43328bbbd470a73c6b3e079247044355406ae9bdb0d81",
+  "date": "2026-11-04",
+  "history": [
+    {"kind": "spec", "verdict": "BLESS-WITH-FIXES", "expert": "e_gpt", "findings": 5, "hash": "sha256:a0cf1e7886627e3f09a6d152f7d83c1b58c312d06ea890721ed13aad29af7873"},
+    {"kind": "spec", "verdict": "BLESS-WITH-FIXES", "expert": "e_gpt", "findings": 4, "hash": "sha256:a1dbe962600a82fecb7ae4d53381265fd93bf238a88f1583e715b73d73a408a2"},
+    {"kind": "spec", "verdict": "BLESS-WITH-FIXES", "expert": "e_gpt", "findings": 2, "hash": "sha256:3bbbaa5c0874ad5a15bc555bbe14fd4adcdc2f203d8d69bdb17f5b5139f7cf5d"},
+    {"kind": "spec", "verdict": "APPROVED", "expert": "e_gpt", "hash": "sha256:2b709c94bd960ef5d14fc98859c2d6f6248aaaf855f6ab1832594d2cc8c5d104"},
+    {"kind": "plan-review", "verdict": "APPROVE-WITH-FINDINGS", "reviewer": "r_glm", "findings": 6},
+    {"kind": "plan-review", "verdict": "APPROVE-WITH-FINDINGS", "reviewer": "r_glm", "findings": 1},
+    {"kind": "plan", "verdict": "BLESS-WITH-FIXES", "expert": "e_gpt", "findings": 2, "hash": "sha256:2127481141a8fbacbfa316099ec62a3dde2b962c1dcb2ea63fd708df36818bc9"},
+    {"kind": "plan", "verdict": "APPROVED", "expert": "e_gpt", "hash": "sha256:d23b5ddc416120657be43328bbbd470a73c6b3e079247044355406ae9bdb0d81"}
+  ]
+}

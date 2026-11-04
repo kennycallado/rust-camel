@@ -347,6 +347,11 @@ jobs:
           # test leg's feature set, with --all-targets for the gated tests.
           cargo clippy -p camel-cli --no-default-features \
             --features flavor-regular,exec --all-targets -- -D warnings
+      - name: verify-release-assets stub tests
+        # bd rc-6ep0i: offline battery for the release asset verification
+        # script (stubbed gh, no network). Keeps the script from rotting
+        # between releases.
+        run: bash scripts/tests/verify-release-assets-test.sh
       - name: lint-unwrap
         run: cargo xtask lint-unwrap
       - name: lint-glob-imports

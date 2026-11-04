@@ -445,6 +445,22 @@ jobs:
           # did until it was hand-flagged; bd rc-9zjhf).
           prerelease: ${{ contains(github.ref_name, '-rc.') }}
 
+      - name: Verify release assets
+        # bd rc-6ep0i: v0.65.0 (run 41810273383) shipped 21 of 22 assets
+        # because action-gh-release treated an eventual-consistency 404 on
+        # asset metadata as success ("Matching asset is present after
+        # refresh; continuing...") and camel-full-aarch64-unknown-linux-gnu.tar.gz
+        # never landed while its .sha256 sidecar did. This step independently
+        # verifies the published asset set against dist/ (name + size
+        # equality), retries transient listing 404s, re-uploads exactly the
+        # unverified set with --clobber, and fails the job listing anything
+        # still missing. Do NOT remove as redundant: the upload action's
+        # "continuing" message is not proof of a complete release.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: scripts/verify-release-assets.sh "$GITHUB_REF_NAME" dist
+
   docker:
     name: Docker (${{ matrix.variant }})
     runs-on: ubuntu-latest
