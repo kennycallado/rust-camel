@@ -680,9 +680,10 @@ impl RhaiLanguage {
     /// `headers` and `properties` maps, each converted EXACTLY ONCE.
     ///
     /// This is the single conversion site for group evaluation and the
-    /// non-mutating eval path. Inbound conversion is fallible: a header,
-    /// property, or body holding a value rhai cannot represent (u64 > i64::MAX,
-    /// sealed Q4) fails before any script runs.
+    /// non-mutating eval path. A header, property, or body holding a JSON
+    /// integer in `(i64::MAX, u64::MAX]` binds as the `json number` wrapper
+    /// (bd rc-141om); inbound conversion refuses nothing else for serde_json
+    /// values.
     fn snapshot(exchange: &Exchange) -> Result<ExchangeSnapshot, LanguageError> {
         // Body FIRST, then headers, then properties: this preserves the
         // pre-snapshot `eval_async` error precedence (body -> header entry ->
@@ -4297,28 +4298,120 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn json_inbound_u64_property_still_refused() {
+    async fn json_inbound_u64_property_binds_json_number() {
         let mut ex = empty_exchange();
         ex.properties
             .insert("big".to_string(), Value::from(u64::MAX));
-        let err = eval_script(r#"property("big")"#, &ex)
+
+        let type_name = eval_script(r#"type_of(property("big"))"#, &ex)
             .await
-            .expect_err("u64 > i64::MAX must be refused");
-        // Spec: the existing typed conversion error is unchanged. The task
-        // wording says `type-mismatch`; observationally the inbound refusal is
-        // the pre-existing `ConversionError` (class `conversion`). Reported as
-        // a test-design-gap.
-        assert_class(&err, ExpressionErrorClass::Conversion, "inbound u64");
-        assert!(
-            matches!(err, LanguageError::ConversionError { .. }),
-            "inbound u64 must stay a conversion refusal: {err:?}"
+            .expect("inbound u64 binds");
+        assert_eq!(type_name, Value::String("json number".to_string()));
+
+        let token = eval_script(r#"property("big").to_string()"#, &ex)
+            .await
+            .expect("the wrapper renders its exact token");
+        assert_eq!(token, Value::String("18446744073709551615".to_string()));
+    }
+
+    #[tokio::test]
+    async fn big_header_does_not_fail_unrelated_later_step() {
+        let lang = RhaiLanguage::new();
+        let mut ex = empty_exchange();
+        ex.input
+            .headers
+            .insert("big".to_string(), Value::from(u64::MAX));
+
+        let first = lang
+            .create_mutating_expression(r#"headers["x"] = 1"#)
+            .expect("first step compiles");
+        first
+            .evaluate(&mut ex)
+            .await
+            .expect("the big header must not fail the step");
+
+        let second = lang
+            .create_mutating_expression(r#"body = "ok""#)
+            .expect("second step compiles");
+        second
+            .evaluate(&mut ex)
+            .await
+            .expect("the big header must not fail a later step");
+
+        assert_eq!(ex.input.headers.get("big"), Some(&Value::from(u64::MAX)));
+        assert_eq!(ex.input.headers.get("x"), Some(&Value::from(1)));
+        assert_eq!(ex.input.body.as_text(), Some("ok"));
+    }
+
+    #[tokio::test]
+    async fn json_body_u64_consistent_with_headers() {
+        let mut ex = Exchange::new(Message::new(Body::Json(Value::from(u64::MAX))));
+        ex.input
+            .headers
+            .insert("big".to_string(), Value::from(u64::MAX));
+
+        let body_type = eval_script("type_of(body)", &ex)
+            .await
+            .expect("the big body binds");
+        let header_type = eval_script(r#"type_of(header("big"))"#, &ex)
+            .await
+            .expect("the big header binds");
+
+        // Q4 body ruling: body and headers bind uniformly.
+        assert_eq!(body_type, Value::String("json number".to_string()));
+        assert_eq!(header_type, Value::String("json number".to_string()));
+    }
+
+    #[tokio::test]
+    async fn json_number_vs_int_comparison_refused() {
+        let mut ex = empty_exchange();
+        ex.input
+            .headers
+            .insert("big".to_string(), Value::from(u64::MAX));
+
+        let err = eval_script(r#"header("big") == 1"#, &ex)
+            .await
+            .expect_err("the json number wrapper has no implicit int coercion");
+        assert_class(
+            &err,
+            ExpressionErrorClass::TypeMismatch,
+            "json number vs int",
         );
     }
 
-    /// Regression (473-t2a fix round 1): the shared snapshot converts the
-    /// body BEFORE the header/property maps. An exchange whose body and
-    /// header are both unconvertible must report the body error, matching the
-    /// pre-snapshot `eval_async` precedence.
+    #[tokio::test]
+    async fn nested_big_int_survives_sibling_mutation() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"body["b"] = 2"#)
+            .expect("mutating expression compiles");
+        let body = Value::Object(
+            [
+                ("a".to_string(), Value::from(u64::MAX)),
+                ("b".to_string(), Value::from(1)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let mut ex = Exchange::new(Message::new(Body::Json(body)));
+
+        expr.evaluate(&mut ex)
+            .await
+            .expect("a sibling mutation must not refuse");
+
+        let Body::Json(v) = &ex.input.body else {
+            panic!("body must stay Body::Json, got {:?}", ex.input.body);
+        };
+        let obj = v.as_object().expect("committed body is an object");
+        assert_eq!(obj.get("a"), Some(&Value::from(u64::MAX)));
+        assert_eq!(obj.get("b"), Some(&Value::from(2)));
+    }
+
+    /// Inbound conversion is now total for serde_json values (bd rc-141om): a
+    /// big body and a big header both bind as the `json number` wrapper. The
+    /// snapshot's body-before-header order remains defined for the
+    /// forward-compat unknown-`Body`-variant arm, the only remaining inbound
+    /// refusal.
     #[tokio::test]
     async fn conversion_error_precedence_body_before_header() {
         let lang = RhaiLanguage::new();
@@ -4328,37 +4421,41 @@ mod tests {
             .headers
             .insert("big".to_string(), Value::from(u64::MAX));
 
-        let err = expr
+        let value = expr
             .evaluate(&ex)
             .await
-            .expect_err("body and header are both unconvertible");
-
-        match err {
-            LanguageError::ConversionError { target, .. } => {
-                assert_eq!(target, "body", "body conversion must win");
-            }
-            other => panic!("expected ConversionError, got {other:?}"),
-        }
+            .expect("a big body and header are both representable");
+        assert_eq!(value, Value::from(u64::MAX));
+        assert_eq!(
+            ex.input.headers.get("big"),
+            Some(&Value::from(u64::MAX)),
+            "read-only eval must leave the header untouched"
+        );
     }
 
-    /// Regression (473-t2a fix round 1): with a valid body, the header map is
-    /// converted before the property map, so a header entry error wins over a
-    /// property entry error. Uses the predicate entry point.
+    /// Write-back order: the mutating transaction validates header deltas
+    /// before property deltas, so a refused-outbound value assigned to both
+    /// surfaces reports the header target (`timestamp()` is the refused
+    /// `Instant`).
     #[tokio::test]
     async fn conversion_error_precedence_header_before_property() {
         let lang = RhaiLanguage::new();
-        let pred = lang.create_predicate("true").expect("predicate compiles");
+        let expr = lang
+            .create_mutating_expression(
+                r#"headers["big"] = timestamp(); properties["big"] = timestamp()"#,
+            )
+            .expect("mutating expression compiles");
         let mut ex = Exchange::new(Message::new("valid"));
         ex.input
             .headers
-            .insert("big".to_string(), Value::from(u64::MAX));
+            .insert("old".to_string(), Value::String("h".to_string()));
         ex.properties
-            .insert("big".to_string(), Value::from(u64::MAX));
+            .insert("old".to_string(), Value::String("p".to_string()));
 
-        let err = pred
-            .matches(&ex)
+        let err = expr
+            .evaluate(&mut ex)
             .await
-            .expect_err("header and property are both unconvertible");
+            .expect_err("timestamp must stay refused outbound");
 
         match err {
             LanguageError::ConversionError { target, .. } => {
@@ -4366,6 +4463,26 @@ mod tests {
             }
             other => panic!("expected ConversionError, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn copied_json_number_entry_converts_exact_u64() {
+        let lang = RhaiLanguage::new();
+        let expr = lang
+            .create_mutating_expression(r#"properties["copy"] = property("big")"#)
+            .expect("mutating expression compiles");
+        let mut ex = empty_exchange();
+        ex.properties
+            .insert("big".to_string(), Value::from(u64::MAX));
+
+        expr.evaluate(&mut ex)
+            .await
+            .expect("the copied wrapper converts back exactly");
+
+        // The changed entry crossed the outbound converter to the exact u64
+        // image; the untouched source keeps its original value handle.
+        assert_eq!(ex.properties.get("copy"), Some(&Value::from(u64::MAX)));
+        assert_eq!(ex.properties.get("big"), Some(&Value::from(u64::MAX)));
     }
 
     #[tokio::test]
@@ -4844,6 +4961,9 @@ mod tests {
         );
     }
 
+    /// No constructible pre-loop refusal fixture remains after rc-141om: the
+    /// group snapshot binds a big header as the `json number` wrapper, so the
+    /// loop runs and clause 0 matches.
     #[tokio::test]
     async fn group_conversion_failure_is_indexed_to_clause_zero() {
         let lang = RhaiLanguage::new();
@@ -4854,20 +4974,15 @@ mod tests {
             .headers
             .insert("big".to_string(), Value::from(u64::MAX));
 
-        let err = group
-            .first_match(&exchange)
-            .await
-            .expect_err("an unrepresentable header must refuse before the loop");
-        assert_eq!(err.index, 0, "pre-loop snapshot failure is indexed to 0");
-        assert_class(
-            &err.error,
-            ExpressionErrorClass::Conversion,
-            "unrepresentable header",
+        assert_eq!(
+            group
+                .first_match(&exchange)
+                .await
+                .expect("the group snapshot binds json numbers"),
+            Some(0),
+            "clause 0 matches; there is no pre-loop refusal"
         );
-        assert!(
-            group.eval_log().is_empty(),
-            "pre-loop failure must not record an evaluated clause"
-        );
+        assert_eq!(group.eval_log(), vec![0]);
     }
 
     #[tokio::test]

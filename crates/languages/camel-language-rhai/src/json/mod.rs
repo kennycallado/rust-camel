@@ -155,6 +155,19 @@ pub(crate) fn token_projects_to_i64(token: &str) -> Option<i64> {
     token.parse::<i64>().ok()
 }
 
+/// Return `Some(u)` only for canonical unsigned decimal tokens — every byte an
+/// ASCII digit, NO leading zero — whose parsed value is strictly greater than
+/// `i64::MAX`; anything else is `None` (the exact inbound image, bd rc-141om).
+pub(crate) fn as_u64_above_i64(token: &str) -> Option<u64> {
+    if token.bytes().any(|b| !b.is_ascii_digit()) || (token.len() > 1 && token.starts_with('0')) {
+        return None;
+    }
+    let value = token.parse::<u64>().ok()?;
+    // Lossless: `i64::MAX` is non-negative, so this widening `as u64` cast
+    // preserves its value exactly.
+    (value > i64::MAX as u64).then_some(value)
+}
+
 /// Project a stored value to a Rhai `Dynamic` using the shared projection:
 /// containers become `JsonValue`, strings/bools/unit stay native, and only
 /// integer-form tokens become native `INT` (other numbers stay `JsonNumber`).

@@ -14,6 +14,7 @@ use camel_language_api::{Body, LanguageError, Value};
 use rhai::{Dynamic, Engine, Scope};
 
 use crate::converter::rhai_map_to_value_map;
+use crate::json::JsonNumber;
 
 /// A single header/property entry change.
 pub(crate) enum EntryDelta {
@@ -44,7 +45,9 @@ pub(crate) fn rhai_values_differ(engine: &Engine, pre: &Dynamic, post: &Dynamic)
         Kind::Map => maps_differ(engine, pre, post),
         Kind::Array => arrays_differ(engine, pre, post),
         Kind::Blob => !blobs_equal(pre, post),
-        // Exotic / custom types have no defined comparison — conservative.
+        Kind::JsonNumber => !json_numbers_equal(pre, post),
+        // Exotic / remaining custom types have no defined comparison —
+        // conservative.
         Kind::Other => true,
     }
 }
@@ -114,6 +117,7 @@ enum Kind {
     Map,
     Array,
     Blob,
+    JsonNumber,
     Other,
 }
 
@@ -136,6 +140,8 @@ fn kind(d: &Dynamic) -> Kind {
         Kind::Array
     } else if d.is::<rhai::Blob>() {
         Kind::Blob
+    } else if d.is::<JsonNumber>() {
+        Kind::JsonNumber
     } else {
         Kind::Other
     }
@@ -193,5 +199,48 @@ fn blobs_equal(pre: &Dynamic, post: &Dynamic) -> bool {
     match (pre, post) {
         (Some(a), Some(b)) => *a == *b,
         _ => false,
+    }
+}
+
+/// Compare two JSON numbers by their exact source token.
+///
+/// A `JsonNumber` is an opaque exact decimal image of a JSON integer that does
+/// not fit `i64`. Two images are equal iff their tokens are identical; any
+/// other shape (a failed downcast) is conservatively "not equal".
+fn json_numbers_equal(pre: &Dynamic, post: &Dynamic) -> bool {
+    let pre = pre.read_lock::<JsonNumber>();
+    let post = post.read_lock::<JsonNumber>();
+    match (pre, post) {
+        (Some(a), Some(b)) => a.as_str() == b.as_str(),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rhai_values_differ;
+    use crate::json::JsonNumber;
+    use rhai::Dynamic;
+
+    #[test]
+    fn json_number_token_equality_diffs_by_token() {
+        let engine = rhai::Engine::new();
+        let a = Dynamic::from(JsonNumber::new("18446744073709551615"));
+        let b = Dynamic::from(JsonNumber::new("18446744073709551615"));
+        let c = Dynamic::from(JsonNumber::new("5"));
+        let i = Dynamic::from(5_i64);
+
+        assert!(
+            !rhai_values_differ(&engine, &a, &b),
+            "same token must not report a delta"
+        );
+        assert!(
+            rhai_values_differ(&engine, &a, &c),
+            "different tokens must report a delta"
+        );
+        assert!(
+            rhai_values_differ(&engine, &a, &i),
+            "json number vs int must report a delta"
+        );
     }
 }

@@ -61,13 +61,19 @@ script step.
 `to_json`, `to_string`, and `to_debug` emit compact JSON in stored order with raw
 UTF-8 and no `/` escape. Native `Map` keys are sorted.
 
-The outbound converter `dynamic_to_value` refuses `JsonValue` and `JsonNumber`
-with the stable labels `json value` and `json number`. Direct outbound wrapper
-conversion is deferred, so persisting parsed JSON uses `to_json` or a native
-leaf. The inbound converter and the `snapshot`/`snapshot_maps` helpers are unchanged.
+The outbound converter `dynamic_to_value` refuses `JsonValue` with the stable
+label `json value` and refuses `JsonNumber` with `json number`, except when its
+token is a plain decimal integer in canonical spelling within (i64::MAX,
+u64::MAX]. That exact inbound image converts back to the identical `u64`. Every
+other token keeps its typed refusal. Direct outbound wrapper conversion is
+otherwise deferred, so persisting parsed JSON uses `to_json` or a native leaf.
+The inbound converter binds a JSON integer in `(i64::MAX, u64::MAX]` as the
+`json number` wrapper; the `snapshot` and `snapshot_maps` helpers pass wrappers
+through unchanged.
 
-Authority: bd rc-qka42. `rc-m01r9` (eager scope conversion) and `rc-141om`
-(inbound u64 refusal) remain out of scope.
+Authority: bd rc-qka42. `rc-m01r9` (eager scope conversion) remains out of scope.
+`rc-141om` is resolved by the `json number` inbound binding, refining owner
+decision 2026-10-02 (sealed Q4) without reversing it.
 
 ## Resource limits
 

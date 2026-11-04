@@ -9,12 +9,15 @@
 
 use camel_language_api::{LanguageError, Value};
 
+use crate::json::JsonNumber;
+
 /// Convert a serde_json Value into a rhai::Dynamic — the single, fallible
 /// inbound boundary conversion (change `language-value-boundary`, task 2.1).
 ///
-/// JSON integers greater than `i64::MAX` are refused with a typed conversion
-/// error (owner decision 2026-10-02, sealed Q4): rhai integers are `i64`, and
-/// a lossy float conversion would silently change the value.
+/// JSON integers in `(i64::MAX, u64::MAX]` bind as the `json number` wrapper
+/// carrying their exact decimal token on every inbound path (bd rc-141om;
+/// refines owner decision 2026-10-02, sealed Q4: no lossy float). The
+/// explicit lossy path is `x.to_float()`.
 ///
 /// `target` is a GENERIC destination label (`"value"`, `"body"`, `"header
 /// entry"`, `"property entry"`). Recursion passes it through UNCHANGED: the
@@ -34,7 +37,9 @@ pub(crate) fn json_to_dynamic(v: &Value, target: &str) -> Result<rhai::Dynamic, 
                 rhai::Dynamic::from(i)
             } else if n.as_u64().is_some() {
                 // Only u64 > i64::MAX reaches here (as_i64 already missed).
-                return Err(refused("u64 > i64::MAX"));
+                // serde_json renders a u64-backed number as the exact plain
+                // decimal, so the wrapper carries the exact inbound image.
+                rhai::Dynamic::from(JsonNumber::new(n.to_string()))
             } else if let Some(f) = n.as_f64() {
                 debug_assert!(f.is_finite(), "valid JSON numbers are finite");
                 rhai::Dynamic::from_float(f)
@@ -124,8 +129,14 @@ pub(crate) fn dynamic_to_value(d: rhai::Dynamic, target: &str) -> Result<Value, 
         // Task 1.5 outbound refusal: direct wrapper conversion stays deferred
         // and reports the stable label, never a Rust type path.
         Err(refused(crate::json::JSON_VALUE_TYPE_NAME))
-    } else if d.is::<crate::json::JsonNumber>() {
-        Err(refused(crate::json::JSON_NUMBER_TYPE_NAME))
+    } else if d.is::<JsonNumber>() {
+        // Only the exact inbound image converts; every other token keeps the
+        // stable `json number` refusal (rc-qka42 deferral).
+        let token = d.cast::<JsonNumber>();
+        match crate::json::as_u64_above_i64(token.as_str()) {
+            Some(u) => Ok(Value::from(u)),
+            None => Err(refused(crate::json::JSON_NUMBER_TYPE_NAME)),
+        }
     } else {
         Err(refused(d.type_name()))
     }
@@ -149,6 +160,7 @@ pub(crate) fn rhai_map_to_value_map(
 
 #[cfg(test)]
 mod tests {
+    use super::JsonNumber;
     use super::{dynamic_to_value, json_to_dynamic};
     use camel_language_api::{LanguageError, Value};
 
@@ -240,36 +252,38 @@ mod tests {
     }
 
     #[test]
-    fn json_number_refused_outbound_stable_label() {
-        let d = rhai::Dynamic::from(crate::json::JsonNumber::new("1"));
-        let err = dynamic_to_value(d, "value").expect_err("number wrapper must be refused");
-        match err {
-            LanguageError::ConversionError {
-                source_type,
-                target,
-            } => {
-                assert_eq!(source_type, "json number");
-                assert_eq!(target, "value");
+    fn json_number_non_u64_token_still_refused_outbound() {
+        for token in ["1.5", "5", "18446744073709551616", "09223372036854775808"] {
+            let d = rhai::Dynamic::from(JsonNumber::new(token));
+            let err = dynamic_to_value(d, "value").expect_err("token must be refused");
+            match err {
+                LanguageError::ConversionError {
+                    source_type,
+                    target,
+                } => {
+                    assert_eq!(source_type, "json number");
+                    assert_eq!(target, "value");
+                }
+                other => panic!("expected ConversionError, got {other:?}"),
             }
-            other => panic!("expected ConversionError, got {other:?}"),
         }
     }
 
     #[test]
-    fn u64_above_i64_max_refused_inbound() {
-        // Sealed Q4: no lossy float conversion for u64 > i64::MAX.
+    fn json_number_u64_round_trips_outbound() {
+        let inbound = json_to_dynamic(&Value::from(u64::MAX), "value").expect("inbound binds");
+        let out = dynamic_to_value(inbound, "value").expect("exact image converts");
+        assert_eq!(out, Value::from(u64::MAX));
+        assert!(out.is_u64());
+    }
+
+    #[test]
+    fn u64_above_i64_max_binds_json_number_inbound() {
         let v = Value::from(u64::MAX);
-        let err = json_to_dynamic(&v, "property big").expect_err("huge u64 refused");
-        match err {
-            LanguageError::ConversionError {
-                source_type,
-                target,
-            } => {
-                assert_eq!(source_type, "u64 > i64::MAX");
-                assert_eq!(target, "property big");
-            }
-            other => panic!("expected ConversionError, got {other:?}"),
-        }
+        let d = json_to_dynamic(&v, "property big").expect("huge u64 binds");
+        assert!(d.is::<JsonNumber>());
+        let n = d.cast::<JsonNumber>();
+        assert_eq!(n.as_str(), "18446744073709551615");
     }
 
     #[test]

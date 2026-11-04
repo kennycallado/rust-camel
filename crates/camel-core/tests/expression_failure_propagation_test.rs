@@ -1299,11 +1299,12 @@ async fn set_property_conversion_refusal_names_trusted_target() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn inbound_scope_refusal_keeps_generic_target() {
-    // An UNRELATED existing property that rhai cannot represent (u64::MAX)
-    // fails when `make_scope` reads it into the script scope. That refusal is
-    // about the property-entry surface, NOT this step's destination `p`, so
-    // the carrier must keep the generic target instead of rewriting it.
+async fn inbound_scope_big_property_binds_and_step_succeeds() {
+    // The inbound property-entry refusal is no longer constructible via rhai
+    // (bd rc-141om): a JSON integer above i64::MAX binds as the `json number`
+    // wrapper, so the seeding step and the unrelated rhai step both succeed.
+    // The carrier's trusted-target rewrite stays pinned by
+    // `set_property_conversion_refusal_names_trusted_target` (non-finite float).
     let steps = vec![
         BuilderStep::DeclarativeSetProperty {
             key: "huge".to_string(),
@@ -1315,25 +1316,12 @@ async fn inbound_scope_refusal_keeps_generic_target() {
         },
     ];
     let (result, _mock) = run_route("inbound-scope-refusal", steps, None).await;
-    let err = result.expect_err("unrepresentable inbound property must fail the step");
-    assert_expression_failed(
-        &err,
-        "inbound-scope-refusal",
-        "rhai",
-        "set_property",
-        ExpressionErrorClass::Conversion,
-        Pos::None,
+    let exchange = result.expect("the big property must not fail the step");
+    assert_eq!(
+        exchange.properties.get("huge"),
+        Some(&Value::from(u64::MAX)),
+        "the big property binds and survives the route"
     );
-    match &err {
-        CamelError::ExpressionFailed {
-            conversion: Some(detail),
-            ..
-        } => {
-            assert_eq!(detail.source_type, "u64 > i64::MAX");
-            assert_eq!(detail.target, "property entry");
-        }
-        other => panic!("expected conversion detail on ExpressionFailed, got {other:?}"),
-    }
 }
 
 // ---------------------------------------------------------------------------

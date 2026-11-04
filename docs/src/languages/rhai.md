@@ -124,7 +124,7 @@ These values have no native JSON representation. The step fails with a typed `co
 - Timestamps (`timestamp`)
 - Any other custom type (reported by its Rhai type name)
 
-On the inbound side, a JSON integer greater than `i64::MAX` is refused (`u64 > i64::MAX`). The engine does not store a lossy float. The error target names the exchange slot: the property key, the header key, or `body`. Keys inside a map value are runtime data and never appear in the error target.
+On the inbound side, a JSON integer in `(i64::MAX, u64::MAX]` binds as `json number` with its exact decimal token. This holds uniformly for body, headers, and properties, nested or not. Detect it with `type_of(x) == "json number"`, read the exact decimal with `x.to_string()`, and take the lossy path only explicitly with `x.to_float()`. Every other unrepresentable value keeps its typed refusal. The error target still names the exchange slot: the property key, the header key, or `body`. Keys inside a map value are runtime data and never appear in the error target.
 
 ### One-way conversions
 
@@ -261,16 +261,20 @@ explicit lossy comparison.
 
 Direct outbound conversion of a wrapper is deferred. Assigning a wrapper to a
 body fails as an explicit compatibility break: `body = parse_json(...)` (or
-`set_body(parse_json(...))`) does not work. Persist parsed JSON with `to_json` or
-a native leaf. `body = to_json(j)` yields a text body that holds valid JSON.
+`set_body(parse_json(...))`) does not work. The exception is a `json number`
+whose token is a plain decimal integer in canonical spelling within
+`(i64::MAX, u64::MAX]`, which converts to the identical `u64`. Persist parsed
+JSON with `to_json` or a native leaf. `body = to_json(j)` yields a text body
+that holds valid JSON.
 
 `to_json(parse_json(s))` is semantically equivalent, not byte-for-byte identical.
 It preserves the value, the numeric magnitude, and the key order. It does not
 preserve whitespace, indentation, or escape spelling. Wrapped number tokens stay
 exact, and a native `i64` spelling may normalize, including `-0` to `0`.
 
-The inbound exchange conversion is unchanged. A JSON integer greater than
-`i64::MAX` on that path is still refused.
+The inbound exchange conversion binds a JSON integer in `(i64::MAX, u64::MAX]` as
+`json number` (bd rc-141om, refining the no-lossy-float owner decision). It no
+longer refuses such a value.
 
 ## Emitting a literal `${...}`
 
