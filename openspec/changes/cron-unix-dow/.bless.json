@@ -1,0 +1,17 @@
+{
+  "kind": "plan",
+  "change": "cron-unix-dow",
+  "verdict": "APPROVE",
+  "hash": "sha256:a95556ff692ad5253b4f1d286d20128c5fcc7842130c976e53d0cd5837342cad",
+  "expert": "experts/e_gpt",
+  "date": "2026-11-04",
+  "sessions": [
+    "ses_e5980a942ffeJfRuU8k5TUJ2r3",
+    "ses_e5966e07bffeEOfzsjCYmr8swF"
+  ],
+  "history": [
+    "spec blessing: 3 rounds (2x BLESS-WITH-FIXES, then APPROVE) — sha256:4967e908150a21c88e138d48798af369acc43540a91a0e3788ff424dabcd47f5",
+    "plan review r_glm: round 1 APPROVE-WITH-FINDINGS (5 fixes applied, 1 hash-provenance finding rejected with evidence), round 2 APPROVE",
+    "plan blessing: APPROVE round 1 — supersedes spec blessing"
+  ]
+}

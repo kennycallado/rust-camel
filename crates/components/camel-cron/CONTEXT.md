@@ -9,6 +9,26 @@ Calendar-triggered scheduling for rust-camel Routes. Fires Exchanges on Unix
 cron:<name>?schedule=<5-field-expr>[&timeZone=<IANA>&includeMetadata=true]
 ```
 
+## Day-of-week semantics
+
+The `schedule` parameter takes Unix day-of-week numbers. `0` and `7` mean
+Sunday. `1` means Monday. `6` means Saturday.
+
+Config normalization translates the Unix day-of-week field to the ordinals of
+the `cron` crate, where Sunday is `1` and Saturday is `7`. A numeric value maps
+with `v % 7 + 1`. A range, list, or step expands over the source values first,
+then each value maps. A single value with a step expands from that value to the
+field maximum 7. `*`, stepped wildcards, and day names pass through
+unchanged because both spaces agree on them.
+
+Endpoint creation rejects four forms: a value outside `0-7`, a descending
+range, a zero step, and a mixed numeric/name endpoint.
+
+Scope note: the `cron` crate intersects a restricted day-of-month field with a
+restricted day-of-week field. Unix cron takes the union (OR) instead. An
+expression that restricts both fields can therefore fire on fewer days than a
+Unix cron implementation would.
+
 ## Language
 
 **CronSchedule**:

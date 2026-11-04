@@ -47,6 +47,8 @@ minute hour day-of-month month day-of-week
 
 The URI uses `+` as the space separator (Apache Camel convention). The expression `*+*+*+*+*` fires every minute. Each field supports the standard operators: `*`, ranges (`1-5`), lists (`1,3,5`), and step values (`*/2`).
 
+The day-of-week field uses Unix numbering: `0` and `7` are Sunday, and `1` is Monday. Numeric ranges, lists, and steps keep that Unix meaning. Day names such as `MON` and `SUN` work unchanged. The component rejects values outside `0-7` at endpoint creation. (See `crates/components/camel-cron/CONTEXT.md`.)
+
 ## Consumer
 
 `cron:tick?schedule=*+*+*+*+*` fires an Exchange on the schedule. The Consumer is a pure source. It reads from no external system. The first fire happens at the next matching schedule time, not at startup.
