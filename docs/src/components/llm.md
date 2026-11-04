@@ -72,7 +72,7 @@ The response cache deduplicates materialized requests. It sits at the producer l
 
 Decision providers need the `decisions` feature. The `all-providers` feature includes it. Loopback and private addresses, such as a local Ollama, need `allow_internal = true`. A question set has 1 to 400 questions. With an Ollama provider the limit is 64, and endpoint creation rejects a larger set.
 
-The Ollama path is verified live against a local `tev1:0.8b` model. The OpenAI and TypeSafe codecs are verified against recorded wire fixtures only; hosted access was not tested. The model names in the example below are placeholders: check each provider's current model list.
+The Ollama path is verified live against a local `tev1:0.8b` model. The TypeSafe codec is verified live against OpenCode Zen: set `type = "typesafe"` and `base_url = "https://opencode.ai/inference/systemone"`, and the codec appends `/v1/systemone`. Zen serves Jev models, such as `jev-1.13`, that its `/v1/models` catalog does not list, so take the model name from Zen's documentation. The OpenAI codec is verified against recorded wire fixtures only; hosted OpenAI access was not tested. The model names in the example below are placeholders: check each provider's current model list.
 
 ```toml
 default_decision_provider = "local"
