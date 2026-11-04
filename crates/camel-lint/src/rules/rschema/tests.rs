@@ -1788,6 +1788,180 @@ steps:
 }
 
 #[test]
+fn rschema_delay_ms_full_config_default_no_diagnostic() {
+    // rc-jq775 shape family: `delay` is `anyOf: [u64, DelayFullConfig]`,
+    // so the type failure under the full-config branch collapses at the
+    // ancestor node. The carve-out must use ancestor coverage (Condition
+    // A + B) so the clean-integer default is carved and its Info note
+    // suppressed. Pinned in all four authored forms: quoted/unquoted and
+    // bare/enveloped.
+    let unquoted_bare = "\
+id: r1
+from: direct:start
+steps:
+  - delay:
+      delay_ms: ${env:OPS_X:-20000}
+";
+    let quoted_bare = "\
+id: r1
+from: direct:start
+steps:
+  - delay:
+      delay_ms: \"${env:OPS_X:-20000}\"
+";
+    let unquoted_enveloped = "\
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - delay:
+          delay_ms: ${env:OPS_X:-20000}
+";
+    let quoted_enveloped = "\
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - delay:
+          delay_ms: \"${env:OPS_X:-20000}\"
+";
+    for source in [
+        unquoted_bare,
+        quoted_bare,
+        unquoted_enveloped,
+        quoted_enveloped,
+    ] {
+        let diags = analyze(source);
+        let rschema = rschema_only(&diags);
+        assert!(
+            rschema.is_empty(),
+            "delay_ms clean-integer default must produce no diagnostic in \
+             every authored form; got: {:?}",
+            rschema
+                .iter()
+                .map(|d| (d.severity, d.message.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn rschema_delay_ms_shorthand_body_no_diagnostic() {
+    // The shorthand `delay: <u64>` body is the `Short` branch of the same
+    // anyOf. A whole-body `${env:OPS_X:-20000}` token is a clean integer
+    // default at an integer-typed position, so the leaf is carved (no
+    // Error, no Info note).
+    let source = "\
+id: r1
+from: direct:start
+steps:
+  - delay: ${env:OPS_X:-20000}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.is_empty(),
+        "delay shorthand clean-integer default must produce no diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_delay_ms_and_dynamic_header_carve_per_leaf() {
+    // Two whole-scalar env leaves under ONE anyOf carve node: `delay_ms`
+    // is integer-typed (carved, silent) while `dynamic_header` is a
+    // string-typed sibling that keeps its string semantics (one Info
+    // note anchored on its own placeholder). The carve is per leaf, so
+    // the ancestor span coverage must not swallow the header note or
+    // flag it as an Error.
+    let source = "\
+id: r1
+from: direct:start
+steps:
+  - delay:
+      delay_ms: ${env:OPS_X:-20000}
+      dynamic_header: ${env:HDR:-3000}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "per-leaf carve must emit no Error; got: {errors:?}"
+    );
+    let infos: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Info)
+        .collect();
+    assert_eq!(
+        infos.len(),
+        1,
+        "expected exactly one Info note for the string-typed header leaf; got: {infos:?}"
+    );
+    assert_eq!(
+        slice(source, &infos[0].span),
+        "${env:HDR:-3000}",
+        "Info span must anchor on the header placeholder node"
+    );
+}
+
+#[test]
+fn rschema_retry_multiplier_clean_int_default_no_diagnostic() {
+    // `multiplier` is f64 (NUMBER-typed, not integer). The typed copy is
+    // the number `2` — a clean integer that parses as the target type —
+    // so the STRING copy's chain clears and the carved leaf is silent.
+    let source = "\
+id: r1
+from: direct:start
+error_handler:
+  retry:
+    max_attempts: 4
+    multiplier: ${env:M:-2}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.is_empty(),
+        "NUMBER-typed clean-integer default must produce no diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_on_exceptions_retry_default_no_diagnostic() {
+    // Same policy shape nested under `on_exceptions[*].retry`;
+    // `max_delay_ms` is u64, so a clean-integer default is carved.
+    let source = "\
+id: r1
+from: direct:start
+error_handler:
+  on_exceptions:
+    - retry:
+        max_attempts: 4
+        max_delay_ms: ${env:D:-10000}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    assert!(
+        rschema.is_empty(),
+        "on_exceptions retry clean-integer default must produce no diagnostic; got: {:?}",
+        rschema
+            .iter()
+            .map(|d| (d.severity, d.message.as_str()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn rschema_numeric_default_in_string_field_stays_string() {
     // Typing-mirror false-positive fix (rc-93wct rev 2): a
     // numeric-looking default substituted into a STRING field must not
@@ -2039,6 +2213,20 @@ steps:
             .map(|d| (d.severity, slice(source, &d.span)))
             .collect::<Vec<_>>()
     );
+    // The `notanumber` Error covers its leaf, so the substituted-default
+    // Info note is suppressed (it would claim clean validation).
+    let infos: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Info)
+        .collect();
+    assert!(
+        infos.is_empty(),
+        "the covering Error must suppress the substituted-default Info note; got: {:?}",
+        infos
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -2151,21 +2339,16 @@ steps:
             .map(|d| (d.severity, slice(source, &d.span)))
             .collect::<Vec<_>>()
     );
-    // The Info note must ALSO survive: the candidate reached the carve-out
-    // loop, Condition A fired (string copy errors), and Condition B kept
-    // the STRING copy (the number copy errors too) — so the leaf is not
-    // carved and the substituted-default note is not suppressed. A
-    // refactor that let the number copy win at non-integer positions
-    // would carve the leaf, drop this Info, and fail the assertion.
+    // The schema type Error covers the authored placeholder, so the
+    // substituted-default Info note is suppressed: a note claiming the
+    // field validated cleanly beside an Error would be a lie.
     let infos: Vec<_> = rschema
         .iter()
         .filter(|d| d.severity == Severity::Info)
         .collect();
-    assert_eq!(
-        infos.len(),
-        1,
-        "expected the substituted-default Info note to survive the bool \
-             position; got: {infos:?}"
+    assert!(
+        infos.is_empty(),
+        "the covering Error must suppress the substituted-default Info note; got: {infos:?}"
     );
 }
 
@@ -3213,6 +3396,20 @@ fn bool_position_non_boolean_defaults_still_error() {
                 .map(|d| (d.severity, slice(&source, &d.span)))
                 .collect::<Vec<_>>()
         );
+        // The type Error covers the placeholder leaf, so the
+        // substituted-default Info note is suppressed.
+        let infos: Vec<_> = rschema
+            .iter()
+            .filter(|d| d.severity == Severity::Info)
+            .collect();
+        assert!(
+            infos.is_empty(),
+            "the covering Error must suppress the substituted-default Info note; got: {:?}",
+            infos
+                .iter()
+                .map(|d| slice(&source, &d.span))
+                .collect::<Vec<_>>()
+        );
     }
 }
 
@@ -3349,6 +3546,253 @@ auto_startup: ${env:AUTO_STARTUP:-1}
         rschema
             .iter()
             .map(|d| (d.severity, slice(source, &d.span)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_float_default_number_position_error_no_info() {
+    // A float default is not a clean integer: `multiplier` (NUMBER-typed)
+    // keeps the STRING copy's type Error at the leaf, and the
+    // substituted-default Info note that would otherwise sit beside it is
+    // suppressed by the covering Error (it would claim the field
+    // validated cleanly, which is false).
+    let source = "\
+id: r1
+from: direct:start
+error_handler:
+  retry:
+    max_attempts: 4
+    multiplier: ${env:M:-2.0}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected exactly one Error for the float default; got: {:?}",
+        errors
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        slice(source, &errors[0].span).contains("${env:M:-2.0}"),
+        "the Error span must cover the authored placeholder; sliced: {:?}",
+        slice(source, &errors[0].span)
+    );
+    let infos: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Info)
+        .collect();
+    assert!(
+        infos.is_empty(),
+        "the covering Error must suppress the substituted-default Info note; got: {:?}",
+        infos
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_jitter_factor_float_default_error_no_info() {
+    // Same shape on `jitter_factor`: a float default is not a clean
+    // integer, so the STRING copy's type Error survives and its
+    // substituted-default Info note is suppressed.
+    let source = "\
+id: r1
+from: direct:start
+error_handler:
+  retry:
+    max_attempts: 4
+    jitter_factor: ${env:J:-0.5}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected exactly one Error for the float default; got: {:?}",
+        errors
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        slice(source, &errors[0].span).contains("${env:J:-0.5}"),
+        "the Error span must cover the authored placeholder; sliced: {:?}",
+        slice(source, &errors[0].span)
+    );
+    let infos: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Info)
+        .collect();
+    assert!(
+        infos.is_empty(),
+        "the covering Error must suppress the substituted-default Info note; got: {:?}",
+        infos
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_empty_default_integer_position_error_no_info() {
+    // An empty default is not a clean integer: the STRING copy's type
+    // Error survives at the integer position and suppresses the
+    // substituted-default Info note.
+    let source = "\
+id: r1
+from: direct:start
+steps:
+  - delay:
+      delay_ms: \"${env:OPS_X:-}\"
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected exactly one Error for the empty default; got: {:?}",
+        errors
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        slice(source, &errors[0].span).contains("${env:OPS_X:-}"),
+        "the Error span must cover the authored placeholder; sliced: {:?}",
+        slice(source, &errors[0].span)
+    );
+    let infos: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Info)
+        .collect();
+    assert!(
+        infos.is_empty(),
+        "the covering Error must suppress the substituted-default Info note; got: {:?}",
+        infos
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rschema_collateral_info_suppression_bounded() {
+    // An ancestor-anchored Error (the DelayBody anyOf collapse) covers the
+    // whole step mapping, so it suppresses the note of the individually
+    // valid `dynamic_header` sibling too. Suppression is bounded to Info:
+    // the Error survives, and a disjoint step's string-position note (a
+    // different span) still fires.
+    let source = "\
+id: r1
+from: direct:start
+steps:
+  - delay:
+      delay_ms: ${env:OPS_X:-2.0}
+      dynamic_header: ${env:HDR:-x-custom}
+  - set_header:
+      key: my-title
+      value: ${env:MY_TITLE:-hello}
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected only the float placeholder Error; got: {:?}",
+        errors
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        slice(source, &errors[0].span).contains("${env:OPS_X:-2.0}"),
+        "the Error span must cover the float placeholder; sliced: {:?}",
+        slice(source, &errors[0].span)
+    );
+    let infos: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Info)
+        .collect();
+    assert_eq!(
+        infos.len(),
+        1,
+        "only the disjoint string-position note must survive; got: {:?}",
+        infos
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        slice(source, &infos[0].span),
+        "${env:MY_TITLE:-hello}",
+        "the surviving Info must anchor on the disjoint set_header value"
+    );
+}
+
+#[test]
+fn rschema_int_position_2x_default_error_no_info() {
+    // `2x` is not a clean integer, so the route boot-rejects it: the
+    // STRING copy's type Error survives at the integer position and
+    // suppresses the substituted-default Info note.
+    let source = "\
+id: r1
+from: direct:start
+steps:
+  - throttle:
+      max_requests: ${env:MY_LIMIT:-2x}
+      period_secs: 1
+";
+    let diags = analyze(source);
+    let rschema = rschema_only(&diags);
+    let errors: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "expected exactly one Error for the `2x` default; got: {:?}",
+        errors
+            .iter()
+            .map(|d| slice(source, &d.span))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        slice(source, &errors[0].span).contains("${env:MY_LIMIT:-2x}"),
+        "the Error span must cover the authored placeholder; sliced: {:?}",
+        slice(source, &errors[0].span)
+    );
+    let infos: Vec<_> = rschema
+        .iter()
+        .filter(|d| d.severity == Severity::Info)
+        .collect();
+    assert!(
+        infos.is_empty(),
+        "the covering Error must suppress the substituted-default Info note; got: {:?}",
+        infos
+            .iter()
+            .map(|d| slice(source, &d.span))
             .collect::<Vec<_>>()
     );
 }

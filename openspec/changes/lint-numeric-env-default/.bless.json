@@ -1,0 +1,31 @@
+{
+  "kind": "plan",
+  "change": "lint-numeric-env-default",
+  "hash": "sha256:c789e50a629e57225c5ffe3d3af9efcd6d23390baa4ca1336efbbbf5732ab020",
+  "expert": "e_gpt",
+  "verdict": "APPROVE",
+  "verdict_detail": "Plan blessing (supersedes spec blessing hash a2f84767…). Spec rounds: BLESS-WITH-FIXES(4) → BLESS-WITH-FIXES(1) → APPROVE. Plan rounds: BLESS-WITH-FIXES(4: non-Copy Span clone in suppression expr [r_glm critical], unowned no-Info clauses for 2x/yes/TRUE, missing 4th delay_ms variant, broken acceptance commands) → BLESS-WITH-FIXES(4: invalid scalar set_header fixture, invalid multi-filter cargo commands, missing dedicated 2x pin, vacuous doc grep across line break) → APPROVE. r_glm plan review rounds: APPROVE-WITH-FINDINGS(1 critical + 3 minor) → APPROVE. tasks.md is intentionally untracked (.git/info/exclude) per repo convention; hash computed over the change dir including tasks.md.",
+  "rounds": [
+    {"verdict": "BLESS-WITH-FIXES", "findings": 4},
+    {"verdict": "BLESS-WITH-FIXES", "findings": 4},
+    {"verdict": "APPROVE", "findings": 0}
+  ],
+  "plan_review": {
+    "reviewer": "r_glm",
+    "rounds": [
+      {"verdict": "APPROVE-WITH-FINDINGS", "critical": 1, "minor": 3},
+      {"verdict": "APPROVE"}
+    ]
+  },
+  "spec_bless": {
+    "expert": "e_gpt",
+    "hash": "sha256:a2f84767aa6f150e4367f37beee44377f3745fd58fbd827d51cf031afda369d4",
+    "verdict": "APPROVE",
+    "rounds": [
+      {"verdict": "BLESS-WITH-FIXES", "findings": 4},
+      {"verdict": "BLESS-WITH-FIXES", "findings": 1},
+      {"verdict": "APPROVE", "findings": 0}
+    ]
+  },
+  "date": "2026-11-04"
+}

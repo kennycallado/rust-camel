@@ -19,9 +19,10 @@
 //! (see `enforce_typing_mirror`). One carve-out mirrors the boot
 //! numeric-knob repair: a whole-scalar token whose default is a clean
 //! integer (i64-or-u64 parse; SYNC with camel-dsl `env_int_probe` and
-//! camel-config `clean_i64`) at an integer-typed schema position is
-//! validated as the NUMBER instead, and a clean boolean (`true` / `false`,
-//! exact lowercase; SYNC with camel-config `clean_bool` and camel-dsl
+//! camel-config `clean_i64`) at an integer- or number-typed schema
+//! position is validated as the NUMBER instead, and a clean boolean
+//! (`true` / `false`, exact lowercase; SYNC with camel-config `clean_bool`
+//! and camel-dsl
 //! `clean_boolean`, pinned by the clean_boolean_lexical_gate SYNC gate pin)
 //! at a boolean-typed position is validated as the BOOL — so such leaves
 //! produce no diagnostic.
@@ -431,7 +432,13 @@ impl Rule for RSchemaRule {
         }
 
         // One Info note per substituted default with a resolvable value-leaf
-        // span, explaining why the field validated cleanly. The note lands
+        // span, explaining why the field validated cleanly. The note is
+        // truthful only when the leaf's chain is error-free, so it is
+        // suppressed when an existing Error span covers it (schema errors
+        // and unresolved-token errors are both already in `diagnostics`).
+        // An ancestor-anchored Error span may also cover individually valid
+        // sibling leaves, suppressing their notes too — bounded to Info:
+        // Errors are never removed, downgraded, or relocated. The note lands
         // on the authored placeholder; tokens without a value-leaf span
         // (comments, mapping keys) are skipped above.
         for (sub, span) in substituted.iter().zip(info_spans) {
@@ -441,6 +448,14 @@ impl Rule for RSchemaRule {
             if carved_spans.contains(&span) {
                 // Carved-out leaf: the default was not kept as a string,
                 // so the substituted-string Info note would be a lie.
+                continue;
+            }
+            if diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error && span_covers(d.span.clone(), &span))
+            {
+                // A covering Error already explains the failure; the
+                // "validated cleanly" note would contradict it.
                 continue;
             }
             diagnostics.push(Diagnostic {

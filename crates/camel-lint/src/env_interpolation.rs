@@ -7,6 +7,10 @@
 // lives in rschema.rs (`clean_integer`) — SYNC'd with camel-dsl
 // `env_int_probe::clean_integer` and camel-config `clean_i64`; this file
 // has no clean-integer logic and needs no behavioral counterpart.
+// The whole-scalar token typing is consumed by `rules/rschema.rs`
+// (`typed_carve_out_instance`), whose clean-integer / clean-boolean gates
+// are the SYNC'd mirrors of camel-dsl `env_int_probe` / camel-config — the
+// typing story cannot be read from this file alone.
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -190,9 +194,13 @@ pub(crate) fn interpolated_validation_copy(raw: &str) -> (String, Vec<Substitute
 /// (rc-93wct rev 2 typing mirror).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WholeScalarEnvToken {
-    /// `${env:VAR:-default}` — substituted; the typing mirror validates the
-    /// leaf as the STRING `default` (numeric/boolean re-inference
-    /// suppressed, replicating the boot tree-walk).
+    /// `${env:VAR:-default}` — substituted. Stage one: the typing mirror
+    /// forces STRING typing and records the leaf as an integer/boolean
+    /// carve-out candidate when the default is a clean integer /
+    /// exact-lowercase boolean. Stage two:
+    /// `rschema::typed_carve_out_instance` re-validates the candidate as
+    /// NUMBER/BOOL once the STRING copy flags the leaf's chain and the typed
+    /// probe clears it (Conditions A/B, ancestor-anchored spans included).
     WithDefault { default: String },
     /// `${env:VAR}` — no default: unresolved at every value position (boot
     /// hard-fails on it).

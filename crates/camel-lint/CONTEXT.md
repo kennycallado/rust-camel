@@ -37,19 +37,29 @@ The engine ships with 6 rules:
 | R-DEPRECATED | Deprecated | Warning | Flags deprecated component options |
 | R-MOCK-IN-PRODUCTION | Mock in production | Warning | Flags an intercept-replaceable inline `mock:` send in a route file; origin scope `to`/`endpoints`; exempt under `tests/fixtures/` paths and `*.test.yaml`; escalates to Error per ADR-0064 §5 |
 
-**R-SCHEMA interpolation (rc-93wct)**: R-SCHEMA validates an interpolated
+**R-SCHEMA interpolation (rc-93wct, rc-jq775)**: R-SCHEMA validates an interpolated
 copy of the source, not the raw text — `${env:NAME:-default}` tokens resolve
 to their default before schema validation (`$${env:...}`/`$$` escapes
 apply), and the rule replicates the boot tree-walk TYPING: a value leaf
 whose authored scalar is exactly one substituted `${env:X:-d}` token
-(whole-scalar; quotes/whitespace trimmed) validates as the STRING `"d"`, so
-numeric/boolean re-inference is suppressed. String-typed positions validate
-cleanly and emit one Info note per substituted default, span-anchored on the
-authored placeholder. Integer-typed positions take a carve-out: a default
-that passes the clean-integer rule is ALSO validated as a NUMBER copy, and
-when the STRING copy errors at the leaf's chain while the NUMBER copy is
-clean, the NUMBER copy wins — no diagnostic and no Info note (boot parity:
-the loader's typed probe coerces such a leaf). Accepted divergences
+(whole-scalar; quotes/whitespace trimmed) validates as the STRING `"d"`, and
+the leaf is recorded as an integer/boolean carve-out candidate when `d` is
+a clean integer or an exact-lowercase `true`/`false`. String-typed and
+polymorphic positions validate cleanly and emit one Info note per
+substituted default, span-anchored on the authored placeholder — but ONLY
+when no Error-severity diagnostic's span covers the leaf: a covering Error
+suppresses the note (it would contradict the Error), and an ancestor-anchored
+anyOf Error also suppresses the notes of individually-valid sibling leaves
+under the same branch node (collateral suppression is bounded to Info output;
+Errors are never removed, downgraded, or relocated). Integer- and
+number-typed positions take the integer carve-out: a default that passes
+the clean-integer rule is ALSO validated as a NUMBER copy, and when the
+STRING copy errors at the leaf's chain while the NUMBER copy is clean, the
+NUMBER copy wins — no diagnostic and no Info note (boot parity: the
+loader's typed probe coerces such a leaf, including the f64 parse of an
+integer at a `number` position). Boolean-typed positions take the boolean
+carve-out: a default that is exactly lowercase `true`/`false` is validated
+as the BOOL copy under the same conditions. Accepted divergences
 (opposite-direction, boot-fails-while-lint-silent): (a) lint applies the
 carve-out to every candidate with no cap, while the boot probe stops at
 eight candidates — a document with more than eight integer-position
@@ -59,14 +69,17 @@ without the `format` feature; schemars emits `format: uint`, not
 `maximum`), so an out-of-range default at a bounded field (e.g. u32
 `failure_threshold: ${env:FT:-5000000000}`) carves clean in lint while
 the boot typed parse rejects it (design-accepted). Any other outcome keeps the
-STRING copy: boolean-typed positions, non-integer or leading-zero defaults,
-and no-default tokens stay schema type Errors anchored on the authored
-placeholder. Known ceiling — structure-changing defaults: an unquoted
-flow-style default (for example `:-[a,b]`) splices into a non-scalar node
-in the validation copy, and a default containing `}` breaks the token
-match entirely; the typing mirror restores boot string typing for the
-spliced node, so both shapes stay silent (Info at most), never a
-false-positive type Error. A whole-scalar no-default token (`${env:X}`) is an Error at
+STRING copy: float defaults (boot coerces only clean integers and
+exact-lowercase booleans — a float default at any numeric position fails
+at boot too), empty or otherwise non-clean defaults, and no-default
+tokens stay schema type Errors whose span covers the authored placeholder
+(anchored at the leaf, or collapsed at an enclosing anyOf node). Known
+ceiling — structure-changing defaults: an unquoted flow-style default (for
+example `:-[a,b]`) splices into a non-scalar node in the validation copy,
+and a default containing `}` breaks the token match entirely; the typing
+mirror restores boot string typing for the spliced node, so both shapes
+stay silent (Info at most), never a false-positive type Error. A
+whole-scalar no-default token (`${env:X}`) is an Error at
 any value position — boot hard-fails on the unresolved variable, so lint
 must not stay silent even where the literal placeholder is a valid string.
 Comment tokens produce no diagnostics (comments have no value leaf in the
