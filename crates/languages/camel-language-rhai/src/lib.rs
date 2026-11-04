@@ -209,6 +209,10 @@ type EvalMutResult = Result<
 >;
 
 /// Resolved limits — every `Option<T>` folded to rust-camel runtime default.
+///
+/// `Copy` so the resolved snapshot can cross `spawn_blocking` 'static move
+/// closures (async eval, predicate-group clause loop) without borrowing.
+#[derive(Clone, Copy)]
 struct ResolvedRhaiLimits {
     max_operations: u64,
     max_string_size: usize,
@@ -233,6 +237,34 @@ fn resolve_rhai_limits(limits: &RhaiLimitsConfig) -> ResolvedRhaiLimits {
         max_function_expression_depth: limits.max_function_expression_depth.unwrap_or(32),
         max_call_levels: limits.max_call_levels.unwrap_or(64),
         execution_timeout_ms: limits.execution_timeout_ms.unwrap_or(5_000),
+    }
+}
+
+/// Map a rhai compile-time [`rhai::ParseError`] to a
+/// [`LanguageError::ParseError`] with the configured limits in scope.
+///
+/// An `ExprTooDeep` error names BOTH resolved depth candidates in its reason
+/// (`max-expression-depth {d} or max-function-expression-depth {f} exceeded`):
+/// rhai raises one shared variant for either setting and cannot identify
+/// which tripped, so the string lists candidates — it does NOT claim both
+/// tripped. Any other parse error keeps rhai's own text verbatim.
+fn compile_error_to_parse_error(
+    e: &rhai::ParseError,
+    script: &str,
+    limits: &RhaiLimitsConfig,
+) -> LanguageError {
+    let r = resolve_rhai_limits(limits);
+    let reason = if matches!(e.err_type(), rhai::ParseErrorType::ExprTooDeep) {
+        format!(
+            "max-expression-depth {} or max-function-expression-depth {} exceeded",
+            r.max_expression_depth, r.max_function_expression_depth
+        )
+    } else {
+        e.to_string()
+    };
+    LanguageError::ParseError {
+        expr: script.to_string(),
+        reason,
     }
 }
 
@@ -263,27 +295,48 @@ fn eval_alt_class(e: &rhai::EvalAltResult) -> ExpressionErrorClass {
     }
 }
 
+/// Map a rhai `ErrorDataTooLarge` category label to the contracted limit
+/// detail: `<limit-name> <bound> exceeded` with lowercase-kebab names
+/// matching the `RhaiLimitsConfig` keys. Only the dedicated label strings
+/// emitted by the rhai engine are EXACT-matched; anything else falls back to
+/// the name-only `"data-size limit exceeded"`. The raw engine label text is
+/// never interpolated into the result.
+fn data_too_large_detail(label: &str, limits: &ResolvedRhaiLimits) -> String {
+    match label {
+        "Length of string" => format!("max-string-size {} exceeded", limits.max_string_size),
+        "Size of array/BLOB" | "Size of BLOB" => {
+            format!("max-array-size {} exceeded", limits.max_array_size)
+        }
+        "Size of object map" => format!("max-map-size {} exceeded", limits.max_map_size),
+        _ => "data-size limit exceeded".to_string(),
+    }
+}
+
 /// Optional `detail` text for a `rhai::EvalAltResult`.
 ///
 /// Redaction contract (ADR-0012, change `language-value-boundary`): value
 /// bearing kinds (`ErrorArithmetic`, `ErrorRuntime`, `ErrorMismatchDataType`,
 /// `ErrorIndexingType`, `ErrorPropertyNotFound`, ...) carry `None` — thrown
-/// values and operands never reach the error. Only short static
-/// operand-free strings are attached for function-not-found and
-/// limit/timeout kinds.
-fn eval_alt_detail(e: &rhai::EvalAltResult) -> Option<String> {
+/// values and operands never reach the error. Only short operand-free
+/// strings are attached for function-not-found, limit/timeout, and data-size
+/// kinds; a limit detail names the limit and its configured bound.
+fn eval_alt_detail(e: &rhai::EvalAltResult, limits: &ResolvedRhaiLimits) -> Option<String> {
     use rhai::EvalAltResult;
-    let detail = match e.unwrap_inner() {
-        EvalAltResult::ErrorFunctionNotFound(..) => "function not found",
-        EvalAltResult::ErrorTooManyOperations(_)
-        | EvalAltResult::ErrorTooManyModules(_)
-        | EvalAltResult::ErrorStackOverflow(_)
-        | EvalAltResult::ErrorDataTooLarge(..)
-        | EvalAltResult::ErrorTooManyVariables(_) => "evaluation limit exceeded",
-        EvalAltResult::ErrorTerminated(..) => "script terminated",
-        _ => return None,
-    };
-    Some(detail.to_string())
+    match e.unwrap_inner() {
+        EvalAltResult::ErrorFunctionNotFound(..) => Some("function not found".to_string()),
+        EvalAltResult::ErrorTooManyOperations(_) => {
+            Some(format!("max-operations {} exceeded", limits.max_operations))
+        }
+        EvalAltResult::ErrorDataTooLarge(label, ..) => Some(data_too_large_detail(label, limits)),
+        EvalAltResult::ErrorStackOverflow(_) => Some(format!(
+            "max-call-levels {} exceeded",
+            limits.max_call_levels
+        )),
+        EvalAltResult::ErrorTooManyVariables(_) => Some("max-variables exceeded".to_string()),
+        EvalAltResult::ErrorTooManyModules(_) => Some("max-modules exceeded".to_string()),
+        EvalAltResult::ErrorTerminated(..) => Some("script terminated".to_string()),
+        _ => None,
+    }
 }
 
 /// Map a rhai `Position` to an [`ErrorPosition`].
@@ -302,15 +355,15 @@ fn to_error_position(p: rhai::Position) -> Option<ErrorPosition> {
 /// the guard sentinel and structured type-signature/type-list mentions of
 /// `StreamBodyRef` become the `Body::Stream` conversion error; everything
 /// else falls through to the structured 1.7 mapper.
-fn eval_error(e: &rhai::EvalAltResult, target: &str) -> LanguageError {
-    stream_body::map_stream_refusal(e, target).unwrap_or_else(|| map_eval_alt(e))
+fn eval_error(e: &rhai::EvalAltResult, target: &str, limits: &ResolvedRhaiLimits) -> LanguageError {
+    stream_body::map_stream_refusal(e, target).unwrap_or_else(|| map_eval_alt(e, limits))
 }
 
 /// Map a `rhai::EvalAltResult` to a structured, redacted [`LanguageError`].
 ///
 /// Classification uses the innermost error (`unwrap_inner`); position is the
 /// deepest available (inner first, outer fallback).
-fn map_eval_alt(e: &rhai::EvalAltResult) -> LanguageError {
+fn map_eval_alt(e: &rhai::EvalAltResult, limits: &ResolvedRhaiLimits) -> LanguageError {
     use rhai::EvalAltResult;
 
     let inner = e.unwrap_inner();
@@ -332,7 +385,7 @@ fn map_eval_alt(e: &rhai::EvalAltResult) -> LanguageError {
     LanguageError::EvalFailure {
         class: eval_alt_class(e),
         position,
-        detail: eval_alt_detail(e),
+        detail: eval_alt_detail(e, limits),
     }
 }
 
@@ -737,10 +790,7 @@ impl RhaiLanguage {
         walk_engine.set_optimization_level(OptimizationLevel::None);
         let walk_ast = walk_engine.compile(script).map_err(|e| {
             debug!(error = %e, "rhai expression compile failed");
-            LanguageError::ParseError {
-                expr: script.to_string(),
-                reason: e.to_string(),
-            }
+            compile_error_to_parse_error(&e, script, limits)
         })?;
         #[cfg(test)]
         COMPILE_COUNT.with(|c| c.set(c.get() + 1));
@@ -759,10 +809,7 @@ impl RhaiLanguage {
         exec_engine.set_optimization_level(OptimizationLevel::Simple);
         let exec_ast = exec_engine.compile(script).map_err(|e| {
             debug!(error = %e, "rhai expression compile failed");
-            LanguageError::ParseError {
-                expr: script.to_string(),
-                reason: e.to_string(),
-            }
+            compile_error_to_parse_error(&e, script, limits)
         })?;
         #[cfg(test)]
         COMPILE_COUNT.with(|c| c.set(c.get() + 1));
@@ -785,7 +832,8 @@ impl RhaiLanguage {
         properties_map: rhai::Map,
     ) -> Result<Value, LanguageError> {
         let engine = Self::create_eval_engine(limits, headers_map.clone(), properties_map.clone());
-        Self::eval_with_engine(&engine, ast, body, headers_map, properties_map)
+        let resolved = resolve_rhai_limits(limits);
+        Self::eval_with_engine(&engine, ast, body, headers_map, properties_map, &resolved)
     }
 
     /// Evaluate a pre-compiled read-only AST with an already-built eval engine.
@@ -800,6 +848,7 @@ impl RhaiLanguage {
         body: rhai::Dynamic,
         headers_map: rhai::Map,
         properties_map: rhai::Map,
+        limits: &ResolvedRhaiLimits,
     ) -> Result<Value, LanguageError> {
         let mut scope = Scope::new();
         let stream = StreamCounters::of_dynamic(&body);
@@ -811,7 +860,7 @@ impl RhaiLanguage {
         // The AST was built once in `create_expression` / `create_predicate`.
         let result: rhai::Dynamic = engine
             .eval_ast_with_scope(&mut scope, ast)
-            .map_err(|e| eval_error(&e, "value"))?;
+            .map_err(|e| eval_error(&e, "value", limits))?;
 
         // POST-EVAL RULE: an unforgiven stream materialization refuses.
         if let Some(counters) = &stream {
@@ -880,9 +929,10 @@ impl RhaiLanguage {
             pre_headers.clone(),
             pre_properties.clone(),
         );
+        let resolved = resolve_rhai_limits(limits);
         let result: rhai::Dynamic = engine
             .eval_ast_with_scope(&mut scope, ast)
-            .map_err(|e| eval_error(&e, "value"))?;
+            .map_err(|e| eval_error(&e, "value", &resolved))?;
 
         // POST-EVAL RULE: an unforgiven stream materialization refuses
         // before any write-back — no partial mutation.
@@ -1115,7 +1165,10 @@ async fn eval_async(
     .map_err(|_elapsed| LanguageError::EvalFailure {
         class: ExpressionErrorClass::Timeout,
         position: None,
-        detail: None,
+        detail: Some(format!(
+            "execution-timeout {}ms exceeded",
+            r.execution_timeout_ms
+        )),
     })?
 }
 
@@ -1199,7 +1252,7 @@ impl PredicateGroup for RhaiPredicateGroup {
             // shared by cloning the `Arc` into each blocking task.
             let clause_result = tokio::time::timeout(timeout, async move {
                 tokio::task::spawn_blocking(move || {
-                    RhaiLanguage::eval_with_engine(&engine, &ast, body, headers, properties)
+                    RhaiLanguage::eval_with_engine(&engine, &ast, body, headers, properties, &r)
                 })
                 .await
                 .map_err(|_join| {
@@ -1217,7 +1270,10 @@ impl PredicateGroup for RhaiPredicateGroup {
                 error: LanguageError::EvalFailure {
                     class: ExpressionErrorClass::Timeout,
                     position: None,
-                    detail: None,
+                    detail: Some(format!(
+                        "execution-timeout {}ms exceeded",
+                        r.execution_timeout_ms
+                    )),
                 },
             })?
             .map_err(|error| IndexedPredicateError { index, error })?;
@@ -1312,7 +1368,10 @@ impl MutatingExpression for RhaiMutatingExpression {
                 Err(LanguageError::EvalFailure {
                     class: ExpressionErrorClass::Timeout,
                     position: None,
-                    detail: None,
+                    detail: Some(format!(
+                        "execution-timeout {}ms exceeded",
+                        r.execution_timeout_ms
+                    )),
                 })
             }
         }
@@ -1383,10 +1442,7 @@ impl Language for RhaiLanguage {
         let engine = Self::create_base_engine(&self.limits);
         let ast = engine.compile(script).map_err(|e| {
             debug!(error = %e, "rhai expression compile failed");
-            LanguageError::ParseError {
-                expr: script.to_string(),
-                reason: e.to_string(),
-            }
+            compile_error_to_parse_error(&e, script, &self.limits)
         })?;
         #[cfg(test)]
         COMPILE_COUNT.with(|c| c.set(c.get() + 1));
@@ -4962,5 +5018,426 @@ mod tests {
     fn group_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<RhaiPredicateGroup>();
+    }
+
+    // ── rhai-limit-errors task 1.2: limit details name limit and bound ──
+    //
+    // Every limit-class `EvalFailure.detail` must be exactly
+    // `<limit-name> <bound> exceeded` with lowercase-kebab names matching the
+    // `RhaiLimitsConfig` keys. Scripted tests assert BOTH the exact detail
+    // string AND the `Limit` class; raw engine label text and script operands
+    // never appear in any detail.
+
+    /// Assert a failed evaluation is a `Limit`-class `EvalFailure` with the
+    /// exact contracted detail string.
+    fn assert_limit_detail(err: &LanguageError, expected: &str) {
+        match err {
+            LanguageError::EvalFailure { class, detail, .. } => {
+                assert_eq!(
+                    *class,
+                    ExpressionErrorClass::Limit,
+                    "expected Limit class, got: {err:?}"
+                );
+                assert_eq!(
+                    detail.as_deref(),
+                    Some(expected),
+                    "expected exact limit detail {expected:?}, got: {err:?}"
+                );
+            }
+            other => panic!("expected EvalFailure, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn limit_detail_names_operations_with_custom_bound() {
+        let lang = RhaiLanguage::with_limits(RhaiLimitsConfig {
+            max_operations: Some(500),
+            ..Default::default()
+        });
+        let expr = lang
+            .create_expression("let x = 0; loop { x += 1; if x > 1000 { break; } } x")
+            .expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("must trip the operations limit");
+        assert_limit_detail(&err, "max-operations 500 exceeded");
+    }
+
+    #[tokio::test]
+    async fn limit_detail_names_string_size_with_custom_bound() {
+        let lang = RhaiLanguage::with_limits(RhaiLimitsConfig {
+            max_string_size: Some(64),
+            ..Default::default()
+        });
+        let expr = lang
+            .create_expression(
+                r#"let s = ""; loop { s = s + "aaaaaaaaaaaaaaaaaaaa"; if s.len() > 200 { break; } } s"#,
+            )
+            .expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("must trip the string-size limit");
+        assert_limit_detail(&err, "max-string-size 64 exceeded");
+    }
+
+    #[tokio::test]
+    async fn limit_detail_names_array_size_with_custom_bound() {
+        let lang = RhaiLanguage::with_limits(RhaiLimitsConfig {
+            max_array_size: Some(50),
+            ..Default::default()
+        });
+        let expr = lang
+            .create_expression("let a = []; loop { a.push(1); if a.len() > 200 { break; } } a")
+            .expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("must trip the array-size limit");
+        assert_limit_detail(&err, "max-array-size 50 exceeded");
+    }
+
+    #[tokio::test]
+    async fn limit_detail_names_map_size_with_custom_bound() {
+        let lang = RhaiLanguage::with_limits(RhaiLimitsConfig {
+            max_map_size: Some(50),
+            ..Default::default()
+        });
+        let expr = lang
+            .create_expression(
+                "let m = #{}; loop { let k = m.len().to_string(); m[k] = 1; if m.len() > 200 { \
+                 break; } } m",
+            )
+            .expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("must trip the map-size limit");
+        assert_limit_detail(&err, "max-map-size 50 exceeded");
+    }
+
+    #[tokio::test]
+    async fn limit_detail_names_call_levels_with_custom_bound() {
+        let lang = RhaiLanguage::with_limits(RhaiLimitsConfig {
+            max_call_levels: Some(8),
+            ..Default::default()
+        });
+        let expr = lang
+            .create_expression("fn f() { f() } f()")
+            .expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("must trip the call-levels limit");
+        assert_limit_detail(&err, "max-call-levels 8 exceeded");
+    }
+
+    #[tokio::test]
+    async fn limit_detail_shows_default_operations_bound() {
+        let lang = RhaiLanguage::new();
+        let expr = lang.create_expression("loop {}").expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("must trip the default operations limit");
+        // The runtime default bound (100_000) must appear verbatim. The
+        // existing green test_rhai_infinite_loop_trips_max_operations proves
+        // the 100_000 ops budget trips before the 5 s default timeout at
+        // opt-level 2, so this detail is deterministic.
+        assert_limit_detail(&err, "max-operations 100000 exceeded");
+    }
+
+    #[test]
+    fn data_too_large_detail_maps_known_labels_exactly() {
+        let limits = super::resolve_rhai_limits(&RhaiLimitsConfig {
+            max_string_size: Some(64),
+            max_array_size: Some(50),
+            max_map_size: Some(77),
+            ..Default::default()
+        });
+        for (label, expected) in [
+            ("Length of string", "max-string-size 64 exceeded"),
+            ("Size of array/BLOB", "max-array-size 50 exceeded"),
+            ("Size of BLOB", "max-array-size 50 exceeded"),
+            ("Size of object map", "max-map-size 77 exceeded"),
+        ] {
+            let error =
+                rhai::EvalAltResult::ErrorDataTooLarge(label.to_string(), rhai::Position::NONE);
+            let err = super::map_eval_alt(&error, &limits);
+            match &err {
+                LanguageError::EvalFailure { class, detail, .. } => {
+                    assert_eq!(
+                        *class,
+                        ExpressionErrorClass::Limit,
+                        "{label}: expected Limit class, got: {err:?}"
+                    );
+                    assert_eq!(
+                        detail.as_deref(),
+                        Some(expected),
+                        "{label}: expected exact detail {expected:?}, got: {err:?}"
+                    );
+                }
+                other => panic!("{label}: expected EvalFailure, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn data_too_large_detail_unknown_label_and_defensive_variants_stay_name_only() {
+        let limits = super::resolve_rhai_limits(&RhaiLimitsConfig::default());
+
+        // An unrecognized label that contains BOTH category keywords must stay
+        // name-only: neither keyword nor the raw label may render.
+        let unknown = rhai::EvalAltResult::ErrorDataTooLarge(
+            "unrecognized string-map SENTINEL_xyzzy".to_string(),
+            rhai::Position::NONE,
+        );
+        let err = super::map_eval_alt(&unknown, &limits);
+        match &err {
+            LanguageError::EvalFailure { class, detail, .. } => {
+                assert_eq!(
+                    *class,
+                    ExpressionErrorClass::Limit,
+                    "expected Limit class, got: {err:?}"
+                );
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("data-size limit exceeded"),
+                    "unknown label must stay name-only, got: {err:?}"
+                );
+            }
+            other => panic!("expected EvalFailure, got {other:?}"),
+        }
+        let rendered = format!("{err:?}");
+        assert!(
+            !rendered.contains("SENTINEL_xyzzy"),
+            "raw label leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("unrecognized"),
+            "raw label leaked: {rendered}"
+        );
+
+        // Defensive variants (rare engine emissions) keep name-only details.
+        for (error, expected) in [
+            (
+                rhai::EvalAltResult::ErrorTooManyVariables(rhai::Position::NONE),
+                "max-variables exceeded",
+            ),
+            (
+                rhai::EvalAltResult::ErrorTooManyModules(rhai::Position::NONE),
+                "max-modules exceeded",
+            ),
+        ] {
+            let err = super::map_eval_alt(&error, &limits);
+            match &err {
+                LanguageError::EvalFailure { class, detail, .. } => {
+                    assert_eq!(
+                        *class,
+                        ExpressionErrorClass::Limit,
+                        "expected Limit class, got: {err:?}"
+                    );
+                    assert_eq!(
+                        detail.as_deref(),
+                        Some(expected),
+                        "expected exact detail {expected:?}, got: {err:?}"
+                    );
+                }
+                other => panic!("expected EvalFailure, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn limit_detail_stays_operand_free_on_map_trip() {
+        let lang = RhaiLanguage::with_limits(RhaiLimitsConfig {
+            max_map_size: Some(50),
+            ..Default::default()
+        });
+        let expr = lang
+            .create_expression(
+                "let m = #{}; loop { let k = \"SECRET_value_\" + m.len().to_string(); m[k] = 1; \
+                 if m.len() > 200 { break; } } m",
+            )
+            .expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr
+            .evaluate(&ex)
+            .await
+            .expect_err("must trip the map-size limit");
+        assert_limit_detail(&err, "max-map-size 50 exceeded");
+        let rendered = format!("{err:?}");
+        assert!(
+            !rendered.contains("SECRET_value_"),
+            "runtime key leaked into the error: {rendered}"
+        );
+    }
+
+    // ── rhai-limit-errors task 1.3: timeout detail names resolved bound ──
+    //
+    // The tokio `Elapsed` mapping must keep the `Timeout` class and carry the
+    // exact detail `execution-timeout {ms}ms exceeded`, where `{ms}` is the
+    // RESOLVED `execution_timeout_ms` (custom value here).
+    // default timeout detail is untested; no spec scenario requires it.
+    // The timeout does NOT cancel the
+    // `spawn_blocking` worker: the loop keeps burning CPU in the background
+    // until the ops budget stops it — expected, same as the existing timeout
+    // tests; do not add sleeps.
+
+    /// Assert a failed evaluation is a `Timeout`-class `EvalFailure` with the
+    /// exact contracted detail string.
+    fn assert_timeout_detail(err: &LanguageError, expected: &str) {
+        match err {
+            LanguageError::EvalFailure { class, detail, .. } => {
+                assert_eq!(
+                    *class,
+                    ExpressionErrorClass::Timeout,
+                    "expected Timeout class, got: {err:?}"
+                );
+                assert_eq!(
+                    detail.as_deref(),
+                    Some(expected),
+                    "expected exact timeout detail {expected:?}, got: {err:?}"
+                );
+            }
+            other => panic!("expected EvalFailure, got: {other:?}"),
+        }
+    }
+
+    /// Ops limit high enough that the 50 ms timeout deterministically wins
+    /// (rhai runs at opt-level 2 in tests).
+    fn timeout_detail_limits() -> RhaiLimitsConfig {
+        RhaiLimitsConfig {
+            max_operations: Some(500_000_000),
+            execution_timeout_ms: Some(50),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_detail_names_custom_bound_expression() {
+        let lang = RhaiLanguage::with_limits(timeout_detail_limits());
+        let expr = lang.create_expression("loop {}").expect("compile");
+        let ex = exchange_with_body("test");
+        let err = expr.evaluate(&ex).await.expect_err("timeout must fire");
+        assert_timeout_detail(&err, "execution-timeout 50ms exceeded");
+    }
+
+    #[tokio::test]
+    async fn timeout_detail_names_custom_bound_predicate() {
+        let lang = RhaiLanguage::with_limits(timeout_detail_limits());
+        let pred = lang.create_predicate("loop {}").expect("compile");
+        let ex = exchange_with_body("test");
+        let err = pred.matches(&ex).await.expect_err("timeout must fire");
+        assert_timeout_detail(&err, "execution-timeout 50ms exceeded");
+    }
+
+    #[tokio::test]
+    async fn timeout_detail_names_custom_bound_group_first_match() {
+        let lang = RhaiLanguage::with_limits(timeout_detail_limits());
+        let group = lang
+            .create_predicate_group(&["loop {}", "true"])
+            .expect("compile")
+            .expect("two clauses compile to a group");
+        let ex = exchange_with_body("test");
+        let err = group
+            .first_match(&ex)
+            .await
+            .expect_err("timeout must fire on clause 0");
+        assert_eq!(
+            err.index, 0,
+            "group must fail on the first clause, never reach \"true\""
+        );
+        // The detail must survive the per-clause `IndexedPredicateError` wrap.
+        assert_timeout_detail(&err.error, "execution-timeout 50ms exceeded");
+    }
+
+    #[tokio::test]
+    async fn timeout_detail_names_custom_bound_mutating() {
+        let lang = RhaiLanguage::with_limits(timeout_detail_limits());
+        let expr = lang.create_mutating_expression("loop {}").expect("compile");
+        let mut ex = exchange_with_body("test");
+        let err = expr.evaluate(&mut ex).await.expect_err("timeout must fire");
+        assert_timeout_detail(&err, "execution-timeout 50ms exceeded");
+    }
+
+    // ── rhai-limit-errors task 1.4: compile-time depth reason names both limits ──
+    //
+    // An `ExprTooDeep` ParseError must carry the exact reason
+    // `max-expression-depth {d} or max-function-expression-depth {f} exceeded`
+    // (RESOLVED values of both settings — rhai cannot identify which one
+    // tripped, so the string lists candidates; it does NOT claim both tripped).
+    // Other parse errors keep rhai's own text; the error stays a
+    // `LanguageError::ParseError`.
+
+    /// Assert a failed compile is a `ParseError` with the exact contracted
+    /// reason string.
+    fn assert_depth_reason(err: &LanguageError, expected: &str) {
+        match err {
+            LanguageError::ParseError { reason, .. } => {
+                assert_eq!(
+                    reason, expected,
+                    "expected exact depth reason {expected:?}, got: {err:?}"
+                );
+            }
+            other => panic!("expected ParseError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn depth_error_reason_names_top_level_depth_custom_bound() {
+        // Function depth stays at its default (32): non-binding for this
+        // top-level script.
+        let lang = RhaiLanguage::with_limits(RhaiLimitsConfig {
+            max_expression_depth: Some(4),
+            ..Default::default()
+        });
+        let Err(err) = lang.create_expression("let x = (((((((1)))))); x") else {
+            panic!("nesting depth 8 over the bound of 4 must fail at parse time");
+        };
+        assert_depth_reason(
+            &err,
+            "max-expression-depth 4 or max-function-expression-depth 32 exceeded",
+        );
+    }
+
+    #[test]
+    fn depth_error_reason_names_function_depth_custom_bound() {
+        // Top-level depth stays at its default (64): the function BODY trips
+        // the function depth setting at parse time; the top-level statement
+        // stays shallow.
+        let lang = RhaiLanguage::with_limits(RhaiLimitsConfig {
+            max_function_expression_depth: Some(3),
+            ..Default::default()
+        });
+        let Err(err) = lang.create_expression("fn f() { let x = (((((1))))); x } f()") else {
+            panic!("function-body nesting depth over the bound of 3 must fail at parse time");
+        };
+        assert_depth_reason(
+            &err,
+            "max-expression-depth 64 or max-function-expression-depth 3 exceeded",
+        );
+    }
+
+    #[test]
+    fn depth_error_reason_applies_on_mutating_path() {
+        let lang = RhaiLanguage::with_limits(RhaiLimitsConfig {
+            max_expression_depth: Some(4),
+            ..Default::default()
+        });
+        let Err(err) = lang.create_mutating_expression("let x = (((((((1)))))); body = x;") else {
+            panic!("nesting depth 8 over the bound of 4 must fail at parse time");
+        };
+        assert_depth_reason(
+            &err,
+            "max-expression-depth 4 or max-function-expression-depth 32 exceeded",
+        );
     }
 }
