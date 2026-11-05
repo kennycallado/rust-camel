@@ -61,22 +61,9 @@ The HTTP producer SHALL NOT forward hop-by-hop/framing headers (including dynami
 
 The HTTP consumer reply-finalizer SHALL NOT strip the valid response headers `Cache-Control`, `Pragma`, `Warning`, or `Via`. A route that sets one of these headers SHALL see it emitted on the wire. The finalizer SHALL still exclude hop-by-hop/framing, request-only, and server-owned (`Date`) headers from responses.
 
-The finalizer SHALL resolve the route's response content type with ASCII
-case-insensitive header lookup, so a route that sets `content-type`,
-`Content-Type`, or any mixed-case spelling controls the reply. The finalizer
-SHALL NOT echo the inbound request `Content-Type` when the route did not
-change it: at ingress the consumer records the request value in the
-Camel-namespaced exchange property `CamelHttpRequestContentType`, and a
-content-type whose current value equals that recorded value is treated as
-inherited and omitted, leaving body inference in charge. The same suppression
-SHALL apply to a `Body::Stream` whose metadata content type equals the
-recorded request value, so a stream inferred from the request cannot
-reintroduce it. A route content type that differs from the recorded request
-value SHALL be emitted. Equality is the normative boundary between inherited
-and route-set: a route that sets exactly the request value is treated as
-inherited. `select_response_headers` SHALL drop every content-type key
-case-insensitively and SHALL append exactly one `Content-Type` when a
-content type is resolved (route value or body inference), and none otherwise.
+The finalizer SHALL resolve the route's response content type with ASCII case-insensitive header lookup, so a route that sets `content-type`, `Content-Type`, or any mixed-case spelling controls the reply. Inheritance SHALL be tracked by provenance, not by value: at ingress the consumer records the request value in the `CamelHttpRequestContentType` exchange property and sets the `CamelHttpContentTypeInherited` marker property when the request carried a `Content-Type` header. Every route path that writes, removes, replaces, or restores the `Content-Type` header SHALL clear or restore the marker when a key matches ASCII-case-insensitively: `SetHeader`, `SetHeaderIfAbsent`, `DynamicSetHeader`, `DynamicSetHeaderIfAbsent`, `RemoveHeader`, the script mutator (for any mutation a script lands on the header entry set), the HTTP and CXF producer response-header mappings, WASM host input replacement (entry-list diff, so guest removals clear too), function patch application, claim-check header restore, archive/stream fragment stripping, and original-message restoration (the marker presence snapshotted with the original message at route entry is restored with it; capture always replaces the snapshot, so a stale presence cannot survive into a nested route — never inferred from header presence).
+
+While the marker is set the finalizer SHALL NOT emit a `Content-Type` from the message header or from body-kind inference. Once a route write has cleared the marker — or when the request carried no `Content-Type`, so no marker exists — the finalizer SHALL emit the message-header value verbatim without comparing it to the recorded request value, and SHALL apply body-kind inference unchanged. A route-set value SHALL be emitted even when it equals the request value, and the message header, when resolved, is the emitted value. The `Body::Stream` metadata rule is unchanged and independent of the marker: the metadata content type is the fallback, resolved only when no route-set message header resolves, so the reply never carries two `Content-Type` values; a metadata value equal to the recorded request value SHALL stay suppressed in both marker states (so an ingress-copied metadata value cannot reintroduce the request value, and removing the header cannot unmask it), while a metadata value that differs from the recorded request value SHALL be emitted as that fallback. Writes through the documented raw escape hatch (direct header-map mutation inside custom processors) bypass provenance tracking, as they bypass header normalization today. `select_response_headers` SHALL drop every content-type key case-insensitively and SHALL append exactly one `Content-Type` when a content type is resolved (route value, or body inference as the fallback), and none otherwise.
 
 #### Scenario: route-set Cache-Control emitted
 
@@ -124,12 +111,14 @@ content type is resolved (route value or body inference), and none otherwise.
 
 #### Scenario: inherited request content type is not echoed
 
-- **GIVEN** a request with `Content-Type: application/xml`, an inherited
-  exchange `Content-Type: application/xml`, and `CamelHttpRequestContentType`
-  set to `application/xml`
+- **GIVEN** a request with `Content-Type: application/xml` whose marker property
+  `CamelHttpContentTypeInherited` is set, and a route that does not write
+  `Content-Type`
 - **WHEN** the consumer builds the response
-- **THEN** `select_response_headers` emits no `Content-Type` unless body
-  inference supplies one, and never emits the request value as a route value
+- **THEN** no route-echoing `Content-Type` is emitted: the untouched message
+  header and body-kind inference are suppressed, and an equal-value stream
+  metadata content type is filtered, so the reply never echoes the request
+  value
 
 #### Scenario: inherited stream metadata is not echoed
 
@@ -138,15 +127,19 @@ content type is resolved (route value or body inference), and none otherwise.
   does not change it
 - **WHEN** the consumer builds the response
 - **THEN** the stream metadata content type is suppressed and no
-  `Content-Type: application/xml` is emitted
+  `Content-Type: application/xml` is emitted; the suppression compares the
+  metadata value with the recorded request value, applies in both marker
+  states, and the metadata channel is only the fallback when no route-set
+  header resolved, so removing the header does not unmask the ingress copy
 
 #### Scenario: route value identical to the request is treated as inherited
 
 - **GIVEN** a request with `Content-Type: application/xml` and a route that
-  sets `content-type: application/xml`
+  writes `content-type: application/xml` through `SetHeader`
 - **WHEN** the consumer builds the response
-- **THEN** the value is treated as inherited and omitted (no provenance
-  channel exists for identical values)
+- **THEN** the write has cleared the marker, so the route value is emitted
+  verbatim as `Content-Type: application/xml`; provenance, not value
+  equality, decides
 
 #### Scenario: empty body without a resolved content type emits none
 
