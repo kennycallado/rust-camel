@@ -2348,8 +2348,11 @@ mod tests {
     }
 
     // Log-capture helpers moved to the shared `crate::test_log_capture`
-    // module (bd rc-zgbqq) so the do_try tests reuse the exact same
-    // capture behavior. `capture_debugs` stays local as a thin wrapper.
+    // shim (bd rc-zgbqq) so the do_try tests reuse the exact same capture
+    // behavior; the shim now delegates the implementation to
+    // `camel_component_api::test_support::log_capture` (bd rc-421es), while
+    // this binary's process-global guard stays colocated in the shim.
+    // `capture_debugs` stays local as a thin wrapper.
     use crate::test_log_capture::{capture_debugs_with_span_records, ensure_global_registry};
 
     /// Event-only capture: discards span records (existing contract).

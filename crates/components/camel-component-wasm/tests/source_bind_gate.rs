@@ -37,6 +37,7 @@ use std::time::Duration;
 
 use camel_component_api::Consumer;
 use camel_component_api::consumer::{ConsumerContext, ExchangeEnvelope};
+use camel_component_api::test_support::log_capture;
 use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -172,49 +173,20 @@ async fn wait_for_bind(port: u16, timeout: Duration) {
 /// Runs an async future under a thread-local `fmt` subscriber capturing
 /// output into a buffer; returns the future's result plus the captured
 /// text. Same make-writer + `set_default` pattern as
-/// `crates/camel-core/src/lifecycle/adapters/route_controller_trait_tests.rs`;
-/// the guard lives across the await so events emitted inside the future
-/// (e.g. the gate's warn) land in the buffer. Safe here because
-/// `#[tokio::test]` polls on one thread. The shared one-time global
-/// registry guard heals/prevents callsite-interest poisoning of the
-/// bind-gate warn callsites (camel-auth `enforce_bind_exposure_gate`,
-/// reached via `source_consumer.rs:274`) that sibling gate tests hit
-/// subscriber-less first (fix pattern: c3853198; bd rc-img5).
+/// `crates/camel-core/src/lifecycle/adapters/route_controller_trait_tests.rs`,
+/// now shared via `camel_component_api::test_support::log_capture` (bd
+/// rc-421es); the guard lives across the await so events emitted inside
+/// the future (e.g. the gate's warn) land in the buffer. Requires
+/// current-thread polling: `#[tokio::test]` polls on one thread, so the
+/// guard stays on the polling thread. Events from spawned tasks are not
+/// captured. The shared one-time global registry guard heals/prevents
+/// callsite-interest poisoning of the bind-gate warn callsites (camel-auth
+/// `enforce_bind_exposure_gate`, reached via `source_consumer.rs:274`)
+/// that sibling gate tests hit subscriber-less first (fix pattern:
+/// c3853198; bd rc-img5).
 async fn capture_logs<F: Future>(fut: F) -> (F::Output, String) {
-    struct CaptureWriter {
-        buf: Arc<std::sync::Mutex<Vec<u8>>>,
-    }
-    impl std::io::Write for CaptureWriter {
-        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-            self.buf.lock().unwrap().extend_from_slice(data);
-            Ok(data.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-        type Writer = CaptureWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            CaptureWriter {
-                buf: Arc::clone(&self.buf),
-            }
-        }
-    }
-    let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt::Subscriber::builder()
-        .with_writer(CaptureWriter {
-            buf: Arc::clone(&buf),
-        })
-        .with_ansi(false)
-        .finish();
     common::ensure_global_tracing_default();
-    let _guard = tracing::subscriber::set_default(subscriber);
-    let output = fut.await;
-    drop(_guard);
-    let captured =
-        String::from_utf8(buf.lock().unwrap().clone()).expect("captured output must be UTF-8");
-    (output, captured)
+    log_capture::capture_logs_async(fut).await
 }
 
 /// Send a raw HTTP POST request over TCP and return the response status

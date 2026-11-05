@@ -24,6 +24,10 @@ pub use env::{EnvGuard, env_lock, env_try_lock};
 /// Shared HTTP/1.1 test harness (framing, recording, routing).
 pub mod http;
 
+/// Shared tracing log-capture harness (thread-local capture families +
+/// `traced-test` global-buffer family).
+pub mod log_capture;
+
 /// TLS test helpers: generate ephemeral CA + server certs for integration tests.
 /// Uses rcgen (pure Rust, no openssl, no Docker).
 pub mod tls {

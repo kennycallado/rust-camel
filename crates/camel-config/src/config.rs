@@ -3534,66 +3534,11 @@ impl Drop for CwdGuard {
     }
 }
 
-/// Test-only log capture: installs a minimal subscriber via
-/// `tracing::subscriber::with_default` for the duration of one closure and
-/// records WARN-level event messages. No global state — safe under parallel
-/// test threads.
+/// Test-only log capture: delegates to the shared
+/// `camel_component_api::test_support::log_capture` harness, keeping this
+/// binary's process-global guard colocated with it.
 #[cfg(test)]
 pub(crate) mod log_capture {
-    use std::fmt;
-    use std::sync::{Arc, Mutex};
-    use tracing::field::{Field, Visit};
-    use tracing::span::{Attributes, Record};
-    use tracing::{Event, Id, Level, Metadata, Subscriber};
-
-    type Sink = Arc<Mutex<Vec<String>>>;
-
-    struct Recorder {
-        warnings: Sink,
-        next_span_id: std::sync::atomic::AtomicU64,
-    }
-
-    struct MessageVisitor(String);
-
-    impl Visit for MessageVisitor {
-        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-            if !self.0.is_empty() {
-                self.0.push(' ');
-            }
-            let _ = fmt::write(&mut self.0, format_args!("{}={:?}", field.name(), value));
-        }
-    }
-
-    impl Subscriber for Recorder {
-        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _attrs: &Attributes<'_>) -> Id {
-            let id = self
-                .next_span_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                + 1;
-            Id::from_u64(id)
-        }
-
-        fn record(&self, _span: &Id, _values: &Record<'_>) {}
-        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
-
-        fn event(&self, event: &Event<'_>) {
-            if *event.metadata().level() >= Level::WARN {
-                let mut visitor = MessageVisitor(String::new());
-                event.record(&mut visitor);
-                if let Ok(mut slot) = self.warnings.lock() {
-                    slot.push(visitor.0);
-                }
-            }
-        }
-
-        fn enter(&self, _span: &Id) {}
-        fn exit(&self, _span: &Id) {}
-    }
-
     /// Install a bare registry as the process-global tracing default, once
     /// per test binary. Guards the `capture_warns` tests against
     /// callsite-interest poisoning: `tracing` caches each callsite's
@@ -3616,22 +3561,16 @@ pub(crate) mod log_capture {
 
     /// Runs `f` with a capturing subscriber installed and returns
     /// `(f's result, captured warn/error messages)` in emission order.
-    /// Messages are rendered as `field="value"` pairs joined by spaces, with
-    /// the human-readable text under the standard `message` field.
+    ///
+    /// Contract unchanged: the verbatim semantics (rendering and the
+    /// `>= Level::WARN` predicate, which due to tracing-core's reversed
+    /// `Level` `Ord` over-captures everything except `error!`) now live in
+    /// the shared module. The implementation was promoted there (bd
+    /// rc-421es); the guard above stays per-binary because it owns this
+    /// test binary's global default.
     pub(crate) fn capture_warns<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
         ensure_global_tracing_default();
-        let sink: Sink = Default::default();
-        let recorder = Recorder {
-            warnings: Arc::clone(&sink),
-            next_span_id: Default::default(),
-        };
-        let out = tracing::subscriber::with_default(recorder, f);
-        let collected = sink
-            .lock()
-            .ok()
-            .map(|slot| slot.clone())
-            .unwrap_or_default();
-        (out, collected)
+        camel_component_api::test_support::log_capture::capture_warns(f)
     }
 }
 

@@ -11,6 +11,7 @@ use camel_api::security_policy::{
     AccessMode, AudienceBinding, AuthContext, AuthorizationDecision, Principal, RouteSecurityPlan,
     SecurityPolicy, SecurityPolicyConfig, TransportId,
 };
+use camel_component_api::test_support::log_capture;
 
 use crate::lifecycle::adapters::route_controller_trait::{
     BindExposureAcks, enforce_bind_exposure_gate,
@@ -58,38 +59,13 @@ fn ensure_global_tracing_default() {
 }
 
 /// Runs `f` under a thread-local `fmt` subscriber capturing output into a
-/// buffer; returns the captured text.
+/// buffer; returns the captured text. ANSI is disabled. The guard stays
+/// per-binary (the colocated `ensure_global_tracing_default` above); the
+/// capture implementation is shared via camel-component-api `test_support`
+/// (bd rc-421es).
 fn capture_logs(f: impl FnOnce()) -> String {
     ensure_global_tracing_default();
-    struct CaptureWriter {
-        buf: Arc<std::sync::Mutex<Vec<u8>>>,
-    }
-    impl std::io::Write for CaptureWriter {
-        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-            self.buf.lock().unwrap().extend_from_slice(data);
-            Ok(data.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
-        type Writer = CaptureWriter;
-        fn make_writer(&'a self) -> Self::Writer {
-            CaptureWriter {
-                buf: Arc::clone(&self.buf),
-            }
-        }
-    }
-    let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt::Subscriber::builder()
-        .with_writer(CaptureWriter {
-            buf: Arc::clone(&buf),
-        })
-        .with_ansi(false)
-        .finish();
-    tracing::subscriber::with_default(subscriber, f);
-    String::from_utf8(buf.lock().unwrap().clone()).expect("captured output must be UTF-8")
+    log_capture::capture_logs(f)
 }
 
 #[test]

@@ -1,0 +1,39 @@
+{
+  "kind": "plan",
+  "change": "shared-log-capture-harness",
+  "hash": "sha256:cec3e521e49eac266c2b2f920165a8f6850247c5788be5ae7dd282785e329533",
+  "expert": "experts/e_gpt",
+  "verdict": "BLESS",
+  "date": "2026-11-05",
+  "spec_gate": "skipped per mission order (skip_specs: true; test tooling only, no normative behavior)",
+  "plan_review": {
+    "reviewer": "reviewers/r_glm",
+    "rounds": [
+      {
+        "verdict": "REJECT",
+        "findings": 4,
+        "note": "critical: #[traced_test] in the component-api lib test binary races network_retry_tests' global default (tracing-test INITIALIZED Once + hard expect) -> traced tests relocated to dedicated integration binary tests/traced_log_capture.rs; important: unused-import contradiction in 4.1/5.1 -> short-path calls; minor: superseded dev-dep tracing-subscriber -> deleted; minor: bd follow-ups unscheduled -> conductor-closeout section"
+      },
+      {
+        "verdict": "APPROVE-WITH-FINDINGS",
+        "findings": 1,
+        "note": "1 absurd-minor (grep wording), folded into the fix round"
+      }
+    ],
+    "final": "APPROVE-WITH-FINDINGS (absurd-minor resolved)"
+  },
+  "bless_passes": [
+    {
+      "pass": 1,
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": 5,
+      "note": "2 test-spec defects (undeclared span field -> record ignored; warn! field-order syntax), duplicate type Sink across tasks 1.3/1.4, guard-absence acceptance would have violated the preserve-network-retry-guard hard constraint, traced_test grep matched doc text"
+    },
+    {
+      "pass": 2,
+      "verdict": "BLESS",
+      "findings": 0,
+      "hash": "sha256:cec3e521e49eac266c2b2f920165a8f6850247c5788be5ae7dd282785e329533"
+    }
+  ]
+}

@@ -875,6 +875,9 @@ mod tests {
     use std::task::{Context, Poll};
 
     use super::*;
+    use camel_component_api::test_support::log_capture::traced::{
+        captured_records_containing, clear_captured_logs, lock_log_capture,
+    };
     use kube::core::Status;
     use kube::core::response::StatusSummary;
     use tracing_test::traced_test;
@@ -1218,42 +1221,6 @@ mod tests {
 
         assert_eq!(prior, 7);
         assert_eq!(epoch.load(Ordering::Acquire), 7);
-    }
-
-    /// Serializes the captured-log tests: `tracing-test`'s global buffer
-    /// is process-wide and is not cleared between tests, so concurrent
-    /// emission would make the zero-record assertion racy.
-    static LOG_CAPTURE_LOCK: Mutex<()> = Mutex::new(());
-
-    fn lock_log_capture() -> std::sync::MutexGuard<'static, ()> {
-        // Poison-resilient: a failed assertion in one log test must not
-        // cascade a PoisonError into its sibling.
-        LOG_CAPTURE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn clear_captured_logs() {
-        let mut buf = tracing_test::internal::global_buf()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        buf.clear();
-    }
-
-    /// Return the captured log record lines whose message contains every
-    /// needle. `#[traced_test]` writes each record as one line into the
-    /// shared global buffer, so line matching approximates per-record
-    /// message matching. Each returned line carries the level (e.g. ` WARN `)
-    /// and the structured `key=value` fields, so callers can pin both.
-    fn captured_records_containing(needles: &[&str]) -> Vec<String> {
-        let buf = tracing_test::internal::global_buf()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        String::from_utf8_lossy(&buf)
-            .lines()
-            .filter(|line| needles.iter().all(|needle| line.contains(needle)))
-            .map(str::to_owned)
-            .collect()
     }
 
     #[traced_test]
