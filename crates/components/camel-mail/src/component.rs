@@ -76,10 +76,25 @@ impl Component for MailComponent {
                 parsed.scheme
             )));
         }
+        let requested = parsed.params.get("account").map(String::as_str);
+        if requested.is_none()
+            && self.config.accounts.len() == 1
+            && config::uri_has_no_host(&parsed.path)
+        {
+            // One account and no host to match: implicit selection can never
+            // succeed, so the typed binding error wins over the generic
+            // authority-parse text.
+            config::bind_account(&self.config.accounts, requested, None)?;
+        }
         match self.scheme {
             MailScheme::Smtp | MailScheme::Smtps => {
                 let cfg = SmtpEndpointConfig::from_uri(uri)?;
-                let account = self.account(cfg.account.as_deref())?;
+                let account = config::bind_account(
+                    &self.config.accounts,
+                    cfg.account.as_deref(),
+                    Some(&cfg.server.host),
+                )?
+                .map(|(_, account)| account);
                 Ok(Box::new(SmtpEndpoint {
                     uri: uri.to_string(),
                     config: Arc::new(cfg),
@@ -88,7 +103,13 @@ impl Component for MailComponent {
             }
             MailScheme::Imap | MailScheme::Imaps => {
                 let cfg = ImapEndpointConfig::from_uri(uri)?;
-                let account = self.account(cfg.account.as_deref())?.ok_or_else(|| {
+                let account = config::bind_account(
+                    &self.config.accounts,
+                    cfg.account.as_deref(),
+                    Some(&cfg.server.host),
+                )?
+                .map(|(_, account)| account)
+                .ok_or_else(|| {
                     CamelError::EndpointCreationFailed(
                         "imap endpoints require an account in [components.mail.accounts]"
                             .to_string(),
@@ -129,12 +150,6 @@ impl Component for MailComponent {
 }
 
 impl MailComponent {
-    /// The account an endpoint uses (see [`config::resolve_account_name`]).
-    fn account(&self, requested: Option<&str>) -> Result<Option<MailAccountConfig>, CamelError> {
-        let name = config::resolve_account_name(&self.config.accounts, requested)?;
-        Ok(name.and_then(|name| self.config.accounts.get(&name).cloned()))
-    }
-
     fn repository(&self, name: &str) -> Result<Arc<dyn IdempotentRepository>, CamelError> {
         self.repositories.get(name).cloned().ok_or_else(|| {
             let mut names: Vec<&str> = self.repositories.keys().map(String::as_str).collect();
@@ -232,18 +247,24 @@ mod tests {
     use camel_component_api::NoOpComponentContext;
     use camel_component_api::test_support::PanicRuntimeObservability;
     use std::collections::HashMap;
+    use std::io;
+    use std::sync::Mutex;
+    use std::sync::PoisonError;
 
-    fn account() -> MailAccountConfig {
+    fn account_with_hosts(hosts: &[&str]) -> MailAccountConfig {
         MailAccountConfig {
             username: Some("u".to_string()),
             password: Some(SecretString::from("pw")),
             ca_file: None,
+            allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
         }
     }
 
-    fn component(names: &[&str]) -> MailComponent {
-        let accounts: HashMap<String, MailAccountConfig> =
-            names.iter().map(|n| (n.to_string(), account())).collect();
+    fn account() -> MailAccountConfig {
+        account_with_hosts(&["h"])
+    }
+
+    fn component_with(accounts: HashMap<String, MailAccountConfig>) -> MailComponent {
         MailComponent::new(
             MailScheme::Smtp,
             Arc::new(MailComponentConfig {
@@ -251,6 +272,16 @@ mod tests {
                 reconnect: None,
             }),
         )
+    }
+
+    fn one_account(account: MailAccountConfig) -> MailComponent {
+        component_with(HashMap::from([("main".to_string(), account)]))
+    }
+
+    fn component(names: &[&str]) -> MailComponent {
+        let accounts: HashMap<String, MailAccountConfig> =
+            names.iter().map(|n| (n.to_string(), account())).collect();
+        component_with(accounts)
     }
 
     const URI: &str = "smtp://h?from=a@x.test&to=b@x.test";
@@ -262,6 +293,17 @@ mod tests {
                 .create_endpoint(URI, &NoOpComponentContext)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn create_endpoint_explicit_account_skips_allowed_hosts() {
+        let ep = one_account(account_with_hosts(&[]))
+            .create_endpoint(
+                "smtp://h?account=main&from=a@x.test&to=b@x.test",
+                &NoOpComponentContext,
+            )
+            .expect("explicit selection is the documented escape hatch");
+        assert_eq!(ep.uri(), "smtp://h?account=main&from=a@x.test&to=b@x.test");
     }
 
     #[test]
@@ -405,5 +447,167 @@ mod tests {
             .create_producer(Arc::new(PanicRuntimeObservability), &ctx)
             .expect_err("err");
         assert!(e.to_string().contains("smtp"), "{e}");
+    }
+
+    fn binding_error(component: &MailComponent, uri: &str) -> CamelError {
+        let e = component
+            .create_endpoint(uri, &NoOpComponentContext)
+            .err()
+            .expect("endpoint creation must fail");
+        assert!(
+            matches!(&e, CamelError::EndpointCreationFailed(_)),
+            "expected EndpointCreationFailed, got {e:?}"
+        );
+        e
+    }
+
+    #[test]
+    fn implicit_single_account_without_allowed_hosts_fails() {
+        let e = binding_error(
+            &one_account(account_with_hosts(&[])),
+            "smtp://mx.example.com?from=a@x.test&to=b@x.test",
+        );
+        let s = e.to_string();
+        for needle in [
+            "main",
+            "?account=",
+            "allowedHosts",
+            "[components.mail.accounts.main]",
+        ] {
+            assert!(s.contains(needle), "missing {needle:?} in {s}");
+        }
+        assert!(!s.contains("mx.example.com"), "{s}");
+    }
+
+    #[test]
+    fn implicit_single_account_host_in_allowed_hosts_succeeds() {
+        assert!(
+            one_account(account_with_hosts(&["mx.example.com"]))
+                .create_endpoint(
+                    "smtp://mx.example.com?from=a@x.test&to=b@x.test",
+                    &NoOpComponentContext,
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn implicit_single_account_host_mismatch_fails() {
+        let e = binding_error(
+            &one_account(account_with_hosts(&["other.example.com"])),
+            "smtp://mx.example.com?from=a@x.test&to=b@x.test",
+        );
+        let s = e.to_string();
+        assert!(s.contains("main"), "{s}");
+        assert!(s.contains("?account="), "{s}");
+        assert!(s.contains("allowedHosts"), "{s}");
+        assert!(!s.contains("mx.example.com"), "{s}");
+    }
+
+    #[test]
+    fn allowed_hosts_match_is_case_insensitive() {
+        assert!(
+            one_account(account_with_hosts(&["MX.Example.COM"]))
+                .create_endpoint("smtp://mx.example.com?from=a@x.test", &NoOpComponentContext)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn explicit_account_ignores_allowed_hosts() {
+        assert!(
+            one_account(account_with_hosts(&[]))
+                .create_endpoint(
+                    "smtp://mx.example.com?account=main&from=a@x.test",
+                    &NoOpComponentContext,
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn implicit_selection_without_uri_host_fails() {
+        let comp = one_account(account_with_hosts(&["mx.example.com"]));
+        for uri in ["smtp:/x?from=a@x.test", "smtp://[]?from=a@x.test"] {
+            let e = binding_error(&comp, uri);
+            let s = e.to_string();
+            for needle in ["main", "?account=", "allowedHosts"] {
+                assert!(s.contains(needle), "{uri}: missing {needle:?} in {s}");
+            }
+            assert!(!s.contains("mail URIs use scheme://host"), "{uri}: {s}");
+        }
+    }
+
+    #[test]
+    fn multi_account_without_account_param_still_fails() {
+        let e = component(&["a", "b"])
+            .create_endpoint("smtp://h?from=a@x.test", &NoOpComponentContext)
+            .err()
+            .expect("err");
+        let s = e.to_string();
+        assert!(s.contains("?account="), "{s}");
+        assert!(s.contains('2'), "{s}");
+    }
+
+    fn ensure_global_tracing_default() {
+        static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if INIT.set(()).is_ok() {
+            let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+        }
+    }
+
+    #[derive(Clone)]
+    struct BufWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_sink() -> (tracing::subscriber::DefaultGuard, Arc<Mutex<Vec<u8>>>) {
+        ensure_global_tracing_default();
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let sub = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(BufWriter(Arc::clone(&buf)))
+            .finish();
+        (tracing::subscriber::set_default(sub), buf)
+    }
+
+    fn log_text(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8_lossy(&buf.lock().unwrap_or_else(PoisonError::into_inner)).into_owned()
+    }
+
+    #[test]
+    fn error_and_log_never_contain_host() {
+        let (_guard, buf) = capture_sink();
+        let e = binding_error(
+            &one_account(account_with_hosts(&["other.example.com"])),
+            "smtp://mx.example.com?from=a@x.test",
+        );
+        let s = e.to_string();
+        assert!(s.contains("?account="), "{s}");
+        assert!(s.contains("allowedHosts"), "{s}");
+        assert!(!s.contains("mx.example.com"), "{s}");
+        let logs = log_text(&buf);
+        assert!(!logs.contains("mx.example.com"), "{logs}");
     }
 }

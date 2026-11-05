@@ -14,9 +14,11 @@ type appears in a public signature (ADR-0020, ADR-0060). Unit tests use a fake t
 
 - Accounts. Host and port live in the URI. Logins and trust anchors live in named accounts under
   `[components.mail.accounts.<name>]`. `resolve_account_name` picks the account: an explicit
-  `?account=` must exist, a single account is the default, several accounts need an explicit name,
-  and none means no authentication for `smtp`/`smtps`; `imap`/`imaps` require an account. The
-  implicit single-account default is an accepted risk with dynamic URIs (ADR-0093).
+  `?account=` must exist, several accounts need an explicit name, and none means no authentication
+  for `smtp`/`smtps`; `imap`/`imaps` require an account. `bind_account` applies the host rule:
+  implicit single-account selection requires the URI host in the account's `allowedHosts`
+  (case-insensitive exact match); an empty list, no match or no URI host fails endpoint creation,
+  and `?account=` bypasses the list. The failure never carries the host (ADR-0093).
   A URI with userinfo fails endpoint creation.
 - Secrets. The account password is a `SecretString` with a redacting `Debug`. No server URL, host or
   port is put into an error or a log line, so nothing needs `redact_url`. Server-derived error text

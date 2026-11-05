@@ -4,6 +4,8 @@
 [components.mail.accounts.main]
 username = "fixture"
 password = "fixture-only"
+# The boot test binds the implicit IMAP endpoint to 127.0.0.1.
+allowedHosts = ["127.0.0.1"]
 
 [components.mail.reconnect]
 max_attempts = 0

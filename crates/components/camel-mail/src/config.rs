@@ -47,6 +47,10 @@ pub struct MailAccountConfig {
     /// PEM file with extra trust anchors added to the webpki roots
     /// (`caFile` in TOML).
     pub ca_file: Option<std::path::PathBuf>,
+    /// Hosts an implicit single-account selection may log in to (`allowedHosts`
+    /// in TOML). Empty disables implicit selection; see ADR-0093.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
 }
 
 impl fmt::Debug for MailAccountConfig {
@@ -55,6 +59,7 @@ impl fmt::Debug for MailAccountConfig {
             .field("username", &self.username)
             .field("password", &self.password)
             .field("caFile", &self.ca_file)
+            .field("allowedHosts", &self.allowed_hosts)
             .finish()
     }
 }
@@ -112,6 +117,93 @@ pub(crate) fn resolve_account_name(
             }
         },
     }
+}
+
+/// Typed failure for an implicit single-account selection whose host is not
+/// allow-listed. Names the account and both remedies; never echoes the host.
+fn implicit_host_error(account: &str) -> CamelError {
+    CamelError::EndpointCreationFailed(format!(
+        "mail account '{account}' does not allow implicit selection for this endpoint's host; \
+         append ?account={account} to the URI or list the host under allowedHosts in \
+         [components.mail.accounts.{account}]"
+    ))
+}
+
+/// Allow-list check for an implicit single-account selection.
+pub(crate) fn validate_implicit_host(
+    account: &str,
+    allowed_hosts: &[String],
+    uri_host: Option<&str>,
+) -> Result<(), CamelError> {
+    let allowed = uri_host.is_some_and(|host| {
+        allowed_hosts
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(host))
+    });
+    if allowed {
+        Ok(())
+    } else {
+        Err(implicit_host_error(account))
+    }
+}
+
+/// Lenient probe: `true` when the URI carries no host a binding rule could match.
+///
+/// Dedicated `parse_authority` errors (userinfo, trailing text, invalid nonzero
+/// port, unterminated IPv6) keep priority by answering `false`.
+pub(crate) fn uri_has_no_host(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("//") else {
+        return true;
+    };
+    let authority = rest.split_once('/').map_or(rest, |(a, _)| a);
+    if authority.is_empty() {
+        return true;
+    }
+    if authority.contains('@') {
+        return false;
+    }
+    if let Some(inner) = authority.strip_prefix('[') {
+        let Some((host, after)) = inner.split_once(']') else {
+            return false;
+        };
+        if !host.is_empty() {
+            return false;
+        }
+        return match after {
+            "" => true,
+            _ => match after.strip_prefix(':') {
+                Some(port) => !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()),
+                None => false,
+            },
+        };
+    }
+    match authority.rsplit_once(':') {
+        Some((host, _)) => host.is_empty(),
+        None => false,
+    }
+}
+
+/// Resolve and validate the account for an endpoint.
+///
+/// Explicit `?account=` selection skips the host allow-list; implicit
+/// single-account selection must match `uri_host` against `allowedHosts`.
+pub(crate) fn bind_account(
+    accounts: &HashMap<String, MailAccountConfig>,
+    requested: Option<&str>,
+    uri_host: Option<&str>,
+) -> Result<Option<(String, MailAccountConfig)>, CamelError> {
+    let Some(name) = resolve_account_name(accounts, requested)? else {
+        return Ok(None);
+    };
+    let cfg = accounts.get(&name).ok_or_else(|| {
+        CamelError::Config(format!(
+            "unknown mail account '{name}' — declare it in [components.mail.accounts.{name}] in Camel.toml"
+        ))
+    })?;
+    if requested.is_none() {
+        validate_implicit_host(&name, &cfg.allowed_hosts, uri_host)?;
+    }
+    Ok(Some((name, cfg.clone())))
 }
 
 /// Mail URI scheme.
@@ -583,6 +675,7 @@ mod tests {
             username: None,
             password: None,
             ca_file: None,
+            allowed_hosts: Vec::new(),
         }
     }
 
@@ -875,5 +968,86 @@ mod tests {
     fn raw_invalid_value_rejected() {
         let e = imap_err("imap://h?account=a&raw=maybe");
         assert!(e.contains("raw"), "{e}");
+    }
+
+    #[test]
+    fn account_parses_allowed_hosts_camel_case() {
+        let c: MailComponentConfig =
+            toml::from_str("[accounts.main]\nallowedHosts = [\"mx.example.com\"]").unwrap();
+        assert_eq!(c.accounts["main"].allowed_hosts, ["mx.example.com"]);
+    }
+
+    #[test]
+    fn uri_probe_cases() {
+        for (path, expected) in [
+            ("/x", true),
+            ("//", true),
+            ("//:25", true),
+            ("//[]", true),
+            ("//[]:25", true),
+            ("//[]@h", false),
+            ("//[]junk", false),
+            ("//[]:abc", false),
+            ("//h", false),
+            ("//h:587", false),
+            ("//[::1]:2525", false),
+            ("//[::1", false),
+            ("//::1", false),
+            ("//user:pw@h", false),
+            ("//h/x", false),
+        ] {
+            assert_eq!(uri_has_no_host(path), expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn implicit_host_validation_matrix() {
+        let hosts = vec!["mx.example.com".to_string()];
+        assert!(validate_implicit_host("a", &hosts, Some("mx.example.com")).is_ok());
+        assert!(validate_implicit_host("a", &hosts, Some("MX.Example.COM")).is_ok());
+        let errors = [
+            validate_implicit_host("a", &hosts, Some("other.example.com")).unwrap_err(),
+            validate_implicit_host("a", &[], Some("mx.example.com")).unwrap_err(),
+            validate_implicit_host("a", &hosts, None).unwrap_err(),
+        ];
+        for e in errors {
+            let s = e.to_string();
+            assert!(s.contains("?account=a"), "{s}");
+            assert!(s.contains("allowedHosts"), "{s}");
+            assert!(s.contains("[components.mail.accounts.a]"), "{s}");
+            assert!(!s.contains("mx.example.com"), "{s}");
+        }
+    }
+
+    #[test]
+    fn bind_account_explicit_skips_allowlist() {
+        let mut cfg = acct();
+        cfg.allowed_hosts.clear();
+        let accounts = HashMap::from([("a".to_string(), cfg)]);
+        let (name, _) = bind_account(&accounts, Some("a"), Some("anywhere.test"))
+            .unwrap()
+            .expect("bound");
+        assert_eq!(name, "a");
+    }
+
+    #[test]
+    fn bind_account_implicit_binds_host() {
+        let mut cfg = acct();
+        cfg.allowed_hosts = vec!["ok.test".to_string()];
+        let accounts = HashMap::from([("a".to_string(), cfg)]);
+        let (name, _) = bind_account(&accounts, None, Some("ok.test"))
+            .unwrap()
+            .expect("bound");
+        assert_eq!(name, "a");
+        assert!(bind_account(&accounts, None, Some("nope.test")).is_err());
+        assert!(bind_account(&accounts, None, None).is_err());
+        assert!(
+            bind_account(&HashMap::new(), None, Some("ok.test"))
+                .unwrap()
+                .is_none()
+        );
+        let two = HashMap::from([("a".to_string(), acct()), ("b".to_string(), acct())]);
+        let e = bind_account(&two, None, Some("ok.test")).unwrap_err();
+        assert!(e.to_string().contains("?account="), "{e}");
     }
 }

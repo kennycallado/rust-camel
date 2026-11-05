@@ -524,6 +524,7 @@ mod tests {
             username: with_login.then(|| "u".to_string()),
             password: with_login.then(|| SecretString::from("hunter2")),
             ca_file: ca,
+            allowed_hosts: Vec::new(),
         }
     }
 

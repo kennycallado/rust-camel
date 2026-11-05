@@ -20,9 +20,10 @@ type Received = Arc<Mutex<mpsc::Receiver<camel_api::Exchange>>>;
 
 fn imap_component() -> MailComponent {
     // FIXTURE-ONLY login for the GreenMail container.
-    let cfg: MailComponentConfig =
-        toml::from_str("[accounts.main]\nusername = \"user\"\npassword = \"pass\"\n")
-            .expect("account config");
+    let cfg: MailComponentConfig = toml::from_str(
+        "[accounts.main]\nusername = \"user\"\npassword = \"pass\"\nallowedHosts = [\"127.0.0.1\"]\n",
+    )
+    .expect("account config");
     MailComponent::new(MailScheme::Imap, Arc::new(cfg))
 }
 

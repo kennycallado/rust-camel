@@ -40,6 +40,7 @@ fn fixture_account() -> MailAccountConfig {
         username: Some("user".to_string()),
         password: Some(SecretString::from("pass")),
         ca_file: None,
+        allowed_hosts: Vec::new(),
     }
 }
 

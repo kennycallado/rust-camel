@@ -21,7 +21,8 @@ use tokio_util::sync::CancellationToken;
 const BOUND: Duration = Duration::from_secs(10);
 
 fn account(ca: Option<&Path>) -> MailAccountConfig {
-    let mut s = String::from("username = \"u\"\npassword = \"hunter2\"\n");
+    let mut s =
+        String::from("username = \"u\"\npassword = \"hunter2\"\nallowedHosts = [\"127.0.0.1\"]\n");
     if let Some(p) = ca {
         s.push_str(&format!("caFile = {:?}\n", p.display().to_string()));
     }
@@ -236,9 +237,10 @@ async fn imap_refused_login_is_permanent() {
 async fn consumer_stops_on_refused_login() {
     let (_guard, logs) = support::capture_logs();
     let server = refusing_server().await;
-    let cfg: MailComponentConfig =
-        toml::from_str("[accounts.main]\nusername = \"u\"\npassword = \"hunter2\"\n")
-            .expect("account config");
+    let cfg: MailComponentConfig = toml::from_str(
+        "[accounts.main]\nusername = \"u\"\npassword = \"hunter2\"\nallowedHosts = [\"127.0.0.1\"]\n",
+    )
+    .expect("account config");
     let endpoint = MailComponent::new(MailScheme::Imap, Arc::new(cfg))
         .create_endpoint(
             &format!(

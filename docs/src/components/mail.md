@@ -25,11 +25,14 @@ Host and port go in the URI. Logins and trust anchors go in named accounts in `C
 username = "robot@example.com"
 password = "${env:MAIL_PASSWORD}"
 # caFile = "/etc/ssl/mail-ca.pem"
+allowedHosts = ["mail.example.com"]
 ```
+
+`allowedHosts` lists the hosts implicit selection may log in to; an empty list disables it, and `?account=<name>` bypasses the list.
 
 When `Camel.toml` has profile sections, the accounts live under `[default.components.mail.accounts.<name>]`. The flat `[components.mail.accounts.<name>]` form shown here is for a config that has no `[default]` or `[<profile>]` section.
 
-Select an account with `?account=<name>`. With exactly one account, every endpoint without `?account=` uses it, so its credentials are sent to whatever host the URI names; keep the account selection explicit when URIs are built dynamically. With several accounts, `?account=` is required. With no account, `smtp` and `smtps` send without authentication; `imap` and `imaps` need an account and fail at endpoint creation without one.
+Select an account with `?account=<name>`. With exactly one account, an endpoint without `?account=` uses it only when the URI host matches an entry in the account's `allowedHosts` (case-insensitive). An empty or absent list disables implicit selection, and a non-matching host or a URI without a host fails at endpoint creation; the error names the account and both fixes and never carries the host. Append `?account=<name>` to bypass the list when one account must reach several hosts. With several accounts, `?account=` is required. With no account, `smtp` and `smtps` send without authentication; `imap` and `imaps` need an account and fail at endpoint creation without one.
 
 ## Debugging IMAP connections
 

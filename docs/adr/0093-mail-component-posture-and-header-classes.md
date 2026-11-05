@@ -1,6 +1,6 @@
 # ADR-0093: Mail component TLS posture, header classes and send semantics
 
-- Status: Accepted (2026-10-25; bd rc-q8zur); amended 2026-11-01: List-Unsubscribe class-A headers (bd rc-dhd1k)
+- Status: Accepted (2026-10-25; bd rc-q8zur); amended 2026-11-01: List-Unsubscribe class-A headers (bd rc-dhd1k); amended 2026-11-05: account host binding (bd rc-bcstf)
 - Source: openspec change `mail-component`
 - Cross-refs: ADR-0007, ADR-0012, ADR-0013, ADR-0015, ADR-0020, ADR-0023,
   ADR-0032, ADR-0034, ADR-0051, ADR-0060, ADR-0063, ADR-0066, ADR-0071,
@@ -131,17 +131,25 @@ library error is cut to 200 characters with control characters removed,
 and a parse error never embeds the raw response. A refused login yields a
 constant message. Account selection follows the rabbitmq model: an
 explicit `?account=` must exist; with one account and no `?account=`, that
-account is used; with several, the endpoint fails and names `?account=`.
+account is used only when the URI host is allow-listed; with several, the
+endpoint fails and names `?account=`.
 With no account, `smtp` and `smtps` send without authentication; `imap`
 and `imaps` require an account and fail endpoint creation without one.
 
-**Accepted risk: implicit single-account selection.** With exactly one
-account, every endpoint without `?account=` logs in with it to whatever
-host its URI names. A dynamic URI (`toD`, a URI assembled from exchange
-data) can therefore forward the account credentials to a host the
-operator did not intend. The owner accepted this for configuration
-convenience (rabbitmq parity); operators who build mail URIs dynamically
-should set `?account=` explicitly. A follow-up is tracked in bd.
+**Implicit single-account selection.** With exactly one account, an
+endpoint without `?account=` logs in with that account only when the URI
+host exactly matches an entry in the account's `allowedHosts`
+(case-insensitive). An absent or empty list, a host that does not match,
+and a URI without a host all fail endpoint creation. The failure names the
+account and both remedies and never carries the host, port or URL.
+Explicit `?account=` ignores the list; it remains the escape hatch for an
+account that must reach several hosts. The rule keeps a dynamic URI,
+assembled from exchange data (`toD`, a URI built from a header), from
+forwarding account credentials to a host the operator never listed. To
+migrate, add the host to `allowedHosts` in
+`[components.mail.accounts.<name>]` or append `?account=<name>` to the
+URI. This retires the accepted risk that this ADR carried until 2026-11
+(bd rc-bcstf).
 
 ### IMAP delivery
 
@@ -272,8 +280,8 @@ endpoint configuration types stay crate-private.
   Message-ID is already recorded, so the redelivery is suppressed.
   Operators should make routes idempotent or set `idempotentRepository`.
 - Wrong credentials stop an IMAP consumer; it does not retry them.
-- With a single account, a dynamically built URI can send its credentials
-  to an unintended host (accepted risk, above).
+- With a single account, a dynamically built URI fails unless its host is
+  listed in the account `allowedHosts`; `?account=` skips the list.
 - A `pollEnrich` pull loses a message when the caller fails after the fetch.
 - Under a non-ring process default provider, SMTP TLS follows that
   provider until bd rc-2bofp lands.

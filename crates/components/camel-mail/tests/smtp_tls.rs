@@ -25,6 +25,7 @@ fn account(ca: Option<&Path>, login: bool) -> MailComponentConfig {
     if let Some(p) = ca {
         s.push_str(&format!("caFile = {:?}\n", p.display().to_string()));
     }
+    s.push_str("allowedHosts = [\"127.0.0.1\"]\n");
     toml::from_str(&s).expect("account config")
 }
 

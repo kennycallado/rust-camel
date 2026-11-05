@@ -70,7 +70,7 @@ binary are harmless: each copy has its own `OnceLock`, exactly one
 `Err`. The guard is per-binary state; per-binary duplication is
 inherent and accepted.
 
-## Inventory (30 guard bodies / 28 files)
+## Inventory (31 guard bodies / 29 files)
 
 ### Natural homes (7)
 
@@ -84,7 +84,7 @@ inherent and accepted.
 | `camel-template/src/test_support.rs` (`#[cfg(all(test, feature = "default"))]`) | `producer.rs` tests; added by mission 487 |
 | `camel-processor/src/test_log_capture.rs` (`ensure_global_registry`) | `error_handler.rs` and `do_try_segment.rs` call sites; replaced the removed `error_handler.rs` copy |
 
-### Per-file copies, no natural home in the binary (14)
+### Per-file copies, no natural home in the binary (15)
 
 `camel-core` lib binary (no crate-level test module):
 
@@ -113,6 +113,12 @@ recorders):
 - `src/component.rs`
 - `src/consumer.rs`
 
+`camel-mail` lib binary (crate-level test module in `component.rs`
+serves its own call sites):
+
+- `camel-component-mail/src/component.rs` (guard and `capture_sink` added
+  by mission 494, 2026-11-05)
+
 ### Per-file copies, sole copy in their binary (9 bodies / 7 files)
 
 - `camel-bundles/src/lib.rs` (inline in `logquiet_regression_tests`)
@@ -126,16 +132,16 @@ recorders):
 - `camel-component-api/src/network_retry_tests.rs` (pattern origin,
   `c3853198`)
 
-Count note (2026-11-01): the groups sum 7 + 14 + 9 = 30 guard bodies
-across 7 + 14 + 7 = 28 files (`camel-ws/src/lib.rs` contributes 3
-bodies in 1 file). Verified with:
+Count note (2026-11-01; `camel-mail` added 2026-11-05 by mission 494):
+the groups sum 7 + 15 + 9 = 31 guard bodies across 7 + 15 + 7 = 29 files
+(`camel-ws/src/lib.rs` contributes 3 bodies in 1 file). Verified with:
 
 ```sh
 grep -rn "set_global_default(tracing_subscriber::registry())" --include=*.rs crates/ | wc -l
-# 30
+# 31
 grep -rn "set_global_default(tracing_subscriber::registry())" --include=*.rs crates/ \
   | sed 's/:[0-9]*:.*//' | sort -u | wc -l
-# 28
+# 29
 ```
 
 `network_retry_tests.rs` predates `36ca7c73` (`c3853198`, pattern
@@ -154,4 +160,4 @@ spawned tasks. That is a deliberate, self-documented different pattern,
 not a guard copy: each `expect` is justified in its own module docs —
 no other global default exists in those binaries, so an install failure
 is a hard test-infra error, not a first-wins race. Both recording
-subscribers are excluded from the 30.
+subscribers are excluded from the 31.

@@ -349,6 +349,7 @@ mod tests {
             username: None,
             password: None,
             ca_file: Some(std::path::PathBuf::from("/nonexistent/ca.pem")),
+            allowed_hosts: Vec::new(),
         };
         assert!(matches!(
             LettreSmtpTransport::new(&cfg, Some(&account)),

@@ -45,7 +45,7 @@ async fn mailpit_starttls_round_trip() {
     let subject = format!("itest-{}", nanos());
 
     let cfg: MailComponentConfig = toml::from_str(&format!(
-        "[accounts.main]\nusername = \"u\"\npassword = \"p\"\ncaFile = {:?}\n",
+        "[accounts.main]\nusername = \"u\"\npassword = \"p\"\ncaFile = {:?}\nallowedHosts = [\"127.0.0.1\"]\n",
         fixture.ca_path.display().to_string()
     ))
     .expect("account config");
