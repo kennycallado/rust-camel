@@ -1,40 +1,27 @@
 {
   "kind": "plan",
-  "change": "mail-account-host-binding",
+  "change": "fault-blame-taxonomy",
   "verdict": "BLESS",
-  "hash": "sha256:262fba1a55dfd87e95c50c6971f7e919dde601a13d02cec1d6590a03bdcf1cbc",
-  "expert": "@experts/e_gpt",
-  "rounds": [
-    {
-      "hash": "sha256:b2ac97b638b4c8bc399ff183875542a1ba540203e352a7c061e28a35e24141c2-stale",
-      "verdict": "BLESS-WITH-FIXES",
-      "fixes": [
-        "dead-code gate boundary: interim clippy at 1.1, -D warnings at 1.2/1.5",
-        "cfg.account.as_deref() in branch-local bind_account calls",
-        "green-before invariants, EndpointCreationFailed variant assert, grep exit codes",
-        "empty bracketed hosts //[] and //[]:25 take the binding error",
-        "Task 1.5 final verification gates with systemd-run containment",
-        "hash drift: recompute on final filesystem"
-      ]
-    },
-    {
-      "hash": "sha256:f3e91a3308c18de01c39405757527a643ba31f2901c2010e54052bfd82142c22",
-      "verdict": "BLESS-WITH-FIXES",
-      "fixes": [
-        "probe precedence: @ before brackets; //[]@h, //[]junk, //[]:abc keep dedicated errors",
-        "no blanket -j4; CARGO_BUILD_JOBS=6 only; scoped mdbook command",
-        "docker tiers recorded gated-off, not exercised"
-      ]
-    },
-    {
-      "hash": "sha256:262fba1a55dfd87e95c50c6971f7e919dde601a13d02cec1d6590a03bdcf1cbc",
-      "verdict": "BLESS"
-    }
-  ],
-  "review_trail": [
-    {"reviewer": "@reviewers/r_glm", "round": 1, "verdict": "Block", "fixes": "examples/mail-example literal + 4 integration-test TOML migrations"},
-    {"reviewer": "@reviewers/r_glm", "round": 2, "verdict": "REJECT", "fixes": "component.rs test helper in Task 1.1 step 6; inventory counts enumerated"},
-    {"reviewer": "@reviewers/r_glm", "round": 3, "verdict": "APPROVE-WITH-FINDINGS", "fixes": "component.rs added to Task 1.1 Files"}
+  "hash": "4f384f6dec5bd82d05cd55e34dc28f7512d8a210e28cda9e63bf47689d4ce5dc",
+  "expert": "experts/e_gpt",
+  "rounds": 1,
+  "spec_bless": {
+    "verdict": "BLESS",
+    "hash": "319461b6831ca74099dea33a3492b5a753a57a700d4ff335095876a091ed3b31",
+    "expert": "experts/e_gpt",
+    "rounds": 2
+  },
+  "plan_review": {
+    "reviewer": "reviewers/r_glm",
+    "rounds": 2,
+    "round1": "APPROVE-WITH-FINDINGS (4 findings: evidence-row count, loop coverage 22->29, .bless.json dirty-state collision, bd error-handler scope)",
+    "round2": "APPROVE (clean)"
+  },
+  "artifacts": [
+    "openspec/changes/fault-blame-taxonomy/proposal.md",
+    "openspec/changes/fault-blame-taxonomy/design.md",
+    "openspec/changes/fault-blame-taxonomy/tasks.md",
+    "docs/adr/0096-fault-blame-taxonomy.md"
   ],
   "date": "2026-11-05"
 }

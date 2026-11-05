@@ -117,6 +117,10 @@ error reply body. The contract is redact-by-construction: no diagnostic record
 emitted while handling a request renders a declared credential value (query
 parameter, cookie, or custom header). The 401/403 reply body carries a generic
 reason only. Any access log added later inherits the same obligation (ADR-0051).
+Fault blame for type-conversion errors is fixed by ADR-0096:
+TypeConversionFailed defaults to the server fault (500); 400 stays reserved for
+request-borne failures. The mapping change lands via the implementation issue
+tracked from bd `rc-v38bd`.
 
 ### Browser cookie guidance
 

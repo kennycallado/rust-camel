@@ -104,6 +104,8 @@ The route must enable the `camel-dsl` `protobuf` cargo feature and register the 
 | `Body::Bytes` | Validates and passes through | Decodes to JSON |
 | `Body::Empty`, `Body::Stream`, `Body::Xml` | Rejected | Rejected |
 
+The format's error blame differs by input spelling today: marshal on invalid bytes raises `ProcessorError` (HTTP 500), marshal on invalid JSON raises `TypeConversionFailed`, and unmarshal on invalid bytes raises `TypeConversionFailed`. ADR-0096 standardizes the consumer mapping: `TypeConversionFailed` defaults to the server fault (HTTP 500), and 400 stays reserved for request-borne failures such as the REST binding's injected unmarshal. The mapping change lands through the implementation issue tracked from bd `rc-v38bd`.
+
 ## DoS protection
 
 The format rejects payloads larger than 64 MiB by default. The cap prevents out-of-memory errors from oversized inputs. Raise or lower the limit with `with_max_decode_bytes`:

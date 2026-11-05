@@ -56,6 +56,8 @@ Security enforcement has two layers:
    the carrier principal; a pipeline denial (`CamelError::Unauthorized`) maps
    to `Status::permission_denied` at the reply sites, and any other pipeline
    error maps to `Status::internal`.
+   This mapping is the ADR-0096 position: non-request-borne conversion
+   failures are gRPC INTERNAL; the request-borne 400 reservation is HTTP-only.
 
 Transport setup also fails closed under ADR-0033. Every Endpoint declares
 `transport=plaintext|tls`. The component rejects `insecure_skip_verify=true`,
