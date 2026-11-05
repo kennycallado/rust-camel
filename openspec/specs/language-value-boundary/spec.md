@@ -410,6 +410,17 @@ the access-aware requirement. The external template component (`camel-template`,
 ADR-0047) keeps its documented lossy byte projection and is not bound by this
 language requirement.
 
+In Simple template interpolation — any template whose result is a concatenation
+of literal text and slot renderings rather than a single whole-slot source — a
+Bytes-backed body slot SHALL render as UTF-8 text when the bytes are valid
+UTF-8, and SHALL fail with a `conversion` error when they are not. The
+interpolation rendering SHALL NEVER be lossy (no U+FFFD replacement) and SHALL
+NEVER render the byte-sequence array. The bare-access projection is unchanged:
+a whole-slot `${body}` source and every non-template read keep the byte-sequence
+array, and nested field access on a Bytes body (`${body.<path>}`) keeps its
+existing behavior. This rule applies to the Simple string surface only; Rhai,
+JavaScript, and MiniJinja bindings are unchanged.
+
 For every surface, `Stream` SHALL NOT be materialized implicitly: reading the
 stream body's VALUE through `body` SHALL fail, and the refusal SHALL happen
 only when the expression actually reads the body (see the access-aware refusal
@@ -452,6 +463,18 @@ accesses that materialize no value MAY be exempt (rhai `type_of(body)` returns
 - **THEN** each SHALL produce the JSON array `[0, 128, 255]`, with no lossy
   UTF-8 decoding
 
+#### Scenario: Bytes embedded in an interpolated template render as UTF-8 text
+
+- **GIVEN** an exchange whose body is `Body::Bytes` holding `hello` (valid
+  UTF-8) and a Simple template `pre${body}post`
+- **WHEN** the template evaluates
+- **THEN** the result SHALL be the string `prehellopost`, with no brackets,
+  no byte list, and exactly one concatenation of the slot rendering
+- **AND GIVEN** a template `status=${header.code} body=${body}` with header
+  `code` = `200` and a body holding `ok`
+- **WHEN** the template evaluates
+- **THEN** the result SHALL be the string `status=200 body=ok`
+
 #### Scenario: MiniJinja refuses non-UTF-8 Bytes instead of lossy text
 
 - **GIVEN** an exchange whose body is `Body::Bytes` holding invalid UTF-8 and
@@ -459,6 +482,14 @@ accesses that materialize no value MAY be exempt (rhai `type_of(body)` returns
 - **WHEN** the template renders
 - **THEN** rendering SHALL fail with a `conversion` error; the bytes SHALL NOT
   be silently replaced with U+FFFD
+
+#### Scenario: Simple interpolation refuses non-UTF-8 Bytes with a typed conversion error
+
+- **GIVEN** an exchange whose body is `Body::Bytes` holding bytes that are not
+  valid UTF-8 and a Simple template `body=${body}`
+- **WHEN** the template evaluates
+- **THEN** the evaluation SHALL fail with a `conversion` error; the result
+  SHALL NOT contain U+FFFD replacement characters and SHALL NOT be a byte list
 
 #### Scenario: Stream body fails loudly
 
