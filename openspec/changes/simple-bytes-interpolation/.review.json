@@ -1,0 +1,22 @@
+{
+  "kind": "holistic-review",
+  "change": "simple-bytes-interpolation",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_e5390923affeiH91I8TRbdTT7p",
+  "impl_head": "sha:5327259c9...c14659939 (branch tip at review)",
+  "plan_bless_hash": "sha256:9f1ac3abc5a1f05547714c20defaa313b80c3f46284ff97dfe767607d8c4943e",
+  "findings": [
+    {
+      "severity": "minor",
+      "note": "tasks.md is blocked by .git/info/exclude — at archive time force-add it (git add -f openspec/changes/simple-bytes-interpolation/tasks.md) as recent archives did, so the merged tree reproduces the plan bless hash",
+      "resolved": "handed to master conductor at archive"
+    },
+    {
+      "severity": "minor",
+      "note": "commit-count bookkeeping: branch has 3 commits (spec/plan/fix), not 4 — informational, no action",
+      "resolved": "no action"
+    }
+  ],
+  "date": "2026-11-05"
+}

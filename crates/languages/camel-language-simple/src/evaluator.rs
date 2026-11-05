@@ -222,6 +222,29 @@ fn body_value(exchange: &Exchange) -> Result<Value, LanguageError> {
     }
 }
 
+/// Render an interpolated value: null is empty, strings pass through, every
+/// other value uses its `Display` form.
+fn render_interpolated(value: Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(s) => s,
+        other => other.to_string(),
+    }
+}
+
+/// Render a body for text interpolation. Bytes bodies must decode as strict
+/// UTF-8 text; a lossy fallback or a byte array would corrupt the template, so
+/// invalid bytes surface as a typed conversion error. Every other body variant
+/// keeps its whole-value rendering.
+fn interpolate_body_text(exchange: &Exchange) -> Result<String, LanguageError> {
+    match &exchange.input.body {
+        Body::Bytes(b) => std::str::from_utf8(b)
+            .map(str::to_owned)
+            .map_err(|_| conversion_error("Body::Bytes", "text")),
+        _ => Ok(render_interpolated(body_value(exchange)?)),
+    }
+}
+
 /// Read a field path from a structured body. Only JSON has addressable fields;
 /// stream bodies fail because their content cannot be inspected without
 /// consuming it.
@@ -322,11 +345,15 @@ fn eval_sync_expr(expr: &Expr, ctx: &mut EvalCtx<'_>) -> Result<Value, LanguageE
                     }
                     InterpolatedPart::Expr(sub_expr) => {
                         ctx.charge_work()?;
-                        let val = eval_sync_expr(sub_expr, ctx)?;
-                        let rendered = match val {
-                            Value::Null => String::new(),
-                            Value::String(s) => s,
-                            other => other.to_string(),
+                        let rendered = if matches!(sub_expr.as_ref(), Expr::Body) {
+                            // Bytes bodies render as UTF-8 text in templates,
+                            // not as their native byte array. Charge the node
+                            // the generic sub-evaluation entry would have
+                            // charged so the slot keeps its two-unit cost.
+                            ctx.charge_work()?;
+                            interpolate_body_text(ctx.exchange)?
+                        } else {
+                            render_interpolated(eval_sync_expr(sub_expr, ctx)?)
                         };
                         ctx.charge_output(rendered.len())?;
                         result.push_str(&rendered);
@@ -494,11 +521,13 @@ where
                         }
                         InterpolatedPart::Expr(sub_expr) => {
                             ctx.charge_work()?;
-                            let val = eval_async_expr(sub_expr, &mut *ctx).await?;
-                            let rendered = match val {
-                                Value::Null => String::new(),
-                                Value::String(s) => s,
-                                other => other.to_string(),
+                            let rendered = if matches!(sub_expr.as_ref(), Expr::Body) {
+                                // Same UTF-8 rendering rule on the deferred
+                                // walk; charge the node explicitly.
+                                ctx.charge_work()?;
+                                interpolate_body_text(ctx.exchange)?
+                            } else {
+                                render_interpolated(eval_async_expr(sub_expr, &mut *ctx).await?)
                             };
                             // Fail fast: check the running total before this
                             // piece is appended, so an oversized template never

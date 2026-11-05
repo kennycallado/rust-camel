@@ -1,0 +1,19 @@
+{
+  "kind": "plan",
+  "change": "simple-bytes-interpolation",
+  "verdict": "BLESS",
+  "hash": "sha256:9f1ac3abc5a1f05547714c20defaa313b80c3f46284ff97dfe767607d8c4943e",
+  "expert": "experts/e_gpt",
+  "session": "ses_e53b9517fffe32jnMkANUbQ342",
+  "date": "2026-11-05",
+  "history": [
+    {
+      "kind": "spec",
+      "verdict": "BLESS",
+      "hash": "sha256:9afcc8e996bf4200929c3fb7e3482f8a3334bd25c0278c20018bbb706f4da023",
+      "expert": "experts/e_gpt",
+      "session": "ses_e53cabb1effeyea3MFSK7oSAiv",
+      "date": "2026-11-05"
+    }
+  ]
+}

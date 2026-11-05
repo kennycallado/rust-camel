@@ -1806,10 +1806,12 @@ mod language_delegate_eval_tests {
 
 #[cfg(test)]
 mod body_field_eval_tests {
+    use super::public_api_tests::BoolLanguage;
     use crate::SimpleLanguage;
     use camel_language_api::Language;
-    use camel_language_api::{Body, Exchange, Value};
+    use camel_language_api::{Body, Exchange, ExpressionErrorClass, LanguageError, Value};
     use serde_json::json;
+    use std::sync::Arc;
 
     async fn eval(expr_str: &str, body: Body) -> Value {
         let mut ex = Exchange::default();
@@ -1974,7 +1976,7 @@ mod body_field_eval_tests {
     }
 
     #[tokio::test]
-    async fn body_bytes_returns_byte_array() {
+    async fn bare_body_bytes_stays_byte_array() {
         // Body::Bytes is exposed as a native array of byte numbers.
         let lang = SimpleLanguage::new();
         let mut ex = Exchange::default();
@@ -2034,21 +2036,124 @@ mod body_field_eval_tests {
     }
 
     #[tokio::test]
-    async fn body_bytes_in_interpolation() {
-        // Body::Bytes renders as a byte array inside an interpolated expression.
+    async fn interpolated_bytes_render_as_utf8_text() {
+        // Body::Bytes renders as UTF-8 text inside an interpolated expression.
         let lang = SimpleLanguage::new();
         let mut ex = Exchange::default();
-        ex.input.body = Body::from(b"ping".to_vec());
+        ex.input.body = Body::from(b"hello".to_vec());
         let val = lang
-            .create_expression("Received: ${body}")
+            .create_expression("body=${body}")
             .unwrap()
             .evaluate(&ex)
             .await
             .unwrap();
-        assert_eq!(
-            val,
-            Value::String("Received: [112,105,110,103]".to_string())
+        assert_eq!(val, Value::String("body=hello".to_string()));
+    }
+
+    #[tokio::test]
+    async fn interpolated_bytes_prefix_and_suffix() {
+        // Text around the bytes slot is preserved, without byte-list brackets.
+        let lang = SimpleLanguage::new();
+        let mut ex = Exchange::default();
+        ex.input.body = Body::from(b"hello".to_vec());
+        let val = lang
+            .create_expression("pre${body}post")
+            .unwrap()
+            .evaluate(&ex)
+            .await
+            .unwrap();
+        assert_eq!(val, Value::String("prehellopost".to_string()));
+    }
+
+    #[tokio::test]
+    async fn interpolated_invalid_utf8_bytes_fail_typed() {
+        // Invalid UTF-8 must fail as a typed conversion error, never render
+        // lossily with U+FFFD replacement characters.
+        let lang = SimpleLanguage::new();
+        let mut ex = Exchange::default();
+        ex.input.body = Body::from(vec![0xffu8, 0xfe]);
+        let err = lang
+            .create_expression("body=${body}")
+            .unwrap()
+            .evaluate(&ex)
+            .await
+            .expect_err("invalid UTF-8 bytes must not render lossily");
+        assert_eq!(err.class(), Some(ExpressionErrorClass::Conversion));
+        let LanguageError::ConversionError {
+            source_type,
+            target,
+        } = &err
+        else {
+            panic!("expected ConversionError, got {err:?}");
+        };
+        assert!(
+            source_type.contains("Body::Bytes"),
+            "source_type must name Body::Bytes, got {source_type:?}"
         );
+        assert!(
+            !source_type.contains('\u{FFFD}') && !target.contains('\u{FFFD}'),
+            "conversion error fields must not contain U+FFFD: {err:?}"
+        );
+        assert!(
+            !format!("{err}").contains('\u{FFFD}'),
+            "conversion error message must not contain U+FFFD: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn interpolated_mixed_headers_and_bytes() {
+        // Reported camel-112 case: header and bytes slots in one template.
+        let lang = SimpleLanguage::new();
+        let mut ex = Exchange::default();
+        ex.input
+            .set_header("CamelHttpResponseCode", Value::Number(200.into()));
+        ex.input.body = Body::from(b"ok".to_vec());
+        let val = lang
+            .create_expression("status=${header.CamelHttpResponseCode} body=${body}")
+            .unwrap()
+            .evaluate(&ex)
+            .await
+            .unwrap();
+        assert_eq!(val, Value::String("status=200 body=ok".to_string()));
+    }
+
+    #[tokio::test]
+    async fn non_bytes_interpolation_unchanged() {
+        // Text-body interpolation must keep its existing rendering.
+        let lang = SimpleLanguage::new();
+        let mut ex = Exchange::default();
+        ex.input.set_header("x", Value::String("a".to_string()));
+        ex.input.body = Body::Text("b".to_string());
+        let val = lang
+            .create_expression("${header.x}-${body}")
+            .unwrap()
+            .evaluate(&ex)
+            .await
+            .unwrap();
+        assert_eq!(val, Value::String("a-b".to_string()));
+    }
+
+    #[tokio::test]
+    async fn interpolated_bytes_async_path_renders_utf8_text() {
+        // Delegate-containing templates take the async walk; bytes slots must
+        // render as UTF-8 text there too.
+        let resolver = Arc::new(|name: &str| {
+            if name == "boollang" {
+                Some(Arc::new(BoolLanguage) as Arc<dyn Language>)
+            } else {
+                None
+            }
+        });
+        let lang = SimpleLanguage::with_resolver(resolver);
+        let mut ex = Exchange::default();
+        ex.input.body = Body::from(b"hello".to_vec());
+        let val = lang
+            .create_expression("${body}${boollang:yes}")
+            .unwrap()
+            .evaluate(&ex)
+            .await
+            .unwrap();
+        assert_eq!(val, Value::String("hellotrue".to_string()));
     }
 
     // --- XML→Json→Simple integration tests ---
@@ -2158,7 +2263,7 @@ mod public_api_tests {
         }
     }
 
-    struct BoolLanguage;
+    pub(super) struct BoolLanguage;
 
     impl Language for BoolLanguage {
         fn name(&self) -> &'static str {
