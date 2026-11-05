@@ -1,0 +1,41 @@
+{
+  "kind": "plan",
+  "change": "jms-journal-codec",
+  "verdict": "BLESSED",
+  "hash": "sha256:d07c5b272957ca181d7d9444cbfbdadbc1ec0c0756b586a62efe6f7a000079e2",
+  "expert": "experts/e_gpt",
+  "session": "ses_e53167501ffex3kIUBN7eIZ6Wq",
+  "rounds": [
+    {
+      "round": 1,
+      "verdict": "BLESS-WITH-FIXES",
+      "session": "ses_e531b7e6effeXH690c1mWIh3iw",
+      "hash": "sha256:a3589fa233ebc4da8c433f590e9234e53a8c6b60354ae5e7cf641187f9a248b4",
+      "fixes_applied": [
+        "test-facing forwarding declarations (MAGIC, FORMAT_VERSION, TYPE_*, frameLength delegation) required in JournalService",
+        "grep acceptance commands made cwd-relative (bridges/jms)"
+      ]
+    },
+    {
+      "round": 2,
+      "verdict": "BLESSED",
+      "session": "ses_e53167501ffex3kIUBN7eIZ6Wq",
+      "hash": "sha256:d07c5b272957ca181d7d9444cbfbdadbc1ec0c0756b586a62efe6f7a000079e2"
+    }
+  ],
+  "reviewer_loop": [
+    {
+      "reviewer": "reviewers/r_glm",
+      "round": 1,
+      "session": "ses_e53237992ffe3rBtMBhzkYbN50",
+      "verdict": "FINDINGS (2 important, 2 minor): replay vector count 1->2, package typo rustamel->rustcamel, call-site count 9->3+3, openspec validate missing in acceptance",
+      "round": 2,
+      "session": "ses_e531cb9b5ffenb15OYofDzibh0",
+      "verdict": "CLEAN"
+    }
+  ],
+  "evidence": [
+    "/tmp/nix-shell.9NGiG3/opencode/jms-journal-codec-plan-self-grill.md",
+    "/tmp/nix-shell.9NGiG3/opencode/jms-journal-codec-rebless-round2.md"
+  ]
+}

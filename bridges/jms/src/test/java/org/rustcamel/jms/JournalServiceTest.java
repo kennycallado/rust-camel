@@ -66,7 +66,7 @@ class JournalServiceTest {
       writeRecord(out, JournalService.TYPE_RESERVE, "ID:2", 3000L);
     }
 
-    JournalService.JournalState state = JournalService.replay(journal);
+    JournalCodec.JournalState state = JournalService.replay(journal);
 
     assertEquals(2L, state.count("ID:1"), "two reservations for ID:1");
     assertEquals(1L, state.count("ID:2"), "one reservation for ID:2");
@@ -85,7 +85,7 @@ class JournalServiceTest {
       writeTornRecord(out, JournalService.TYPE_RESERVE, "ID:torn", 3000L);
     }
 
-    JournalService.JournalState state = JournalService.replay(journal);
+    JournalCodec.JournalState state = JournalService.replay(journal);
 
     assertEquals(1L, state.count("ID:1"), "an earlier confirmed count survives a torn tail");
     assertEquals(1L, state.count("ID:2"), "an earlier confirmed count survives a torn tail");
@@ -107,7 +107,7 @@ class JournalServiceTest {
       writeRecord(out, JournalService.TYPE_ROLLBACK, "ID:1", 2000L);
     }
 
-    JournalService.JournalState state = JournalService.replay(journal);
+    JournalCodec.JournalState state = JournalService.replay(journal);
 
     assertEquals(1L, state.count("ID:1"), "a ROLLBACK does not change the count");
     assertFalse(state.inFlight("ID:1"), "a ROLLBACK clears in-flight");
@@ -126,7 +126,7 @@ class JournalServiceTest {
       writeRecord(out, JournalService.TYPE_RETIRE, "ID:retire", 2100L);
     }
 
-    JournalService.JournalState state = JournalService.replay(journal);
+    JournalCodec.JournalState state = JournalService.replay(journal);
 
     assertEquals(0L, state.count("ID:commit"), "COMMIT removes the entry");
     assertFalse(state.contains("ID:commit"), "COMMIT removes the entry");
@@ -393,7 +393,7 @@ class JournalServiceTest {
     }
 
     Path journal = tempDir.resolve("broker-a").resolve("queue-a.journal");
-    JournalService.JournalState onDisk = JournalService.replay(journal);
+    JournalCodec.JournalState onDisk = JournalService.replay(journal);
     assertEquals(1L, onDisk.count("ID:1"), "the reservation is durable on disk");
     assertTrue(onDisk.inFlight("ID:1"), "the durable RESERVE is in-flight");
 
@@ -432,7 +432,7 @@ class JournalServiceTest {
     }
 
     Path journal = tempDir.resolve("broker-a").resolve("queue-a.journal");
-    JournalService.JournalState onDisk = JournalService.replay(journal);
+    JournalCodec.JournalState onDisk = JournalService.replay(journal);
     assertEquals(0L, onDisk.count("ID:commit"), "the durable COMMIT removes the entry");
     assertFalse(onDisk.contains("ID:commit"), "the durable COMMIT removes the entry");
     assertEquals(1L, onDisk.count("ID:rollback"), "the durable ROLLBACK keeps the count");
@@ -531,7 +531,7 @@ class JournalServiceTest {
     try (JournalService.JournalHandle handle = service.acquire("broker-a", "queue-a", 1000L)) {
       assertTrue(Files.size(journal) < garbageBytes, "compaction shrank the journal at open");
       assertFalse(Files.exists(snapshot), "the temp snapshot is gone after the atomic replace");
-      JournalService.JournalState onDisk = JournalService.replay(journal);
+      JournalCodec.JournalState onDisk = JournalService.replay(journal);
       assertEquals(1L, onDisk.count("ID:live"), "the live count survives compaction");
       assertTrue(onDisk.inFlight("ID:live"), "the durable RESERVE stays in-flight");
       assertEquals(0L, onDisk.count("ID:dead"), "a committed entry cannot come back");
@@ -650,7 +650,7 @@ class JournalServiceTest {
       assertEquals(1L, handle.count("ID:after"));
     }
 
-    JournalService.JournalState onDisk = JournalService.replay(journal);
+    JournalCodec.JournalState onDisk = JournalService.replay(journal);
     assertEquals(
         1L, onDisk.count("ID:after"), "the append after compaction is durable in the new inode");
     assertEquals(1L, onDisk.count("ID:live"), "the live reservation is preserved");
@@ -680,7 +680,7 @@ class JournalServiceTest {
       assertEquals(1L, handle.count("ID:stale"), "a later receipt restarts the budget at one");
     }
 
-    JournalService.JournalState onDisk = JournalService.replay(journal);
+    JournalCodec.JournalState onDisk = JournalService.replay(journal);
     assertEquals(1L, onDisk.count("ID:stale"), "only the fresh reservation is durable");
     assertTrue(onDisk.inFlight("ID:stale"), "the fresh reservation is in-flight");
   }
@@ -826,7 +826,7 @@ class JournalServiceTest {
       assertEquals(before, handle.count("ID:real"), "a rejected blank id never loses a count");
       assertEquals(0L, handle.count(""), "the storage never manufactures an empty id");
     }
-    JournalService.JournalState onDisk = JournalService.replay(journal);
+    JournalCodec.JournalState onDisk = JournalService.replay(journal);
     assertEquals(1L, onDisk.count("ID:real"), "the valid reservation is durable");
     assertEquals(0L, onDisk.count(""), "no empty-id record was ever written");
   }
@@ -878,7 +878,7 @@ class JournalServiceTest {
       handle.reserve(newId);
       assertEquals(1L, handle.count(newId));
     }
-    JournalService.JournalState onDisk = JournalService.replay(journal);
+    JournalCodec.JournalState onDisk = JournalService.replay(journal);
     assertEquals(1L, onDisk.count(newId), "an append after a discarded torn tail is durable");
     assertTrue(onDisk.inFlight(newId), "the appended reservation is in-flight");
   }
