@@ -19,7 +19,10 @@ use std::task::{Context, Poll};
 use tower::Service;
 
 use camel_api::body::Body;
-use camel_api::{BoxValueFuture, CamelError, ClaimCheckRepository, Exchange, Message, Value};
+use camel_api::{
+    BoxValueFuture, CamelError, ClaimCheckRepository, Exchange, Headers, Message,
+    PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value,
+};
 
 /// Fallible claim-check key source.
 ///
@@ -130,28 +133,46 @@ impl ClaimCheckService {
 /// Merge cached headers from a stashed message into the current message
 /// according to filter rules. Called from the async `call` future with
 /// all data cloned in advance.
-fn merge_stashed(current: &mut Message, stashed: &Message, filter: &ClaimCheckFilter) {
+///
+/// Also clears `PROPERTY_HTTP_CONTENT_TYPE_INHERITED` whenever the applied
+/// headers action lands or drops a `Content-Type` key, because the restored
+/// value no longer proves inherited provenance.
+fn merge_stashed(exchange: &mut Exchange, stashed: &Message, filter: &ClaimCheckFilter) {
+    let current = &mut exchange.input;
+
     match filter.body {
         FilterAction::Include => current.body = stashed.body.clone(),
         FilterAction::Exclude => {}
         FilterAction::Remove => current.body = Body::Empty,
     }
 
-    match &filter.headers_action {
+    let clears_marker = match &filter.headers_action {
         HeadersAction::All(action) => match action {
             FilterAction::Include => {
                 for (k, v) in &stashed.headers {
                     current.headers.insert(k.clone(), v.clone());
                 }
+                stashed.headers.keys().any(|k| is_content_type_key(k))
             }
-            FilterAction::Exclude => {}
-            FilterAction::Remove => current.headers.clear(),
+            FilterAction::Exclude => false,
+            FilterAction::Remove => {
+                current.headers.clear();
+                true
+            }
         },
         HeadersAction::ByPattern {
             include,
             exclude,
             remove,
         } => {
+            let clears_marker = action_touches_content_type(
+                include,
+                exclude,
+                remove,
+                &stashed.headers,
+                &current.headers,
+            );
+
             if !include.is_empty() {
                 for (k, v) in &stashed.headers {
                     if include.iter().any(|p| p.matches(k)) {
@@ -171,8 +192,57 @@ fn merge_stashed(current: &mut Message, stashed: &Message, filter: &ClaimCheckFi
                     .headers
                     .retain(|k, _| !remove.iter().any(|p| p.matches(k)));
             }
+
+            clears_marker
         }
+    };
+
+    if clears_marker {
+        exchange.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
     }
+}
+
+fn is_content_type_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("content-type")
+}
+
+/// Predicate for [`HeadersAction::ByPattern`]: does applying the pattern set
+/// land or drop a `Content-Type` key?
+///
+/// Side-effect free; must be called before the header mutation so that
+/// `current_headers` reflects what the `remove` patterns act on.
+fn action_touches_content_type(
+    include: &[HeaderPattern],
+    exclude: &[HeaderPattern],
+    remove: &[HeaderPattern],
+    stashed_headers: &Headers,
+    current_headers: &Headers,
+) -> bool {
+    if !include.is_empty()
+        && stashed_headers
+            .keys()
+            .any(|k| is_content_type_key(k) && include.iter().any(|p| p.matches(k)))
+    {
+        return true;
+    }
+
+    if !exclude.is_empty()
+        && stashed_headers
+            .keys()
+            .any(|k| is_content_type_key(k) && !exclude.iter().any(|p| p.matches(k)))
+    {
+        return true;
+    }
+
+    if !remove.is_empty()
+        && current_headers
+            .keys()
+            .any(|k| is_content_type_key(k) && remove.iter().any(|p| p.matches(k)))
+    {
+        return true;
+    }
+
+    false
 }
 
 impl Service<Exchange> for ClaimCheckService {
@@ -204,7 +274,7 @@ impl Service<Exchange> for ClaimCheckService {
                 ClaimCheckOp::Get => {
                     let stashed = repository.get(&key).await?;
                     if let Some(ref f) = filter {
-                        merge_stashed(&mut exchange.input, &stashed, f);
+                        merge_stashed(&mut exchange, &stashed, f);
                     } else {
                         exchange.input.body = stashed.body;
                     }
@@ -213,7 +283,7 @@ impl Service<Exchange> for ClaimCheckService {
                 ClaimCheckOp::GetAndRemove => {
                     let stashed = repository.get_and_remove(&key).await?;
                     if let Some(ref f) = filter {
-                        merge_stashed(&mut exchange.input, &stashed, f);
+                        merge_stashed(&mut exchange, &stashed, f);
                     } else {
                         exchange.input.body = stashed.body;
                     }
@@ -228,7 +298,7 @@ impl Service<Exchange> for ClaimCheckService {
                 ClaimCheckOp::Pop => {
                     let stashed = repository.pop(&key).await?;
                     if let Some(ref f) = filter {
-                        merge_stashed(&mut exchange.input, &stashed, f);
+                        merge_stashed(&mut exchange, &stashed, f);
                     } else {
                         exchange.input.body = stashed.body;
                     }

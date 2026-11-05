@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use camel_api::{
-    Body, CamelError, Exchange, StreamMetadata, StreamSplitConfig, StreamSplitFormat,
-    fragment_exchange,
+    Body, CamelError, Exchange, PROPERTY_HTTP_CONTENT_TYPE_INHERITED, StreamMetadata,
+    StreamSplitConfig, StreamSplitFormat, fragment_exchange,
 };
 use futures::Stream;
 use std::pin::Pin;
@@ -127,13 +127,16 @@ pub fn fragment_stream_exchange(parent: &Exchange, body: Body) -> Exchange {
     let mut ex = fragment_exchange(parent, body);
     ex.input.headers.remove("Content-Length");
     ex.input.headers.remove("Content-Type");
+    // The fragment body is new content, so the parent's request-dependent
+    // suppression marker must not be inherited.
+    ex.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
     ex
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camel_api::StreamMetadata;
+    use camel_api::{StreamMetadata, Value};
 
     fn default_metadata() -> StreamMetadata {
         StreamMetadata::default()
@@ -235,6 +238,32 @@ mod tests {
         assert!(
             msg.contains("format: zip"),
             "expected suggestion in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn stream_fragment_clears_marker() {
+        let mut parent = Exchange::new(camel_api::Message {
+            headers: Default::default(),
+            body: Body::Bytes(Bytes::from_static(b"parent body")),
+        });
+        parent.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+        parent.input.headers.insert(
+            "Content-Type".to_string(),
+            Value::String("text/plain".into()),
+        );
+
+        let fragment = fragment_stream_exchange(&parent, Body::Bytes(Bytes::from_static(b"part")));
+
+        assert_eq!(
+            fragment.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "the stream fragment must clear the inherited suppression marker"
+        );
+        assert_eq!(
+            parent.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&Value::Bool(true)),
+            "the parent marker must stay untouched"
         );
     }
 }

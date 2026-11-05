@@ -20,7 +20,10 @@ use futures::Stream;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
-use camel_api::{Body, CamelError, Exchange, Message, StreamingSplitExpression, Value};
+use camel_api::{
+    Body, CamelError, Exchange, Message, PROPERTY_HTTP_CONTENT_TYPE_INHERITED,
+    StreamingSplitExpression, Value,
+};
 
 use crate::archive_splitter::{
     DEFAULT_MAX_PATH_LENGTH, DuplicatePolicy, next_free_indexed_name, validate_entry_path,
@@ -530,6 +533,9 @@ fn tar_entry_stream(
                     ex.input.headers.remove("Content-Length");
                     ex.input.headers.remove("Content-Type");
                     ex.properties = parent.properties.clone();
+                    // The entry body is new content, so the parent's
+                    // request-dependent suppression marker must not be inherited.
+                    ex.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
                     ex.pattern = parent.pattern;
                     ex.otel_context = parent.otel_context.clone();
 
@@ -1391,6 +1397,37 @@ mod tests {
         assert!(
             err.contains("no regular entries") && err.contains("allow_empty_archive"),
             "expected the fail-closed empty-archive error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tar_fragment_clears_marker() {
+        let tar_data = tar_archive(&[("hello.txt", b'0', b"hello world".as_slice())]);
+        let mut parent = Exchange::new(Message {
+            headers: Default::default(),
+            body: Body::Bytes(Bytes::from(tar_data)),
+        });
+        parent.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+        parent.input.headers.insert(
+            "Content-Type".to_string(),
+            Value::String("application/x-tar".into()),
+        );
+        assert_eq!(
+            parent.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&Value::Bool(true)),
+            "parent must start with the marker armed"
+        );
+
+        let results = tar_splitter(TarSplitConfig::default())(parent)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(results.len(), 1);
+        let fragment = results[0].as_ref().expect("entry fragment ok");
+        assert_eq!(
+            fragment.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "the entry fragment must clear the inherited suppression marker"
         );
     }
 }

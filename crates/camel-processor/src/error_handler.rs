@@ -9,7 +9,11 @@ use camel_api::error_handler::{
     HEADER_REDELIVERY_COUNTER, HEADER_REDELIVERY_MAX_COUNTER, PolicyId, RetryOutcome,
     StepDisposition,
 };
-use camel_api::{BoxProcessor, CamelError, Exchange, PipelineOutcome, SyncBoxProcessor, Value};
+use camel_api::{
+    BoxProcessor, CamelError, Exchange, ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION,
+    OriginalContentTypeInherited, PROPERTY_HTTP_CONTENT_TYPE_INHERITED, PipelineOutcome,
+    SyncBoxProcessor, Value,
+};
 
 async fn execute_on_steps(
     original: Exchange,
@@ -142,6 +146,21 @@ impl DefaultRouteErrorHandler {
                 exchange.get_extension::<camel_api::Message>(camel_api::ORIGINAL_MESSAGE_EXTENSION)
         {
             exchange.input = orig.clone();
+
+            // Provenance capture always replaces the snapshot at route entry, so
+            // the stored snapshot — including its absence — is authoritative for
+            // the inherited marker on the restored message. Never infer from
+            // header presence.
+            let inherited = exchange
+                .get_extension::<OriginalContentTypeInherited>(
+                    ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION,
+                )
+                .is_some_and(|snapshot| snapshot.0);
+            if inherited {
+                exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+            } else {
+                exchange.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+            }
         }
     }
 
@@ -1876,6 +1895,180 @@ mod tests {
         assert_eq!(
             received_text, "mutated-body",
             "When use_original_message=false, DLC should see the mutated body"
+        );
+    }
+
+    // ── http-content-type-provenance: restoration restores the marker ──
+
+    fn handled_policy() -> ExceptionPolicy {
+        ExceptionPolicy {
+            matches: Arc::new(|_| true),
+            retry: None,
+            handled_by: None,
+            on_steps: None,
+            disposition: ExceptionDisposition::Handled,
+        }
+    }
+
+    fn body_text(body: &camel_api::Body) -> String {
+        match body {
+            camel_api::Body::Text(s) => s.clone(),
+            camel_api::Body::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            camel_api::Body::Json(v) => v.to_string(),
+            _ => String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn restore_reinstates_marker_for_untouched_original() {
+        let handler = DefaultRouteErrorHandler::new(None, vec![(handled_policy(), None)])
+            .with_use_original_message(true);
+
+        let mut original = Message::new("original-body");
+        original.set_header("Content-Type", "application/xml");
+
+        let mut ex = make_exchange();
+        ex.input = original.clone();
+        ex.set_extension(camel_api::ORIGINAL_MESSAGE_EXTENSION, Arc::new(original));
+        ex.set_extension(
+            camel_api::ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION,
+            Arc::new(camel_api::OriginalContentTypeInherited(true)),
+        );
+
+        // Simulate a route step that wrote Content-Type and cleared provenance:
+        // the untouched original snapshot must restore both.
+        ex.input.set_header("Content-Type", "application/json");
+        ex.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+
+        let disposition = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                ex,
+                CamelError::ProcessorError("boom".into()),
+            )
+            .await
+            .expect("handle_step should succeed");
+        let StepDisposition::Handled(ex) = disposition else {
+            panic!("expected Handled disposition");
+        };
+
+        assert_eq!(body_text(&ex.input.body), "original-body");
+        assert_eq!(
+            ex.input.header("Content-Type"),
+            Some(&Value::String("application/xml".into()))
+        );
+        assert_eq!(
+            ex.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&Value::Bool(true)),
+            "restoring an inherited original must reinstate the marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_removes_live_marker_when_snapshot_false() {
+        let handler = DefaultRouteErrorHandler::new(None, vec![(handled_policy(), None)])
+            .with_use_original_message(true);
+
+        // Original without a Content-Type header: route wrote it, so provenance
+        // is authoritative false and the restored exchange must not claim it.
+        let original = Message::new("original-body");
+
+        let mut ex = make_exchange();
+        ex.input = original.clone();
+        ex.set_extension(camel_api::ORIGINAL_MESSAGE_EXTENSION, Arc::new(original));
+        ex.set_extension(
+            camel_api::ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION,
+            Arc::new(camel_api::OriginalContentTypeInherited(false)),
+        );
+        ex.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+
+        let disposition = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                ex,
+                CamelError::ProcessorError("boom".into()),
+            )
+            .await
+            .expect("handle_step should succeed");
+        let StepDisposition::Handled(ex) = disposition else {
+            panic!("expected Handled disposition");
+        };
+
+        assert_eq!(
+            ex.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "a stored false snapshot must clear a live marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_clears_marker_when_snapshot_absent() {
+        let handler = DefaultRouteErrorHandler::new(None, vec![(handled_policy(), None)])
+            .with_use_original_message(true);
+
+        // Message stashed without provenance capture: capture always replaces,
+        // so absent snapshot is authoritative and clears the live marker.
+        let original = Message::new("original-body");
+
+        let mut ex = make_exchange();
+        ex.input = original.clone();
+        ex.set_extension(camel_api::ORIGINAL_MESSAGE_EXTENSION, Arc::new(original));
+        ex.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+
+        let disposition = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                ex,
+                CamelError::ProcessorError("boom".into()),
+            )
+            .await
+            .expect("handle_step should succeed");
+        let StepDisposition::Handled(ex) = disposition else {
+            panic!("expected Handled disposition");
+        };
+
+        assert_eq!(
+            ex.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "an absent provenance snapshot must clear a live marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_without_use_original_message_leaves_marker_untouched() {
+        let handler = DefaultRouteErrorHandler::new(None, vec![(handled_policy(), None)]);
+        // use_original_message defaults to false: restoration must not run.
+
+        let mut original = Message::new("original-body");
+        original.set_header("Content-Type", "application/xml");
+
+        let mut ex = make_exchange();
+        ex.input = original.clone();
+        ex.set_extension(camel_api::ORIGINAL_MESSAGE_EXTENSION, Arc::new(original));
+        ex.input = Message::new("mutated-body");
+        ex.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+
+        let disposition = handler
+            .handle_step(
+                Some(PolicyId(0)),
+                ex,
+                CamelError::ProcessorError("boom".into()),
+            )
+            .await
+            .expect("handle_step should succeed");
+        let StepDisposition::Handled(ex) = disposition else {
+            panic!("expected Handled disposition");
+        };
+
+        assert_eq!(
+            body_text(&ex.input.body),
+            "mutated-body",
+            "restoration must not run when use_original_message is disabled"
+        );
+        assert_eq!(
+            ex.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&Value::Bool(true)),
+            "restoration must not run when use_original_message is disabled"
         );
     }
 

@@ -673,6 +673,191 @@ async fn get_with_headers_all_include_merges_all_stashed_headers() {
 
 // --- coverage gap: include-then-remove ordering ---
 
+// --- Content-Type provenance marker on header restore ---
+
+fn marked_exchange() -> Exchange {
+    let mut exchange = make_exchange(Body::Empty);
+    exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+    exchange
+}
+
+#[tokio::test]
+async fn claim_check_clears_marker_when_ct_included() {
+    let repo = Arc::new(TestRepo::new("test"));
+    let stashed_msg = Message {
+        body: Body::Empty,
+        headers: [(
+            "Content-Type".into(),
+            Value::String("application/json".into()),
+        )]
+        .into(),
+    };
+    repo.set("k", stashed_msg).await.unwrap();
+
+    let filter = ClaimCheckFilter::parse("headers").unwrap();
+    let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Get, make_key_expr("k"))
+        .with_filter(filter);
+
+    let result = svc.oneshot(marked_exchange()).await.unwrap();
+
+    assert_eq!(
+        result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        None,
+        "restoring a Content-Type header must clear the inherited marker"
+    );
+    assert_eq!(
+        result.input.headers.get("Content-Type"),
+        Some(&Value::String("application/json".into()))
+    );
+}
+
+#[tokio::test]
+async fn claim_check_clears_marker_on_all_remove() {
+    let repo = Arc::new(TestRepo::new("test"));
+    repo.set("k", Message::new(Body::Empty)).await.unwrap();
+
+    let filter = ClaimCheckFilter::parse("--headers").unwrap();
+    let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Get, make_key_expr("k"))
+        .with_filter(filter);
+
+    let result = svc.oneshot(marked_exchange()).await.unwrap();
+
+    assert_eq!(
+        result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        None,
+        "clearing all headers drops any Content-Type key"
+    );
+}
+
+#[tokio::test]
+async fn claim_check_clears_marker_on_bypattern_include_matching_ct() {
+    let repo = Arc::new(TestRepo::new("test"));
+    let stashed_msg = Message {
+        body: Body::Empty,
+        headers: [("Content-Type".into(), Value::String("text/plain".into()))].into(),
+    };
+    repo.set("k", stashed_msg).await.unwrap();
+
+    let filter = ClaimCheckFilter::parse("header:Content-Type").unwrap();
+    let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Get, make_key_expr("k"))
+        .with_filter(filter);
+
+    let result = svc.oneshot(marked_exchange()).await.unwrap();
+
+    assert_eq!(
+        result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        None,
+        "including a Content-Type header from the stash must clear the marker"
+    );
+    assert_eq!(
+        result.input.headers.get("Content-Type"),
+        Some(&Value::String("text/plain".into()))
+    );
+}
+
+#[tokio::test]
+async fn claim_check_clears_marker_on_bypattern_exclude_missing_ct() {
+    let repo = Arc::new(TestRepo::new("test"));
+    let stashed_msg = Message {
+        body: Body::Empty,
+        headers: [("Content-Type".into(), Value::String("text/plain".into()))].into(),
+    };
+    repo.set("k", stashed_msg).await.unwrap();
+
+    // Excluding only X-Other means the stashed Content-Type is inserted.
+    let filter = ClaimCheckFilter::parse("-header:X-Other").unwrap();
+    let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Get, make_key_expr("k"))
+        .with_filter(filter);
+
+    let result = svc.oneshot(marked_exchange()).await.unwrap();
+
+    assert_eq!(
+        result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        None,
+        "a Content-Type inserted by an exclude filter must clear the marker"
+    );
+    assert_eq!(
+        result.input.headers.get("Content-Type"),
+        Some(&Value::String("text/plain".into()))
+    );
+}
+
+#[tokio::test]
+async fn claim_check_clears_marker_on_pattern_removing_ct() {
+    let repo = Arc::new(TestRepo::new("test"));
+    repo.set("k", Message::new(Body::Empty)).await.unwrap();
+
+    let filter = ClaimCheckFilter::parse("--header:Content-Type").unwrap();
+    let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Get, make_key_expr("k"))
+        .with_filter(filter);
+
+    let mut exchange = marked_exchange();
+    exchange
+        .input
+        .headers
+        .insert("Content-Type".into(), Value::String("text/plain".into()));
+
+    let result = svc.oneshot(exchange).await.unwrap();
+
+    assert_eq!(result.input.headers.get("Content-Type"), None);
+    assert_eq!(
+        result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        None,
+        "dropping a Content-Type header must clear the marker"
+    );
+}
+
+#[tokio::test]
+async fn claim_check_keeps_marker_when_remove_pattern_misses_case_variant() {
+    let repo = Arc::new(TestRepo::new("test"));
+    repo.set("k", Message::new(Body::Empty)).await.unwrap();
+
+    // HeaderPattern matching is case-sensitive: Exact("Content-Type") does not
+    // match a lowercase "content-type", so the key survives and the marker stays.
+    let filter = ClaimCheckFilter::parse("--header:Content-Type").unwrap();
+    let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Get, make_key_expr("k"))
+        .with_filter(filter);
+
+    let mut exchange = marked_exchange();
+    exchange
+        .input
+        .headers
+        .insert("content-type".into(), Value::String("text/plain".into()));
+
+    let result = svc.oneshot(exchange).await.unwrap();
+
+    assert_eq!(
+        result.input.headers.get("content-type"),
+        Some(&Value::String("text/plain".into()))
+    );
+    assert_eq!(
+        result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        Some(&Value::Bool(true))
+    );
+}
+
+#[tokio::test]
+async fn claim_check_keeps_marker_when_headers_untouched() {
+    let repo = Arc::new(TestRepo::new("test"));
+    let stashed_msg = Message {
+        body: Body::Empty,
+        headers: [("X-Other".into(), Value::String("v".into()))].into(),
+    };
+    repo.set("k", stashed_msg).await.unwrap();
+
+    let filter = ClaimCheckFilter::parse("-headers").unwrap();
+    let svc = ClaimCheckService::new(repo.clone(), ClaimCheckOp::Get, make_key_expr("k"))
+        .with_filter(filter);
+
+    let result = svc.oneshot(marked_exchange()).await.unwrap();
+
+    assert_eq!(
+        result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        Some(&Value::Bool(true)),
+        "All(Exclude) lands no header and drops none, so provenance is unchanged"
+    );
+}
+
 #[tokio::test]
 async fn include_then_remove_specific_header() {
     let repo = Arc::new(TestRepo::new("test"));

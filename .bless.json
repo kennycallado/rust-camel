@@ -1,27 +1,14 @@
 {
   "kind": "plan",
-  "change": "fault-blame-taxonomy",
-  "verdict": "BLESS",
-  "hash": "4f384f6dec5bd82d05cd55e34dc28f7512d8a210e28cda9e63bf47689d4ce5dc",
   "expert": "experts/e_gpt",
-  "rounds": 1,
-  "spec_bless": {
-    "verdict": "BLESS",
-    "hash": "319461b6831ca74099dea33a3492b5a753a57a700d4ff335095876a091ed3b31",
-    "expert": "experts/e_gpt",
-    "rounds": 2
-  },
-  "plan_review": {
-    "reviewer": "reviewers/r_glm",
-    "rounds": 2,
-    "round1": "APPROVE-WITH-FINDINGS (4 findings: evidence-row count, loop coverage 22->29, .bless.json dirty-state collision, bd error-handler scope)",
-    "round2": "APPROVE (clean)"
-  },
-  "artifacts": [
-    "openspec/changes/fault-blame-taxonomy/proposal.md",
-    "openspec/changes/fault-blame-taxonomy/design.md",
-    "openspec/changes/fault-blame-taxonomy/tasks.md",
-    "docs/adr/0096-fault-blame-taxonomy.md"
-  ],
-  "date": "2026-11-05"
+  "verdict": "BLESSED",
+  "hash": "sha256:b505acb7547196253697a962fde071cf5eebcbd673b36051a1c85d305c1d4ef6",
+  "note": "Supersedes the spec-stage blessing (e5f6ef36..., commit 54007a925) per conductor flow. Plan history: r_glm review REJECT round 1 (stream-gating regression, camel-builder dev-dep, zip/tar placement, ByPattern arms, site-7 untested) -> all applied; r_glm APPROVE-WITH-FINDINGS round 2 (round-trip test rewrites, case-sensitive ByPattern remove, recorded-value read) -> applied verbatim; e_gpt plan-bless round 1 REJECT (six fix categories: api root exports, function-patch consumed vectors, WASM property-merge ordering, CXF/helper seams, site-13 restoration coverage, honest TDD) -> all applied; e_gpt plan-bless round 2 BLESSED (ses_e53aecdaaffeNf6oj05dWryjBH, evidence /tmp/nix-shell.9NGiG3/opencode/http-content-type-provenance-plan-grill-round2.md). Master authorization covered two plan-bless rounds; both consumed.",
+  "spec_trail": {
+    "final_spec_bless": "sha256:e5f6ef36dd85c6000f5faab15952964614e269604b699a4b132872df07932442",
+    "committed_as": "54007a925 spec(http-content-type-provenance): blessed",
+    "rounds": 6,
+    "round_1_to_3": "conductor autopilot (budget cap hit, see previous park)",
+    "round_4_to_6": "master conductor authorized"
+  }
 }

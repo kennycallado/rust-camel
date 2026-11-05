@@ -9111,7 +9111,7 @@ fn response_content_type_reads_lowercase_header() {
     let mut msg = Message::default();
     msg.set_header("content-type", "application/vnd.acme+json");
     assert_eq!(
-        response_content_type(&msg, None).as_deref(),
+        response_content_type(&msg, false).as_deref(),
         Some("application/vnd.acme+json")
     );
 }
@@ -9121,16 +9121,31 @@ fn response_content_type_reads_mixed_case_header() {
     let mut msg = Message::default();
     msg.set_header("CoNtEnT-TyPe", "application/vnd.acme+json");
     assert_eq!(
-        response_content_type(&msg, None).as_deref(),
+        response_content_type(&msg, false).as_deref(),
         Some("application/vnd.acme+json")
     );
 }
 
 #[test]
-fn response_content_type_drops_inherited_equal_value() {
+fn response_content_type_suppressed_while_marker_set() {
     let mut msg = Message::default();
     msg.set_header("Content-Type", "application/xml");
-    assert_eq!(response_content_type(&msg, Some("application/xml")), None);
+    assert_eq!(
+        response_content_type(&msg, true),
+        None,
+        "the marker overrides the value: an untouched ingress header is never emitted"
+    );
+}
+
+#[test]
+fn response_content_type_emits_route_value_equal_to_request() {
+    let mut msg = Message::default();
+    msg.set_header("Content-Type", "application/xml");
+    assert_eq!(
+        response_content_type(&msg, false).as_deref(),
+        Some("application/xml"),
+        "a route write is emitted even when it equals the request value"
+    );
 }
 
 #[test]
@@ -9138,7 +9153,7 @@ fn response_content_type_keeps_changed_value() {
     let mut msg = Message::default();
     msg.set_header("content-type", "application/json");
     assert_eq!(
-        response_content_type(&msg, Some("application/xml")).as_deref(),
+        response_content_type(&msg, false).as_deref(),
         Some("application/json")
     );
 }
@@ -9156,6 +9171,148 @@ fn record_request_content_type_sets_property() {
         exchange.property(PROPERTY_REQUEST_CONTENT_TYPE),
         Some(&Value::String("application/xml".to_string()))
     );
+}
+
+#[test]
+fn record_request_content_type_sets_marker() {
+    let mut exchange = Exchange::new(Message::default());
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/json"),
+    );
+    record_request_content_type(&mut exchange, &headers);
+    assert_eq!(
+        exchange.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        Some(&Value::Bool(true)),
+        "ingress arms the provenance marker"
+    );
+    assert_eq!(
+        exchange.property(PROPERTY_REQUEST_CONTENT_TYPE),
+        Some(&Value::String("application/json".to_string())),
+        "the recorded value property is unchanged"
+    );
+}
+
+#[test]
+fn record_request_content_type_without_header_leaves_no_marker() {
+    let mut exchange = Exchange::new(Message::default());
+    let headers = http::HeaderMap::new();
+    record_request_content_type(&mut exchange, &headers);
+    assert_eq!(
+        exchange.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        None
+    );
+}
+
+#[test]
+fn inferred_content_type_suppressed_while_marker_set() {
+    let json = Body::Json(serde_json::json!({"a": 1}));
+    assert_eq!(inferred_content_type(&json, true), None);
+    assert_eq!(
+        inferred_content_type(&Body::Text("x".to_string()), true),
+        None
+    );
+}
+
+#[test]
+fn inferred_content_type_unmarked_still_infers() {
+    let json = Body::Json(serde_json::json!({"a": 1}));
+    assert_eq!(
+        inferred_content_type(&json, false).as_deref(),
+        Some("application/json")
+    );
+    assert_eq!(
+        inferred_content_type(&Body::Bytes(bytes::Bytes::new()), false),
+        None
+    );
+    assert_eq!(
+        inferred_content_type(&Body::Bytes(bytes::Bytes::new()), true),
+        None
+    );
+    assert_eq!(inferred_content_type(&Body::Empty, true), None);
+    assert_eq!(inferred_content_type(&Body::Empty, false), None);
+}
+
+#[test]
+fn stream_metadata_equal_to_request_suppressed() {
+    assert_eq!(
+        stream_metadata_content_type(
+            Some("application/xml".to_string()),
+            true,
+            Some("application/xml"),
+        ),
+        None
+    );
+}
+
+#[test]
+fn stream_metadata_filter_is_marker_independent() {
+    assert_eq!(
+        stream_metadata_content_type(
+            Some("application/xml".to_string()),
+            false,
+            Some("application/xml"),
+        ),
+        None,
+        "clearing the marker must not resurrect the ingress copy"
+    );
+    assert_eq!(
+        stream_metadata_content_type(
+            Some("video/mp4".to_string()),
+            false,
+            Some("application/xml"),
+        )
+        .as_deref(),
+        Some("video/mp4")
+    );
+}
+
+#[test]
+fn http_producer_mapping_clears_marker_on_ct() {
+    let mut exchange = Exchange::new(Message::default());
+    exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/json"),
+    );
+    headers.insert("x-request-id", http::HeaderValue::from_static("abc"));
+    apply_response_header_mapping(&mut exchange, &headers, &[]);
+    assert_eq!(
+        exchange.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        None,
+        "a mapped response Content-Type is not the ingress copy"
+    );
+    assert_eq!(
+        exchange.input.header_ic("content-type"),
+        Some(&Value::String("application/json".to_string()))
+    );
+    assert_eq!(
+        exchange.input.header("X-Request-Id"),
+        Some(&Value::String("abc".to_string()))
+    );
+}
+
+#[test]
+fn http_producer_mapping_keeps_marker_on_other_headers() {
+    let mut exchange = Exchange::new(Message::default());
+    exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+    let mut headers = http::HeaderMap::new();
+    headers.insert("x-request-id", http::HeaderValue::from_static("abc"));
+    headers.insert("x-skipped", http::HeaderValue::from_static("nope"));
+    let skip = vec!["X-Skipped".to_string()];
+    apply_response_header_mapping(&mut exchange, &headers, &skip);
+    assert_eq!(
+        exchange.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        Some(&Value::Bool(true)),
+        "non-Content-Type mappings leave the marker alone"
+    );
+    assert_eq!(
+        exchange.input.header("X-Request-Id"),
+        Some(&Value::String("abc".to_string()))
+    );
+    assert_eq!(exchange.input.header("X-Skipped"), None);
 }
 
 #[test]
@@ -9207,13 +9364,9 @@ fn reply_content_type_round_trip_no_echo() {
     );
     record_request_content_type(&mut exchange, &headers);
     let inherited = exchange
-        .property(PROPERTY_REQUEST_CONTENT_TYPE)
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    assert_eq!(
-        response_content_type(&exchange.input, inherited.as_deref()),
-        None
-    );
+        .property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED)
+        .is_some();
+    assert_eq!(response_content_type(&exchange.input, inherited), None);
 }
 
 #[test]
@@ -9227,15 +9380,14 @@ fn reply_content_type_round_trip_lowercase_override() {
         http::HeaderValue::from_static("application/xml"),
     );
     record_request_content_type(&mut exchange, &headers);
-    let inherited = exchange
-        .property(PROPERTY_REQUEST_CONTENT_TYPE)
-        .and_then(Value::as_str)
-        .map(str::to_string);
     exchange
         .input
         .set_header("content-type", "application/json");
+    // Emulate the route writer that produced the header above: every writer
+    // clears the provenance marker (bd rc-tf0k4).
+    exchange.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
     assert_eq!(
-        response_content_type(&exchange.input, inherited.as_deref()).as_deref(),
+        response_content_type(&exchange.input, false).as_deref(),
         Some("application/json")
     );
 }
@@ -9252,13 +9404,280 @@ fn reply_content_type_round_trip_identical_is_inherited() {
     );
     record_request_content_type(&mut exchange, &headers);
     let inherited = exchange
-        .property(PROPERTY_REQUEST_CONTENT_TYPE)
-        .and_then(Value::as_str)
-        .map(str::to_string);
+        .property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED)
+        .is_some();
     exchange.input.set_header("content-type", "application/xml");
+    assert_eq!(response_content_type(&exchange.input, inherited), None);
+}
+
+/// Build the exchange shape ingress produces: the request `Content-Type`
+/// header plus the recorded value and provenance marker properties. With
+/// `header: None` all three are absent, mirroring a header-less request.
+fn inherited_exchange(header: Option<(&str, &str)>, body: Body) -> Exchange {
+    let mut message = Message::new(body);
+    if let Some((key, value)) = header {
+        message.set_header(key, value);
+    }
+    let mut exchange = Exchange::new(message);
+    if let Some((_, value)) = header {
+        exchange.set_property(
+            PROPERTY_REQUEST_CONTENT_TYPE,
+            Value::String(value.to_string()),
+        );
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+    }
+    exchange
+}
+
+/// Run a writer over a marked ingress exchange and return the resulting
+/// marker state plus the resolved reply headers.
+async fn run_writer<S>(writer: S, exchange: Exchange) -> (Exchange, bool)
+where
+    S: tower::Service<Exchange, Response = Exchange, Error = camel_api::CamelError>,
+    S::Future: Send,
+{
+    use tower::ServiceExt;
+    let out = writer.oneshot(exchange).await.expect("writer must succeed");
+    let marker_set = out.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED).is_some();
+    (out, marker_set)
+}
+
+fn emitted_content_types(selected: &[(String, String)]) -> Vec<&str> {
+    selected
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
+        .map(|(_, v)| v.as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn route_set_content_type_equal_to_request_is_preserved() {
+    let exchange = inherited_exchange(
+        Some(("Content-Type", "application/json")),
+        Body::Text("{\"status\":\"success\"}".to_string()),
+    );
+    let writer = camel_processor::SetHeader::new(
+        camel_api::IdentityProcessor,
+        "Content-Type",
+        Value::from("application/json"),
+    );
+    let (out, marker_set) = run_writer(writer, exchange).await;
     assert_eq!(
-        response_content_type(&exchange.input, inherited.as_deref()),
-        None
+        out.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        None,
+        "a route Content-Type write clears the provenance marker"
+    );
+    let user = response_content_type(&out.input, marker_set);
+    assert_eq!(user.as_deref(), Some("application/json"));
+    let inferred = inferred_content_type(&out.input.body, marker_set);
+    assert_eq!(inferred.as_deref(), Some("text/plain; charset=utf-8"));
+    let selected = select_response_headers(&out.input.headers, user, inferred);
+    assert_eq!(
+        emitted_content_types(&selected),
+        ["application/json"],
+        "exactly one Content-Type entry, and it is the route value"
+    );
+}
+
+#[tokio::test]
+async fn route_set_content_type_with_charset_equal_to_request_is_preserved() {
+    let exchange = inherited_exchange(
+        Some(("Content-Type", "application/json; charset=utf-8")),
+        Body::Text("{\"status\":\"success\"}".to_string()),
+    );
+    let writer = camel_processor::SetHeader::new(
+        camel_api::IdentityProcessor,
+        "Content-Type",
+        Value::from("application/json; charset=utf-8"),
+    );
+    let (out, marker_set) = run_writer(writer, exchange).await;
+    assert!(!marker_set, "the write clears the marker");
+    let user = response_content_type(&out.input, marker_set);
+    assert_eq!(user.as_deref(), Some("application/json; charset=utf-8"));
+    let selected = select_response_headers(&out.input.headers, user, None);
+    assert_eq!(
+        emitted_content_types(&selected),
+        ["application/json; charset=utf-8"],
+        "the route value is preserved verbatim, charset included"
+    );
+}
+
+#[tokio::test]
+async fn route_set_content_type_different_from_request_is_preserved() {
+    let exchange = inherited_exchange(
+        Some(("Content-Type", "application/json")),
+        Body::Text("a,b".to_string()),
+    );
+    let writer = camel_processor::SetHeader::new(
+        camel_api::IdentityProcessor,
+        "Content-Type",
+        Value::from("text/csv"),
+    );
+    let (out, marker_set) = run_writer(writer, exchange).await;
+    assert!(!marker_set, "the write clears the marker");
+    let user = response_content_type(&out.input, marker_set);
+    assert_eq!(user.as_deref(), Some("text/csv"));
+    let selected = select_response_headers(&out.input.headers, user, None);
+    assert_eq!(emitted_content_types(&selected), ["text/csv"]);
+}
+
+#[tokio::test]
+async fn untouched_request_content_type_is_not_echoed() {
+    let exchange = inherited_exchange(
+        Some(("Content-Type", "application/json")),
+        Body::Json(serde_json::json!({"status": "success"})),
+    );
+    // No writer runs: the marker is still set.
+    let marker_set = exchange
+        .property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED)
+        .is_some();
+    assert!(marker_set, "ingress armed the marker");
+    let user = response_content_type(&exchange.input, marker_set);
+    assert_eq!(user, None, "an untouched ingress header is never emitted");
+    let inferred = inferred_content_type(&exchange.input.body, marker_set);
+    assert_eq!(inferred, None, "an untouched body is never typed");
+    let selected = select_response_headers(&exchange.input.headers, user, inferred);
+    assert!(
+        emitted_content_types(&selected).is_empty(),
+        "no Content-Type may reach the wire: {selected:?}"
+    );
+}
+
+#[tokio::test]
+async fn content_type_written_by_dynamic_set_header_is_preserved() {
+    let exchange = inherited_exchange(
+        Some(("Content-Type", "application/json")),
+        Body::Text("{\"status\":\"success\"}".to_string()),
+    );
+    let source = camel_api::ValueSource::Sync(Arc::new(|_: &Exchange| {
+        Value::String("application/json".to_string())
+    }));
+    let writer = camel_processor::DynamicSetHeader::new(
+        camel_api::IdentityProcessor,
+        "Content-Type",
+        source,
+    );
+    let (out, marker_set) = run_writer(writer, exchange).await;
+    assert!(!marker_set, "the dynamic write clears the marker");
+    let user = response_content_type(&out.input, marker_set);
+    assert_eq!(user.as_deref(), Some("application/json"));
+    let selected = select_response_headers(&out.input.headers, user, None);
+    assert_eq!(emitted_content_types(&selected), ["application/json"]);
+}
+
+#[tokio::test]
+async fn content_type_written_by_header_dsl_is_preserved() {
+    use camel_api::SpanKindHint;
+    use camel_builder::RouteBuilder;
+    use camel_builder::StepAccumulator;
+    use camel_core::route::{BuilderStep, CompiledStep, PipelineRuntimeCtx, compose_pipeline};
+    use tower::ServiceExt;
+
+    let def = RouteBuilder::from("t:t")
+        .route_id("ct-header-dsl")
+        .set_header_fn("Content-Type", |_ex: &Exchange| {
+            Value::String("application/json".to_string())
+        })
+        .build()
+        .unwrap();
+    let pipeline = compose_pipeline(
+        def.steps()
+            .iter()
+            .filter_map(|s| {
+                if let BuilderStep::Processor(op) = s {
+                    Some(op.0.clone())
+                } else {
+                    None
+                }
+            })
+            .map(|p| CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
+                processor: p,
+                body_contract: None,
+                lifecycle: None,
+                label: None,
+                to_uri: None,
+            })
+            .collect(),
+        PipelineRuntimeCtx::compile_time(),
+    );
+    let exchange = inherited_exchange(
+        Some(("Content-Type", "application/json")),
+        Body::Text("{\"status\":\"success\"}".to_string()),
+    );
+    let out = pipeline
+        .oneshot(exchange)
+        .await
+        .expect("compiled header DSL pipeline must succeed");
+    assert_eq!(
+        out.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+        None,
+        "the builder write clears the marker"
+    );
+    let marker_set = out.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED).is_some();
+    let user = response_content_type(&out.input, marker_set);
+    assert_eq!(user.as_deref(), Some("application/json"));
+    let selected = select_response_headers(&out.input.headers, user, None);
+    assert_eq!(emitted_content_types(&selected), ["application/json"]);
+}
+
+#[tokio::test]
+async fn content_type_header_case_is_insensitive() {
+    for key in ["content-type", "Content-Type"] {
+        let exchange = inherited_exchange(
+            Some(("Content-Type", "application/json")),
+            Body::Text("{\"status\":\"success\"}".to_string()),
+        );
+        let writer = camel_processor::SetHeader::new(
+            camel_api::IdentityProcessor,
+            key,
+            Value::from("application/json"),
+        );
+        let (out, marker_set) = run_writer(writer, exchange).await;
+        assert!(!marker_set, "writer keyed `{key}` clears the marker");
+        let user = response_content_type(&out.input, marker_set);
+        assert_eq!(
+            user.as_deref(),
+            Some("application/json"),
+            "writer keyed `{key}` value is emitted"
+        );
+        let selected = select_response_headers(&out.input.headers, user, None);
+        assert_eq!(emitted_content_types(&selected), ["application/json"]);
+    }
+}
+
+#[tokio::test]
+async fn removing_content_type_leaves_no_inherited_value() {
+    let exchange = inherited_exchange(
+        Some(("Content-Type", "application/json")),
+        Body::Bytes(bytes::Bytes::new()),
+    );
+    let writer = camel_processor::RemoveHeader::new(camel_api::IdentityProcessor, "Content-Type");
+    let (out, marker_set) = run_writer(writer, exchange).await;
+    assert!(!marker_set, "the removal clears the marker");
+    assert_eq!(
+        out.input.header_ic("Content-Type"),
+        None,
+        "the header is gone"
+    );
+    assert_eq!(
+        response_content_type(&out.input, false),
+        None,
+        "the marker is not resurrected through the header channel"
+    );
+    assert_eq!(
+        inferred_content_type(&Body::Bytes(bytes::Bytes::new()), false),
+        None,
+        "the marker is not resurrected through body inference"
+    );
+    assert_eq!(
+        stream_metadata_content_type(
+            Some("application/json".to_string()),
+            false,
+            Some("application/json"),
+        ),
+        None,
+        "the marker is not resurrected through stream metadata"
     );
 }
 

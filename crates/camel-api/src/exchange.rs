@@ -14,6 +14,24 @@ use crate::value::Value;
 /// so the error handler can restore body+headers before DLC dispatch.
 pub const ORIGINAL_MESSAGE_EXTENSION: &str = "CamelOriginalMessage";
 
+/// Extension key for the Content-Type provenance snapshot taken with
+/// `ORIGINAL_MESSAGE_EXTENSION` at route entry when `use_original_message` is
+/// enabled. Capture replaces the snapshot unconditionally; restore reads it to
+/// rebuild the inherited marker.
+pub const ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION: &str = "CamelOriginalContentTypeInherited";
+
+/// Marker-presence snapshot stored under `ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION`.
+/// Stored as `Arc<OriginalContentTypeInherited>` via `Exchange::set_extension`.
+pub struct OriginalContentTypeInherited(pub bool);
+
+/// Exchange property marking that the current `Content-Type` was inherited from
+/// the incoming request rather than written by a route step.
+///
+/// Set by the HTTP consumer at ingress and cleared by any route step that
+/// writes or removes `Content-Type`, so downstream components can suppress
+/// value-equality checks in favour of provenance.
+pub const PROPERTY_HTTP_CONTENT_TYPE_INHERITED: &str = "CamelHttpContentTypeInherited";
+
 /// Pipeline-executor-recognized stop signal. Set by processors (ThrottleStrategy::Drop,
 /// SamplingService) that cannot return PipelineOutcome::Stopped directly because they
 /// are Tower `Service<Exchange>` (Process mode), not OutcomePipeline (Segment).
@@ -132,6 +150,12 @@ impl Exchange {
     /// Set a property value.
     pub fn set_property(&mut self, key: impl Into<String>, value: impl Into<Value>) {
         self.properties.insert(key.into(), value.into());
+    }
+
+    /// Remove an exchange property. Idempotent: removing an absent key is a no-op.
+    /// Used by provenance writers to clear `PROPERTY_HTTP_CONTENT_TYPE_INHERITED`.
+    pub fn remove_property(&mut self, key: &str) {
+        self.properties.remove(key);
     }
 
     /// Check if the exchange has an error.
@@ -268,6 +292,57 @@ mod tests {
     use crate::in_flight::{InFlightClaim, InFlightGauge};
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn remove_property_removes_and_is_idempotent() {
+        let mut ex = Exchange::new(Message::default());
+        ex.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+        assert_eq!(
+            ex.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&Value::Bool(true))
+        );
+
+        ex.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+        assert_eq!(ex.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED), None);
+
+        ex.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+        assert_eq!(ex.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED), None);
+    }
+
+    #[test]
+    fn remove_property_absent_is_noop() {
+        let mut ex = Exchange::new(Message::default());
+        assert_eq!(ex.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED), None);
+
+        ex.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+
+        assert_eq!(ex.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED), None);
+    }
+
+    #[test]
+    fn original_content_type_snapshot_roundtrips() {
+        let mut ex = Exchange::new(Message::default());
+        ex.set_extension(
+            ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION,
+            Arc::new(OriginalContentTypeInherited(true)),
+        );
+
+        let snapshot = ex
+            .get_extension::<OriginalContentTypeInherited>(
+                ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION,
+            )
+            .expect("snapshot stored under its extension key");
+        assert!(snapshot.0);
+
+        let fresh = Exchange::new(Message::default());
+        assert!(
+            fresh
+                .get_extension::<OriginalContentTypeInherited>(
+                    ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION
+                )
+                .is_none()
+        );
+    }
 
     #[test]
     fn test_exchange_new() {

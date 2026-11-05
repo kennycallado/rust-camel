@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 
 use tower::Service;
 
-use camel_api::{CamelError, Exchange};
+use camel_api::{CamelError, Exchange, PROPERTY_HTTP_CONTENT_TYPE_INHERITED};
 
 /// A processor that removes a header from the exchange's input message.
 #[derive(Clone)]
@@ -58,6 +58,9 @@ where
 
     fn call(&mut self, mut exchange: Exchange) -> Self::Future {
         exchange.input.remove_header(&self.key);
+        if self.key.eq_ignore_ascii_case("content-type") {
+            exchange.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+        }
         let fut = self.inner.call(exchange);
         Box::pin(fut)
     }
@@ -133,5 +136,42 @@ mod tests {
 
         let result = processor.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("hello"));
+    }
+
+    // ── Content-Type provenance marker ──
+
+    #[tokio::test]
+    async fn remove_header_clears_marker_on_content_type() {
+        let mut exchange = Exchange::new(Message::default());
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+        exchange
+            .input
+            .set_header("Content-Type", Value::String("application/json".into()));
+
+        let processor = RemoveHeader::new(IdentityProcessor, "Content-Type");
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "removing Content-Type must clear the marker"
+        );
+        assert!(result.input.header_ic("content-type").is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_header_keeps_marker_on_other_header() {
+        let mut exchange = Exchange::new(Message::default());
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+        exchange.input.set_header("X-Flag", Value::Bool(true));
+
+        let processor = RemoveHeader::new(IdentityProcessor, "X-Flag");
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&Value::Bool(true)),
+            "removing an unrelated header must leave the marker untouched"
+        );
     }
 }

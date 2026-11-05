@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 
 use tower::Service;
 
-use camel_api::{CamelError, Exchange, Value};
+use camel_api::{CamelError, Exchange, PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value};
 
 /// A processor that sets a header on the exchange's input message.
 #[derive(Clone)]
@@ -66,6 +66,9 @@ where
         exchange
             .input
             .set_header(self.key.clone(), self.value.clone());
+        if self.key.eq_ignore_ascii_case("content-type") {
+            exchange.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+        }
         let fut = self.inner.call(exchange);
         Box::pin(fut)
     }
@@ -110,6 +113,9 @@ where
             exchange
                 .input
                 .set_header(self.key.clone(), self.value.clone());
+            if self.key.eq_ignore_ascii_case("content-type") {
+                exchange.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+            }
         }
         let fut = self.inner.call(exchange);
         Box::pin(fut)
@@ -280,5 +286,83 @@ mod tests {
         let result = processor.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("body content"));
         assert_eq!(result.input.header("header"), Some(&Value::Bool(true)));
+    }
+
+    // ── Content-Type provenance marker ──
+
+    #[tokio::test]
+    async fn set_header_clears_marker_on_content_type() {
+        let mut exchange = Exchange::new(Message::default());
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+
+        let processor = SetHeader::new(IdentityProcessor, "Content-Type", "application/json");
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "writing Content-Type must clear the inherited-content-type marker"
+        );
+        assert_eq!(
+            result.input.header("Content-Type"),
+            Some(&Value::String("application/json".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn set_header_keeps_marker_on_other_header() {
+        let mut exchange = Exchange::new(Message::default());
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+
+        let processor = SetHeader::new(IdentityProcessor, "X-Flag", "on");
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&Value::Bool(true)),
+            "writing an unrelated header must leave the marker untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_header_if_absent_clears_marker_only_when_written() {
+        // (a) Header absent: the write happens, so the marker is cleared.
+        let mut exchange = Exchange::new(Message::default());
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+
+        let processor =
+            SetHeaderIfAbsent::new(IdentityProcessor, "Content-Type", "application/json");
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "an if-absent write of Content-Type must clear the marker"
+        );
+        assert_eq!(
+            result.input.header("Content-Type"),
+            Some(&Value::String("application/json".into()))
+        );
+
+        // (b) Header already present: no write, so the marker survives.
+        let mut exchange = Exchange::new(Message::default());
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+        exchange
+            .input
+            .set_header("Content-Type", Value::String("text/plain".into()));
+
+        let processor =
+            SetHeaderIfAbsent::new(IdentityProcessor, "Content-Type", "application/json");
+
+        let result = processor.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&Value::Bool(true)),
+            "an if-absent no-op must not clear the marker"
+        );
+        assert_eq!(
+            result.input.header("Content-Type"),
+            Some(&Value::String("text/plain".into()))
+        );
     }
 }

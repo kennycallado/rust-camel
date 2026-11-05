@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 
+use camel_api::PROPERTY_HTTP_CONTENT_TYPE_INHERITED;
 use camel_component_api::{Body, CamelError, Exchange, Value};
 use tokio::sync::Semaphore;
 use tower::Service;
@@ -13,6 +14,22 @@ use tracing::debug;
 use crate::error::CxfError;
 use crate::pool::{BridgeState, CxfBridgePool, cxf_bridge_client};
 use crate::proto::SoapRequest;
+
+/// Map upstream response headers onto the exchange input message.
+///
+/// Header keys are matched case-insensitively: a mapped `Content-Type` is a
+/// route-path write, so the inherited-content-type marker must be cleared.
+fn apply_response_header_mapping(
+    exchange: &mut Exchange,
+    headers: impl IntoIterator<Item = (String, String)>,
+) {
+    for (k, v) in headers {
+        exchange.input.set_header(&k, Value::String(v));
+        if k.eq_ignore_ascii_case("content-type") {
+            exchange.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+        }
+    }
+}
 
 fn is_transport_error(status: &tonic::Status) -> bool {
     match status.code() {
@@ -367,9 +384,7 @@ impl Service<Exchange> for CxfProducer {
 
             exchange.input.body = Body::Bytes(response.payload.into());
 
-            for (k, v) in response.headers {
-                exchange.input.set_header(&k, Value::String(v));
-            }
+            apply_response_header_mapping(&mut exchange, response.headers);
 
             Ok(exchange)
         })
@@ -669,5 +684,53 @@ mod tests {
     #[test]
     fn redact_url_empty_address_stays_empty() {
         assert_eq!(redact_url(""), "");
+    }
+
+    // ── http-content-type-provenance: response mapping clears the marker ────
+
+    fn exchange_with_marker() -> Exchange {
+        let mut exchange = Exchange::new(Message::new(Body::Text("x".to_string())));
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+        exchange
+    }
+
+    #[test]
+    fn cxf_response_mapping_clears_marker_on_ct() {
+        let mut exchange = exchange_with_marker();
+
+        apply_response_header_mapping(
+            &mut exchange,
+            [
+                ("Content-Type".to_string(), "text/xml".to_string()),
+                ("X-Other".to_string(), "v".to_string()),
+            ],
+        );
+
+        assert_eq!(
+            exchange.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "mapping a Content-Type response header must clear the inherited marker"
+        );
+        assert_eq!(
+            exchange
+                .input
+                .header("Content-Type")
+                .and_then(|v| v.as_str()),
+            Some("text/xml"),
+            "the mapped Content-Type header must remain on the input message"
+        );
+    }
+
+    #[test]
+    fn cxf_response_mapping_keeps_marker_on_other_headers() {
+        let mut exchange = exchange_with_marker();
+
+        apply_response_header_mapping(&mut exchange, [("X-Other".to_string(), "v".to_string())]);
+
+        assert_eq!(
+            exchange.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&Value::Bool(true)),
+            "mapping headers without Content-Type must not clear the marker"
+        );
     }
 }

@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 
 use tower::Service;
 
-use camel_api::{CamelError, Exchange, ValueSource};
+use camel_api::{CamelError, Exchange, PROPERTY_HTTP_CONTENT_TYPE_INHERITED, ValueSource};
 
 /// A processor that sets a header from a fallible [`ValueSource`].
 ///
@@ -77,7 +77,11 @@ where
         let mut inner = std::mem::replace(&mut self.inner, clone);
         Box::pin(async move {
             let value = source.evaluate(&exchange).await?;
+            let touches_content_type = key.eq_ignore_ascii_case("content-type");
             exchange.input.set_header(key, value);
+            if touches_content_type {
+                exchange.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+            }
             inner.call(exchange).await
         })
     }
@@ -133,7 +137,11 @@ where
         let mut inner = std::mem::replace(&mut self.inner, clone);
         Box::pin(async move {
             let value = source.evaluate(&exchange).await?;
+            let touches_content_type = key.eq_ignore_ascii_case("content-type");
             exchange.input.set_header(key, value);
+            if touches_content_type {
+                exchange.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+            }
             inner.call(exchange).await
         })
     }
@@ -476,5 +484,77 @@ mod tests {
         let result = svc.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body.as_text(), Some("body content"));
         assert_eq!(result.input.header("len"), Some(&Value::Number(12.into())));
+    }
+
+    // ── Content-Type provenance marker ──
+
+    #[tokio::test]
+    async fn dynamic_set_header_clears_marker_on_content_type() {
+        let mut exchange = Exchange::new(Message::default());
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+
+        let svc = DynamicSetHeader::new(
+            IdentityProcessor,
+            "Content-Type",
+            sync_source(|_ex: &Exchange| Value::String("application/json".into())),
+        );
+
+        let result = svc.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "a dynamic Content-Type write must clear the marker"
+        );
+        assert_eq!(
+            result.input.header("Content-Type"),
+            Some(&Value::String("application/json".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn dynamic_set_header_if_absent_clears_marker_only_when_written() {
+        // (a) Header absent: the write happens, so the marker is cleared.
+        let mut exchange = Exchange::new(Message::default());
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+
+        let svc = DynamicSetHeaderIfAbsent::new(
+            IdentityProcessor,
+            "Content-Type",
+            sync_source(|_ex: &Exchange| Value::String("application/json".into())),
+        );
+
+        let result = svc.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "an if-absent dynamic Content-Type write must clear the marker"
+        );
+        assert_eq!(
+            result.input.header("Content-Type"),
+            Some(&Value::String("application/json".into()))
+        );
+
+        // (b) Header already present: no write, so the marker survives.
+        let mut msg = Message::default();
+        msg.set_header("Content-Type", Value::String("text/plain".into()));
+        let mut exchange = Exchange::new(msg);
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+
+        let svc = DynamicSetHeaderIfAbsent::new(
+            IdentityProcessor,
+            "Content-Type",
+            sync_source(|_ex: &Exchange| Value::String("application/json".into())),
+        );
+
+        let result = svc.oneshot(exchange).await.unwrap();
+        assert_eq!(
+            result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&Value::Bool(true)),
+            "an if-absent dynamic no-op must not clear the marker"
+        );
+        assert_eq!(
+            result.input.header("Content-Type"),
+            Some(&Value::String("text/plain".into()))
+        );
     }
 }

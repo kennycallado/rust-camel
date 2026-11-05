@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use camel_api::{
     CamelError, Exchange, ExchangePatch, FunctionDefinition, FunctionId, FunctionInvocationError,
-    FunctionInvoker, PatchBody,
+    FunctionInvoker, PROPERTY_HTTP_CONTENT_TYPE_INHERITED, PatchBody,
 };
 use tower::Service;
 use tracing::Instrument;
@@ -150,11 +150,22 @@ fn apply_patch(ex: &mut Exchange, patch: ExchangePatch) {
             _ => ex.input.body.clone(),
         };
     }
+    let set_touches_ct = patch
+        .headers_set
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+    let removed_touches_ct = patch
+        .headers_removed
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case("content-type"));
     for (k, v) in patch.headers_set {
         ex.input.set_header(k, v);
     }
     for k in patch.headers_removed {
         ex.input.remove_header(&k);
+    }
+    if set_touches_ct || removed_touches_ct {
+        ex.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
     }
     for (k, v) in patch.properties_set {
         ex.properties.insert(k, v);
@@ -726,6 +737,66 @@ mod tests {
             Some("keep")
         );
         assert_eq!(result.input.body.as_text(), Some("new body"));
+    }
+
+    #[tokio::test]
+    async fn function_patch_clears_marker_on_ct_set() {
+        let invoker = Arc::new(MockInvoker::new(vec![Ok(ExchangePatch {
+            headers_set: vec![("Content-Type".into(), serde_json::json!("application/json"))],
+            ..Default::default()
+        })]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let mut ex = Exchange::default();
+        ex.set_property(
+            PROPERTY_HTTP_CONTENT_TYPE_INHERITED,
+            serde_json::json!(true),
+        );
+        let result = step.call(ex).await.unwrap();
+        assert_eq!(
+            result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "a patch that sets Content-Type must clear the inherited marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn function_patch_clears_marker_on_ct_remove() {
+        let invoker = Arc::new(MockInvoker::new(vec![Ok(ExchangePatch {
+            headers_removed: vec!["content-type".into()],
+            ..Default::default()
+        })]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let mut ex = Exchange::default();
+        ex.set_property(
+            PROPERTY_HTTP_CONTENT_TYPE_INHERITED,
+            serde_json::json!(true),
+        );
+        let result = step.call(ex).await.unwrap();
+        assert_eq!(
+            result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "a patch that removes Content-Type must clear the inherited marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn function_patch_keeps_marker_on_other_headers() {
+        let invoker = Arc::new(MockInvoker::new(vec![Ok(ExchangePatch {
+            headers_set: vec![("X-Flag".into(), serde_json::json!("on"))],
+            ..Default::default()
+        })]));
+        let mut step = FunctionStep::new(invoker, test_definition());
+        let mut ex = Exchange::default();
+        ex.set_property(
+            PROPERTY_HTTP_CONTENT_TYPE_INHERITED,
+            serde_json::json!(true),
+        );
+        let result = step.call(ex).await.unwrap();
+        assert_eq!(
+            result.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&serde_json::json!(true)),
+            "a patch that does not touch Content-Type must keep the inherited marker"
+        );
     }
 
     #[tokio::test]

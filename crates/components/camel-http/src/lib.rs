@@ -58,6 +58,7 @@ use tower::Service;
 use tracing::debug;
 
 use axum::body::BodyDataStream;
+use camel_api::PROPERTY_HTTP_CONTENT_TYPE_INHERITED;
 use camel_api::component_metadata::ComponentMetadata;
 use camel_auth::bearer_token_layer::BearerTokenLayer;
 use camel_auth::oauth2::TokenProvider;
@@ -2337,25 +2338,38 @@ impl Consumer for HttpConsumer {
                                     })
                                     .unwrap_or(200);
 
-                                let inherited_ct = out
+                                // Ingress recorded value, used only by the
+                                // marker-independent stream-metadata filter.
+                                let recorded_ct = out
                                     .property(PROPERTY_REQUEST_CONTENT_TYPE)
                                     .and_then(Value::as_str)
                                     .map(str::to_string);
+                                // Provenance marker: set at ingress, cleared by
+                                // every route writer that touches Content-Type
+                                // (bd rc-tf0k4).
+                                let inherited = out
+                                    .property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED)
+                                    .is_some();
 
                                 let user_content_type =
-                                    response_content_type(&out.input, inherited_ct.as_deref());
+                                    response_content_type(&out.input, inherited);
+
+                                // Computed before the match consumes the body;
+                                // the gate lives in the production helper.
+                                let inferred_body = inferred_content_type(&out.input.body, inherited);
 
                                 let (reply_body, inferred_content_type): (HttpReplyBody, Option<String>) = match out.input.body {
                                     Body::Bytes(b) => (HttpReplyBody::Bytes(b), None),
-                                    Body::Text(s) => (HttpReplyBody::Bytes(bytes::Bytes::from(s.into_bytes())), Some("text/plain; charset=utf-8".to_string())),
-                                    Body::Xml(s) => (HttpReplyBody::Bytes(bytes::Bytes::from(s.into_bytes())), Some("application/xml".to_string())),
+                                    Body::Text(s) => (HttpReplyBody::Bytes(bytes::Bytes::from(s.into_bytes())), inferred_body),
+                                    Body::Xml(s) => (HttpReplyBody::Bytes(bytes::Bytes::from(s.into_bytes())), inferred_body),
                                     Body::Json(v) => (HttpReplyBody::Bytes(bytes::Bytes::from(
                                         v.to_string().into_bytes(),
-                                    )), Some("application/json".to_string())),
+                                    )), inferred_body),
                                     Body::Stream(s) => {
-                                        let ct = response_stream_content_type(
+                                        let ct = stream_metadata_content_type(
                                             s.metadata.content_type.clone(),
-                                            inherited_ct.as_deref(),
+                                            inherited,
+                                            recorded_ct.as_deref(),
                                         );
                                         match s.stream.lock().await.take() {
                                             Some(stream) => (
@@ -3510,21 +3524,11 @@ impl Service<Exchange> for HttpProducer {
                     .unwrap_or("Unknown")
                     .to_string();
 
-                for (key, value) in response.headers() {
-                    if config
-                        .skip_response_headers
-                        .iter()
-                        .any(|h| h.eq_ignore_ascii_case(key.as_str()))
-                    {
-                        continue;
-                    }
-                    if let Ok(val_str) = value.to_str() {
-                        exchange.input.set_header(
-                            title_case_header(key.as_str()),
-                            serde_json::Value::String(val_str.to_string()),
-                        );
-                    }
-                }
+                apply_response_header_mapping(
+                    &mut exchange,
+                    response.headers(),
+                    &config.skip_response_headers,
+                );
 
                 exchange.input.set_header(
                     "CamelHttpResponseCode",
@@ -3778,6 +3782,10 @@ const PROPERTY_REQUEST_CONTENT_TYPE: &str = "CamelHttpRequestContentType";
 /// Record the inbound request `Content-Type` on the exchange so the reply
 /// finaliser can suppress a response content type that merely echoes it.
 /// A missing header or a non-UTF-8 value leaves properties untouched.
+///
+/// Recording also arms the provenance marker
+/// ([`PROPERTY_HTTP_CONTENT_TYPE_INHERITED`]): an untouched `Content-Type` is
+/// the ingress copy, and every route writer clears the marker (bd rc-tf0k4).
 fn record_request_content_type(exchange: &mut Exchange, headers: &http::HeaderMap) {
     if let Some(value) = headers
         .get(http::header::CONTENT_TYPE)
@@ -3787,15 +3795,19 @@ fn record_request_content_type(exchange: &mut Exchange, headers: &http::HeaderMa
             PROPERTY_REQUEST_CONTENT_TYPE,
             Value::String(value.to_string()),
         );
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
     }
 }
 
-/// Resolve the route's response content type with case-insensitive lookup,
-/// dropping it when it still equals the inherited request value.
-fn response_content_type(msg: &Message, inherited: Option<&str>) -> Option<String> {
+/// Resolve the route's response content type with case-insensitive lookup.
+/// While the provenance marker is set the header is still the ingress copy,
+/// so nothing is emitted regardless of its value (bd rc-tf0k4).
+fn response_content_type(msg: &Message, inherited: bool) -> Option<String> {
+    if inherited {
+        return None;
+    }
     msg.header_ic("Content-Type")
         .and_then(Value::as_str)
-        .filter(|value| Some(*value) != inherited)
         .map(str::to_string)
 }
 
@@ -3806,6 +3818,70 @@ fn response_stream_content_type(
     inherited: Option<&str>,
 ) -> Option<String> {
     metadata.filter(|value| Some(value.as_str()) != inherited)
+}
+
+/// Resolve the reply content type for a stream body.
+///
+/// The stream-metadata filter is deliberately marker-INDEPENDENT (blessed
+/// decision, bd rc-tf0k4): gating it on `inherited` would resurrect the
+/// ingress copy after a route clears the marker. `inherited` is accepted so
+/// the call site states the marker state explicitly and tests can pin both.
+fn stream_metadata_content_type(
+    metadata: Option<String>,
+    inherited: bool,
+    recorded_value: Option<&str>,
+) -> Option<String> {
+    let _ = inherited;
+    response_stream_content_type(metadata, recorded_value)
+}
+
+/// Map the remote response headers onto the exchange as producer output,
+/// honouring `skip_response_headers`. Extracted from the inline loop in
+/// `HttpProducer::call` for unit testability.
+///
+/// Mapping a `Content-Type` clears the provenance marker: the value now comes
+/// from the remote server, not from the ingress request (bd rc-tf0k4).
+fn apply_response_header_mapping(
+    exchange: &mut Exchange,
+    headers: &http::HeaderMap,
+    skip_response_headers: &[String],
+) {
+    for (key, value) in headers {
+        if skip_response_headers
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(key.as_str()))
+        {
+            continue;
+        }
+        let Ok(val_str) = value.to_str() else {
+            continue;
+        };
+        exchange.input.set_header(
+            title_case_header(key.as_str()),
+            serde_json::Value::String(val_str.to_string()),
+        );
+        if key.as_str().eq_ignore_ascii_case("content-type") {
+            exchange.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+        }
+    }
+}
+
+/// Infer a reply content type from the body kind.
+///
+/// While the provenance marker is set the body still carries the ingress
+/// representation, so no type is inferred — otherwise a route that only
+/// rewrites the body would emit a request-dependent type (bd rc-tf0k4).
+/// `Bytes`/`Empty` never infer; streams use [`stream_metadata_content_type`].
+fn inferred_content_type(body: &Body, inherited: bool) -> Option<String> {
+    if inherited {
+        return None;
+    }
+    match body {
+        Body::Text(_) => Some("text/plain; charset=utf-8".to_string()),
+        Body::Xml(_) => Some("application/xml".to_string()),
+        Body::Json(_) => Some("application/json".to_string()),
+        _ => None,
+    }
 }
 
 /// Select the HTTP response headers emitted by the consumer reply finaliser

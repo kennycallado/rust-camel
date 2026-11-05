@@ -14,7 +14,8 @@ use tower::Service;
 use camel_api::metrics::MetricsCollector;
 use camel_api::{
     BoxProcessor, CamelError, Exchange, IdentityProcessor, Message, NoOpMetrics,
-    ORIGINAL_MESSAGE_EXTENSION, PipelineOutcome,
+    ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION, ORIGINAL_MESSAGE_EXTENSION,
+    OriginalContentTypeInherited, PROPERTY_HTTP_CONTENT_TYPE_INHERITED, PipelineOutcome,
 };
 
 use camel_api::error_handler::{BoundaryKind, RetryOutcome, StepDisposition};
@@ -939,6 +940,15 @@ impl Service<Exchange> for RouteChannelService {
             if use_original_message {
                 let original: Arc<Message> = Arc::new(ex.input.clone());
                 ex.set_extension(ORIGINAL_MESSAGE_EXTENSION, original);
+
+                // Capture Content-Type provenance at route entry. Always
+                // replace the snapshot: a nested route must not inherit a
+                // stale snapshot from its parent exchange (direct: hand-off).
+                let inherited = ex.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED).is_some();
+                ex.set_extension(
+                    ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION,
+                    Arc::new(OriginalContentTypeInherited(inherited)),
+                );
             }
 
             // Gate 1: Security

@@ -7,7 +7,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 
-use camel_api::{Body, CamelError, Exchange, Message, StreamingSplitExpression, Value};
+use camel_api::{
+    Body, CamelError, Exchange, Message, PROPERTY_HTTP_CONTENT_TYPE_INHERITED,
+    StreamingSplitExpression, Value,
+};
 use futures::Stream;
 
 use crate::archive_splitter::{
@@ -331,6 +334,9 @@ pub fn split_zip_bytes(
                     ex.input.headers.remove("Content-Length");
                     ex.input.headers.remove("Content-Type");
                     ex.properties = parent.properties.clone();
+                    // The entry body is new content, so the parent's
+                    // request-dependent suppression marker must not be inherited.
+                    ex.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
                     ex.pattern = parent.pattern;
                     ex.otel_context = parent.otel_context.clone();
 
@@ -723,5 +729,36 @@ mod tests {
                 "error text mismatch for {name}: {err}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn zip_fragment_clears_marker() {
+        let zip_data = make_zip_with_files(vec![("hello.txt", b"hello world")]);
+        let mut parent = Exchange::new(Message {
+            headers: Default::default(),
+            body: Body::Bytes(Bytes::from(zip_data)),
+        });
+        parent.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+        parent.input.headers.insert(
+            "Content-Type".to_string(),
+            Value::String("application/zip".into()),
+        );
+        assert_eq!(
+            parent.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&Value::Bool(true)),
+            "parent must start with the marker armed"
+        );
+
+        let results = zip_splitter(ZipSplitConfig::default())(parent)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(results.len(), 1);
+        let fragment = results[0].as_ref().expect("entry fragment ok");
+        assert_eq!(
+            fragment.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "the entry fragment must clear the inherited suppression marker"
+        );
     }
 }

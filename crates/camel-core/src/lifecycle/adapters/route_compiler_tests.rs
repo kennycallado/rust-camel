@@ -4,7 +4,9 @@ use camel_api::error_handler::{
     BoundaryKind, ExceptionDisposition, ExceptionPolicy, PolicyId, RetryOutcome, StepDisposition,
 };
 use camel_api::{
-    Body, BoxProcessorExt, CircuitBreakerConfig, Message, OutcomePipeline, OutcomeSegment, Value,
+    Body, BoxProcessorExt, CircuitBreakerConfig, Message,
+    ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION, OriginalContentTypeInherited, OutcomePipeline,
+    OutcomeSegment, PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value,
 };
 use camel_processor::RouteErrorHandler;
 use camel_processor::error_handler::DefaultRouteErrorHandler;
@@ -896,6 +898,185 @@ async fn test_use_original_message_wholesale_exchange_replacement() {
         received_text, "new-body",
         "When a step replaces the Exchange wholesale, use_original_message cannot \
          restore the pre-route Message — the stash lives on the original Exchange"
+    );
+}
+
+// ── Route-entry Content-Type provenance capture (Task 3.2) ──
+//
+// `use_original_message` stashes the pre-route message AND a typed snapshot of
+// the inherited Content-Type marker. Capture always replaces the snapshot so a
+// nested route cannot inherit a stale value from its parent exchange; restore
+// (Task 2.5) reads only that snapshot, never header presence.
+
+#[tokio::test]
+async fn route_entry_capture_sets_snapshot_when_marker_present() {
+    let mut ex = Exchange::new(Message::new("body"));
+    ex.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+
+    let pipeline = compose_pipeline_with_handler(vec![], None, PipelineRuntimeCtx::compile_time());
+    let channel = RouteChannelService::new(Arc::new(PropagateHandler), None, None, pipeline, true);
+
+    let result = tower::ServiceExt::oneshot(channel, ex)
+        .await
+        .expect("pass-through channel must succeed");
+    let snapshot = result
+        .get_extension::<OriginalContentTypeInherited>(ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION)
+        .expect("route entry must capture the inherited-marker snapshot");
+    assert!(
+        snapshot.0,
+        "marker present at route entry must capture OriginalContentTypeInherited(true)"
+    );
+}
+
+#[tokio::test]
+async fn route_entry_capture_replaces_stale_snapshot_when_marker_absent() {
+    // Simulates a nested route receiving an exchange that still carries the
+    // parent's snapshot while the live marker has been cleared (the parent
+    // wrote Content-Type, removing inherited provenance).
+    let mut ex = Exchange::new(Message::new("body"));
+    ex.set_extension(
+        ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION,
+        Arc::new(OriginalContentTypeInherited(true)),
+    );
+    assert!(
+        ex.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED).is_none(),
+        "fixture must not carry the live marker"
+    );
+
+    let pipeline = compose_pipeline_with_handler(vec![], None, PipelineRuntimeCtx::compile_time());
+    let channel = RouteChannelService::new(Arc::new(PropagateHandler), None, None, pipeline, true);
+
+    let result = tower::ServiceExt::oneshot(channel, ex)
+        .await
+        .expect("pass-through channel must succeed");
+    let snapshot = result
+        .get_extension::<OriginalContentTypeInherited>(ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION)
+        .expect("route entry must capture the inherited-marker snapshot");
+    assert!(
+        !snapshot.0,
+        "marker absent at route entry must replace the stale snapshot with \
+         OriginalContentTypeInherited(false)"
+    );
+}
+
+#[tokio::test]
+async fn nested_use_original_message_route_restores_route_set_header_without_resuppression() {
+    // End-to-end regression (design.md:85): capture at route entry + restore in
+    // the real error handler. Before capture landed, the nested route kept the
+    // parent's stale `true` snapshot and the restored marker re-suppressed the
+    // route-set Content-Type.
+    let policy = ExceptionPolicy {
+        matches: Arc::new(|_| true),
+        retry: None,
+        handled_by: None,
+        on_steps: None,
+        disposition: ExceptionDisposition::Handled,
+    };
+    let mut nested_handler = DefaultRouteErrorHandler::new(None, vec![(policy, None)]);
+    nested_handler.use_original_message = true;
+    let nested_handler: Arc<dyn RouteErrorHandler> = Arc::new(nested_handler);
+
+    // Nested route body: overwrite the live input with its own message, then fail.
+    let nested_replace = BoxProcessor::from_fn(|mut ex: Exchange| {
+        Box::pin(async move {
+            let mut msg = Message::new("nested-body");
+            msg.set_header("Content-Type", Value::String("application/json".into()));
+            ex.input = msg;
+            Ok(ex)
+        })
+    });
+    let nested_failing = BoxProcessor::from_fn(|_ex: Exchange| {
+        Box::pin(async {
+            Err::<Exchange, CamelError>(CamelError::ProcessorError("nested-boom".into()))
+        })
+    });
+    let nested_pipeline = compose_pipeline_with_handler(
+        vec![
+            CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
+                processor: nested_replace,
+                body_contract: None,
+                lifecycle: None,
+                label: None,
+                to_uri: None,
+            },
+            CompiledStep::Process {
+                kind_hint: SpanKindHint::Internal,
+                processor: nested_failing,
+                body_contract: None,
+                lifecycle: None,
+                label: None,
+                to_uri: None,
+            },
+        ],
+        Some(nested_handler.clone()),
+        PipelineRuntimeCtx::compile_time(),
+    );
+    let nested_channel =
+        RouteChannelService::new(nested_handler, None, None, nested_pipeline, true);
+
+    // Parent route: write Content-Type (clearing the live marker) and hand the
+    // exchange to the nested route channel.
+    let nested_for_step = nested_channel.clone();
+    let parent_step = BoxProcessor::from_fn(move |mut ex: Exchange| {
+        let nested = nested_for_step.clone();
+        Box::pin(async move {
+            ex.input
+                .set_header("Content-Type", Value::String("application/json".into()));
+            ex.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
+            tower::ServiceExt::oneshot(nested, ex).await
+        })
+    });
+    let parent_pipeline = compose_pipeline_with_handler(
+        vec![CompiledStep::Process {
+            kind_hint: SpanKindHint::Internal,
+            processor: parent_step,
+            body_contract: None,
+            lifecycle: None,
+            label: None,
+            to_uri: None,
+        }],
+        None,
+        PipelineRuntimeCtx::compile_time(),
+    );
+    let parent_channel = RouteChannelService::new(
+        Arc::new(PropagateHandler),
+        None,
+        None,
+        parent_pipeline,
+        true,
+    );
+
+    // Ingress: inherited Content-Type from the HTTP consumer.
+    let mut ex = Exchange::new(Message::new("request-body"));
+    ex.input
+        .set_header("Content-Type", Value::String("text/plain".into()));
+    ex.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+
+    let result = tower::ServiceExt::oneshot(parent_channel, ex)
+        .await
+        .expect("Handled disposition must return the restored exchange");
+
+    // The nested error handler restored the nested route's pre-failure message,
+    // which carries the header written by the parent route.
+    assert_eq!(
+        result.input.header("Content-Type").and_then(Value::as_str),
+        Some("application/json"),
+        "restored exchange must keep the route-set Content-Type"
+    );
+    assert!(
+        result
+            .property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED)
+            .is_none(),
+        "live inherited marker must stay absent after restore — otherwise the \
+         route-set Content-Type would be re-suppressed downstream"
+    );
+    let snapshot = result
+        .get_extension::<OriginalContentTypeInherited>(ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION)
+        .expect("nested route entry must capture the snapshot");
+    assert!(
+        !snapshot.0,
+        "nested capture must replace the parent's stale true snapshot with false"
     );
 }
 

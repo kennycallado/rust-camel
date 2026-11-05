@@ -55,6 +55,11 @@ tokio = { workspace = true, features = ["test-util"] }
 # Publish-order-safe only while camel-core does NOT weak-depend back (ADR-0055).
 # lint-publish-cycles guards this; re-add a core→http dev-dep and this cycles again.
 camel-core = { workspace = true }
+# End-to-end provenance acceptance tests drive the real route writers (bd
+# rc-tf0k4). Neither crate depends on camel-component-http, so the publish
+# graph stays acyclic (lint-publish-cycles guards this).
+camel-processor = { workspace = true }
+camel-builder = { workspace = true }
 tempfile = { workspace = true }
 flate2 = { workspace = true }
 tracing-test = { workspace = true, features = ["no-env-filter"] }

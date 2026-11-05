@@ -1,5 +1,8 @@
 use bytes::Bytes;
-use camel_api::{Body, CamelError, Exchange, ExchangePattern, Message, Value};
+use camel_api::{
+    Body, CamelError, Exchange, ExchangePattern, Message, PROPERTY_HTTP_CONTENT_TYPE_INHERITED,
+    Value,
+};
 use std::collections::HashMap;
 
 use crate::bindings::camel::plugin::types::{
@@ -192,12 +195,35 @@ pub fn exchange_to_wasm_with_body(
     })
 }
 
+/// Collect the exact `Content-Type` header entries (key spelling and value) as
+/// a deterministically ordered list.
+///
+/// The guest replaces the host input message wholesale, so a before/after
+/// comparison of this list detects every landed Content-Type change — added,
+/// changed, respelled, or removed — while ignoring untouched entries.
+fn content_type_entries(headers: &HashMap<String, Value>) -> Vec<(String, Value)> {
+    let mut entries: Vec<(String, Value)> = headers
+        .iter()
+        .filter(|(key, _)| key.eq_ignore_ascii_case("content-type"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+}
+
 pub fn wasm_to_exchange(wasm: WasmExchange, original: &mut Exchange) {
+    // Snapshot before the guest input replacement so removals are detected.
+    let content_type_before = content_type_entries(&original.input.headers);
     original.input = wasm_to_message(wasm.input);
     original.output = wasm.output.map(wasm_to_message);
     let guest_props = kv_list_to_values(wasm.properties);
     for (key, value) in guest_props {
         original.properties.insert(key, value);
+    }
+    // Must run AFTER the properties merge: guest-echoed host properties
+    // re-insert the marker property and would otherwise re-arm inheritance.
+    if content_type_entries(&original.input.headers) != content_type_before {
+        original.remove_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED);
     }
     original.pattern = match wasm.pattern {
         WasmPattern::InOnly => ExchangePattern::InOnly,
@@ -611,6 +637,116 @@ mod tests {
         );
         let otel_val: Option<&OtelMarker> = out.otel_context.get::<OtelMarker>();
         assert_eq!(otel_val, Some(&OtelMarker("preserved")));
+    }
+
+    // ── Content-Type provenance marker on WASM input replacement ──
+
+    /// Original exchange marked as HTTP Content-Type inheritance with a
+    /// `Content-Type: application/json` input header present.
+    fn marked_content_type_exchange() -> Exchange {
+        let mut msg = Message::new("in");
+        msg.set_header("Content-Type", Value::String("application/json".into()));
+        let mut exchange = Exchange::new(msg);
+        exchange.set_property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED, Value::Bool(true));
+        exchange
+    }
+
+    fn content_type_header(exchange: &Exchange) -> Option<&Value> {
+        exchange
+            .input
+            .headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value)
+    }
+
+    #[test]
+    fn wasm_replacement_clears_marker_on_ct_removed() {
+        let original = marked_content_type_exchange();
+        let mut wasm = exchange_to_wasm(&original).expect("exchange_to_wasm should succeed");
+        // Guest properties echo the host marker: the merge below re-inserts it.
+        assert!(
+            wasm.properties
+                .iter()
+                .any(|(key, _)| key == PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            "fixture must echo the marker property back to the host"
+        );
+        wasm.input
+            .headers
+            .retain(|(key, _)| !key.eq_ignore_ascii_case("content-type"));
+
+        let mut target = original.clone();
+        wasm_to_exchange(wasm, &mut target);
+
+        assert!(
+            content_type_header(&target).is_none(),
+            "guest removal of Content-Type must land"
+        );
+        assert_eq!(
+            target.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "removal must clear the marker even though the merge echoed it"
+        );
+    }
+
+    #[test]
+    fn wasm_replacement_clears_marker_on_ct_changed() {
+        let original = marked_content_type_exchange();
+        let mut wasm = exchange_to_wasm(&original).expect("exchange_to_wasm should succeed");
+        wasm.input
+            .headers
+            .retain(|(key, _)| !key.eq_ignore_ascii_case("content-type"));
+        wasm.input
+            .headers
+            .push(("Content-Type".into(), "text/html".into()));
+
+        let mut target = original.clone();
+        wasm_to_exchange(wasm, &mut target);
+
+        assert_eq!(
+            content_type_header(&target),
+            Some(&Value::String("text/html".into()))
+        );
+        assert_eq!(target.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED), None);
+    }
+
+    #[test]
+    fn wasm_replacement_clears_marker_on_case_respell() {
+        let original = marked_content_type_exchange();
+        let mut wasm = exchange_to_wasm(&original).expect("exchange_to_wasm should succeed");
+        wasm.input
+            .headers
+            .retain(|(key, _)| !key.eq_ignore_ascii_case("content-type"));
+        wasm.input
+            .headers
+            .push(("content-type".into(), "application/json".into()));
+
+        let mut target = original.clone();
+        wasm_to_exchange(wasm, &mut target);
+
+        assert_eq!(
+            target.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            None,
+            "respelling the key is a landed difference"
+        );
+    }
+
+    #[test]
+    fn wasm_replacement_keeps_marker_when_ct_untouched() {
+        let original = marked_content_type_exchange();
+        let wasm = exchange_to_wasm(&original).expect("exchange_to_wasm should succeed");
+
+        let mut target = original.clone();
+        wasm_to_exchange(wasm, &mut target);
+
+        assert_eq!(
+            content_type_header(&target),
+            Some(&Value::String("application/json".into()))
+        );
+        assert_eq!(
+            target.property(PROPERTY_HTTP_CONTENT_TYPE_INHERITED),
+            Some(&Value::Bool(true))
+        );
     }
 
     #[test]
