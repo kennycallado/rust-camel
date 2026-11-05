@@ -11,8 +11,9 @@
 # continuing..." and reported success, so
 # camel-full-aarch64-unknown-linux-gnu.tar.gz never landed while its .sha256
 # sidecar did. This script is the independent gate that runs after upload: it
-# reads the release asset list, requires every local `camel-*` file to be
-# present with a remote size exactly equal to the local file size, retries
+# reads the release asset list, requires every regular file in the dist
+# directory to be present with a remote size exactly equal to the local file
+# size, retries
 # transient listing 404s within a bounded window, re-uploads exactly the
 # unverified set once with --clobber, verifies again from a fresh listing, and
 # fails loudly either with `MISSING: <basename>` lines (confirmed absent or
@@ -90,7 +91,7 @@ verify_pass() {
   # readable directory is still allowed to pass (upstream owns local-set
   # completeness).
   set +e
-  files="$(find "$DIST_DIR" -maxdepth 1 -type f -name 'camel-*' | sort)"
+  files="$(find "$DIST_DIR" -maxdepth 1 -type f | sort)"
   scan_status=$?
   set -e
   if [[ $scan_status -ne 0 ]]; then

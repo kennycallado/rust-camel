@@ -1,0 +1,48 @@
+{
+  "kind": "plan",
+  "change": "release-bridge-asset-verify",
+  "verdict": "APPROVE",
+  "hash": "sha256:0c280ed5395d920ca825cc1d5ec9c6a82edb71b75fca67109b2f95b8a1d49e3b",
+  "expert": "experts/e_gpt",
+  "blessing_trail": [
+    {
+      "kind": "spec",
+      "round": 1,
+      "verdict": "REJECT",
+      "hash": "sha256:af2b8dad348ce24ff60d07d70a5adaffdbc082ed3e5fa7c2156f898b4a8f7b33",
+      "sessionID": "ses_e5445923fffeW4D22mmcSGe3NP",
+      "blockers": [
+        "camel-* scan filter made the bridge gate vacuous -> scan widened to all regular files",
+        "bridge release jobs lacked checkout -> SHA-pinned checkout step added as first step"
+      ]
+    },
+    {
+      "kind": "spec",
+      "round": 2,
+      "verdict": "APPROVE",
+      "hash": "sha256:cc7446ebe00a51e0c913a60cf28cefa95d8b8190ff2cc46429dbafa3844bbe0b",
+      "sessionID": "ses_e543fcfa8ffe0y8lae0WqwRCUu"
+    },
+    {
+      "kind": "review",
+      "reviewer": "reviewers/r_glm",
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "sessionID": "ses_e543bb202ffe69V3Se3vppMsMe",
+      "findings_resolved": [
+        "diff-count arithmetic +11 -> +10",
+        "PyYAML availability note (any YAML parser acceptable)",
+        "spec WARN prose naming -> about (hash recomputed)"
+      ],
+      "note": "reviewer executed plan on /tmp copies: battery 10/10, workflow structural checks green"
+    },
+    {
+      "kind": "plan",
+      "round": 1,
+      "verdict": "APPROVE",
+      "hash": "sha256:0c280ed5395d920ca825cc1d5ec9c6a82edb71b75fca67109b2f95b8a1d49e3b",
+      "sessionID": "ses_e542c2a99ffeulTOXrx977E0Aq",
+      "rationale": "Tasks are executable, correctly sequenced, machine-checkable, scope-bounded, and cover all 11 delta scenarios."
+    }
+  ],
+  "blessed_at": "2026-11-05"
+}

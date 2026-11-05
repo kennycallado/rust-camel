@@ -40,6 +40,15 @@ make_dist() {
   dd if=/dev/zero of="$dist/camel-b.tar.gz" bs=200 count=1 status=none
 }
 
+# Bridge-named dist set: exercises the prefix-agnostic expected-set scan.
+make_bridge_dist() {
+  local dist="$1"
+  mkdir -p "$dist"
+  dd if=/dev/zero of="$dist/cxf-bridge-9.9.9.tar.gz" bs=100 count=1 status=none
+  dd if=/dev/zero of="$dist/cxf-bridge-9.9.9.zip" bs=200 count=1 status=none
+  dd if=/dev/zero of="$dist/cxf-bridge-9.9.9-SHA256SUMS" bs=64 count=1 status=none
+}
+
 write_fixtures() {
   mkdir -p "$FIXTURES"
   cat >"$FIXTURES/assets-full.json" <<'JSON'
@@ -60,6 +69,12 @@ JSON
   {"name":"camel-a.tar.gz","size":99},
   {"name":"camel-a.tar.gz.sha256","size":64},
   {"name":"camel-b.tar.gz","size":200}
+]}
+JSON
+  cat >"$FIXTURES/assets-bridge-partial.json" <<'JSON'
+{"assets":[
+  {"name":"cxf-bridge-9.9.9.tar.gz","size":100},
+  {"name":"cxf-bridge-9.9.9-SHA256SUMS","size":64}
 ]}
 JSON
 }
@@ -146,6 +161,18 @@ if [[ "${1:-}" == "release" && "${2:-}" == "view" ]]; then
       cat "$VERIFY_TEST_ASSETS_MISSING"
       exit 0
       ;;
+    repair_upload_failure_then_verify)
+      if upload_log_has_a; then
+        cat "$VERIFY_TEST_ASSETS_FULL"
+      else
+        cat "$VERIFY_TEST_ASSETS_MISSING"
+      fi
+      exit 0
+      ;;
+    bridge_missing)
+      cat "$VERIFY_TEST_ASSETS_BRIDGE_PARTIAL"
+      exit 0
+      ;;
     *)
       unexpected "unknown scenario $scenario"
       ;;
@@ -166,6 +193,9 @@ if [[ "${1:-}" == "release" && "${2:-}" == "upload" ]]; then
   done
   if [[ $saw_clobber -ne 1 ]]; then
     unexpected "upload without --clobber: $*"
+  fi
+  if [[ "$scenario" == "repair_upload_failure_then_verify" ]]; then
+    exit 1
   fi
   exit 0
 fi
@@ -354,6 +384,28 @@ t_repair_then_listing_failure_no_stale_missing() {
   assert_uploads_exactly "camel-a.tar.gz" || return 1
 }
 
+t_repair_upload_failure_warns_and_reverifies() {
+  export VERIFY_TEST_SCENARIO=repair_upload_failure_then_verify
+  run_verify 2 2
+  assert_status 0 || return 1
+  assert_stdout_line "Verified release assets for tag '$TAG' after repair" || return 1
+  assert_stderr_line "WARN: repair upload failed; re-verifying from a fresh listing anyway" || return 1
+  assert_no_missing_lines || return 1
+  assert_uploads_exactly "camel-a.tar.gz" || return 1
+  assert_view_count_gt 2 || return 1
+}
+
+t_bridge_named_missing_asset_fails() {
+  rm -f "$WORK/dist"/camel-*
+  make_bridge_dist "$WORK/dist"
+  export VERIFY_TEST_SCENARIO=bridge_missing
+  export VERIFY_TEST_ASSETS_BRIDGE_PARTIAL="$FIXTURES/assets-bridge-partial.json"
+  run_verify 2 1
+  assert_status 1 || return 1
+  assert_single_missing_line "cxf-bridge-9.9.9.zip" || return 1
+  assert_uploads_exactly "cxf-bridge-9.9.9.zip" || return 1
+}
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -375,6 +427,8 @@ main() {
     t_successful_repair
     t_size_mismatch_triggers_repair
     t_repair_then_listing_failure_no_stale_missing
+    t_repair_upload_failure_warns_and_reverifies
+    t_bridge_named_missing_asset_fails
   )
 
   local passed=0
