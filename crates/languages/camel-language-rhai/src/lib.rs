@@ -194,6 +194,25 @@ thread_local! {
     pub(crate) static COMPILE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+// Test-only working-copy counter. Per-thread for the same reason as
+// `COMPILE_COUNT`: parallel tests must not perturb the delta a single test
+// observes. Incremented by [`RhaiLanguage::working_copy`], the single producer
+// of the deep container copy pushed into an evaluation scope, so a
+// reader-registration regression that deep-copies the snapshot becomes
+// observable.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SNAPSHOT_WORKING_COPIES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: number of deep container copies performed by
+/// [`RhaiLanguage::working_copy`] on this thread.
+#[cfg(test)]
+pub(crate) fn snapshot_working_copies() -> usize {
+    SNAPSHOT_WORKING_COPIES.with(std::cell::Cell::get)
+}
+
 /// Result type for mutating eval (returns value + modified exchange fields).
 ///
 /// The body is `Option<Body>`: `None` means the script never assigned it, so
@@ -715,6 +734,16 @@ impl RhaiLanguage {
         Ok((headers, properties))
     }
 
+    /// The single named producer of a scope working copy: the deep clone of a
+    /// shared snapshot container that a script may mutate. Call this once per
+    /// container per evaluation and push the result into the [`Scope`]; every
+    /// other snapshot access goes through the shared `Arc`.
+    fn working_copy(map: &rhai::Map) -> rhai::Map {
+        #[cfg(test)]
+        SNAPSHOT_WORKING_COPIES.with(|c| c.set(c.get() + 1));
+        map.clone()
+    }
+
     /// Create a read-only eval engine with `header()` and `property()`
     /// registered as native readers. A new engine per eval avoids sharing
     /// mutable state between evaluations.
@@ -725,8 +754,8 @@ impl RhaiLanguage {
     /// is the dynamic-call backstop.
     fn create_eval_engine(
         limits: &RhaiLimitsConfig,
-        headers: rhai::Map,
-        properties: rhai::Map,
+        headers: Arc<rhai::Map>,
+        properties: Arc<rhai::Map>,
     ) -> Engine {
         let mut engine = Self::create_base_engine(limits);
         Self::register_snapshot_readers(&mut engine, headers, properties);
@@ -734,29 +763,38 @@ impl RhaiLanguage {
     }
 
     /// Register the `header(name)`/`property(name)` snapshot readers on an
-    /// engine. The readers are backed by the supplied maps, captured at
-    /// snapshot time, so a later map assignment in a mutating script does not
-    /// change what the readers return (task 3.3, M7): after
+    /// engine. The readers hold the supplied snapshots through `Arc`, captured
+    /// at snapshot time, so a later map assignment in a mutating script does
+    /// not change what the readers return (task 3.3, M7): after
     /// `headers["k"] = "new"` a call to `header("k")` still returns the
     /// pre-run value, whereas the mutated map is what propagates back to the
     /// exchange.
-    fn register_snapshot_readers(engine: &mut Engine, headers: rhai::Map, properties: rhai::Map) {
-        // The snapshot maps are immutable after registration, so the readers
-        // own them directly (no `Arc`/`RwLock` indirection). Each closure is
-        // `Fn` and only reads. Presence readers get their own clones so a
-        // present-but-null entry is distinguishable from an absent one.
-        let presence_headers = headers.clone();
-        let presence_properties = properties.clone();
+    ///
+    /// Registration performs no deep `rhai::Map` copy — only `Arc` clones —
+    /// so one snapshot serves every reader plus every scope seed.
+    fn register_snapshot_readers(
+        engine: &mut Engine,
+        headers: Arc<rhai::Map>,
+        properties: Arc<rhai::Map>,
+    ) {
+        // Each container backs two closures: a value reader that clones only
+        // the requested entry, and a presence reader that checks `contains_key`
+        // so a present-but-null entry stays distinguishable from an absent one.
+        let reader_headers = Arc::clone(&headers);
+        let presence_headers = headers;
+
+        let reader_properties = Arc::clone(&properties);
+        let presence_properties = properties;
 
         engine.register_fn("header", move |name: String| -> rhai::Dynamic {
-            headers
+            reader_headers
                 .get(name.as_str())
                 .cloned()
                 .unwrap_or(rhai::Dynamic::UNIT)
         });
 
         engine.register_fn("property", move |name: String| -> rhai::Dynamic {
-            properties
+            reader_properties
                 .get(name.as_str())
                 .cloned()
                 .unwrap_or(rhai::Dynamic::UNIT)
@@ -832,30 +870,40 @@ impl RhaiLanguage {
         headers_map: rhai::Map,
         properties_map: rhai::Map,
     ) -> Result<Value, LanguageError> {
-        let engine = Self::create_eval_engine(limits, headers_map.clone(), properties_map.clone());
+        // One `Arc` snapshot per container: the engine readers and the scope
+        // working copy share the same snapshot.
+        let headers = Arc::new(headers_map);
+        let properties = Arc::new(properties_map);
+        let engine =
+            Self::create_eval_engine(limits, Arc::clone(&headers), Arc::clone(&properties));
         let resolved = resolve_rhai_limits(limits);
-        Self::eval_with_engine(&engine, ast, body, headers_map, properties_map, &resolved)
+        Self::eval_with_engine(&engine, ast, body, headers, properties, &resolved)
     }
 
     /// Evaluate a pre-compiled read-only AST with an already-built eval engine.
     ///
     /// This is the shared tail of [`Self::eval_sync`] and the predicate-group
-    /// clause loop: a fresh scope seeded from the owned snapshot, the
+    /// clause loop: a fresh scope seeded from the shared snapshot, the
     /// post-eval stream-refusal rule, and the `dynamic_to_value` conversion.
     /// Keeping both callers on this helper preserves failure-contract parity.
+    ///
+    /// The containers arrive as `Arc` snapshots and the mutable scope values
+    /// are created here, once per evaluation: [`Self::working_copy`] is the
+    /// only deep copy, so the predicate-group clause loop gets fresh per-clause
+    /// working copies by construction.
     fn eval_with_engine(
         engine: &Engine,
         ast: &rhai::AST,
         body: rhai::Dynamic,
-        headers_map: rhai::Map,
-        properties_map: rhai::Map,
+        headers: Arc<rhai::Map>,
+        properties: Arc<rhai::Map>,
         limits: &ResolvedRhaiLimits,
     ) -> Result<Value, LanguageError> {
         let mut scope = Scope::new();
         let stream = StreamCounters::of_dynamic(&body);
         scope.push("body", body);
-        scope.push("headers", headers_map);
-        scope.push("properties", properties_map);
+        scope.push("headers", Self::working_copy(&headers));
+        scope.push("properties", Self::working_copy(&properties));
 
         // eval_ast_with_scope reuses the pre-compiled AST — no re-parse per eval.
         // The AST was built once in `create_expression` / `create_predicate`.
@@ -913,22 +961,26 @@ impl RhaiLanguage {
             None
         };
 
-        // 2. Scope with the pre-eval snapshots.
+        // 2. One `Arc` snapshot per container, shared by the pre/post diff and
+        // the readers; the scope gets the single per-eval working copy.
+        let pre_headers = Arc::new(pre_headers);
+        let pre_properties = Arc::new(pre_properties);
         let mut scope = Scope::new();
-        scope.push("headers", pre_headers.clone());
-        scope.push("properties", pre_properties.clone());
+        scope.push("headers", Self::working_copy(&pre_headers));
+        scope.push("properties", Self::working_copy(&pre_properties));
         scope.push_dynamic("body", body_dyn);
 
         // 3. Run the pre-compiled AST (no re-parse per eval). The engine is
-        // reused below as the frozen scalar-comparison engine. Register the
-        // snapshot readers so script steps get `header()`/`property()` backed
-        // by the PRE-eval snapshot maps (task 3.3): an in-script map
-        // assignment does not change what the readers return.
+        // used only for the AST evaluation and the snapshot-reader
+        // registration. Register the snapshot readers so script steps get
+        // `header()`/`property()` backed by the PRE-eval snapshot maps
+        // (task 3.3): an in-script map assignment does not change what the
+        // readers return.
         let mut engine = RhaiLanguage::create_base_engine(limits);
         RhaiLanguage::register_snapshot_readers(
             &mut engine,
-            pre_headers.clone(),
-            pre_properties.clone(),
+            Arc::clone(&pre_headers),
+            Arc::clone(&pre_properties),
         );
         let resolved = resolve_rhai_limits(limits);
         let result: rhai::Dynamic = engine
@@ -953,10 +1005,12 @@ impl RhaiLanguage {
 
         // 5. Validate every pending change BEFORE committing any of it —
         // generic entry targets only, runtime keys never enter diagnostics.
-        let header_deltas = map_deltas(&engine, &pre_headers, &post_headers, "header entry")?;
-        let property_deltas =
-            map_deltas(&engine, &pre_properties, &post_properties, "property entry")?;
-        let body_change = Self::body_change(&scope, &engine, pre_body.as_ref(), stream.as_ref())?;
+        // `&Arc<rhai::Map>` derefs to `&rhai::Map`: the diff reads the same
+        // snapshot the readers hold, while the scope copy is the separate
+        // working copy that the script may mutate.
+        let header_deltas = map_deltas(&pre_headers, &post_headers, "header entry")?;
+        let property_deltas = map_deltas(&pre_properties, &post_properties, "property entry")?;
+        let body_change = Self::body_change(&scope, pre_body.as_ref(), stream.as_ref())?;
         let result_value = dynamic_to_value(result, "value")?;
 
         // 6. Commit: start from the original owned maps so untouched entries
@@ -994,7 +1048,6 @@ impl RhaiLanguage {
     /// compared with its pre-eval snapshot through [`rhai_values_differ`].
     fn body_change(
         scope: &Scope<'_>,
-        engine: &Engine,
         pre_body: Option<&rhai::Dynamic>,
         stream: Option<&StreamCounters>,
     ) -> Result<Option<Body>, LanguageError> {
@@ -1009,7 +1062,7 @@ impl RhaiLanguage {
             return Ok(Some(value_to_body(dynamic_to_value(post.clone(), "body")?)));
         }
         match pre_body {
-            Some(pre_body) if rhai_values_differ(engine, pre_body, post) => {
+            Some(pre_body) if rhai_values_differ(pre_body, post) => {
                 Ok(Some(value_to_body(dynamic_to_value(post.clone(), "body")?)))
             }
             _ => Ok(None),
@@ -1219,12 +1272,15 @@ impl PredicateGroup for RhaiPredicateGroup {
             (Some(body), headers, properties)
         };
 
-        // ONE eval engine for the whole call, built before the loop. The
-        // clause loop only clones the shared `Arc`, never constructs an engine.
+        // ONE eval engine for the whole call, built before the loop from the
+        // shared `Arc` snapshots. The clause loop only clones the `Arc`s — the
+        // per-clause scope working copies are created inside `eval_with_engine`.
+        let headers_map = Arc::new(headers_map);
+        let properties_map = Arc::new(properties_map);
         let engine = Arc::new(RhaiLanguage::create_eval_engine(
             &self.limits,
-            headers_map.clone(),
-            properties_map.clone(),
+            Arc::clone(&headers_map),
+            Arc::clone(&properties_map),
         ));
 
         for (index, ast) in self.asts.iter().enumerate() {
@@ -1245,8 +1301,8 @@ impl PredicateGroup for RhaiPredicateGroup {
 
             let engine = Arc::clone(&engine);
             let ast = Arc::clone(ast);
-            let headers = headers_map.clone();
-            let properties = properties_map.clone();
+            let headers = Arc::clone(&headers_map);
+            let properties = Arc::clone(&properties_map);
 
             // Per-clause timeout + `spawn_blocking`, mirroring `eval_async`.
             // rhai's `eval_ast_with_scope` takes `&self`, so the one engine is
@@ -1473,6 +1529,7 @@ mod tests {
 
     use super::{
         RhaiExpression, RhaiLanguage, RhaiMutatingExpression, RhaiPredicate, RhaiPredicateGroup,
+        snapshot_working_copies,
     };
 
     #[test]
@@ -1618,6 +1675,56 @@ mod tests {
         let lang = RhaiLanguage::new();
         lang.create_predicate(r#"has_header("x")"#)
             .expect("presence readers are not read-only mutations");
+    }
+
+    /// Reader registration must share the snapshot maps, not copy them: the
+    /// callers build each map once and every reader shares it through an
+    /// `Arc`. The only deep container copies allowed are the per-evaluation
+    /// `working_copy()` scope seeds, which registration must not perform.
+    #[test]
+    fn snapshot_reader_registration_makes_no_deep_copy() {
+        let mut ex = exchange_with_body("payload");
+        ex.input
+            .headers
+            .insert("h".to_string(), Value::String("hv".to_string()));
+        ex.properties
+            .insert("p".to_string(), Value::String("pv".to_string()));
+        let (headers, properties) = RhaiLanguage::snapshot_maps(&ex).expect("small maps convert");
+        let headers = Arc::new(headers);
+        let properties = Arc::new(properties);
+
+        // Measure the registration alone: the base engine is built before the
+        // delta and no scope is created here, so a non-zero delta can only be
+        // a deep container copy performed during reader registration.
+        let mut engine = RhaiLanguage::create_base_engine(&RhaiLimitsConfig::default());
+        let before = snapshot_working_copies();
+        RhaiLanguage::register_snapshot_readers(
+            &mut engine,
+            Arc::clone(&headers),
+            Arc::clone(&properties),
+        );
+        let after = snapshot_working_copies();
+
+        assert_eq!(
+            after - before,
+            0,
+            "reader registration must not deep-copy either snapshot map"
+        );
+        // Each container backs two closures — one value reader (`header`/
+        // `property`) and one presence reader (`has_header`/`has_property`) —
+        // and each closure moves its own `Arc` clone. That is 1 caller-held
+        // handle + 2 reader-held handles = 3; a hidden `rhai::Map` clone would
+        // leave the count unchanged but a copy at the scope seed would not.
+        assert_eq!(
+            Arc::strong_count(&headers),
+            3,
+            "header snapshot must be shared by exactly its two readers"
+        );
+        assert_eq!(
+            Arc::strong_count(&properties),
+            3,
+            "property snapshot must be shared by exactly its two readers"
+        );
     }
 
     #[tokio::test]
@@ -5553,6 +5660,355 @@ mod tests {
         assert_depth_reason(
             &err,
             "max-expression-depth 4 or max-function-expression-depth 32 exceeded",
+        );
+    }
+
+    // ── rhai-lazy-property-binding task 1.1: surface regression guards ──
+    //
+    // These four guards pin behavior that the lazy-property-binding change
+    // must not move. They run green on the unmodified tree.
+
+    /// Build the guard fixture: 40 chunks (`c0`..`c39`) × 128 integer keys
+    /// (`k0`..`k127`) = 5120 leaves.
+    fn large_property_fixture() -> Value {
+        let mut big = serde_json::Map::new();
+        for chunk_index in 0..40_u64 {
+            let mut chunk = serde_json::Map::new();
+            for key_index in 0..128_u64 {
+                chunk.insert(
+                    format!("k{key_index}"),
+                    Value::from(chunk_index * 128 + key_index),
+                );
+            }
+            big.insert(format!("c{chunk_index}"), Value::Object(chunk));
+        }
+        Value::Object(big)
+    }
+
+    fn chunk_mut<'a>(big: &'a mut Value, chunk: &str) -> &'a mut serde_json::Map<String, Value> {
+        big.as_object_mut()
+            .and_then(|obj| obj.get_mut(chunk))
+            .and_then(Value::as_object_mut)
+            .expect("fixture chunk is an object")
+    }
+
+    fn exchange_with_large_property(big: Value) -> Exchange {
+        let mut ex = Exchange::new(Message::default());
+        ex.set_property("big", big);
+        ex
+    }
+
+    #[tokio::test]
+    async fn large_property_chunk_read_returns_native_map() {
+        let lang = RhaiLanguage::new();
+        let ex = exchange_with_large_property(large_property_fixture());
+        let expr = lang
+            .create_expression(
+                r#"properties.big["c0"].len() == 128 && type_of(properties.big) == "map""#,
+            )
+            .expect("read-only expression compiles");
+        let val = expr
+            .evaluate(&ex)
+            .await
+            .expect("large property read evaluates");
+        assert_eq!(val, Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn large_property_write_back_still_lands() {
+        let lang = RhaiLanguage::new();
+        let original = large_property_fixture();
+        let mut expected = original.clone();
+        chunk_mut(&mut expected, "c3").insert("k5".to_string(), Value::from(999));
+
+        let mut ex = exchange_with_large_property(original);
+        let expr = lang
+            .create_mutating_expression(r#"properties.big["c3"]["k5"] = 999;"#)
+            .expect("mutating script compiles");
+        expr.evaluate(&mut ex)
+            .await
+            .expect("mutating script evaluates");
+
+        assert_eq!(
+            ex.properties.get("big"),
+            Some(&expected),
+            "only big.c3.k5 may change; all other 5119 leaves must stay bit-identical"
+        );
+    }
+
+    #[tokio::test]
+    async fn big_integer_json_fidelity_preserved_on_large_property() {
+        let lang = RhaiLanguage::new();
+        let mut big = large_property_fixture();
+        chunk_mut(&mut big, "c0").insert("big_num".to_string(), Value::from(u64::MAX));
+        let ex = exchange_with_large_property(big);
+
+        let expr = lang
+            .create_expression(
+                r#"type_of(properties.big["c0"]["big_num"]) == "json number" && properties.big["c0"]["big_num"].to_string() == "18446744073709551615""#,
+            )
+            .expect("read-only expression compiles");
+        let val = expr
+            .evaluate(&ex)
+            .await
+            .expect("big integer read evaluates without coercion");
+        assert_eq!(val, Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn read_only_surface_guard_still_rejects_property_mutation() {
+        let lang = RhaiLanguage::new();
+        for script in [r#"properties.x = 1"#, r#"set_property("k", 1)"#] {
+            let Err(err) = lang.create_expression(script) else {
+                panic!("read-only property mutation must be rejected at create time: {script}");
+            };
+            assert!(
+                matches!(&err, LanguageError::ParseError { reason, .. } if reason.contains("script:")),
+                "expected ParseError mentioning `script:`, got: {err:?}"
+            );
+        }
+    }
+
+    // ── rhai-lazy-property-binding task 1.2: native leaf comparison ──
+
+    /// A flat property object of 10,000 scalar leaves (`k0`..`k9999`).
+    fn wide_property_fixture() -> Value {
+        let mut big = serde_json::Map::new();
+        for key_index in 0..10_000_u64 {
+            big.insert(format!("k{key_index}"), Value::from(key_index));
+        }
+        Value::Object(big)
+    }
+
+    #[test]
+    fn write_back_diff_never_evaluates_script_code() {
+        let limits = RhaiLimitsConfig::default();
+        let engine = RhaiLanguage::create_base_engine(&limits);
+        let ast = engine
+            .compile("properties.big.k0 = 42;")
+            .expect("mutating script compiles");
+
+        let original = wide_property_fixture();
+        let mut properties = std::collections::HashMap::new();
+        properties.insert("big".to_string(), original.clone());
+
+        let before = crate::transaction::diff_engine_evals();
+        let outcome = RhaiLanguage::eval_mut_sync(
+            &ast,
+            &limits,
+            camel_language_api::Body::Text("body".to_string()),
+            std::collections::HashMap::new(),
+            properties,
+        );
+        let delta = crate::transaction::diff_engine_evals() - before;
+
+        let (_result, _body_change, _headers, out_properties) =
+            outcome.expect("mutating evaluation succeeds");
+        assert_eq!(
+            delta, 0,
+            "the write-back diff must not evaluate script code"
+        );
+
+        let mut expected = original;
+        expected
+            .as_object_mut()
+            .expect("fixture is an object")
+            .insert("k0".to_string(), Value::from(42_u64));
+        assert_eq!(
+            out_properties.get("big"),
+            Some(&expected),
+            "only k0 may change; k1..k9999 must stay untouched"
+        );
+    }
+
+    // ── rhai-lazy-property-binding task 1.4: node-visit and copy bounds ──
+
+    /// Scalar leaf keys of the JSON body object.
+    const FIXTURE_BODY_KEYS: usize = 2;
+    /// Scalar header entries.
+    const FIXTURE_HEADER_KEYS: usize = 3;
+    /// Scalar leaves of the small property object the mutating script edits.
+    const FIXTURE_SMALL_PROP_KEYS: usize = 2;
+    /// Chunks (and scalar leaves per chunk) of the large property object.
+    const FIXTURE_BIG_CHUNKS: usize = 2;
+    const FIXTURE_BIG_CHUNK_KEYS: usize = 3;
+
+    /// Expected `json_to_dynamic` node visits for one full conversion pass:
+    /// every node including each container root counts once. Computed from the
+    /// same constants `conversion_fixture` builds its exchange from.
+    fn fixture_nodes() -> usize {
+        // Body: root object + one scalar leaf per key.
+        let body = 1 + FIXTURE_BODY_KEYS;
+        // Headers: scalar leaves only (the header map itself is not a JSON
+        // node — each entry value is converted separately).
+        let headers = FIXTURE_HEADER_KEYS;
+        // `small`: root object + scalar leaves.
+        let small = 1 + FIXTURE_SMALL_PROP_KEYS;
+        // `big`: root object + one root object and scalar leaves per chunk.
+        let big = 1 + FIXTURE_BIG_CHUNKS * (1 + FIXTURE_BIG_CHUNK_KEYS);
+        body + headers + small + big
+    }
+
+    /// The bounded conversion fixture: a small `Body::Json` object, scalar
+    /// headers, and two property object trees. Every value is a scalar leaf so
+    /// the node count is a simple expression of the constants above.
+    fn conversion_fixture() -> Exchange {
+        let mut body = serde_json::Map::new();
+        for index in 0..FIXTURE_BODY_KEYS {
+            body.insert(format!("b{index}"), Value::from(index as u64));
+        }
+        let mut msg = Message::new(camel_language_api::Body::Json(Value::Object(body)));
+        for index in 0..FIXTURE_HEADER_KEYS {
+            msg.set_header(format!("h{index}"), Value::from(index as u64));
+        }
+        let mut exchange = Exchange::new(msg);
+
+        let mut small = serde_json::Map::new();
+        for index in 0..FIXTURE_SMALL_PROP_KEYS {
+            small.insert(format!("k{index}"), Value::from(index as u64));
+        }
+        exchange.set_property("small", Value::Object(small));
+
+        let mut big = serde_json::Map::new();
+        for chunk_index in 0..FIXTURE_BIG_CHUNKS {
+            let mut chunk = serde_json::Map::new();
+            for key_index in 0..FIXTURE_BIG_CHUNK_KEYS {
+                chunk.insert(
+                    format!("k{key_index}"),
+                    Value::from((chunk_index * FIXTURE_BIG_CHUNK_KEYS + key_index) as u64),
+                );
+            }
+            big.insert(format!("c{chunk_index}"), Value::Object(chunk));
+        }
+        exchange.set_property("big", Value::Object(big));
+        exchange
+    }
+
+    /// One read-path evaluation converts each bound value exactly once, and so
+    /// does one mutating evaluation. Conversion stays in `snapshot` on the
+    /// caller thread (it must not move inside `eval_sync`/`spawn_blocking`), so
+    /// both deltas cover the full conversion pass.
+    #[test]
+    fn each_eval_converts_each_bound_value_exactly_once() {
+        let limits = RhaiLimitsConfig::default();
+        let engine = RhaiLanguage::create_base_engine(&limits);
+        let read_ast = engine
+            .compile("1 + 1")
+            .expect("read-only expression compiles");
+        let mut_ast = engine
+            .compile("properties.small.k1 = 42;")
+            .expect("mutating script compiles");
+        let expected = fixture_nodes();
+        let exchange = conversion_fixture();
+
+        // READ path: `snapshot` converts, `eval_sync` receives converted values.
+        let before = crate::converter::convert_node_visits();
+        let snapshot = RhaiLanguage::snapshot(&exchange).expect("snapshot converts");
+        RhaiLanguage::eval_sync(
+            &read_ast,
+            &limits,
+            snapshot.body,
+            snapshot.headers,
+            snapshot.properties,
+        )
+        .expect("read evaluation succeeds");
+        let read_delta = crate::converter::convert_node_visits() - before;
+
+        // MUTATING path: the pre-eval snapshots convert inline.
+        let before = crate::converter::convert_node_visits();
+        RhaiLanguage::eval_mut_sync(
+            &mut_ast,
+            &limits,
+            exchange.input.body.clone(),
+            exchange.input.headers.clone(),
+            exchange.properties.clone(),
+        )
+        .expect("mutating evaluation succeeds");
+        let mut_delta = crate::converter::convert_node_visits() - before;
+
+        assert_eq!(
+            read_delta, expected,
+            "one read evaluation must convert each JSON node exactly once"
+        );
+        assert_eq!(
+            mut_delta, expected,
+            "one mutating evaluation must convert each JSON node exactly once"
+        );
+    }
+
+    /// Repeated evaluations of the same unchanged exchange neither accumulate
+    /// conversion work nor deep container copies: node visits scale linearly
+    /// with the evaluation count and each evaluation performs exactly one
+    /// working copy per container (`headers` + `properties`) on both paths.
+    #[test]
+    fn repeated_evaluations_do_not_accumulate_copies() {
+        const EVALUATIONS: usize = 5;
+        let limits = RhaiLimitsConfig::default();
+        let engine = RhaiLanguage::create_base_engine(&limits);
+        let read_ast = engine
+            .compile("1 + 1")
+            .expect("read-only expression compiles");
+        let mut_ast = engine
+            .compile("properties.small.k1 = 42;")
+            .expect("mutating script compiles");
+        let exchange = conversion_fixture();
+
+        // READ path: 5 × snapshot + eval_sync.
+        let nodes_before = crate::converter::convert_node_visits();
+        let copies_before = snapshot_working_copies();
+        for _ in 0..EVALUATIONS {
+            let snapshot = RhaiLanguage::snapshot(&exchange).expect("snapshot converts");
+            RhaiLanguage::eval_sync(
+                &read_ast,
+                &limits,
+                snapshot.body,
+                snapshot.headers,
+                snapshot.properties,
+            )
+            .expect("read evaluation succeeds");
+        }
+        let read_nodes = crate::converter::convert_node_visits() - nodes_before;
+        let read_copies = snapshot_working_copies() - copies_before;
+
+        // MUTATING path: 5 × eval_mut_sync.
+        let nodes_before = crate::converter::convert_node_visits();
+        let copies_before = snapshot_working_copies();
+        for _ in 0..EVALUATIONS {
+            RhaiLanguage::eval_mut_sync(
+                &mut_ast,
+                &limits,
+                exchange.input.body.clone(),
+                exchange.input.headers.clone(),
+                exchange.properties.clone(),
+            )
+            .expect("mutating evaluation succeeds");
+        }
+        let mut_nodes = crate::converter::convert_node_visits() - nodes_before;
+        let mut_copies = snapshot_working_copies() - copies_before;
+
+        let expected_nodes = fixture_nodes() * EVALUATIONS;
+        assert_eq!(
+            read_nodes, expected_nodes,
+            "read-path node visits must stay exactly one conversion pass per evaluation"
+        );
+        assert_eq!(
+            mut_nodes, expected_nodes,
+            "mutating-path node visits must stay exactly one conversion pass per evaluation"
+        );
+        assert_eq!(
+            read_copies,
+            2 * EVALUATIONS,
+            "the read path takes one working copy per container (headers + properties) per evaluation"
+        );
+        assert_eq!(
+            mut_copies,
+            2 * EVALUATIONS,
+            "the mutating path takes one working copy per container (headers + properties) per evaluation"
+        );
+        assert_eq!(
+            read_copies + mut_copies,
+            4 * EVALUATIONS,
+            "both paths together must take exactly 20 copies over 5 evaluations each"
         );
     }
 }

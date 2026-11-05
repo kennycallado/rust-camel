@@ -52,7 +52,7 @@ When a Choice has two or more `when` clauses that all use Rhai, rust-camel compi
 
 ## Read surface
 
-Read-only expressions and predicates expose `body`, `headers`, and `properties` variables plus the `header()`, `property()`, `has_header()`, and `has_property()` readers. A `MutatingExpression` (a `script:` step) exposes `body`, `headers`, and `properties` as mutable scope variables and also provides the same four readers. Its write-back is a validate-all-then-commit transaction: only changed entries and an assigned body are written, and the Exchange is untouched unless the whole evaluation succeeds.
+Read-only expressions and predicates expose `body`, `headers`, and `properties` variables plus the `header()`, `property()`, `has_header()`, and `has_property()` readers. A `MutatingExpression` (a `script:` step) exposes `body`, `headers`, and `properties` as mutable scope variables and also provides the same four readers. Its write-back is a validate-all-then-commit transaction: only changed entries and an assigned body are written, and the Exchange is untouched unless the whole evaluation succeeds. Each evaluation converts each bound value once; per-evaluation cost is proportional to the values the script binds, not to how many times the same exchange is evaluated.
 
 Both modes expose the same names. The `script:` readers differ in freshness:
 

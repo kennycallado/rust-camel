@@ -11,6 +11,23 @@ use camel_language_api::{LanguageError, Value};
 
 use crate::json::JsonNumber;
 
+// Test-only conversion-node counter. Per-thread for the same reason as the
+// crate's other test counters: parallel tests must not perturb the delta a
+// single test observes. Incremented once per `json_to_dynamic` invocation
+// (every JSON node including the root), so a test can pin how many nodes one
+// conversion pass visits.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CONVERT_NODE_VISITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: number of `json_to_dynamic` node visits on this thread.
+#[cfg(test)]
+pub(crate) fn convert_node_visits() -> usize {
+    CONVERT_NODE_VISITS.with(std::cell::Cell::get)
+}
+
 /// Convert a serde_json Value into a rhai::Dynamic — the single, fallible
 /// inbound boundary conversion (change `language-value-boundary`, task 2.1).
 ///
@@ -24,6 +41,9 @@ use crate::json::JsonNumber;
 /// carrier rewrites it to the trusted `EvalMeta.target` for read-only verbs,
 /// and it never carries runtime exchange data.
 pub(crate) fn json_to_dynamic(v: &Value, target: &str) -> Result<rhai::Dynamic, LanguageError> {
+    // Every JSON node (including the root) counts exactly once per visit.
+    #[cfg(test)]
+    CONVERT_NODE_VISITS.with(|c| c.set(c.get() + 1));
     let refused = |source_type: &str| LanguageError::ConversionError {
         source_type: source_type.to_string(),
         target: target.to_string(),

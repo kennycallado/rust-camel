@@ -71,7 +71,10 @@ The inbound converter binds a JSON integer in `(i64::MAX, u64::MAX]` as the
 `json number` wrapper; the `snapshot` and `snapshot_maps` helpers pass wrappers
 through unchanged.
 
-Authority: bd rc-qka42. `rc-m01r9` (eager scope conversion) remains out of scope.
+Authority: bd rc-qka42. `rc-m01r9`'s eager-per-call overhead is resolved by
+`rhai-lazy-property-binding` (native write-back comparison, one snapshot and
+one working copy per container per evaluation); subtree-level laziness stays
+deferred to bd rc-telbk.
 `rc-141om` is resolved by the `json number` inbound binding, refining owner
 decision 2026-10-02 (sealed Q4) without reversing it.
 

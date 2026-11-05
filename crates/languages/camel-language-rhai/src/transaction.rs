@@ -3,7 +3,7 @@
 //!
 //! A mutating script is a transaction. The evaluator snapshots the native
 //! `body`/`headers`/`properties` values before evaluation and compares them
-//! with the post-eval scope values using a RECURSIVE, TYPE-SENSITIVE
+//! with the post-eval scope values using a RECURSIVE, TYPE-SENSITIVE native
 //! comparison ([`rhai_values_differ`]). An int-to-float change is a change
 //! even though rhai's `==` treats `1 == 1.0` as true. Only added, changed and
 //! removed entries are converted — with GENERIC entry targets, never runtime
@@ -11,7 +11,7 @@
 //! a conversion failure commits nothing.
 
 use camel_language_api::{Body, LanguageError, Value};
-use rhai::{Dynamic, Engine, Scope};
+use rhai::Dynamic;
 
 use crate::converter::rhai_map_to_value_map;
 use crate::json::JsonNumber;
@@ -24,15 +24,17 @@ pub(crate) enum EntryDelta {
     Remove,
 }
 
-/// Recursive, type-sensitive value comparison.
+/// Recursive, type-sensitive, native value comparison.
 ///
 /// Returns `true` when the two values differ. Different scalar types always
 /// differ (this is what catches an int-to-float change); same-type scalars are
-/// compared through the frozen comparison [`Engine`] evaluating `a == b`
-/// (`Dynamic` has no `PartialEq`). Maps recurse over the union of keys and
-/// arrays recurse pairwise by position. A comparison failure or an exotic type
-/// is conservatively reported as a change.
-pub(crate) fn rhai_values_differ(engine: &Engine, pre: &Dynamic, post: &Dynamic) -> bool {
+/// compared natively per [`Kind`] — bool, int, float, char and string — with
+/// no script evaluation. Float comparison uses `PartialEq`, so NaN differs
+/// from itself (the same result the engine's `==` produced). A failed
+/// downcast is conservatively reported as a change. Maps recurse over the
+/// union of keys and arrays recurse pairwise by position. An exotic type is
+/// conservatively reported as a change.
+pub(crate) fn rhai_values_differ(pre: &Dynamic, post: &Dynamic) -> bool {
     let (pre_kind, post_kind) = (kind(pre), kind(post));
     if pre_kind != post_kind {
         return true;
@@ -40,10 +42,10 @@ pub(crate) fn rhai_values_differ(engine: &Engine, pre: &Dynamic, post: &Dynamic)
     match pre_kind {
         Kind::Unit => false,
         Kind::Bool | Kind::Int | Kind::Float | Kind::Char | Kind::String => {
-            !scalars_equal(engine, pre, post)
+            !scalars_equal(pre, post)
         }
-        Kind::Map => maps_differ(engine, pre, post),
-        Kind::Array => arrays_differ(engine, pre, post),
+        Kind::Map => maps_differ(pre, post),
+        Kind::Array => arrays_differ(pre, post),
         Kind::Blob => !blobs_equal(pre, post),
         Kind::JsonNumber => !json_numbers_equal(pre, post),
         // Exotic / remaining custom types have no defined comparison —
@@ -59,7 +61,6 @@ pub(crate) fn rhai_values_differ(engine: &Engine, pre: &Dynamic, post: &Dynamic)
 /// An error propagates with no delta applied. Runtime keys never enter
 /// `target`.
 pub(crate) fn map_deltas(
-    engine: &Engine,
     pre: &rhai::Map,
     post: &rhai::Map,
     target: &str,
@@ -69,7 +70,7 @@ pub(crate) fn map_deltas(
     for (k, pre_v) in pre {
         match post.get(k) {
             None => removed.push(k.to_string()),
-            Some(post_v) if rhai_values_differ(engine, pre_v, post_v) => {
+            Some(post_v) if rhai_values_differ(pre_v, post_v) => {
                 changed.insert(k.clone(), post_v.clone());
             }
             Some(_) => {}
@@ -147,18 +148,35 @@ fn kind(d: &Dynamic) -> Kind {
     }
 }
 
-/// Compare two same-type scalars through the frozen engine. A comparison
-/// failure (for example an exotic scalar) is conservatively "not equal".
-fn scalars_equal(engine: &Engine, a: &Dynamic, b: &Dynamic) -> bool {
-    let mut scope = Scope::new();
-    scope.push_dynamic("a", a.clone());
-    scope.push_dynamic("b", b.clone());
-    engine
-        .eval_expression_with_scope::<bool>(&mut scope, "a == b")
-        .unwrap_or(false)
+/// Compare two same-kind scalars natively. A failed downcast (for example an
+/// exotic scalar) is conservatively "not equal".
+fn scalars_equal(a: &Dynamic, b: &Dynamic) -> bool {
+    match kind(a) {
+        Kind::Bool => match (a.as_bool(), b.as_bool()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        },
+        Kind::Int => match (a.as_int(), b.as_int()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        },
+        Kind::Float => match (a.as_float(), b.as_float()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        },
+        Kind::Char => match (a.as_char(), b.as_char()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        },
+        Kind::String => match (a.as_immutable_string_ref(), b.as_immutable_string_ref()) {
+            (Ok(a), Ok(b)) => a.as_str() == b.as_str(),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
-fn maps_differ(engine: &Engine, pre: &Dynamic, post: &Dynamic) -> bool {
+fn maps_differ(pre: &Dynamic, post: &Dynamic) -> bool {
     let pre = pre.read_lock::<rhai::Map>();
     let post = post.read_lock::<rhai::Map>();
     let (Some(pre), Some(post)) = (pre, post) else {
@@ -169,14 +187,14 @@ fn maps_differ(engine: &Engine, pre: &Dynamic, post: &Dynamic) -> bool {
     }
     for (k, pre_v) in pre.iter() {
         match post.get(k) {
-            Some(post_v) if !rhai_values_differ(engine, pre_v, post_v) => {}
+            Some(post_v) if !rhai_values_differ(pre_v, post_v) => {}
             _ => return true,
         }
     }
     false
 }
 
-fn arrays_differ(engine: &Engine, pre: &Dynamic, post: &Dynamic) -> bool {
+fn arrays_differ(pre: &Dynamic, post: &Dynamic) -> bool {
     let pre = pre.read_lock::<rhai::Array>();
     let post = post.read_lock::<rhai::Array>();
     let (Some(pre), Some(post)) = (pre, post) else {
@@ -186,7 +204,7 @@ fn arrays_differ(engine: &Engine, pre: &Dynamic, post: &Dynamic) -> bool {
         return true;
     }
     for (a, b) in pre.iter().zip(post.iter()) {
-        if rhai_values_differ(engine, a, b) {
+        if rhai_values_differ(a, b) {
             return true;
         }
     }
@@ -217,6 +235,24 @@ fn json_numbers_equal(pre: &Dynamic, post: &Dynamic) -> bool {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Number of script-level evaluations performed by the write-back diff.
+    ///
+    /// Spec-mandated instrumentation for the native-comparison design: the
+    /// diff compares leaves natively, so nothing in this module can increment
+    /// the counter. Its `0` assertion pins that design, while the compile-time
+    /// absence of an `Engine` parameter on [`rhai_values_differ`] is the
+    /// primary structural guard.
+    static DIFF_ENGINE_EVALS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Read the current thread's write-back-diff script-evaluation count.
+#[cfg(test)]
+pub(crate) fn diff_engine_evals() -> usize {
+    DIFF_ENGINE_EVALS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
 mod tests {
     use super::rhai_values_differ;
     use crate::json::JsonNumber;
@@ -224,22 +260,21 @@ mod tests {
 
     #[test]
     fn json_number_token_equality_diffs_by_token() {
-        let engine = rhai::Engine::new();
         let a = Dynamic::from(JsonNumber::new("18446744073709551615"));
         let b = Dynamic::from(JsonNumber::new("18446744073709551615"));
         let c = Dynamic::from(JsonNumber::new("5"));
         let i = Dynamic::from(5_i64);
 
         assert!(
-            !rhai_values_differ(&engine, &a, &b),
+            !rhai_values_differ(&a, &b),
             "same token must not report a delta"
         );
         assert!(
-            rhai_values_differ(&engine, &a, &c),
+            rhai_values_differ(&a, &c),
             "different tokens must report a delta"
         );
         assert!(
-            rhai_values_differ(&engine, &a, &i),
+            rhai_values_differ(&a, &i),
             "json number vs int must report a delta"
         );
     }
