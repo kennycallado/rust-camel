@@ -2,14 +2,19 @@
 //! (openspec change `r2embed`, Task 3.2; bd `rc-0ks57` file-ancestor
 //! confinement discipline).
 //!
-//! Legacy path readers (TLS cert/key/CA consumers, `xslt:`, `validator:`,
-//! `sql:file:`) need a real file. The `proto file` class does NOT
-//! materialize: since mission 350 its assets register into the in-process
-//! proto compiler's embedded registry and its sites rewrite to
-//! `camel-embedded:` references, so a proto-only artifact never writes to
-//! temp. Materialization writes exactly the disk-class substitution-
-//! targeted asset bytes into a random per-boot directory under
-//! [`std::env::temp_dir`]:
+//! Legacy path readers in the TLS family (certificate, private key, and
+//! client CA consumers) need a real file. The `proto file`, `xslt
+//! stylesheet`, `xsd schema`, and `sql file` classes do NOT materialize:
+//! the proto class registers into the in-process proto compiler's
+//! embedded registry (mission 350) and the xslt/xsd/sql classes into
+//! `camel_component_api::embedded_assets` (mission 351), and their sites
+//! rewrite to `camel-embedded:` references — no disk write, so an
+//! artifact carrying only those classes never writes to temp.
+//! Materialization writes exactly the disk-class substitution-targeted
+//! asset bytes into a random per-boot directory under the first WRITABLE
+//! candidate from [`standard_materialization_candidates`] — the system
+//! temp directory, falling back to a writable directory next to the
+//! artifact:
 //!
 //! - the directory is created exclusively at mode 0700 (private to the
 //!   booting process);
@@ -25,8 +30,10 @@
 //! Residue caveat, documented not hidden: `SIGKILL`, `process::exit`, or
 //! the in-tree force-exit on a second stop signal (`commands/run.rs:691`,
 //! `commands/job/signal.rs:82`) bypasses the drop guard and leaves the
-//! per-boot directory behind in the OS temp directory. Operators who need
-//! a stronger guarantee get it when these classes flip to a bytes seam.
+//! per-boot directory behind in the chosen candidate directory (the
+//! system temp directory or the directory next to the artifact).
+//! Operators who need a stronger guarantee get it when these classes
+//! flip to a bytes seam.
 //!
 //! Only assets referenced by materialized consumers are written — never
 //! the whole store. Static-file entries stay memory-served through the
@@ -98,30 +105,86 @@ impl std::error::Error for MaterializeError {
 }
 
 /// Owns one per-boot confined directory. Created exclusively at mode
-/// 0700 under [`std::env::temp_dir`]; dropping the value removes the
-/// directory with everything written inside it.
+/// 0700 under the first writable materialization candidate — the system
+/// temp directory, falling back to a writable directory next to the
+/// artifact — with identical confined semantics and drop-cleanup in
+/// either location. Dropping the value removes the directory with
+/// everything written inside it.
 #[derive(Debug)]
 pub struct Materialization {
     dir: tempfile::TempDir,
 }
 
+/// The standard boot-time candidate chain for [`Materialization`].
+///
+/// The chain is ordered: [`std::env::temp_dir`] first, then the
+/// directory holding the running artifact image
+/// (`current_exe`'s parent). A missing artifact directory is skipped.
+/// The per-boot directory is created under the first WRITABLE candidate;
+/// every candidate receives identical confined semantics.
+pub(crate) fn standard_materialization_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![std::env::temp_dir()];
+    if let Some(artifact_dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+    {
+        candidates.push(artifact_dir);
+    }
+    candidates
+}
+
 impl Materialization {
-    /// Creates the per-boot directory under [`std::env::temp_dir`] with a
-    /// random name, exclusively, at mode 0700. The only failure mode is
-    /// the OS-level directory creation (the read-only contract's
-    /// missing-writable-temp case).
+    /// Creates the per-boot directory under the standard candidate chain
+    /// ([`standard_materialization_candidates`]) with a random name,
+    /// exclusively, at mode 0700.
     pub fn create() -> std::io::Result<Self> {
-        let dir = tempfile::Builder::new()
-            .prefix("camel-assets-")
-            .tempdir_in(std::env::temp_dir())?;
-        // Affirm the private mode explicitly instead of relying on the
-        // tempfile default, so the contract holds regardless of the
-        // crate version in the lockfile.
-        #[cfg(unix)]
-        {
-            let _ = std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700));
+        Self::create_with_candidates(&standard_materialization_candidates())
+    }
+
+    /// Creates the per-boot directory under the first writable
+    /// candidate.
+    ///
+    /// Candidates are tried in order; the first successful directory
+    /// creation wins and later candidates are not touched. Every
+    /// candidate receives identical confined semantics and drop-cleanup:
+    /// the directory is created exclusively at mode 0700, writes stay
+    /// confined inside it (see [`Self::write`]), and dropping the value
+    /// removes it. The only failure mode is that EVERY candidate fails
+    /// at the OS level (the read-only contract's missing-writable-temp
+    /// case), which returns the last candidate's error. An empty
+    /// candidate list is a configuration error and returns the
+    /// synthetic `NotFound` with reason "no materialization candidate
+    /// directories configured".
+    pub(crate) fn create_with_candidates(candidates: &[PathBuf]) -> std::io::Result<Self> {
+        let mut last_error = None;
+        for candidate in candidates {
+            match tempfile::Builder::new()
+                .prefix("camel-assets-")
+                .tempdir_in(candidate)
+            {
+                Ok(dir) => {
+                    // Affirm the private mode explicitly instead of
+                    // relying on the tempfile default, so the contract
+                    // holds regardless of the crate version in the
+                    // lockfile.
+                    #[cfg(unix)]
+                    {
+                        let _ = std::fs::set_permissions(
+                            dir.path(),
+                            std::fs::Permissions::from_mode(0o700),
+                        );
+                    }
+                    return Ok(Self { dir });
+                }
+                Err(source) => last_error = Some(source),
+            }
         }
-        Ok(Self { dir })
+        Err(last_error.unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no materialization candidate directories configured",
+            )
+        }))
     }
 
     /// The per-boot directory path.
@@ -440,5 +503,47 @@ fn materialize_shared_subdirectory_second_write_succeeds() {
     assert!(
         !dir.exists(),
         "dropping the guard removes the shared subdirectory tree"
+    );
+}
+
+/// Fallback chain: the first candidate is unavailable (a missing child
+/// under a test-owned root, never an assumed-absent machine path), so
+/// the per-boot directory lands under the second, writable candidate
+/// with the same 0700 mode and drop-cleanup.
+#[cfg(test)]
+#[test]
+fn materialize_falls_back_to_second_candidate() {
+    let root = tempfile::tempdir().expect("test temp root");
+    let missing = root.path().join("missing-child");
+    let writable = tempfile::tempdir().expect("writable candidate");
+
+    let mat =
+        Materialization::create_with_candidates(&[missing.clone(), writable.path().to_path_buf()])
+            .expect("the second candidate creates the per-boot directory");
+    let dir = mat.path().to_path_buf();
+    assert!(
+        dir.starts_with(writable.path()),
+        "the per-boot directory must land under the first writable candidate: {}",
+        dir.display()
+    );
+    assert!(dir.is_dir(), "the per-boot directory exists");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&dir)
+            .expect("per-boot directory metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "per-boot directory must be 0700");
+    }
+    assert!(
+        !missing.exists(),
+        "the unavailable first candidate must never be created"
+    );
+
+    drop(mat);
+    assert!(
+        !dir.exists(),
+        "dropping the guard removes the fallback per-boot directory"
     );
 }

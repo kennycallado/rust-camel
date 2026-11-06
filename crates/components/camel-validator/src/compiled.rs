@@ -17,8 +17,11 @@ use serde_yml::Value as YamlValue;
 
 use crate::config::{SchemaType, ValidatorConfig};
 use crate::error::ValidatorError;
-use crate::resolver::{FilesystemResolver, ResourceResolver};
-use crate::schema_set::{SchemaSet, discover_schema_set};
+use crate::resolver::{FilesystemResolver, MAX_SCHEMA_BYTES, ResourceResolver};
+use crate::schema_set::{
+    SchemaSet, discover_embedded_schema_set, discover_schema_set, embedded_ref_bytes,
+    embedded_ref_name, is_embedded_ref,
+};
 use crate::xsd_bridge::XsdBridge;
 
 /// Returns an approximate byte-length for a [`Body`] variant.
@@ -261,7 +264,21 @@ impl CompiledValidator {
                         "schema path contains non-UTF-8 characters".into(),
                     )
                 })?;
-                let content = resolver.resolve(path_str)?;
+                // Embedded references resolve from the process-global registry
+                // before any filesystem attempt; the shared cap keeps registry
+                // bytes bounded exactly like disk bytes.
+                let content =
+                    match embedded_ref_bytes(path_str).map_err(|e| e.to_endpoint_error())? {
+                        Some(bytes) => {
+                            if bytes.len() as u64 > MAX_SCHEMA_BYTES {
+                                return Err(CamelError::EndpointCreationFailed(format!(
+                                    "schema file '{path_str}' exceeds {MAX_SCHEMA_BYTES} bytes"
+                                )));
+                            }
+                            bytes
+                        }
+                        None => resolver.resolve(path_str)?,
+                    };
                 match config.schema_type {
                     SchemaType::Json => Self::compile_json(
                         &content,
@@ -300,8 +317,17 @@ impl CompiledValidator {
         backend: Arc<dyn XsdBridge>,
         max_payload_bytes: Option<usize>,
     ) -> Result<Self, CamelError> {
-        let set = discover_schema_set(path, aliases)
-            .map_err(|e| CamelError::EndpointCreationFailed(e.to_string()))?;
+        // A non-UTF-8 path can never carry the ASCII prefix, so it keeps the
+        // existing filesystem behavior.
+        let set = if let Some(reference) = path.to_str() {
+            match embedded_ref_bytes(reference).map_err(|e| e.to_endpoint_error())? {
+                Some(bytes) => discover_embedded_schema_set(&bytes, reference, aliases)
+                    .map_err(|e| e.to_endpoint_error())?,
+                None => discover_schema_set(path, aliases).map_err(|e| e.to_endpoint_error())?,
+            }
+        } else {
+            discover_schema_set(path, aliases).map_err(|e| e.to_endpoint_error())?
+        };
         Ok(CompiledValidator::Xml {
             schema_set: Arc::new(set),
             backend,
@@ -375,6 +401,43 @@ impl CompiledValidator {
         })
     }
 
+    /// Canonicalizes an embedded protobuf reference for the proto compiler.
+    ///
+    /// The proto compiler resolves `camel-embedded:` references from its own
+    /// process-global registry. Boot registers proto assets in both
+    /// registries, but a caller that populated only the shared
+    /// `camel-component-api` registry must still resolve: the bytes are
+    /// forwarded (idempotently) before compiling. A prefixed value with no
+    /// registration in either registry fails closed with the shared wording.
+    /// Prefix-less paths are returned unchanged.
+    fn embedded_proto_schema_path(path: &Path) -> Result<PathBuf, CamelError> {
+        let Some(value) = path.to_str() else {
+            return Ok(path.to_path_buf());
+        };
+        if !is_embedded_ref(value) {
+            return Ok(path.to_path_buf());
+        }
+        let missing =
+            || ValidatorError::endpoint(format!("no embedded schema registered under '{value}'"));
+        let Some(name) = embedded_ref_name(value) else {
+            return Err(missing().to_endpoint_error());
+        };
+        let canonical = || {
+            PathBuf::from(format!(
+                "{}{name}",
+                camel_proto_compiler::EMBEDDED_REF_PREFIX
+            ))
+        };
+        if let Some(bytes) = camel_component_api::embedded_assets::get(&name) {
+            camel_proto_compiler::embedded::register(&name, bytes.to_vec());
+            return Ok(canonical());
+        }
+        if camel_proto_compiler::embedded::contains(&name) {
+            return Ok(canonical());
+        }
+        Err(missing().to_endpoint_error())
+    }
+
     /// Compiles the `.proto` descriptor and stores the requested message
     /// descriptor once, at endpoint creation.
     ///
@@ -397,7 +460,8 @@ impl CompiledValidator {
                 )
             })?;
 
-        let state = compile_protobuf_state(path, message)?;
+        let schema_path = Self::embedded_proto_schema_path(path)?;
+        let state = compile_protobuf_state(&schema_path, message)?;
 
         Ok(CompiledValidator::Protobuf {
             state: Arc::new(ArcSwap::from_pointee(state)),
@@ -841,6 +905,301 @@ message Person {
         assert_eq!(
             after.source_files, expected_sources,
             "the watch sources must be exactly the descriptor inputs"
+        );
+    }
+
+    // ── embedded registry seams (fixture51 family) ──────────────────────
+
+    const F51_STANDALONE_XSD: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:complexType name="Order">
+    <xs:sequence>
+      <xs:element name="id" type="xs:string"/>
+    </xs:sequence>
+  </xs:complexType>
+</xs:schema>
+"#;
+
+    const F51_XSD_WITH_IMPORT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:import schemaLocation="common.xsd"/>
+</xs:schema>
+"#;
+
+    fn register_embedded(key: &str, bytes: &[u8]) -> Vec<u8> {
+        camel_component_api::embedded_assets::register(key, bytes.to_vec());
+        bytes.to_vec()
+    }
+
+    /// Pins the validator's encoded-spelling literal to the registry's
+    /// canonical prefix (the same cross-crate guard pattern camel-xslt uses):
+    /// drift would silently stop recognizing one of the two reserved
+    /// spellings.
+    #[test]
+    fn encoded_embedded_prefix_literal_matches_registry_prefix() {
+        assert_eq!(
+            crate::schema_set::ENCODED_EMBEDDED_REF_PREFIX,
+            camel_component_api::embedded_assets::EMBEDDED_REF_PREFIX.replace(':', "%3A"),
+            "the encoded embedded-reference spelling must track the registry constant"
+        );
+    }
+
+    fn compile_embedded(uri: &str) -> Result<CompiledValidator, CamelError> {
+        let cfg = ValidatorConfig::from_uri(uri).expect("embedded validator URI must parse");
+        CompiledValidator::compile(&cfg, Arc::new(MockBridge { register_err: None }))
+    }
+
+    fn alias_query(aliases: &[(&str, &str)]) -> String {
+        let mut obj = serde_json::Map::new();
+        for (key, value) in aliases {
+            obj.insert(
+                (*key).to_string(),
+                serde_json::Value::String((*value).to_string()),
+            );
+        }
+        let json = serde_json::Value::Object(obj).to_string();
+        percent_encoding::utf8_percent_encode(&json, percent_encoding::NON_ALPHANUMERIC).to_string()
+    }
+
+    fn expect_xml(compiled: CompiledValidator) -> Arc<SchemaSet> {
+        match compiled {
+            CompiledValidator::Xml { schema_set, .. } => schema_set,
+            _ => panic!("expected an XML compiled validator"),
+        }
+    }
+
+    #[test]
+    fn embedded_standalone_xsd_compiles_from_registry() {
+        let key = "assets/xsd/fixture51/root.xsd";
+        let bytes = register_embedded(key, F51_STANDALONE_XSD.as_bytes());
+        let compiled = compile_embedded(
+            "validator:camel-embedded%3Aassets%2Fxsd%2Ffixture51%2Froot.xsd?schemaType=xml",
+        )
+        .expect("a registered standalone XSD must compile");
+        let set = expect_xml(compiled);
+        assert_eq!(set.root_system_id, "root.xsd");
+        assert_eq!(
+            set.resources.get("root.xsd").map(Vec::as_slice),
+            Some(bytes.as_slice()),
+            "the root entry must carry the exact registered bytes"
+        );
+        assert_eq!(set.resources.len(), 1);
+    }
+
+    #[test]
+    fn embedded_xsd_root_alias_succeeds_and_counts_bytes() {
+        let key = "assets/xsd/fixture52/root.xsd";
+        let mut bytes = F51_STANDALONE_XSD.as_bytes().to_vec();
+        bytes.resize(2 * 1024 * 1024, b' ');
+        let bytes = register_embedded(key, &bytes);
+        let aliases = alias_query(&[("urn:t", "root.xsd")]);
+        let uri = format!(
+            "validator:camel-embedded%3Aassets%2Fxsd%2Ffixture52%2Froot.xsd\
+             ?schemaType=xml&schemaAliases={aliases}"
+        );
+        let compiled = compile_embedded(&uri).expect("an alias to the root must compile");
+        let set = expect_xml(compiled);
+        assert_eq!(set.root_system_id, "root.xsd");
+        assert_eq!(
+            set.resources.get("root.xsd").map(Vec::as_slice),
+            Some(bytes.as_slice())
+        );
+        assert_eq!(
+            set.resources.get("urn:t").map(Vec::as_slice),
+            Some(bytes.as_slice()),
+            "the alias URI entry must carry the same root bytes"
+        );
+        assert_eq!(set.resources.len(), 2);
+        assert_eq!(
+            set.aliases.get("urn:t").map(String::as_str),
+            Some("root.xsd")
+        );
+    }
+
+    #[test]
+    fn embedded_xsd_with_import_fails_typed() {
+        let key = "assets/xsd/fixture53/root.xsd";
+        register_embedded(key, F51_XSD_WITH_IMPORT.as_bytes());
+        let err = compile_embedded(
+            "validator:camel-embedded%3Aassets%2Fxsd%2Ffixture53%2Froot.xsd?schemaType=xml",
+        )
+        .expect_err("an import must fail: only the root is embedded");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("common.xsd"),
+            "must name the missing import: {msg}"
+        );
+        assert!(
+            msg.contains("not embedded"),
+            "must state it is not embedded: {msg}"
+        );
+        assert!(
+            msg.contains("camel-embedded:assets/xsd/fixture53/root.xsd"),
+            "must name the root reference: {msg}"
+        );
+    }
+
+    #[test]
+    fn embedded_xsd_alias_to_missing_resource_fails_typed() {
+        let key = "assets/xsd/fixture54/root.xsd";
+        register_embedded(key, F51_STANDALONE_XSD.as_bytes());
+        let aliases = alias_query(&[("urn:o", "other.xsd")]);
+        let uri = format!(
+            "validator:camel-embedded%3Aassets%2Fxsd%2Ffixture54%2Froot.xsd\
+             ?schemaType=xml&schemaAliases={aliases}"
+        );
+        let err = compile_embedded(&uri).expect_err("an alias to another resource must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("other.xsd"),
+            "must name the alias target: {msg}"
+        );
+        assert!(
+            msg.contains("not embedded"),
+            "must state it is not embedded: {msg}"
+        );
+    }
+
+    #[test]
+    fn embedded_xsd_oversized_root_fails_budget() {
+        use crate::schema_set::MAX_SCHEMA_BYTES;
+        let key = "assets/xsd/fixture55/root.xsd";
+        let bytes = vec![b'x'; MAX_SCHEMA_BYTES + 1];
+        register_embedded(key, &bytes);
+        let err = compile_embedded(
+            "validator:camel-embedded%3Aassets%2Fxsd%2Ffixture55%2Froot.xsd?schemaType=xml",
+        )
+        .expect_err("a root past the aggregate byte cap must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("8 MiB"), "must name the aggregate cap: {msg}");
+        assert!(
+            !msg.contains("well-formed"),
+            "the budget error must win before XML parsing: {msg}"
+        );
+    }
+
+    #[test]
+    fn embedded_xsd_alias_byte_overflow_fails_aggregate() {
+        let key = "assets/xsd/fixture56/root.xsd";
+        let mut bytes = F51_STANDALONE_XSD.as_bytes().to_vec();
+        bytes.resize(5 * 1024 * 1024, b' ');
+        register_embedded(key, &bytes);
+        let aliases = alias_query(&[("urn:t", "root.xsd")]);
+        let uri = format!(
+            "validator:camel-embedded%3Aassets%2Fxsd%2Ffixture56%2Froot.xsd\
+             ?schemaType=xml&schemaAliases={aliases}"
+        );
+        let err = compile_embedded(&uri)
+            .expect_err("root + alias bytes past 8 MiB must fail the aggregate budget");
+        let msg = err.to_string();
+        assert!(msg.contains("8 MiB"), "must name the aggregate cap: {msg}");
+    }
+
+    #[test]
+    fn embedded_xsd_alias_count_overflow_fails() {
+        use crate::schema_set::MAX_SCHEMA_ALIASES;
+        let key = "assets/xsd/fixture57/root.xsd";
+        register_embedded(key, F51_STANDALONE_XSD.as_bytes());
+        let mut cfg = ValidatorConfig::from_uri(
+            "validator:camel-embedded%3Aassets%2Fxsd%2Ffixture57%2Froot.xsd?schemaType=xml",
+        )
+        .expect("URI parses");
+        for i in 0..=MAX_SCHEMA_ALIASES {
+            cfg.schema_aliases
+                .insert(format!("urn:a{i}"), "root.xsd".to_string());
+        }
+        let err = CompiledValidator::compile(&cfg, Arc::new(MockBridge { register_err: None }))
+            .expect_err("an over-cap alias map must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("128"), "must name the alias cap: {msg}");
+    }
+
+    #[test]
+    fn embedded_xsd_unknown_reference_fails_closed() {
+        let err = compile_embedded(
+            "validator:camel-embedded:assets/xsd/never-registered-51?schemaType=xml",
+        )
+        .expect_err("an unregistered embedded reference must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("never-registered-51"),
+            "must name the full reference: {msg}"
+        );
+        assert!(
+            msg.contains("no embedded schema registered"),
+            "must use the fail-closed wording: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_json_schema_resolves_from_registry() {
+        let key = "assets/fixture51/schema.json";
+        register_embedded(
+            key,
+            br#"{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}"#,
+        );
+        let compiled = compile_embedded(
+            "validator:camel-embedded%3Aassets%2Ffixture51%2Fschema.json?schemaType=json",
+        )
+        .expect("a registered JSON schema must compile");
+        assert!(
+            compiled
+                .validate(&Body::Text(r#"{"id":1}"#.into()))
+                .await
+                .is_ok()
+        );
+        assert!(
+            compiled
+                .validate(&Body::Text(r#"{"id":"x"}"#.into()))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_yaml_schema_resolves_from_registry() {
+        let key = "assets/fixture51/schema.yaml";
+        register_embedded(
+            key,
+            b"type: object\nproperties:\n  id:\n    type: integer\n",
+        );
+        let compiled = compile_embedded(
+            "validator:camel-embedded%3Aassets%2Ffixture51%2Fschema.yaml?schemaType=yaml",
+        )
+        .expect("a registered YAML schema must compile");
+        assert!(matches!(compiled, CompiledValidator::Yaml { .. }));
+        assert!(compiled.validate(&Body::Text("id: 1".into())).await.is_ok());
+    }
+
+    /// Protobuf seam: the validator forwards a shared-registry registration
+    /// into the proto compiler's own registry and compiles the canonical
+    /// reference. A prefixed-but-unregistered proto fails closed with the same
+    /// "no embedded schema registered" wording.
+    #[tokio::test]
+    async fn embedded_protobuf_resolves_from_registry() {
+        let key = "assets/fixture51/person.proto";
+        register_embedded(key, PROTO_PERSON);
+        let compiled = compile_embedded(
+            "validator:camel-embedded%3Aassets%2Ffixture51%2Fperson.proto\
+             ?schemaType=protobuf&message=test.v1.Person",
+        )
+        .expect("a registered proto must compile");
+        assert!(matches!(compiled, CompiledValidator::Protobuf { .. }));
+        assert!(
+            compiled
+                .validate(&Body::Text(r#"{"name":"Ann"}"#.to_string()))
+                .await
+                .is_ok()
+        );
+
+        let err = compile_embedded(
+            "validator:camel-embedded%3Aassets%2Ffixture51%2Fnever.proto\
+             ?schemaType=protobuf&message=test.v1.Person",
+        )
+        .expect_err("an unregistered embedded proto must fail closed");
+        assert!(
+            err.to_string().contains("no embedded schema registered"),
+            "must use the fail-closed wording: {err}"
         );
     }
 }

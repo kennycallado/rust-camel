@@ -324,7 +324,45 @@ impl XsltComponent {
     /// a misconfigured URI pointing at a huge/unbounded file.
     const MAX_STYLESHEET_BYTES: u64 = 16 * 1024 * 1024;
 
+    /// Reads the stylesheet bytes for `stylesheet_uri`.
+    ///
+    /// Embedded references are resolved first, before any filesystem
+    /// access. `camel-cli` registers xslt assets at boot from
+    /// digest-verified store entries, so a sealed artifact boots without
+    /// materializing a file. Both spellings are accepted: `resolve_ref`
+    /// percent-decodes the encoded spelling in full, exactly once, and
+    /// treats a canonical suffix as a literal registry key. The
+    /// `camel-embedded:` / `camel-embedded%3A` prefixes are reserved
+    /// workspace-wide (see `camel-proto-compiler::embedded`), which
+    /// shadows a real file named with the prefix; therefore an
+    /// unregistered reference fails closed with a typed error instead of
+    /// probing the host filesystem. Only prefix-less values take the
+    /// filesystem path.
     fn read_stylesheet(&self, stylesheet_uri: &str) -> Result<Vec<u8>, XsltError> {
+        // The encoded spelling lives in `camel_component_api::embedded_assets`
+        // as a private constant, so match it literally here.
+        if stylesheet_uri.starts_with(camel_component_api::embedded_assets::EMBEDDED_REF_PREFIX)
+            || stylesheet_uri.starts_with("camel-embedded%3A")
+        {
+            let Some(bytes) = camel_component_api::embedded_assets::resolve_ref(stylesheet_uri)
+            else {
+                return Err(XsltError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("no embedded stylesheet registered under '{stylesheet_uri}'"),
+                )));
+            };
+            if bytes.len() as u64 > Self::MAX_STYLESHEET_BYTES {
+                return Err(XsltError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "embedded stylesheet exceeds {} bytes",
+                        Self::MAX_STYLESHEET_BYTES
+                    ),
+                )));
+            }
+            return Ok(bytes.to_vec());
+        }
+
         let path = PathBuf::from(stylesheet_uri);
 
         // Audit 2026-08-31, F4-5: confinement parity with camel-template —
@@ -618,5 +656,82 @@ mod tests {
             3,
             "max_attempts=3 must yield exactly 3 invocations"
         );
+    }
+
+    #[test]
+    fn read_stylesheet_resolves_embedded_reference() {
+        const KEY: &str = "assets/xslt/fixture41.xslt";
+        const BYTES: &[u8] = b"<xsl:stylesheet version=\"1.0\"/>";
+        camel_component_api::embedded_assets::register(KEY, BYTES.to_vec());
+
+        let component = XsltComponent::new(XsltComponentConfig::default());
+        assert_eq!(
+            component
+                .read_stylesheet("camel-embedded:assets/xslt/fixture41.xslt")
+                .expect("canonical embedded reference resolves"),
+            BYTES
+        );
+        assert_eq!(
+            component
+                .read_stylesheet("camel-embedded%3Aassets/xslt/fixture41.xslt")
+                .expect("production encoded reference resolves"),
+            BYTES,
+            "the encoded-colon, literal-slash shape is what URI_SITE_SET produces"
+        );
+        assert_eq!(
+            component
+                .read_stylesheet("camel-embedded%3Aassets%2Fxslt%2Ffixture41.xslt")
+                .expect("fully percent-encoded embedded reference resolves"),
+            BYTES
+        );
+    }
+
+    #[test]
+    fn encoded_prefix_literal_matches_registry_prefix() {
+        assert_eq!(
+            "camel-embedded%3A",
+            camel_component_api::embedded_assets::EMBEDDED_REF_PREFIX.replace(':', "%3A")
+        );
+    }
+
+    #[test]
+    fn read_stylesheet_fails_closed_on_unknown_reference() {
+        let component = XsltComponent::new(XsltComponentConfig::default());
+        let err = component
+            .read_stylesheet("camel-embedded:assets/xslt/never-registered-41")
+            .expect_err("unregistered embedded reference must fail closed");
+        let message = err.to_string();
+        assert!(
+            message.contains("never-registered-41"),
+            "error must name the reference, got: {message}"
+        );
+        assert!(
+            message.contains("no embedded stylesheet registered"),
+            "error must be the typed embedded failure, got: {message}"
+        );
+    }
+
+    #[test]
+    fn read_stylesheet_rejects_oversized_embedded_stylesheet() {
+        const KEY: &str = "assets/xslt/big41.xslt";
+        camel_component_api::embedded_assets::register(KEY, vec![b'x'; 17 * 1024 * 1024]);
+
+        let component = XsltComponent::new(XsltComponentConfig::default());
+        let err = component
+            .read_stylesheet("camel-embedded:assets/xslt/big41.xslt")
+            .expect_err("oversized embedded stylesheet must be rejected");
+        assert!(err.to_string().contains("exceeds"), "got: {err}");
+    }
+
+    #[test]
+    fn read_stylesheet_plain_path_unchanged() {
+        let stylesheet = write_test_stylesheet();
+        let component = XsltComponent::new(XsltComponentConfig::default());
+
+        let bytes = component
+            .read_stylesheet(&stylesheet.path().to_string_lossy())
+            .expect("plain filesystem path still reads");
+
+        assert_eq!(bytes, b"<xsl:stylesheet version=\"1.0\"/>");
     }
 }

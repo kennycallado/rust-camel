@@ -12,6 +12,8 @@ pub mod component;
 pub mod component_context;
 pub mod consumer;
 pub mod dispatch;
+/// Registry of sealed-boot embedded xslt/xsd/sql assets; see the module docs.
+pub mod embedded_assets;
 pub mod endpoint;
 pub mod health_registry;
 pub mod runtime_observability;

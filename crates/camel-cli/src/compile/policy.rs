@@ -37,6 +37,15 @@
 //! parameters are named rejections — an embeddable asset needs a
 //! root-relative, compile-known path.
 //!
+//! The boot partition ([`super::runtime`]
+//! `prepare_embedded_assets`) splits the collected classes in two.
+//! [`is_in_memory_class`] names the `proto file`, `xslt stylesheet`,
+//! `xsd schema`, and `sql file` classes: their bytes register into the
+//! process-global embedded-asset registries and their sites rewrite to
+//! `camel-embedded:` references, so they never touch the filesystem.
+//! Every other class is a legacy path reader materialized into a
+//! per-boot confined directory.
+//!
 //! The certificate/key/CA fields are scoped to TLS and listener contexts
 //! (`tls`, `ssl`, `rest`, `mcp` ancestors): a bare `key:` under ordinary
 //! message steps (`set_header`, `remove_header`, claim checks, …) is a
@@ -113,12 +122,49 @@ fn forbidden_field(key: &str, allow_route_sources: bool) -> Option<&'static str>
 pub(crate) const SECRET_ASSET_CLASS: &str = "private key";
 
 /// Asset class of the gRPC `protoFile` descriptor. The boot partition
-/// ([`super::runtime`] `prepare_embedded_assets`) keys on this constant:
-/// the class resolves IN MEMORY through the in-process proto compiler
-/// (`camel-embedded:` refs into the embedded registry) and is never
-/// materialized to disk. All sites MUST compare against this constant,
-/// never a literal.
+/// ([`super::runtime`] `prepare_embedded_assets`) keys on
+/// [`is_in_memory_class`]: the class resolves IN MEMORY through the
+/// in-process proto compiler (`camel-embedded:` refs into the embedded
+/// registry) and is never materialized to disk. All sites MUST compare
+/// against this constant, never a literal.
 pub(crate) const PROTO_ASSET_CLASS: &str = "proto file";
+
+/// Asset class of an XSLT stylesheet (`xslt:` URI operand or `xslt`
+/// document field). The boot partition ([`super::runtime`]
+/// `prepare_embedded_assets`) keys on [`is_in_memory_class`]: the class
+/// resolves IN MEMORY through the process-global embedded-asset
+/// registry (`camel-embedded:` refs) and is never materialized to disk.
+/// All sites MUST compare against this constant, never a literal.
+pub(crate) const XSLT_ASSET_CLASS: &str = "xslt stylesheet";
+
+/// Asset class of an XML schema (`validator:` URI operand or `xsd`
+/// document field). The boot partition ([`super::runtime`]
+/// `prepare_embedded_assets`) keys on [`is_in_memory_class`]: the class
+/// resolves IN MEMORY through the process-global embedded-asset
+/// registry (`camel-embedded:` refs) and is never materialized to disk.
+/// All sites MUST compare against this constant, never a literal.
+pub(crate) const XSD_ASSET_CLASS: &str = "xsd schema";
+
+/// Asset class of a SQL query file (`sql:file:` URI operand). The boot
+/// partition ([`super::runtime`] `prepare_embedded_assets`) keys on
+/// [`is_in_memory_class`]: the class resolves IN MEMORY through the
+/// process-global embedded-asset registry (`camel-embedded:` refs) and
+/// is never materialized to disk. All sites MUST compare against this
+/// constant, never a literal.
+pub(crate) const SQL_ASSET_CLASS: &str = "sql file";
+
+/// Whether `class` resolves in memory at boot: the `proto file`,
+/// `xslt stylesheet`, `xsd schema`, and `sql file` classes register
+/// their bytes into the process-global embedded-asset registries and
+/// rewrite their sites to `camel-embedded:` references, so they never
+/// touch the filesystem. Every other class is a legacy path reader and
+/// materializes into the per-boot confined directory.
+pub(crate) fn is_in_memory_class(class: &str) -> bool {
+    matches!(
+        class,
+        PROTO_ASSET_CLASS | XSLT_ASSET_CLASS | XSD_ASSET_CLASS | SQL_ASSET_CLASS
+    )
+}
 
 /// Asset class for a collected document field key, or `None`. The
 /// certificate/key/CA family only counts inside a TLS or listener
@@ -129,8 +175,8 @@ fn collected_field(key: &str, tls_context: bool) -> Option<&'static str> {
         "cert" | "certPath" | "cert_path" if tls_context => Some("certificate"),
         "key" | "keyPath" | "key_path" if tls_context => Some(SECRET_ASSET_CLASS),
         "client_ca" | "clientCaPath" | "client_ca_path" if tls_context => Some("client CA"),
-        "xslt" => Some("xslt stylesheet"),
-        "xsd" => Some("xsd schema"),
+        "xslt" => Some(XSLT_ASSET_CLASS),
+        "xsd" => Some(XSD_ASSET_CLASS),
         "static_dir" | "staticDir" => Some("static directory"),
         _ => None,
     }
@@ -193,9 +239,9 @@ fn forbidden_scheme(scheme: &str) -> Option<&'static str> {
 /// path after the scheme (query stripped) is the declared asset path.
 fn uri_operand_class(scheme: &str) -> Option<(&'static str, bool)> {
     match scheme {
-        "xslt" => Some(("xslt stylesheet", false)),
-        "validator" => Some(("xsd schema", false)),
-        "sql" => Some(("sql file", true)),
+        "xslt" => Some((XSLT_ASSET_CLASS, false)),
+        "validator" => Some((XSD_ASSET_CLASS, false)),
+        "sql" => Some((SQL_ASSET_CLASS, true)),
         _ => None,
     }
 }

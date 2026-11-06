@@ -17,16 +17,19 @@
 //!   files or the inline `routes:` block) with no filesystem route
 //!   discovery.
 //!
-//! Asset resolution (r2embed Task 3.2): the substitution table recorded
-//! at compile time is the ONLY runtime resolution path. Before kind
-//! dispatch, the in-memory asset registry is populated from the decoded
-//! store (memory-served classes read through it, never the filesystem)
-//! and the substitution table's recorded byte spans are rewritten —
-//! last-offset-first — to the confined per-boot materialization paths of
-//! the disk-written classes (TLS cert/key/CA, `xslt:`, `validator:`,
-//! `sql:file:`). The runtime never text-searches or canonicalizes
-//! declared strings, and TLS-class resolution is embedded-only with no
-//! host fallback. The watcher never activates.
+//! Asset resolution (r2embed Task 3.2; mission 350/351): the
+//! substitution table recorded at compile time is the ONLY runtime
+//! resolution path. Before kind dispatch, the in-memory asset registries
+//! are populated from the decoded store (memory-served classes read
+//! through them, never the filesystem) and the substitution table's
+//! recorded byte spans are rewritten — last-offset-first — to the
+//! confined per-boot materialization paths of the disk-written TLS
+//! family (certificate, private key, client CA). The `proto file`,
+//! `xslt stylesheet`, `xsd schema`, and `sql file` classes resolve in
+//! memory to `camel-embedded:` references instead. The runtime never
+//! text-searches or canonicalizes declared strings, and TLS-class
+//! resolution is embedded-only with no host fallback. The watcher never
+//! activates.
 //! `${env:NAME}` resolves from the deployment environment through the
 //! discovery and config seams. Declared job `args:` resolve at startup
 //! through the same parser path as normal jobs with NO dynamic flags
@@ -378,20 +381,30 @@ const URI_SITE_SET: &percent_encoding::AsciiSet = &NON_ALPHANUMERIC
 /// enforcement, or confined materialization. Every variant is a
 /// fail-closed exit-2 diagnostic; nothing boots.
 #[derive(Debug)]
-enum PrepareError {
+pub(crate) enum PrepareError {
     /// The embedded manifest could not be re-parsed (defense in depth;
     /// decode already validated it).
     Manifest(String),
     /// Registry population failed a positional/digest check.
     Registry(camel_bundles::AssetRegistryError),
-    /// A disk-written class needs a writable temp location and
-    /// `std::env::temp_dir()` is not one. Names the class and the OS
-    /// cause (read-only contract, r2embed Task 3.2 Step 5; proto-class
-    /// targets never reach this — they resolve in memory, mission 350).
+    /// A disk-written class needs a writable directory for confined
+    /// materialization and neither the system temp directory nor the
+    /// directory next to the artifact is one. Names the class and a
+    /// path-FREE cause derived from the OS error kind (read-only
+    /// contract, r2embed Task 3.2 Step 5; in-memory class targets never
+    /// reach this — proto/xslt/xsd/sql resolve in memory, mission
+    /// 350/351).
+    ///
+    /// The Display is deliberately path-free: tempfile wraps
+    /// directory-creation failures in a `PathError` whose Display prints
+    /// the attempted absolute path, and absolute host paths must not leak
+    /// into user-facing diagnostics or logs. The original io error (and
+    /// its kind/raw OS code) stays in the variant and is reachable via
+    /// [`std::error::Error::source`] for programmatic inspection.
     TempUnavailable {
         /// Class of the first disk-class substitution target.
         class: String,
-        /// Underlying OS error.
+        /// Underlying OS error (kept for `source()`; never Displayed).
         source: std::io::Error,
     },
     /// Confined materialization failed (planted entry, symlink,
@@ -410,11 +423,26 @@ impl fmt::Display for PrepareError {
         match self {
             Self::Manifest(reason) => write!(f, "compiled artifact manifest is invalid: {reason}"),
             Self::Registry(e) => write!(f, "asset registry population failed: {e}"),
-            Self::TempUnavailable { class, source } => write!(
-                f,
-                "{class} asset requires a writable temp directory for confined \
-                 materialization: {source}"
-            ),
+            Self::TempUnavailable { class, source } => {
+                // Path-FREE cause: `source` is a tempfile `PathError`
+                // whose Display leaks the attempted absolute path.
+                let cause = match source.kind() {
+                    std::io::ErrorKind::PermissionDenied => {
+                        "the location is not writable".to_string()
+                    }
+                    std::io::ErrorKind::NotFound => "the location does not exist".to_string(),
+                    _ => format!(
+                        "the location rejected directory creation (os error {})",
+                        source.raw_os_error().unwrap_or_default()
+                    ),
+                };
+                write!(
+                    f,
+                    "{class} asset requires a writable directory for confined materialization \
+                     (tried the system temp directory and the directory next to the artifact): \
+                     {cause}"
+                )
+            }
             Self::Materialize(e) => write!(f, "confined materialization failed: {e}"),
             Self::Rule(e) => e.fmt(f),
             Self::StoreInconsistent(reason) => write!(f, "substitution rewrite failed: {reason}"),
@@ -643,21 +671,23 @@ fn push_replacement(
 }
 
 /// The pre-boot asset preparation at the DECIDED single swap point
-/// (r2embed Task 3.2; the proto class re-plumbed to in-memory resolution,
-/// mission 350): after decode, before the route/job kind dispatch.
+/// (r2embed Task 3.2; proto re-plumbed to in-memory resolution in mission
+/// 350, xslt/xsd/sql in mission 351): after decode, before the route/job
+/// kind dispatch.
 ///
 /// 1. The asset registry is populated from the store's entries
 ///    (positional manifest pairing, digest verification) — the
 ///    memory-served class's FS of record.
-/// 2. Substitution targets partition by class. The `proto file` class
-///    resolves IN MEMORY: each asset registers into the in-process proto
-///    compiler's embedded registry and its site rewrites to a
-///    `camel-embedded:` reference — no disk write, so a proto-only
-///    artifact boots on a host with no writable temp directory. Every
-///    other class (TLS cert/key/CA, `xslt:`, `validator:`, `sql:file:`)
-///    is a legacy path reader: its assets materialize into a per-boot
-///    confined directory (static-file entries stay memory-served and
-///    never touch the filesystem).
+/// 2. Substitution targets partition by class. The FOUR in-memory
+///    classes — `proto file`, `xslt stylesheet`, `xsd schema`, `sql
+///    file` ([`super::policy::is_in_memory_class`]) — resolve IN MEMORY:
+///    each asset registers into its process-global embedded-asset
+///    registry and its site rewrites to a `camel-embedded:` reference —
+///    no disk write, so an artifact carrying only those classes boots on
+///    a host with no writable temp directory. The disk classes are the
+///    TLS family only (`certificate`, `private key`, `client CA`): their
+///    assets materialize into a per-boot confined directory (static-file
+///    entries stay memory-served and never touch the filesystem).
 /// 3. The substitution path-safety rule is enforced at every site
 ///    BEFORE anything is registered or written; `uri` sites then receive
 ///    the percent-encoded replacement (confined path or embedded
@@ -668,12 +698,29 @@ fn push_replacement(
 ///    TLS-class resolution is embedded-only: no host fallback exists.
 ///
 /// Returns the materialization guard when a per-boot directory exists —
-/// exactly when disk-class targets exist; dropping it removes the
-/// directory on shutdown AND boot failure. Proto-only artifacts return
-/// `None` with ZERO temp writes.
+/// exactly when TLS-family targets exist; dropping it removes the
+/// directory on shutdown AND boot failure. Proto/xslt/xsd/sql-only
+/// artifacts return `Ok(None)` with ZERO temp writes.
 fn prepare_embedded_assets(
     store: &mut VirtualDocumentStore,
     manifest_json: &str,
+) -> Result<Option<super::materialize::Materialization>, PrepareError> {
+    prepare_embedded_assets_with_candidates(
+        store,
+        manifest_json,
+        &super::materialize::standard_materialization_candidates(),
+    )
+}
+
+/// [`prepare_embedded_assets`] with an injected materialization candidate
+/// chain. The boot path passes the standard chain; tests inject their own
+/// (a missing child directory under a test-owned temp root, so no test
+/// ever writes to the ambient machine temp directory). Candidate
+/// semantics are identical to [`super::materialize::Materialization::create_with_candidates`].
+pub(crate) fn prepare_embedded_assets_with_candidates(
+    store: &mut VirtualDocumentStore,
+    manifest_json: &str,
+    candidates: &[PathBuf],
 ) -> Result<Option<super::materialize::Materialization>, PrepareError> {
     let manifest = manifest::Manifest::from_canonical_json(manifest_json.as_bytes())
         .map_err(|e| PrepareError::Manifest(e.to_string()))?;
@@ -714,26 +761,35 @@ fn prepare_embedded_assets(
     let mut sites: BTreeMap<String, Vec<(SubstitutionSpan, Vec<u8>)>> = BTreeMap::new();
     let mut disk_targets: Vec<(&SubstitutionEntry, String, String)> = Vec::new();
     for (entry, rel, class) in targets {
-        if class == super::policy::PROTO_ASSET_CLASS {
+        if super::policy::is_in_memory_class(&class) {
             // In-memory class: rewrite the site to the reserved
-            // reference and register the bytes with the in-process proto
-            // compiler. The reference carries only `:` `/` `.` `_` `-`
-            // and alphanumerics, so a `uri` site passes the safety rule;
-            // a `literal` site fails the literal charset clause (`:` is
-            // outside `[A-Za-z0-9._/+-]`), keeping hand-crafted stores
-            // fail-closed. Proto sites are URI parameters, so the uri
-            // context is the only producer shape.
+            // reference and register the bytes with the process-global
+            // embedded-asset registry. The reference carries only `:`
+            // `/` `.` `_` `-` and alphanumerics, so a `uri` site passes
+            // the safety rule; a `literal` site fails the literal charset
+            // clause (`:` is outside `[A-Za-z0-9._/+-]`), keeping
+            // hand-crafted stores fail-closed. These sites are URI
+            // operands or URI parameters, so the uri context is the only
+            // producer shape.
             let reference = embedded_ref(&entry.asset);
             enforce_substitution_path_safety(&entry.document, &reference, entry.context)
                 .map_err(PrepareError::Rule)?;
+            // Every in-memory class reads its bytes from the verified
+            // store: the `StoreInconsistent` guard applies to all four,
+            // so an unreadable substitution target never reaches a
+            // registry or a rewritten site.
+            let Some(bytes) = store.read(&entry.asset) else {
+                return Err(PrepareError::StoreInconsistent(format!(
+                    "substitution target {} is unreadable",
+                    entry.asset
+                )));
+            };
+            camel_component_api::embedded_assets::register(&entry.asset, bytes.to_vec());
+            // The grpc build additionally feeds the proto compiler's own
+            // registry: its resolver reads that registry, not the shared
+            // one.
             #[cfg(feature = "grpc")]
-            {
-                let Some(bytes) = store.read(&entry.asset) else {
-                    return Err(PrepareError::StoreInconsistent(format!(
-                        "substitution target {} is unreadable",
-                        entry.asset
-                    )));
-                };
+            if class == super::policy::PROTO_ASSET_CLASS {
                 camel_proto_compiler::embedded::register(&entry.asset, bytes.to_vec());
             }
             push_replacement(&mut sites, entry, &reference);
@@ -743,19 +799,20 @@ fn prepare_embedded_assets(
     }
 
     // A disk-written class exists, so a writable temp location is
-    // required: the read-only contract's materialized-class side. A
-    // proto-only artifact never reaches this branch.
+    // required: the read-only contract's materialized-class side. An
+    // artifact carrying only in-memory classes never reaches this
+    // branch.
     let materialization = if disk_targets.is_empty() {
         None
     } else {
         let first_class = disk_targets[0].2.clone();
         Some(
-            super::materialize::Materialization::create().map_err(|source| {
-                PrepareError::TempUnavailable {
+            super::materialize::Materialization::create_with_candidates(candidates).map_err(
+                |source| PrepareError::TempUnavailable {
                     class: first_class,
                     source,
-                }
-            })?,
+                },
+            )?,
         )
     };
 
@@ -2166,6 +2223,464 @@ mod tests {
         assert!(
             rewritten.contains(&confined_expected),
             "the TLS site must carry the confined path ({confined_expected}): {rewritten}"
+        );
+    }
+
+    /// Task 3.1: a TLS-class artifact boots when the system temp
+    /// directory is unavailable by falling back to the next candidate (a
+    /// writable directory next to the artifact in production; an
+    /// injected writable directory here). The certificate lands under
+    /// the fallback directory at mode 0600 and the unavailable first
+    /// candidate is never created.
+    #[test]
+    fn tls_asset_boots_without_system_temp() {
+        let _serial = PREPARE_LOCK.lock().expect("prepare lock");
+
+        let cert_asset = "grpc/svc501.crt";
+        let cert_source = "-----BEGIN CERTIFICATE-----\nfixture501\n-----END CERTIFICATE-----\n";
+        let doc = "routes:\n  - id: grpc-serve\n    from: \
+                   'grpc://127.0.0.1:50051/p501.Svc/M?serverCertPath=grpc/svc501.crt&transport=tls'\n    \
+                   steps:\n      - log: req\n";
+        let (store, manifest_json) = build_in_memory_fixture(
+            doc,
+            cert_asset,
+            "certificate",
+            cert_asset,
+            cert_source.as_bytes(),
+        );
+        let mut store = store;
+        let (_missing_root, missing) = missing_candidate();
+        let writable = tempfile::tempdir().expect("writable candidate");
+
+        let guard = super::prepare_embedded_assets_with_candidates(
+            &mut store,
+            &manifest_json,
+            &[missing.clone(), writable.path().to_path_buf()],
+        )
+        .expect("prepare falls back to the first writable candidate")
+        .expect("a TLS-class artifact materializes a per-boot directory");
+
+        assert!(
+            guard.path().starts_with(writable.path()),
+            "the per-boot directory must land under the writable candidate: {}",
+            guard.path().display()
+        );
+        let cert_path = guard.path().join(cert_asset);
+        assert!(
+            cert_path.is_file(),
+            "the certificate asset must materialize"
+        );
+        assert_eq!(
+            std::fs::read(&cert_path).expect("materialized cert bytes"),
+            cert_source.as_bytes(),
+            "the materialized certificate bytes are exact"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&cert_path)
+                .expect("materialized cert metadata")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "materialized file must be 0600");
+        }
+        assert!(
+            !missing.exists(),
+            "the unavailable first candidate must never be created"
+        );
+    }
+
+    /// Task 3.1: when every candidate fails, the diagnostic names the
+    /// asset class and the materialization requirement but leaks NO
+    /// path; the original io error stays reachable and keeps its kind.
+    #[test]
+    fn error_names_the_asset_class_and_requirement() {
+        let _serial = PREPARE_LOCK.lock().expect("prepare lock");
+
+        let cert_asset = "grpc/svc501e.crt";
+        let cert_source = "-----BEGIN CERTIFICATE-----\nfixture501e\n-----END CERTIFICATE-----\n";
+        let doc = "routes:\n  - id: grpc-serve\n    from: \
+                   'grpc://127.0.0.1:50051/p501e.Svc/M?serverCertPath=grpc/svc501e.crt&transport=tls'\n    \
+                   steps:\n      - log: req\n";
+        let (store, manifest_json) = build_in_memory_fixture(
+            doc,
+            cert_asset,
+            "certificate",
+            cert_asset,
+            cert_source.as_bytes(),
+        );
+        let mut store = store;
+        let (_root_a, missing_a) = missing_candidate();
+        let (_root_b, missing_b) = missing_candidate();
+
+        let err = super::prepare_embedded_assets_with_candidates(
+            &mut store,
+            &manifest_json,
+            &[missing_a.clone(), missing_b.clone()],
+        )
+        .expect_err("no candidate is writable");
+
+        let display = err.to_string();
+        assert!(
+            display.starts_with("certificate"),
+            "the diagnostic must start with the asset class: {display}"
+        );
+        assert!(
+            display.contains("writable"),
+            "the diagnostic must name the writability requirement: {display}"
+        );
+        assert!(
+            display.contains("materialization"),
+            "the diagnostic must name materialization: {display}"
+        );
+        for candidate in [&missing_a, &missing_b] {
+            assert!(
+                !display.contains(candidate.to_str().expect("candidate utf-8")),
+                "the diagnostic must not leak the candidate path {}: {display}",
+                candidate.display()
+            );
+        }
+        assert!(
+            !display.contains(&std::env::temp_dir().display().to_string()),
+            "the diagnostic must not leak the system temp directory: {display}"
+        );
+        assert!(
+            !display.contains("camel-assets-"),
+            "the diagnostic must not leak the per-boot directory name: {display}"
+        );
+
+        let source = std::error::Error::source(&err).expect("the original io error is retained");
+        let io = source
+            .downcast_ref::<std::io::Error>()
+            .expect("the retained source is the io error");
+        assert_eq!(
+            io.kind(),
+            std::io::ErrorKind::NotFound,
+            "the original io error kind is preserved"
+        );
+    }
+
+    /// Builds a one-document, one-asset store whose single URI
+    /// substitution site declares `declared` with `class`. `asset_path`
+    /// is the store asset path (no `assets/` prefix); the substitution
+    /// entry keys the registry under `assets/<asset_path>`.
+    fn build_in_memory_fixture(
+        doc: &str,
+        declared: &str,
+        class: &str,
+        asset_path: &str,
+        bytes: &[u8],
+    ) -> (VirtualDocumentStore, String) {
+        let span = declared_span(doc, declared);
+        let store = VirtualDocumentStore::build_with_assets(
+            "app.yaml",
+            &[StoreDocument {
+                path: "app.yaml".to_string(),
+                kind: StoreEntryKind::Route,
+                bytes: doc.as_bytes().to_vec(),
+            }],
+            &[StoreAsset {
+                path: asset_path.to_string(),
+                class: Some(class.to_string()),
+                bytes: bytes.to_vec(),
+            }],
+            &[],
+            &["app.yaml".to_string()],
+            &[SubstitutionEntry {
+                asset: format!("assets/{asset_path}"),
+                context: SubstitutionContext::Uri,
+                declared: declared.to_string(),
+                document: "app.yaml".to_string(),
+                spans: vec![span],
+            }],
+        )
+        .expect("store builds");
+        let manifest =
+            super::manifest::derive_for_store(&store, TrailerKind::Route, &[]).expect("manifest");
+        (store, manifest.to_canonical_json())
+    }
+
+    /// A test-owned candidate that never exists: the seam must not fall
+    /// back to the ambient machine temp directory.
+    fn missing_candidate() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().expect("test temp root");
+        let missing = root.path().join("missing-child");
+        (root, missing)
+    }
+
+    /// Mission 351: an xslt-class artifact boots with `Ok(None)` (zero
+    /// temp writes), rewrites its URI site to the percent-encoded
+    /// `camel-embedded:` reference, and registers the exact asset bytes.
+    #[test]
+    fn xslt_asset_boots_without_system_temp() {
+        let _serial = PREPARE_LOCK.lock().expect("prepare lock");
+
+        let asset_path = "styles/t501x.xslt";
+        let asset_bytes = b"<xsl:stylesheet version=\"1.0\">fixture-t501x</xsl:stylesheet>";
+        let doc = "routes:\n  - id: xslt501\n    from: timer:t\n    steps:\n      - to: \
+                   'xslt:styles/t501x.xslt'\n";
+        let (store, manifest_json) = build_in_memory_fixture(
+            doc,
+            asset_path,
+            super::super::policy::XSLT_ASSET_CLASS,
+            asset_path,
+            asset_bytes,
+        );
+        let mut store = store;
+        let (_root, missing) = missing_candidate();
+
+        let prepared = super::prepare_embedded_assets_with_candidates(
+            &mut store,
+            &manifest_json,
+            std::slice::from_ref(&missing),
+        )
+        .expect("prepare succeeds for an xslt-only store");
+        assert!(
+            prepared.is_none(),
+            "an xslt-only artifact must not materialize a per-boot directory"
+        );
+
+        let rewritten =
+            String::from_utf8(store.read("app.yaml").expect("site entry present").to_vec())
+                .expect("site entry is UTF-8");
+        let expected = utf8_percent_encode(
+            &super::embedded_ref("assets/styles/t501x.xslt"),
+            URI_SITE_SET,
+        )
+        .to_string();
+        assert!(
+            rewritten.contains(&expected),
+            "the xslt URI site must carry the embedded reference ({expected}): {rewritten}"
+        );
+        assert_eq!(
+            &camel_component_api::embedded_assets::get("assets/styles/t501x.xslt")
+                .expect("xslt asset registered")[..],
+            asset_bytes,
+            "the registry must hold the exact xslt bytes"
+        );
+    }
+
+    /// Mission 351: an xsd-class artifact boots with `Ok(None)`, rewrites
+    /// its URI site to the encoded reference, and registers the bytes.
+    #[test]
+    fn xsd_asset_boots_without_system_temp() {
+        let _serial = PREPARE_LOCK.lock().expect("prepare lock");
+
+        let asset_path = "schemas/a501x.xsd";
+        let asset_bytes = b"<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"/>";
+        let doc = "routes:\n  - id: xsd501\n    from: timer:t\n    steps:\n      - to: \
+                   'validator:schemas/a501x.xsd'\n";
+        let (store, manifest_json) = build_in_memory_fixture(
+            doc,
+            asset_path,
+            super::super::policy::XSD_ASSET_CLASS,
+            asset_path,
+            asset_bytes,
+        );
+        let mut store = store;
+        let (_root, missing) = missing_candidate();
+
+        let prepared = super::prepare_embedded_assets_with_candidates(
+            &mut store,
+            &manifest_json,
+            std::slice::from_ref(&missing),
+        )
+        .expect("prepare succeeds for an xsd-only store");
+        assert!(
+            prepared.is_none(),
+            "an xsd-only artifact must not materialize a per-boot directory"
+        );
+
+        let rewritten =
+            String::from_utf8(store.read("app.yaml").expect("site entry present").to_vec())
+                .expect("site entry is UTF-8");
+        let expected = utf8_percent_encode(
+            &super::embedded_ref("assets/schemas/a501x.xsd"),
+            URI_SITE_SET,
+        )
+        .to_string();
+        assert!(
+            rewritten.contains(&expected),
+            "the xsd URI site must carry the embedded reference ({expected}): {rewritten}"
+        );
+        assert_eq!(
+            &camel_component_api::embedded_assets::get("assets/schemas/a501x.xsd")
+                .expect("xsd asset registered")[..],
+            asset_bytes,
+            "the registry must hold the exact xsd bytes"
+        );
+    }
+
+    /// Mission 351: a sql-class artifact boots with `Ok(None)`, rewrites
+    /// its `sql:file:` URI operand to the encoded reference, and
+    /// registers the bytes.
+    #[test]
+    fn sql_asset_boots_without_system_temp() {
+        let _serial = PREPARE_LOCK.lock().expect("prepare lock");
+
+        let asset_path = "queries/q501x.sql";
+        let asset_bytes = b"SELECT 501 AS marker;\n";
+        let doc = "routes:\n  - id: sql501\n    from: timer:t\n    steps:\n      - to: \
+                   'sql:file:queries/q501x.sql'\n";
+        let (store, manifest_json) = build_in_memory_fixture(
+            doc,
+            asset_path,
+            super::super::policy::SQL_ASSET_CLASS,
+            asset_path,
+            asset_bytes,
+        );
+        let mut store = store;
+        let (_root, missing) = missing_candidate();
+
+        let prepared = super::prepare_embedded_assets_with_candidates(
+            &mut store,
+            &manifest_json,
+            std::slice::from_ref(&missing),
+        )
+        .expect("prepare succeeds for a sql-only store");
+        assert!(
+            prepared.is_none(),
+            "a sql-only artifact must not materialize a per-boot directory"
+        );
+
+        let rewritten =
+            String::from_utf8(store.read("app.yaml").expect("site entry present").to_vec())
+                .expect("site entry is UTF-8");
+        let expected = utf8_percent_encode(
+            &super::embedded_ref("assets/queries/q501x.sql"),
+            URI_SITE_SET,
+        )
+        .to_string();
+        assert!(
+            rewritten.contains(&expected),
+            "the sql URI site must carry the embedded reference ({expected}): {rewritten}"
+        );
+        assert_eq!(
+            &camel_component_api::embedded_assets::get("assets/queries/q501x.sql")
+                .expect("sql asset registered")[..],
+            asset_bytes,
+            "the registry must hold the exact sql bytes"
+        );
+    }
+
+    /// Mission 351: a store carrying ALL the in-memory classes requests
+    /// no per-boot directory. If any disk-class path ever ran, the
+    /// sentinel directory would gain a `camel-assets-*` entry — so zero
+    /// entries is the zero-temp-writes proof.
+    #[test]
+    fn no_unrequested_temp_writes_at_boot() {
+        let _serial = PREPARE_LOCK.lock().expect("prepare lock");
+
+        let xslt = "styles/t501z.xslt";
+        let xsd = "schemas/a501z.xsd";
+        let sql = "queries/q501z.sql";
+        let xslt_bytes = b"<xsl:stylesheet version=\"1.0\"/>";
+        let xsd_bytes = b"<xs:schema xmlns:xs=\"http://www.w3.org/2001/XMLSchema\"/>";
+        let sql_bytes = b"SELECT 501;\n";
+        let doc = "routes:\n  - id: xslt501z\n    from: timer:xslt\n    steps:\n      - to: \
+                   'xslt:styles/t501z.xslt'\n  - id: xsd501z\n    from: timer:xsd\n    steps:\n      \
+                   - to: 'validator:schemas/a501z.xsd'\n  - id: sql501z\n    from: timer:sql\n    \
+                   steps:\n      - to: 'sql:file:queries/q501z.sql'\n";
+        let store = VirtualDocumentStore::build_with_assets(
+            "app.yaml",
+            &[StoreDocument {
+                path: "app.yaml".to_string(),
+                kind: StoreEntryKind::Route,
+                bytes: doc.as_bytes().to_vec(),
+            }],
+            &[
+                StoreAsset {
+                    path: xslt.to_string(),
+                    class: Some(super::super::policy::XSLT_ASSET_CLASS.to_string()),
+                    bytes: xslt_bytes.to_vec(),
+                },
+                StoreAsset {
+                    path: xsd.to_string(),
+                    class: Some(super::super::policy::XSD_ASSET_CLASS.to_string()),
+                    bytes: xsd_bytes.to_vec(),
+                },
+                StoreAsset {
+                    path: sql.to_string(),
+                    class: Some(super::super::policy::SQL_ASSET_CLASS.to_string()),
+                    bytes: sql_bytes.to_vec(),
+                },
+            ],
+            &[],
+            &["app.yaml".to_string()],
+            &[
+                SubstitutionEntry {
+                    asset: format!("assets/{xslt}"),
+                    context: SubstitutionContext::Uri,
+                    declared: xslt.to_string(),
+                    document: "app.yaml".to_string(),
+                    spans: vec![declared_span(doc, xslt)],
+                },
+                SubstitutionEntry {
+                    asset: format!("assets/{xsd}"),
+                    context: SubstitutionContext::Uri,
+                    declared: xsd.to_string(),
+                    document: "app.yaml".to_string(),
+                    spans: vec![declared_span(doc, xsd)],
+                },
+                SubstitutionEntry {
+                    asset: format!("assets/{sql}"),
+                    context: SubstitutionContext::Uri,
+                    declared: sql.to_string(),
+                    document: "app.yaml".to_string(),
+                    spans: vec![declared_span(doc, sql)],
+                },
+            ],
+        )
+        .expect("store builds");
+        let manifest =
+            super::manifest::derive_for_store(&store, TrailerKind::Route, &[]).expect("manifest");
+        let manifest_json = manifest.to_canonical_json();
+
+        let sentinel = tempfile::tempdir().expect("sentinel directory");
+        let mut store = store;
+        let prepared = super::prepare_embedded_assets_with_candidates(
+            &mut store,
+            &manifest_json,
+            &[sentinel.path().to_path_buf()],
+        )
+        .expect("prepare succeeds for an in-memory-only store");
+        assert!(
+            prepared.is_none(),
+            "no in-memory class may require a materialization directory"
+        );
+        assert_eq!(
+            std::fs::read_dir(sentinel.path())
+                .expect("sentinel directory readable")
+                .count(),
+            0,
+            "no disk-class path may run for an in-memory-only artifact"
+        );
+    }
+
+    /// The embedded-reference prefix is shared by two leaf crates
+    /// (`camel-proto-compiler` for the proto class and
+    /// `camel-component-api` for the xslt/xsd/sql classes). They cannot
+    /// reference each other (both sit below `camel-cli` in the layering),
+    /// so this test is the consistency guard: it fails the moment either
+    /// constant drifts on a grpc build.
+    #[cfg(feature = "grpc")]
+    #[test]
+    fn embedded_ref_prefixes_match_across_leaf_crates() {
+        assert_eq!(
+            camel_proto_compiler::embedded::EMBEDDED_REF_PREFIX,
+            camel_component_api::embedded_assets::EMBEDDED_REF_PREFIX
+        );
+    }
+
+    /// Unconditional companion to the cross-crate guard: the registry
+    /// constant must remain the canonical literal even in profiles where
+    /// the grpc (proto compiler) dependency is not compiled in. The crates
+    /// cannot reference each other, so the test is the consistency guard.
+    #[test]
+    fn embedded_ref_prefix_constant_matches_literal() {
+        assert_eq!(
+            camel_component_api::embedded_assets::EMBEDDED_REF_PREFIX,
+            "camel-embedded:"
         );
     }
 }

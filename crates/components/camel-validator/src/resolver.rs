@@ -20,7 +20,10 @@ pub struct FilesystemResolver;
 /// Maximum schema size read from disk (audit 2026-08-31, F4-6). Schemas are
 /// operator config; the cap is defense-in-depth against a URI pointing at a
 /// huge/unbounded file (e.g. a device file or a multi-GB log).
-const MAX_SCHEMA_BYTES: u64 = 16 * 1024 * 1024;
+///
+/// Shared with the embedded-registry path so registry bytes are capped
+/// exactly like disk bytes.
+pub(crate) const MAX_SCHEMA_BYTES: u64 = 16 * 1024 * 1024;
 
 impl ResourceResolver for FilesystemResolver {
     fn resolve(&self, path: &str) -> Result<Vec<u8>, CamelError> {

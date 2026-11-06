@@ -158,11 +158,11 @@ truststore pinning policy for signed artifacts plus the strict directive
 decision for unsigned ones (keypin and strictmode, ADR-0083).
 `compile::runtime` owns the artifact boot seam: registry population,
 substitution, and the materialization guard, all before the route/job
-kind dispatch; runtime.rs holds the zone's size ceiling (2042 lines after
-keypin's trust hooks and the strictmode unsigned-rejection increment), and
-the next growth of its verification block extracts `compile/verify.rs`
-first (deferral still holds, now recorded against the strictmode
-increment, bd rc-5u0jx item (c)). The canonical store model
+kind dispatch; runtime.rs holds the zone's size ceiling (2686 lines after
+the keypin trust hooks, the strictmode unsigned-rejection increment, and
+the sealed-artifact materialization increment), and the next growth of
+its verification block extracts `compile/verify.rs` first (deferral still
+holds, bd rc-5u0jx item (c)). The canonical store model
 lives in camel-dsl and is re-exported verbatim; this crate never defines a
 second one.
 
@@ -243,25 +243,35 @@ virtual store, its manifest, and one entry point — built by
 point. After decode and before the route/job kind dispatch —
 the single swap point, so both artifact kinds get identical treatment —
 the runtime populates the camel-bundles asset registry from the
-positionally paired store and manifest entries and applies the
-substitution table: recorded byte spans in document text and embedded
-config are rewritten last-offset-first to the confined per-boot
-materialization paths of the disk-written classes (`uri` sites
-percent-encoded, `literal` sites raw), while static files stay
-memory-served through the registry. The runtime never text-searches or
+positionally paired store and manifest entries and populates the
+embedded-asset registries for the in-memory classes, then applies the
+substitution table. Boot registers ALL in-memory classes' bytes (proto,
+xslt, xsd, sql) into the shared `camel_component_api::embedded_assets`
+registry; a grpc build ADDITIONALLY feeds the proto file class into its
+own `camel-proto-compiler::embedded` registry, and the validator's
+protobuf seam forwards shared-registry bytes into that proto-compiler
+registry when it compiles an embedded protobuf schema. Both registries
+share the reserved `camel-embedded:` prefix. Recorded byte spans in
+document text and embedded config are rewritten last-offset-first:
+in-memory classes become `camel-embedded:` references, and the TLS-family
+disk classes become confined per-boot materialization paths (`uri` sites
+percent-encoded, `literal` sites raw). Static files stay memory-served
+through the camel-bundles registry. The runtime never text-searches or
 canonicalizes declared strings, and TLS-class resolution is embedded-only
 with no host fallback. The substitution path-safety rule (valid UTF-8, no
 ASCII control characters at all sites; `literal` sites limited to
 `[A-Za-z0-9._/+-]`) fails closed before boot. `compile::materialize`
 writes only substitution-targeted assets into a random per-boot directory
-under `std::env::temp_dir()` — directory 0700, files 0600 via
-`create_new`, the nearest-existing ancestor re-checked across every
-created component — and a guard removes the directory on shutdown AND
-boot failure; `SIGKILL`, `process::exit`, or the second-stop-signal
+under the first WRITABLE candidate — the system temp directory, falling
+back to a writable directory next to the artifact — with directory 0700,
+files 0600 via `create_new`, and the nearest-existing ancestor re-checked
+across every created component; a guard removes the directory on shutdown
+AND boot failure; `SIGKILL`, `process::exit`, or the second-stop-signal
 force-exit bypasses the guard and leaves residue (documented, bd
-rc-0ks57). An artifact with only static-file assets needs no writable
-temp; one with a disk-written class exits 2 before boot when
-`std::env::temp_dir()` is unwritable. Route artifacts call
+rc-0ks57). An artifact with only in-memory or static-file assets needs no
+writable location; one with a TLS-family disk class exits 2 before boot
+when no candidate is writable, with the path-free typed `TempUnavailable`
+diagnostic naming the class. Route artifacts call
 `camel_dsl::discover_virtual_store`, register every referenced route, and
 reuse the existing `camel run` boot, context start, signal shutdown,
 report, and exit handling with watch disabled; job artifacts consume the

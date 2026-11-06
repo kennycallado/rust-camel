@@ -1,6 +1,8 @@
 # camel compile
 
-`camel compile` packs one route or job document into a self-contained executable artifact. The artifact is a copy of the current Camel executable with an appended trailer that carries the documents. It runs on a target host without a source tree, route files, or a toolchain, and it performs no extraction; the TLS, xslt, xsd, and sql classes materialize into a confined per-boot directory under the system temp directory.
+`camel compile` packs one route or job document into a self-contained executable artifact. The artifact is a copy of the current Camel executable with an appended trailer that carries the documents. It runs on a target host without a source tree, route files, or a toolchain, and it performs no extraction; the `xslt`, `xsd`, and `sql` asset classes resolve in process from the embedded-asset registry and write nothing. The TLS classes (certificate, private key, client CA) materialize into a confined per-boot directory under the system temp directory; when that location is not writable, the artifact falls back to a writable directory next to the artifact. On a host with no writable location the boot fails before startup with a typed error naming the class and the requirement. An abrupt kill (`SIGKILL`, `process::exit`, or the in-tree force-exit on a second stop signal) bypasses the removal guard and may leave the per-boot directory behind.
+
+Embedded `xsd` assets support standalone schemas. A schema with `import` or `include` (or an alias to a non-embedded resource) fails at boot with a typed error naming the missing resource.
 
 The format is a native Linux preview: the only accepted target is the native Linux triple of the compiling executable.
 

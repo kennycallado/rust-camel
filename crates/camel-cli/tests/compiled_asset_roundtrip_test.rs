@@ -12,7 +12,10 @@
 //! the confined materialization: the child's `TMPDIR` points at a
 //! directory the parent controls, so materialized per-boot directories
 //! (`camel-assets-…`) are observable while the artifact runs and their
-//! absence after exit proves guard cleanup. Materialized bytes are
+//! absence after exit proves guard cleanup. In-memory classes (`xslt
+//! stylesheet`, `xsd schema`, `sql file`) are the counter-contract:
+//! their artifacts register into the embedded registry and must leave
+//! the watched root empty at ALL times. Materialized bytes are
 //! read mid-run: the "context started" marker is emitted only after
 //! the pre-boot prepare phase, so everything materialized is on disk
 //! by the time the marker is visible, and the guard removes the
@@ -129,8 +132,9 @@ fn fixture_dir() -> PathBuf {
 /// A one-shot job whose pipeline fails deterministically AFTER boot (the
 /// `direct:boom` consumer sends to a `direct:` endpoint with no
 /// consumer) while an UNUSED inline route carries the `xslt:` asset
-/// reference: the stylesheet materializes at boot, then the pipeline
-/// fails — the guard must remove the per-boot directory at exit.
+/// reference: the stylesheet is an in-memory class — it resolves through
+/// the registry and NO per-boot directory appears — then the pipeline
+/// fails with exit 1 and the watched root stays empty throughout.
 const FAILING_XSLT_JOB_DOC: &str = "\
 execute:
   mode: one-shot
@@ -205,14 +209,16 @@ routes:
           static_dir: www
 ";
 
-/// The disk-written-class round trip (Task 3.3): `xslt:`,
-/// `validator:`, and `sql:file:` in ONE artifact. All three consumers
-/// resolve their substituted confined path eagerly — the xslt endpoint
-/// reads the stylesheet and the validator compiles the schema at
-/// endpoint creation, the sql consumer reads the query file at
-/// consumer start (before the pool init, which uses the in-memory
-/// sqlite URL so no database server is needed). Boot success proves
-/// all three substituted paths resolved.
+/// The in-memory-class round trip (Task 3.3, landed class split):
+/// `xslt:`, `validator:`, and `sql:file:` in ONE artifact — all three
+/// are in-memory classes. Boot registers their bytes into the embedded
+/// registry and the consumers resolve their `camel-embedded:` refs
+/// eagerly — the xslt endpoint reads the stylesheet and the validator
+/// compiles the schema at endpoint creation, the sql consumer reads the
+/// query file at consumer start (before the pool init, which uses the
+/// in-memory sqlite URL so no database server is needed). Boot success
+/// proves all three registry resolutions; the artifact must create NO
+/// per-boot directory.
 const MULTI_CLASS_DOC: &str = "\
 routes:
   - id: xslt-route
@@ -319,7 +325,6 @@ O3k2xlmxSHocawK37e4oM2fHTSzupZP56725RxQWon+bbuxIopDQUh5A
 /// One compiled fixture artifact.
 struct Fixture {
     failing_xslt_job: PathBuf,
-    tls_route: PathBuf,
     static_route: PathBuf,
     tls_listener: PathBuf,
     tls_block: PathBuf,
@@ -375,14 +380,14 @@ fn fixture() -> &'static Fixture {
 
         // TLS route with its five PEM fixtures under certs/. The key
         // fields are the secret family, so the compile needs the
-        // `--embed-secrets` opt-in. This artifact serves the pre-boot
-        // failure paths only (see the module docs).
+        // `--embed-secrets` opt-in. The artifact is compiled below as
+        // `tlsblock.bin` and serves the pre-boot failure paths only
+        // (see the module docs).
         std::fs::create_dir_all(dir.join("certs")).expect("mkdir certs");
         std::fs::write(dir.join("app.yaml"), TLS_ROUTE_DOC).expect("write tls doc");
         for name in ["tls.crt", "tls.key", "svc.crt", "svc.key", "ca.pem"] {
             std::fs::write(dir.join("certs").join(name), PEM_BYTES).expect("write pem fixture");
         }
-        let tls_route = compile("app.yaml", "tls.bin", &["--embed-secrets"]);
 
         // Static-tree route with a small www tree.
         std::fs::write(dir.join("static.yaml"), STATIC_ROUTE_DOC).expect("write static doc");
@@ -405,11 +410,11 @@ fn fixture() -> &'static Fixture {
 
         // TLS-block artifact for the pre-boot failure paths: bogus PEM
         // bytes suffice (never parsed) and `--embed-secrets` covers the
-        // key field. It reuses the SAME nested `app.yaml` document as
-        // `tls.bin` (its `certs/` files are already written), so those
-        // five nested assets exercise shared-subdirectory materialization
-        // on the failure path too — the pre-fix root-level strip
-        // workaround is gone.
+        // key field. It reuses the SAME nested `app.yaml` document
+        // written above (its `certs/` files are already written), so
+        // those five nested assets exercise shared-subdirectory
+        // materialization on the failure path too — the pre-fix
+        // root-level strip workaround is gone.
         let tls_block = compile("app.yaml", "tlsblock.bin", &["--embed-secrets"]);
 
         // Multi-class round trip: xslt + validator + sql:file: with
@@ -420,9 +425,10 @@ fn fixture() -> &'static Fixture {
         let multi_class = compile("multi.yaml", "multi.bin", &[]);
 
         // Validator-only route for the percent-encoding round trip
-        // (reuses transform.xslt is NOT wanted here: only the
-        // percent-decoding validator consumer tolerates the encoded
-        // confined path, so this document carries no other class).
+        // (reuses transform.xslt is NOT wanted here: the validator URI
+        // site carries the percent-encoded `camel-embedded%3A` spelling
+        // that only the percent-decoding validator consumer decodes, so
+        // this document carries no other class).
         std::fs::write(dir.join("valdoc.yaml"), VALIDATOR_DOC).expect("write validator doc");
         let validator_only = compile("valdoc.yaml", "valdoc.bin", &[]);
 
@@ -435,7 +441,6 @@ fn fixture() -> &'static Fixture {
 
         Fixture {
             failing_xslt_job,
-            tls_route,
             static_route,
             tls_listener,
             tls_block,
@@ -630,9 +635,9 @@ fn read_confined(dir: &Path) -> BTreeMap<String, Vec<u8>> {
 }
 
 /// Run the failing-xslt job artifact against a watched temp root. The
-/// per-boot materialization directory (`camel-assets-…`) must appear
-/// while the artifact runs and must be gone at exit — guard cleanup on
-/// failure — with the job's pipeline failure as the exit cause.
+/// xslt stylesheet is an in-memory class: NO per-boot materialization
+/// directory (`camel-assets-…`) may appear at all — the job fails with
+/// its pipeline exit 1 and the watched root stays empty throughout.
 ///
 /// Strengthened (Task 3.3 review follow-up) with a SECOND case: an
 /// exit-2 boot failure AFTER materialization (the TLS-block artifact
@@ -642,8 +647,8 @@ fn read_confined(dir: &Path) -> BTreeMap<String, Vec<u8>> {
 #[test]
 fn materialize_guard_removes_directory_on_boot_failure() {
     child_guard();
-    // ---- Case 1 (Task 3.2): exit-1 pipeline failure after
-    // materialization.
+    // ---- Case 1 (Task 3.2): exit-1 pipeline failure; the in-memory
+    // class materializes nothing.
     let (deploy, artifact) = deploy_artifact(&fixture().failing_xslt_job);
     let watched = tempfile::Builder::new()
         .prefix("camel-asset-watched-")
@@ -670,12 +675,13 @@ fn materialize_guard_removes_directory_on_boot_failure() {
         "the failing job pipeline exits 1; captured: {captured}"
     );
     assert!(
-        observed.is_some(),
-        "the per-boot materialization directory must have been observed in the watched root"
+        observed.is_none(),
+        "an in-memory class must not materialize a per-boot directory; found: {:?}",
+        observed
     );
     assert!(
         entries_of(watched.path()).is_empty(),
-        "the guard must remove the per-boot directory at exit; left behind: {:?}",
+        "the in-memory failure path leaves the watched root empty; left behind: {:?}",
         entries_of(watched.path())
     );
 
@@ -719,43 +725,64 @@ fn materialize_guard_removes_directory_on_boot_failure() {
     );
 }
 
-/// A disk-written class (TLS) with an UNWRITABLE temp override exits 2
-/// BEFORE boot with the class-and-temp diagnostic — never a route or
-/// configuration boot.
+/// A disk-written TLS class with an UNWRITABLE system temp directory
+/// now BOOTS via the TWO-CANDIDATE fallback chain: materialization is
+/// tried in `std::env::temp_dir()` first, then in a writable directory
+/// next to the running artifact (`current_exe`'s parent). The system
+/// temp candidate (a regular FILE, ENOTDIR for every user including
+/// root) is never written; the listener boots from the confined
+/// artifact-adjacent materialization and shuts down cleanly. The typed
+/// exit-2 diagnostic fires only when NO candidate is writable; that
+/// branch is unit-covered by
+/// `compile::runtime::tests::error_names_the_asset_class_and_requirement`.
 #[test]
-fn disk_written_class_without_writable_temp_fails_before_boot() {
+fn disk_written_class_without_writable_temp_falls_back_to_artifact_dir() {
     child_guard();
-    let (deploy, artifact) = deploy_artifact(&fixture().tls_route);
-    let watched = tempfile::tempdir().expect("watched temp root");
+    let _guard = BOOT_SERIAL.lock().expect("boot serial");
+    let (deploy, artifact) = deploy_artifact(&fixture().tls_listener);
+    let watched = tempfile::Builder::new()
+        .prefix("camel-asset-watched-")
+        .tempdir()
+        .expect("watched temp root");
     // A regular FILE as TMPDIR: `tempdir_in` fails with ENOTDIR for
     // every user, including root — a deterministic unwritable temp.
     let blocker = watched.path().join("blocker");
     std::fs::write(&blocker, b"not a directory\n").expect("plant blocker file");
 
     let mut child = spawn_child(
-        "disk_written_class_without_writable_temp_fails_before_boot",
+        "disk_written_class_without_writable_temp_falls_back_to_artifact_dir",
         deploy.path(),
         &artifact,
         &[("TMPDIR", blocker.to_str().expect("blocker utf-8"))],
     );
     let drained = spawn_drained(&mut child);
+    assert!(
+        wait_for_marker(
+            &mut child,
+            &drained.markers(),
+            "context started",
+            Duration::from_secs(180)
+        ),
+        "the TLS listener must boot through the artifact-adjacent fallback: {}",
+        drained.captured()
+    );
+    common::send_term(&child.0);
     let code = wait_exit_code(&mut child, Duration::from_secs(180));
     let captured = drained.finish();
     assert_eq!(
-        code, 2,
-        "an unavailable writable temp exits 2 before boot; captured: {captured}"
+        code, 0,
+        "SIGTERM shuts down gracefully; captured: {captured}"
     );
     assert!(
-        captured.contains("client CA") || captured.contains("certificate"),
-        "the diagnostic names the materialized asset class; captured: {captured}"
+        !captured.contains("requires a writable directory"),
+        "the artifact-adjacent fallback must engage, not the typed no-writable diagnostic; \
+         captured: {captured}"
     );
-    assert!(
-        captured.to_lowercase().contains("temp"),
-        "the diagnostic names the missing writable temp; captured: {captured}"
-    );
-    assert!(
-        !captured.contains("context started"),
-        "no route boot may happen; captured: {captured}"
+    assert_eq!(
+        entries_of(watched.path()),
+        vec!["blocker".to_string()],
+        "the unwritable system temp root must gain no per-boot directory; found: {:?}",
+        entries_of(watched.path())
     );
 }
 
@@ -1009,14 +1036,18 @@ fn round_trip_tls_materializes_confined_and_boots() {
 /// content — two files under ONE shared `certs/` directory, the exact
 /// shape the pre-fix missing-parent walk rejected with `File exists`.
 /// With the source tree absent, boot success requires the substitution —
-/// the listener's PEM parse opens the substituted confined paths.
+/// the listener's PEM parse opens the substituted confined paths. The
+/// watched root name carries a space AND a literal `%`: the confined
+/// materialization path inherits both, so the percent-encoded
+/// substituted URI value round-trips the endpoint's decode-once — the
+/// end-to-end hostile-path coverage for a materialized TLS class.
 #[test]
 fn round_trip_tls_uri_params_materialize_and_substitute() {
     child_guard();
     let _guard = BOOT_SERIAL.lock().expect("boot serial");
     let (deploy, artifact) = deploy_artifact(&fixture().tls_listener);
     let watched = tempfile::Builder::new()
-        .prefix("camel-asset-watched-")
+        .prefix("watched dir%")
         .tempdir()
         .expect("watched temp root");
 
@@ -1060,15 +1091,18 @@ fn round_trip_tls_uri_params_materialize_and_substitute() {
     assert!(entries_of(watched.path()).is_empty(), "shutdown cleanup");
 }
 
-/// `xslt:`, `validator:`, and `sql:file:` substitution round trip
-/// (Task 3.3): all three consumers resolve their substituted confined
-/// path eagerly (stylesheet read and schema compile at endpoint
-/// creation, query-file read at consumer start — the latter before the
-/// in-memory sqlite pool init, so no database server is needed), so
-/// boot success proves resolution, and the confined files hold the
-/// embedded bytes.
+/// `xslt:`, `validator:`, and `sql:file:` in-memory round trip (Task
+/// 3.3, landed class split): all three are in-memory classes — boot
+/// registers the stylesheet, schema, and query bytes into the embedded
+/// registry and the consumers resolve their `camel-embedded:` refs
+/// eagerly (stylesheet read and schema compile at endpoint creation,
+/// query-file read at consumer start — the latter before the in-memory
+/// sqlite pool init, so no database server is needed). Boot success
+/// proves all three registry resolutions, and the artifact must create
+/// NO per-boot directory: the sealed design materializes only the
+/// TLS-family disk classes.
 #[test]
-fn round_trip_xslt_validator_sql_materialize_and_substitute() {
+fn round_trip_xslt_validator_sql_resolve_from_registry() {
     child_guard();
     let _guard = BOOT_SERIAL.lock().expect("boot serial");
     let (deploy, artifact) = deploy_artifact(&fixture().multi_class);
@@ -1087,7 +1121,7 @@ fn round_trip_xslt_validator_sql_materialize_and_substitute() {
         .expect("watched temp root");
 
     let mut child = spawn_child(
-        "round_trip_xslt_validator_sql_materialize_and_substitute",
+        "round_trip_xslt_validator_sql_resolve_from_registry",
         deploy.path(),
         &artifact,
         &[("TMPDIR", watched.path().to_str().expect("watched utf-8"))],
@@ -1100,25 +1134,14 @@ fn round_trip_xslt_validator_sql_materialize_and_substitute() {
             "context started",
             Duration::from_secs(180)
         ),
-        "all three substituted classes resolve at boot: {}",
+        "all three in-memory classes resolve through the embedded registry at boot: {}",
         drained.captured()
     );
-    let per_boot = per_boot_dir(watched.path()).expect("per-boot directory after boot marker");
-    let confined = read_confined(&per_boot);
     assert_eq!(
-        confined.get("transform.xslt").map(Vec::as_slice),
-        Some(XSLT_BYTES),
-        "the stylesheet materializes byte-identical"
-    );
-    assert_eq!(
-        confined.get("schema.json").map(Vec::as_slice),
-        Some(SCHEMA_BYTES),
-        "the schema materializes byte-identical"
-    );
-    assert_eq!(
-        confined.get("query.sql").map(Vec::as_slice),
-        Some(QUERY_BYTES),
-        "the sql query file materializes byte-identical"
+        per_boot_dir(watched.path()),
+        None,
+        "in-memory classes must not materialize a per-boot directory; found: {:?}",
+        entries_of(watched.path())
     );
     common::send_term(&child.0);
     let code = wait_exit_code(&mut child, Duration::from_secs(180));
@@ -1129,8 +1152,48 @@ fn round_trip_xslt_validator_sql_materialize_and_substitute() {
     );
     assert!(
         entries_of(watched.path()).is_empty(),
-        "shutdown removes the per-boot directory; left behind: {:?}",
+        "an in-memory-class artifact must create no temp files; found: {:?}",
         entries_of(watched.path())
+    );
+
+    // ---- Unwritable TMPDIR variant (the "In-process classes write
+    // nothing at boot" GIVEN): a regular FILE as TMPDIR is ENOTDIR for
+    // every user, including root — the in-memory artifact must still
+    // boot registry-only and leave the watched root untouched.
+    let (deploy2, artifact2) = deploy_artifact(&fixture().multi_class);
+    let watched2 = tempfile::tempdir().expect("watched temp root");
+    let blocker = watched2.path().join("blocker");
+    std::fs::write(&blocker, b"not a directory\n").expect("plant blocker file");
+    let mut child2 = spawn_child(
+        "round_trip_xslt_validator_sql_resolve_from_registry",
+        deploy2.path(),
+        &artifact2,
+        &[("TMPDIR", blocker.to_str().expect("blocker utf-8"))],
+    );
+    let drained2 = spawn_drained(&mut child2);
+    assert!(
+        wait_for_marker(
+            &mut child2,
+            &drained2.markers(),
+            "context started",
+            Duration::from_secs(180)
+        ),
+        "the in-memory artifact boots with no writable temp: {}",
+        drained2.captured()
+    );
+    common::send_term(&child2.0);
+    let code2 = wait_exit_code(&mut child2, Duration::from_secs(180));
+    let captured2 = drained2.finish();
+    assert_eq!(
+        code2, 0,
+        "SIGTERM shuts down gracefully; captured: {captured2}"
+    );
+    assert_eq!(
+        entries_of(watched2.path()),
+        vec!["blocker".to_string()],
+        "the in-memory artifact writes nothing (the watched root holds only the planted \
+         blocker): {:?}",
+        entries_of(watched2.path())
     );
 }
 
@@ -1139,7 +1202,9 @@ fn round_trip_xslt_validator_sql_materialize_and_substitute() {
 /// rewritten store at the single swap point, so confinement,
 /// substitution to confined paths, byte-identical materialized content,
 /// and shutdown cleanup are identical to the route kind. The job
-/// completes (exit 0).
+/// completes (exit 0). The `xslt:` stylesheet rides along as an
+/// in-memory class: it resolves through the registry and must NOT
+/// materialize into the confined directory.
 ///
 /// Task 3.3 deviation: the block's "document-field TLS cert" job asset
 /// is unbootable in this runtime (a `tls:` block is an unknown DSL
@@ -1178,7 +1243,7 @@ fn round_trip_job_artifact_materializes_and_substitutes_identically() {
         watched.path(),
         &mut child,
         Duration::from_secs(180),
-        &["transform.xslt", "certs/svc.crt", "certs/svc.key"],
+        &["certs/svc.crt", "certs/svc.key"],
     );
     let code = wait_exit_code(&mut child, Duration::from_secs(180));
     let captured = drained.finish();
@@ -1189,11 +1254,10 @@ fn round_trip_job_artifact_materializes_and_substitutes_identically() {
             captured
         )
     });
-    assert_eq!(
-        confined.get("transform.xslt").map(Vec::as_slice),
-        Some(XSLT_BYTES),
-        "the substituted stylesheet resolves inside the confined directory with byte-identical \
-         content (observed at {})",
+    assert!(
+        !confined.contains_key("transform.xslt"),
+        "the stylesheet is an in-memory class and must not materialize into the confined \
+         directory (observed at {})",
         per_boot.display()
     );
     assert_eq!(
@@ -1518,12 +1582,15 @@ fn round_trip_read_only_contract_by_class() {
 }
 
 /// Percent-encoded substituted `uri`-site values round-trip through the
-/// `validator:` percent-decode (Task 3.3): the per-boot path contains a
-/// space AND a literal `%`, so the substituted URI value is
-/// percent-encoded; the validator's decode recovers the exact confined
-/// path and the schema loads byte-identical (boot success is the decode
-/// proof — `CompiledValidator::compile` opens the decoded path at
-/// endpoint creation).
+/// `validator:` percent-decode (Task 3.3, landed class split): the
+/// runtime writes the percent-encoded `camel-embedded%3A` spelling into
+/// the `validator:` URI site, the validator's decode-once recovers the
+/// `camel-embedded:` reference, and the schema compiles from the
+/// registry (boot success is the decode proof —
+/// `CompiledValidator::compile` resolves the decoded reference at
+/// endpoint creation). The hostile temp root — its name carries a space
+/// AND a literal `%` — is retained as the tripwire: the in-memory class
+/// needs no materialization, so no per-boot directory may appear.
 #[test]
 fn substitution_percent_encoding_round_trips_validator_decode() {
     child_guard();
@@ -1534,7 +1601,7 @@ fn substitution_percent_encoding_round_trips_validator_decode() {
         "no host schema"
     );
     // The watched root name carries a space and a literal %: the
-    // per-boot path inherits both.
+    // hostile name the in-memory class must ignore entirely.
     let watched = tempfile::Builder::new()
         .prefix("watched dir%")
         .tempdir()
@@ -1570,16 +1637,15 @@ fn substitution_percent_encoding_round_trips_validator_decode() {
             "context started",
             Duration::from_secs(180)
         ),
-        "the validator percent-decoded the substituted value to the exact confined path: {}",
+        "the validator percent-decoded the substituted `camel-embedded%3A` value to the \
+         registry reference: {}",
         drained.captured()
     );
-    let per_boot = per_boot_dir(watched.path()).expect("per-boot directory after boot marker");
     assert_eq!(
-        read_confined(&per_boot)
-            .get("schema.json")
-            .map(Vec::as_slice),
-        Some(SCHEMA_BYTES),
-        "the schema loads from the confined path with byte-identical content"
+        per_boot_dir(watched.path()),
+        None,
+        "an in-memory class must not materialize a per-boot directory; found: {:?}",
+        entries_of(watched.path())
     );
     common::send_term(&child.0);
     let code = wait_exit_code(&mut child, Duration::from_secs(180));

@@ -1,0 +1,15 @@
+{
+  "verdict": "BLESS",
+  "expert": "experts/e_gpt",
+  "hash": "sha256:630dad0db271e810c5d77b4939d9853b69f197ae806b9a0092e4c2e42f5b7271",
+  "kind": "plan",
+  "rounds": 3,
+  "history": [
+    "spec: 3 e_gpt rounds (APPROVED) — XSD seam correction, percent-encoding decode seam, aggregate XSD budget semantics",
+    "plan review: r_glm 3 Important + 6 Minor findings, all fixed and verified",
+    "plan bless round 1: BLESS-WITH-FIXES (6 fixes: complete URI decode, path-free TLS diagnostics, XSD alias/budget semantics, worker contracts, hermetic mission tests, docs accuracy)",
+    "plan bless round 2: BLESS-WITH-FIXES (3 gaps: %FF/encoded-two-key/%253A tests, root-relative alias fixtures, targeted forbidden-text assertion)",
+    "plan bless round 3: BLESS"
+  ],
+  "hash_scope": "proposal.md, design.md, specs/cli-compile/spec.md, tasks.md"
+}

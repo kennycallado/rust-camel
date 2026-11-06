@@ -733,10 +733,42 @@ impl SqlEndpointConfig {
     /// was previously called in `from_uri()`. Must be invoked during async init
     /// (producer pool init or consumer start) — never in a synchronous context.
     ///
-    /// After this call, `self.query` contains the file content (trimmed) and
-    /// `self.source_path` is cleared to prevent re-reading.
+    /// `file:` operands naming a registered embedded asset
+    /// (`camel-embedded:<asset path>` or its percent-encoded spelling) resolve
+    /// from the boot registry with zero filesystem access; an unregistered
+    /// reference never probes the host filesystem — the prefix is reserved (see
+    /// `camel-proto-compiler::embedded`). Only prefix-less values are read from
+    /// disk. The canonical spelling normally arrives through `from_uri`, whose
+    /// `parse_uri` percent-decodes the path exactly once; `resolve_ref` accepts
+    /// both spellings so a directly-placed `source_path` resolves either way.
+    ///
+    /// After this call, `self.query` contains the content (trimmed) and
+    /// `self.source_path` is retained so callers can still inspect the original
+    /// reference.
     pub async fn resolve_file_query(&mut self) -> Result<(), CamelError> {
         if let Some(file_path) = self.source_path.take() {
+            // Embedded references are resolved before any filesystem access.
+            // `camel-cli` registers sql assets at boot from digest-verified
+            // store entries, so a sealed artifact boots without materializing
+            // a file. The encoded spelling is private to
+            // `camel_component_api::embedded_assets`, so match it literally.
+            if file_path.starts_with(camel_component_api::embedded_assets::EMBEDDED_REF_PREFIX)
+                || file_path.starts_with(ENCODED_EMBEDDED_REF_PREFIX)
+            {
+                let Some(bytes) = camel_component_api::embedded_assets::resolve_ref(&file_path)
+                else {
+                    return Err(CamelError::Config(format!(
+                        "no embedded SQL file registered under '{file_path}'"
+                    )));
+                };
+                let contents = String::from_utf8(bytes.to_vec()).map_err(|e| {
+                    CamelError::Config(format!("Failed to read SQL file '{}': {}", file_path, e))
+                })?;
+                self.query = contents.trim().to_string();
+                self.source_path = Some(file_path);
+                return Ok(());
+            }
+
             let contents = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
                 CamelError::Config(format!("Failed to read SQL file '{}': {}", file_path, e))
             })?;
@@ -747,6 +779,12 @@ impl SqlEndpointConfig {
         Ok(())
     }
 }
+
+/// Percent-encoded spelling of
+/// `camel_component_api::embedded_assets::EMBEDDED_REF_PREFIX`, which is
+/// private. A value carrying either spelling is resolved against the boot
+/// registry and never against the filesystem.
+const ENCODED_EMBEDDED_REF_PREFIX: &str = "camel-embedded%3A";
 
 struct SslParamMapping {
     pg_key: &'static str,
@@ -1524,6 +1562,121 @@ mod tests {
             .await
             .expect("file query should resolve");
         assert_eq!(c.query, "SELECT * FROM users");
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    // Sealed artifacts (mission 351): embedded SQL references resolve from the
+    // process-global registry with zero filesystem access.
+    #[test]
+    fn encoded_embedded_prefix_literal_matches_registry_prefix() {
+        assert_eq!(
+            ENCODED_EMBEDDED_REF_PREFIX,
+            camel_component_api::embedded_assets::EMBEDDED_REF_PREFIX.replace(':', "%3A")
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_file_query_resolves_embedded_reference() {
+        const KEY: &str = "assets/sql/fixture61.sql";
+        camel_component_api::embedded_assets::register(KEY, b"SELECT 1".to_vec());
+
+        // The percent-encoded form travels through `parse_uri`, which decodes
+        // the path exactly once, so the canonical spelling reaches the config.
+        let mut from_uri = SqlEndpointConfig::from_uri(
+            "sql:file:camel-embedded%3Aassets%2Fsql%2Ffixture61.sql?db_url=sqlite://memory",
+        )
+        .expect("from_uri should accept the encoded embedded reference");
+        assert_eq!(
+            from_uri.source_path.as_deref(),
+            Some("camel-embedded:assets/sql/fixture61.sql"),
+            "parse_uri decodes the encoded prefix once into the canonical spelling"
+        );
+        from_uri
+            .resolve_file_query()
+            .await
+            .expect("registered embedded reference resolves");
+        assert_eq!(from_uri.query, "SELECT 1");
+
+        // A directly-placed canonical spelling resolves identically.
+        let mut direct = SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite://memory")
+            .expect("plain config");
+        direct.source_path = Some("camel-embedded:assets/sql/fixture61.sql".into());
+        direct
+            .resolve_file_query()
+            .await
+            .expect("canonical embedded reference resolves");
+        assert_eq!(direct.query, "SELECT 1");
+    }
+
+    #[tokio::test]
+    async fn resolve_file_query_fails_closed_on_unknown_reference() {
+        let mut config = SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite://memory")
+            .expect("plain config");
+        config.source_path = Some("camel-embedded:assets/sql/never-registered-61".into());
+
+        let err = config
+            .resolve_file_query()
+            .await
+            .expect_err("unregistered embedded reference must fail closed");
+        let message = err.to_string();
+        assert!(
+            message.contains("never-registered-61"),
+            "error must name the reference, got: {message}"
+        );
+        assert!(
+            message.contains("no embedded SQL file registered"),
+            "error must be the typed embedded failure, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_file_query_rejects_non_utf8_embedded_bytes() {
+        const KEY: &str = "assets/sql/bad62.sql";
+        camel_component_api::embedded_assets::register(KEY, vec![0xFF, 0xFE]);
+
+        let mut config = SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite://memory")
+            .expect("plain config");
+        config.source_path = Some("camel-embedded:assets/sql/bad62.sql".into());
+
+        let err = config
+            .resolve_file_query()
+            .await
+            .expect_err("non-UTF-8 embedded SQL bytes must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("bad62.sql"),
+            "error must name the reference, got: {message}"
+        );
+        assert!(
+            message.contains("Failed to read SQL file"),
+            "error must mirror the read-error wording, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_file_query_plain_file_unchanged() {
+        use std::io::Write;
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!(
+            "test_sql_plain61_{}.sql",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        {
+            let mut f = std::fs::File::create(&tmp).expect("create temp sql file");
+            writeln!(f, "SELECT 42 FROM plain61").expect("write temp sql file");
+        }
+        let mut config = SqlEndpointConfig::from_uri("sql:select 1?db_url=sqlite://memory")
+            .expect("plain config");
+        config.source_path = Some(tmp.to_string_lossy().into_owned());
+
+        config
+            .resolve_file_query()
+            .await
+            .expect("plain file query still resolves");
+        assert_eq!(config.query, "SELECT 42 FROM plain61");
         std::fs::remove_file(&tmp).ok();
     }
 

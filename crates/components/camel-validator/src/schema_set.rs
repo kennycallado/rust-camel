@@ -18,6 +18,9 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use camel_component_api::embedded_assets::{
+    EMBEDDED_REF_PREFIX, resolve_ref as resolve_embedded_ref,
+};
 use quick_xml::NsReader;
 use quick_xml::XmlVersion;
 use quick_xml::events::BytesStart;
@@ -46,6 +49,66 @@ pub const MAX_IMPORT_DEPTH: usize = 32;
 /// The XML Schema namespace. Only `import`/`include` elements in this
 /// namespace are reference edges; any other namespace binding is ignored.
 const XML_SCHEMA_NS: &str = "http://www.w3.org/2001/XMLSchema";
+
+/// Percent-encoded spelling of [`EMBEDDED_REF_PREFIX`], used when the
+/// reference travels inside a URI component.
+///
+/// `camel-component-api` keeps this constant private; the literal is repeated
+/// here so both spellings are detected before any filesystem attempt. A unit
+/// test pins it to the registry's canonical constant.
+pub(crate) const ENCODED_EMBEDDED_REF_PREFIX: &str = "camel-embedded%3A";
+
+/// True when `value` carries either embedded-reference spelling.
+///
+/// Prefix detection is lexical and never depends on decodability: a
+/// prefixed-but-malformed value must fail closed instead of falling through
+/// to filesystem discovery.
+pub(crate) fn is_embedded_ref(value: &str) -> bool {
+    value.starts_with(EMBEDDED_REF_PREFIX) || value.starts_with(ENCODED_EMBEDDED_REF_PREFIX)
+}
+
+/// The registry name carried by one embedded reference, or `None` when the
+/// value carries no prefix or its encoded spelling is not valid UTF-8 after
+/// one round of percent-decoding.
+///
+/// The decode rules are defined by
+/// [`camel_component_api::embedded_assets::resolve_ref`]: a canonical suffix
+/// is a literal registry key (never decoded); the encoded spelling is decoded
+/// in full, exactly once. `embedded_ref_name` MUST stay in lockstep with that
+/// resolver — drift would derive a root key that diverges from the
+/// registration the registry actually resolved.
+pub(crate) fn embedded_ref_name(value: &str) -> Option<String> {
+    if let Some(name) = value.strip_prefix(EMBEDDED_REF_PREFIX) {
+        return Some(name.to_string());
+    }
+    if value.starts_with(ENCODED_EMBEDDED_REF_PREFIX) {
+        let decoded = percent_encoding::percent_decode_str(value)
+            .decode_utf8()
+            .ok()?;
+        return decoded
+            .strip_prefix(EMBEDDED_REF_PREFIX)
+            .map(str::to_string);
+    }
+    None
+}
+
+/// Resolves an embedded schema reference to its registered bytes.
+///
+/// `Ok(None)` means the value carries neither prefix and the caller's
+/// filesystem path is unchanged. A prefixed value always resolves against the
+/// registry: an unregistered key is a typed error that names the full
+/// reference, never a filesystem probe.
+pub(crate) fn embedded_ref_bytes(value: &str) -> Result<Option<Vec<u8>>, ValidatorError> {
+    if !is_embedded_ref(value) {
+        return Ok(None);
+    }
+    match resolve_embedded_ref(value) {
+        Some(bytes) => Ok(Some(bytes.to_vec())),
+        None => Err(ValidatorError::endpoint(format!(
+            "no embedded schema registered under '{value}'"
+        ))),
+    }
+}
 
 /// A discovered schema set, keyed for transmission to the XML bridge.
 ///
@@ -165,6 +228,43 @@ fn discover_schema_set_with(
     // root systemId is the operator-facing name, not the symlink target's name.
     let root_system_id = normalize_virtual(root_name)?;
 
+    // Alias shape validation runs after root validation so the filesystem
+    // path's typed-error precedence is unchanged.
+    let normalized_aliases = normalize_aliases(aliases)?;
+
+    let mut discoverer = Discoverer {
+        virtual_root: parent.to_path_buf(),
+        canonical_root,
+        aliases: normalized_aliases,
+        cache: HashMap::new(),
+        seen: HashSet::new(),
+        resources: BTreeMap::new(),
+        total_bytes: 0,
+        queue: VecDeque::new(),
+        read,
+    };
+    discoverer.run(&root_system_id)?;
+
+    Ok(SchemaSet {
+        root_system_id,
+        resources: discoverer.resources,
+        aliases: discoverer.aliases,
+    })
+}
+
+/// Validates and normalizes the supplied absolute-URI alias map.
+///
+/// Enforces the [`MAX_SCHEMA_ALIASES`] cap and the alias-shape contract
+/// (absolute-URI keys, root-relative non-URI values, decode-once) shared by
+/// filesystem and embedded discovery.
+fn normalize_aliases(
+    aliases: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, ValidatorError> {
+    if aliases.len() > MAX_SCHEMA_ALIASES {
+        return Err(ValidatorError::endpoint(format!(
+            "schema_aliases exceeds the {MAX_SCHEMA_ALIASES}-entry cap"
+        )));
+    }
     let mut normalized_aliases: BTreeMap<String, String> = BTreeMap::new();
     for (uri, value) in aliases {
         if !is_absolute_uri(uri) {
@@ -185,24 +285,85 @@ fn discover_schema_set_with(
         }
         normalized_aliases.insert(uri.clone(), normalize_virtual(&decoded)?);
     }
+    Ok(normalized_aliases)
+}
 
-    let mut discoverer = Discoverer {
-        virtual_root: parent.to_path_buf(),
-        canonical_root,
-        aliases: normalized_aliases,
-        cache: HashMap::new(),
-        seen: HashSet::new(),
-        resources: BTreeMap::new(),
-        total_bytes: 0,
-        queue: VecDeque::new(),
-        read,
-    };
-    discoverer.run(&root_system_id)?;
+/// Typed fail-closed error for an embedded reference to something other than
+/// the root schema.
+fn embedded_missing(root_reference: &str, what: &str) -> ValidatorError {
+    ValidatorError::endpoint(format!(
+        "embedded schema '{root_reference}' {what} which is not embedded; \
+         sealed artifacts support standalone schemas — flatten or host the schema set"
+    ))
+}
+
+/// Discovers a schema set for an embedded (registry-backed) root schema.
+///
+/// A sealed artifact serves ONE standalone schema: the root bytes come from
+/// the process-global embedded-asset registry, and every `xs:import`/
+/// `xs:include` must resolve back to the root (directly or through a supplied
+/// alias). Any other reference is a typed error naming the missing resource;
+/// the host filesystem is never consulted.
+///
+/// Budgets reuse [`checked_insert`], so the root and its redundant alias
+/// entries count toward [`MAX_SCHEMA_RESOURCES`] and [`MAX_SCHEMA_BYTES`]
+/// exactly as filesystem discovery counts them. Embedded sets are depth-0, so
+/// [`MAX_IMPORT_DEPTH`] is not consulted.
+pub(crate) fn discover_embedded_schema_set(
+    root_bytes: &[u8],
+    root_reference: &str,
+    aliases: &BTreeMap<String, String>,
+) -> Result<SchemaSet, ValidatorError> {
+    let normalized_aliases = normalize_aliases(aliases)?;
+
+    let store_path = embedded_ref_name(root_reference).ok_or_else(|| {
+        ValidatorError::endpoint(format!(
+            "embedded schema reference '{root_reference}' has no UTF-8 store path"
+        ))
+    })?;
+    // A sealed artifact has no directory on disk: the virtual root is the
+    // store asset's file name (`assets/xsd/deep/root.xsd` -> `root.xsd`).
+    let root_file = store_path.rsplit('/').next().unwrap_or(store_path.as_str());
+    let root_system_id = normalize_virtual(root_file)?;
+
+    let mut resources = BTreeMap::new();
+    let mut total_bytes = 0usize;
+    // Budget check BEFORE any XML parsing: an oversized root must fail as a
+    // cap error, never as a parse error.
+    checked_insert(
+        &mut resources,
+        &mut total_bytes,
+        &root_system_id,
+        root_bytes,
+    )?;
+
+    for (uri, target) in &normalized_aliases {
+        if target != &root_system_id {
+            return Err(embedded_missing(
+                root_reference,
+                &format!("aliases '{uri}' to '{target}'"),
+            ));
+        }
+        // Redundant alias entry beside the relative root key; both byte
+        // values count toward the aggregate budget.
+        checked_insert(&mut resources, &mut total_bytes, uri, root_bytes)?;
+    }
+
+    for location in parse_schema_refs(root_bytes)? {
+        let target = resolve_ref(&root_system_id, &location, &normalized_aliases)?;
+        if target != root_system_id {
+            return Err(embedded_missing(
+                root_reference,
+                &format!("imports/includes '{location}'"),
+            ));
+        }
+        checked_insert(&mut resources, &mut total_bytes, &target, root_bytes)?;
+    }
 
     Ok(SchemaSet {
         root_system_id,
-        resources: discoverer.resources,
-        aliases: discoverer.aliases,
+        resources,
+        aliases: normalized_aliases,
     })
 }
 
