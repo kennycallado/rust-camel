@@ -1324,6 +1324,47 @@ async fn inbound_scope_big_property_binds_and_step_succeeds() {
     );
 }
 
+/// Canonical scenario "Map survives a property round-trip"
+/// (openspec/specs/language-value-boundary): a rhai script step stores
+/// `#{"a": 1, "b": [2, 3]}` into a property; a later rhai script reads it
+/// back, sees a map equal to the stored value, and reports the type `map`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rhai_map_property_round_trip() {
+    let steps = vec![
+        BuilderStep::DeclarativeSetProperty {
+            key: "m".to_string(),
+            value_source: ValueSourceDef::Expression(rhai(r#"#{"a": 1, "b": [2, 3]}"#)),
+        },
+        BuilderStep::DeclarativeSetProperty {
+            key: "round_trip_type".to_string(),
+            value_source: ValueSourceDef::Expression(rhai(r#"type_of(property("m"))"#)),
+        },
+        BuilderStep::DeclarativeSetProperty {
+            key: "round_trip_equal".to_string(),
+            value_source: ValueSourceDef::Expression(rhai(
+                r#"property("m") == #{"a": 1, "b": [2, 3]}"#,
+            )),
+        },
+    ];
+    let (result, _mock) = run_route("map-property-round-trip", steps, None).await;
+    let exchange = result.expect("the map property must survive the round-trip");
+    assert_eq!(
+        exchange.properties.get("m"),
+        Some(&serde_json::json!({"a": 1, "b": [2, 3]})),
+        "the stored property holds the exact map"
+    );
+    assert_eq!(
+        exchange.properties.get("round_trip_type"),
+        Some(&Value::String("map".to_string())),
+        "the later script must report the type `map`"
+    );
+    assert_eq!(
+        exchange.properties.get("round_trip_equal"),
+        Some(&Value::Bool(true)),
+        "the later script must see a map equal to the stored value"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Template-looking literals and env slots (task 2.2)
 // ---------------------------------------------------------------------------

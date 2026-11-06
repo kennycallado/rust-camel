@@ -1,7 +1,9 @@
 # Tracing capture guards: convention and inventory (rc-puo4f)
 
 Convention for the `ensure_global_tracing_default` test guard and the
-inventory of every guard copy, refreshed 2026-11-01 by mission 487.
+inventory of every guard copy, refreshed 2026-11-01 by mission 487 and
+2026-11-06 by mission 513 (bd rc-c436d) for the shared log-capture
+promotion (bd rc-421es).
 Source of the copies: commit `36ca7c73` (mission 167, bd rc-img5),
 which audited 29 files repo-wide and healed 21 of them with the
 `c3853198`-pattern OnceLock guard. This note consolidates the copies
@@ -52,19 +54,42 @@ parallel load (e_glm stage-4 note, mission 167).
 
 ## Shared home vs per-file copy
 
-Consolidate into a natural shared home only when one already exists
-within the same test-binary reachability:
+New capture helpers first try the promoted shared module:
+`camel_component_api::test_support::log_capture` (feature
+`test-support`; the `tracing-test` global-buffer family sits behind
+the opt-in `traced-test-capture` feature). A consumer crate reaches
+the shared module through a dev-dependency on `camel-component-api`
+with those features. That dev-dependency edge is the sanctioned shape
+(bd rc-421es); it supersedes the older "do not invent cross-crate
+test-deps" rule for this one dependency only. The shared module
+installs thread-local subscribers and never installs the process-global
+default, so every test binary keeps its own OnceLock guard. The shared
+module holds no guard copy and stays out of the inventory counts.
+
+A per-file guard copy remains correct when:
+
+- the test binary has no dev-dependency on `camel-component-api`, and
+  one capture site does not justify the new edge;
+- the crate keeps an in-crate natural home that also holds the local
+  guard (`camel-config` `config.rs` and `camel-processor`
+  `test_log_capture.rs` delegate their capture families to the shared
+  module and keep their guards);
+- the helper documents a deliberate do-not-merge decision
+  (`camel-processor` `data_format/test_util.rs`).
+
+In-crate natural homes still exist for binaries that do not use the
+shared module:
 
 - A crate-level `#[cfg(test)]` test module (`camel-dsl`:
   `src/lib.rs` `test_support`).
 - A crate-local capture helper module (`camel-config`:
-  `src/config.rs` `log_capture`).
+  `src/config.rs` `log_capture`, now a delegation wrapper).
 - A `tests/common` module for integration binaries
   (`camel-config`: `tests/common/mod.rs`).
 
 Where no natural home exists, keep the per-file copy. Do not invent
-new crates, `pub` API, or cross-crate test-deps to deduplicate
-(mission 167 convention decision). Multiple copies inside one test
+new crates or `pub` API to deduplicate (mission 167 convention
+decision). Multiple copies inside one test
 binary are harmless: each copy has its own `OnceLock`, exactly one
 `set_global_default` succeeds, and the losers ignore the expected
 `Err`. The guard is per-binary state; per-binary duplication is
@@ -77,12 +102,12 @@ inherent and accepted.
 | Location | Serves |
 | --- | --- |
 | `camel-dsl/src/lib.rs` (`test_support`) | `discovery.rs`, `env_int_probe.rs` call sites |
-| `camel-config/src/config.rs` (`log_capture`) | `config_tests/parity_golden_tests.rs` call site |
+| `camel-config/src/config.rs` (`log_capture`) | `config_tests/parity_golden_tests.rs` call site; `capture_warns` now delegates to `camel_component_api::test_support::log_capture`, the guard body stays (rc-421es) |
 | `camel-config/tests/common/mod.rs` | `tests/cache_repo_config.rs` call site (consolidated here by rc-puo4f) |
-| `camel-component-wasm/tests/common/mod.rs` | `tests/source_bind_gate.rs` call site (consolidated here by rc-puo4f) |
+| `camel-component-wasm/tests/common/mod.rs` | `tests/source_bind_gate.rs` call site (guard consolidated here by rc-puo4f; the `source_bind_gate` capture family moved to the shared module by rc-421es) |
 | `camel-core/tests/route_interception/common.rs` | `tests/route_interception/support.rs` `capture_tracing` call site (floor added by rc-6jarb) |
 | `camel-template/src/test_support.rs` (`#[cfg(all(test, feature = "default"))]`) | `producer.rs` tests; added by mission 487 |
-| `camel-processor/src/test_log_capture.rs` (`ensure_global_registry`) | `error_handler.rs` and `do_try_segment.rs` call sites; replaced the removed `error_handler.rs` copy |
+| `camel-processor/src/test_log_capture.rs` (`ensure_global_registry`) | `error_handler.rs` and `do_try_segment.rs` call sites; replaced the removed `error_handler.rs` copy; now a delegation shim over the shared module, guard stays local (rc-421es) |
 
 ### Per-file copies, no natural home in the binary (15)
 
@@ -91,7 +116,8 @@ inherent and accepted.
 - `src/cache/disk_offload_tests.rs` (shared with
   `disk_offload_reclaim_tests.rs` within the disk-offload tree only)
 - `src/cache/redb.rs`
-- `src/lifecycle/adapters/route_controller_trait_tests.rs`
+- `src/lifecycle/adapters/route_controller_trait_tests.rs` (capture
+  families come from the shared module; the guard body stays, rc-421es)
 - `src/lifecycle/adapters/route_compiler_span_tests.rs`
 - `src/lifecycle/adapters/consumer_management.rs`
 - `src/lifecycle/application/context_lifecycle.rs`
@@ -132,7 +158,21 @@ serves its own call sites):
 - `camel-component-api/src/network_retry_tests.rs` (pattern origin,
   `c3853198`)
 
-Count note (2026-11-01; `camel-mail` added 2026-11-05 by mission 494):
+### Traced global-buffer users (not in the counts)
+
+`#[traced_test]` tests do not use the OnceLock guard. The
+camel-platform-kubernetes trio in `src/platform_service.rs`
+(`note_renewal_epoch_regression_logs_warning`,
+`note_renewal_epoch_equal_and_none_emit_no_epoch_log`,
+`recreate_after_delete_does_not_regress_term`) imports
+`lock_log_capture`, `clear_captured_logs`, and
+`captured_records_containing` from
+`camel_component_api::test_support::log_capture::traced` (features
+`test-support` and `traced-test-capture`). rc-421es deleted the local
+copies of those three functions.
+
+Count note (2026-11-01; `camel-mail` added 2026-11-05 by mission 494;
+re-verified 2026-11-06 by mission 513, rc-c436d):
 the groups sum 7 + 15 + 9 = 31 guard bodies across 7 + 15 + 7 = 29 files
 (`camel-ws/src/lib.rs` contributes 3 bodies in 1 file). Verified with:
 

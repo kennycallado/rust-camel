@@ -93,7 +93,7 @@ pub fn nanos() -> u128 {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     let prev = LAST
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |p| Some(now.max(p + 1)))
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |p| Some(now.max(p + 1)))
         .unwrap_or(0);
     u128::from(now.max(prev + 1))
 }

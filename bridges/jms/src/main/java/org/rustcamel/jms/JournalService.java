@@ -92,20 +92,24 @@ public final class JournalService {
   /** On-disk format version; forwards to {@link JournalCodec#FORMAT_VERSION}. */
   static final byte FORMAT_VERSION = JournalCodec.FORMAT_VERSION;
 
-  /** Record type: a reservation attempt for a message id; forwards to {@link JournalCodec}. */
+  /**
+   * Record type: a reservation attempt for a message id; forwards to {@link
+   * JournalCodec#TYPE_RESERVE}.
+   */
   static final byte TYPE_RESERVE = JournalCodec.TYPE_RESERVE;
 
-  /** Record type: the reserved delivery settled; forwards to {@link JournalCodec}. */
+  /** Record type: the reserved delivery settled; forwards to {@link JournalCodec#TYPE_COMMIT}. */
   static final byte TYPE_COMMIT = JournalCodec.TYPE_COMMIT;
 
   /**
    * Record type: the reserved delivery rolled back; the reservation stays; forwards to {@link
-   * JournalCodec}.
+   * JournalCodec#TYPE_ROLLBACK}.
    */
   static final byte TYPE_ROLLBACK = JournalCodec.TYPE_ROLLBACK;
 
   /**
-   * Record type: a stale reservation was retired at compaction; forwards to {@link JournalCodec}.
+   * Record type: a stale reservation was retired at compaction; forwards to {@link
+   * JournalCodec#TYPE_RETIRE}.
    */
   static final byte TYPE_RETIRE = JournalCodec.TYPE_RETIRE;
 

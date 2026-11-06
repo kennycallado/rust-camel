@@ -33,9 +33,9 @@ use std::path::{Path, PathBuf};
 
 use camel_bridge::process::BrokerType;
 
-/// On-disk magic, matching `JournalService.MAGIC`.
+/// On-disk magic, matching `JournalCodec.MAGIC` (forwarded by `JournalService`).
 const MAGIC: &[u8; 4] = b"RCJN";
-/// On-disk format version, matching `JournalService.FORMAT_VERSION`.
+/// On-disk format version, matching `JournalCodec.FORMAT_VERSION` (forwarded by `JournalService`).
 const FORMAT_VERSION: u8 = 1;
 /// `MAGIC` plus the one-byte version.
 const HEADER_LENGTH: usize = 5;
@@ -273,7 +273,7 @@ pub fn lock_owner_pid(path: &Path) -> Result<Option<u32>, String> {
 mod tests {
     use super::*;
 
-    /// Encodes one frame exactly as `JournalService.encodeFrame` does, so the
+    /// Encodes one frame exactly as `JournalCodec.encodeFrame` does, so the
     /// reader is exercised against the real byte layout.
     fn encode_raw(type_byte: u8, id_bytes: &[u8]) -> Vec<u8> {
         let payload_len = MIN_PAYLOAD_LEN + id_bytes.len();
