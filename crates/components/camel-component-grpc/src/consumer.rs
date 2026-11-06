@@ -115,6 +115,10 @@ pub(crate) fn consumer_concurrency_limit(configured: usize) -> Result<usize, Cam
 /// semantics survive with enforcement living wholly in the pipeline
 /// layer. Every other pipeline error is system-broken, not a denial:
 /// INTERNAL, unchanged.
+///
+/// ADR-0096: conversion failures stay `INTERNAL` — they are not
+/// request-borne contract violations. The HTTP consumer now agrees (500)
+/// after `fault-blame-mapping`.
 fn pipeline_error_to_status(e: CamelError) -> Status {
     match e {
         CamelError::Unauthorized(msg) => Status::permission_denied(msg),
@@ -1380,6 +1384,19 @@ mod tests {
     fn canonical_redact_host_pinned() {
         assert_eq!(redact_host("host.example:8080"), "host.example:8080");
         assert_eq!(redact_host("a@b@c"), "***@c");
+    }
+
+    /// ADR-0096 §Decision 3: the gRPC mapping stands. Conversion failures
+    /// are system-broken, not request-contract violations, so they stay
+    /// `INTERNAL`; only pipeline policy denials map to `PERMISSION_DENIED`.
+    /// Pinning test — asserts the mapping, it does not change it.
+    #[test]
+    fn grpc_conversion_failure_stays_internal() {
+        let status = pipeline_error_to_status(CamelError::TypeConversionFailed("x".into()));
+        assert_eq!(status.code(), tonic::Code::Internal);
+
+        let status = pipeline_error_to_status(CamelError::Unauthorized("x".into()));
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
     }
 
     #[test]

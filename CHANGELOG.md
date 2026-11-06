@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- change(components/http,rest-dsl): non-request-borne type-conversion failures now map to HTTP 500 (conversion_failed) instead of 400 (bad_request), and the REST binding-injected unmarshal/schema check reclassifies its failures to ValidationError (400, validation_error) per ADR-0096 fault blame; mid-route user unmarshal and authored marshal keep their conversion error identity but now report 500; metric label at the binding seam moves type_conversion → validation; no opt-in window (ADR-0090) (bd rc-zwd3l).
+
 ### Fixes
 
 - fix(cli): sealed artifacts boot without a writable system temp directory for the xslt, xsd, and sql asset classes (in-memory resolution), and the TLS classes fall back to a writable artifact-adjacent directory with a typed error when none exists (bd rc-l39dj).

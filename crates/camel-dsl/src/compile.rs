@@ -1295,6 +1295,7 @@ fn compile_declarative_step_with_threshold(
             format,
             schema: None,
             config,
+            request_borne: _,
         }) => {
             let df = resolve_marshal_data_format(&format, &config)?;
             Ok(BuilderStep::Processor(camel_api::OpaqueProcessor(
@@ -1305,6 +1306,7 @@ fn compile_declarative_step_with_threshold(
             format,
             schema: None,
             config,
+            request_borne: _,
         }) => {
             let df = resolve_marshal_data_format(&format, &config)?;
             Ok(BuilderStep::Processor(camel_api::OpaqueProcessor(
@@ -1318,6 +1320,7 @@ fn compile_declarative_step_with_threshold(
             format,
             schema,
             config,
+            request_borne,
         }) => {
             let df = if format.strip_prefix("protobuf:").is_some() {
                 reject_protobuf_config(&config)?;
@@ -1345,15 +1348,31 @@ fn compile_declarative_step_with_threshold(
             //   StreamCacheService(UnmarshalService(
             //     JsonSchemaValidateService(IdentityProcessor, schema), df))
             // — unmarshal runs first (raw text → Body::Json), then validate.
+            //
+            // A request-borne binding step (REST lowering, ADR-0096) uses
+            // `UnmarshalService::for_request_binding`: a format conversion
+            // failure is reclassified to ValidationError (400) because the
+            // failing input is by definition the client request. The
+            // schema-wrap and stream-cache layering are identical.
             let inner: BoxProcessor = if let Some(schema) = schema {
                 let validator = JsonSchemaValidateService::new(IdentityProcessor, &schema)?;
+                let unmarshal = if request_borne {
+                    UnmarshalService::for_request_binding(validator, df)
+                } else {
+                    UnmarshalService::new(validator, df)
+                };
                 BoxProcessor::new(StreamCacheService::new(
-                    UnmarshalService::new(validator, df),
+                    unmarshal,
                     camel_api::stream_cache::StreamCacheConfig::new(stream_cache_threshold),
                 ))
             } else {
+                let unmarshal = if request_borne {
+                    UnmarshalService::for_request_binding(IdentityProcessor, df)
+                } else {
+                    UnmarshalService::new(IdentityProcessor, df)
+                };
                 BoxProcessor::new(StreamCacheService::new(
-                    UnmarshalService::new(IdentityProcessor, df),
+                    unmarshal,
                     camel_api::stream_cache::StreamCacheConfig::new(stream_cache_threshold),
                 ))
             };
@@ -3528,6 +3547,7 @@ mod tests {
             format: "json".to_string(),
             schema: None,
             config: None,
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_ok());
@@ -3540,10 +3560,203 @@ mod tests {
             format: "xml".to_string(),
             schema: None,
             config: None,
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_ok());
         assert!(matches!(result.unwrap(), BuilderStep::Processor(_)));
+    }
+
+    #[tokio::test]
+    async fn binding_seam_compiles_to_reclassifying_unmarshal() {
+        // ADR-0096: the binding-injected unmarshal is the request-borne seam.
+        // A REST POST with `binding: json` lowers to
+        // [ContentNegotiation, Unmarshal(json), ...]; the compiled unmarshal
+        // must reclassify a format conversion failure to ValidationError.
+        let yaml = r#"
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /api/users
+    operations:
+      - method: POST
+        operation_id: createUser
+        consumes: application/json
+        produces: application/json
+        to: direct:createUser
+"#;
+        let routes = crate::yaml::parse_yaml(yaml).expect("REST YAML must parse + compile");
+        assert_eq!(routes.len(), 1, "expected exactly one lowered route");
+        let steps = routes[0].steps();
+        let BuilderStep::Processor(op) = &steps[1] else {
+            panic!("expected the binding unmarshal processor at index 1, got: {steps:?}");
+        };
+
+        use tower::ServiceExt;
+
+        let exchange = camel_api::Exchange::new(camel_api::Message::new(camel_api::Body::Text(
+            "not json".to_string(),
+        )));
+        let err =
+            op.0.clone()
+                .oneshot(exchange)
+                .await
+                .expect_err("malformed JSON must fail the binding unmarshal");
+        match err {
+            CamelError::ValidationError(msg) => assert!(
+                msg.contains("request body rejected"),
+                "the binding seam must reclassify the format failure, got: {msg:?}"
+            ),
+            other => panic!("expected ValidationError from the request-borne seam, got: {other:?}"),
+        }
+    }
+
+    /// Real binding-seam error (Task 5.1): compile a `binding: json` POST
+    /// and drive its injected unmarshal with a malformed body.
+    async fn binding_seam_error() -> CamelError {
+        let yaml = r#"
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /api/seam-kind
+    operations:
+      - method: POST
+        operation_id: seamKind
+        binding: json
+        consumes: application/json
+        produces: application/json
+        to: direct:seamKind
+"#;
+        let routes = crate::yaml::parse_yaml(yaml).expect("REST YAML must parse + compile");
+        assert_eq!(routes.len(), 1, "expected exactly one lowered route");
+        let steps = routes[0].steps();
+        let BuilderStep::Processor(op) = &steps[1] else {
+            panic!("expected the binding unmarshal processor at index 1, got: {steps:?}");
+        };
+
+        use tower::ServiceExt;
+
+        op.0.clone()
+            .oneshot(camel_api::Exchange::new(camel_api::Message::new(
+                camel_api::Body::Text("not json".to_string()),
+            )))
+            .await
+            .expect_err("malformed JSON must fail the binding unmarshal")
+    }
+
+    /// Real authored mid-route error (Task 5.1): compile the REST route whose
+    /// user steps are `set_body` then `unmarshal: json`, and drive the
+    /// authored unmarshal at index 3 with pipeline data that is not JSON.
+    async fn authored_mid_route_unmarshal_error() -> CamelError {
+        let yaml = r#"
+rest:
+  - host: 0.0.0.0
+    port: 8080
+    path: /api/seam-authored
+    operations:
+      - method: POST
+        operation_id: seamAuthored
+        binding: json
+        consumes: application/json
+        produces: application/json
+        steps:
+          - set_body: "not json"
+          - unmarshal: json
+"#;
+        let routes = crate::yaml::parse_yaml(yaml).expect("REST YAML must parse + compile");
+        assert_eq!(routes.len(), 1, "expected exactly one lowered route");
+        let steps = routes[0].steps();
+        let BuilderStep::Processor(op) = &steps[3] else {
+            panic!("expected the authored unmarshal processor at index 3, got: {steps:?}");
+        };
+
+        use tower::ServiceExt;
+
+        op.0.clone()
+            .oneshot(camel_api::Exchange::new(camel_api::Message::new(
+                camel_api::Body::Text("not json".to_string()),
+            )))
+            .await
+            .expect_err("non-JSON pipeline data must fail the authored unmarshal")
+    }
+
+    /// Compile a single `on_exceptions` clause with `kind` and no steps, then
+    /// evaluate its policy predicate. REST blocks cannot author
+    /// `error_handler` (`deny_unknown_fields`, lowering sets `None`) and the
+    /// shared e2e rig never executes route policies, so the compiled-policy
+    /// predicate is the executable surface for handler-kind matching.
+    fn policy_matches_for_kind(kind: &str, err: &CamelError) -> bool {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some(kind.into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: None,
+                continued: None,
+                handled_by: None,
+            }]),
+            use_original_message: false,
+        })
+        .expect("compile should succeed");
+
+        assert_eq!(
+            config.policies.len(),
+            1,
+            "kind {kind} should compile to one policy"
+        );
+        (config.policies[0].matches)(err)
+    }
+
+    #[tokio::test]
+    async fn error_handler_kind_at_binding_seam() {
+        // ADR-0096: the binding seam reclassifies to ValidationError, so an
+        // ingress TypeConversionFailed policy stops firing for seam failures
+        // while a ValidationError policy covers them.
+        let err = binding_seam_error().await;
+        assert!(
+            matches!(err, CamelError::ValidationError(_)),
+            "the binding seam must surface ValidationError, got: {err:?}"
+        );
+        assert!(
+            !policy_matches_for_kind("TypeConversionFailed", &err),
+            "a TypeConversionFailed policy must not match the binding-seam failure"
+        );
+        assert!(
+            policy_matches_for_kind("ValidationError", &err),
+            "a ValidationError policy must match the binding-seam failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_error_handler_matches_binding_seam() {
+        // Positive pin: the compiled binding-seam failure is matched by a
+        // ValidationError policy. Policy steps stay empty; only the predicate
+        // is exercised.
+        let err = binding_seam_error().await;
+        assert!(
+            policy_matches_for_kind("ValidationError", &err),
+            "a ValidationError policy must match the compiled binding-seam failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_route_failure_matches_type_conversion_handler() {
+        // The kind vocabulary itself is unchanged: an authored mid-route
+        // unmarshal keeps TypeConversionFailed and its ingress policy still
+        // fires. This positive pin may pass immediately — the authored route
+        // compiles unchanged on main.
+        let err = authored_mid_route_unmarshal_error().await;
+        assert!(
+            matches!(err, CamelError::TypeConversionFailed(_)),
+            "an authored mid-route unmarshal must keep TypeConversionFailed, got: {err:?}"
+        );
+        assert!(
+            policy_matches_for_kind("TypeConversionFailed", &err),
+            "a TypeConversionFailed policy must match the authored mid-route failure"
+        );
     }
 
     #[test]
@@ -3552,6 +3765,7 @@ mod tests {
             format: "avro".to_string(),
             schema: None,
             config: None,
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err());
@@ -3563,6 +3777,7 @@ mod tests {
             format: "protobuf".to_string(),
             schema: None,
             config: None,
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err());
@@ -3580,6 +3795,7 @@ mod tests {
             format: format!("protobuf:{}#helloworld.HelloRequest", proto_fixture_path()),
             schema: None,
             config: None,
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(
@@ -3596,6 +3812,7 @@ mod tests {
             format: format!("protobuf:{}#helloworld.HelloReply", proto_fixture_path()),
             schema: None,
             config: None,
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(
@@ -3612,6 +3829,7 @@ mod tests {
             format: "protobuf:missing.proto#nonexistent".to_string(),
             schema: None,
             config: None,
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err());
@@ -3631,6 +3849,7 @@ mod tests {
                 "required": ["name"]
             })),
             config: None,
+            request_borne: false,
         });
         let err = compile_declarative_step(step)
             .expect_err("Marshal with schema must be rejected at compile time");
@@ -3652,6 +3871,7 @@ mod tests {
             format: "json".to_string(),
             schema: None,
             config: None,
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(
@@ -3666,6 +3886,7 @@ mod tests {
             format: "json".to_string(),
             schema: None,
             config: None,
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(
@@ -3683,6 +3904,7 @@ mod tests {
             format: "xml".to_string(),
             schema: None,
             config: None,
+            request_borne: false,
         });
         let BuilderStep::Processor(op) =
             compile_declarative_step(step).expect("compile response marshal")
@@ -3715,6 +3937,7 @@ mod tests {
             format: "json".to_string(),
             schema: Some(serde_json::json!({ "type": "object" })),
             config: None,
+            request_borne: false,
         });
         let err = compile_declarative_step(step)
             .expect_err("ResponseMarshal with schema must be rejected at compile time");
@@ -3735,6 +3958,7 @@ mod tests {
                 format: "xml".to_string(),
                 schema: None,
                 config: None,
+                request_borne: false,
             }))
             .expect("authored marshal(xml) must compile")
         else {
@@ -3805,6 +4029,7 @@ mod tests {
             format: "json".to_string(),
             schema: None,
             config: None,
+            request_borne: false,
         });
         assert_eq!(declarative_step_name(&step), "marshal");
     }
@@ -3815,6 +4040,7 @@ mod tests {
             format: "xml".to_string(),
             schema: None,
             config: None,
+            request_borne: false,
         });
         assert_eq!(declarative_step_name(&step), "unmarshal");
     }
@@ -6502,6 +6728,7 @@ mod tests {
             format: "json".into(),
             schema: None,
             config: Some(serde_json::json!({"max_bytes": 67108864})),
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_ok(), "should compile with config: {:?}", result);
@@ -6513,6 +6740,7 @@ mod tests {
             format: "xml".into(),
             schema: None,
             config: Some(serde_json::json!({"max_depth": 250})),
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(
@@ -6528,6 +6756,7 @@ mod tests {
             format: "csv".into(),
             schema: None,
             config: Some(serde_json::json!({"delimiter": "|", "max_records": 5000000})),
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(
@@ -6543,6 +6772,7 @@ mod tests {
             format: "zip".into(),
             schema: None,
             config: Some(serde_json::json!({"max_decompressed_size": 2147483648u64})),
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(
@@ -6558,6 +6788,7 @@ mod tests {
             format: "protobuf:some.proto#SomeMessage".into(),
             schema: None,
             config: Some(serde_json::json!({"any_key": 1})),
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err(), "protobuf marshal + config should fail");
@@ -6574,6 +6805,7 @@ mod tests {
             format: "json".into(),
             schema: None,
             config: Some(serde_json::json!({"max_byte": 100})),
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err(), "typo should fail at compile time");
@@ -6588,6 +6820,7 @@ mod tests {
             format: "protobuf:some.proto#SomeMessage".into(),
             schema: None,
             config: Some(serde_json::json!({"any_key": 1})),
+            request_borne: false,
         });
         let result = compile_declarative_step(step);
         assert!(result.is_err(), "protobuf + config should fail");

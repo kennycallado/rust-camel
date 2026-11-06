@@ -1,0 +1,8 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "a6c71f62322452a777003c829859dde3e695dd809651d26c88bf8bed58a6fc1f",
+  "expert": "e_gpt",
+  "round": 3,
+  "history": "r1 BLESS-WITH-FIXES (P1-P6 applied); r2 BLESS-WITH-FIXES (P1 residue fixed); r3 BLESS"
+}

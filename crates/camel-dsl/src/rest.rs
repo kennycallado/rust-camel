@@ -403,6 +403,8 @@ fn lower_operation(
             // (see camel-component-http `pipeline_error_to_reply`).
             schema: op.request_schema.clone(),
             config: None,
+            // request-borne seam (ADR-0096): format failures reclassify to ValidationError (400)
+            request_borne: true,
         }));
     }
 

@@ -844,6 +844,70 @@ mod tests {
     }
 
     #[test]
+    fn error_classification_label_is_pinned() {
+        // Pins `classify()` labels for every variant the ADR-0096 fault-blame
+        // change touches, so a silent label move fails here first.
+        let type_conversion = CamelError::TypeConversionFailed(String::new());
+        let validation = CamelError::ValidationError(String::new());
+        let unsupported = CamelError::UnsupportedMediaType {
+            consumed: String::new(),
+            declared: String::new(),
+        };
+        let not_acceptable = CamelError::NotAcceptable {
+            accept: String::new(),
+            produced: String::new(),
+        };
+        let unauthenticated = CamelError::Unauthenticated(String::new());
+        let unauthorized = CamelError::Unauthorized(String::new());
+        let processor_with_source = CamelError::ProcessorErrorWithSource(
+            String::new(),
+            Arc::new(std::io::Error::other("inner")),
+        );
+        let consumer_stopping = CamelError::ConsumerStopping;
+
+        assert_eq!(
+            type_conversion.classify(),
+            "type_conversion",
+            "TypeConversionFailed must classify as type_conversion (ADR-0096)"
+        );
+        assert_eq!(
+            validation.classify(),
+            "validation",
+            "ValidationError must classify as validation"
+        );
+        assert_eq!(
+            unsupported.classify(),
+            "unsupported_media_type",
+            "UnsupportedMediaType must classify as unsupported_media_type"
+        );
+        assert_eq!(
+            not_acceptable.classify(),
+            "not_acceptable",
+            "NotAcceptable must classify as not_acceptable"
+        );
+        assert_eq!(
+            unauthenticated.classify(),
+            "unauthenticated",
+            "Unauthenticated must classify as unauthenticated"
+        );
+        assert_eq!(
+            unauthorized.classify(),
+            "unauthorized",
+            "Unauthorized must classify as unauthorized"
+        );
+        assert_eq!(
+            processor_with_source.classify(),
+            "processor",
+            "ProcessorErrorWithSource must classify as processor"
+        );
+        assert_eq!(
+            consumer_stopping.classify(),
+            "consumer_stop",
+            "ConsumerStopping must classify as consumer_stop"
+        );
+    }
+
+    #[test]
     fn display_negotiation_errors() {
         let unsupported = CamelError::UnsupportedMediaType {
             consumed: "text/plain".into(),

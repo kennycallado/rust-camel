@@ -1273,6 +1273,7 @@ pub(crate) fn route_step_to_declarative_step(
                 format: marshal,
                 schema: None,
                 config,
+                request_borne: false,
             }))
         }
         RouteDslStep::ResponseMarshal(MarshalStep { marshal, config }) => {
@@ -1285,12 +1286,14 @@ pub(crate) fn route_step_to_declarative_step(
                 format: marshal,
                 schema: None,
                 config,
+                request_borne: false,
             }))
         }
         RouteDslStep::Unmarshal(UnmarshalStep {
             unmarshal,
             schema,
             config,
+            request_borne,
         }) => {
             if unmarshal.trim().is_empty() {
                 return Err(CamelError::RouteError(
@@ -1301,6 +1304,7 @@ pub(crate) fn route_step_to_declarative_step(
                 format: unmarshal,
                 schema,
                 config,
+                request_borne,
             }))
         }
         RouteDslStep::Bean(BeanStep {
@@ -6412,6 +6416,67 @@ routes:
             err.to_string().contains("did not match any variant"),
             "expected untagged-enum rejection, got: {err}"
         );
+    }
+
+    #[test]
+    fn yaml_rejects_authored_request_borne_marker() {
+        // `request_borne` is a programmatic-only marker (ADR-0096), never
+        // authorable. The positive control pins that the identical route
+        // parses when the marker is absent; the marker variant must fail.
+        // Under the untagged enum the specific `unknown_field` message is
+        // swallowed, so only error occurrence is asserted.
+        let control = r#"
+routes:
+  - id: request-borne-guard
+    from: "direct:start"
+    steps:
+      - unmarshal: json
+"#;
+        let parsed: RouteDslRoutes =
+            serde_yml::from_str(control).expect("control route without marker must parse");
+        assert_eq!(parsed.routes.len(), 1);
+
+        let with_marker = r#"
+routes:
+  - id: request-borne-guard
+    from: "direct:start"
+    steps:
+      - unmarshal: json
+        request_borne: true
+"#;
+        let result: Result<RouteDslRoutes, _> = serde_yml::from_str(with_marker);
+        assert!(
+            result.is_err(),
+            "authored request_borne marker must be rejected at deserialization"
+        );
+    }
+
+    #[test]
+    fn lowering_preserves_default_false() {
+        let yaml = r#"
+routes:
+  - id: default-false
+    from: "direct:start"
+    steps:
+      - unmarshal: xml
+"#;
+        let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
+        let route = parsed
+            .routes
+            .into_iter()
+            .next()
+            .expect("fixture has exactly one route");
+        let declarative = route_dsl_to_declarative_route(route).expect("lowering must succeed");
+        match &declarative.steps[0] {
+            DeclarativeStep::Unmarshal(def) => {
+                assert!(
+                    !def.request_borne,
+                    "authored unmarshal must not be request-borne"
+                );
+                assert_eq!(def.format, "xml");
+            }
+            other => panic!("expected Unmarshal step, got {other:?}"),
+        }
     }
 
     #[test]

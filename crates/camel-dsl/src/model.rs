@@ -529,6 +529,9 @@ pub struct DataFormatDef {
     /// Optional per-format configuration (e.g. `{ "max_bytes": 67108864 }`).
     /// Deserialized by the config-aware factory per ADR-0038.
     pub config: Option<serde_json::Value>,
+    /// Internal marker (ADR-0096): `false` for authored steps, `true` only
+    /// for the lowering-injected request unmarshal.
+    pub request_borne: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -934,6 +937,7 @@ mod tests {
             format: "protobuf".into(),
             schema: None,
             config: None,
+            request_borne: false,
         };
         assert_eq!(def.format, "protobuf");
         assert!(def.schema.is_none());

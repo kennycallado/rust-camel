@@ -35,8 +35,12 @@ impl<P> MarshalService<P> {
     ///
     /// Response-side marshal failures are deliberately wrapped in
     /// [`CamelError::ProcessorErrorWithSource`] so the HTTP finalizer maps the
-    /// failure to 500, while request-side [`UnmarshalService`] keeps
-    /// [`CamelError::TypeConversionFailed`] → 400. The source chain preserves
+    /// failure to 500. This follows the ADR-0096 blame rule: conversion
+    /// failures default to 500 unless the failing step's input is by definition
+    /// the request. The binding-injected unmarshal is that seam; it
+    /// reclassifies [`CamelError::TypeConversionFailed`] to
+    /// [`CamelError::ValidationError`] (HTTP 400) via
+    /// [`UnmarshalService::for_request_binding`]. The source chain preserves
     /// the original error.
     pub fn for_response(inner: P, format: Arc<dyn DataFormat>) -> Self {
         Self {
@@ -56,11 +60,33 @@ const _: fn() = || {
 pub struct UnmarshalService<P> {
     inner: P,
     format: Arc<dyn DataFormat>,
+    request_borne: bool,
 }
 
 impl<P> UnmarshalService<P> {
     pub fn new(inner: P, format: Arc<dyn DataFormat>) -> Self {
-        Self { inner, format }
+        Self {
+            inner,
+            format,
+            request_borne: false,
+        }
+    }
+
+    /// Build an unmarshal step for a REST binding's request body (ADR-0096).
+    ///
+    /// The binding-injected unmarshal is the request-borne seam: its failing
+    /// input is by definition the client request. A format
+    /// [`CamelError::TypeConversionFailed`] is reclassified to
+    /// [`CamelError::ValidationError`] so consumers map it to 400. Every other
+    /// error — other format variants and inner-service failures — passes
+    /// through unchanged. User-authored `unmarshal` steps use [`Self::new`] and
+    /// inherit the 500 default.
+    pub fn for_request_binding(inner: P, format: Arc<dyn DataFormat>) -> Self {
+        Self {
+            inner,
+            format,
+            request_borne: true,
+        }
     }
 }
 
@@ -125,7 +151,21 @@ where
                 let fut = self.inner.call(exchange);
                 Box::pin(fut)
             }
-            Err(e) => Box::pin(async move { Err(e) }),
+            Err(e) => {
+                // ADR-0096: only the binding seam's format conversion failure is
+                // request-borne. Inner-service errors bypass this mapping.
+                let e = if self.request_borne {
+                    match e {
+                        CamelError::TypeConversionFailed(msg) => {
+                            CamelError::ValidationError(format!("request body rejected: {msg}"))
+                        }
+                        other => other,
+                    }
+                } else {
+                    e
+                };
+                Box::pin(async move { Err(e) })
+            }
         }
     }
 }
@@ -154,6 +194,38 @@ mod tests {
 
         fn unmarshal(&self, _body: Body) -> Result<Body, CamelError> {
             Err(CamelError::ProcessorError("unmarshal-fail".to_string()))
+        }
+    }
+
+    struct ConversionFailingDataFormat;
+
+    impl DataFormat for ConversionFailingDataFormat {
+        fn name(&self) -> &str {
+            "conversion-failing"
+        }
+
+        fn marshal(&self, body: Body) -> Result<Body, CamelError> {
+            Ok(body)
+        }
+
+        fn unmarshal(&self, _body: Body) -> Result<Body, CamelError> {
+            Err(CamelError::TypeConversionFailed("boom".to_string()))
+        }
+    }
+
+    struct RouteFailingDataFormat;
+
+    impl DataFormat for RouteFailingDataFormat {
+        fn name(&self) -> &str {
+            "route-failing"
+        }
+
+        fn marshal(&self, body: Body) -> Result<Body, CamelError> {
+            Ok(body)
+        }
+
+        fn unmarshal(&self, _body: Body) -> Result<Body, CamelError> {
+            Err(CamelError::RouteError("x".to_string()))
         }
     }
 
@@ -357,5 +429,60 @@ mod tests {
         let exchange = Exchange::new(Message::new(Body::Json(json!({"a": 1}))));
         let result = svc.oneshot(exchange).await.unwrap();
         assert_eq!(result.input.body, Body::Text("{\"a\":1}".to_string()));
+    }
+
+    #[tokio::test]
+    async fn request_binding_reclassifies_format_conversion_failure() {
+        let svc = UnmarshalService::for_request_binding(
+            IdentityProcessor,
+            Arc::new(ConversionFailingDataFormat),
+        );
+        let exchange = Exchange::new(Message::new(Body::Text("x".to_string())));
+        let result = svc.oneshot(exchange).await;
+        match result {
+            Err(CamelError::ValidationError(msg)) => {
+                assert!(
+                    msg.contains("request body rejected: boom"),
+                    "message must name the request-borne rejection, got {msg:?}"
+                );
+            }
+            other => panic!("expected ValidationError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn request_binding_passes_inner_conversion_failure_through() {
+        let inner = tower::service_fn(|_ex: Exchange| async {
+            Err::<Exchange, CamelError>(CamelError::TypeConversionFailed("inner".to_string()))
+        });
+        let svc = UnmarshalService::for_request_binding(inner, Arc::new(JsonDataFormat::default()));
+        let exchange = Exchange::new(Message::new(Body::Text(r#"{"a":1}"#.to_string())));
+        let result = svc.oneshot(exchange).await;
+        assert!(
+            matches!(result, Err(CamelError::TypeConversionFailed(msg)) if msg == "inner"),
+            "inner conversion failures must bypass the reclassification boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_binding_passes_other_format_variants_through() {
+        let svc = UnmarshalService::for_request_binding(
+            IdentityProcessor,
+            Arc::new(RouteFailingDataFormat),
+        );
+        let exchange = Exchange::new(Message::new(Body::Text("x".to_string())));
+        let result = svc.oneshot(exchange).await;
+        assert!(
+            matches!(result, Err(CamelError::RouteError(msg)) if msg == "x"),
+            "only TypeConversionFailed is reclassified"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_unmarshal_keeps_conversion_failure() {
+        let svc = UnmarshalService::new(IdentityProcessor, Arc::new(ConversionFailingDataFormat));
+        let exchange = Exchange::new(Message::new(Body::Text("x".to_string())));
+        let result = svc.oneshot(exchange).await;
+        assert!(matches!(result, Err(CamelError::TypeConversionFailed(msg)) if msg == "boom"));
     }
 }

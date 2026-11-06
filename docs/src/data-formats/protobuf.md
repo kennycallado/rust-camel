@@ -104,7 +104,7 @@ The route must enable the `camel-dsl` `protobuf` cargo feature and register the 
 | `Body::Bytes` | Validates and passes through | Decodes to JSON |
 | `Body::Empty`, `Body::Stream`, `Body::Xml` | Rejected | Rejected |
 
-The format's error blame differs by input spelling today: marshal on invalid bytes raises `ProcessorError` (HTTP 500), marshal on invalid JSON raises `TypeConversionFailed`, and unmarshal on invalid bytes raises `TypeConversionFailed`. ADR-0096 standardizes the consumer mapping: `TypeConversionFailed` defaults to the server fault (HTTP 500), and 400 stays reserved for request-borne failures such as the REST binding's injected unmarshal. The mapping change lands through the implementation issue tracked from bd `rc-v38bd`.
+The format raises different error variants by input spelling: marshal on invalid bytes raises `ProcessorError`, and marshal on invalid JSON and unmarshal on invalid bytes raise `TypeConversionFailed`. Per ADR-0096, blame follows input provenance, not the variant. `TypeConversionFailed` maps to HTTP 500. The REST binding seam reclassifies its injected unmarshal failures to `ValidationError` (400), because that input is the client request.
 
 ## DoS protection
 

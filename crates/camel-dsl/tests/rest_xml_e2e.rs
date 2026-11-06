@@ -318,8 +318,10 @@ async fn xml_malformed_request_fails_before_user_step() {
     .expect_err("malformed xml must fail the unmarshal");
 
     assert!(
-        matches!(err, CamelError::TypeConversionFailed(_)),
-        "expected TypeConversionFailed from the xml unmarshal, got: {err:?}"
+        matches!(err, CamelError::ValidationError(_)),
+        // The XML format still raises TypeConversionFailed; the REST binding
+        // seam reclassifies it to ValidationError (ADR-0096).
+        "expected ValidationError reclassified by the binding seam, got: {err:?}"
     );
     assert_eq!(
         user_step_runs.load(Ordering::SeqCst),
@@ -344,8 +346,10 @@ async fn xml_empty_request_body_fails_closed() {
     .expect_err("an empty xml request body must fail closed");
 
     assert!(
-        matches!(err, CamelError::TypeConversionFailed(_)),
-        "expected TypeConversionFailed from the xml unmarshal, got: {err:?}"
+        matches!(err, CamelError::ValidationError(_)),
+        // The XML format still raises TypeConversionFailed; the REST binding
+        // seam reclassifies it to ValidationError (ADR-0096).
+        "expected ValidationError reclassified by the binding seam, got: {err:?}"
     );
     assert_eq!(
         user_step_runs.load(Ordering::SeqCst),
@@ -370,8 +374,10 @@ async fn xml_doctype_entity_fails_closed() {
     .expect_err("a custom doctype entity must fail closed");
 
     assert!(
-        matches!(err, CamelError::TypeConversionFailed(_)),
-        "expected TypeConversionFailed from the xml unmarshal, got: {err:?}"
+        matches!(err, CamelError::ValidationError(_)),
+        // The XML format still raises TypeConversionFailed; the REST binding
+        // seam reclassifies it to ValidationError (ADR-0096).
+        "expected ValidationError reclassified by the binding seam, got: {err:?}"
     );
     assert_eq!(
         user_step_runs.load(Ordering::SeqCst),

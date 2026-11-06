@@ -226,12 +226,21 @@ async fn form_gate_opaque_charset_fails_at_unmarshal() {
         .expect_err("non-UTF-8 percent-decoded bytes must fail the form unmarshal");
 
     match err {
-        CamelError::TypeConversionFailed(msg) => assert!(
-            msg.starts_with("form"),
-            "form unmarshal error must start with 'form', got: {msg}"
-        ),
+        CamelError::ValidationError(msg) => {
+            // The form format still raises TypeConversionFailed; the REST
+            // binding seam reclassifies it (ADR-0096). The prefix embeds the
+            // original form diagnostic.
+            assert!(
+                msg.starts_with("request body rejected: form"),
+                "seam prefix must wrap the form diagnostic, got: {msg}"
+            );
+            assert!(
+                msg.contains("not valid UTF-8"),
+                "the underlying form diagnostic must survive, got: {msg}"
+            );
+        }
         other => panic!(
-            "expected TypeConversionFailed from the unmarshal (not a gate rejection), got: {other:?}"
+            "expected ValidationError from the binding seam (not a gate rejection), got: {other:?}"
         ),
     }
 }

@@ -1195,6 +1195,14 @@ pub struct UnmarshalStep {
     pub schema: Option<serde_json::Value>,
     #[serde(default)]
     pub config: Option<serde_json::Value>,
+    /// Programmatic-only marker for the REST binding-injected request
+    /// unmarshal (ADR-0096): distinguishes the framework-generated step from
+    /// an authored `unmarshal` when mapping fault blame. Not authorable in
+    /// YAML — `deny_unknown_fields` rejects it in route files.
+    #[serde(skip)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    #[cfg_attr(feature = "schema", ts(skip))]
+    pub request_borne: bool,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

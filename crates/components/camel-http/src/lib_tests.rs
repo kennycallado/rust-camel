@@ -8611,16 +8611,16 @@ fn from_uri_round_trips_templated_path_with_http_method() {
 }
 
 // -----------------------------------------------------------------------
-// rc-1dk4: TypeConversionFailed → 400 Bad Request
+// rc-1dk4: conversion failures → 500; request-borne seam → 400 (ADR-0096)
 // -----------------------------------------------------------------------
 
 #[test]
-fn type_conversion_failed_maps_to_400() {
+fn conversion_failure_maps_to_500() {
     let reply = pipeline_error_to_reply(
         CamelError::TypeConversionFailed("invalid JSON at line 1".to_string()),
         "/api/users",
     );
-    assert_eq!(reply.status, 400);
+    assert_eq!(reply.status, 500);
     // Exactly one Content-Type header, application/json
     let json_ct = reply
         .headers
@@ -8634,8 +8634,136 @@ fn type_conversion_failed_maps_to_400() {
         _ => panic!("expected bytes body"),
     };
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
-    assert_eq!(parsed["error"], "bad_request");
+    assert_eq!(parsed["error"], "conversion_failed");
     assert_eq!(parsed["message"], "invalid JSON at line 1");
+}
+
+#[test]
+fn validation_error_still_maps_to_400() {
+    // The request-borne binding seam reclassifies format conversion
+    // failures to ValidationError (ADR-0096), so this arm must keep its
+    // 400 mapping.
+    let reply = pipeline_error_to_reply(CamelError::ValidationError("invalid".to_string()), "/x");
+    assert_eq!(reply.status, 400);
+    let body = match &reply.body {
+        HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        _ => panic!("expected bytes body"),
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
+    assert_eq!(parsed["error"], "validation_error");
+}
+
+#[test]
+fn content_negotiation_codes_unchanged() {
+    let unsupported = pipeline_error_to_reply(
+        CamelError::UnsupportedMediaType {
+            consumed: "a".to_string(),
+            declared: "b".to_string(),
+        },
+        "/x",
+    );
+    assert_eq!(unsupported.status, 415);
+    let body = match &unsupported.body {
+        HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        _ => panic!("expected bytes body"),
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
+    assert_eq!(parsed["error"], "unsupported_media_type");
+
+    let not_acceptable = pipeline_error_to_reply(
+        CamelError::NotAcceptable {
+            accept: "a".to_string(),
+            produced: "b".to_string(),
+        },
+        "/x",
+    );
+    assert_eq!(not_acceptable.status, 406);
+    let body = match &not_acceptable.body {
+        HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        _ => panic!("expected bytes body"),
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
+    assert_eq!(parsed["error"], "not_acceptable");
+}
+
+#[test]
+fn consumer_stopping_stays_503() {
+    let reply = pipeline_error_to_reply(CamelError::ConsumerStopping, "/x");
+    assert_eq!(reply.status, 503);
+}
+
+/// Minimal recording subscriber: captures every event's `message` field
+/// into a shared buffer. Kept local to this test module (no new
+/// dev-dependency) so the log-text pin below needs no tracing harness.
+#[derive(Clone, Default)]
+struct MessageRecorder {
+    messages: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+struct MessageVisitor<'a>(&'a mut String);
+
+impl tracing::field::Visit for MessageVisitor<'_> {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0.push_str(value);
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" && self.0.is_empty() {
+            self.0.push_str(&format!("{value:?}"));
+        }
+    }
+}
+
+impl tracing::Subscriber for MessageRecorder {
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut message = String::new();
+        event.record(&mut MessageVisitor(&mut message));
+        self.messages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(message);
+    }
+}
+
+#[test]
+fn conversion_failure_log_no_longer_says_bad_request() {
+    // Positive pin: the old text was "Type conversion failed (bad request)",
+    // so a negative `bad_request` assertion would be vacuous. Assert instead
+    // that the event explicitly names the internal-server-error mapping.
+    let recorder = MessageRecorder::default();
+    let messages = Arc::clone(&recorder.messages);
+    let reply = tracing::subscriber::with_default(recorder, || {
+        pipeline_error_to_reply(CamelError::TypeConversionFailed("x".to_string()), "/p")
+    });
+    assert_eq!(reply.status, 500);
+
+    let recorded = messages
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        recorded
+            .iter()
+            .any(|m| m.contains("Type conversion failed (internal server error)")),
+        "the warning must state the server-fault mapping, got: {recorded:?}"
+    );
 }
 
 #[test]

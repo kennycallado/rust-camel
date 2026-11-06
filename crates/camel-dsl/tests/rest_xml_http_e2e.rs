@@ -8,9 +8,10 @@
 //! `rest_negotiation_e2e.rs` Part 2:
 //!
 //! 1. A malformed request body must fail the compiled `Unmarshal(xml)`
-//!    with `TypeConversionFailed`; the error reply goes through the
-//!    consumer's own `pipeline_error_to_reply`, which renders 400 with
-//!    the typed `bad_request` marker and the parse message.
+//!    at the REST binding seam; per ADR-0096 the seam reclassifies the
+//!    format's `TypeConversionFailed` to `ValidationError`, so the
+//!    consumer's own `pipeline_error_to_reply` renders 400 with the typed
+//!    `validation_error` marker and the `request body rejected` message.
 //! 2. A valid request must complete the whole pipeline (`Unmarshal`,
 //!    user step, `Marshal`, `SetHeader(Content-Type)`,
 //!    `SetHeaderIfAbsent(status)`) and return 201 (POST default) with the
@@ -75,7 +76,7 @@ async fn spawn_xml_server(path: &str, method: &str) -> ServerHandle {
 }
 
 #[tokio::test]
-async fn e2e_malformed_xml_returns_400() {
+async fn binding_seam_failure_maps_to_400() {
     let _guard = acquire_deadline(
         &SERVER_MUTEX,
         "SERVER_MUTEX (dsl rest e2e)",
@@ -103,12 +104,16 @@ async fn e2e_malformed_xml_returns_400() {
     let parsed: serde_json::Value =
         serde_json::from_slice(&resp.body).expect("400 body must parse as JSON");
     assert_eq!(
-        parsed["error"], "bad_request",
-        "400 body must carry the typed error marker, got: {parsed}"
+        parsed["error"], "validation_error",
+        "400 body must carry the seam-reclassified marker, got: {parsed}"
     );
     let message = parsed["message"]
         .as_str()
         .expect("400 message must be a string");
+    assert!(
+        message.contains("request body rejected"),
+        "400 message must carry the seam prefix, got: {message}"
+    );
     assert!(
         message.contains("unexpected end of XML input"),
         "400 message must carry the pinned parse error, got: {message}"

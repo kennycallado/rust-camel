@@ -267,11 +267,12 @@ async fn rest_request_schema_e2e_empty_body_passes() {
 }
 
 #[tokio::test]
-async fn rest_request_schema_e2e_malformed_json_returns_type_conversion_error() {
+async fn rest_request_schema_e2e_binding_seam_rejects_malformed_json() {
     // The chain is: UnmarshalService → JsonSchemaValidateService. A body
-    // that is not valid JSON at all fails at the unmarshal layer with
-    // CamelError::TypeConversionFailed — also mapped to 400 by the HTTP
-    // reply finaliser, but for a different reason than schema mismatch.
+    // that is not valid JSON at all fails at the unmarshal layer. Per
+    // ADR-0096 the REST binding seam reclassifies the format's
+    // TypeConversionFailed to CamelError::ValidationError, so the failure
+    // surfaces as 400 validation_error rather than 500 conversion_failed.
     // Pin that distinction: schema validation is reached only after
     // successful JSON parsing.
     let processor = compiled_unmarshal_processor();
@@ -280,10 +281,21 @@ async fn rest_request_schema_e2e_malformed_json_returns_type_conversion_error() 
         .oneshot(ex)
         .await
         .expect_err("malformed JSON must fail at unmarshal");
-    assert!(
-        matches!(err, CamelError::TypeConversionFailed(_)),
-        "expected TypeConversionFailed (pre-validation), got: {err:?}"
-    );
+    match err {
+        CamelError::ValidationError(msg) => {
+            assert!(
+                msg.starts_with("request body rejected: "),
+                "the seam prefix must be present, got: {msg:?}"
+            );
+            assert!(
+                msg.contains("cannot unmarshal Body::Text as JSON"),
+                "the JSON parse diagnostic must survive, got: {msg:?}"
+            );
+        }
+        other => panic!(
+            "expected ValidationError from the binding seam (pre-validation), got: {other:?}"
+        ),
+    }
 }
 
 #[test]

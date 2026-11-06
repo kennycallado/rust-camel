@@ -6,10 +6,11 @@
 //! This binary closes the response-side gap. A user step produces a body
 //! the compiled automatic `ResponseMarshal` step cannot encode, and the
 //! HTTP finaliser must map the wrapped `ProcessorErrorWithSource` to 500 —
-//! never 400. The same route must still return 400 for a malformed
-//! request, and an authored `marshal: xml` inside `steps:` keeps its raw
-//! `TypeConversionFailed` (400) because only the automatic response step
-//! is tagged as response-side.
+//! never 400. The same route's request binding seam replies 400 with
+//! `validation_error` for a malformed request (ADR-0096), and an authored
+//! `marshal: xml` inside `steps:` is a user-authored step: its raw
+//! `TypeConversionFailed` maps to 500 `conversion_failed`, because only the
+//! request binding seam is request-borne.
 //!
 //! The user step at index 2 is replaced with a producer processor, so the
 //! 500 path really traverses the compiled `ResponseMarshal` service and
@@ -121,8 +122,9 @@ rest:
 "#;
 
 /// An authored `marshal: xml` in the user steps is a step-side marshal,
-/// not the automatic response marshal: its failure must stay a raw
-/// `TypeConversionFailed` (400), not the wrapped 500.
+/// not the automatic response marshal: its failure surfaces a raw
+/// `TypeConversionFailed`, which ADR-0096 maps to 500 `conversion_failed`
+/// (server fault), not the wrapped response-marshal 500.
 const XML_AUTHORED_MARSHAL_YAML: &str = r#"
 rest:
   - host: 127.0.0.1
@@ -418,14 +420,14 @@ async fn e2e_json_malformed_request_still_returns_400() {
     let parsed: serde_json::Value =
         serde_json::from_slice(&resp.body).expect("400 body must parse as JSON");
     assert_eq!(
-        parsed["error"], "bad_request",
-        "400 body must carry the typed error marker, got: {parsed}"
+        parsed["error"], "validation_error",
+        "400 body must carry the binding-seam marker, got: {parsed}"
     );
     token.cancel();
 }
 
 #[tokio::test]
-async fn e2e_authored_marshal_in_rest_user_steps_stays_400() {
+async fn e2e_authored_marshal_failure_is_server_error() {
     let _guard = acquire_deadline(
         &SERVER_MUTEX,
         "SERVER_MUTEX (dsl rest marshal e2e)",
@@ -447,13 +449,13 @@ async fn e2e_authored_marshal_in_rest_user_steps_stays_400() {
     );
 
     assert_eq!(
-        resp.status, 400,
-        "an authored marshal failure must stay a client error"
+        resp.status, 500,
+        "an authored marshal failure must map to a server error (ADR-0096)"
     );
     let parsed: serde_json::Value =
-        serde_json::from_slice(&resp.body).expect("400 body must parse as JSON");
+        serde_json::from_slice(&resp.body).expect("500 body must parse as JSON");
     assert_eq!(
-        parsed["error"], "bad_request",
+        parsed["error"], "conversion_failed",
         "authored marshal must surface the raw TypeConversionFailed marker, got: {parsed}"
     );
     token.cancel();

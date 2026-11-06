@@ -94,10 +94,15 @@ rest: YAML ──parse_yaml──▶ http: routes (with to: direct:...)
 
 ## Error handling
 
-- **Malformed JSON body → 400 Bad Request.** The `unmarshal(json)` step
-  raises `CamelError::TypeConversionFailed`; the HTTP finaliser maps this
-  to `400 Bad Request` with a structured JSON error body
-  (`{"error":"bad_request","message":"..."}`).
+- **Malformed JSON body → 400 Bad Request.** The `consumes: application/json`
+  declaration injects the `unmarshal(json)` step at the binding seam. Per
+  ADR-0096 fault blame that seam is request-borne, so the step
+  reclassifies its format failure to `CamelError::ValidationError` → 400
+  with a structured JSON error body
+  (`{"error":"validation_error","message":"request body rejected: ..."}`).
+  An authored unmarshal in the middle of a route is not request-borne and
+  stays a server fault instead: 500 with
+  `{"error":"conversion_failed","message":"..."}`.
 - **Schema validation failure → 400 Bad Request.** When `request_schema`
   is declared on an operation, the body is validated against the schema
   after unmarshaling. Failures return `ValidationError → 400` with

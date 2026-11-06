@@ -3654,12 +3654,18 @@ pub(crate) fn lock_registry_test_mutex() -> std::sync::MutexGuard<'static, ()> {
 /// Map a pipeline error to an HTTP reply.
 ///
 /// Extracted from the inline `match` in `dispatch_handler` for unit
-/// testability (rc-1dk4). Client-fault errors map to their 4xx codes
-/// with a structured JSON error body: `TypeConversionFailed`/
-/// `ValidationError` → 400, `UnsupportedMediaType` → 415 (media
-/// negotiation gate, REST lowering), `NotAcceptable` → 406 (same
-/// gate); `Unauthenticated`/`Unauthorized` keep their `401`/`403`
-/// mappings; all other errors map to `500 Internal Server Error`.
+/// testability (rc-1dk4). Per ADR-0096, conversion failures default to
+/// the 500 blame bucket unless the failing step's input is by definition
+/// the request; the REST binding seam reclassifies those to
+/// `ValidationError`, so:
+///
+/// - `TypeConversionFailed` → 500 `conversion_failed` (server fault),
+/// - `ValidationError` → 400 `validation_error` (client fault),
+/// - negotiation errors → 415 `unsupported_media_type` / 406
+///   `not_acceptable` (REST lowering gate),
+/// - `Unauthenticated`/`Unauthorized` → 401/403,
+/// - `ConsumerStopping` → 503,
+/// - all other errors → 500 Internal Server Error.
 fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
     match e {
         CamelError::Unauthenticated(msg) => {
@@ -3681,8 +3687,8 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
             }
         }
         CamelError::TypeConversionFailed(msg) => {
-            tracing::warn!(error = %msg, path = %path, "Type conversion failed (bad request)");
-            json_error_reply(400, "bad_request", msg)
+            tracing::warn!(error = %msg, path = %path, "Type conversion failed (internal server error)");
+            json_error_reply(500, "conversion_failed", msg)
         }
         CamelError::ValidationError(msg) => {
             tracing::warn!(error = %msg, path = %path, "Schema validation failed (bad request)");
@@ -3728,7 +3734,7 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
 
 /// Build a JSON error reply with the given status, error code, and message.
 ///
-/// Shared by the `TypeConversionFailed`/`ValidationError` (400),
+/// Shared by the `TypeConversionFailed` (500), `ValidationError` (400),
 /// `UnsupportedMediaType` (415), and `NotAcceptable` (406) arms of
 /// `pipeline_error_to_reply` so the four replies cannot drift apart. The
 /// `unwrap_or_else(|_| "{}".to_string())` fallback keeps the reply valid
