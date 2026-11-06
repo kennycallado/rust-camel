@@ -1,0 +1,18 @@
+{
+  "kind": "plan",
+  "change": "jms-invalid-property-policy",
+  "verdict": "BLESSED",
+  "hash": "sha256:092902666e2f55e733ef8dbf6b15f6d8bccf33edf6bed9d12c63d1a06696350b",
+  "expert": "@experts/e_gpt",
+  "session": "ses_e4e6827b2ffeYPRs8I8zpaixXW",
+  "date": "2026-11-06",
+  "notes": "Plan bless, supersedes spec bless dfa99292. One BLESS-WITH-FIXES cycle (3 text fixes: broker.useJmx URL, bounded no-delivery window, step-range acceptance) then BLESSED. Prior r_glm plan review APPROVE after one fix cycle (bump-bridge tool, task 1.3 wiring).",
+  "history": [
+    {
+      "kind": "spec",
+      "verdict": "BLESSED",
+      "hash": "sha256:dfa99292c9b704a135694cf419f713143c1a2ecd2a484a6b52da5202b3c5d395",
+      "session": "ses_e4e7b1827ffeiKkkvz7OSrffk5"
+    }
+  ]
+}

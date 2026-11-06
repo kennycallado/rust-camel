@@ -209,7 +209,7 @@ This default is a breaking change. The Producer no longer forwards user headers 
 
 Denial runs before the allowlist check. The Producer denies reserved JMS names, the `jms` and `camel` framework namespaces, and credential-shaped names even when the allowlist names them. It forwards only string values. A denied name such as `api-key` or `Authorization` never reaches the broker.
 
-Use valid JMS property names, such as `traceId` and `orderId`. The Producer does not sanitize property names. Artemis can drop a hyphenated name (`rc-ooczk`). This release declares that inherited gap. It does not fix it.
+Use valid JMS property names, such as `traceId` and `orderId`. The Producer never sanitizes, renames, or drops a forwarded property. A broker-rejected property write fails the send with an error naming the offending property names, never their values, surfaced as gRPC `INVALID_ARGUMENT`. ActiveMQ Classic tolerates a hyphenated name and Artemis rejects it, because the JMS identifier rule excludes `-` (`rc-ooczk`).
 
 `Content-Type` stays a dedicated protocol field. Inbound mapping (the `mapJmsHeaders` option) is unchanged.
 

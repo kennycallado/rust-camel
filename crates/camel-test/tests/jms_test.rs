@@ -34,6 +34,11 @@ mod jms_credentials_cases;
 #[path = "support/jms_native_uri_cases.rs"]
 mod jms_native_uri_cases;
 
+// CI-owned Artemis rows for the invalid-property policy; the test names are
+// still selected by `cargo test ... --test jms_test <name>`.
+#[path = "support/jms_invalid_property_cases.rs"]
+mod jms_invalid_property_cases;
+
 use std::collections::HashMap;
 use std::time::Duration;
 

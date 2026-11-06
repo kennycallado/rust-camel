@@ -150,7 +150,7 @@ Do not edit a live journal file while a route or bridge holds the lock. An unkey
 
 The Rust producer forwards an outgoing exchange header only when the `jmsHeaderAllowlist` endpoint option names it. The allowlist is empty by default. This is a breaking change: user headers are not forwarded unless allowlisted. Credentials are denied before the allowlist check, together with reserved JMS names and the `jms` and `camel` framework namespaces.
 
-Use valid JMS property names, such as `traceId` and `orderId`. The producer does not sanitize property names. Hyphenated names can be dropped by Artemis (`rc-ooczk`). This release does not fix that gap.
+Use valid JMS property names, such as `traceId` and `orderId`. A legal name is forwarded unchanged: the bridge does not sanitize, rename, or drop a property. If the broker client rejects a forwarded property write, the send fails with `InvalidPropertyException` naming the offending properties but never their values, surfaced as gRPC `INVALID_ARGUMENT`. The JMS identifier rule excludes `-`: ActiveMQ Classic tolerates hyphenated names and Artemis rejects them, so the rule is uniform and only the legality set differs.
 
 ## Native image
 

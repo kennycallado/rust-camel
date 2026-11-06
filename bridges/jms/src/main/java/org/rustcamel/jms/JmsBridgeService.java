@@ -87,6 +87,16 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
           SendResponse.newBuilder().setMessageId(msgId == null ? "" : msgId).build());
       responseObserver.onCompleted();
       healthCache().recordSendSuccess(generation);
+    } catch (InvalidPropertyException e) {
+      // A rejected property write is the caller's error, not broker trouble: name the offending
+      // properties, never the values, and leave the health snapshot untouched.
+      LOG.warn(
+          "JMS send rejected, invalid JMS property names for destination '"
+              + request.getDestination()
+              + "': "
+              + e.getMessage());
+      responseObserver.onError(
+          Status.INVALID_ARGUMENT.withDescription(e.getMessage()).asException());
     } catch (Exception e) {
       LOG.error(
           "JMS send failed for destination '" + request.getDestination() + "': " + e.getMessage(),

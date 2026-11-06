@@ -13,6 +13,7 @@
 
 ### Fixes
 
+- fix(components/jms): a broker-rejected JMS property write now fails the send with a typed error naming the offending property names (no values), mapped to gRPC INVALID_ARGUMENT — a hyphenated, allowlisted header such as `x-crash-proof` no longer silently vanishes on Artemis; legal-name forwarding is byte-identical (bd rc-ooczk).
 - fix(cli): sealed artifacts boot without a writable system temp directory for the xslt, xsd, and sql asset classes (in-memory resolution), and the TLS classes fall back to a writable artifact-adjacent directory with a typed error when none exists (bd rc-l39dj).
 - fix(components/http): a route that sets `Content-Type` now always emits it verbatim on the reply, including when it equals the request value — inheritance is tracked by the `CamelHttpContentTypeInherited` provenance marker that route header writes clear, replacing value equality; replies to requests with a `Content-Type` whose route only rewrites the body no longer emit a request-dependent inferred type, and archive/stream fragment replies and `useOriginalMessage` restorations no longer depend on the request value either (bd rc-tf0k4).
 - fix(languages/simple): interpolating a `Bytes` body as a direct `${body}` slot into a template string with literal text now renders valid UTF-8 as text instead of a byte list, and fails with a `conversion` error on invalid UTF-8; a bare `${body}` keeps the byte array (bd rc-0v855).

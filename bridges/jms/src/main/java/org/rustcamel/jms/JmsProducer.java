@@ -2,6 +2,8 @@ package org.rustcamel.jms;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -42,6 +44,7 @@ public class JmsProducer {
       if (contentType != null && !contentType.isEmpty()) {
         msg.setStringProperty("ContentType", contentType);
       }
+      List<String> rejected = new ArrayList<>();
       for (var entry : headers.entrySet()) {
         String key = entry.getKey();
         // Backstop: never write a reserved, framework, or credential name as a
@@ -50,12 +53,10 @@ public class JmsProducer {
         try {
           msg.setStringProperty(key, entry.getValue());
         } catch (Exception e) {
-          LOG.log(
-              Level.FINE,
-              "Failed to set JMS property ''{0}'': {1}",
-              new Object[] {key, e.getMessage()});
+          rejected.add(key);
         }
       }
+      if (!rejected.isEmpty()) throw new InvalidPropertyException(String.join(", ", rejected));
       producer.send(msg);
       LOG.log(
           Level.FINE,

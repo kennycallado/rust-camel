@@ -134,8 +134,12 @@ Denial runs before the allowlist check. Reserved JMS names, the `jms` and
 `camel` framework namespaces, and credential substrings are denied even when
 listed. QoS headers are set after extraction. `Content-Type` stays a dedicated
 field, and inbound mapping is unchanged. Use valid JMS property names, such as
-`traceId` and `orderId`. The producer does not sanitize property names, and
-Artemis can drop a hyphenated name (`rc-ooczk`).
+`traceId` and `orderId`. The producer does not sanitize, rename, or drop a
+forwarded property. A broker-rejected property write fails the send with a
+typed error that names the property names and never their values, mapped to
+gRPC `INVALID_ARGUMENT` (`rc-ooczk`). Legality is broker-dependent: Classic
+tolerates a hyphenated name, and Artemis rejects it because the JMS identifier
+rule excludes `-`.
 
 ## Trust boundary and credential redaction
 
