@@ -5,7 +5,6 @@ Compilation of self-contained native artifacts. The compiler embeds documents,
 configuration, and assets into a copy of the executable with an EOF trailer,
 verifies the trailer and BLAKE3 checksum at boot, and supports detached
 signing, truststore pinning, and freshness floors.
-
 ## Requirements
 ### Requirement: Compile a native single-document artifact
 
@@ -221,7 +220,7 @@ The artifact reader SHALL distinguish an absent trailer from a malformed trailer
 
 ### Requirement: Run embedded documents without extraction
 
-The artifact SHALL feed the indexed documents through the existing parse, runtime interpolation, lowering, boot, and start paths using an in-memory virtual store. Runtime SHALL build configuration from embedded `Camel.toml`, include, and selected-profile entries. Embedded job configuration SHALL pass through the same job boot projection as argv jobs before context configuration; embedded route configuration SHALL boot unchanged. Runtime SHALL perform no source-tree reads, glob expansion, ambient `Camel.toml` or profile loading, canonicalization of declared asset strings, temporary extraction, watch, or hot reload. The only permitted filesystem writes are an explicitly requested report and the confined per-boot materialization of asset entries consumed by documented legacy path-reading consumers. Source diagnostics SHALL use `compiled://<logical-path>` identities. `${env:NAME}` expressions SHALL resolve from the deployment environment, not the compiler environment. Route `--report <path>` SHALL write JSON object `{ "kind": "route", "status": "completed"|"failed", "error": string|null }`; job reports SHALL use the existing job outcome schema. Boot and report-write failures SHALL exit 2; route pipeline failures SHALL exit 1; completed routes SHALL exit 0. The read-only deployment contract is class-dependent: an artifact whose assets are all memory-served SHALL write nothing under any filesystem; an artifact containing a disk-written class SHALL require a writable system temp directory (`TMPDIR`) and SHALL fail before boot when none is available.
+The artifact SHALL feed the indexed documents through the existing parse, runtime interpolation, lowering, boot, and start paths using an in-memory virtual store. Runtime SHALL build configuration from embedded `Camel.toml`, include, and selected-profile entries. Embedded job configuration SHALL pass through the same job boot projection as argv jobs before context configuration; embedded route configuration SHALL boot unchanged. Runtime SHALL perform no source-tree reads, glob expansion, ambient `Camel.toml` or profile loading, canonicalization of declared asset strings, temporary extraction, watch, or hot reload. The only permitted filesystem writes are an explicitly requested report and the confined per-boot materialization of TLS-family asset entries — the remaining legacy path-reading consumers; the `xslt stylesheet`, `xsd schema`, and `sql file` classes resolve in memory through the embedded-asset registry and write nothing. Source diagnostics SHALL use `compiled://<logical-path>` identities. `${env:NAME}` expressions SHALL resolve from the deployment environment, not the compiler environment. Route `--report <path>` SHALL write JSON object `{ "kind": "route", "status": "completed"|"failed", "error": string|null }`; job reports SHALL use the existing job outcome schema. Boot and report-write failures SHALL exit 2; route pipeline failures SHALL exit 1; completed routes SHALL exit 0. The read-only deployment contract is class-dependent: an artifact whose assets are all memory-served SHALL write nothing under any filesystem; an artifact containing a disk-written TLS-family class SHALL require a writable location — the system temp directory (`TMPDIR`) or, failing that, a writable directory next to the artifact — and SHALL fail before boot with a typed diagnostic naming the class and the requirement when no writable location exists.
 
 #### Scenario: Multi-document artifact runs without its source tree
 
@@ -247,17 +246,29 @@ The artifact SHALL feed the indexed documents through the existing parse, runtim
 - **WHEN** it boots and receives deployment environment values
 - **THEN** it runs without materializing any entry and writes nothing other than an explicitly requested report
 
+#### Scenario: In-process classes write nothing at boot
+
+- **GIVEN** a valid artifact whose asset classes are only `xslt stylesheet`, `xsd schema`, and `sql file`, running with a read-only root filesystem and no writable `TMPDIR`
+- **WHEN** it boots
+- **THEN** no per-boot directory is created, nothing is written under any filesystem beyond an explicitly requested report, and the owning components resolve their assets in process from the embedded-asset registry
+
 #### Scenario: Disk-written class boots on read-only root with writable TMPDIR
 
 - **GIVEN** a valid artifact containing a disk-written class (for example an embedded TLS certificate), running with a read-only root filesystem and a writable `TMPDIR`
 - **WHEN** it boots
 - **THEN** the confined per-boot materialization succeeds inside `TMPDIR`, the listener spawns against the substituted paths, and nothing is written outside `TMPDIR` and an explicitly requested report
 
+#### Scenario: Disk-written class without writable temp falls back to the artifact directory
+
+- **GIVEN** a valid artifact containing a disk-written TLS-family class, running with no writable `TMPDIR` and a writable directory next to the artifact
+- **WHEN** it boots
+- **THEN** the confined per-boot materialization is created next to the artifact with the same 0700/0600 confined semantics, the listener spawns against the substituted paths, and the system temp directory is not written
+
 #### Scenario: Disk-written class without writable temp fails before boot
 
-- **GIVEN** a valid artifact containing a disk-written class, running with no writable system temp directory
+- **GIVEN** a valid artifact containing a disk-written TLS-family class, running with neither a writable system temp directory nor a writable artifact directory
 - **WHEN** it starts
-- **THEN** it exits 2 before route or configuration boot with a diagnostic naming the class and the missing writable temp location
+- **THEN** it exits 2 before route or configuration boot with the typed diagnostic naming the asset class and the missing writable-directory requirement, carrying a path-free OS cause (the attempted candidate paths never appear in the message)
 
 #### Scenario: Embedded job artifact binds no diagnostic listeners
 
@@ -444,7 +455,7 @@ The compiler SHALL normalize source names to UTF-8 relative paths using `/`, anc
 
 ### Requirement: Embed and serve deploy-time assets
 
-The artifact SHALL carry deploy-time assets as typed `asset` store entries under the `assets/` logical namespace with `store_schema: 2`, embedding asset bytes verbatim and recording each entry's asset class. The index SHALL carry the compile-time substitution table recording each (document, declared string) pair's exact byte span(s) in the normalized document or config entry together with its asset logical path; runtime SHALL replace only those recorded spans — applied last-offset-first so earlier offsets and line numbers stay stable — and SHALL NOT perform declared-string text search, canonicalize, re-resolve, or re-read declared asset strings from the filesystem. Values substituted into a URI SHALL be percent-encoded so they round-trip consumer decoding (the `validator:` URI path is percent-decoded before use); when a materialization path contains URI-reserved characters or whitespace that cannot be encoded safely, the runtime SHALL fail before boot with a named diagnostic. The artifact runtime SHALL populate an in-memory, read-only asset registry from the decoded asset entries before boot, verifying each BLAKE3 digest against the manifest and failing closed on mismatch, duplicate, or missing entry. Static-file entries SHALL be served from the registry; static files are the only memory-served class in R2. Consumers that read files by path and are named in the design as legacy consumers (TLS PEM loading from document fields and TLS URI parameters, `xslt:` stylesheets, `validator:` schemas, `sql:file:` operands) SHALL receive a per-boot confined materialization: only referenced assets, written into a directory created under `std::env::temp_dir()` with a random per-boot name at mode 0700, each file written once with `create_new` semantics at mode 0600 so an existing entry or symlink is never followed, ancestor confinement re-checked per the bd `rc-0ks57` discipline, referenced through substituted paths resolved before discovery, and removed at shutdown AND on boot failure by a guard owned by the artifact runtime. An abrupt `SIGKILL`, a `process::exit` call, or the in-tree force-exit on a second stop signal bypasses the guard and may leave residue in the system temp directory; this caveat SHALL be documented. The artifact SHALL perform no bulk extraction, and the registry SHALL stay empty in normal `camel run` operation. Runtime SHALL NOT load assets that the store does not contain. TLS-class references — document `tls` blocks, the `tlsCert`/`tlsKey` URI parameters, and the gRPC `*Path` family — SHALL resolve exclusively through the embedded store and its confined materialization, with NO host-filesystem fallback: the runtime SHALL NOT probe the host filesystem for any TLS path, and a host path that was not embedded SHALL NOT be consulted.
+The artifact SHALL carry deploy-time assets as typed `asset` store entries under the `assets/` logical namespace with `store_schema: 2`, embedding asset bytes verbatim and recording each entry's asset class. The index SHALL carry the compile-time substitution table recording each (document, declared string) pair's exact byte span(s) in the normalized document or config entry together with its asset logical path; runtime SHALL replace only those recorded spans — applied last-offset-first so earlier offsets and line numbers stay stable — and SHALL NOT perform declared-string text search, canonicalize, re-resolve, or re-read declared asset strings from the filesystem. Values substituted into a URI SHALL be percent-encoded so they round-trip consumer decoding (the `validator:` URI path is percent-decoded before use); when a materialization path contains URI-reserved characters or whitespace that cannot be encoded safely, the runtime SHALL fail before boot with a named diagnostic. The artifact runtime SHALL populate an in-memory, read-only asset registry from the decoded asset entries before boot, verifying each BLAKE3 digest against the manifest and failing closed on mismatch, duplicate, or missing entry. Static-file entries SHALL be served from the registry. The `xslt stylesheet`, `xsd schema`, and `sql file` classes are memory-served as well (the mission-350 in-process pattern): at boot the runtime registers each referenced asset's verified bytes into the process-global embedded-asset registry (`camel_component_api::embedded_assets`) under its store path and rewrites each recorded span to a `camel-embedded:<store path>` reference — percent-encoded at URI sites so it round-trips consumer decoding, while a `literal`-context site for these classes now fails closed on the literal charset clause — the in-memory reference cannot satisfy it, so the failure moves from a boot-time discovery error to a prepare-time rule error with the same exit code. The owning component SHALL resolve a `camel-embedded:` reference from that registry before any filesystem attempt — applying its existing size cap — and SHALL fail closed when the reference names no registered asset; a value carrying either the canonical or the percent-encoded (`camel-embedded%3A`) prefix spelling that names no registered asset fails with a typed error naming the reference and never probes the host filesystem (the prefix is reserved, so prefixed values never reach the filesystem path); `camel-validator` keeps decoding the URI path exactly once in its own `from_uri` parse and `camel-sql` receives the canonical spelling through camel-endpoint's `parse_uri` decode-once, while `camel-xslt` — whose manual URI parse performs no decoding — accepts both spellings at its seam, decoding a complete encoded reference exactly once (a canonical reference's suffix is a literal key and is never decoded), without changing plain-path behavior. The XSD class resolves through registry-backed ROOT discovery in the `compile_xsd`/`discover_schema_set` path: the root schema resolves from the registry, import/include resolution keeps the existing budgets (8 MiB total transmitted schema-set bytes — alias and relative-path entries both count toward it — 256 resources, 128 aliases, 32-level import depth), and an embedded root carrying an unresolvable import/include fails with a typed, named error naming the missing resource. The `camel-embedded:` prefix is reserved workspace-wide together with `camel-proto-compiler::embedded`: a real file whose name starts with the prefix is shadowed, a documented reservation. Consumers that read files by path and are named in the design as legacy consumers (TLS PEM loading from document fields and TLS URI parameters) SHALL receive a per-boot confined materialization: only referenced TLS-family assets, written into a directory created under `std::env::temp_dir()` with a random per-boot name at mode 0700 — when that directory cannot be created, falling back to a writable directory next to the artifact (the running executable's parent); the first candidate that accepts the directory wins — each file written once with `create_new` semantics at mode 0600 so an existing entry or symlink is never followed, ancestor confinement re-checked per the bd `rc-0ks57` discipline, referenced through substituted paths resolved before discovery, and removed at shutdown AND on boot failure by a guard owned by the artifact runtime. When neither the system temp directory nor the artifact-adjacent directory is writable, the runtime SHALL fail before boot with the typed `TempUnavailable` diagnostic naming the asset class and the writable-directory requirement, with a path-free OS cause — the raw tempfile source error carries the attempted path and MUST NOT be interpolated into the user-facing message, staying reachable through `Error::source()`. An abrupt `SIGKILL`, a `process::exit` call, or the in-tree force-exit on a second stop signal bypasses the guard and may leave residue in the materialization location; this caveat SHALL be documented. The artifact SHALL perform no bulk extraction, and the registry SHALL stay empty in normal `camel run` operation. Runtime SHALL NOT load assets that the store does not contain. TLS-class references — document `tls` blocks, the `tlsCert`/`tlsKey` URI parameters, and the gRPC `*Path` family — SHALL resolve exclusively through the embedded store and its confined materialization, with NO host-filesystem fallback: the runtime SHALL NOT probe the host filesystem for any TLS path, and a host path that was not embedded SHALL NOT be consulted.
 
 #### Scenario: Asset round trip through the registry
 
@@ -452,11 +463,35 @@ The artifact SHALL carry deploy-time assets as typed `asset` store entries under
 - **WHEN** the artifact boots
 - **THEN** the registry exposes the asset bytes by logical path, the digest matches the manifest, and no temporary file is created — static files are the memory-served class
 
+#### Scenario: In-process asset classes never touch the filesystem
+
+- **GIVEN** a compiled artifact whose routes reference `xslt:`, `validator:`, and `sql:file:` assets
+- **WHEN** the artifact boots
+- **THEN** the substitution sites carry `camel-embedded:` references, the owning components receive the exact embedded bytes from the registry, no file is written for these classes, and a reference naming an unregistered asset fails closed with the component's normal error shape
+
+#### Scenario: Percent-encoded reference round trips through consumer parses
+
+- **GIVEN** a compiled artifact whose `xslt:` substitution sites carry the percent-encoded spelling `camel-embedded%3A<store path>` written by the runtime (the manual xslt URI parse does not decode) and a `sql:file:` site carrying the canonical spelling (the `parse_uri` decode already ran)
+- **WHEN** the owning component parses the URI and resolves the stylesheet or query
+- **THEN** the xslt seam decodes the spelling exactly once and resolves the same registered bytes as the canonical spelling, the sql query resolves from the registry through the canonical spelling, a prefixed-but-unregistered reference fails with a typed error naming the reference and never probes the host filesystem, and a plain-path stylesheet or query resolves exactly as before the change
+
+#### Scenario: Embedded XSD set behavior is explicit
+
+- **GIVEN** a compiled artifact with a `validator:` root schema that is standalone (no import/include) and a second artifact whose root schema imports a file that was never embedded
+- **WHEN** the artifacts boot
+- **THEN** the standalone schema resolves entirely from the registry under the existing budgets (8 MiB total transmitted schema-set bytes — alias and relative-path entries both count toward it — 256 resources, 128 aliases, 32-level import depth), while the importing artifact fails with a typed, named error identifying the missing schema resource and never probes the host filesystem for it
+
+#### Scenario: Host decoys for in-process classes are never probed
+
+- **GIVEN** a compiled artifact and new files placed after compilation at the original `xslt:`, `validator:`, and `sql:file:` declared paths
+- **WHEN** the artifact starts
+- **THEN** the owning components resolve only through the embedded registry, the decoy files are never opened, and the served bytes equal the embedded entries
+
 #### Scenario: Legacy consumer materialization is confined
 
 - **GIVEN** a compiled artifact whose TLS listener references embedded certificate and key entries
 - **WHEN** the artifact boots and the listener spawns
-- **THEN** the referenced assets exist only inside the confined per-boot directory under the system temp directory, the substituted paths resolve inside it, files are mode 0600 and the directory mode 0700, no asset is written outside it, and shutdown removes the directory
+- **THEN** the referenced assets exist only inside the confined per-boot directory (system temp directory, or the artifact-adjacent directory when the temp dir is not writable), the substituted paths resolve inside it, files are mode 0600 and the directory mode 0700, no asset is written outside it, and shutdown removes the directory
 
 #### Scenario: Materialization is removed on boot failure
 
