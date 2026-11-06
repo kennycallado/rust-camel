@@ -106,16 +106,23 @@ pub fn validate_llm_url_pinned(
     Ok((host_str.to_string(), addrs))
 }
 
-/// Validate a provider `base_url` before constructing the underlying client.
+/// Validate a provider `base_url` at BOOT time: URL shape and policy
+/// checks only — no DNS resolution.
 ///
-/// H15: rejects non-http(s) schemes AND resolves DNS to block
-/// private/loopback/link-local IPs via the shared `is_ssrf_blocked_ip`
-/// helper. Prevents SSRF to cloud metadata endpoints (e.g. 169.254.169.254).
+/// H15: rejects non-http(s) schemes; under PublicHttpsOnly it also
+/// rejects plain HTTP so public endpoints must use HTTPS.
 ///
-/// DNS resolution is **fail-closed**: if the host cannot be resolved,
-/// validation fails. An unresolvable host is treated as a configuration
-/// error — silently passing would let typos, hijacked DNS, or
-/// firewalled-internal names reach the outbound client.
+/// DNS resolution is deliberately NOT performed here (bd rc-ga0kl): a
+/// fail-closed resolution at boot made a transient DNS failure abort
+/// `camel run` for routes that never call `llm`. The pinned-resolution
+/// check runs lazily at FIRST USE of the component instead — through
+/// [`validate_llm_url_pinned`], which resolves fail-closed, rejects
+/// blocked SSRF addresses, and hands the caller the addresses to pin via
+/// `resolve_to_addrs` — so no connection is ever attempted before the
+/// host is validated and pinned, and a later DNS change is not honoured.
+/// The typed error and message at first use are the same
+/// [`LlmError::InvalidRequest`] "cannot resolve llm base_url host …"
+/// that boot used to produce.
 pub fn validate_llm_url(url: &str, policy: SsrfPolicy) -> Result<(), LlmError> {
     let parsed = url::Url::parse(url).map_err(|e| {
         LlmError::InvalidRequest(format!(
@@ -130,31 +137,15 @@ pub fn validate_llm_url(url: &str, policy: SsrfPolicy) -> Result<(), LlmError> {
         )));
     }
 
-    // Under PublicHttpsOnly: reject non-HTTPS and blocked IPs.
-    // Under AllowInternal: accept http/https; IP-gated decision deferred
-    // to validate_llm_url_pinned which rejects HTTP-if-public.
-    if !policy.allows_internal() {
-        if parsed.scheme() != "https" {
-            return Err(LlmError::InvalidRequest(format!(
-                "llm base_url must use HTTPS for public endpoints (got '{}'). \
-                 Set allow_internal = true for local HTTP endpoints.",
-                parsed.scheme()
-            )));
-        }
-        if let Some(host) = parsed.host_str() {
-            use std::net::ToSocketAddrs;
-            let addrs = (host, 0u16).to_socket_addrs().map_err(|e| {
-                LlmError::InvalidRequest(format!("cannot resolve llm base_url host '{host}': {e}"))
-            })?;
-            for addr in addrs {
-                if camel_api::is_ssrf_blocked_ip(&addr.ip()) {
-                    return Err(LlmError::InvalidRequest(format!(
-                        "llm base_url resolves to blocked SSRF address: {}",
-                        addr.ip()
-                    )));
-                }
-            }
-        }
+    // Under PublicHttpsOnly: reject non-HTTPS. (IP/SSRF gating is
+    // deferred to validate_llm_url_pinned at first use, together with
+    // the fail-closed DNS resolution it is inseparable from.)
+    if !policy.allows_internal() && parsed.scheme() != "https" {
+        return Err(LlmError::InvalidRequest(format!(
+            "llm base_url must use HTTPS for public endpoints (got '{}'). \
+             Set allow_internal = true for local HTTP endpoints.",
+            parsed.scheme()
+        )));
     }
     Ok(())
 }
@@ -382,14 +373,40 @@ default_model = "mock-model-legacy"
     }
 
     #[test]
-    fn validate_llm_url_rejects_unresolvable_host() {
-        // Fail-closed on DNS resolution failure: a non-resolvable host
-        // is treated as a config error, not a silent pass-through.
-        let err = validate_llm_url("https://no-such-host.invalid", SsrfPolicy::PublicHttpsOnly)
-            .unwrap_err();
+    fn validate_llm_url_accepts_unresolvable_host_boot_is_lazy() {
+        // Boot validation is DNS-free (bd rc-ga0kl): a transient DNS
+        // failure must not abort `camel run` before any route runs. The
+        // fail-closed resolution moved to first use
+        // (`validate_llm_url_pinned`); see its unresolvable-host test.
+        validate_llm_url("https://no-such-host.invalid", SsrfPolicy::PublicHttpsOnly)
+            .expect("boot must not resolve DNS: unresolvable host boots fine");
+    }
+
+    #[test]
+    fn validate_llm_url_pinned_rejects_unresolvable_host() {
+        // First-use check stays fail-closed with the same typed error
+        // boot used to produce (bd rc-ga0kl).
+        let err =
+            validate_llm_url_pinned("https://no-such-host.invalid", SsrfPolicy::PublicHttpsOnly)
+                .unwrap_err();
         assert!(
             err.to_string().contains("cannot resolve"),
             "expected DNS error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_llm_url_pinned_resolves_resolvable_host_and_pins() {
+        // A resolvable hostname still resolves and returns the addresses
+        // to pin (bd rc-ga0kl): the lazy move never skips pinning.
+        let (host, addrs) =
+            validate_llm_url_pinned("http://localhost:11434", SsrfPolicy::AllowInternal)
+                .expect("localhost resolves");
+        assert_eq!(host, "localhost");
+        assert!(!addrs.is_empty(), "resolved addresses must be non-empty");
+        assert!(
+            addrs.iter().all(|addr| addr.ip().is_loopback()),
+            "localhost must resolve to loopback, got: {addrs:?}"
         );
     }
 
@@ -467,6 +484,30 @@ default_model = "mock-model-legacy"
         assert!(result.is_err(), "expected Err for file:// base_url");
         let err = result.err().expect("is_err above"); // allow-unwrap
         assert!(err.to_string().contains("http/https"), "msg: {err}");
+    }
+
+    #[cfg(any(feature = "openai", feature = "all-providers"))]
+    #[test]
+    fn build_single_boots_with_unresolvable_host() {
+        // bd rc-ga0kl: a transient DNS failure at boot must not abort the
+        // run for routes that never call `llm`. Provider construction is
+        // lazy — the pinned fail-closed resolution happens at first use
+        // (see the genai first-use test in genai_adapter_tests).
+        use crate::config::OpenaiProviderConfig;
+        let config = LlmProviderConfig::Openai(OpenaiProviderConfig {
+            api_key: "sk-test".into(),
+            base_url: Some("https://no-such-host.invalid".into()),
+            default_model: "gpt-4o".into(),
+            timeout_secs: None,
+            max_concurrency: None,
+            network_retry: None,
+            pricing: None,
+            cache_ttl_secs: None,
+            cache_max_entries: None,
+        });
+        let provider =
+            build_single("oai", &config, None, SsrfPolicy::PublicHttpsOnly).expect("boot ok");
+        assert_eq!(provider.id(), "oai");
     }
 
     #[test]

@@ -60,8 +60,11 @@ pub(crate) async fn sql_validate_action(
         return Err(ScenarioFailure::ActionTransport {
             action: index,
             source: crate::adapters::TransportError::Other {
-                message: "sql validation: no datasource catalog is available; the \
-                          boot-owning caller must pass the cascade's catalog"
+                message: "the `sql` validate target requires a datasource catalog, but this \
+                          run has no datasource catalog: declare the datasource under \
+                          `[datasources]` in the nearest Camel.toml and run the document \
+                          through the booted path — a scenario-only (boot-less) run cannot \
+                          validate sql rows"
                     .to_string(),
             },
         });

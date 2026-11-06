@@ -63,8 +63,11 @@ pub(crate) async fn surreal_validate_action(
         return Err(ScenarioFailure::ActionTransport {
             action: index,
             source: crate::adapters::TransportError::Other {
-                message: "surreal validation: no datasource catalog is available; the \
-                          boot-owning caller must pass the cascade's catalog"
+                message: "the `surreal` validate target requires a datasource catalog, but \
+                          this run has no datasource catalog: declare the datasource under \
+                          `[datasources]` in the nearest Camel.toml and run the document \
+                          through the booted path — a scenario-only (boot-less) run cannot \
+                          validate surreal records"
                     .to_string(),
             },
         });

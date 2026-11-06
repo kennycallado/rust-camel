@@ -53,7 +53,10 @@ pub(super) mod warn_capture {
         fn record_follows_from(&self, _span: &Id, _follows_from: &Id) {}
 
         fn event(&self, event: &Event<'_>) {
-            if *event.metadata().level() >= Level::WARN {
+            // tracing-core orders Levels so that more-severe levels compare
+            // SMALLER (ERROR is the minimum, TRACE the maximum):
+            // "WARN and more severe" is `<= Level::WARN` (bd rc-icpbt).
+            if *event.metadata().level() <= Level::WARN {
                 let mut visitor = FieldVisitor(String::new());
                 event.record(&mut visitor);
                 if let Ok(mut slot) = self.events.lock() {

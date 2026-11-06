@@ -2036,6 +2036,47 @@ async fn validate_sql_without_catalog_fails_closed() {
     }
 }
 
+/// A scenario-only run (`None` catalog) fails a `sql:` action with the
+/// user-facing diagnostic (bd rc-oheej): it names the missing
+/// `[datasources]` declaration and the boot-less limitation — never the
+/// internal caller-contract sentence ("boot-owning caller"), which
+/// describes harness internals, not the author's problem.
+#[tokio::test]
+#[cfg(all(test, feature = "sql"))]
+async fn sql_action_without_catalog_reports_user_facing_diagnostic() {
+    let doc = doc_with(vec![ScenarioAction::Sql {
+        datasource: "appdb".to_string(),
+        prepare: vec!["DELETE FROM t_nocat".to_string()],
+    }]);
+    let router = PartnerRouter::new(BTreeMap::new());
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(
+        outcome.verdict, None,
+        "the missing catalog must fail the run: {outcome:?}"
+    );
+    match &outcome.per_action[0] {
+        Err(ScenarioFailure::ActionTransport { source, .. }) => {
+            let crate::adapters::TransportError::Other { message } = source else {
+                panic!("expected TransportError::Other, got {source:?}");
+            };
+            assert!(
+                message.contains("no datasource catalog"),
+                "the diagnostic must name the missing catalog: {message}"
+            );
+            assert!(
+                message.contains("[datasources]"),
+                "the diagnostic must name the declaration remedy: {message}"
+            );
+            assert!(
+                !message.contains("boot-owning caller"),
+                "the internal caller contract must not leak: {message}"
+            );
+        }
+        other => panic!("expected ActionTransport on action 0, got {other:?}"),
+    }
+}
+
 /// A `sql` target paired with the message grammar is a pairing the
 /// parser never produces: the runner fails closed with the
 /// unpaired-validate detail naming the sql/rows rule. The action is

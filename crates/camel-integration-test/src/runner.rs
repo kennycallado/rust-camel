@@ -869,8 +869,11 @@ async fn run_action(
                     return Err(ScenarioFailure::ActionTransport {
                         action: index,
                         source: TransportError::Other {
-                            message: "sql action: no datasource catalog is available; the \
-                                      boot-owning caller must pass the cascade's catalog"
+                            message: "the `sql:` action requires a datasource catalog, but this \
+                                      run has no datasource catalog: declare the datasource \
+                                      under `[datasources]` in the nearest Camel.toml and run \
+                                      the document through the booted path — a scenario-only \
+                                      (boot-less) run cannot execute `sql:` actions"
                                 .to_string(),
                         },
                     });
@@ -918,8 +921,12 @@ async fn run_action(
                     return Err(ScenarioFailure::ActionTransport {
                         action: index,
                         source: TransportError::Other {
-                            message: "surreal action: no datasource catalog is available; the \
-                                      boot-owning caller must pass the cascade's catalog"
+                            message: "the `surreal:` action requires a datasource catalog, but \
+                                      this run has no datasource catalog: declare the \
+                                      datasource under `[datasources]` in the nearest \
+                                      Camel.toml and run the document through the booted \
+                                      path — a scenario-only (boot-less) run cannot execute \
+                                      `surreal:` actions"
                                 .to_string(),
                         },
                     });
@@ -965,8 +972,12 @@ async fn run_action(
                     return Err(ScenarioFailure::ActionTransport {
                         action: index,
                         source: TransportError::Other {
-                            message: "redis action: no datasource catalog is available; the \
-                                      boot-owning caller must pass the cascade's catalog"
+                            message: "the `redis` action requires a datasource catalog, but \
+                                      this run has no datasource catalog: declare the \
+                                      datasource under `[datasources]` in the nearest \
+                                      Camel.toml and run the document through the booted \
+                                      path — a scenario-only (boot-less) run cannot execute \
+                                      `redis` actions"
                                 .to_string(),
                         },
                     });

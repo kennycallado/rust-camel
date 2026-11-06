@@ -112,6 +112,44 @@ fn capture_warns_two_events_preserve_emission_order() {
 }
 
 #[test]
+fn capture_warns_captures_warn_and_error_not_lower_levels() {
+    // Level-ordering pin (bd rc-icpbt): the captured set is exactly
+    // warn-or-more-severe. The predicate must keep `error!` (the inverted
+    // historical comparison dropped it) and must not pull `info!`,
+    // `debug!`, or `trace!` back in.
+    let (_, warns) = super::capture_warns(|| {
+        tracing::error!("probe error");
+        tracing::warn!("probe warn");
+        tracing::info!("probe info");
+        tracing::debug!("probe debug");
+        tracing::trace!("probe trace");
+    });
+    assert_eq!(
+        warns.len(),
+        2,
+        "exactly the error and warn events must be captured: {warns:?}"
+    );
+    let error_pos = warns
+        .iter()
+        .position(|entry| entry.contains("probe error"))
+        .expect("error event must be captured");
+    let warn_pos = warns
+        .iter()
+        .position(|entry| entry.contains("probe warn"))
+        .expect("warn event must be captured");
+    let info_hit = warns.iter().any(|entry| entry.contains("probe info"));
+    let debug_hit = warns.iter().any(|entry| entry.contains("probe debug"));
+    let trace_hit = warns.iter().any(|entry| entry.contains("probe trace"));
+    assert!(!info_hit, "info events must not be captured: {warns:?}");
+    assert!(!debug_hit, "debug events must not be captured: {warns:?}");
+    assert!(!trace_hit, "trace events must not be captured: {warns:?}");
+    assert!(
+        error_pos < warn_pos,
+        "emission order must be preserved: error at {error_pos}, warn at {warn_pos} — {warns:?}"
+    );
+}
+
+#[test]
 fn capture_debugs_captures_debug_and_more_severe_events() {
     let ((), events, span_records) = super::capture_debugs_with_span_records(|| {
         tracing::debug!("probe debug");

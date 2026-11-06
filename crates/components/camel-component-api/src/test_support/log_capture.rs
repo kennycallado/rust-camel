@@ -11,9 +11,10 @@
 //!   `Subscriber` writing through [`CaptureWriter`] with ANSI off. The sync
 //!   form runs the closure on the caller's thread; the async form captures
 //!   only what the polling thread emits.
-//! - [`capture_warns`] — a hand-rolled `Subscriber` that records every event
-//!   except `error!` (the historical camel-config `>= WARN` predicate, kept
-//!   verbatim; see the fn doc for the reversed-`Level`-ordering truth).
+//! - [`capture_warns`] — a hand-rolled `Subscriber` that records WARN and
+//!   ERROR events (warn-or-more-severe; the historical camel-config
+//!   `>= WARN` predicate with the reversed-`Level`-ordering comparison
+//!   corrected — see the fn doc for the `Level`-ordering truth).
 //! - [`capture_debugs_with_span_records`] + [`captured_field`] /
 //!   [`record_field`] — a `tracing_subscriber` registry with `Layer`s,
 //!   capturing DEBUG-and-more-severe events plus span records.
@@ -152,7 +153,8 @@ pub async fn capture_logs_async<F: std::future::Future>(fut: F) -> (F::Output, S
 /// it; define it exactly once.
 type Sink = Arc<Mutex<Vec<String>>>;
 
-/// Minimal `Subscriber` recording events selected by the historical predicate.
+/// Minimal `Subscriber` recording events selected by the
+/// warn-or-more-severe predicate.
 struct Recorder {
     warnings: Sink,
     next_span_id: std::sync::atomic::AtomicU64,
@@ -186,7 +188,12 @@ impl Subscriber for Recorder {
     fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
     fn event(&self, event: &Event<'_>) {
-        if *event.metadata().level() >= Level::WARN {
+        // tracing-core orders Levels so that more-severe levels compare
+        // SMALLER (ERROR is the minimum, TRACE the maximum): "WARN and more
+        // severe" is `<= Level::WARN`. A `>=` comparison here would capture
+        // everything EXCEPT `error!` — the opposite of this function's
+        // contract (bd rc-icpbt; the historical camel-config predicate).
+        if *event.metadata().level() <= Level::WARN {
             let mut visitor = MessageVisitor(String::new());
             event.record(&mut visitor);
             if let Ok(mut slot) = self.warnings.lock() {
@@ -206,14 +213,16 @@ impl Subscriber for Recorder {
 /// followed by `field="value"` pairs (str fields quoted via Debug) — the
 /// `event!` macro prepends the message.
 ///
-/// Captured set: WARN, INFO, DEBUG, and TRACE — everything EXCEPT `error!`.
+/// Captured set: WARN and ERROR — warn-or-more-severe, as the name says.
 /// `tracing-core`'s `Level` `Ord` is reversed (ERROR compares smallest;
-/// tracing-core 0.1.36 `src/metadata.rs:945-950`), so the historical predicate
-/// `*event.metadata().level() >= Level::WARN` selects every level but ERROR.
-/// Historical camel-config contract, kept verbatim for behavior-identical
-/// replacement (bd rc-421es). The predicate over-captures relative to the
-/// function name; the fix (and the consumer-test audit it requires) is
-/// deliberately deferred — do not "correct" it here.
+/// tracing-core 0.1.36 `src/metadata.rs:945-950`), so the correct
+/// comparison for "WARN or more severe" is
+/// `*event.metadata().level() <= Level::WARN`. The historical camel-config
+/// predicate used `>=`, which selects every level EXCEPT ERROR; the
+/// promotion (bd rc-421es) kept it verbatim and deferred the fix. Fixed in
+/// bd rc-icpbt together with an audit of every consumer test: no consumer
+/// relied on the over-capture (all assertions are needle-filtered on
+/// `warn!` messages), so the fix is assertion-neutral for them.
 ///
 /// Unlike the camel-config original this function does NOT install a
 /// process-global registry default: that belongs to each consumer test

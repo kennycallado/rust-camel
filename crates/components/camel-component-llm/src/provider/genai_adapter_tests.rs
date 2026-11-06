@@ -794,6 +794,48 @@ fn build_ollama_builds_genai_provider() {
     assert_eq!(provider.default_model(), "llama3");
 }
 
+/// bd rc-ga0kl: an unresolvable base_url boots fine (provider
+/// construction is lazy) and fails closed at FIRST USE, with the same
+/// typed error and message the boot-time check used to produce.
+#[cfg(any(feature = "ollama", feature = "all-providers"))]
+#[tokio::test]
+async fn first_use_fails_closed_on_unresolvable_base_url() {
+    use crate::config::OllamaProviderConfig;
+    use crate::provider::ChatRequest;
+    use futures::StreamExt;
+
+    let config = OllamaProviderConfig {
+        base_url: "http://no-such-host.invalid:11434".into(),
+        default_model: "llama3".into(),
+        timeout_secs: None,
+        max_concurrency: None,
+        network_retry: None,
+        pricing: None,
+        cache_ttl_secs: None,
+        cache_max_entries: None,
+    };
+    let provider = build_ollama(
+        "ol",
+        &config,
+        Duration::from_secs(30),
+        SsrfPolicy::AllowInternal,
+    )
+    .expect("boot must succeed: DNS resolution moved to first use");
+
+    let mut stream =
+        provider.chat_stream(ChatRequest::new("llama3", vec![ChatMessage::user("hi")]));
+    let first = stream
+        .next()
+        .await
+        .expect("the fail-closed client build must surface an event");
+    let err = first.expect_err("first use must fail closed on an unresolvable host");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cannot resolve llm base_url host 'no-such-host.invalid'"),
+        "expected the typed DNS error, got: {msg}"
+    );
+}
+
 #[test]
 fn body_derived_error_details_are_truncated() {
     let body = "x".repeat(500);
@@ -2166,14 +2208,47 @@ mod generic_native {
                     generic_config(service, "explicit-key", "explicit-model", Some(url), None),
                     false,
                 );
-                let result = build_provider_map(&config);
-                let err = match result {
-                    Ok(_) => panic!("public-HTTPS policy must reject the override"),
+                // bd rc-ga0kl: boot no longer resolves DNS, so the two
+                // HTTPS IP literals BOOT fine now — their SSRF gating
+                // moved to first use (asserted below through the same
+                // pinned check the client build runs). The `file:` scheme
+                // is still rejected at boot: the shape check is DNS-free.
+                if url.starts_with("https://") {
+                    let map = build_provider_map(&config)
+                        .expect("boot must be lazy: no DNS resolution at construction");
+                    assert_eq!(map.len(), 1, "provider registered for {url}");
+                } else {
+                    let err = match build_provider_map(&config) {
+                        Ok(_) => panic!("non-http scheme must still be rejected at boot"),
+                        Err(err) => err,
+                    };
+                    assert!(
+                        matches!(&err, LlmError::InvalidRequest(_)),
+                        "expected InvalidRequest for {service:?} {url}, got: {err}"
+                    );
+                }
+            }
+
+            // First-use gate (bd rc-ga0kl): the pinned check the client
+            // build runs rejects blocked IPs fail-closed — the same gate
+            // boot used to perform inline.
+            for blocked in ["https://127.0.0.1/v1", "https://169.254.169.254/v1"] {
+                let first_use = GenaiConfig::Generic {
+                    service,
+                    api_key: "explicit-key".into(),
+                    base_url: Some(blocked.to_string()),
+                };
+                let err = match collect_pinning_from_config(&first_use, SsrfPolicy::PublicHttpsOnly)
+                    .await
+                {
                     Err(err) => err,
+                    Ok(pinning) => {
+                        panic!("blocked SSRF address must fail closed at first use: {pinning:?}")
+                    }
                 };
                 assert!(
-                    matches!(&err, LlmError::InvalidRequest(_)),
-                    "expected InvalidRequest for {service:?} {url}, got: {err}"
+                    err.to_string().contains("blocked SSRF address"),
+                    "expected the typed SSRF error for {blocked}, got: {err}"
                 );
             }
 
