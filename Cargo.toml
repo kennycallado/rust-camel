@@ -156,7 +156,7 @@ prost-reflect = { version = "0.16", features = ["serde"] }
 protox = "=0.9.1"
 tonic-prost-build = { version = "0.14" }
 tonic-prost = { version = "0.14" }
-tower = { version = "0.5", features = ["util"] }
+tower = { version = "0.5", features = ["util", "timeout", "limit", "buffer"] }
 tower-lsp = "0.20"
 tower-http = { version = "0.7", features = ["fs", "timeout"] }
 async-trait = "0.1"

@@ -46,6 +46,26 @@ residual risk accepted while the design stays default-only.
 _Avoid_: step trait, accumulator, StepAccumulation (not a symbol — the real name is
 `StepAccumulator`)
 
+**`.to_layered(uri, layer)`**:
+Producer-granularity middleware on every `StepAccumulator`. Appends `BuilderStep::LayeredTo`; the
+layer wraps the producer resolved for `uri` at route compile time, not the rest of the pipeline.
+_Avoid_: layered to, to with layer
+
+**`.layered(layer, |section| ...)`**:
+Section-granularity middleware on every `StepAccumulator`. The closure receives a `SectionBuilder`
+that offers the step methods but no route metadata, `.parameters()`, `.route_layer()`, or
+`.build()`. Its steps become one `BuilderStep::Layered` and run as one segment, so `.stop()` inside
+the section stops the route and the route error handler treats the section as one retry unit.
+Nested `to_layered` and `layered` calls work inside the section.
+_Avoid_: middleware block, subsection
+
+**`.route_layer(layer)`**:
+Route-granularity middleware on `RouteBuilder` only. Collects factories as route metadata; `build()`
+nests the entire step list into `Layered` steps. Repeated calls nest, the last-added layer is the
+OUTERMOST, and the route error handler retries the whole wrapped route. `build_canonical()` rejects
+routes that carry layers.
+_Avoid_: global layer, route middleware (unqualified)
+
 **BuilderStep**:
 Re-exported from `camel_core::route::BuilderStep` (`enum BuilderStep`); **not** owned by this crate.
 camel-builder is the canonical *writer* of `BuilderStep` values through the fluent API, while

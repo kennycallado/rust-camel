@@ -89,6 +89,7 @@ fn steps_contain_stream_out(steps: &[BuilderStep]) -> bool {
         | BuilderStep::StreamSplit { steps, .. }
         | BuilderStep::Split { steps, .. }
         | BuilderStep::Filter { steps, .. }
+        | BuilderStep::Layered { steps, .. }
         | BuilderStep::Multicast { steps, .. }
         | BuilderStep::Throttle { steps, .. }
         | BuilderStep::LoadBalance { steps, .. }
@@ -142,10 +143,12 @@ fn steps_contain_stream_out(steps: &[BuilderStep]) -> bool {
                     .is_some_and(|fin| steps_contain_stream_out(&fin.steps))
         }
 
-        // Static-URI leaves: WireTap, Enrich, and PollEnrich carry a
+        // Static-URI leaves: WireTap, Enrich, PollEnrich, and the
+        // middleware-wrapped send LayeredTo carry a
         // fixed endpoint URI (no nested pipeline), visited by
         // `for_each_step_uri` in camel-core's startup_validation.rs.
         BuilderStep::WireTap { uri }
+        | BuilderStep::LayeredTo { uri, .. }
         | BuilderStep::Enrich { uri, .. }
         | BuilderStep::PollEnrich { uri, .. } => is_stream_out_uri(uri),
 

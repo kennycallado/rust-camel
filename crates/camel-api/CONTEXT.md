@@ -82,6 +82,35 @@ built from. The erased service is `Send + Sync` by construction; a clone is a lo
 `clone_box()` call. `SyncBoxProcessor` remains as a vestigial newtype pending a separate collapse.
 _Avoid_: boxed service, dyn processor
 
+**ProcessorLayer**:
+Object-safe factory trait (`layer.rs`) that wraps a `BoxProcessor` in a Tower layer and re-erases
+the result behind `CamelError`. A blanket impl covers every `tower::Layer<BoxProcessor>` whose
+service is `Clone + Send + Sync + 'static` with a `Send` future and an error convertible into
+`BoxError`. That blanket impl forecloses hand-written impls for concrete tower layers (`E0119`), so
+a non-qualifying layer needs a newtype. A layer that does not meet the bounds fails to compile at the
+`wrap` call site; there is no runtime fallback.
+_Avoid_: middleware trait, layer trait (unqualified), wrapper
+
+**LayerFactory**:
+Cloneable handle to an `Arc<dyn ProcessorLayer>` (`layer.rs`) stored in builder steps and
+`BuilderStep`. `Debug` is redacted to `LayerFactory(...)`; equality is `Arc` pointer identity, not
+structural, so two equal-but-distinct layers compare unequal.
+_Avoid_: layer holder, middleware factory
+
+**CamelErrorAdapter**:
+Tower `Service` shim (`layer.rs`) whose `Error` is `CamelError` over an inner service with
+`Error: Into<BoxError>`. `poll_ready` and `call` both operate on the same handle — never on a
+per-call clone — because permit-style layers reserve capacity on the handle that called
+`poll_ready`. Cloning inside `call` deadlocks those layers under concurrency.
+_Avoid_: error mapper, error wrapper
+
+**SegmentProcessor**:
+`Service<Exchange, Error = CamelError>` bridge (`layer.rs`) over an `OutcomeSegment`, so
+segment-mode pipelines can be wrapped by a `ProcessorLayer`. `Completed` and `Failed` map through
+`PipelineOutcome::into_tower_result`; `Stopped(ex)` maps to `Ok(ex)` after unconditionally setting
+the `CamelStop` property to true, so `run_steps` re-derives Stop at the next Process step.
+_Avoid_: segment service, segment wrapper
+
 **PipelineOutcome**:
 Enum (`pipeline_outcome.rs`): `Completed(Exchange) | Stopped(Exchange) | Failed(CamelError)`. Sits
 **one layer above Tower** — Tower responses stay `Result<Exchange, CamelError>`. Defined here;

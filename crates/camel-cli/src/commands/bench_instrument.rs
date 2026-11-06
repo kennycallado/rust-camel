@@ -166,7 +166,8 @@ fn count_sentinels_anywhere(steps: &[BuilderStep]) -> usize {
             | BuilderStep::StreamSplit { steps, .. }
             | BuilderStep::Split { steps, .. }
             | BuilderStep::Filter { steps, .. }
-            | BuilderStep::Multicast { steps, .. } => {
+            | BuilderStep::Multicast { steps, .. }
+            | BuilderStep::Layered { steps, .. } => {
                 count += count_sentinels_anywhere(steps);
             }
             BuilderStep::DeclarativeChoice { whens, otherwise } => {
@@ -311,6 +312,7 @@ fn route_anchor_defs(defs: Vec<RouteDefinition>, file: &Arc<Mutex<File>>) -> Vec
 }
 
 /// Walk the flat step list and insert pre/post processors around each `To`.
+/// `LayeredTo` sends are not wrapped — revisit when the DSL gains `to_layered`.
 fn inject_timing(
     steps: Vec<BuilderStep>,
     route_id: String,

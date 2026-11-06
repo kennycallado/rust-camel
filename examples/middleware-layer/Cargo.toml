@@ -1,0 +1,21 @@
+[package]
+name = "middleware-layer"
+description = "Custom Tower middleware at producer, section, and whole-route granularity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+camel-api.workspace = true
+camel-core.workspace = true
+camel-builder.workspace = true
+camel-component-direct.workspace = true
+camel-component-mock.workspace = true
+camel-component-timer.workspace = true
+tower.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

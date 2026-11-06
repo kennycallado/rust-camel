@@ -41,6 +41,8 @@ pub const CANONICAL_CONTRACT_RUST_ONLY_STEPS: &[&str] = &[
     "map_body",
     "set_body_fn",
     "set_header_fn",
+    "to_layered",
+    "layered",
 ];
 
 pub fn canonical_contract_supports_step(step: &str) -> bool {
@@ -807,6 +809,21 @@ mod tests {
         let split_reason = canonical_contract_rejection_reason("split")
             .expect("split should require declarative form");
         assert!(split_reason.contains("declarative"));
+    }
+
+    /// Task 2.1 (builder-layer-middleware): layered builder steps are
+    /// Rust-only programmable steps, so canonical v2 must reject them with the
+    /// explicit rust-only reason rather than report them as unknown.
+    #[test]
+    fn canonical_rejection_lists_include_layered_steps() {
+        for step in ["to_layered", "layered"] {
+            let reason = canonical_contract_rejection_reason(step)
+                .unwrap_or_else(|| panic!("{step} must be explicitly rejected"));
+            assert!(
+                reason.contains("rust-only programmable step"),
+                "{step} rejection reason was: {reason}"
+            );
+        }
     }
 
     #[test]

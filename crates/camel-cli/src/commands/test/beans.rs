@@ -133,6 +133,7 @@ fn collect_from_steps(steps: &[BuilderStep], calls: &mut Vec<(String, String)>) 
             | BuilderStep::StreamSplit { steps, .. }
             | BuilderStep::Split { steps, .. }
             | BuilderStep::Filter { steps, .. }
+            | BuilderStep::Layered { steps, .. }
             | BuilderStep::Multicast { steps, .. }
             | BuilderStep::Throttle { steps, .. }
             | BuilderStep::LoadBalance { steps, .. }
@@ -187,6 +188,7 @@ fn collect_from_steps(steps: &[BuilderStep], calls: &mut Vec<(String, String)>) 
             // Leaf variants — hold no nested step lists.
             BuilderStep::Processor(_)
             | BuilderStep::To(_)
+            | BuilderStep::LayeredTo { .. }
             | BuilderStep::Stop
             | BuilderStep::Log { .. }
             | BuilderStep::DeclarativeSetHeader { .. }

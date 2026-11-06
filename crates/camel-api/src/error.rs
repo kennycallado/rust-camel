@@ -580,6 +580,124 @@ impl From<EndpointUriError> for CamelError {
     }
 }
 
+/// Boxed trait-object error used by Tower middleware (`Service::Error`).
+pub type BoxError = std::boxed::Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// Returns `true` when an [`tower::timeout::error::Elapsed`] appears anywhere
+/// in the source chain rooted at `err`.
+///
+/// The walk starts at `err` itself: `TimeoutLayer` boxes a bare `Elapsed` with
+/// no wrapper, so skipping the root would miss the common timeout case.
+fn source_chain_contains_elapsed(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(source) = current {
+        if source
+            .downcast_ref::<tower::timeout::error::Elapsed>()
+            .is_some()
+        {
+            return true;
+        }
+        current = std::error::Error::source(source);
+    }
+    false
+}
+
+/// Converts a boxed middleware error into a [`CamelError`].
+///
+/// A boxed [`CamelError`] passes through unchanged. This keeps native exception
+/// matching and fault classification intact after a middleware hop instead of
+/// double-wrapping it as a processor error.
+///
+/// Any other boxed error becomes [`CamelError::ProcessorErrorWithSource`] with
+/// the original error preserved as the source, so the chain stays inspectable.
+/// A Tower timeout anywhere in the chain (not only at its root) is reported as
+/// a middleware timeout.
+///
+/// The payload is an [`OpaqueErrorSource`] around the `Arc`, not a bare `Arc`.
+/// With a bare `Arc` the chain would skip the pointee: thiserror's generated
+/// `source()` delegates through std's forwarding `Error for Arc<T>` impl to the
+/// pointee's own `source()`. The wrapper instead returns the pointee DIRECTLY
+/// from its own `source()`, with no `Arc` hop, so the concrete error is the
+/// FIRST node of the public chain — `err.source()` already yields it, and
+/// `downcast_ref` reaches it at hop 1 (e.g.
+/// `tower::timeout::error::Elapsed`).
+///
+/// # Examples
+///
+/// A boxed [`CamelError`] is returned unchanged:
+///
+/// ```
+/// use std::error::Error;
+///
+/// use camel_api::error::CamelError;
+///
+/// let boxed: Box<dyn Error + Send + Sync> = Box::new(CamelError::InvalidUri("u".into()));
+/// match CamelError::from(boxed) {
+///     CamelError::InvalidUri(uri) => assert_eq!(uri, "u"),
+///     other => panic!("expected pass-through, got {other:?}"),
+/// }
+/// ```
+///
+/// A timeout nested in the source chain is classified as a middleware timeout,
+/// and the source is preserved:
+///
+/// ```
+/// use std::error::Error;
+///
+/// use camel_api::error::CamelError;
+/// use tower::timeout::error::Elapsed;
+///
+/// #[derive(Debug)]
+/// struct TimedOut(Elapsed);
+///
+/// impl std::fmt::Display for TimedOut {
+///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+///         f.write_str("middleware call timed out")
+///     }
+/// }
+///
+/// impl Error for TimedOut {
+///     fn source(&self) -> Option<&(dyn Error + 'static)> {
+///         Some(&self.0)
+///     }
+/// }
+///
+/// let boxed: Box<dyn Error + Send + Sync> = Box::new(TimedOut(Elapsed::new()));
+/// let err = CamelError::from(boxed);
+/// assert!(err.to_string().contains("middleware timeout elapsed"));
+///
+/// let mut source = err.source();
+/// let mut reached_elapsed = false;
+/// while let Some(inner) = source {
+///     if inner.downcast_ref::<Elapsed>().is_some() {
+///         reached_elapsed = true;
+///         break;
+///     }
+///     source = inner.source();
+/// }
+/// assert!(reached_elapsed, "source chain must reach the original Elapsed");
+/// ```
+impl From<BoxError> for CamelError {
+    fn from(err: BoxError) -> Self {
+        // Pass a native CamelError through untouched: double-wrapping it would
+        // break doTry catch-by-variant matching and fault classification.
+        match err.downcast::<CamelError>() {
+            Ok(camel_error) => *camel_error,
+            Err(err) => {
+                let message = if source_chain_contains_elapsed(err.as_ref()) {
+                    "middleware timeout elapsed"
+                } else {
+                    "middleware error"
+                };
+                CamelError::ProcessorErrorWithSource(
+                    message.to_string(),
+                    Arc::new(OpaqueErrorSource::new(Arc::from(err))),
+                )
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,6 +716,108 @@ mod tests {
     }
 
     impl std::error::Error for SampleSource {}
+
+    /// Wrapper whose only source is a tower timeout [`Elapsed`], used to prove
+    /// the `BoxError` conversion walks the whole source chain.
+    ///
+    /// [`Elapsed`]: tower::timeout::error::Elapsed
+    #[derive(Debug)]
+    struct ElapsedSourcedError(tower::timeout::error::Elapsed);
+
+    impl fmt::Display for ElapsedSourcedError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("wrapped middleware failure")
+        }
+    }
+
+    impl std::error::Error for ElapsedSourcedError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn boxed_camel_error_passthrough_unchanged() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> =
+            Box::<dyn std::error::Error + Send + Sync>::from(CamelError::InvalidUri(
+                "u".to_string(),
+            ));
+        let err = CamelError::from(boxed);
+        match err {
+            CamelError::InvalidUri(uri) => assert_eq!(uri, "u"),
+            other => panic!("expected InvalidUri passthrough, got {other:?}"),
+        }
+    }
+
+    /// Asserts a tower [`Elapsed`] is reachable through the public
+    /// [`std::error::Error::source`] chain within `max_hops` hops.
+    ///
+    /// This is the real consumer path: the `ProcessorErrorWithSource` payload is
+    /// opaque, so callers can only walk `source()` and `downcast_ref`.
+    ///
+    /// [`Elapsed`]: tower::timeout::error::Elapsed
+    fn assert_elapsed_within_source_hops(err: &CamelError, max_hops: usize) {
+        let mut current = err.source();
+        for _ in 0..max_hops {
+            let Some(node) = current else { break };
+            if node
+                .downcast_ref::<tower::timeout::error::Elapsed>()
+                .is_some()
+            {
+                return;
+            }
+            current = node.source();
+        }
+        panic!("source chain does not reach tower Elapsed within {max_hops} hops: {err:?}");
+    }
+
+    #[test]
+    fn timeout_error_classified_through_source_chain() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(ElapsedSourcedError(tower::timeout::error::Elapsed::new()));
+        let err = CamelError::from(boxed);
+        assert!(
+            err.to_string().contains("middleware timeout elapsed"),
+            "unexpected display: {err}"
+        );
+        assert_elapsed_within_source_hops(&err, 3);
+    }
+
+    #[test]
+    fn bare_elapsed_root_error_classified_as_timeout() {
+        // Mirrors probe P4: `TimeoutLayer` boxes a bare `Elapsed` at the chain
+        // root, with no wrapper error to walk through. The `OpaqueErrorSource`
+        // payload still surfaces it as a downcastable chain node (hop 1).
+        let boxed: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(tower::timeout::error::Elapsed::new());
+        let err = CamelError::from(boxed);
+        assert!(
+            err.to_string().contains("middleware timeout elapsed"),
+            "unexpected display: {err}"
+        );
+        assert_elapsed_within_source_hops(&err, 3);
+    }
+
+    #[test]
+    #[allow(clippy::io_other_error)]
+    fn plain_box_error_preserves_source() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> =
+            Box::new(std::io::Error::new(std::io::ErrorKind::Other, "boom"));
+        let err = CamelError::from(boxed);
+        match &err {
+            CamelError::ProcessorErrorWithSource(message, _) => {
+                assert!(
+                    message.contains("middleware error"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected ProcessorErrorWithSource, got {other:?}"),
+        }
+        let source = err
+            .source()
+            .expect("ProcessorErrorWithSource carries a source");
+        assert_eq!(source.to_string(), "boom");
+    }
 
     fn all_error_samples() -> Vec<CamelError> {
         vec![

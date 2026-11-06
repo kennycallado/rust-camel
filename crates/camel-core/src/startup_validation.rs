@@ -122,11 +122,11 @@ pub fn scan_route_definitions_for_sql_checks(
 
 /// Walk every statically declared URI reachable through `step` and invoke
 /// `f` for each one. Variant coverage mirrors the prior
-/// `walk_step_uris`: `To`, `WireTap`, `Enrich`, `PollEnrich`, plus all
-/// structural sub-pipelines whose `steps` are known at parse time
+/// `walk_step_uris`: `To` / `LayeredTo`, `WireTap`, `Enrich`, `PollEnrich`,
+/// plus all structural sub-pipelines whose `steps` are known at parse time
 /// (`Filter` / `DeclarativeFilter`, `Split` / `DeclarativeSplit` /
 /// `DeclarativeStreamSplit`, `Multicast`, `Throttle`, `LoadBalance`,
-/// `Loop` / `DeclarativeLoop`, `IdempotentConsumer`), the `Choice` and
+/// `Loop` / `DeclarativeLoop`, `IdempotentConsumer`, `Layered`), the `Choice` and
 /// `DeclarativeChoice` `whens` (and `otherwise`), and the
 /// `DeclarativeDoTry` `try_steps` / `catch` / `finally` blocks.
 ///
@@ -135,7 +135,7 @@ pub fn scan_route_definitions_for_sql_checks(
 /// resolved at runtime and cannot be statically validated.
 fn for_each_step_uri<F: FnMut(&str)>(step: &BuilderStep, f: &mut F) {
     match step {
-        BuilderStep::To(uri) => f(uri),
+        BuilderStep::To(uri) | BuilderStep::LayeredTo { uri, .. } => f(uri),
         BuilderStep::WireTap { uri } | BuilderStep::Enrich { uri, .. } => {
             f(uri);
         }
@@ -153,7 +153,8 @@ fn for_each_step_uri<F: FnMut(&str)>(step: &BuilderStep, f: &mut F) {
         | BuilderStep::LoadBalance { steps, .. }
         | BuilderStep::Loop { steps, .. }
         | BuilderStep::DeclarativeLoop { steps, .. }
-        | BuilderStep::IdempotentConsumer { steps, .. } => {
+        | BuilderStep::IdempotentConsumer { steps, .. }
+        | BuilderStep::Layered { steps, .. } => {
             for s in steps {
                 for_each_step_uri(s, f);
             }
@@ -518,6 +519,37 @@ mod tests {
             "direct:start",
             vec![BuilderStep::Filter {
                 predicate: FilterPredicate::new(|_| true),
+                steps: vec![BuilderStep::To("exec:echo".to_string())],
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// A middleware-wrapped send is still a send — `LayeredTo` contributes
+    /// its authored URI to the scheme scan (regression: the upstream
+    /// catch-all silently skipped it).
+    #[test]
+    fn scheme_scanner_detects_exec_in_layered_to() {
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::LayeredTo {
+                uri: "exec:echo".to_string(),
+                factory: camel_api::LayerFactory::new(tower::limit::ConcurrencyLimitLayer::new(2)),
+            }],
+        )
+        .with_route_id("r".to_string());
+        assert!(route_definitions_reference_scheme(&[route], "exec"));
+    }
+
+    /// `Layered` sub-pipeline — recurse into `steps` like every other
+    /// structural container.
+    #[test]
+    fn scheme_scanner_detects_exec_in_layered() {
+        let route = RouteDefinition::new(
+            "direct:start",
+            vec![BuilderStep::Layered {
+                factory: camel_api::LayerFactory::new(tower::limit::ConcurrencyLimitLayer::new(2)),
                 steps: vec![BuilderStep::To("exec:echo".to_string())],
             }],
         )

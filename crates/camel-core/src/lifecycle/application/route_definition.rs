@@ -9,8 +9,8 @@ use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::loop_eip::LoopConfig;
 use camel_api::security_policy::SecurityPolicyConfig;
 use camel_api::{
-    AggregatorConfig, FilterPredicate, MulticastConfig, OpaqueProcessor, ResequencePolicyConfig,
-    SpanKindHint, SplitterConfig,
+    AggregatorConfig, FilterPredicate, LayerFactory, MulticastConfig, OpaqueProcessor,
+    ResequencePolicyConfig, SpanKindHint, SplitterConfig,
 };
 use camel_auth::TokenAuthenticator;
 use camel_component_api::ConcurrencyModel;
@@ -401,14 +401,33 @@ pub enum BuilderStep {
     Resequence {
         policy_config: ResequencePolicyConfig,
     },
+    /// A `to(uri)` send wrapped in a Tower middleware layer. The layer wraps
+    /// the resolved producer at route-add time; the step is still a send, so
+    /// span and latency metadata mirror `To`.
+    LayeredTo {
+        /// Authored destination URI — resolved like `To` at route-add time,
+        /// then wrapped with `factory`.
+        uri: String,
+        /// Type-erased tower layer applied around the resolved producer.
+        factory: LayerFactory,
+    },
+    /// A middleware layer wrapping a nested sub-pipeline (`layered`).
+    Layered {
+        /// Type-erased tower layer applied around the compiled section.
+        factory: LayerFactory,
+        /// Section steps compiled into one outcome-aware segment, wrapped
+        /// with `factory`.
+        steps: Vec<BuilderStep>,
+    },
 }
 
 impl BuilderStep {
     /// Stable span name for this step (span-name-enrichment, task 1.2).
     ///
-    /// `To` yields `to:{scheme}` where scheme is the AUTHORED URI before the
-    /// first `:` — a pure string split, no endpoint resolution, so a `SkipTo`
-    /// interception never rewrites the label. EIP variants yield their
+    /// `To` and its middleware-wrapped twin `LayeredTo` yield `to:{scheme}`
+    /// where scheme is the AUTHORED URI before the first `:` — a pure string
+    /// split, no endpoint resolution, so a `SkipTo` interception never
+    /// rewrites the label. EIP variants yield their
     /// kebab-case EIP name; declarative twins share the label of their
     /// programmatic sibling (`DeclarativeSplit` and `Split` are both
     /// `"split"`). Genuinely anonymous variants (opaque processors, the Stop
@@ -423,6 +442,12 @@ impl BuilderStep {
             Self::Processor(_) | Self::Stop => None,
 
             Self::To(uri) => uri.contains(':').then(|| {
+                let scheme = uri.split(':').next().unwrap_or_default();
+                format!("to:{scheme}")
+            }),
+
+            // A layered send is still a send: same authored-scheme label.
+            Self::LayeredTo { uri, .. } => uri.contains(':').then(|| {
                 let scheme = uri.split(':').next().unwrap_or_default();
                 format!("to:{scheme}")
             }),
@@ -477,12 +502,14 @@ impl BuilderStep {
             Self::CachePeekStale { .. } => Some("cache-peek-stale".into()),
             Self::DeclarativeDoTry { .. } | Self::DoTry { .. } => Some("do-try".into()),
             Self::Resequence { .. } => Some("resequence".into()),
+            Self::Layered { .. } => Some("layered".into()),
         }
     }
 
     /// Declared send URI retained on the compiled step for step-latency
-    /// attribution (steplatency task 1.1). Only `To` carries one: the RAW
-    /// AUTHORED URI, extracted as a pure string copy with no endpoint
+    /// attribution (steplatency task 1.1). Only `To` and `LayeredTo` carry
+    /// one: the RAW AUTHORED URI, extracted as a pure string copy with no
+    /// endpoint
     /// resolution, so a `SkipTo` interception never rewrites it — the
     /// compiled step keeps the URI the route author wrote, not the
     /// intercept target. Stored as shared immutable text (`Arc<str>`).
@@ -493,6 +520,7 @@ impl BuilderStep {
     pub(crate) fn to_uri_metadata(&self) -> Option<Arc<str>> {
         match self {
             Self::To(uri) => Some(Arc::from(uri.as_str())),
+            Self::LayeredTo { uri, .. } => Some(Arc::from(uri.as_str())),
 
             // rc-4mz7: every remaining variant is named explicitly — no
             // wildcard. A new BuilderStep variant fails to compile until it
@@ -546,14 +574,16 @@ impl BuilderStep {
             | Self::CachePeekStale { .. }
             | Self::DeclarativeDoTry { .. }
             | Self::DoTry { .. }
+            | Self::Layered { .. }
             | Self::Resequence { .. } => None,
         }
     }
 
     /// Span kind hint for this step's step span (span-kind-hint, task 1.2).
     ///
-    /// Endpoint-bearing variants (`To`, `Enrich`, `PollEnrich`, `WireTap`)
-    /// classify the AUTHORED URI scheme — the text before the first `:`,
+    /// Endpoint-bearing variants (`To`, `LayeredTo`, `Enrich`, `PollEnrich`,
+    /// `WireTap`) classify the AUTHORED URI scheme — the text before the
+    /// first `:`,
     /// compared with `eq_ignore_ascii_case`, no endpoint resolution — so a
     /// `SkipTo` interception never rewrites the kind. Messaging broker
     /// schemes map to `Producer` (async, one-way send) and synchronous
@@ -567,8 +597,9 @@ impl BuilderStep {
     /// `#[non_exhaustive]`, so same-crate exhaustiveness holds.
     pub(crate) fn span_kind_hint(&self) -> SpanKindHint {
         match self {
-            // Endpoint-bearing variants: classify by the authored scheme.
+            // A layered send classifies exactly like `To`: authored scheme only.
             Self::To(uri)
+            | Self::LayeredTo { uri, .. }
             | Self::Enrich { uri, .. }
             | Self::PollEnrich { uri, .. }
             | Self::WireTap { uri, .. } => uri_span_kind(uri),
@@ -622,6 +653,7 @@ impl BuilderStep {
             | Self::CachePeekStale { .. }
             | Self::DeclarativeDoTry { .. }
             | Self::DoTry { .. }
+            | Self::Layered { .. }
             | Self::Resequence { .. } => SpanKindHint::Internal,
         }
     }
@@ -2035,5 +2067,44 @@ mod tests {
         let def = RouteDefinition::new("direct:start", vec![])
             .with_circuit_breaker_fallback(vec![BuilderStep::To("mock:out".into())]);
         assert_eq!(def.circuit_breaker_fallback().len(), 1);
+    }
+
+    /// Task 2.1 (builder-layer-middleware): a layered send is still a send.
+    ///
+    /// `LayeredTo` must expose the same span label, declared send URI, and
+    /// span-kind classification as the equivalent plain `To` — the middleware
+    /// layer never changes the authored endpoint metadata.
+    #[test]
+    fn builder_step_layered_to_metadata_parity() {
+        let layered = BuilderStep::LayeredTo {
+            uri: "kafka:topic".into(),
+            factory: LayerFactory::new(tower::limit::ConcurrencyLimitLayer::new(2)),
+        };
+        let plain = BuilderStep::To("kafka:topic".into());
+
+        assert_eq!(layered.span_label(), Some("to:kafka".to_string()));
+        assert_eq!(layered.to_uri_metadata(), Some(Arc::from("kafka:topic")));
+        assert_eq!(layered.span_kind_hint(), SpanKindHint::Producer);
+
+        // Parity with the plain send on all three accessors.
+        assert_eq!(layered.span_label(), plain.span_label());
+        assert_eq!(layered.to_uri_metadata(), plain.to_uri_metadata());
+        assert_eq!(layered.span_kind_hint(), plain.span_kind_hint());
+    }
+
+    /// Task 2.1 (builder-layer-middleware): a wrapping layer is not a send.
+    ///
+    /// `Layered` carries no endpoint of its own: it labels `layered`, exposes
+    /// no declared URI, and is internal route processing.
+    #[test]
+    fn builder_step_layered_label_and_internal_hint() {
+        let step = BuilderStep::Layered {
+            factory: LayerFactory::new(tower::limit::ConcurrencyLimitLayer::new(2)),
+            steps: vec![],
+        };
+
+        assert_eq!(step.span_label(), Some("layered".to_string()));
+        assert_eq!(step.to_uri_metadata(), None);
+        assert_eq!(step.span_kind_hint(), SpanKindHint::Internal);
     }
 }

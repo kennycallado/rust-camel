@@ -1,0 +1,53 @@
+{
+  "kind": "plan",
+  "change": "builder-layer-middleware",
+  "verdict": "BLESS",
+  "hash": "sha256:b1a0b220dee810f6ec7b4f62845c56813889d3eced2a52514a48734e676ac175",
+  "expert": "experts/e_gpt",
+  "session": "ses_e4ed8c2b1ffeup17YYxMDScsIj",
+  "blessed_at": "2026-11-06",
+  "supersedes_spec_bless": true,
+  "reviewer_loop": [
+    {
+      "reviewer": "reviewers/r_glm",
+      "rounds": 3,
+      "final": "APPROVE-WITH-FINDINGS (last minor fixed post-round)"
+    }
+  ],
+  "history": [
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:edd71965d3d3c306d4de50a1b6c81c997c22b4f02764088b0348fce8dfd30b94",
+      "session": "ses_e4eeb1e72ffeh6G2klg4znqRTx"
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:77ad7671b24523d9325d67d0f09aeb5827a1571b84540cebf60231613ca46e08",
+      "session": "ses_e4edd4d77ffeiKn8A6NuooiVR0"
+    }
+  ],
+  "spec_bless_history": [
+    {
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:e145805480d5cbf27d39c36eb03ad1101c81026fff86031bed21057395191992",
+      "session": "ses_e4f1b8496ffeZBMfWkg17bataJ"
+    },
+    {
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:adaba738d24437a526215538a6e1798bf243028c5c7bf7b37ddaae63ed6d58ea",
+      "session": "ses_e4f153e48ffeX3pw1A5NBAW6I9"
+    },
+    {
+      "verdict": "BLESS",
+      "hash": "sha256:e69c96206398f33c4474c195673d2030ce7e27e56e67ff1eb957b01f23d48d37",
+      "session": "ses_e4f1068efffecLR0CLircdK6V1"
+    },
+    {
+      "verdict": "BLESS",
+      "hash": "sha256:1c34f024de33c3bf0d07d0105f637accdd4beec3529a2a909e8ef9932819118e",
+      "session": "ses_e4f0bba9bffe857KHnjnBHtRxr"
+    }
+  ]
+}

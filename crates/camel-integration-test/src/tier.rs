@@ -140,6 +140,7 @@ fn walk_steps<'a>(steps: &'a [BuilderStep], uris: &mut Vec<&'a str>, dynamic_dis
         match step {
             // Steps carrying a URI: the endpoint joins the closure.
             BuilderStep::To(uri)
+            | BuilderStep::LayeredTo { uri, .. }
             | BuilderStep::WireTap { uri }
             | BuilderStep::Enrich { uri, .. }
             | BuilderStep::PollEnrich { uri, .. } => uris.push(uri),
@@ -160,6 +161,7 @@ fn walk_steps<'a>(steps: &'a [BuilderStep], uris: &mut Vec<&'a str>, dynamic_dis
             | BuilderStep::StreamSplit { steps, .. }
             | BuilderStep::Split { steps, .. }
             | BuilderStep::Filter { steps, .. }
+            | BuilderStep::Layered { steps, .. }
             | BuilderStep::Multicast { steps, .. }
             | BuilderStep::Throttle { steps, .. }
             | BuilderStep::LoadBalance { steps, .. }

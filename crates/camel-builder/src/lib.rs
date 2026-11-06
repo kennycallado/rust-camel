@@ -1,7 +1,8 @@
 //! Fluent builder API for constructing Camel routes programmatically with EIP patterns.
 //!
-//! Main types: `RouteBuilder`, `StepAccumulator`, `SplitBuilder`, `ChoiceBuilder`, `MulticastBuilder`,
-//! `ThrottleBuilder`, `LoopBuilder`, `LoadBalancerBuilder`, `OnExceptionBuilder`.
+//! Main types: `RouteBuilder`, `StepAccumulator`, `SectionBuilder`, `SplitBuilder`,
+//! `ChoiceBuilder`, `MulticastBuilder`, `ThrottleBuilder`, `LoopBuilder`,
+//! `LoadBalancerBuilder`, `OnExceptionBuilder`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -24,7 +25,8 @@ use camel_api::splitter::SplitterConfig;
 use camel_api::throttler::{ThrottleStrategy, ThrottlerConfig};
 use camel_api::{
     BoxProcessor, CamelError, CanonicalRouteSpec, EndpointUri, Exchange, FilterPredicate,
-    IdentityProcessor, LanguageExpressionDef, OpaqueProcessor, ProcessorFn, Value,
+    IdentityProcessor, LanguageExpressionDef, LayerFactory, OpaqueProcessor, ProcessorFn,
+    ProcessorLayer, Value,
     runtime::{
         CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
         CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
@@ -365,6 +367,144 @@ pub trait StepAccumulator: Sized {
         });
         self
     }
+
+    /// Send to `uri` through a Tower middleware layer.
+    ///
+    /// The layer wraps the producer resolved for `uri` at route-add time. For
+    /// span and latency metadata the step is still a send, so it mirrors
+    /// [`to`](Self::to).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use camel_builder::{RouteBuilder, StepAccumulator};
+    /// use camel_core::route::BuilderStep;
+    /// use tower::limit::ConcurrencyLimitLayer;
+    ///
+    /// let route = RouteBuilder::from("direct:a")
+    ///     .route_id("doctest")
+    ///     .to_layered("mock:b", ConcurrencyLimitLayer::new(2))
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// match &route.steps()[0] {
+    ///     BuilderStep::LayeredTo { uri, .. } => assert_eq!(uri, "mock:b"),
+    ///     other => panic!("expected LayeredTo, got {other:?}"),
+    /// }
+    /// ```
+    fn to_layered(mut self, uri: impl Into<String>, layer: impl ProcessorLayer + 'static) -> Self {
+        self.steps_mut().push(BuilderStep::LayeredTo {
+            uri: uri.into(),
+            factory: LayerFactory::new(layer),
+        });
+        self
+    }
+
+    /// Wrap a nested sub-pipeline in a Tower middleware layer.
+    ///
+    /// The closure receives a [`SectionBuilder`] — a step accumulator without
+    /// route metadata, `.parameters()`, `.route_layer()` or `.build()` — so the
+    /// scope can only add steps. Nested [`layered`](Self::layered) calls work.
+    ///
+    /// The section's steps run as ONE segment wrapped by `layer`:
+    ///
+    /// - [`stop`](Self::stop) inside the section stops the route.
+    /// - The route error handler treats the section as one retry unit.
+    ///
+    /// # Example
+    ///
+    /// A single-step section:
+    ///
+    /// ```
+    /// use camel_builder::{RouteBuilder, StepAccumulator};
+    /// use camel_core::route::BuilderStep;
+    /// use tower::limit::ConcurrencyLimitLayer;
+    ///
+    /// let route = RouteBuilder::from("direct:a")
+    ///     .route_id("doctest")
+    ///     .layered(ConcurrencyLimitLayer::new(2), |section| section.to("mock:1"))
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// match &route.steps()[0] {
+    ///     BuilderStep::Layered { steps, .. } => {
+    ///         assert!(matches!(steps[0], BuilderStep::To(_)));
+    ///     }
+    ///     other => panic!("expected Layered, got {other:?}"),
+    /// }
+    /// ```
+    ///
+    /// See [`SectionBuilder`] for nested sections.
+    fn layered(
+        mut self,
+        layer: impl ProcessorLayer + 'static,
+        section: impl FnOnce(SectionBuilder) -> SectionBuilder,
+    ) -> Self {
+        let section_builder = section(SectionBuilder::new());
+        self.steps_mut().push(BuilderStep::Layered {
+            factory: LayerFactory::new(layer),
+            steps: section_builder.into_steps(),
+        });
+        self
+    }
+}
+
+/// Step accumulator handed to the closure of [`StepAccumulator::layered`].
+///
+/// A `SectionBuilder` inherits every step-adding method from
+/// [`StepAccumulator`] (`to`, `process`, `set_header`, `map_body`, nested
+/// `to_layered`/`layered`, `stop`, …) but deliberately exposes **no**
+/// `.parameters()`, **no** `.route_layer()` and **no** `.build()`, and carries
+/// no route metadata. Deferred-parameter and whole-route-middleware misuse
+/// therefore cannot be expressed inside a section.
+///
+/// # Example
+///
+/// Nested sections produce nested [`BuilderStep::Layered`] steps:
+///
+/// ```
+/// use camel_builder::{RouteBuilder, StepAccumulator};
+/// use camel_core::route::BuilderStep;
+/// use tower::limit::ConcurrencyLimitLayer;
+///
+/// let route = RouteBuilder::from("direct:a")
+///     .route_id("doctest")
+///     .layered(ConcurrencyLimitLayer::new(2), |section| {
+///         section.layered(ConcurrencyLimitLayer::new(3), |inner| {
+///             inner.to_layered("mock:b", ConcurrencyLimitLayer::new(4))
+///         })
+///     })
+///     .build()
+///     .unwrap();
+///
+/// match &route.steps()[0] {
+///     BuilderStep::Layered { steps, .. } => match &steps[0] {
+///         BuilderStep::Layered { steps, .. } => {
+///             assert!(matches!(steps[0], BuilderStep::LayeredTo { .. }));
+///         }
+///         other => panic!("expected nested Layered, got {other:?}"),
+///     },
+///     other => panic!("expected Layered, got {other:?}"),
+/// }
+/// ```
+pub struct SectionBuilder {
+    steps: Vec<BuilderStep>,
+}
+
+impl SectionBuilder {
+    pub(crate) fn new() -> Self {
+        Self { steps: Vec::new() }
+    }
+
+    pub(crate) fn into_steps(self) -> Vec<BuilderStep> {
+        self.steps
+    }
+}
+
+impl StepAccumulator for SectionBuilder {
+    fn steps_mut(&mut self) -> &mut Vec<BuilderStep> {
+        &mut self.steps
+    }
 }
 
 /// Identifies the endpoint slot a `.parameters()` call attaches to.
@@ -395,6 +535,8 @@ enum EndpointSlot {
 pub struct RouteBuilder {
     from_uri: String,
     steps: Vec<BuilderStep>,
+    /// Whole-route middleware layers, in call order (first added is innermost).
+    route_layers: Vec<LayerFactory>,
     /// Pending `.parameters()` maps, each attached to a specific endpoint slot.
     parameter_assignments: Vec<(EndpointSlot, BTreeMap<String, String>)>,
     /// Misuse recorded at `.parameters()` call time and surfaced at `build()`.
@@ -436,6 +578,7 @@ impl RouteBuilder {
         Self {
             from_uri: endpoint.to_string(),
             steps: Vec::new(),
+            route_layers: Vec::new(),
             parameter_assignments: Vec::new(),
             parameter_misuse: None,
             error_handler: None,
@@ -800,6 +943,40 @@ impl RouteBuilder {
         self
     }
 
+    /// Wrap the whole route in a Tower middleware layer.
+    ///
+    /// Repeated calls nest: each added layer wraps the previously wrapped
+    /// route, so the last-added layer is the OUTERMOST. The whole compiled
+    /// route becomes ONE wrapped unit for the error handler.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use camel_builder::{RouteBuilder, StepAccumulator};
+    /// use camel_core::route::BuilderStep;
+    /// use tower::limit::ConcurrencyLimitLayer;
+    ///
+    /// let route = RouteBuilder::from("direct:a")
+    ///     .route_id("doctest")
+    ///     .to("mock:b")
+    ///     .route_layer(ConcurrencyLimitLayer::new(2))
+    ///     .route_layer(ConcurrencyLimitLayer::new(5))
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// // The last-added layer is the outermost wrapper.
+    /// match &route.steps()[0] {
+    ///     BuilderStep::Layered { steps, .. } => {
+    ///         assert!(matches!(&steps[0], BuilderStep::Layered { .. }));
+    ///     }
+    ///     other => panic!("expected Layered, got {other:?}"),
+    /// }
+    /// ```
+    pub fn route_layer(mut self, layer: impl ProcessorLayer + 'static) -> Self {
+        self.route_layers.push(LayerFactory::new(layer));
+        self
+    }
+
     /// Consume the builder and produce a [`RouteDefinition`].
     // Duplicate route IDs are detected at `CamelContext::add_route_definition` time
     // (RouteController rejects atomically with CamelError::RouteError).
@@ -864,7 +1041,14 @@ impl RouteBuilder {
             std::mem::take(&mut self.parameter_misuse),
         )?;
 
-        let definition = RouteDefinition::new(self.from_uri, self.steps);
+        // Whole-route middleware: iterate in call order so the FIRST added
+        // layer is innermost and the LAST added is outermost.
+        let mut steps = self.steps;
+        for factory in self.route_layers {
+            steps = vec![BuilderStep::Layered { factory, steps }];
+        }
+
+        let definition = RouteDefinition::new(self.from_uri, steps);
         let definition = if let Some(eh) = resolved_error_handler {
             definition.with_error_handler(eh)
         } else {
@@ -921,6 +1105,16 @@ impl RouteBuilder {
                         .to_string(),
                 )
             })?;
+
+        // Canonical v2 has no whole-route wrapper step: reject BEFORE
+        // canonicalizing, otherwise the plain steps would be emitted and the
+        // middleware silently dropped.
+        if !self.route_layers.is_empty() {
+            return Err(CamelError::RouteError(
+                "route_layer(...) layers are not representable in canonical v2; use build() for layered routes"
+                    .into(),
+            ));
+        }
 
         // Deferred `.parameters()` validation and merge (same path as `build()`).
         apply_parameter_assignments(
@@ -1381,6 +1575,8 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::DeclarativeDoTry { .. } => "do_try",
         BuilderStep::DoTry { .. } => "do_try",
         BuilderStep::Resequence { .. } => "resequence",
+        BuilderStep::LayeredTo { .. } => "to_layered",
+        BuilderStep::Layered { .. } => "layered",
     }
 }
 
@@ -4740,6 +4936,132 @@ mod tests {
                 assert_eq!(steps.len(), 1);
             }
             other => panic!("expected StreamSplit step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_layered_pushes_layered_to_step() {
+        use tower::limit::ConcurrencyLimitLayer;
+
+        let route = RouteBuilder::from("direct:a")
+            .route_id("t")
+            .to_layered("mock:b", ConcurrencyLimitLayer::new(2))
+            .build()
+            .unwrap();
+
+        assert_eq!(route.steps().len(), 1);
+        match &route.steps()[0] {
+            BuilderStep::LayeredTo { uri, .. } => assert_eq!(uri, "mock:b"),
+            other => panic!("expected LayeredTo step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn layered_closure_scopes_section_steps() {
+        use tower::limit::ConcurrencyLimitLayer;
+
+        let route = RouteBuilder::from("direct:a")
+            .route_id("t")
+            .layered(ConcurrencyLimitLayer::new(2), |s| {
+                s.to("mock:1").to("mock:2")
+            })
+            .build()
+            .unwrap();
+
+        match &route.steps()[0] {
+            BuilderStep::Layered { steps, .. } => assert_eq!(steps.len(), 2),
+            other => panic!("expected Layered step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_layer_nests_last_outermost() {
+        use tower::limit::ConcurrencyLimitLayer;
+
+        let l1 = ConcurrencyLimitLayer::new(2);
+        let l2 = ConcurrencyLimitLayer::new(5);
+        let builder = RouteBuilder::from("direct:a")
+            .route_id("t")
+            .to("mock:b")
+            .route_layer(l1)
+            .route_layer(l2);
+        // Same Arcs the fold moves into the step tree.
+        let f1 = builder.route_layers[0].clone();
+        let f2 = builder.route_layers[1].clone();
+
+        let route = builder.build().unwrap();
+
+        match &route.steps()[0] {
+            BuilderStep::Layered { factory, steps } => {
+                assert_eq!(factory, &f2, "last-added layer must be outermost");
+                match &steps[0] {
+                    BuilderStep::Layered { factory, steps } => {
+                        assert_eq!(factory, &f1, "first-added layer must be innermost");
+                        assert_eq!(steps.len(), 1);
+                        assert!(
+                            matches!(&steps[0], BuilderStep::To(uri) if uri == "mock:b"),
+                            "innermost steps must be the route body"
+                        );
+                    }
+                    other => panic!("expected inner Layered step, got {other:?}"),
+                }
+            }
+            other => panic!("expected outer Layered step, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_canonical_rejects_layered_to_route() {
+        use tower::limit::ConcurrencyLimitLayer;
+
+        let result = RouteBuilder::from("direct:a")
+            .route_id("t")
+            .to_layered("mock:b", ConcurrencyLimitLayer::new(2))
+            .build_canonical();
+
+        match result {
+            Err(CamelError::RouteError(msg)) => {
+                assert!(msg.contains("to_layered"), "msg was: {msg}");
+                assert!(msg.contains("canonical"), "msg was: {msg}");
+            }
+            other => panic!("expected canonical rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_canonical_rejects_layered_section_route() {
+        use tower::limit::ConcurrencyLimitLayer;
+
+        let result = RouteBuilder::from("direct:a")
+            .route_id("t")
+            .layered(ConcurrencyLimitLayer::new(2), |s| s.to("mock:1"))
+            .build_canonical();
+
+        match result {
+            Err(CamelError::RouteError(msg)) => {
+                assert!(msg.contains("layered"), "msg was: {msg}");
+                assert!(msg.contains("canonical"), "msg was: {msg}");
+            }
+            other => panic!("expected canonical rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_canonical_rejects_route_layer() {
+        use tower::limit::ConcurrencyLimitLayer;
+
+        let result = RouteBuilder::from("direct:a")
+            .route_id("t")
+            .to("mock:b")
+            .route_layer(ConcurrencyLimitLayer::new(2))
+            .build_canonical();
+
+        match result {
+            Err(CamelError::RouteError(msg)) => {
+                assert!(msg.contains("route_layer"), "msg was: {msg}");
+                assert!(msg.contains("canonical"), "msg was: {msg}");
+            }
+            other => panic!("expected canonical rejection, got {other:?}"),
         }
     }
 }

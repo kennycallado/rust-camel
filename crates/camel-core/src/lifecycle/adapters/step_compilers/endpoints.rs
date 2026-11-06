@@ -5,7 +5,7 @@
 use camel_api::SpanKindHint;
 use std::sync::Arc;
 
-use camel_api::{BoxProcessor, CamelError, StepLifecycle};
+use camel_api::{BoxProcessor, CamelError, LayerFactory, StepLifecycle};
 
 use super::{
     CompilationContext, CompileOutcome, CompiledStep, StepCompiler, StepCompilerRegistry,
@@ -48,6 +48,37 @@ fn compile_to(
             to_uri: None,
         })),
     }
+}
+
+/// Compile a middleware-wrapped send (`LayeredTo`).
+///
+/// Resolution is the SAME path as [`compile_to`] (`resolve_send`), including
+/// the intercept-target error enrichment, so a `SkipTo`-substituted
+/// `LayeredTo` reports component/config failures exactly like an interrupted
+/// `To`. The only difference is the final wrap: the factory's layer wraps the
+/// resolved producer. A wrap failure aborts route-add with the layer's
+/// message. `to_uri` stays `None` here: the registry stamps the authored send
+/// URI centrally from `BuilderStep::to_uri_metadata`.
+fn compile_to_layered(
+    ctx: &CompilationContext,
+    uri: &str,
+    factory: &LayerFactory,
+    intercept_target: Option<&str>,
+) -> Result<CompileOutcome, CamelError> {
+    let resolved = match (resolve_send(ctx, uri), intercept_target) {
+        (Err(e), Some(target)) => return Err(enrich_intercept_error(e, target)),
+        (Err(e), None) => return Err(e),
+        (Ok(resolved), _) => resolved,
+    };
+    let processor = factory.wrap(resolved.producer)?;
+    Ok(CompileOutcome::Matched(CompiledStep::Process {
+        kind_hint: SpanKindHint::Internal,
+        processor,
+        body_contract: resolved.body_contract,
+        lifecycle: resolved.lifecycle,
+        label: None,
+        to_uri: None,
+    }))
 }
 
 /// Compile a diverted send (Task 5): a wiretap copy stage in front of the
@@ -129,6 +160,28 @@ impl StepCompiler for EndpointsCompiler {
                 }
             }
 
+            // ── LayeredTo ──
+            //
+            // Intercept lookup is identical to `To` (same rules, same order):
+            // `SkipTo` substitutes the URI before resolution and `LayeredTo`
+            // keeps its wrap; `DivertCopyTo` is intentionally NOT supported.
+            // A diverted send needs the composite copy+real pipeline
+            // (`compile_divert`); silently downgrading it to a `SkipTo`-style
+            // substitution would suppress the copy delivery. The blessed spec
+            // has no divert+layer scenario, so this is an explicit narrowing
+            // of design.md's "interception aware" sentence: loud failure over
+            // silently wrong semantics. Plain `To` under `DivertCopyTo` still
+            // goes through `compile_divert` unchanged.
+            BuilderStep::LayeredTo { uri, factory } => match ctx.intercept.lookup(&uri) {
+                None => compile_to_layered(ctx, &uri, &factory, None),
+                Some(InterceptAction::SkipTo { uri: target }) => {
+                    compile_to_layered(ctx, target, &factory, Some(target.as_str()))
+                }
+                Some(InterceptAction::DivertCopyTo { .. }) => Err(CamelError::RouteError(
+                    "to_layered does not support DivertCopyTo interception; use .to() or a SkipTo rule for the intercepted URI".into(),
+                )),
+            },
+
             // ── WireTap ──
             BuilderStep::WireTap { uri } => {
                 // WireTap needs the same lifecycle capture as `To`. The
@@ -180,7 +233,10 @@ mod tests {
     use crate::IdempotentRegistry;
     use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
     use async_trait::async_trait;
-    use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, StepLifecycle, StepShutdownReason};
+    use camel_api::{
+        BodyType, BoxProcessor, BoxProcessorExt, CamelError, Exchange, Message, StepLifecycle,
+        StepShutdownReason,
+    };
     use camel_bean::BeanRegistry;
     use camel_component_api::{
         Component, ComponentContext, Endpoint, ProducerContext, RuntimeObservability,
@@ -188,7 +244,13 @@ mod tests {
     };
     use camel_endpoint::parse_uri;
     use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+    use tower::Service;
+    use tower::ServiceExt;
 
     /// Minimal `StepLifecycle` for tests. Exists here (not in camel-api)
     /// because `camel-component-api` must not depend on test types from
@@ -266,20 +328,33 @@ mod tests {
         }
     }
 
-    /// `ComponentContext` that resolves only the `stateful:` scheme.
-    struct StatefulContext {
-        handle: Arc<dyn StepLifecycle>,
+    /// Parameterized `ComponentContext` shared by every test in this module.
+    ///
+    /// Replaces the four copy-pasted per-scheme contexts (`StatefulContext`,
+    /// `StatelessContext`, `ProbeContext`, `NeverReadyContext`) with a single
+    /// scheme→component map, so the `ComponentContext` boilerplate (languages,
+    /// metrics, platform service, health checks) lives in ONE place.
+    struct TestCompilerContext {
+        components: HashMap<String, Arc<dyn Component>>,
     }
 
-    impl ComponentContext for StatefulContext {
-        fn resolve_component(&self, scheme: &str) -> Option<Arc<dyn Component>> {
-            if scheme == "stateful" {
-                Some(Arc::new(StatefulComponent {
-                    handle: self.handle.clone(),
-                }))
-            } else {
-                None
+    impl TestCompilerContext {
+        fn new() -> Self {
+            Self {
+                components: HashMap::new(),
             }
+        }
+
+        fn with(mut self, component: Arc<dyn Component>) -> Self {
+            self.components
+                .insert(component.scheme().to_string(), component);
+            self
+        }
+    }
+
+    impl ComponentContext for TestCompilerContext {
+        fn resolve_component(&self, scheme: &str) -> Option<Arc<dyn Component>> {
+            self.components.get(scheme).cloned()
         }
         fn resolve_language(&self, _name: &str) -> Option<Arc<dyn camel_language_api::Language>> {
             None
@@ -297,6 +372,32 @@ mod tests {
         ) {
         }
         fn unregister_route_health_check(&self, _route_id: &str) {}
+    }
+
+    /// Context resolving `stateful:` to an endpoint that exposes `handle`.
+    fn stateful_context(handle: Arc<dyn StepLifecycle>) -> Arc<dyn ComponentContext> {
+        Arc::new(TestCompilerContext::new().with(Arc::new(StatefulComponent { handle })))
+    }
+
+    /// Context resolving `stateless:` to an endpoint with no lifecycle handle.
+    fn stateless_context() -> Arc<dyn ComponentContext> {
+        Arc::new(TestCompilerContext::new().with(Arc::new(StatelessComponent)))
+    }
+
+    /// Context resolving `test:` to the in-flight probe endpoint.
+    fn probe_context(
+        inflight: Arc<AtomicUsize>,
+        max_inflight: Arc<AtomicUsize>,
+    ) -> Arc<dyn ComponentContext> {
+        Arc::new(TestCompilerContext::new().with(Arc::new(ProbeComponent {
+            inflight,
+            max_inflight,
+        })))
+    }
+
+    /// Context resolving `neverready:` to a producer whose `poll_ready` fails.
+    fn never_ready_context() -> Arc<dyn ComponentContext> {
+        Arc::new(TestCompilerContext::new().with(Arc::new(NeverReadyComponent)))
     }
 
     /// `StepLifecycle` fake that tracks how many times `shutdown` was called.
@@ -419,33 +520,205 @@ mod tests {
         }
     }
 
-    /// `ComponentContext` that resolves only the `stateless:` scheme.
-    struct StatelessContext;
+    /// Endpoint whose producer tracks concurrent in-flight calls and exposes a
+    /// body contract, so `LayeredTo` can be compared against plain `To` on
+    /// observable compile output.
+    struct ProbeEndpoint {
+        uri: String,
+        inflight: Arc<AtomicUsize>,
+        max_inflight: Arc<AtomicUsize>,
+    }
 
-    impl ComponentContext for StatelessContext {
-        fn resolve_component(&self, scheme: &str) -> Option<Arc<dyn Component>> {
-            if scheme == "stateless" {
-                Some(Arc::new(StatelessComponent))
-            } else {
-                None
-            }
+    impl Endpoint for ProbeEndpoint {
+        fn uri(&self) -> &str {
+            &self.uri
         }
-        fn resolve_language(&self, _name: &str) -> Option<Arc<dyn camel_language_api::Language>> {
+
+        fn create_consumer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+        ) -> Result<Box<dyn camel_component_api::Consumer>, CamelError> {
+            Err(CamelError::EndpointCreationFailed("not a consumer".into()))
+        }
+
+        fn create_producer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+            _ctx: &ProducerContext,
+        ) -> Result<BoxProcessor, CamelError> {
+            let inflight = Arc::clone(&self.inflight);
+            let max_inflight = Arc::clone(&self.max_inflight);
+            Ok(BoxProcessor::from_fn(move |ex| {
+                let inflight = Arc::clone(&inflight);
+                let max_inflight = Arc::clone(&max_inflight);
+                Box::pin(async move {
+                    let current = inflight.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_inflight.fetch_max(current, Ordering::SeqCst);
+                    // allow-test-sleep: 50ms window keeps concurrent probes
+                    // overlapping long enough for the concurrency limit to be
+                    // observable.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    inflight.fetch_sub(1, Ordering::SeqCst);
+                    Ok(ex)
+                })
+            }))
+        }
+
+        fn body_contract(&self) -> Option<BodyType> {
+            Some(BodyType::Text)
+        }
+
+        fn lifecycle(&self) -> Option<Arc<dyn StepLifecycle>> {
             None
         }
-        fn metrics(&self) -> Arc<dyn camel_api::MetricsCollector> {
-            Arc::new(camel_api::NoOpMetrics)
+    }
+
+    /// Component that vends `ProbeEndpoint` for the `test:` scheme.
+    struct ProbeComponent {
+        inflight: Arc<AtomicUsize>,
+        max_inflight: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Component for ProbeComponent {
+        fn scheme(&self) -> &str {
+            "test"
         }
-        fn platform_service(&self) -> Arc<dyn camel_api::PlatformService> {
-            Arc::new(camel_api::NoopPlatformService::default())
-        }
-        fn register_route_health_check(
+
+        fn create_endpoint(
             &self,
-            _route_id: &str,
-            _check: Arc<dyn camel_api::AsyncHealthCheck>,
-        ) {
+            uri: &str,
+            _ctx: &dyn ComponentContext,
+        ) -> Result<Box<dyn Endpoint>, CamelError> {
+            Ok(Box::new(ProbeEndpoint {
+                uri: uri.to_string(),
+                inflight: Arc::clone(&self.inflight),
+                max_inflight: Arc::clone(&self.max_inflight),
+            }))
         }
-        fn unregister_route_health_check(&self, _route_id: &str) {}
+    }
+
+    /// Producer whose `poll_ready` always fails — used to prove that the
+    /// `LayeredTo` wrap does not swallow readiness errors.
+    #[derive(Clone)]
+    struct NeverReadyProducer;
+
+    impl Service<Exchange> for NeverReadyProducer {
+        type Response = Exchange;
+        type Error = CamelError;
+        type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Err(CamelError::EndpointCreationFailed(
+                "probe not ready".into(),
+            )))
+        }
+
+        fn call(&mut self, exchange: Exchange) -> Self::Future {
+            Box::pin(async move { Ok(exchange) })
+        }
+    }
+
+    struct NeverReadyEndpoint {
+        uri: String,
+    }
+
+    impl Endpoint for NeverReadyEndpoint {
+        fn uri(&self) -> &str {
+            &self.uri
+        }
+
+        fn create_consumer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+        ) -> Result<Box<dyn camel_component_api::Consumer>, CamelError> {
+            Err(CamelError::EndpointCreationFailed("not a consumer".into()))
+        }
+
+        fn create_producer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+            _ctx: &ProducerContext,
+        ) -> Result<BoxProcessor, CamelError> {
+            Ok(BoxProcessor::new(NeverReadyProducer))
+        }
+    }
+
+    struct NeverReadyComponent;
+
+    #[async_trait]
+    impl Component for NeverReadyComponent {
+        fn scheme(&self) -> &str {
+            "neverready"
+        }
+
+        fn create_endpoint(
+            &self,
+            uri: &str,
+            _ctx: &dyn ComponentContext,
+        ) -> Result<Box<dyn Endpoint>, CamelError> {
+            Ok(Box::new(NeverReadyEndpoint {
+                uri: uri.to_string(),
+            }))
+        }
+    }
+
+    /// Component that tags its producer's output with the serving scheme.
+    ///
+    /// Used by the SkipTo interception test: the compiled process must be served
+    /// by the intercept TARGET, not the authored scheme.
+    struct TaggedComponent {
+        scheme: &'static str,
+    }
+
+    struct TaggedEndpoint {
+        uri: String,
+        scheme: &'static str,
+    }
+
+    impl Endpoint for TaggedEndpoint {
+        fn uri(&self) -> &str {
+            &self.uri
+        }
+
+        fn create_consumer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+        ) -> Result<Box<dyn camel_component_api::Consumer>, CamelError> {
+            Err(CamelError::EndpointCreationFailed("not a consumer".into()))
+        }
+
+        fn create_producer(
+            &self,
+            _rt: Arc<dyn RuntimeObservability>,
+            _ctx: &ProducerContext,
+        ) -> Result<BoxProcessor, CamelError> {
+            let tag = self.scheme;
+            Ok(BoxProcessor::from_fn(move |mut ex: Exchange| {
+                Box::pin(async move {
+                    ex.set_property("served_by", tag);
+                    Ok(ex)
+                })
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl Component for TaggedComponent {
+        fn scheme(&self) -> &str {
+            self.scheme
+        }
+
+        fn create_endpoint(
+            &self,
+            uri: &str,
+            _ctx: &dyn ComponentContext,
+        ) -> Result<Box<dyn Endpoint>, CamelError> {
+            Ok(Box::new(TaggedEndpoint {
+                uri: uri.to_string(),
+                scheme: self.scheme,
+            }))
+        }
     }
 
     /// Build a `CompilationContext` that can resolve `stateful:dest` URIs.
@@ -487,9 +760,7 @@ mod tests {
         let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
         let languages: super::super::SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
         let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
-        let component_ctx: Arc<dyn ComponentContext> = Arc::new(StatefulContext {
-            handle: handle.clone(),
-        });
+        let component_ctx: Arc<dyn ComponentContext> = stateful_context(handle.clone());
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = IdempotentRegistry::new();
         let claim_check_repositories = ClaimCheckRegistry::new();
@@ -547,9 +818,7 @@ mod tests {
         let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
         let languages: super::super::SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
         let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
-        let component_ctx: Arc<dyn ComponentContext> = Arc::new(StatefulContext {
-            handle: handle.clone(),
-        });
+        let component_ctx: Arc<dyn ComponentContext> = stateful_context(handle.clone());
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = IdempotentRegistry::new();
         let claim_check_repositories = ClaimCheckRegistry::new();
@@ -608,9 +877,7 @@ mod tests {
         let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
         let languages: super::super::SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
         let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
-        let component_ctx: Arc<dyn ComponentContext> = Arc::new(StatefulContext {
-            handle: handle.clone(),
-        });
+        let component_ctx: Arc<dyn ComponentContext> = stateful_context(handle.clone());
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = IdempotentRegistry::new();
         let claim_check_repositories = ClaimCheckRegistry::new();
@@ -672,7 +939,7 @@ mod tests {
         let languages: super::super::SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
         let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
         // Use a stateless component whose endpoints return None from lifecycle().
-        let component_ctx: Arc<dyn ComponentContext> = Arc::new(StatelessContext);
+        let component_ctx: Arc<dyn ComponentContext> = stateless_context();
         let staging = FunctionStagingMode::DirectAdd;
         let idempotent_repositories = IdempotentRegistry::new();
         let claim_check_repositories = ClaimCheckRegistry::new();
@@ -717,5 +984,308 @@ mod tests {
             }
             other => panic!("expected CompiledStep::Process, got {other:?}"),
         }
+    }
+
+    /// `LayeredTo` compiles to the SAME `Process` shape as `To` (body
+    /// contract, lifecycle presence) and the layer is engaged around the
+    /// resolved producer: with `ConcurrencyLimitLayer(4)` and six concurrent
+    /// invocations the producer never sees more than four in flight.
+    #[tokio::test]
+    async fn layered_to_compiles_with_to_parity() {
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let max_inflight = Arc::new(AtomicUsize::new(0));
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: super::super::SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> =
+            probe_context(Arc::clone(&inflight), Arc::clone(&max_inflight));
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = IdempotentRegistry::new();
+        let claim_check_repositories = ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = make_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let to_step = match EndpointsCompiler
+            .compile(
+                BuilderStep::To("test:out".into()),
+                0,
+                &ctx,
+                &StepCompilerRegistry::new(),
+            )
+            .expect("To compilation should succeed")
+        {
+            CompileOutcome::Matched(s) => s,
+            CompileOutcome::NotHandled(_) => panic!("To must be handled"),
+        };
+
+        let layered_step = match EndpointsCompiler
+            .compile(
+                BuilderStep::LayeredTo {
+                    uri: "test:out".into(),
+                    factory: LayerFactory::new(tower::limit::ConcurrencyLimitLayer::new(4)),
+                },
+                0,
+                &ctx,
+                &StepCompilerRegistry::new(),
+            )
+            .expect("LayeredTo compilation should succeed")
+        {
+            CompileOutcome::Matched(s) => s,
+            CompileOutcome::NotHandled(_) => panic!("LayeredTo must be handled"),
+        };
+
+        let (to_body, to_lifecycle) = match to_step {
+            CompiledStep::Process {
+                body_contract,
+                lifecycle,
+                ..
+            } => (body_contract, lifecycle.is_some()),
+            other => panic!("expected CompiledStep::Process for To, got {other:?}"),
+        };
+        let (processor, layered_body, layered_lifecycle) = match layered_step {
+            CompiledStep::Process {
+                processor,
+                body_contract,
+                lifecycle,
+                ..
+            } => (processor, body_contract, lifecycle.is_some()),
+            other => panic!("expected CompiledStep::Process for LayeredTo, got {other:?}"),
+        };
+
+        assert_eq!(
+            to_body, layered_body,
+            "LayeredTo must carry the same body contract as plain To"
+        );
+        assert!(
+            to_body.is_some(),
+            "parity assertion is only meaningful when the endpoint declares a body contract"
+        );
+        assert_eq!(
+            to_lifecycle, layered_lifecycle,
+            "LayeredTo must preserve lifecycle presence semantics of plain To"
+        );
+
+        // The producer sleeps 50ms, so six concurrent oneshot calls must
+        // saturate — and never exceed — the four permits.
+        let calls: Vec<_> = (0..6)
+            .map(|i| {
+                let processor = processor.clone();
+                async move {
+                    ServiceExt::oneshot(processor, Exchange::new(Message::new(format!("m{i}"))))
+                        .await
+                }
+            })
+            .collect();
+        for result in futures::future::join_all(calls).await {
+            result.expect("probe call should succeed");
+        }
+        let observed = max_inflight.load(Ordering::SeqCst);
+        assert_eq!(
+            observed, 4,
+            "six concurrent calls must engage the limit at exactly 4 in flight"
+        );
+        assert_eq!(
+            inflight.load(Ordering::SeqCst),
+            0,
+            "all in-flight probes must have completed"
+        );
+    }
+
+    /// Wrap failures propagate: a producer whose `poll_ready` errors must
+    /// surface that error through the wrapped `BoxProcessor`, not get
+    /// swallowed into `Ready(Ok(()))`.
+    #[tokio::test]
+    async fn layered_to_propagates_readiness_error() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: super::super::SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = never_ready_context();
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = IdempotentRegistry::new();
+        let claim_check_repositories = ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let ctx = make_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+
+        let step = match EndpointsCompiler
+            .compile(
+                BuilderStep::LayeredTo {
+                    uri: "neverready:out".into(),
+                    factory: LayerFactory::new(tower::limit::ConcurrencyLimitLayer::new(1)),
+                },
+                0,
+                &ctx,
+                &StepCompilerRegistry::new(),
+            )
+            .expect("LayeredTo compilation should succeed")
+        {
+            CompileOutcome::Matched(s) => s,
+            CompileOutcome::NotHandled(_) => panic!("LayeredTo must be handled"),
+        };
+        let mut processor = match step {
+            CompiledStep::Process { processor, .. } => processor,
+            other => panic!("expected CompiledStep::Process, got {other:?}"),
+        };
+
+        let err = std::future::poll_fn(|cx| tower::Service::poll_ready(&mut processor, cx))
+            .await
+            .expect_err("readiness error must surface through the wrapped processor");
+        assert!(
+            err.to_string().contains("probe not ready"),
+            "unexpected readiness error: {err}"
+        );
+    }
+
+    /// `DivertCopyTo` has no layered counterpart: the arm must fail loudly
+    /// instead of silently downgrading the divert to a plain send.
+    #[tokio::test]
+    async fn layered_to_rejects_divert_interception() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: super::super::SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = stateless_context();
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = IdempotentRegistry::new();
+        let claim_check_repositories = ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let mut ctx = make_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+        ctx.intercept =
+            crate::intercept::InterceptRules::new(vec![crate::intercept::InterceptRule {
+                uri: "test:out".into(),
+                action: InterceptAction::DivertCopyTo {
+                    uri: "mock:copy".into(),
+                },
+            }])
+            .expect("a mock: divert target is a valid rule");
+
+        let err = match EndpointsCompiler.compile(
+            BuilderStep::LayeredTo {
+                uri: "test:out".into(),
+                factory: LayerFactory::new(tower::limit::ConcurrencyLimitLayer::new(1)),
+            },
+            0,
+            &ctx,
+            &StepCompilerRegistry::new(),
+        ) {
+            Ok(_) => panic!("LayeredTo under DivertCopyTo must be rejected"),
+            Err(e) => e,
+        };
+        match err {
+            CamelError::RouteError(msg) => {
+                assert!(
+                    msg.contains("to_layered"),
+                    "error must name the layered step: {msg}"
+                );
+                assert!(
+                    msg.contains("DivertCopyTo"),
+                    "error must name the unsupported interception: {msg}"
+                );
+            }
+            other => panic!("expected CamelError::RouteError, got {other:?}"),
+        }
+    }
+
+    /// `LayeredTo` must honour `SkipTo` interception exactly like `To`: the
+    /// compiled Process wraps the TARGET producer, so a run is served by the
+    /// intercept target (here `mock:`), not the authored URI's scheme.
+    #[tokio::test]
+    async fn layered_to_compiles_under_skip_to_interception() {
+        let pc = ProducerContext::default();
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let languages: super::super::SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans: Arc<Mutex<BeanRegistry>> = Arc::new(Mutex::new(BeanRegistry::new()));
+        let component_ctx: Arc<dyn ComponentContext> = Arc::new(
+            TestCompilerContext::new()
+                .with(Arc::new(TaggedComponent { scheme: "test" }))
+                .with(Arc::new(TaggedComponent { scheme: "mock" })),
+        );
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent_repositories = IdempotentRegistry::new();
+        let claim_check_repositories = ClaimCheckRegistry::new();
+        let cache_repositories = crate::CacheRegistry::new();
+
+        let mut ctx = make_ctx(
+            &pc,
+            rt,
+            &languages,
+            &beans,
+            component_ctx,
+            &staging,
+            &idempotent_repositories,
+            &claim_check_repositories,
+            &cache_repositories,
+        );
+        ctx.intercept =
+            crate::intercept::InterceptRules::new(vec![crate::intercept::InterceptRule {
+                uri: "test:out".into(),
+                action: InterceptAction::SkipTo {
+                    uri: "mock:target".into(),
+                },
+            }])
+            .expect("a mock: intercept target is a valid rule");
+
+        let step = match EndpointsCompiler
+            .compile(
+                BuilderStep::LayeredTo {
+                    uri: "test:out".into(),
+                    factory: LayerFactory::new(tower::limit::ConcurrencyLimitLayer::new(4)),
+                },
+                0,
+                &ctx,
+                &StepCompilerRegistry::new(),
+            )
+            .expect("LayeredTo compilation should succeed")
+        {
+            CompileOutcome::Matched(s) => s,
+            CompileOutcome::NotHandled(_) => panic!("LayeredTo must be handled"),
+        };
+        let processor = match step {
+            CompiledStep::Process { processor, .. } => processor,
+            other => panic!("expected CompiledStep::Process, got {other:?}"),
+        };
+
+        let ex = ServiceExt::oneshot(processor, Exchange::new(Message::new("x")))
+            .await
+            .expect("the wrapped intercept-target producer should succeed");
+        assert_eq!(
+            ex.property("served_by").and_then(|v| v.as_str()),
+            Some("mock"),
+            "SkipTo must substitute the target before the LayeredTo wrap"
+        );
     }
 }

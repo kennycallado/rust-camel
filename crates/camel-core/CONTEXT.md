@@ -147,6 +147,16 @@ Terminates route processing successfully. `run_steps` converts it to `PipelineOu
 **Segment**:
 Wraps an `OutcomeSegment` — a structural EIP sub-pipeline (Filter, Choice, Loop, Throttle, doTry, Split, StreamingSplit, Multicast, LoadBalance) that returns `PipelineOutcome` directly. Enables `Stopped(ex)` propagation with nested-before-Stop mutations intact.
 
+## Middleware step variants
+
+**BuilderStep::LayeredTo**:
+Authored send step that carries a `LayerFactory` beside the URI. The endpoints compiler resolves the producer like `To` (interception aware: `SkipTo` rewrites the URI before resolution, `DivertCopyTo` is rejected) and wraps it with `factory.wrap(producer)`. Compiles to `CompiledStep::Process` with the same resolved lifecycle, body contract, and `to_uri` metadata as `To`.
+_Avoid_: layered send, middleware to
+
+**BuilderStep::Layered**:
+Authored section step that carries a `LayerFactory` and a child `Vec<BuilderStep>`. The middleware compiler compiles the children with `compile_children_segments`, composes one `OutcomeSegment`, bridges it with `SegmentProcessor`, wraps it with `factory.wrap`, and emits `CompiledStep::Segment`. Segment mode is mandatory: a `Stop` inside the section must propagate as `Stopped`, which a `Process`-mode wrap would flatten. A route-level `.route_layer()` folds the whole step list into repeated `Layered` steps at `build()`.
+_Avoid_: layer block, middleware section
+
 ## Inline dispatch capability publication
 
 At consumer start and resume (route_controller_trait), for non-Concurrent

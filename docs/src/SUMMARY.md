@@ -147,6 +147,7 @@
   - [Redis state assertions](testing/scenario-redis.md)
 - [Extending rust-camel](extending/index.md)
   - [Custom component](extending/custom-component.md)
+  - [Custom middleware](extending/custom-middleware.md)
 - [Architecture](architecture/index.md)
 - [API reference](api-reference.md)
 - [Documentation workflow](contributing.md)

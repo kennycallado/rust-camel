@@ -32,6 +32,7 @@ pub mod health;
 
 pub mod idempotent;
 pub mod in_flight;
+mod layer;
 pub mod lifecycle;
 pub mod load_balancer;
 pub mod loop_eip;
@@ -84,7 +85,7 @@ pub use dynamic_router::DynamicRouterConfig;
 pub use endpoint_pipeline::{CAMEL_SLIP_ENDPOINT, EndpointPipelineConfig, EndpointResolver};
 pub use endpoint_uri::EndpointUri;
 pub use error::{
-    CIRCUIT_OPEN, CamelError, ConfigValidationError, ConversionDetail, EndpointUriError,
+    BoxError, CIRCUIT_OPEN, CamelError, ConfigValidationError, ConversionDetail, EndpointUriError,
     ErrorPosition, ExpressionErrorClass, OpaqueErrorSource,
 };
 pub use error_handler::{
@@ -111,6 +112,7 @@ pub use function::{
 pub use health::{AsyncHealthCheck, CheckResult, HealthReport, HealthSource, ServiceHealth};
 pub use idempotent::IdempotentRepository;
 pub use in_flight::{InFlightClaim, InFlightGauge};
+pub use layer::{CamelErrorAdapter, LayerFactory, ProcessorLayer, SegmentProcessor};
 pub use lifecycle::{HealthStatus, Lifecycle, ServiceStatus};
 pub use load_balancer::{LoadBalanceStrategy, LoadBalancerConfig};
 pub use message::Message;

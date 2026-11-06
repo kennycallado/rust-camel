@@ -25,6 +25,7 @@ mod control_flow;
 mod core;
 mod endpoints;
 mod error_handling;
+mod middleware;
 mod routing;
 mod splitting;
 mod transforms;
@@ -411,6 +412,7 @@ pub(crate) fn build_registry() -> StepCompilerRegistry {
     reg.register(Box::new(transforms::TransformsCompiler));
     reg.register(Box::new(routing::RoutingCompiler));
     reg.register(Box::new(control_flow::ControlFlowCompiler));
+    reg.register(Box::new(middleware::MiddlewareCompiler));
     reg.register(Box::new(splitting::SplittingCompiler));
     reg.register(Box::new(error_handling::ErrorHandlingCompiler));
     reg
