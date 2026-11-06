@@ -229,7 +229,23 @@ Rust owns the default directory and the broker key. The default directory is `$X
 
 The cap is not absolute. At compaction the bridge retires entries untouched longer than the retention window (default 24 hours). Retirement never applies to the current in-flight reservation. The bridge never evicts a live reservation to admit another. Duplicates across separate journal domains are bounded at N times the cap, where N is the number of distinct journal domains that consume the queue within one retention window.
 
-Topic subscribers use a per-subscription volatile counter. The topic cap is not crash-stable, and the counter resets on disconnect. Durable topic subscribers are unsupported.
+Topic subscribers use a per-subscription volatile counter. The topic cap is not crash-stable, and the counter resets on disconnect.
+
+### Durable topic subscriptions
+
+A topic consumer becomes durable when the route URI sets both `clientId` and `subscriptionName`:
+
+```text
+jms:topic:prices?clientId=app-1&subscriptionName=snapshots
+```
+
+The snake_case aliases `client_id` and `subscription_name` resolve to the same values. Both parameters are required together and must be non-blank. Either alone, or either on a `queue:` destination, fails at URI parse time. A durable endpoint also requires `concurrentConsumers=1` (the default), because one client id serves exactly one dedicated connection.
+
+Durable subscribers require a bridge that advertises `durable-subscribers-v1`. An older bridge is refused at the capability gate before the first subscribe, and the slot parks permanently. The component never falls back to a non-durable consumer.
+
+The subscription persists across reconnect and bridge restart. The durable identity stays stable, so messages published while the subscriber is disconnected are delivered after re-attach. Cancelling the route does not unsubscribe or delete the broker-side subscription; cleanup is broker-side.
+
+Client-id uniqueness is the operator's duty. Each subscriber needs a distinct `clientId`; a collision with another connection fails as `CLIENT_ID_IN_USE`.
 
 ### Operator recovery
 
@@ -340,7 +356,6 @@ A missing bridge terminal is not by itself read as the native limit. A native-fi
 
 ## Limitations
 
-- Durable topic subscribers are not supported.
 - IBM MQ is not supported.
 - The `InOut` exchange pattern and `Session` transaction mode log a warning and fall back to the default.
 

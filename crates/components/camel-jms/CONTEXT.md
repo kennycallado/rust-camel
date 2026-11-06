@@ -87,7 +87,25 @@ retention window (default 24 hours). The current reservation is never retired,
 and no live reservation is evicted. Duplicates across distinct domains are
 bounded at N times the cap, where N is the number of domains within one
 retention window. Topic subscribers use a per-subscription volatile counter,
-which resets on disconnect. Durable topic subscribers are unsupported.
+which resets on disconnect.
+
+### Durable topic subscriptions
+
+A topic consumer is durable when it sets both `client_id` and
+`subscription_name` (`clientId`/`subscriptionName` aliases). Both are required
+together, must be non-blank, and are valid only on a topic destination. A
+durable endpoint requires `concurrentConsumers` of 1, because one client id
+serves exactly one dedicated connection.
+
+Durable routes require the `durable-subscribers-v1` capability. A bridge
+without it parks the slot permanently at the gate and never falls back to a
+non-durable consumer.
+
+The durable identity stays stable across reconnect and bridge restart, so
+messages published while disconnected are delivered after re-attach. Route
+cancel does not delete the broker-side subscription; cleanup is broker-side.
+Client-id uniqueness is the operator's duty; a collision classifies as
+`CLIENT_ID_IN_USE`.
 
 ### Operator recovery
 

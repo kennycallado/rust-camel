@@ -78,6 +78,17 @@ When the broker URL scheme is `ssl://` or `wss://`, startup aborts unless all of
 
 Paths containing the `placeholder-` marker are rejected even when the file exists. A secure scheme never falls back to a plaintext connection.
 
+### Example — secure Classic broker
+
+```bash
+BRIDGE_BROKER_URL=ssl://broker.example.com:61617
+BRIDGE_BROKER_TYPE=activemq
+BRIDGE_BROKER_TLS_CA_CERT_PATH=/etc/camel/broker-ca.pem
+BRIDGE_BROKER_TLS_SERVER_NAME=broker.example.com
+```
+
+`BRIDGE_BROKER_TLS_CA_CERT_PATH` replaces platform trust; omit it to use platform trust. `BRIDGE_BROKER_TLS_SERVER_NAME` sets the expected broker identity (SNI and peer host) when it differs from the URL host. A `BRIDGE_BROKER_TLS_CLIENT_CERT_PATH`/`BRIDGE_BROKER_TLS_CLIENT_KEY_PATH` pair adds mTLS. The component derives these variables from the endpoint `tls` table.
+
 ### Example — secure Artemis broker
 
 ```bash
@@ -100,7 +111,23 @@ Rust provides `JMS_ATTEMPT_JOURNAL_DIR` and `JMS_BRIDGE_BROKER_KEY` to the bridg
 
 The journal domain is the tuple of directory, broker key, and destination key. One live owner holds it at a time. The bridge acquires it at the first subscribe and releases it when the last subscription ends. Producers and topic subscribers never lock. A busy lock waits a bounded time, then the subscribe fails with `FAILED_PRECONDITION`. A new owner inherits the recorded counts through lock handoff. The cap is not absolute: at compaction the bridge retires entries untouched longer than the retention window (default 24 hours). Retirement never applies to the current reservation, and the bridge never evicts a live reservation. Duplicates across distinct domains are bounded at N times the cap, where N is the number of domains within one retention window.
 
-Topic subscribers use a per-subscription volatile counter. The topic cap is not crash-stable, and the counter resets on disconnect. Durable topic subscribers are unsupported.
+Topic subscribers use a per-subscription volatile counter. The topic cap is not crash-stable, and the counter resets on disconnect.
+
+## Durable topic subscribers
+
+A topic consumer becomes durable when it sets both `clientId` and `subscriptionName`:
+
+```text
+jms:topic:prices?clientId=app-1&subscriptionName=snapshots
+```
+
+The snake_case aliases `client_id` and `subscription_name` are accepted and resolve to the same values. Both parameters are required together and must be non-blank; either alone, or either on a `queue:` destination, fails at URI parse time. A durable endpoint also requires `concurrentConsumers=1` (the default), because one client id serves exactly one dedicated connection.
+
+Durable subscribers require a bridge build that advertises `durable-subscribers-v1` (the pinned `camel_jms::BRIDGE_VERSION` or later). An older bridge is refused at the capability gate before the first subscribe, and the slot parks permanently with an error naming the required and pinned bridge versions.
+
+Client-id uniqueness is an operator duty. Each subscriber needs a distinct `clientId`; a collision with another connection fails loud as `CLIENT_ID_IN_USE`.
+
+The subscription persists across route cancel, reconnect, and bridge restart: the durable identity stays stable, and messages published while the subscriber is disconnected are delivered after re-attach. Cancelling a route does not unsubscribe or delete the broker-side subscription; it remains until an operator removes it on the broker. Cleanup is broker-side.
 
 ## Broker-native precedence
 

@@ -28,8 +28,10 @@ use crate::config::{
 };
 use crate::consumer::JmsConsumer;
 use crate::diagnostics::{
-    LastBrokerFailure, MISSING_BROKER_TLS_CAPABILITY, ensure_selector_capability,
-    ensure_tls_capability, evaluate_startup_selector_gate, missing_message_selector_capability,
+    LastBrokerFailure, MISSING_BROKER_TLS_CAPABILITY, ensure_durable_capability,
+    ensure_selector_capability, ensure_tls_capability, evaluate_startup_durable_gate,
+    evaluate_startup_selector_gate, missing_durable_capability,
+    missing_message_selector_capability,
 };
 use crate::health::{
     BrokerHealthMemory, BrokerHealthObservation, BrokerHealthStatus, JmsHealthCheck,
@@ -414,6 +416,13 @@ pub struct BridgeSlot {
     /// on every evaluation (no closure capture), so a selector attached after
     /// slot start stays covered. No capability evidence is stored on the slot.
     pub(crate) selector_required: Arc<AtomicBool>,
+    /// Shared durable-subscriber requirement (task 1.3): latched `true` by the
+    /// consumer-attach path whenever an endpoint configures a `clientId`,
+    /// BEFORE any durable-gate evaluation. The startup gate, the runtime
+    /// Health gate, and the consumer-attach gate read this flag fresh on every
+    /// evaluation (no closure capture), so a durable route attached after slot
+    /// start stays covered. No capability evidence is stored on the slot.
+    pub(crate) durable_required: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for BridgeSlot {
@@ -679,14 +688,22 @@ impl JmsBridgePool {
     /// selector-gate evaluation (the startup gate below reads it per launch).
     /// The flag only ever latches to `true`; a non-selector caller never clears
     /// a requirement registered by a sibling selector route.
+    ///
+    /// `durable_required` is the matching durable-subscriber requirement
+    /// (task 1.3): it latches the slot's shared `durable_required` flag BEFORE
+    /// any durable-gate evaluation, and likewise only ever latches to `true`.
     pub async fn get_or_create_slot(
         &self,
         broker_name: &str,
         selector_required: bool,
+        durable_required: bool,
     ) -> Result<Arc<BridgeSlot>, CamelError> {
         if let Some(slot) = self.slots.get(broker_name) {
             if selector_required {
                 slot.selector_required.store(true, Ordering::SeqCst);
+            }
+            if durable_required {
+                slot.durable_required.store(true, Ordering::SeqCst);
             }
             return Ok(Arc::clone(&*slot));
         }
@@ -699,6 +716,9 @@ impl JmsBridgePool {
         if let Some(slot) = self.slots.get(broker_name) {
             if selector_required {
                 slot.selector_required.store(true, Ordering::SeqCst);
+            }
+            if durable_required {
+                slot.durable_required.store(true, Ordering::SeqCst);
             }
             return Ok(Arc::clone(&*slot));
         }
@@ -738,6 +758,12 @@ impl JmsBridgePool {
                         .selector_required
                         .store(true, Ordering::SeqCst);
                 }
+                if durable_required {
+                    existing
+                        .get()
+                        .durable_required
+                        .store(true, Ordering::SeqCst);
+                }
                 return Ok(Arc::clone(existing.get()));
             }
             dashmap::Entry::Vacant(entry) => {
@@ -754,6 +780,7 @@ impl JmsBridgePool {
                     probe_wake: Arc::new(tokio::sync::Notify::new()),
                     last_broker_failure: std::sync::Mutex::new(None),
                     selector_required: Arc::new(AtomicBool::new(selector_required)),
+                    durable_required: Arc::new(AtomicBool::new(durable_required)),
                 });
                 entry.insert(Arc::clone(&slot));
                 slot
@@ -773,6 +800,7 @@ impl JmsBridgePool {
             tls,
             self.health_broker_probe_mode,
             &slot.selector_required,
+            &slot.durable_required,
         )
         .await;
 
@@ -859,6 +887,60 @@ impl JmsBridgePool {
             );
             warn!(
                 "Bridge for '{}' lacks message-selector-v1; killed and parking slot.",
+                slot.name
+            );
+            kill_and_park(slot, reason.clone()).await;
+            return Err(parked_operator_error(&slot.name, &reason));
+        }
+        Ok(())
+    }
+
+    /// Consumer-attach durable-subscriber gate (task 1.3).
+    ///
+    /// Mirrors [`Self::selector_attach_gate`]: `BridgeSlot` stores no
+    /// capability evidence, so a durable-configured consumer attaching to a
+    /// running slot (at slot start or late) issues ONE fresh Health RPC — the
+    /// existing health client under the configured `health_timeout_ms` — and
+    /// gates on THAT response before the consumer's first Subscribe.
+    ///
+    /// Both failure arms park the slot permanently (fail closed, no silent
+    /// start): a missing `durable-subscribers-v1` capability rides the
+    /// three-fragment error (pinned bridge version + capability + required
+    /// and pinned versions); an RPC error or timeout parks with a
+    /// "could not verify durable-subscriber support" message naming the
+    /// capability and the required version. The shared `durable_required` flag
+    /// must already be latched by the attach path (see `get_or_create_slot`).
+    pub(crate) async fn durable_attach_gate(
+        &self,
+        slot: &Arc<BridgeSlot>,
+        channel: &Channel,
+    ) -> Result<(), CamelError> {
+        let mut client = bridge_service_client(channel.clone());
+        let health_timeout = Duration::from_millis(self.health_timeout_ms);
+        let resp = match tokio::time::timeout(health_timeout, client.health(HealthRequest {})).await
+        {
+            Ok(Ok(resp)) => resp.into_inner(),
+            Ok(Err(_)) | Err(_) => {
+                let reason = "could not verify durable-subscriber support: bridge health RPC \
+                     failed or timed out; the bridge must report capability \
+                     durable-subscribers-v1 from a jms bridge >= 0.9.0"
+                    .to_string();
+                warn!(
+                    "Bridge for '{}' cannot verify durable-subscriber support; killed and parking slot.",
+                    slot.name
+                );
+                kill_and_park(slot, reason.clone()).await;
+                return Err(parked_operator_error(&slot.name, &reason));
+            }
+        };
+        if ensure_durable_capability(&resp.capabilities, true).is_err() {
+            let reason = format!(
+                "bridge {} {}",
+                self.bridge_version,
+                missing_durable_capability()
+            );
+            warn!(
+                "Bridge for '{}' lacks durable-subscribers-v1; killed and parking slot.",
                 slot.name
             );
             kill_and_park(slot, reason.clone()).await;
@@ -1227,6 +1309,27 @@ impl JmsBridgePool {
                                         bridge_version,
                                         missing_message_selector_capability()
                                     ))
+                                } else if ensure_durable_capability(
+                                    &resp.capabilities,
+                                    slot.durable_required.load(Ordering::SeqCst),
+                                )
+                                .is_err()
+                                {
+                                    // Task 1.3: the matching durable-subscriber
+                                    // gate, armed by the SHARED requirement flag
+                                    // read fresh per response so a durable route
+                                    // attached after monitor start stays covered
+                                    // and capability loss parks the slot and
+                                    // stops resubscription.
+                                    warn!(
+                                        "Bridge for '{}' lacks durable-subscribers-v1; killed and parking slot.",
+                                        slot.name
+                                    );
+                                    Some(format!(
+                                        "bridge {} {}",
+                                        bridge_version,
+                                        missing_durable_capability()
+                                    ))
                                 } else {
                                     None
                                 };
@@ -1412,6 +1515,7 @@ impl JmsBridgePool {
                                         slot_tls.clone(),
                                         health_broker_probe_mode,
                                         &slot.selector_required,
+                                        &slot.durable_required,
                                     )
                                     .await
                                 }
@@ -1431,6 +1535,7 @@ impl JmsBridgePool {
                             slot_tls.clone(),
                             health_broker_probe_mode,
                             &slot.selector_required,
+                            &slot.durable_required,
                         )
                         .await;
 
@@ -1539,6 +1644,7 @@ impl JmsBridgePool {
         tls: Option<JmsTlsEnv>,
         health_broker_probe_mode: HealthBrokerProbeMode,
         selector_required: &AtomicBool,
+        durable_required: &AtomicBool,
     ) -> Result<(BridgeProcess, Channel), StartBridgeError> {
         info!(
             "Starting JMS bridge process for {}...",
@@ -1596,6 +1702,7 @@ impl JmsBridgePool {
             start_timeout_ms,
             tls_configured,
             selector_required,
+            durable_required,
             None,
         )
         .await
@@ -1620,16 +1727,22 @@ impl JmsBridgePool {
     /// way. Evidence is re-collected per launch (`seen_capabilities` starts
     /// empty), so a previous bridge instance never authorizes its replacement.
     ///
+    /// `durable_required` is the matching durable-subscriber requirement
+    /// (task 1.3), read fresh at gate evaluation: when armed and the freshly
+    /// collected evidence lacks `durable-subscribers-v1`, the launch fails
+    /// closed with the same fresh-evidence guarantee.
+    ///
     /// `startup_channel_override` is a test seam (mirroring
     /// `set_refresh_connector_override`: substitute only the channel
     /// acquisition) — when `Some`, the post-ready mTLS connect is skipped and
-    /// the readiness probe plus both capability gates run unchanged over the
+    /// the readiness probe plus all capability gates run unchanged over the
     /// provided channel. Production passes `None`.
     pub(crate) async fn start_bridge_process_with_config(
         process_config: &BridgeProcessConfig,
         start_timeout_ms: u64,
         tls_configured: bool,
         selector_required: &AtomicBool,
+        durable_required: &AtomicBool,
         startup_channel_override: Option<Channel>,
     ) -> Result<(BridgeProcess, Channel), StartBridgeError> {
         // Phase 1: spawn and read the ready handshake. `BridgeProcess::start`
@@ -1708,6 +1821,24 @@ impl JmsBridgePool {
         match evaluate_startup_selector_gate(
             &gate_capabilities,
             selector_required.load(Ordering::SeqCst),
+        ) {
+            Ok(()) => {}
+            Err(BridgeError::PermanentFailure(reason)) => {
+                let _ = process.stop().await;
+                return Err(StartBridgeError::Permanent(reason));
+            }
+            Err(other) => {
+                let _ = process.stop().await;
+                return Err(classify_start_error(other));
+            }
+        }
+        // Task 1.3: the durable-subscribers-v1 startup gate over the same
+        // freshly collected evidence, armed by the shared requirement flag
+        // (read per evaluation). Same three-fragment diagnostic and same
+        // kill-then-permanent-error channel as the selector gate.
+        match evaluate_startup_durable_gate(
+            &gate_capabilities,
+            durable_required.load(Ordering::SeqCst),
         ) {
             Ok(()) => {}
             Err(BridgeError::PermanentFailure(reason)) => {
@@ -1816,7 +1947,10 @@ impl JmsComponent {
         content_type: &str,
     ) -> Result<String, CamelError> {
         let broker_name = self.pool.resolve_broker_name(None)?;
-        let slot = self.pool.get_or_create_slot(&broker_name, false).await?;
+        let slot = self
+            .pool
+            .get_or_create_slot(&broker_name, false, false)
+            .await?;
         let channel = match &*slot.state_rx.borrow() {
             BridgeState::Ready { channel } => channel.clone(),
             other => {
@@ -2004,7 +2138,7 @@ impl Service<Exchange> for LazyJmsProducer {
         let endpoint_config = self.endpoint_config.clone();
 
         Box::pin(async move {
-            let slot = pool.get_or_create_slot(&broker_name, false).await?;
+            let slot = pool.get_or_create_slot(&broker_name, false, false).await?;
             let mut rx = slot.state_rx.clone();
 
             loop {
@@ -2592,7 +2726,7 @@ mod tests {
             .map(|_| {
                 let pool = Arc::clone(&pool);
                 tokio::spawn(async move {
-                    let _ = pool.get_or_create_slot("test", false).await;
+                    let _ = pool.get_or_create_slot("test", false, false).await;
                 })
             })
             .collect();
@@ -2691,6 +2825,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -2860,12 +2995,16 @@ mod tests {
                 probe_wake: Arc::new(tokio::sync::Notify::new()),
                 last_broker_failure: std::sync::Mutex::new(None),
                 selector_required: Arc::new(AtomicBool::new(false)),
+                durable_required: Arc::new(AtomicBool::new(false)),
             });
             pool.slots.insert(name.to_string(), slot);
         }
 
         // Attempting to create a third slot should fail.
-        let err = pool.get_or_create_slot("b3", false).await.unwrap_err();
+        let err = pool
+            .get_or_create_slot("b3", false, false)
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("max_bridges"),
             "expected max_bridges error, got: {}",
@@ -2910,12 +3049,13 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         pool.slots.insert("b1".to_string(), slot);
 
         // b1 is Degraded (not active), so creating b1's slot returns existing.
         // The max_bridges check only applies to new slots.
-        let result = pool.get_or_create_slot("b1", false).await;
+        let result = pool.get_or_create_slot("b1", false, false).await;
         assert!(result.is_ok(), "existing slot must be returned");
     }
 
@@ -2947,6 +3087,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -2993,6 +3134,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -3047,6 +3189,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -3095,6 +3238,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -3172,6 +3316,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -3279,6 +3424,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -3324,6 +3470,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -3538,6 +3685,7 @@ mod tests {
                 probe_wake: Arc::new(tokio::sync::Notify::new()),
                 last_broker_failure: std::sync::Mutex::new(None),
                 selector_required: Arc::new(AtomicBool::new(false)),
+                durable_required: Arc::new(AtomicBool::new(false)),
             });
             pool.slots.insert(name.to_string(), slot);
         }
@@ -3603,6 +3751,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -3726,6 +3875,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -3791,6 +3941,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         };
 
         JmsBridgePool::apply_initial_start_result(
@@ -3823,6 +3974,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         };
         JmsBridgePool::apply_initial_start_result(
             &transient,
@@ -3865,6 +4017,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         JmsBridgePool::apply_initial_start_result(
             slot.as_ref(),
@@ -3899,7 +4052,10 @@ mod tests {
         );
 
         // An existing-slot lookup returns the parked slot without starting.
-        let got = pool.get_or_create_slot("default", false).await.unwrap();
+        let got = pool
+            .get_or_create_slot("default", false, false)
+            .await
+            .unwrap();
         assert!(
             matches!(&*got.state_rx.borrow(), BridgeState::Parked(_)),
             "existing-slot lookup must return the parked slot unchanged"
@@ -3930,6 +4086,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         };
 
         slot.publish_shutdown();
@@ -3963,6 +4120,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         };
 
         slot.publish_shutdown();
@@ -4001,6 +4159,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         };
 
         JmsBridgePool::apply_initial_start_result(
@@ -4055,6 +4214,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         slot.publish_shutdown();
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
@@ -4117,6 +4277,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         };
         // Shutdown wins before the restart result is installed.
         slot.publish_shutdown();
@@ -4224,6 +4385,7 @@ mod tests {
             &config,
             300,
             false,
+            &AtomicBool::new(false),
             &AtomicBool::new(false),
             None,
         )
@@ -4381,6 +4543,7 @@ mod tests {
             None,
             HealthBrokerProbeMode::Skip,
             &AtomicBool::new(false),
+            &AtomicBool::new(false),
         )
         .await;
 
@@ -4463,7 +4626,7 @@ mod tests {
 
         // Initial launch through pool acquisition records the first env copy.
         let slot = pool
-            .get_or_create_slot("default", false)
+            .get_or_create_slot("default", false, false)
             .await
             .expect("initial slot acquisition");
 
@@ -4548,7 +4711,7 @@ mod tests {
         .expect("pool config must be valid");
 
         let slot = pool
-            .get_or_create_slot("default", false)
+            .get_or_create_slot("default", false, false)
             .await
             .expect("initial slot acquisition");
 
@@ -4650,7 +4813,7 @@ mod tests {
         // Acquisition returns the existing slot without launching a second
         // bridge, keeping this test focused on the accessor.
         let acquired = pool
-            .get_or_create_slot("default", false)
+            .get_or_create_slot("default", false, false)
             .await
             .expect("slot acquisition");
         assert!(Arc::ptr_eq(&acquired, &slot));
@@ -4714,6 +4877,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -4787,6 +4951,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(AtomicBool::new(false)),
+            durable_required: Arc::new(AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -6124,6 +6289,7 @@ mod tests {
             2_000,
             false,
             &AtomicBool::new(true),
+            &AtomicBool::new(false),
             Some(channel1),
         )
         .await
@@ -6150,6 +6316,7 @@ mod tests {
             2_000,
             false,
             &AtomicBool::new(true),
+            &AtomicBool::new(false),
             Some(channel2),
         )
         .await;

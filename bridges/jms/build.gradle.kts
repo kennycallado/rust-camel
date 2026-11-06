@@ -48,6 +48,8 @@ dependencies {
 
     testImplementation("io.quarkus:quarkus-junit5")
     testImplementation("org.mockito:mockito-core:5.12.0")
+    // Embedded Classic broker (vm://) for durable-subscription tests; pinned to the client version.
+    testImplementation("org.apache.activemq:activemq-broker:5.19.10")
     // In-memory SpanExporter for otel wiring tests (no collector, no egress)
     testImplementation("io.opentelemetry:opentelemetry-sdk-testing")
 }

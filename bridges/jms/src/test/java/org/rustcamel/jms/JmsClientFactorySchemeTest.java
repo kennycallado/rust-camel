@@ -135,4 +135,29 @@ class JmsClientFactorySchemeTest {
     assertTrue(ex.getMessage().contains("wss"), ex.getMessage());
     assertTrue(ex.getMessage().contains("TRUSTSTORE"), ex.getMessage());
   }
+
+  @Test
+  void artemisSecureSchemePinsVerifyHost() throws IOException {
+    // Decision D1 (rc-ewfom): verification is always on, pinned rather than inherited.
+    String keystore = newStore("verify-host-keystore.p12");
+    String truststore = newStore("verify-host-truststore.p12");
+
+    Map<String, Object> cfg =
+        JmsClientFactory.transportConfig(
+            URI.create("ssl://broker:61617"), keystore, truststore, "secret", "artemis");
+
+    assertEquals(Boolean.TRUE, cfg.get(TransportConstants.SSL_ENABLED_PROP_NAME));
+    assertTrue(cfg.containsKey(TransportConstants.VERIFY_HOST_PROP_NAME), cfg.toString());
+    assertEquals(Boolean.TRUE, cfg.get(TransportConstants.VERIFY_HOST_PROP_NAME));
+  }
+
+  @Test
+  void artemisPlaintextSchemeHasNoVerifyHost() {
+    Map<String, Object> cfg =
+        JmsClientFactory.transportConfig(
+            URI.create("tcp://broker:61616"), null, null, null, "artemis");
+
+    assertFalse(cfg.containsKey(TransportConstants.SSL_ENABLED_PROP_NAME), cfg.toString());
+    assertFalse(cfg.containsKey(TransportConstants.VERIFY_HOST_PROP_NAME), cfg.toString());
+  }
 }

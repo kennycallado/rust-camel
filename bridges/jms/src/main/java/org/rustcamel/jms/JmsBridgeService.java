@@ -1,6 +1,7 @@
 package org.rustcamel.jms;
 
 import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import io.quarkus.grpc.GrpcService;
@@ -33,6 +34,9 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
 
   /** Capability advertising the message-selector subscription support (389-jms-selector). */
   static final String CAP_MESSAGE_SELECTOR_V1 = "message-selector-v1";
+
+  /** Capability advertising durable topic subscribers (client id + subscription name). */
+  static final String CAP_DURABLE_SUBSCRIBERS_V1 = "durable-subscribers-v1";
 
   @Inject JmsProducer producer;
   @Inject jakarta.enterprise.inject.Instance<JmsConsumer> consumerFactory;
@@ -128,6 +132,10 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
     // The request's selector rides on the injected instance like the other subscribe inputs,
     // assigned before the consume loop starts. Blank means no selector.
     consumer.messageSelector = request.getMessageSelector();
+    // Durable identity rides the same seam: both fields are assigned before subscribe() runs and
+    // are validated synchronously inside the consumer before any thread or connection exists.
+    consumer.clientId = request.getClientId();
+    consumer.subscriptionName = request.getSubscriptionName();
 
     boolean refused;
     JmsConsumer existing;
@@ -227,6 +235,14 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
             }
           },
           finished);
+    } catch (StatusRuntimeException e) {
+      // Request validation failed before the owner thread existed (durable identity is
+      // INVALID_ARGUMENT). Release the registration exactly once and forward the status unchanged
+      // instead of letting it escape with a stale activeConsumers entry.
+      if (cleanupSubscription(consumer, subId, finished)) {
+        LOG.error("JMS subscribe failed for subscription '" + subId + "': " + e.getMessage(), e);
+        responseObserver.onError(e);
+      }
     } catch (IllegalStateException e) {
       // Startup validation failed (ADR-0033): a malformed JMS_MAX_BODY_BYTES must fail loud here,
       // not escape as grpc UNKNOWN — and without leaving this consumer in activeConsumers.
@@ -273,6 +289,7 @@ public class JmsBridgeService extends BridgeServiceGrpc.BridgeServiceImplBase {
     return snapshot.toResponse().toBuilder()
         .addCapabilities(CAP_BROKER_TLS_V1)
         .addCapabilities(CAP_MESSAGE_SELECTOR_V1)
+        .addCapabilities(CAP_DURABLE_SUBSCRIBERS_V1)
         .setFailureClass(BrokerFailureClass.toProto(failureClass))
         .build();
   }

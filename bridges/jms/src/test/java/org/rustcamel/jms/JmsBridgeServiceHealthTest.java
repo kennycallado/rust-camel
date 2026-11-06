@@ -567,6 +567,22 @@ class JmsBridgeServiceHealthTest {
         "the message selector capability must be advertised: " + response.getCapabilitiesList());
   }
 
+  @Test
+  void healthAdvertisesDurableCapability() {
+    assertEquals("durable-subscribers-v1", JmsBridgeService.CAP_DURABLE_SUBSCRIBERS_V1);
+    HealthResponse response = JmsBridgeService.healthResponse(HealthSnapshot.up(1L, 0L), null);
+    List<String> capabilities = response.getCapabilitiesList();
+    assertTrue(
+        capabilities.contains("durable-subscribers-v1"),
+        "the durable subscriber capability must be advertised: " + capabilities);
+    assertTrue(
+        capabilities.contains("broker-tls-v1"),
+        "the TLS capability must stay advertised next to it: " + capabilities);
+    assertTrue(
+        capabilities.contains("message-selector-v1"),
+        "the message selector capability must stay advertised next to it: " + capabilities);
+  }
+
   private JmsBridgeService newService() {
     JmsBridgeService created = new JmsBridgeService();
     clientFactory = mock(JmsClientFactory.class);

@@ -13,6 +13,7 @@ import java.security.cert.CertPathValidatorException;
 import java.security.cert.CertificateException;
 import java.util.ArrayList;
 import java.util.List;
+import javax.jms.InvalidClientIDException;
 import javax.jms.JMSSecurityException;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLHandshakeException;
@@ -135,6 +136,25 @@ class BrokerFailureClassifierTest {
         BrokerFailureClass.OTHER,
         BrokerFailureClassifier.classify(new RuntimeException(brokerText)),
         "exception text alone must not select the class");
+  }
+
+  /**
+   * The broker's duplicate-client-id rejection is {@link InvalidClientIDException}; it must map to
+   * {@code CLIENT_ID_IN_USE} by type, including through a wrapper chain, without inspecting the
+   * remote text (the text carries the broker's identity echo).
+   */
+  @Test
+  void invalidClientIDExceptionClassifiesAsClientIdInUse() {
+    String brokerText = "Broker: localhost - Client: app-1 already connected from vm://localhost";
+    assertEquals(
+        BrokerFailureClass.CLIENT_ID_IN_USE,
+        BrokerFailureClassifier.classify(new InvalidClientIDException(brokerText)));
+    assertEquals(
+        BrokerFailureClass.CLIENT_ID_IN_USE,
+        BrokerFailureClassifier.classify(
+            new RuntimeException(
+                "connection start failed", new InvalidClientIDException(brokerText))),
+        "the duplicate-id rejection must classify through a wrapper chain too");
   }
 
   @Test

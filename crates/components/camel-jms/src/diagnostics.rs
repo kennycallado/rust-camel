@@ -31,6 +31,27 @@ pub(crate) fn missing_message_selector_capability() -> String {
     )
 }
 
+/// Minimum bridge release that advertises `durable-subscribers-v1` (task 1.3).
+///
+/// Distinct from [`crate::BRIDGE_VERSION`]: the pinned build may predate the
+/// minimum that supports durable subscription identity, so the diagnostic
+/// names both the requirement and the version the component was built for.
+pub(crate) const DURABLE_SUBSCRIBERS_MIN_BRIDGE_VERSION: &str = "0.9.0";
+
+/// Missing-capability clause for the durable-subscriber gate (task 1.3).
+///
+/// The surfaced message is `bridge {version_or_path} {missing_durable_capability()}`
+/// where the prefix is the pinned `crate::BRIDGE_VERSION` on the startup and
+/// monitor paths and the pinned bridge version on the consumer-attach path
+/// (same substitution shape as the selector gate).
+pub(crate) fn missing_durable_capability() -> String {
+    format!(
+        "lacks durable-subscribers-v1; requires a jms bridge >= {} (pinned {})",
+        DURABLE_SUBSCRIBERS_MIN_BRIDGE_VERSION,
+        crate::BRIDGE_VERSION
+    )
+}
+
 /// Last broker failure observed from a bridge `Health` response (task 8.1).
 ///
 /// Stored on the broker handle by the health monitor and read by the consumer
@@ -96,6 +117,32 @@ pub(crate) fn ensure_selector_capability(
     Ok(())
 }
 
+/// Capability gate for durable subscription identity (task 1.3).
+///
+/// A route configuring `clientId`/`subscriptionName` requires a bridge build
+/// that reports the `durable-subscribers-v1` capability. An older bridge
+/// reports no capabilities (proto3 default: empty), which fails closed. Without
+/// a durable identity a missing capability is not fatal and the gate returns
+/// `Ok`.
+///
+/// Same error shape as [`ensure_selector_capability`]: a permanent
+/// (config-class) rejection ([`BridgeError::PermanentFailure`]) whose text
+/// names the missing capability, the required bridge version, and the pinned
+/// `crate::BRIDGE_VERSION`. Call sites kill the launched bridge and map it to
+/// their permanent-error channel without retry.
+pub(crate) fn ensure_durable_capability(
+    capabilities: &[String],
+    durable_required: bool,
+) -> Result<(), BridgeError> {
+    if durable_required && !capabilities.iter().any(|c| c == "durable-subscribers-v1") {
+        return Err(BridgeError::PermanentFailure(format!(
+            "bridge {}",
+            missing_durable_capability()
+        )));
+    }
+    Ok(())
+}
+
 /// Startup capability gate for message selectors (task 1.2).
 ///
 /// The shared startup-gate decision seam: the real launch path
@@ -116,6 +163,31 @@ pub(crate) fn evaluate_startup_selector_gate(
             "bridge {} {}",
             crate::BRIDGE_VERSION,
             missing_message_selector_capability()
+        )));
+    }
+    Ok(())
+}
+
+/// Startup capability gate for durable subscription identity (task 1.3).
+///
+/// The shared startup-gate decision seam: the real launch path
+/// (`start_bridge_process_with_config`) calls this over the freshly collected
+/// startup Health evidence and surfaces the error as its permanent
+/// (config-class) rejection. The text is the three-fragment diagnostic — the
+/// missing capability `durable-subscribers-v1`, the required bridge version
+/// (`0.9.0`), and the pinned bridge version the component was built for
+/// (`crate::BRIDGE_VERSION`, the same substitution shape as the selector
+/// startup text). Evidence is re-collected per launch, so a previous bridge
+/// instance never authorizes its replacement.
+pub(crate) fn evaluate_startup_durable_gate(
+    capabilities: &[String],
+    durable_required: bool,
+) -> Result<(), BridgeError> {
+    if durable_required && !capabilities.iter().any(|c| c == "durable-subscribers-v1") {
+        return Err(BridgeError::PermanentFailure(format!(
+            "bridge {} {}",
+            crate::BRIDGE_VERSION,
+            missing_durable_capability()
         )));
     }
     Ok(())

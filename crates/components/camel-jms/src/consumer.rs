@@ -263,13 +263,24 @@ fn selector_required(endpoint_config: &JmsEndpointConfig) -> bool {
         .is_some_and(|s| !s.trim().is_empty())
 }
 
+/// True when the endpoint configures a durable subscription identity (task
+/// 1.3).
+///
+/// `clientId` and `subscriptionName` are validated as a pair at URI parsing,
+/// so a configured `client_id` arms the shared capability requirement and the
+/// consumer-attach gate.
+fn durable_required(endpoint_config: &JmsEndpointConfig) -> bool {
+    endpoint_config.client_id.is_some()
+}
+
 async fn await_ready_channel(
     pool: &JmsBridgePool,
     broker_name: &str,
     selector_required: bool,
+    durable_required: bool,
 ) -> Result<Channel, WaitReadyError> {
     let slot = pool
-        .get_or_create_slot(broker_name, selector_required)
+        .get_or_create_slot(broker_name, selector_required, durable_required)
         .await
         .map_err(WaitReadyError::Transient)?;
     let mut rx = slot.state_rx.clone();
@@ -288,6 +299,16 @@ async fn await_ready_channel(
                 // terminally (no silent start).
                 if selector_required {
                     pool.selector_attach_gate(&slot, &channel)
+                        .await
+                        .map_err(WaitReadyError::Terminal)?;
+                }
+                // Task 1.3: consumer-attach durable-subscriber gate, in the
+                // same preflight position: ONE fresh Health RPC before the
+                // consumer's first Subscribe, including when the slot went
+                // Ready earlier for a non-durable route. A failure parks the
+                // slot permanently and fails this consumer terminally.
+                if durable_required {
+                    pool.durable_attach_gate(&slot, &channel)
                         .await
                         .map_err(WaitReadyError::Terminal)?;
                 }
@@ -489,7 +510,7 @@ async fn consumer_loop(
                 );
                 break;
             }
-            result = await_ready_channel(pool, broker_name, selector_required(endpoint_config)) => {
+            result = await_ready_channel(pool, broker_name, selector_required(endpoint_config), durable_required(endpoint_config)) => {
                 match result {
                     Ok(channel) => channel,
                     Err(WaitReadyError::Terminal(e)) => {
@@ -577,6 +598,8 @@ async fn consumer_loop(
                 destination: destination.clone(),
                 subscription_id: subscription_id.clone(),
                 message_selector: endpoint_config.message_selector.clone().unwrap_or_default(),
+                client_id: endpoint_config.client_id.clone().unwrap_or_default(),
+                subscription_name: endpoint_config.subscription_name.clone().unwrap_or_default(),
             }) => result,
         } {
             Ok(resp) => {
@@ -994,7 +1017,11 @@ impl Consumer for JmsConsumer {
         {
             let slot = self
                 .pool
-                .get_or_create_slot(&self.broker_name, selector_required(&self.endpoint_config))
+                .get_or_create_slot(
+                    &self.broker_name,
+                    selector_required(&self.endpoint_config),
+                    durable_required(&self.endpoint_config),
+                )
                 .await?;
             match &*slot.state_rx.borrow() {
                 BridgeState::Ready { .. } => {} // bridge is up — proceed
@@ -1152,7 +1179,9 @@ mod tests {
     };
     use crate::component::{BridgeSlot, ProbeOutcome, StartBridgeError};
     use crate::config::{JmsPoolConfig, jms_reconnect_default};
-    use crate::diagnostics::evaluate_startup_selector_gate;
+    use crate::diagnostics::{
+        ensure_durable_capability, evaluate_startup_durable_gate, evaluate_startup_selector_gate,
+    };
     use crate::proto::bridge_service_server::{BridgeService, BridgeServiceServer};
     use crate::proto::{
         CompletionOutcome, CompletionRequest, CompletionResponse, HealthRequest, HealthResponse,
@@ -1350,12 +1379,13 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durable_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
 
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            await_ready_channel(&pool, "default", false),
+            await_ready_channel(&pool, "default", false, false),
         )
         .await
         .expect("await_ready_channel must not hang on a parked slot");
@@ -1398,6 +1428,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durable_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
 
@@ -1459,6 +1490,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durable_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         // Retain the Arc so the test can reach state_tx/state_rx after the pool
         // is moved into the consumer (matches the component.rs slot fixtures).
@@ -2558,6 +2590,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durable_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
 
@@ -2715,8 +2748,8 @@ mod tests {
     // ── Task 1.2: fail-closed message-selector-v1 capability gate ────────────
 
     use crate::bridge_client_test::{
-        connect_scripted, selector_monitor_fixture, shutdown_test_slot, spawn_selector_gate_bridge,
-        wait_parked,
+        ScriptedHealth, connect_scripted, probe_gate, selector_monitor_fixture, shutdown_test_slot,
+        spawn_durable_gate_bridge, spawn_selector_gate_bridge, wait_parked,
     };
 
     /// Writes an executable stub bridge child announcing `port` on the ready
@@ -2849,6 +2882,7 @@ mod tests {
             2_000,
             false,
             &std::sync::atomic::AtomicBool::new(true),
+            &std::sync::atomic::AtomicBool::new(false),
             Some(channel),
         )
         .await;
@@ -2893,6 +2927,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durable_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
         JmsBridgePool::apply_initial_start_result(
@@ -3212,6 +3247,497 @@ mod tests {
         bridge.shutdown().await;
     }
 
+    // ── Task 1.3: fail-closed durable-subscribers-v1 capability gate ─────────
+
+    /// Durable subscription URI: topic-only pair, exactly one consumer.
+    const DURABLE_TOPIC_URI: &str = "jms:topic:orders?client_id=app-1&subscription_name=snapshots";
+
+    fn durable_endpoint() -> JmsEndpointConfig {
+        JmsEndpointConfig::from_uri(DURABLE_TOPIC_URI)
+            .expect("durable topic uri with clientId/subscriptionName must parse")
+    }
+
+    /// Diagnostic contract (task 1.3): the park/error text names the missing
+    /// capability, the required bridge release, and the pinned bridge version.
+    fn assert_durable_park_text(text: &str) {
+        for needle in ["durable-subscribers-v1", "0.9.0", crate::BRIDGE_VERSION] {
+            assert!(
+                text.contains(needle),
+                "text must contain '{needle}': {text}"
+            );
+        }
+    }
+
+    /// Task 1.3: the STARTUP seam rejects empty evidence when a durable
+    /// identity is required, passes trivially without one, and the
+    /// consumer-attach gate then parks a durable route on a capability-less
+    /// bridge BEFORE any Subscribe reaches it.
+    #[tokio::test]
+    async fn durable_gate_parks_without_capability() {
+        // Unit level: the shared decision seams themselves.
+        let startup_err = evaluate_startup_durable_gate(&[], true)
+            .expect_err("empty capabilities must fail the startup gate when durable is required");
+        assert_durable_park_text(&startup_err.to_string());
+        let attach_err = ensure_durable_capability(&[], true)
+            .expect_err("empty capabilities must fail the attach gate when durable is required");
+        assert_durable_park_text(&attach_err.to_string());
+        assert!(
+            evaluate_startup_durable_gate(&[], false).is_ok(),
+            "without a durable requirement the startup gate passes trivially"
+        );
+        assert!(
+            ensure_durable_capability(&[], false).is_ok(),
+            "without a durable requirement the attach gate passes trivially"
+        );
+
+        // Attach path: a Ready slot backed by an old bridge (no capabilities).
+        let bridge = spawn_durable_gate_bridge(&[]).await;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "jms-durable-park".to_string(),
+        );
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            consumer_loop(
+                &pool,
+                "default",
+                &durable_endpoint(),
+                &reconnect_after(1),
+                CancellationToken::new(),
+                &ctx,
+                0,
+                rt(),
+            ),
+        )
+        .await
+        .expect("the attach gate must fail fast")
+        .expect_err("a durable route on an incapable bridge must fail");
+        assert_durable_park_text(&err.to_string());
+        assert_eq!(
+            bridge.subscribe_count(),
+            0,
+            "the durable gate must park before any Subscribe"
+        );
+
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
+    }
+
+    /// Task 1.3: a durable route on a bridge advertising
+    /// `durable-subscribers-v1` passes the gate, and its Subscribe call
+    /// carries the configured client id and subscription name.
+    #[tokio::test]
+    async fn durable_gate_passes_with_capability() {
+        let mut bridge = spawn_durable_gate_bridge(&["durable-subscribers-v1"]).await;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+        let (handle, cancel) =
+            spawn_route_consumer(Arc::clone(&pool), durable_endpoint(), "jms-durable-capable");
+
+        bridge.next_subscribe().await;
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("consumer exits on requested shutdown");
+
+        {
+            let captured = bridge.subscribes.lock().expect("subscribes mutex poisoned");
+            assert_eq!(captured.len(), 1, "exactly one subscribe request");
+            assert_eq!(captured[0].destination, "topic:orders");
+            assert_eq!(
+                captured[0].client_id, "app-1",
+                "the Subscribe must carry the configured clientId"
+            );
+            assert_eq!(
+                captured[0].subscription_name, "snapshots",
+                "the Subscribe must carry the configured subscriptionName"
+            );
+            assert!(
+                !captured[0].subscription_id.is_empty(),
+                "subscription_id must be non-empty"
+            );
+        }
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
+    }
+
+    /// Task 1.3: a route without durable parameters is unaffected by an old
+    /// bridge — the gate passes trivially and the subscription proceeds with
+    /// empty identity fields.
+    #[tokio::test]
+    async fn non_durable_route_skips_gate() {
+        let mut bridge = spawn_durable_gate_bridge(&[]).await;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+        let endpoint_cfg = JmsEndpointConfig::from_uri("jms:queue:orders")
+            .expect("uri without durable params must parse");
+        let (handle, cancel) =
+            spawn_route_consumer(Arc::clone(&pool), endpoint_cfg, "jms-non-durable-old");
+
+        bridge.next_subscribe().await;
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("consumer exits on requested shutdown");
+
+        {
+            let captured = bridge.subscribes.lock().expect("subscribes mutex poisoned");
+            assert_eq!(captured.len(), 1, "the subscription must proceed");
+            assert!(captured[0].client_id.is_empty());
+            assert!(captured[0].subscription_name.is_empty());
+        }
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
+    }
+
+    /// Task 1.3: runtime capability loss parks permanently and stops
+    /// resubscription. The later Health responses (no capability) model the
+    /// replaced instance; the shared flag registered at consumer attach arms
+    /// the runtime gate, so the slot parks and no further Subscribe calls go
+    /// out.
+    #[tokio::test]
+    async fn durable_gate_runtime_loss_parks() {
+        let mut bridge = spawn_durable_gate_bridge(&["durable-subscribers-v1"]).await;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+        let (handle, _cancel) = spawn_route_consumer(
+            Arc::clone(&pool),
+            durable_endpoint(),
+            "jms-durable-runtime-loss",
+        );
+
+        // The first responses include the capability: the attach gate passes
+        // and exactly one Subscribe goes out.
+        bridge.next_subscribe().await;
+        assert_eq!(bridge.subscribe_count(), 1, "one Subscribe before the loss");
+
+        // The replaced instance advertises nothing.
+        bridge.set_capabilities(&[]);
+        let reason = wait_parked(&slot).await;
+        assert_durable_park_text(&reason);
+
+        // Release the stream: the consumer re-attaches — or would resubscribe
+        // if the park had not stopped it terminally.
+        bridge.end_streams();
+        let result = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("consumer must terminate after the park")
+            .expect("consumer task must not panic");
+        let err = result.expect_err("the parked slot must fail the consumer terminally");
+        assert_durable_park_text(&err.to_string());
+        assert_eq!(
+            bridge.subscribe_count(),
+            1,
+            "no further Subscribe calls after capability loss"
+        );
+
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
+    }
+
+    /// Task 1.3: capability evidence is re-collected per launch. A capable
+    /// instance lets the durable launch through; the replacement instance
+    /// (same shared requirement flag) without the capability fails closed, so
+    /// the first instance's evidence never authorizes its replacement.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn durable_gate_evidence_not_inherited() {
+        let bridge = spawn_durable_gate_bridge(&["durable-subscribers-v1"]).await;
+        let dir = tempfile::tempdir().expect("stub tempdir");
+        let (stub, _pidfile) = ready_line_stub(dir.path(), "durable-inherit", 1);
+        let config = BridgeProcessConfig::jms(
+            stub,
+            "tcp://localhost:61616".to_string(),
+            BrokerType::ActiveMq,
+            None,
+            None,
+            2_000,
+            30_000,
+            30_000,
+            Some("/var/lib/state/rust-camel/jms-bridge".to_string()),
+            Some("0123456789abcdef0123456789abcdef".to_string()),
+            None,
+        );
+        let selector_required = std::sync::atomic::AtomicBool::new(false);
+        let durable_required = std::sync::atomic::AtomicBool::new(true);
+
+        // Cycle 1: the launch gate window collects the capability and passes.
+        let channel1 = connect_scripted(bridge.port).await;
+        let (process1, _channel1) = JmsBridgePool::start_bridge_process_with_config(
+            &config,
+            2_000,
+            false,
+            &selector_required,
+            &durable_required,
+            Some(channel1),
+        )
+        .await
+        .expect("cycle 1 must pass on its own collected capability evidence");
+        let _ = process1.stop().await;
+
+        // The replacement instance advertises nothing.
+        bridge.set_capabilities(&[]);
+        let channel2 = connect_scripted(bridge.port).await;
+        let result = JmsBridgePool::start_bridge_process_with_config(
+            &config,
+            2_000,
+            false,
+            &selector_required,
+            &durable_required,
+            Some(channel2),
+        )
+        .await;
+        let reason = match result {
+            Err(StartBridgeError::Permanent(reason)) => reason,
+            Err(StartBridgeError::Other(e)) => {
+                panic!("the replacement durable gate must classify permanently: {e}")
+            }
+            Ok(_) => panic!("the replacement durable gate must reject the launch"),
+        };
+        assert_durable_park_text(&reason);
+
+        bridge.shutdown().await;
+    }
+
+    /// Task 1.3: the durable identity fields are stable across a reconnect
+    /// while every Subscribe still mints a distinct fresh subscription id.
+    #[tokio::test]
+    async fn durable_request_fields_stable_across_reconnect() {
+        let mut bridge = spawn_durable_gate_bridge(&["durable-subscribers-v1"]).await;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+        let (handle, cancel) = spawn_route_consumer(
+            Arc::clone(&pool),
+            durable_endpoint(),
+            "jms-durable-reconnect",
+        );
+
+        bridge.next_subscribe().await;
+        let first = {
+            let captured = bridge.subscribes.lock().expect("subscribes mutex poisoned");
+            captured[0].clone()
+        };
+
+        // End the stream: the consumer re-attaches and subscribes again.
+        bridge.end_streams();
+        bridge.next_subscribe().await;
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("consumer exits on requested shutdown");
+
+        {
+            let captured = bridge.subscribes.lock().expect("subscribes mutex poisoned");
+            assert_eq!(captured.len(), 2, "the consumer must resubscribe once");
+            for request in captured.iter() {
+                assert_eq!(request.client_id, first.client_id);
+                assert_eq!(request.subscription_name, first.subscription_name);
+                assert_eq!(request.client_id, "app-1");
+                assert_eq!(request.subscription_name, "snapshots");
+            }
+            assert_ne!(
+                captured[0].subscription_id, captured[1].subscription_id,
+                "each stream must carry a distinct fresh subscription_id"
+            );
+            assert!(
+                !captured[1].subscription_id.is_empty(),
+                "the reconnect subscription_id must be non-empty"
+            );
+        }
+
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
+    }
+
+    /// Task 1.3: the gate is capability-only. A bridge advertising
+    /// `durable-subscribers-v1` passes while reporting STALE / UNKNOWN /
+    /// SKIPPED / UNSPECIFIED broker status in separate runs.
+    #[tokio::test]
+    async fn durable_gate_status_independent() {
+        // Raw HealthStatus values: 2=STALE, 3=UNKNOWN, 4=SKIPPED,
+        // 0=UNSPECIFIED. Unverified broker status must neither bypass nor
+        // weaken the capability gate.
+        for status in [2i32, 3, 4, 0] {
+            let mut bridge = spawn_durable_gate_bridge(&["durable-subscribers-v1"]).await;
+            *bridge.status.lock().expect("status mutex poisoned") = status;
+            let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+            let (handle, cancel) =
+                spawn_route_consumer(Arc::clone(&pool), durable_endpoint(), "jms-durable-status");
+
+            bridge.next_subscribe().await;
+            cancel.cancel();
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .expect("consumer exits on requested shutdown");
+
+            assert_eq!(
+                bridge.subscribe_count(),
+                1,
+                "status {status}: the gate must pass on the capability alone"
+            );
+            shutdown_test_slot(&slot).await;
+            bridge.shutdown().await;
+        }
+    }
+
+    /// Task 1.3: a durable route whose attach Health RPC never completes fails
+    /// within the configured health timeout instead of blocking startup. This
+    /// rides the shared selector-gate health-timeout path; the slot parks with
+    /// the "could not verify durable-subscriber support" reason.
+    #[tokio::test]
+    async fn durable_gate_bounded_health_wait() {
+        let gate = probe_gate();
+        let server = spawn_scripted_health(vec![ScriptedHealth::Gate {
+            response: HealthResponse {
+                healthy: true,
+                broker_connected: true,
+                message: "scripted".to_string(),
+                status: 0,
+                age_ms: 0,
+                ..Default::default()
+            },
+            gate: Arc::clone(&gate),
+        }])
+        .await;
+        let channel = connect_scripted(server.port).await;
+
+        // No monitor is spawned: the attach gate's Health RPC is the only
+        // caller, so the gate reliably holds it past the deadline.
+        let pool = Arc::new(
+            JmsBridgePool::from_config(JmsPoolConfig {
+                health_timeout_ms: 100,
+                ..JmsPoolConfig::single_broker("tcp://localhost:61616", BrokerType::Generic)
+            })
+            .expect("bounded-health pool config must be valid"),
+        );
+        let (state_tx, state_rx) = tokio::sync::watch::channel(BridgeState::Ready { channel });
+        let slot = Arc::new(BridgeSlot {
+            name: "default".to_string(),
+            broker_url: "tcp://localhost:61616".to_string(),
+            broker_type: BrokerType::Generic,
+            credentials: None,
+            state_rx,
+            state_tx,
+            process: Arc::new(tokio::sync::Mutex::new(None)),
+            health_monitor_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            probe_wake: Arc::new(tokio::sync::Notify::new()),
+            last_broker_failure: std::sync::Mutex::new(None),
+            selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durable_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        pool.slots.insert("default".to_string(), Arc::clone(&slot));
+
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "jms-durable-health-timeout".to_string(),
+        );
+        let started = std::time::Instant::now();
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            consumer_loop(
+                &pool,
+                "default",
+                &durable_endpoint(),
+                &reconnect_after(1),
+                CancellationToken::new(),
+                &ctx,
+                0,
+                rt(),
+            ),
+        )
+        .await
+        .expect("the health timeout must bound the attach gate")
+        .expect_err("an unverifiable durable route must fail");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the gate must fail within its health timeout"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("could not verify durable-subscriber support"),
+            "the timeout reason must name the durable verification: {text}"
+        );
+        for needle in ["durable-subscribers-v1", "0.9.0"] {
+            assert!(
+                text.contains(needle),
+                "the timeout reason must contain '{needle}': {text}"
+            );
+        }
+        assert_eq!(
+            server.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the attach gate issues exactly one Health RPC"
+        );
+
+        // Releasing the held reply lets the server task finish cleanly.
+        server.shutdown().await;
+        shutdown_test_slot(&slot).await;
+    }
+
+    /// Task 1.3: a durable consumer attaching to an already-running slot whose
+    /// bridge never advertised `durable-subscribers-v1` is stopped by the
+    /// attach-path fresh Health check BEFORE its first Subscribe — the
+    /// Subscribe count does not increase and the consumer fails with the
+    /// durable error, even though the slot went Ready earlier for a
+    /// non-durable route.
+    #[tokio::test]
+    async fn durable_gate_blocks_late_attach() {
+        let mut bridge = spawn_durable_gate_bridge(&[]).await;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+
+        // A NON-durable consumer keeps running against the incapable bridge
+        // (slot startup saw no durable requirement).
+        let plain_cfg = JmsEndpointConfig::from_uri("jms:queue:orders")
+            .expect("uri without durable params must parse");
+        let (first_handle, _first_cancel) =
+            spawn_route_consumer(Arc::clone(&pool), plain_cfg, "jms-incapable-plain");
+        bridge.next_subscribe().await;
+        assert_eq!(
+            bridge.subscribe_count(),
+            1,
+            "baseline non-durable Subscribe"
+        );
+
+        // The durable route attaches late.
+        let (route_tx, _route_rx) = mpsc::channel(16);
+        let ctx = ConsumerContext::new(
+            route_tx,
+            CancellationToken::new(),
+            "jms-incapable-durable".to_string(),
+        );
+        let err = tokio::time::timeout(
+            Duration::from_secs(10),
+            consumer_loop(
+                &pool,
+                "default",
+                &durable_endpoint(),
+                &reconnect_after(1),
+                CancellationToken::new(),
+                &ctx,
+                1,
+                rt(),
+            ),
+        )
+        .await
+        .expect("the attach gate must fail fast")
+        .expect_err("a durable consumer on an incapable bridge must fail");
+        assert_durable_park_text(&err.to_string());
+        assert_eq!(
+            bridge.subscribe_count(),
+            1,
+            "the attach gate must park before the durable consumer's Subscribe"
+        );
+
+        bridge.end_streams();
+        let _ = tokio::time::timeout(Duration::from_secs(5), first_handle)
+            .await
+            .expect("first consumer terminates");
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
+    }
+
     // ── Task 3.5: send_and_wait settlement harness ───────────────────────────
     //
     // These tests drive the real `consumer_loop` against an in-process tonic
@@ -3387,6 +3913,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durable_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
         pool
@@ -3417,6 +3944,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durable_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), slot);
         pool
@@ -3448,6 +3976,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durable_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -3469,6 +3998,7 @@ mod tests {
             probe_wake: Arc::new(tokio::sync::Notify::new()),
             last_broker_failure: std::sync::Mutex::new(None),
             selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            durable_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         pool.slots.insert("default".to_string(), Arc::clone(&slot));
         slot
@@ -3991,7 +4521,7 @@ mod tests {
             // The slot is never parked or restarted: it stays Ready for other
             // routes and producers sharing it.
             let slot = pool
-                .get_or_create_slot("default", false)
+                .get_or_create_slot("default", false, false)
                 .await
                 .expect("slot");
             assert!(
@@ -4642,7 +5172,7 @@ mod tests {
         );
 
         let slot = ready_pool
-            .get_or_create_slot("default", false)
+            .get_or_create_slot("default", false, false)
             .await
             .expect("slot");
         assert!(
@@ -5029,7 +5559,7 @@ mod tests {
         .expect("spawn park-during-reconnect bridge");
         let pool = pool_with_mock_channel(port).await;
         let slot = pool
-            .get_or_create_slot("default", false)
+            .get_or_create_slot("default", false, false)
             .await
             .expect("slot");
         let state_tx = slot.state_tx.clone();

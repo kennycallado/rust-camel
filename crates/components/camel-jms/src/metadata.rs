@@ -24,6 +24,12 @@ pub(super) struct JmsMetadataDescriptor {
     #[uri_param(name = "messageSelector")]
     pub _message_selector: Option<String>,
 
+    #[uri_param(name = "clientId")]
+    pub _client_id: Option<String>,
+
+    #[uri_param(name = "subscriptionName")]
+    pub _subscription_name: Option<String>,
+
     #[uri_param(name = "concurrentConsumers", default = "1")]
     pub _concurrent_consumers: u32,
 
@@ -72,6 +78,7 @@ mod tests {
         let mut expected = vec![
             "acknowledgementMode",
             "broker",
+            "clientId",
             "concurrentConsumers",
             "exchangePattern",
             "jmsHeaderAllowlist",
@@ -79,6 +86,7 @@ mod tests {
             "messageSelector",
             "persistentDelivery",
             "priority",
+            "subscriptionName",
             "timeToLive",
             "transactionMode",
         ];

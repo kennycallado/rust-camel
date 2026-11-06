@@ -21,6 +21,7 @@ import javax.jms.Message;
 import javax.jms.MessageConsumer;
 import javax.jms.Session;
 import javax.jms.TextMessage;
+import javax.jms.Topic;
 import jms_bridge.CompletionOutcome;
 import jms_bridge.JmsMessage;
 import org.jboss.logging.Logger;
@@ -63,6 +64,22 @@ public class JmsConsumer {
    * selector stays a broker-owned failure.
    */
   volatile String messageSelector;
+
+  /**
+   * Durable subscription client id, or {@code null}/blank when none was requested. Assigned from
+   * the subscribe request on the injected instance before the consume loop starts, like {@link
+   * #messageSelector}. Both {@link #clientId} and {@link #subscriptionName} must be set for a topic
+   * destination to select the durable consumer path; a half-specified identity is rejected
+   * synchronously in {@link #subscribe} before any thread or connection exists.
+   */
+  volatile String clientId;
+
+  /**
+   * Durable subscription name, or {@code null}/blank when none was requested. Paired with {@link
+   * #clientId}: the provider creates the subscription with {@code
+   * Session.createDurableConsumer(topic, subscriptionName, selector, false)}.
+   */
+  volatile String subscriptionName;
 
   /**
    * Owner-thread settlement state. The session is touched only by the owner thread; a gRPC {@code
@@ -271,6 +288,11 @@ public class JmsConsumer {
    * expression goes to the provider verbatim: an invalid selector is a broker-owned failure
    * surfaced on the observer, never validated or rewritten locally.
    *
+   * <p>Durable identity ({@link #clientId} and {@link #subscriptionName}) is validated here,
+   * synchronously, before the owner thread exists: a half-specified identity or durable identity on
+   * a queue destination fails the subscribe permanently with {@code INVALID_ARGUMENT}, so no
+   * partial subscription is ever attempted. The failure never echoes the parameter values.
+   *
    * @param finished shared flag indicating the stream has terminated. The gRPC cancel handler or
    *     this consumer's terminal callback sets it; the consumer only reads it, so the service's
    *     compared-and-set teardown stays the single owner of observer termination.
@@ -283,6 +305,12 @@ public class JmsConsumer {
     // Startup validation (ADR-0033): a malformed JMS_MAX_BODY_BYTES must fail loud before any
     // broker connection is created.
     maxBodyBytes();
+
+    // Durable identity is request-scoped, so an invalid combination must fail before the owner
+    // thread exists: a started thread would otherwise attempt a partial subscription. The status
+    // is INVALID_ARGUMENT (not the startup-validation FAILED_PRECONDITION) and names both
+    // parameters without echoing their values.
+    validateDurableIdentity(destination);
 
     synchronized (settleLock) {
       running = true;
@@ -328,6 +356,13 @@ public class JmsConsumer {
         return;
       }
 
+      // Durable identity must be visible on the connection before start(): the provider rejects
+      // setClientID after start. Only a topic with both fields set takes this path; the request
+      // was already validated synchronously in subscribe().
+      boolean durable = topic && hasDurableIdentity();
+      if (durable) {
+        connection.setClientID(clientId);
+      }
       connection.start();
       // Bridge-managed settlement: the session is ALWAYS CLIENT_ACKNOWLEDGE. Endpoint
       // acknowledgementMode and transactionMode options never reach Java over the proto and, by
@@ -335,7 +370,11 @@ public class JmsConsumer {
       // A requested transactionMode=Session only warns on the Rust side.
       session = connection.createSession(false, Session.CLIENT_ACKNOWLEDGE);
       Destination dest = JmsProducer.parseDestination(session, destination);
-      if (messageSelector != null && !messageSelector.isBlank()) {
+      if (durable) {
+        // D2: noLocal is fixed false — the bridge consumes its own published messages.
+        consumer =
+            session.createDurableConsumer((Topic) dest, subscriptionName, selectorOrNull(), false);
+      } else if (messageSelector != null && !messageSelector.isBlank()) {
         consumer = session.createConsumer(dest, messageSelector);
       } else {
         consumer = session.createConsumer(dest);
@@ -492,6 +531,50 @@ public class JmsConsumer {
   /** Whether the destination addresses a topic rather than a queue. */
   private static boolean isTopic(String destination) {
     return destination.startsWith("topic:");
+  }
+
+  /** Whether the request carries a complete durable identity (both fields non-blank). */
+  private boolean hasDurableIdentity() {
+    return !isBlank(clientId) && !isBlank(subscriptionName);
+  }
+
+  /** The selector to hand to the provider, or {@code null} when none was requested. */
+  private String selectorOrNull() {
+    return isBlank(messageSelector) ? null : messageSelector;
+  }
+
+  private static boolean isBlank(String value) {
+    return value == null || value.isBlank();
+  }
+
+  /**
+   * Validates the durable identity carried by the subscribe request. Called synchronously from
+   * {@link #subscribe} before the owner thread exists so an invalid identity can never produce a
+   * partial subscription. A half-specified identity and durable identity on a queue destination are
+   * both permanent {@code INVALID_ARGUMENT} failures naming both parameters; the parameter values
+   * are never echoed.
+   *
+   * @param destination the requested destination
+   */
+  private void validateDurableIdentity(String destination) {
+    boolean hasClientId = !isBlank(clientId);
+    boolean hasSubscriptionName = !isBlank(subscriptionName);
+    if (!hasClientId && !hasSubscriptionName) {
+      return;
+    }
+    if (hasClientId != hasSubscriptionName) {
+      throw Status.INVALID_ARGUMENT
+          .withDescription(
+              "client_id and subscription_name must be set together for a durable subscription")
+          .asRuntimeException();
+    }
+    if (!isTopic(destination)) {
+      throw Status.INVALID_ARGUMENT
+          .withDescription(
+              "client_id and subscription_name require a topic destination; durable subscriptions"
+                  + " are topic-only")
+          .asRuntimeException();
+    }
   }
 
   /** Fails a queue subscribe when the bridge has no journal directory or broker key. */

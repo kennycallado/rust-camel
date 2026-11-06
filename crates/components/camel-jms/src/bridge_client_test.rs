@@ -53,6 +53,52 @@ fn protos_have_identical_wire_additions() {
     );
 }
 
+/// Task 1.1: all three on-disk copies of the JMS bridge proto (component,
+/// Java bridge, fake bridge) must be byte-identical so the generated types and
+/// the Java peer cannot drift apart.
+#[test]
+fn proto_copies_identical() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let component = std::fs::read(format!("{manifest_dir}/proto/jms_bridge.proto"))
+        .expect("read component proto");
+    let bridge = std::fs::read(format!(
+        "{manifest_dir}/../../../bridges/jms/src/main/proto/jms_bridge.proto"
+    ))
+    .expect("read Java bridge proto");
+    let fake_bridge = std::fs::read(format!(
+        "{manifest_dir}/../../camel-fake-bridge/proto/jms_bridge.proto"
+    ))
+    .expect("read fake bridge proto");
+
+    assert_eq!(
+        component, bridge,
+        "component and Java bridge protos must be byte-identical"
+    );
+    assert_eq!(
+        component, fake_bridge,
+        "component and fake bridge protos must be byte-identical"
+    );
+    assert_eq!(
+        bridge, fake_bridge,
+        "Java bridge and fake bridge protos must be byte-identical"
+    );
+}
+
+/// Task 1.1: durable-topic subscription fields (tags 4 and 5) must exist on
+/// the generated `SubscribeRequest`, with proto3 empty-string defaults.
+#[test]
+fn subscribe_request_has_durable_fields() {
+    let request = SubscribeRequest::default();
+    assert_eq!(
+        request.client_id, "",
+        "SubscribeRequest must expose client_id (tag 4)"
+    );
+    assert_eq!(
+        request.subscription_name, "",
+        "SubscribeRequest must expose subscription_name (tag 5)"
+    );
+}
+
 /// Deterministic non-uniform pattern so the assertion compares real bytes
 /// instead of an all-zero or all-same payload.
 fn near_cap_body() -> Vec<u8> {
@@ -226,6 +272,8 @@ async fn near_cap_body_decodes_end_to_end() {
             destination: "queue.decode.limit.test".to_string(),
             subscription_id: "near-cap-test".to_string(),
             message_selector: String::new(),
+            client_id: String::new(),
+            subscription_name: String::new(),
         })
         .await
         .expect("subscribe accepted");
@@ -271,6 +319,8 @@ async fn content_type_round_trips_through_stream() {
             destination: "queue.ct.test".to_string(),
             subscription_id: "ct-round-trip".to_string(),
             message_selector: String::new(),
+            client_id: String::new(),
+            subscription_name: String::new(),
         })
         .await
         .expect("subscribe accepted");
@@ -313,6 +363,8 @@ async fn duplicate_subscription_id_surfaces_already_exists() {
             destination: "queue.dup.test".to_string(),
             subscription_id: "dup-test".to_string(),
             message_selector: String::new(),
+            client_id: String::new(),
+            subscription_name: String::new(),
         })
         .await
         .expect("first subscribe accepted");
@@ -322,6 +374,8 @@ async fn duplicate_subscription_id_surfaces_already_exists() {
             destination: "queue.dup.test".to_string(),
             subscription_id: "dup-test".to_string(),
             message_selector: String::new(),
+            client_id: String::new(),
+            subscription_name: String::new(),
         })
         .await
     {
@@ -440,6 +494,8 @@ async fn traceparent_injected_on_every_rpc_shape() {
             destination: "queue.tp.test".into(),
             subscription_id: "tp-test".into(),
             message_selector: String::new(),
+            client_id: String::new(),
+            subscription_name: String::new(),
         })
         .await
         .expect("subscribe accepted");
@@ -510,6 +566,8 @@ async fn no_traceparent_without_active_context() {
             destination: "queue.tp.test".into(),
             subscription_id: "tp-fallback".into(),
             message_selector: String::new(),
+            client_id: String::new(),
+            subscription_name: String::new(),
         })
         .await
         .expect("subscribe accepted");
@@ -890,6 +948,7 @@ pub(crate) async fn selector_monitor_fixture(port: u16) -> (Arc<JmsBridgePool>, 
         probe_wake: Arc::new(tokio::sync::Notify::new()),
         last_broker_failure: std::sync::Mutex::new(None),
         selector_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        durable_required: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     pool.slots.insert("default".to_string(), Arc::clone(&slot));
     pool.spawn_health_monitor(Arc::clone(&slot)).await;
@@ -1110,6 +1169,22 @@ pub(crate) async fn spawn_selector_gate_bridge(capabilities: &[&str]) -> Selecto
         shutdown: shutdown_tx,
         task,
     }
+}
+
+/// Task 1.3 fixture: the durable-subscriber gate mock.
+///
+/// Same server shape as [`SelectorGateBridge`] — one Health surface whose
+/// `capabilities`/`status` the test controls per phase, plus recorded
+/// `Subscribe` traffic and open streams. The durable gate needs exactly those
+/// observations (zero Subscribe on park, identity fields on pass, no
+/// resubscribe after capability loss), so the fixture is shared rather than
+/// duplicated.
+pub(crate) type DurableGateBridge = SelectorGateBridge;
+
+/// Spawns the durable-gate mock advertising `capabilities` until the test
+/// flips them.
+pub(crate) async fn spawn_durable_gate_bridge(capabilities: &[&str]) -> DurableGateBridge {
+    spawn_selector_gate_bridge(capabilities).await
 }
 
 /// Test fixture owning the real health monitor, the scripted health server,

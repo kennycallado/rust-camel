@@ -324,6 +324,12 @@ pub struct JmsEndpointConfig {
     // Only messages matching the selector are delivered to the consumer.
     pub message_selector: Option<String>,
 
+    // Durable subscription identity: both are required together, only on a
+    // topic destination, and only with `concurrent_consumers == 1`. Validation
+    // lives in `from_uri` (fail loud at config time).
+    pub client_id: Option<String>,
+    pub subscription_name: Option<String>,
+
     // JMS-011: Number of concurrent consumer tasks to spawn for this endpoint.
     // Each consumer polls messages independently. Default: 1.
     pub concurrent_consumers: u32,
@@ -368,6 +374,8 @@ enum KnownParam {
     Broker,
     AckMode,
     MessageSelector,
+    ClientId,
+    SubscriptionName,
     ConcurrentConsumers,
     TransactionMode,
     TimeToLive,
@@ -386,6 +394,10 @@ const KNOWN_PARAM_NAMES: &[(&str, KnownParam)] = &[
     ("acknowledgement_mode", KnownParam::AckMode),
     ("messageSelector", KnownParam::MessageSelector),
     ("message_selector", KnownParam::MessageSelector),
+    ("clientId", KnownParam::ClientId),
+    ("client_id", KnownParam::ClientId),
+    ("subscriptionName", KnownParam::SubscriptionName),
+    ("subscription_name", KnownParam::SubscriptionName),
     ("concurrentConsumers", KnownParam::ConcurrentConsumers),
     ("concurrent_consumers", KnownParam::ConcurrentConsumers),
     ("transactionMode", KnownParam::TransactionMode),
@@ -528,6 +540,8 @@ impl JmsEndpointConfig {
         let mut broker_name: Option<String> = None;
         let mut acknowledgement_mode = AcknowledgementMode::default();
         let mut message_selector: Option<String> = None;
+        let mut client_id: Option<String> = None;
+        let mut subscription_name: Option<String> = None;
         let mut concurrent_consumers = default_concurrent_consumers();
         let mut transaction_mode = JmsTransactionMode::default();
         let mut time_to_live: Option<u64> = None;
@@ -561,6 +575,12 @@ impl JmsEndpointConfig {
                         message_selector = Some(decoded);
                     }
                     Some(KnownParam::MessageSelector) => {}
+                    Some(KnownParam::ClientId) => {
+                        client_id = Some(percent_decode_lossy(v));
+                    }
+                    Some(KnownParam::SubscriptionName) => {
+                        subscription_name = Some(percent_decode_lossy(v));
+                    }
                     Some(KnownParam::ConcurrentConsumers) => {
                         concurrent_consumers = v.parse::<u32>().map_err(|_| {
                             camel_component_api::CamelError::ProcessorError(format!(
@@ -638,12 +658,55 @@ impl JmsEndpointConfig {
             }
         }
 
+        // Durable subscription identity. The topic-only rule fires first so any
+        // durable parameter on a non-topic destination is named directly,
+        // whether the pair is complete or half-specified; blank values come
+        // next so a present-but-empty key is named instead of surfacing as a
+        // missing pair member; then both-or-neither and the single-consumer
+        // invariant.
+        if (client_id.is_some() || subscription_name.is_some())
+            && destination_type != DestinationType::Topic
+        {
+            return Err(camel_component_api::CamelError::ProcessorError(
+                "durable subscription parameters require a topic destination".to_string(),
+            ));
+        }
+        for (name, value) in [
+            ("clientId", client_id.as_deref()),
+            ("subscriptionName", subscription_name.as_deref()),
+        ] {
+            if value.is_some_and(|v| v.trim().is_empty()) {
+                return Err(camel_component_api::CamelError::ProcessorError(format!(
+                    "invalid {}: must not be blank",
+                    name
+                )));
+            }
+        }
+        match (client_id.as_deref(), subscription_name.as_deref()) {
+            (Some(_), Some(_)) => {
+                if concurrent_consumers != 1 {
+                    return Err(camel_component_api::CamelError::ProcessorError(
+                        "durable endpoint requires concurrentConsumers of exactly 1".to_string(),
+                    ));
+                }
+            }
+            (None, None) => {}
+            _ => {
+                return Err(camel_component_api::CamelError::ProcessorError(
+                    "durable subscription parameters require both clientId and subscriptionName"
+                        .to_string(),
+                ));
+            }
+        }
+
         Ok(JmsEndpointConfig {
             destination_type,
             destination_name,
             broker_name,
             acknowledgement_mode,
             message_selector,
+            client_id,
+            subscription_name,
             concurrent_consumers,
             transaction_mode,
             time_to_live,
@@ -2194,6 +2257,83 @@ broker_type = "activemq"
         );
     }
 
+    // ── durable subscription identity: clientId + subscriptionName ──────
+
+    #[test]
+    fn parse_durable_params() {
+        let cfg = JmsEndpointConfig::from_uri(
+            "jms:topic:prices?clientId=app-1&subscriptionName=snapshots",
+        )
+        .unwrap();
+        assert_eq!(cfg.client_id, Some("app-1".to_string()));
+        assert_eq!(cfg.subscription_name, Some("snapshots".to_string()));
+    }
+
+    #[test]
+    fn parse_durable_params_snake_aliases() {
+        let cfg = JmsEndpointConfig::from_uri(
+            "jms:topic:prices?client_id=app-1&subscription_name=snapshots",
+        )
+        .unwrap();
+        assert_eq!(cfg.client_id, Some("app-1".to_string()));
+        assert_eq!(cfg.subscription_name, Some("snapshots".to_string()));
+    }
+
+    #[test]
+    fn durable_params_require_pair() {
+        let err =
+            JmsEndpointConfig::from_uri("jms:topic:prices?subscriptionName=snapshots").unwrap_err();
+        assert!(err.to_string().contains("clientId"), "got: {}", err);
+    }
+
+    #[test]
+    fn durable_params_reject_queue() {
+        let err = JmsEndpointConfig::from_uri(
+            "jms:queue:orders?clientId=app-1&subscriptionName=snapshots",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("topic"), "got: {}", err);
+    }
+
+    #[test]
+    fn durable_params_reject_blank() {
+        let err =
+            JmsEndpointConfig::from_uri("jms:topic:prices?clientId=&subscriptionName=snapshots")
+                .unwrap_err();
+        assert!(err.to_string().contains("clientId"), "got: {}", err);
+    }
+
+    #[test]
+    fn durable_params_reject_concurrent_consumers() {
+        let err = JmsEndpointConfig::from_uri(
+            "jms:topic:prices?clientId=app-1&subscriptionName=snapshots&concurrentConsumers=2",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("concurrentConsumers"), "got: {}", err);
+        assert!(msg.contains('1'), "got: {}", err);
+    }
+
+    #[test]
+    fn durable_params_accept_concurrent_consumers_one() {
+        let cfg = JmsEndpointConfig::from_uri(
+            "jms:topic:prices?clientId=app-1&subscriptionName=snapshots&concurrentConsumers=1",
+        )
+        .unwrap();
+        assert_eq!(cfg.client_id, Some("app-1".to_string()));
+        assert_eq!(cfg.subscription_name, Some("snapshots".to_string()));
+    }
+
+    #[test]
+    fn durable_misspelling_still_unknown() {
+        let cfg = JmsEndpointConfig::from_uri("jms:topic:prices?durableSubscribtion=news").unwrap();
+        assert_eq!(cfg.unknown_params, vec!["durableSubscribtion"]);
+        assert!(
+            !format!("{cfg:?}").contains("news"),
+            "the unknown value must never reach Debug output"
+        );
+    }
+
     #[test]
     fn parse_transaction_mode_session() {
         let cfg = JmsEndpointConfig::from_uri("jms:queue:orders?transactionMode=Session").unwrap();
@@ -3045,6 +3185,8 @@ insecure_skip_verify = true
             KnownParam::Broker,
             KnownParam::AckMode,
             KnownParam::MessageSelector,
+            KnownParam::ClientId,
+            KnownParam::SubscriptionName,
             KnownParam::ConcurrentConsumers,
             KnownParam::TransactionMode,
             KnownParam::TimeToLive,
@@ -3058,6 +3200,8 @@ insecure_skip_verify = true
                 KnownParam::Broker => variants.push(KnownParam::Broker),
                 KnownParam::AckMode => variants.push(KnownParam::AckMode),
                 KnownParam::MessageSelector => variants.push(KnownParam::MessageSelector),
+                KnownParam::ClientId => variants.push(KnownParam::ClientId),
+                KnownParam::SubscriptionName => variants.push(KnownParam::SubscriptionName),
                 KnownParam::ConcurrentConsumers => variants.push(KnownParam::ConcurrentConsumers),
                 KnownParam::TransactionMode => variants.push(KnownParam::TransactionMode),
                 KnownParam::TimeToLive => variants.push(KnownParam::TimeToLive),
@@ -3101,6 +3245,10 @@ insecure_skip_verify = true
             "acknowledgement_mode",
             "messageSelector",
             "message_selector",
+            "clientId",
+            "client_id",
+            "subscriptionName",
+            "subscription_name",
             "concurrentConsumers",
             "concurrent_consumers",
             "transactionMode",
@@ -3175,6 +3323,43 @@ insecure_skip_verify = true
                     assert_eq!(
                         cfg.message_selector.as_deref(),
                         Some("b > 2"),
+                        "literal {literal}"
+                    );
+                }
+                "clientId" => {
+                    // Durable identity needs a topic destination and the pair.
+                    let cfg = JmsEndpointConfig::from_uri(
+                        "jms:topic:t?clientId=app-1&subscriptionName=s1",
+                    )
+                    .unwrap_or_else(|e| panic!("literal {literal:?} failed to parse: {e}"));
+                    assert_eq!(cfg.client_id.as_deref(), Some("app-1"), "literal {literal}");
+                }
+                "client_id" => {
+                    let cfg = JmsEndpointConfig::from_uri(
+                        "jms:topic:t?client_id=app-2&subscription_name=s2",
+                    )
+                    .unwrap_or_else(|e| panic!("literal {literal:?} failed to parse: {e}"));
+                    assert_eq!(cfg.client_id.as_deref(), Some("app-2"), "literal {literal}");
+                }
+                "subscriptionName" => {
+                    let cfg = JmsEndpointConfig::from_uri(
+                        "jms:topic:t?clientId=app-3&subscriptionName=s3",
+                    )
+                    .unwrap_or_else(|e| panic!("literal {literal:?} failed to parse: {e}"));
+                    assert_eq!(
+                        cfg.subscription_name.as_deref(),
+                        Some("s3"),
+                        "literal {literal}"
+                    );
+                }
+                "subscription_name" => {
+                    let cfg = JmsEndpointConfig::from_uri(
+                        "jms:topic:t?client_id=app-4&subscription_name=s4",
+                    )
+                    .unwrap_or_else(|e| panic!("literal {literal:?} failed to parse: {e}"));
+                    assert_eq!(
+                        cfg.subscription_name.as_deref(),
+                        Some("s4"),
                         "literal {literal}"
                     );
                 }

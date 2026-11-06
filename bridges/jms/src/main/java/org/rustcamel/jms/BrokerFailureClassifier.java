@@ -7,6 +7,7 @@ import java.security.cert.CertPathValidatorException;
 import java.security.cert.CertificateException;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import javax.jms.InvalidClientIDException;
 import javax.jms.JMSSecurityException;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLHandshakeException;
@@ -108,6 +109,12 @@ public final class BrokerFailureClassifier {
     // UNSUPPORTED_TRANSPORT; a javax.jms.IllegalStateException is always CLIENT_ID_IN_USE.
     if (chainHas(failure, BrokerFailureClassifier::isUnsupportedTransportMarker)) {
       return BrokerFailureClass.UNSUPPORTED_TRANSPORT;
+    }
+    // The broker's duplicate-client-id rejection is its own type; keep it ahead of the general
+    // provider-state branch so a wrapped InvalidClientIDException cannot fall through. Type only:
+    // the remote text is never inspected, so no broker-supplied identity echoes.
+    if (chainHas(failure, error -> error instanceof InvalidClientIDException)) {
+      return BrokerFailureClass.CLIENT_ID_IN_USE;
     }
     if (chainHas(failure, error -> error instanceof javax.jms.IllegalStateException)) {
       return BrokerFailureClass.CLIENT_ID_IN_USE;

@@ -4,6 +4,7 @@
 
 ### Added
 
+- feat(components/jms): durable topic subscribers end to end — `clientId`/`subscriptionName` URI parameters (snake_case aliases, pair-required, topic-only, `concurrentConsumers=1`), `client_id`/`subscription_name` on `SubscribeRequest`, and the fail-closed `durable-subscribers-v1` startup/attach capability gate; the bridge pins Artemis `verifyHost=true` explicitly for secure schemes (2.36 connector default, now explicit), and the JMS READMEs document the durable contract plus a Classic `ssl://` example (bd rc-c4fbo).
 - feat(testing): scenario documents accept a document-level `finally:` teardown list (sleep, sql, surreal, and a delete-only redis `del` prepare action) that runs after the verdict on both verdict paths; teardown failures report as the new `teardown-failure` apparatus class without masking the verdict (bd rc-6wodc).
 
 ### Changed

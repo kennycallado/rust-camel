@@ -506,6 +506,11 @@ public class JmsClientFactory {
     }
 
     params.put(TransportConstants.SSL_ENABLED_PROP_NAME, true);
+    // Decision D1 (rc-ewfom): hostname verification is always on for secure schemes. It is
+    // pinned explicitly so the contract does not depend on client defaults (2.36 connector
+    // default reads true via DEFAULT_CONNECTOR_VERIFY_HOST, verified by javap on
+    // artemis-jms-client-all-2.36.0.jar).
+    params.put(TransportConstants.VERIFY_HOST_PROP_NAME, Boolean.TRUE);
     // Artemis 2.36 names these without the SSL_ prefix ("sslEnabled" gates them).
     params.put(TransportConstants.KEYSTORE_PATH_PROP_NAME, keystorePath);
     params.put(TransportConstants.TRUSTSTORE_PATH_PROP_NAME, truststorePath);

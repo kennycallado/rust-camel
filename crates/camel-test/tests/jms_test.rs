@@ -859,6 +859,8 @@ async fn subscribe_bounded(
             destination: queue.to_string(),
             subscription_id: subscription_id.clone(),
             message_selector: String::new(),
+            client_id: String::new(),
+            subscription_name: String::new(),
         }),
     )
     .await
