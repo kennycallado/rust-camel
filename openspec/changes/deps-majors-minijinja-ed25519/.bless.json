@@ -1,0 +1,23 @@
+{
+  "kind": "plan",
+  "change": "deps-majors-minijinja-ed25519",
+  "verdict": "BLESS",
+  "hash": "sha256:2a2ffe8d838612f68d99046aa2814bec5efb1575eacd3fc21c33fced9f7c8947",
+  "expert": "experts/e_gpt",
+  "session": "ses_e4e0c0ffaffeYJFUnUI8pU7g6b",
+  "rounds": 2,
+  "first_verdict": "BLESS-WITH-FIXES",
+  "fixes_applied": [
+    "error-oracle rule: redacted public display only; reader upstream detail excluded",
+    "max-context-size pin unconditional (S9 vs bytes-precheck distinct matrix rows)",
+    "complete test catalog (7 diagnostic pins + 8 output-branch tests); uncatalogued gaps STOP",
+    "515.2 updates shape-matrix.md; zero gap/partial rows in engine sections required"
+  ],
+  "reviewer_history": [
+    "r_glm round 1: APPROVE-WITH-FINDINGS (5 findings, applied)",
+    "r_glm round 2: APPROVE-WITH-FINDINGS (dry-run carve-out + commit subject, applied)",
+    "e_gpt plan round 1: BLESS-WITH-FIXES (4 blockers, applied)"
+  ],
+  "supersedes_spec_bless": "sha256:c9732572368c8c1f5d06dfa6635e426618b996233f8c6e8b470a940c46f8b682",
+  "date": "2026-11-06"
+}
