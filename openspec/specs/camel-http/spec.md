@@ -9,15 +9,30 @@ fallback, and duplicate consumer-registration rejection.
 
 The HTTP error finalizer SHALL construct JSON replies for
 `TypeConversionFailed`, `ValidationError`, `UnsupportedMediaType`, and
-`NotAcceptable` through one private helper without changing observable reply
-behavior.
+`NotAcceptable` through one private helper. `ValidationError` SHALL map to
+400, `UnsupportedMediaType` to 415 (media negotiation gate, REST lowering),
+and `NotAcceptable` to 406 (same gate). `TypeConversionFailed` SHALL map to
+500 with the JSON error code `conversion_failed` and a log line that does not
+claim a bad request (ADR-0096 fault blame: a conversion failure on data that
+is not by definition request-borne is a server fault).
+`Unauthenticated`/`Unauthorized` keep their `401`/`403` mappings and
+`ConsumerStopping` keeps its `503 Service Unavailable` mapping; the
+remaining fallback arm (every other error) maps to `500 Internal Server
+Error`.
 
-#### Scenario: Type conversion failure remains a bad request
+#### Scenario: Type conversion failure is a server error
 
 - **GIVEN** `pipeline_error_to_reply` receives `TypeConversionFailed("bad")`
 - **WHEN** it maps the error to an HTTP reply
-- **THEN** the reply has status 400, `Content-Type: application/json`, and
-  JSON fields `error: "bad_request"` and `message: "bad"`
+- **THEN** the reply has status 500, `Content-Type: application/json`, and
+  JSON fields `error: "conversion_failed"` and `message: "bad"`; neither the
+  JSON error code nor the log line claims a bad request
+
+#### Scenario: Consumer shutdown remains 503
+
+- **GIVEN** `pipeline_error_to_reply` receives `CamelError::ConsumerStopping`
+- **WHEN** it maps the error to an HTTP reply
+- **THEN** the reply has status 503 and the shutdown mapping is unchanged
 
 #### Scenario: Validation failure remains a bad request
 
@@ -399,10 +414,11 @@ status 500 with the fixed body `Internal Server Error` and no error detail in
 the reply. The REST lowering raises that variant for a failed response-encode
 step (see `rest-dsl`, response-side marshal failures), so a server-side
 marshalling defect is never reported as a client error. The finalizer SHALL
-keep mapping `CamelError::TypeConversionFailed` to status 400 with the
-`bad_request` JSON body for request-side conversion failures; that mapping is
-not widened to response-side failures because the response step no longer
-raises `TypeConversionFailed`.
+map `CamelError::TypeConversionFailed` to status 500 with the
+`conversion_failed` JSON body (ADR-0096 fault blame): a conversion failure
+that the REST binding seam has not reclassified request-borne is a server or
+upstream fault, and the injected response step no longer raises
+`TypeConversionFailed`.
 
 #### Scenario: processor error with source is a server error
 
