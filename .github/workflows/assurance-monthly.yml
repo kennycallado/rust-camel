@@ -111,6 +111,17 @@ jobs:
           legs=$(./scripts/fuzz-legs.sh --dispatch)
           echo "FUZZ_LEGS=$legs" >> "$GITHUB_ENV"
 
+      # Order matters: the worktree must exist BEFORE the ASAN cache restores
+      # into it. A cache hit materialises $RUNNER_TEMP/fuzz-wt/target-fuzz/...,
+      # and `git worktree add` then fails with exit 128 because the directory
+      # already exists (seen 2026-11-06, run 42270964780). fuzz-smoke.yml has
+      # the same order for the same reason.
+      - name: Linked worktree for instrumented runs
+        run: |
+          mkdir -p "$RUNNER_TEMP/deep-state"
+          : > "$RUNNER_TEMP/deep-state/fuzz-findings.txt"
+          git worktree add "$RUNNER_TEMP/fuzz-wt" HEAD
+
       - id: cache-asan
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -123,12 +134,6 @@ jobs:
           key: fuzz-asan-${{ env.NIGHTLY }}-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.lock') }}-w${{ steps.cache-week.outputs.week }}
           restore-keys: |
             fuzz-asan-${{ env.NIGHTLY }}-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.lock') }}-
-
-      - name: Linked worktree for instrumented runs
-        run: |
-          mkdir -p "$RUNNER_TEMP/deep-state"
-          : > "$RUNNER_TEMP/deep-state/fuzz-findings.txt"
-          git worktree add "$RUNNER_TEMP/fuzz-wt" HEAD
 
       - name: Deep fuzz (serial legs from the worktree)
         run: |
