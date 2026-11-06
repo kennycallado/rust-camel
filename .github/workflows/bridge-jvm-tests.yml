@@ -76,3 +76,7 @@ jobs:
           export QUARKUS_NATIVE_ADDITIONAL_BUILD_ARGS="$NATIVE_BUILD_ARGS_NEUTRAL"
           ./gradlew build -Dquarkus.package.jar.enabled=false \
             -Dquarkus.native.enabled=true -Pversion=dev
+      - name: Evictor verification (native image)
+        shell: bash
+        working-directory: bridges/jms
+        run: ./gradlew --offline evictorVerifyNative

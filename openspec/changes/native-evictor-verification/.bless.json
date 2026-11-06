@@ -1,0 +1,16 @@
+{
+  "kind": "plan",
+  "change": "native-evictor-verification",
+  "verdict": "BLESS",
+  "hash": "7b83d5131329beb76a5470f77ec2a51b1f445fead67ce99a7ff201b244435577",
+  "expert": "@experts/e_gpt",
+  "session": "ses_e4dc566e0ffeMkcpvGEFihdc4B",
+  "planRounds": [
+    {"round": 1, "verdict": "BLESS-WITH-FIXES", "session": "ses_e4dd793c2ffeMTGcw14mQ8nQH8", "hash": "c6fdbd856efd1f988a5ffe7e48c7b9c6bd66522594aa79fdc5708ffcba0afdf2"},
+    {"round": 2, "verdict": "BLESS-WITH-FIXES", "session": "ses_e4dcd76adffe2l2tckZAP66OJp", "hash": "d79088452eed92088a7000674edba7be8b7921f1fa7c892f2e4c9b291b31c858"},
+    {"round": 3, "verdict": "BLESS-WITH-FIXES", "session": "ses_e4dc873c2ffepsPjgvMLFF2S4v", "hash": "c6c3d27921496e417b5a17e02e9e99ee37f2d5774747f87c93a131cca1192e82"},
+    {"round": 4, "verdict": "BLESS", "session": "ses_e4dc566e0ffeMkcpvGEFihdc4B", "hash": "7b83d5131329beb76a5470f77ec2a51b1f445fead67ce99a7ff201b244435577"}
+  ],
+  "supersedesSpecHash": "220fbd42bef4b033005b91684ff75daa54fda1b6be5af7b4765a4b87c9a97f48",
+  "blessedAt": "2026-11-06"
+}
