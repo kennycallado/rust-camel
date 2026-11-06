@@ -2515,3 +2515,231 @@ async fn lean_doc_annotation_stays_lean() {
     assert!(out.contains("doc.test.yaml [lean]\n"), "out: {out}");
     assert!(!err.contains("R-UNIT-FULL"), "err: {err}");
 }
+
+// ---------------------------------------------------------------------------
+// Document namespaces (scenario-namespaces task 5.1): run id, ordinals,
+// discovery cap, and the harness-env fold, exercised through the driver
+// seams `namespace_ordinals` / `mint_scenario_namespaces` and
+// `scenario::harness_env_bindings`.
+// ---------------------------------------------------------------------------
+
+/// Write a minimal scenario document declaring one namespace binding
+/// (`bindVar: ns` → `base`).
+fn write_namespace_scenario(dir: &Path, name: &str, base: &str) -> PathBuf {
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r#"
+routeFiles: [routes.yaml]
+namespaces:
+  - bindVar: ns
+    base: {base}
+scenario:
+  - sleep:
+      duration: 1ms
+"#
+        ),
+    )
+    .expect("write namespace scenario doc"); // allow-unwrap
+    path
+}
+
+/// Parse a document and return its scenario half (panics for a unit doc).
+fn parse_scenario(path: &Path) -> camel_integration_test::ScenarioDocument {
+    let text = fs::read_to_string(path).expect("read scenario doc"); // allow-unwrap
+    match super::document::parse_document(path, &text).expect("parse scenario doc") {
+        // allow-unwrap
+        super::document::ParsedDocument::Scenario(doc) => *doc,
+        super::document::ParsedDocument::Unit(_) => {
+            panic!("{} is not a scenario doc", path.display())
+        }
+    }
+}
+
+/// Extract the `RUN` and `ORD` segments of a minted namespace
+/// (`BASE~it~RUN~ORD~`).
+fn mint_segments(value: &str) -> (String, String) {
+    let (_, rest) = value.split_once("~it~").expect("mint marker"); // allow-unwrap
+    let (run, rest) = rest.split_once('~').expect("run terminator"); // allow-unwrap
+    let ordinal = rest.strip_suffix('~').expect("trailing mint terminator"); // allow-unwrap
+    (run.to_string(), ordinal.to_string())
+}
+
+/// Two discovered documents of one invocation share the identical 8-hex
+/// run segment and differ only in their zero-padded ordinal.
+#[tokio::test(flavor = "multi_thread")]
+async fn namespace_run_id_is_per_invocation() {
+    let dir = temp_dir("ns-run-id");
+    let a = write_namespace_scenario(&dir, "a.test.yaml", "iso");
+    let b = write_namespace_scenario(&dir, "b.test.yaml", "iso");
+    let _guard = CleanupPaths(vec![a.clone(), b.clone(), dir.clone()]);
+
+    let documents = vec![a.clone(), b.clone()];
+    let ordinals = namespace_ordinals(&documents).expect("ordinals under the cap"); // allow-unwrap
+    let lookup = ordinal_map(&ordinals);
+    // ONE run id for the whole invocation.
+    let run_id = camel_integration_test::namespace::generate_run_id();
+
+    let mut docs = Vec::new();
+    for path in &documents {
+        let mut doc = parse_scenario(path);
+        mint_scenario_namespaces(&mut doc, path, &run_id, &lookup).expect("mint must succeed"); // allow-unwrap
+        docs.push(doc);
+    }
+
+    let value_a = docs[0].minted_namespaces.get("ns").expect("a mint"); // allow-unwrap
+    let value_b = docs[1].minted_namespaces.get("ns").expect("b mint"); // allow-unwrap
+    let (run_a, ord_a) = mint_segments(value_a);
+    let (run_b, ord_b) = mint_segments(value_b);
+    assert_eq!(run_a, run_id, "the mint carries the invocation run id");
+    assert_eq!(run_b, run_id, "both documents share the invocation run id");
+    assert_eq!(run_a.len(), 8, "the run segment is eight hex characters");
+    assert!(
+        run_a.bytes().all(|b| b.is_ascii_hexdigit()),
+        "run segment: {run_a}"
+    );
+    assert_eq!(ord_a, "0001", "a is first in the discovered list");
+    assert_eq!(ord_b, "0002", "b is second in the discovered list");
+    assert_ne!(value_a, value_b, "ordinals keep the mints distinct");
+}
+
+/// Ordinals come from the byte-sorted discovered list, never from the
+/// execution (CLI argument) order; the input slice is left untouched.
+#[test]
+fn ordinal_assignment_ignores_execution_order() {
+    let root = tempfile::tempdir().expect("create root"); // allow-unwrap
+    let a_dir = root.path().join("a_dir");
+    fs::create_dir_all(&a_dir).expect("create a_dir"); // allow-unwrap
+    let sorted_first = a_dir.join("a.test.yaml");
+    fs::write(&sorted_first, "").expect("write a_dir doc"); // allow-unwrap
+    let sorted_last = root.path().join("z_standalone.test.yaml");
+    fs::write(&sorted_last, "").expect("write standalone doc"); // allow-unwrap
+
+    // CLI order: the named file FIRST, the directory SECOND — the reverse
+    // of the byte order of the discovered list.
+    let (documents, _explicit, errors) = expand_test_paths(&[sorted_last.clone(), a_dir.clone()]);
+    assert!(errors.is_empty(), "errors: {errors:?}");
+    assert_eq!(
+        documents,
+        vec![sorted_last.clone(), sorted_first.clone()],
+        "execution order keeps CLI argument order"
+    );
+    let execution_order = documents.clone();
+
+    let ordinals = namespace_ordinals(&documents).expect("ordinals under the cap"); // allow-unwrap
+    assert_eq!(
+        ordinals,
+        vec![(sorted_first.clone(), 1), (sorted_last.clone(), 2)],
+        "ordinals follow the byte-sorted discovered list"
+    );
+    assert_eq!(
+        documents, execution_order,
+        "ordinal assignment must not reorder the execution list"
+    );
+}
+
+/// More than 9999 discovered documents is a load error naming the count.
+#[test]
+fn discovery_cap_errors_at_10000() {
+    let documents: Vec<PathBuf> = (0..10_001)
+        .map(|index| PathBuf::from(format!("doc{index}.test.yaml")))
+        .collect();
+    let err = namespace_ordinals(&documents).expect_err("10001 documents must exceed the cap"); // allow-unwrap
+    assert!(
+        err.contains("10001"),
+        "error must name the discovered count: {err}"
+    );
+}
+
+/// The driver-entry half of the cap: a directory argument expanding past
+/// the cap fails the whole run before any document is read. Empty stubs
+/// suffice — the cap check runs ahead of document parsing.
+#[tokio::test(flavor = "multi_thread")]
+async fn discovery_cap_driver_entry_exits_two() {
+    let dir = temp_dir("discovery-cap-driver");
+    let _guard = CleanupPaths(vec![dir.clone()]);
+    for index in 0..10_001 {
+        fs::write(dir.join(format!("doc{index}.test.yaml")), "").expect("write stub doc"); // allow-unwrap
+    }
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let config = TestRunConfig {
+        files: vec![dir.clone()],
+        ..Default::default()
+    };
+    let summary = run_tests_full(&config, &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 2, "the cap is a load error: exit 2");
+    assert_eq!(summary.passed, 0, "no document may be executed");
+    assert_eq!(summary.failed, 0, "no document may be executed");
+    assert!(
+        summary.parse_errors >= 1,
+        "the cap must count as a parse-class entry"
+    );
+    let err = String::from_utf8(err).unwrap();
+    assert!(
+        err.contains("10001"),
+        "error must name the discovered count: {err}"
+    );
+}
+
+/// A directly-constructed scenario document with a harness mint for `ns`
+/// and a colliding probe in the document env map.
+fn doc_with_mint(ns_mint: &str, env_ns: &str) -> camel_integration_test::ScenarioDocument {
+    use camel_integration_test::{RouteSource, ScenarioDocument};
+    use std::collections::BTreeMap;
+    ScenarioDocument {
+        source_path: PathBuf::new(),
+        route_source: RouteSource::RouteFiles(Vec::new()),
+        scenario: Vec::new(),
+        finally: None,
+        partners: None,
+        env: Some(BTreeMap::from([("ns".to_string(), env_ns.to_string())])),
+        env_passthrough: None,
+        profile: None,
+        send_deadline: None,
+        inbound: None,
+        logs: None,
+        namespaces: Vec::new(),
+        minted_namespaces: BTreeMap::from([("ns".to_string(), ns_mint.to_string())]),
+    }
+}
+
+/// The full-boot harness env tier folds the mints over the partner
+/// bindVars, and the layered env resolves the mint with harness
+/// precedence over a colliding document-env probe.
+#[test]
+fn mint_visible_to_env_layer() {
+    use camel_integration_test::LayeredEnv;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    let mint = "iso~it~3f9a1c0e~0001~";
+    let doc = doc_with_mint(mint, "doc-value");
+    let partners = BTreeMap::from([("p1".to_string(), "http://127.0.0.1:9".to_string())]);
+
+    let harness = super::scenario::harness_env_bindings(partners, &doc);
+    assert_eq!(
+        harness.get("ns").map(String::as_str),
+        Some(mint),
+        "the mint must land in the harness tier"
+    );
+    assert_eq!(
+        harness.get("p1").map(String::as_str),
+        Some("http://127.0.0.1:9"),
+        "partner bindVars survive the fold"
+    );
+
+    let no_ambient: camel_integration_test::AmbientLookup = Arc::new(|_: &str| None);
+    let env = LayeredEnv::new(
+        doc.env.clone().unwrap_or_default(),
+        harness,
+        Vec::new(),
+        no_ambient,
+    );
+    assert_eq!(
+        env.lookup("ns").as_deref(),
+        Some(mint),
+        "harness precedence must win over the colliding doc-env probe"
+    );
+}

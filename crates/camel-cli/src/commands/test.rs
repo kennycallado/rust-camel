@@ -39,6 +39,7 @@ mod document_tests;
 #[cfg(test)]
 mod driver_tests;
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -260,6 +261,62 @@ fn push_unique(path: PathBuf, documents: &mut Vec<PathBuf>, seen: &mut HashSet<P
     }
 }
 
+/// The 1-based ordinals of the discovered documents for namespace
+/// minting, in byte-sorted order.
+///
+/// The ordinal is the position in the deterministic sorted
+/// discovered-document list (ADR-0069 §4) — deliberately independent of
+/// the EXECUTION list, which keeps the expansion contract (byte-sorted
+/// within a directory, CLI order across arguments). The input slice is
+/// not modified. More than
+/// [`camel_integration_test::namespace::MAX_DOCUMENTS`] documents is a
+/// load error naming the count.
+fn namespace_ordinals(documents: &[PathBuf]) -> Result<Vec<(PathBuf, usize)>, String> {
+    let mut sorted = documents.to_vec();
+    sorted.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
+    camel_integration_test::namespace::check_discovery_cap(sorted.len())?;
+    Ok(sorted
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| (path, index + 1))
+        .collect())
+}
+
+/// Keyed form of [`namespace_ordinals`] output: the canonicalized path
+/// (raw-path fallback), the same identity [`push_unique`] deduplicates
+/// on.
+fn ordinal_map(ordinals: &[(PathBuf, usize)]) -> HashMap<PathBuf, usize> {
+    ordinals
+        .iter()
+        .map(|(path, ordinal)| (explicit_key(path), *ordinal))
+        .collect()
+}
+
+/// Mints one parsed scenario document's declared namespaces into its
+/// harness layer (`minted_namespaces`) from the invocation run id and the
+/// document's discovered-list ordinal.
+///
+/// The ordinal comes from [`namespace_ordinals`], never from the
+/// execution loop position, so tier and endpoint filters cannot shift
+/// it.
+fn mint_scenario_namespaces(
+    doc: &mut camel_integration_test::ScenarioDocument,
+    path: &Path,
+    run_id: &str,
+    ordinals: &HashMap<PathBuf, usize>,
+) -> Result<(), String> {
+    let ordinal = ordinals
+        .get(&explicit_key(path))
+        .copied()
+        .ok_or_else(|| format!("no discovered-document ordinal for {}", path.display()))?;
+    camel_integration_test::namespace::apply_namespaces(
+        &mut doc.minted_namespaces,
+        &doc.namespaces,
+        run_id,
+        ordinal,
+    )
+}
+
 /// The executed half of one parsed document: unit documents keep their
 /// loaded route definitions for the run (loaded once, reused by the
 /// runner); scenario documents keep the scenario itself.
@@ -362,6 +419,20 @@ pub async fn run_tests_full(
     let mut any_survivor = false;
 
     let (documents, explicit, expansion_errors) = expand_test_paths(&config.files);
+    // Discovery-time document cap (ADR-0069 §4): more than 9999 discovered
+    // documents is a load error reported before any document is parsed.
+    if let Err(message) = camel_integration_test::namespace::check_discovery_cap(documents.len()) {
+        return discovery_cap_failure(err, message);
+    }
+    // Namespace ordinals read the byte-sorted discovered list only; the
+    // execution list below keeps the expansion order contract.
+    let ordinals = match namespace_ordinals(&documents) {
+        Ok(ordinals) => ordinals,
+        Err(message) => return discovery_cap_failure(err, message),
+    };
+    let ordinal_by_key = ordinal_map(&ordinals);
+    // One run id per invocation, shared by every document (ADR-0069 §4).
+    let run_id = camel_integration_test::namespace::generate_run_id();
     // Every expansion error becomes one `ExpansionReport` (name = displayed
     // path, error = bare message) consumed by the JUnit writer after the loop.
     let mut expansion_reports: Vec<junit::ExpansionReport> = Vec::new();
@@ -421,7 +492,16 @@ pub async fn run_tests_full(
                 continue;
             }
         };
-        let doc = match parse_document(path, &text) {
+        let parsed = parse_document(path, &text).and_then(|mut doc| {
+            // Scenario documents carry the harness-minted namespaces from
+            // the invocation run id and their discovered-list ordinal,
+            // independent of every filter and of the execution position.
+            if let document::ParsedDocument::Scenario(scenario) = &mut doc {
+                mint_scenario_namespaces(scenario, path, &run_id, &ordinal_by_key)?;
+            }
+            Ok(doc)
+        });
+        let doc = match parsed {
             Ok(doc) => doc,
             Err(e) => {
                 parse_error_names.push(path.display().to_string());
@@ -691,6 +771,18 @@ pub async fn run_tests_full(
         passed,
         failed,
         parse_errors: parse_error_names.len(),
+    }
+}
+
+/// Reports a discovery-cap load error to `err` and returns the exit-2
+/// summary, before any document is read, parsed, or filtered.
+fn discovery_cap_failure(err: &mut dyn Write, message: String) -> TestRunSummary {
+    let _ = writeln!(err, "{message}");
+    TestRunSummary {
+        exit_code: 2,
+        passed: 0,
+        failed: 0,
+        parse_errors: 1,
     }
 }
 

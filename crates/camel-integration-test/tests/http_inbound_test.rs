@@ -261,6 +261,8 @@ async fn inbound_response_validated_on_wire() {
         send_deadline: fixture.doc.send_deadline,
         inbound: fixture.doc.inbound,
         logs: fixture.doc.logs,
+        namespaces: fixture.doc.namespaces,
+        minted_namespaces: fixture.doc.minted_namespaces,
     };
     let mut vars = inbound_vars(bound);
     let outcome = run_scenario_document(&corrupted, &fixture.router, &mut vars, None).await;

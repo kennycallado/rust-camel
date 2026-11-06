@@ -373,6 +373,8 @@ async fn boot_inline_routes_still_rejected() {
         send_deadline: None,
         inbound: None,
         logs: None,
+        namespaces: Vec::new(),
+        minted_namespaces: BTreeMap::new(),
     };
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("Camel.toml"), "# minimal\n").expect("write Camel.toml");
@@ -417,6 +419,8 @@ async fn boot_rejects_inbound_without_http_feature() {
             bind_var: "INBOUND".to_string(),
         }),
         logs: None,
+        namespaces: Vec::new(),
+        minted_namespaces: BTreeMap::new(),
     };
     let dir = tempfile::tempdir().expect("temp dir");
     std::fs::write(dir.path().join("Camel.toml"), "# minimal\n").expect("write Camel.toml");

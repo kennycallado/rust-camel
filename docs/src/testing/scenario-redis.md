@@ -5,9 +5,9 @@ Enable `integration-redis` in `camel-cli`, or `redis` in `camel-integration-test
 The default CLI (`flavor-regular`) and `flavor-full` activate this assertion executor; `flavor-slim` does not.
 Without the feature, a valid Redis target returns a named verdict failure.
 
-This family owns the read side plus one delete-only `redis:` prepare action (see [The `redis:` del action](#the-redis-del-action)).
+This family owns the read side plus two delete-only `redis:` prepare forms: the literal-key `del` action and the finally-only `unlinkPrefix` teardown (see [The `redis:` del action](#the-redis-del-action)).
 Writing keys stays the route producer's job, or a Redis client's.
-There is no `set` action, no pattern delete, and no generic command runner.
+There is no `set` action, no generic command runner, and no pattern delete of authored keys.
 There is no generic `state:` action.
 
 ## Datasource configuration
@@ -148,19 +148,62 @@ scenario:
 A key containing `*`, `?`, `[`, `]`, `{`, or `}` fails the load, because `del` is not a pattern match.
 One `DEL` removes every listed key through the datasource's catalog connection.
 A missing key is success, so the action is idempotent and a delete before seeding is safe.
-There is no `FLUSHDB`, no `FLUSHALL`, and no pattern delete; glob-style bulk delete is deferred (bd rc-ql8eq).
+`unlinkPrefix` is the only pattern-shaped delete, and only under a harness-minted namespace prefix (see [unlinkPrefix (namespace-scoped teardown)](#unlinkprefix-namespace-scoped-teardown)).
+There is no `FLUSHDB` and no `FLUSHALL`.
+Glob-style bulk delete of authored keys is not supported.
 Diagnostics name the datasource and sanitize the driver text, never the URL.
 
-The action is accepted in both lists.
+The `del` action is accepted in both lists.
 In `scenario:` it is the clean-first idiom: delete the test's unique key before seeding it.
 In a document-level `finally:` list it is the teardown: delete the keys after the verdict, on both verdict paths.
 A teardown failure reports as `teardown-failure` and never masks the verdict.
 The `validate` redis target keeps its read vocabulary (`datasource/key/type/ttl`), and the two never mix.
 
+### unlinkPrefix (namespace-scoped teardown)
+
+A `redis:` teardown item may declare `unlinkPrefix` instead of `del`:
+
+```yaml
+finally:
+- redis:
+    datasource: statedb
+    unlinkPrefix: "${env:ns}order:"
+```
+
+`unlinkPrefix` and `del` are one-of: a document declares exactly one of the two fields. An action with both fields, or with neither field, fails at load.
+
+The action is allowed ONLY in `finally:`. An entry in `scenario:` fails at load with a message that names `unlinkPrefix` and the action position.
+
+The template is exactly `${env:NAME}` plus an optional literal suffix. `NAME` must be a namespace `bindVar` that the same document declares. The load rejects these templates:
+
+- A default construct, for example `${env:ns:-fallback}`.
+- A second `${`.
+- A suffix with a Redis glob metacharacter: `*`, `?`, `[`, `]`, `\`, or `^`.
+
+The run-time safety contract has these steps:
+
+1. The harness resolves `NAME` from the minted namespace layer only. The document `env:` map and the ambient environment never supply the value.
+2. The harness re-checks the resolved value against the mint grammar. It also checks that the value is byte-equal to the value minted for this document. The action issues no `SCAN` when either check fails.
+3. The `MATCH` pattern is the escaped namespace-plus-suffix text plus one unescaped `*`.
+4. The harness sends `SCAN` with `COUNT 500`. `COUNT` is a hint, so one reply may carry more keys.
+5. The harness byte-checks every returned key against the namespace-plus-suffix text before it unlinks anything. A violating key fails the whole reply, and nothing from that reply is unlinked.
+6. The harness sends `UNLINK` in batches of at most 500 keys. The action has a 10-second deadline and a 100 000-key cap.
+
+A deadline breach, a cap breach, or a violating key reports as the existing `teardown-failure` apparatus class. The report names the reason and the number of keys deleted so far. There is no new failure class.
+
+A cluster datasource is refused at datasource configuration (see [Datasource configuration](#datasource-configuration)). `KEYS`, `FLUSHDB`, `FLUSHALL`, and generic command runners stay forbidden. The `del` form keeps its literal single-`DEL` contract.
+
+Only a harness-minted prefix-free namespace makes the delete scope provable, so this action is the only pattern-shaped delete in the family.
+
+See [ADR-0069](../adr/0069-integration-tier-testing-contract.md) §8.4 for the ruling.
+
+The out-of-scope boundary is the same as for document namespaces: no cross-run reaper and no cluster support ([Document namespaces](scenario-documents.md#document-namespaces)).
+
 ## Durable state and verification
 
 Clean keys with the `del` action above: before seeding in `scenario:`, and after the test in `finally:`.
 Do not share keys between parallel scenarios.
+A document that shares `statedb` with concurrent jobs uses a namespace and the `unlinkPrefix` teardown, so the scan cannot reach another job's keys.
 Shutdown invokes the factory's no-op close hook. It does not delete keys or release every catalog reference.
 Connections are drop-scoped: release requires dropping all boot, context, catalog, and cloned connection owners.
 

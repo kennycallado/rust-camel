@@ -2607,6 +2607,7 @@ dependencies = [
  "camel-dsl",
  "camel-matchers",
  "futures",
+ "getrandom 0.3.4",
  "http",
  "http-body-util",
  "humantime",

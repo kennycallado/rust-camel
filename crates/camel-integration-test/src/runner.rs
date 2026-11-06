@@ -413,7 +413,17 @@ pub async fn run_scenario(
     for (index, action) in doc.scenario.iter().enumerate() {
         // The single-action loop has no boot of its own, so a `sql:`
         // action here has no datasource catalog and fails closed.
-        run_action(action, index, router, vars, started_at, send_deadline, None).await?;
+        run_action(
+            action,
+            index,
+            router,
+            vars,
+            started_at,
+            send_deadline,
+            None,
+            &doc.minted_namespaces,
+        )
+        .await?;
     }
     Ok(ScenarioVerdict::Pass)
 }
@@ -585,6 +595,7 @@ pub async fn run_scenario_document(
             started_at,
             send_deadline,
             datasource_catalog,
+            &doc.minted_namespaces,
         )
         .await;
         // The event records the action's execution RETURN (pass or
@@ -642,6 +653,7 @@ pub async fn run_scenario_document(
             started_at,
             send_deadline,
             datasource_catalog,
+            &doc.minted_namespaces,
         ))
         .await;
         trace.push(ScenarioEvent::Teardown(index));
@@ -796,7 +808,9 @@ fn as_tracing_level(level: LogLevel) -> tracing::Level {
 /// [`run_scenario`] and [`run_scenario_document`]; every failure
 /// carries the action index. A `sql:` action seeds through
 /// `datasource_catalog` (`None` fails closed — see
-/// [`run_scenario_document`]).
+/// [`run_scenario_document`]). `minted_namespaces` is the
+/// harness-written map the `unlinkPrefix` arm resolves its scope from.
+#[allow(clippy::too_many_arguments)] // the runner context is a flat parameter list; each argument is one run-scoped input
 async fn run_action(
     action: &ScenarioAction,
     index: usize,
@@ -805,6 +819,7 @@ async fn run_action(
     started_at: Instant,
     send_deadline: Duration,
     datasource_catalog: Option<&Arc<dyn DatasourceCatalog>>,
+    minted_namespaces: &BTreeMap<String, String>,
 ) -> Result<(), ScenarioFailure> {
     match action {
         ScenarioAction::Send {
@@ -979,6 +994,81 @@ async fn run_action(
                     source: TransportError::Other {
                         message: "the `redis` action requires the `redis` feature, which this \
                                   harness build does not enable: rebuild with \
+                                  `--features redis` (demand-gated activation)"
+                            .to_string(),
+                    },
+                });
+            }
+        }
+        ScenarioAction::RedisUnlinkPrefix {
+            datasource,
+            template,
+        } => {
+            // Apparatus class (exit 2): a namespace-scoped teardown is
+            // harness-side cleanup, so failure never means the system
+            // under test misbehaved (the sql/surreal/redis-del arm
+            // rationale).
+            #[cfg(feature = "redis")]
+            {
+                let Some(catalog) = datasource_catalog else {
+                    return Err(ScenarioFailure::ActionTransport {
+                        action: index,
+                        source: TransportError::Other {
+                            message: "redis unlink-prefix action: no datasource catalog is \
+                                      available; the boot-owning caller must pass the cascade's \
+                                      catalog"
+                                .to_string(),
+                        },
+                    });
+                };
+                // Resolve the NAME from the harness-minted map ONLY. A
+                // missing entry or a non-mint value fails before any
+                // SCAN; the resolved value is the map value byte for
+                // byte (no trimming, no case folding, no prefix match).
+                let (name, suffix) = match crate::redis_action::split_unlink_template(template) {
+                    Ok(parts) => parts,
+                    Err(message) => {
+                        return Err(ScenarioFailure::ActionTransport {
+                            action: index,
+                            source: TransportError::Other { message },
+                        });
+                    }
+                };
+                let scope = match crate::redis_action::resolve_minted_scope(minted_namespaces, name)
+                {
+                    Ok(scope) => scope,
+                    Err(message) => {
+                        return Err(ScenarioFailure::ActionTransport {
+                            action: index,
+                            source: TransportError::Other { message },
+                        });
+                    }
+                };
+                let prefix = format!("{scope}{suffix}");
+                crate::redis_action::execute_redis_unlink_prefix(
+                    catalog,
+                    datasource,
+                    &prefix,
+                    &crate::redis_action::UnlinkLimits::default(),
+                )
+                .await
+                .map_err(|message| ScenarioFailure::ActionTransport {
+                    action: index,
+                    source: TransportError::Other { message },
+                })?;
+            }
+            // Defense-in-depth: the document parser rejects the
+            // `unlinkPrefix` action without the feature, so only a
+            // directly-constructed document reaches this arm (the
+            // boot-level inbound precedent).
+            #[cfg(not(feature = "redis"))]
+            {
+                let _ = (datasource, template, datasource_catalog, minted_namespaces);
+                return Err(ScenarioFailure::ActionTransport {
+                    action: index,
+                    source: TransportError::Other {
+                        message: "the `redis` `unlinkPrefix` action requires the `redis` feature, \
+                                  which this harness build does not enable: rebuild with \
                                   `--features redis` (demand-gated activation)"
                             .to_string(),
                     },

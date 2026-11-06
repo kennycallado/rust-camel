@@ -4297,3 +4297,619 @@ finally:
         "rendered error must name the finally position: {err}"
     );
 }
+
+// -------------------------------------------------------------------------
+// Document namespaces (bd rc-ql8eq, task 3.1)
+// -------------------------------------------------------------------------
+
+/// Namespace bindVar and base are unique within a document; both
+/// duplicate forms fail at load naming the offending field.
+#[test]
+fn namespace_rejects_duplicate_bindvar_or_base() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: a
+- bindVar: ns
+  base: b
+scenario:
+- sleep:
+    duration: 1s
+"#,
+    )
+    .expect_err("duplicate bindVar must fail at load");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("doc-validation"),
+        "error must name the doc-validation class: {rendered}"
+    );
+    assert!(
+        rendered.contains("duplicate bindVar"),
+        "error must name the duplicate field: {rendered}"
+    );
+    assert!(
+        rendered.contains("ns"),
+        "error must name the colliding bindVar: {rendered}"
+    );
+
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: first
+  base: same
+- bindVar: second
+  base: same
+scenario:
+- sleep:
+    duration: 1s
+"#,
+    )
+    .expect_err("duplicate base must fail at load");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("doc-validation"),
+        "error must name the doc-validation class: {rendered}"
+    );
+    assert!(
+        rendered.contains("duplicate base"),
+        "error must name the duplicate field: {rendered}"
+    );
+    assert!(
+        rendered.contains("same"),
+        "error must name the colliding base: {rendered}"
+    );
+}
+
+/// A namespace bindVar is reserved against the document `env:` keys,
+/// the `envPassthrough` names, and the partner bindVars; the reverse
+/// direction (partner bindVar shadows a declared namespace) fails too.
+#[test]
+fn namespace_rejects_env_collision() {
+    // (a) namespace bindVar equals an `env:` key.
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+env:
+  ns: fixture
+namespaces:
+- bindVar: ns
+  base: a
+scenario:
+- sleep:
+    duration: 1s
+"#,
+    )
+    .expect_err("namespace bindVar must not shadow an env key");
+    assert!(
+        err.to_string().contains("ns"),
+        "error must name the colliding key: {err}"
+    );
+    assert!(
+        err.to_string().contains("doc-validation"),
+        "error must name the doc-validation class: {err}"
+    );
+
+    // (b) namespace bindVar equals an `envPassthrough` name.
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+envPassthrough: [ns]
+namespaces:
+- bindVar: ns
+  base: a
+scenario:
+- sleep:
+    duration: 1s
+"#,
+    )
+    .expect_err("namespace bindVar must not shadow an envPassthrough name");
+    assert!(
+        err.to_string().contains("ns"),
+        "error must name the colliding key: {err}"
+    );
+
+    // (c) namespace bindVar equals a partner bindVar.
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: a
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:9999/hook
+      provisioning: harness
+      bindVar: ns
+"#,
+    )
+    .expect_err("namespace bindVar must not shadow a partner bindVar");
+    assert!(
+        err.to_string().contains("ns"),
+        "error must name the colliding key: {err}"
+    );
+
+    // Reverse direction: the partner bindVar equals a declared
+    // namespace bindVar (the same equality, checked from the
+    // partner-vs-namespace walk).
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- send:
+    to:
+      endpoint: http://127.0.0.1:9999/hook
+      provisioning: harness
+      bindVar: ns
+namespaces:
+- bindVar: ns
+  base: a
+"#,
+    )
+    .expect_err("partner bindVar must not shadow a declared namespace bindVar");
+    assert!(
+        err.to_string().contains("ns"),
+        "error must name the colliding key: {err}"
+    );
+}
+
+/// A valid namespace entry parses into `doc.namespaces`; the minted
+/// map is harness-written and stays empty after parse.
+#[test]
+fn namespace_parses_and_defaults_empty_minted() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: "112"
+scenario:
+- sleep:
+    duration: 1s
+"#,
+    )
+    .expect("a valid namespace entry must parse");
+    assert_eq!(doc.namespaces.len(), 1, "one binding must be declared");
+    assert_eq!(doc.namespaces[0].bind_var, "ns");
+    assert_eq!(doc.namespaces[0].base, "112");
+    assert!(
+        doc.minted_namespaces.is_empty(),
+        "the parser never fills the harness-written minted map"
+    );
+}
+
+/// A namespace item carries exactly `bindVar` and `base`; any other key
+/// is rejected naming the key.
+#[test]
+fn namespace_raw_item_unknown_key_rejected() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: a
+  extra: 1
+scenario:
+- sleep:
+    duration: 1s
+"#,
+    )
+    .expect_err("an unknown namespace key must fail at load");
+    assert!(
+        err.to_string().contains("extra"),
+        "error must name the unknown key: {err}"
+    );
+    assert!(
+        err.to_string().contains("doc-validation"),
+        "error must name the doc-validation class: {err}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Redis unlink-prefix teardown (bd rc-ql8eq, task 4.1)
+// -------------------------------------------------------------------------
+
+/// A `redis:` item may declare `unlinkPrefix` instead of `del`; the
+/// template's NAME must be a DECLARED namespace bindVar. Literals,
+/// document env keys, default constructs, a second reference, and
+/// unknown names are load-time grammar defects in every build.
+#[test]
+fn unlink_prefix_must_start_with_a_declared_binding() {
+    // A literal prefix is not a template at all.
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: "112"
+scenario:
+- sleep:
+    duration: 1s
+finally:
+- redis:
+    datasource: cache
+    unlinkPrefix: '112~it~x'
+"#,
+    )
+    .expect_err("a literal template must fail at load");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("112~it~x"),
+        "error must name the template: {rendered}"
+    );
+    assert!(
+        rendered.contains("must start with"),
+        "error must name the template grammar: {rendered}"
+    );
+
+    // An `env:` key is not a namespace bindVar, even when declared.
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+env:
+  SOME_ENV_KEY: fixture
+namespaces:
+- bindVar: ns
+  base: "112"
+scenario:
+- sleep:
+    duration: 1s
+finally:
+- redis:
+    datasource: cache
+    unlinkPrefix: '${env:SOME_ENV_KEY}'
+"#,
+    )
+    .expect_err("an env key that is not a namespace bindVar must fail");
+    assert!(
+        err.to_string().contains("SOME_ENV_KEY"),
+        "error must name the unknown NAME: {err}"
+    );
+
+    // A default construct inside the NAME segment is banned; the `:-`
+    // suffix form is the next test.
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: "112"
+scenario:
+- sleep:
+    duration: 1s
+finally:
+- redis:
+    datasource: cache
+    unlinkPrefix: '${env:ns:-fallback}'
+"#,
+    )
+    .expect_err("a default construct in the NAME segment must fail");
+    assert!(
+        err.to_string().contains("default construct"),
+        "error must name the default construct: {err}"
+    );
+
+    // Exactly one reference: a second `${` anywhere is banned.
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: "112"
+scenario:
+- sleep:
+    duration: 1s
+finally:
+- redis:
+    datasource: cache
+    unlinkPrefix: '${env:ns}${env:ns}'
+"#,
+    )
+    .expect_err("a second reference must fail");
+    assert!(
+        err.to_string().contains("second `${`"),
+        "error must name the second reference: {err}"
+    );
+
+    // Unknown NAME.
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: "112"
+scenario:
+- sleep:
+    duration: 1s
+finally:
+- redis:
+    datasource: cache
+    unlinkPrefix: '${env:NOT_DECLARED}'
+"#,
+    )
+    .expect_err("an undeclared NAME must fail");
+    assert!(
+        err.to_string().contains("NOT_DECLARED"),
+        "error must name the undeclared NAME: {err}"
+    );
+}
+
+/// `unlinkPrefix` is finally-only. A valid entry in `scenario:` fails
+/// with the POSITION error, never the demand-gate error, even in a
+/// featureless build: grammar -> position check -> demand gate.
+#[test]
+fn unlink_prefix_is_rejected_outside_finally() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: "112"
+scenario:
+- redis:
+    datasource: cache
+    unlinkPrefix: '${env:ns}:state:'
+"#,
+    )
+    .expect_err("unlinkPrefix must be rejected in the scenario list");
+    match &err {
+        DocError::Validation { index, message } => {
+            assert_eq!(*index, 0, "error must name the scenario position");
+            assert!(
+                message.contains("unlinkPrefix"),
+                "message must name the action: {message}"
+            );
+            assert!(
+                message.contains("finally-only"),
+                "message must state the finally-only law: {message}"
+            );
+            assert!(
+                !message.contains("requires the `redis` feature"),
+                "the position check must precede the demand gate: {message}"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    assert!(
+        err.to_string().contains("scenario[0]"),
+        "rendered error must name the scenario position: {err}"
+    );
+}
+
+/// A structurally valid unlink-prefix entry in `finally:` reaches the
+/// demand gate in a featureless build (grammar first, then the gate).
+#[cfg(not(feature = "redis"))]
+#[test]
+fn unlink_prefix_valid_entry_demand_gates_featureless() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: "112"
+scenario:
+- sleep:
+    duration: 1s
+finally:
+- redis:
+    datasource: cache
+    unlinkPrefix: '${env:ns}:state:'
+"#,
+    )
+    .expect_err("parse must fail without the redis feature");
+    match &err {
+        DocError::FinallyValidation { index, message } => {
+            assert_eq!(*index, 0, "error must name the finally position");
+            assert!(
+                message.contains("requires the `redis` feature"),
+                "message must carry the demand-gate text: {message}"
+            );
+        }
+        other => panic!("expected FinallyValidation, got {other:?}"),
+    }
+    assert!(
+        err.to_string().contains("finally[0]"),
+        "rendered error must name the finally position: {err}"
+    );
+}
+
+/// A redis-enabled build loads the valid entry in `finally:`.
+#[cfg(feature = "redis")]
+#[test]
+fn unlink_prefix_parses_in_finally_when_redis_feature_on() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: "112"
+scenario:
+- sleep:
+    duration: 1s
+finally:
+- redis:
+    datasource: cache
+    unlinkPrefix: '${env:ns}:state:'
+"#,
+    )
+    .expect("a valid unlink-prefix entry must parse");
+    let finally = doc.finally.expect("declared finally list must parse");
+    match finally.first().expect("first entry") {
+        ScenarioAction::RedisUnlinkPrefix {
+            datasource,
+            template,
+        } => {
+            assert_eq!(datasource, "cache");
+            assert_eq!(template, "${env:ns}:state:");
+        }
+        other => panic!("expected RedisUnlinkPrefix, got {other:?}"),
+    }
+}
+
+/// The `:-` ban applies to the NAME segment only: the suffix is free
+/// text and may contain `:-` literally. Featureless builds reach the
+/// demand gate (proving grammar passed); redis builds load.
+#[test]
+fn unlink_prefix_suffix_may_contain_colon_default_literal() {
+    let result = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: "112"
+scenario:
+- sleep:
+    duration: 1s
+finally:
+- redis:
+    datasource: cache
+    unlinkPrefix: '${env:ns}:-x'
+"#,
+    );
+    #[cfg(feature = "redis")]
+    {
+        let doc = result.expect("a literal `:-` suffix must parse");
+        let finally = doc.finally.expect("declared finally list must parse");
+        assert!(
+            matches!(
+                finally.first(),
+                Some(ScenarioAction::RedisUnlinkPrefix { template, .. })
+                    if template == "${env:ns}:-x"
+            ),
+            "the literal suffix must survive: {finally:?}"
+        );
+    }
+    #[cfg(not(feature = "redis"))]
+    {
+        let err = result.expect_err("featureless builds fail at the demand gate");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("requires the `redis` feature"),
+            "the grammar must pass and the demand gate must fire: {rendered}"
+        );
+        assert!(
+            !rendered.contains("default construct"),
+            "a suffix `:-` is not a NAME default construct: {rendered}"
+        );
+    }
+}
+
+/// Redis glob metacharacters in the suffix are load-time grammar
+/// defects in every build, naming the metacharacter.
+#[test]
+fn unlink_prefix_rejects_glob_metacharacters_in_suffix() {
+    let cases = [
+        ("${env:ns}a*b", '*'),
+        ("${env:ns}a?b", '?'),
+        ("${env:ns}a[b", '['),
+        ("${env:ns}a]b", ']'),
+        ("${env:ns}a\\b", '\\'),
+        ("${env:ns}a^b", '^'),
+    ];
+    for (template, found) in cases {
+        let fixture = format!(
+            r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: "112"
+scenario:
+- sleep:
+    duration: 1s
+finally:
+- redis:
+    datasource: cache
+    unlinkPrefix: '{template}'
+"#
+        );
+        let err =
+            parse_case(&fixture).expect_err("a glob metacharacter in the suffix must fail at load");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("metacharacter"),
+            "template `{template}` must fail on the glob law: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("`{found}`")),
+            "error must name the metacharacter `{found}`: {rendered}"
+        );
+    }
+}
+
+/// Exactly one of `del` and `unlinkPrefix` is declared per `redis:`
+/// item, and a `del`-only document still parses into `RedisDel`.
+#[test]
+fn unlink_prefix_one_of_del_or_unlink_prefix() {
+    // Both fields: the one-of rule names the action index.
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+namespaces:
+- bindVar: ns
+  base: "112"
+scenario:
+- redis:
+    datasource: cache
+    del: [k1]
+    unlinkPrefix: '${env:ns}:state:'
+"#,
+    )
+    .expect_err("declaring both action fields must fail");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("exactly one"),
+        "error must name the one-of rule: {rendered}"
+    );
+    assert!(
+        rendered.contains("scenario[0]"),
+        "error must name the action index: {rendered}"
+    );
+
+    // Neither field: the one-of rule names both accepted fields.
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- redis:
+    datasource: cache
+"#,
+    )
+    .expect_err("declaring neither action field must fail");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("exactly one"),
+        "error must name the one-of rule: {rendered}"
+    );
+    assert!(
+        rendered.contains("`del`") && rendered.contains("`unlinkPrefix`"),
+        "error must name both accepted fields: {rendered}"
+    );
+
+    // Regression guard on the Option migration: a `del`-only document
+    // parses identically into the delete twin.
+    #[cfg(feature = "redis")]
+    {
+        let doc = parse_case(
+            r#"
+routeFiles: [routes.yaml]
+scenario:
+- redis:
+    datasource: cache
+    del:
+    - k1
+    - k2
+"#,
+        )
+        .expect("a del-only document must still parse");
+        match doc.scenario.first().expect("one action") {
+            ScenarioAction::RedisDel { datasource, keys } => {
+                assert_eq!(datasource, "cache");
+                assert_eq!(keys, &vec!["k1".to_string(), "k2".to_string()]);
+            }
+            other => panic!("expected RedisDel, got {other:?}"),
+        }
+    }
+}

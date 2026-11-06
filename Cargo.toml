@@ -253,6 +253,10 @@ http-body-util = { version = "0.1", default-features = false }
 url = "2"
 libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
+# Document-namespace run ids (bd rc-ql8eq, ADR-0069 §4): four OS-CSPRNG
+# bytes per invocation, rendered as eight lowercase hex characters. Never
+# time/pid/hostname; see `camel-integration-test::namespace`.
+getrandom = "0.3"
 rhai = { version = "1", features = ["sync", "no_module"] }
 # minijinja cargo features:
 # - fuel: required for set_fuel() (S5 resource limit, see ADR-0047 §4).

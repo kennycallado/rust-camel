@@ -1,6 +1,6 @@
 # ADR-0069: Integration-Tier Testing Contract
 
-- Status: Accepted (human-ratified 2026-09-03; e_opus + e_gpt BLESS-WITH-FIXES, fixes applied). Amended 2026-09-06: section 13 added (flake taxonomy and test-design rules R1-R7, bd rc-jwp3; ADR-0070 carries the staged-listener application of R2). Amended 2026-10-03: section 14 added (waist: adapter taxonomy and shared seams; bd rc-25lup.6); ratified by e_opus (RATIFIED-WITH-FIXES, fixes applied). Amended 2026-11-05: document-level `finally:` teardown, delete-only redis `del` prepare action, `teardown-failure` apparatus class (bd rc-6wodc).
+- Status: Accepted (human-ratified 2026-09-03; e_opus + e_gpt BLESS-WITH-FIXES, fixes applied). Amended 2026-09-06: section 13 added (flake taxonomy and test-design rules R1-R7, bd rc-jwp3; ADR-0070 carries the staged-listener application of R2). Amended 2026-10-03: section 14 added (waist: adapter taxonomy and shared seams; bd rc-25lup.6); ratified by e_opus (RATIFIED-WITH-FIXES, fixes applied). Amended 2026-11-05: document-level `finally:` teardown, delete-only redis `del` prepare action, `teardown-failure` apparatus class (bd rc-6wodc). Amended 2026-11-06: document namespaces (§4) and the namespace-scoped redis `unlinkPrefix` teardown exception (§8 item 4, bd rc-ql8eq).
 - Date: 2026-09-03
 - Supersedes: none. Binds the sketch in ADR-0064 section 4.
 - Epic: rc-kk69. Authoring path: human grill + ste-writing (same path as ADR-0064, per rc-379d precedent). Not a conductor-light change.
@@ -144,6 +144,33 @@ resolve. Solved by the typed env probe (rc-45xig, rc-v1sw — landed
 probe coerce clean-integer defaults at integer-typed positions in both the
 DSL YAML and camel-config TOML arms. Ports in URIs resolve today.
 
+Document namespaces (bd rc-ql8eq, ruled by e_opus 2026-11-06): a scenario
+document MAY declare top-level `namespaces:` entries
+`[{bindVar: NAME, base: BASE}]`. The harness mints `BASE ~it~ RUN ~ ORD ~`
+per document: `BASE` matches `[A-Za-z0-9][A-Za-z0-9_-]{0,31}`, `RUN` is
+four bytes from the OS CSPRNG rendered as exactly eight lowercase hex
+characters, generated once per `camel test` invocation and shared by every
+document of that run (never derived from
+time, pid, or hostname), and `ORD` is the 1-based zero-padded four-digit
+index of the document in the deterministic sorted discovered-document
+list, before every filter — the driver assigns the ordinal and enforces
+the discovery cap at discovery time: more than 9999 discovered documents
+in one invocation is a load error. Example: `112~it~3f9a1c0e~0007~`; maximum length 50
+bytes. The minted value binds in the harness-provisioned layer of the
+layered environment — the same layer as partner `bindVar` values — so
+`${env:NAME}` resolves to it and the reserved-key rule keeps `NAME` out of
+the document env map. The set of minted values is prefix-free by two
+independent guarantees: the trailing `~` terminator and the fixed-width
+zero-padded fields. Neither is a prefix of another document's value, so the
+prefix of document 10's value never matches document 100's keys. Both
+guarantees are load-bearing; removing either is a defect. This is defence
+in depth: the fixed widths bound the value space structurally, the
+terminator bounds it against appended suffixes, and either alone keeps the
+mint prefix-free. A run id is 32 bits of CSPRNG output, so two concurrent
+CI jobs colliding on one run id is a ~2⁻³² event; stale namespaces from
+crashed runs are accepted, and there is no cross-run reaper — sweeping
+`112~it~*` would delete a concurrent job's keys.
+
 ### 5. Partner-side assertions are the only normative proof
 
 Scope note 2026-10-03: this rule is traffic-family law; state families carry their own normative proof (see section 14).
@@ -278,6 +305,29 @@ suite keeps its runtime and composition.
    keys only, one `DEL` through the boot's datasource catalog, glob
    metacharacters rejected at load, no `FLUSHDB`/`FLUSHALL`/pattern
    delete/generic runner (pattern delete deferred to rc-ql8eq).
+
+   The rc-ql8eq exception landed as the namespace-scoped `unlinkPrefix`
+   teardown action (bd rc-ql8eq, e_opus ruling 2026-11-06). It is allowed
+   ONLY in `finally:`, one-of with `del`, and its template MUST be exactly
+   `${env:NAME}` plus an optional literal suffix where `NAME` is a
+   namespace bindVar declared by the same document — no `:-default` (the
+   `NAME` segment carries no `:`), no second `${`, and a suffix carrying
+   no Redis glob metacharacters (`* ? [ ] \ ^`). At run time the harness
+   resolves `NAME` from the minted namespace layer only,
+   re-checks BOTH that the value matches the mint grammar AND that it is
+   byte-equal to the value minted for this document before issuing any
+   SCAN, builds the MATCH pattern as the escaped namespace-suffix
+   concatenation plus exactly one unescaped `*`, SCANs with `COUNT 500`
+   (a hint — a reply may carry more keys), validates every returned key
+   byte-prefix-matches before any UNLINK chunk executes (a violating key
+   fails the whole reply as an infrastructure failure with nothing from it
+   unlinked), and UNLINKs in batches of at most 500 within a 10-second
+   deadline and a 100 000-key cap; any breach reports under the existing
+   `teardown-failure` apparatus class with the reason and the number of
+   keys deleted so far. Cluster datasources are refused. The general
+   pattern-delete ban, `FLUSHDB`/`FLUSHALL`, and generic command runners
+   remain: only a harness-minted prefix-free namespace makes the
+   delete scope provable.
 5. WS, after the consumer-client role lands (rc-39d6).
 6. gRPC is a loopback candidate. It needs no Docker. It activates on demand.
 7. Kafka, JMS, and other broker adapters wait for an adapter-specific

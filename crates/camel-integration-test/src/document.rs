@@ -35,6 +35,7 @@ use camel_core::RouteDefinition;
 use noyalib::compat::serde_yaml;
 use serde::Deserialize;
 
+use crate::namespace::{NamespaceBinding, validate_namespace_entries};
 use error::{RawEndpointRef, classify_yaml_error, endpoint_from_raw, parse_duration};
 
 // The partner-script grammar lives in its own module; the public
@@ -87,7 +88,8 @@ pub struct ScenarioDocument {
     /// Document-level teardown list (scenario-finally-hooks): actions
     /// executed after the verdict, regardless of the scenario outcome.
     /// The allowed set is prepare-class only: `sleep`, `sql`,
-    /// `surreal`, and `redis-del`; `send`, `receive`, and `validate`
+    /// `surreal`, `redis-del`, and `redis-unlink-prefix` (the
+    /// `unlinkPrefix` form); `send`, `receive`, and `validate`
     /// are verdict actions and are rejected at load.
     /// Execution is the runner's post-verdict step (task 1.4). A
     /// declared list must be non-empty (the empty-`prepare` law).
@@ -123,6 +125,18 @@ pub struct ScenarioDocument {
     /// `try_init` before the boot); otherwise the document fails
     /// through the apparatus class.
     pub logs: Option<LogsAssertion>,
+    /// Declared `namespaces:` bindings, load-validated (bd rc-ql8eq):
+    /// bindVar and base unique within the document, and the bindVar
+    /// reserved against the document `env:` keys, the
+    /// `envPassthrough` names, the partner bindVars, and the inbound
+    /// bindVar.
+    pub namespaces: Vec<NamespaceBinding>,
+    /// Harness-minted namespace values, keyed by bindVar (bd rc-ql8eq).
+    /// The parser NEVER reads this map from YAML: the harness writes
+    /// it after parse, one mint per declared binding, from the
+    /// invocation run id and the document ordinal. Empty by default,
+    /// so a directly-constructed document resolves no namespace.
+    pub minted_namespaces: BTreeMap<String, String>,
 }
 
 /// The route source of a scenario document. Exactly one form is
@@ -277,6 +291,26 @@ pub enum ScenarioAction {
         /// error.
         keys: Vec<String>,
     },
+    /// Namespace-scoped redis teardown (bd rc-ql8eq): `SCAN MATCH` the
+    /// harness-minted namespace prefix and `UNLINK` every key under
+    /// it. FINALLY-ONLY by law: a document-authored destructive scan
+    /// must never run as a scenario prepare step, so the `scenario:`
+    /// position rejects this variant at load. The template is
+    /// `${env:BIND_VAR}SUFFIX`; `BIND_VAR` must name a declared
+    /// `namespaces:` bindVar, and the runner resolves its value from
+    /// the harness-minted map only (never the document `env:` map or
+    /// the ambient environment). The suffix is literal and glob-free.
+    /// Activation is demand-gated behind the harness `redis` feature
+    /// (the `redis-del` precedent, ADR-0069 §8); the grammar and
+    /// validation run in every build.
+    RedisUnlinkPrefix {
+        /// The datasource name as declared under `[datasources.*]` in
+        /// `Camel.toml`.
+        datasource: String,
+        /// `${env:BIND_VAR}SUFFIX`; the NAME must be a declared
+        /// namespace bindVar, the suffix a literal glob-free remainder.
+        template: String,
+    },
 }
 
 impl ScenarioAction {
@@ -326,6 +360,11 @@ impl ScenarioAction {
             // A `redis:` delete action references a named datasource,
             // never an endpoint: it declares no bindings.
             Self::RedisDel { .. } => Vec::new(),
+            // A `redis:` unlink-prefix action references a named
+            // datasource and a harness-minted namespace bindVar, never
+            // an endpoint: it declares no bindings (the `RedisDel`
+            // precedent).
+            Self::RedisUnlinkPrefix { .. } => Vec::new(),
         }
     }
 }
@@ -467,6 +506,11 @@ struct RawDocument {
     // walk (keys, level set, regex compile) runs during validation so
     // every error names the offending clause.
     logs: Option<serde_yaml::Value>,
+    // Document-level namespace declarations (bd rc-ql8eq): raw node;
+    // the grammar walk extracts the `(bindVar, base)` pairs during
+    // validation so every error names the entry (the `inbound:`/`logs:`
+    // raw-node precedent).
+    namespaces: Option<serde_yaml::Value>,
     // Unit-tier vocabulary, present only to detect and name the mixing
     // ban violation.
     inputs: Option<serde_yaml::Value>,
@@ -618,6 +662,13 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
     let raw = serde_yaml::from_str::<RawDocument>(&text)
         .map_err(|e| classify_yaml_error(&e.to_string()))?;
 
+    // Phase A (bd rc-ql8eq): extract the raw `(bindVar, base)` pairs
+    // before anything else so the list is available to `build_action`
+    // (the template NAME validation) and to the reverse
+    // partner-vs-namespace walk below. Phase B validates and types them
+    // after the scenario actions are built.
+    let raw_namespaces = namespaces_from_raw(raw.namespaces)?;
+
     // (c) This parser accepts scenario documents only, and the
     // scenario list must be non-empty: an empty list would yield a
     // trivially-green FULL document with zero actions (mirrors the
@@ -712,13 +763,32 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
     // (f) Action conversion.
     let mut scenario = Vec::with_capacity(raw_scenario.len());
     for (index, item) in raw_scenario.into_iter().enumerate() {
-        scenario.push(build_action(item, index)?);
+        let action = build_action(item, index, &raw_namespaces)?;
+        // Parse-order law for `unlinkPrefix` (bd rc-ql8eq): grammar runs
+        // in `build_action`; the position check runs next, before the
+        // redis demand gate (which `finally_from_raw` applies), so a
+        // featureless build reports the finally-only defect rather than
+        // the missing feature. This departs from the `del` precedent,
+        // whose gate fires inside `build_action`.
+        if matches!(action, ScenarioAction::RedisUnlinkPrefix { .. }) {
+            return Err(DocError::Validation {
+                index,
+                message: format!(
+                    "`unlinkPrefix` is a finally-only teardown action; it must not appear in \
+                     the `scenario:` list (scenario position {index})"
+                ),
+            });
+        }
+        scenario.push(action);
     }
     // (f2) Document-level `finally:` teardown list: the same
     // converter runs in every build, then the allowed-set match
     // rejects verdict actions. Errors are re-positioned at
     // `finally[i]`.
-    let finally = raw.finally.map(finally_from_raw).transpose()?;
+    let finally = raw
+        .finally
+        .map(|value| finally_from_raw(value, &raw_namespaces))
+        .transpose()?;
     // (g) Partner scripting: entries convert from the raw sequence
     // with the entry key named on every failure; an empty sequence is
     // a valid, inert entry. The grammar conversion lives in the
@@ -752,6 +822,49 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
             }
         }
     }
+    // (h2) Reverse direction of the namespace reservation walk (bd
+    // rc-ql8eq): a partner bindVar must not shadow a declared
+    // namespace bindVar either. The raw pairs are available before
+    // Phase B validates them, so this check keeps the existing
+    // action-indexed error shape.
+    for (index, action) in scenario.iter().enumerate() {
+        for (bind_var, endpoint) in action.bindings() {
+            if raw_namespaces
+                .iter()
+                .any(|(namespace_bind_var, _)| namespace_bind_var == bind_var)
+            {
+                return Err(DocError::Validation {
+                    index,
+                    message: format!(
+                        "endpoint `{endpoint}` declares bindVar `{bind_var}`, which collides \
+                         with a declared namespace bindVar"
+                    ),
+                });
+            }
+        }
+    }
+    // Phase B (bd rc-ql8eq): validate and type the raw namespace
+    // entries against the full reservation list: document `env:` keys,
+    // `envPassthrough` names, partner bindVars, and the inbound
+    // bindVar. Errors name the entry index and field through the
+    // helper's own `namespaces[i]:` prefix.
+    let mut reserved: Vec<String> = Vec::new();
+    if let Some(env) = raw.env.as_ref() {
+        reserved.extend(env.keys().cloned());
+    }
+    if let Some(env_passthrough) = raw.env_passthrough.as_ref() {
+        reserved.extend(env_passthrough.iter().cloned());
+    }
+    for action in &scenario {
+        for (bind_var, _) in action.bindings() {
+            reserved.push(bind_var.to_string());
+        }
+    }
+    if let Some(inbound) = inbound.as_ref() {
+        reserved.push(inbound.bind_var.clone());
+    }
+    let namespaces = validate_namespace_entries(&raw_namespaces, &reserved)
+        .map_err(|message| DocError::Validation { index: 0, message })?;
     // (i) Partner-target cross-check: a `partner` validate target URI
     // must equal a harness endpoint reference declared by the
     // scenario's own `send`/`receive` actions (URI string equality),
@@ -860,7 +973,71 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
         send_deadline,
         inbound,
         logs,
+        namespaces,
+        minted_namespaces: BTreeMap::new(),
     })
+}
+
+/// Phase A of the `namespaces:` parse (bd rc-ql8eq): extract the raw
+/// `(bindVar, base)` pairs from the section. The grammar is a list of
+/// maps with exactly `bindVar` and `base`; unknown keys, non-map
+/// entries, and a non-list section are rejected naming the entry.
+/// Semantic validation (grammar, uniqueness, reservations) is Phase B,
+/// after the scenario actions are built.
+fn namespaces_from_raw(
+    value: Option<serde_yaml::Value>,
+) -> Result<Vec<(String, String)>, DocError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let section_error = |message: String| DocError::Validation { index: 0, message };
+    let serde_yaml::Value::Sequence(entries) = value else {
+        return Err(section_error(format!(
+            "`namespaces` must be a list of maps with `bindVar` and `base`, got {value:?}"
+        )));
+    };
+    let mut pairs = Vec::with_capacity(entries.len());
+    for (index, item) in entries.into_iter().enumerate() {
+        let serde_yaml::Value::Mapping(ref map) = item else {
+            return Err(section_error(format!(
+                "namespaces[{index}] must be a map with `bindVar` and `base`, got {item:?}"
+            )));
+        };
+        let mut bind_var: Option<String> = None;
+        let mut base: Option<String> = None;
+        for (key, value) in map {
+            match key.as_str() {
+                "bindVar" => {
+                    let text = value.as_str().ok_or_else(|| {
+                        section_error(format!(
+                            "namespaces[{index}]: `bindVar` must be a string, got {value:?}"
+                        ))
+                    })?;
+                    bind_var = Some(text.to_string());
+                }
+                "base" => {
+                    let text = value.as_str().ok_or_else(|| {
+                        section_error(format!(
+                            "namespaces[{index}]: `base` must be a string, got {value:?}"
+                        ))
+                    })?;
+                    base = Some(text.to_string());
+                }
+                other => {
+                    return Err(section_error(format!(
+                        "namespaces[{index}]: unknown field `{other}`; expected `bindVar` and `base`"
+                    )));
+                }
+            }
+        }
+        let bind_var = bind_var.ok_or_else(|| {
+            section_error(format!("namespaces[{index}] requires a `bindVar` key"))
+        })?;
+        let base = base
+            .ok_or_else(|| section_error(format!("namespaces[{index}] requires a `base` key")))?;
+        pairs.push((bind_var, base));
+    }
+    Ok(pairs)
 }
 
 /// Converts the raw `inbound:` node. The v1 grammar is a single map
@@ -994,38 +1171,63 @@ fn surreal_action_from_raw(
     })
 }
 
-/// Converts a raw `redis:` delete action into the model, feature-split
-/// so the arm type checks in both configurations
-/// (scenario-finally-hooks task 1.3).
+/// Converts a raw `redis:` item into the model. The raw twin carries
+/// BOTH action fields optionally (so an unlink-only item deserializes),
+/// and [`crate::redis_action::validate_redis_action`] owns the one-of
+/// rule plus the form grammar. Every grammar defect is reported in
+/// every build, before any demand gate.
 ///
-/// Validation (empty datasource, empty `del`, glob-metacharacter keys)
-/// runs in every build BEFORE the gate; only a structurally valid
-/// action reaches the demand gate, which — without the harness `redis`
-/// feature — rejects it naming the feature and the rebuild instruction
-/// (the `sql:` precedent, ADR-0069 §8).
-#[cfg(feature = "redis")]
-fn redis_del_action_from_raw(
+/// The `del` form keeps its historical gate placement: the feature
+/// demand gate fires here, inside `build_action` (the `sql:`
+/// precedent, ADR-0069 §8). The `unlinkPrefix` form deliberately
+/// departs: `build_action` stays position-agnostic and returns the
+/// variant ungated, so the `scenario:` position check (which must
+/// reject it as finally-only) precedes the gate. `finally_from_raw`
+/// applies the gate after accepting the position — the parse-order law
+/// is grammar -> position -> demand gate.
+fn redis_action_from_raw(
     raw: crate::redis_action::RawRedisDelAction,
     index: usize,
+    namespace_bind_vars: &[(String, String)],
 ) -> Result<ScenarioAction, DocError> {
-    let validated = crate::redis_action::validate_redis_del_action(&raw, index)
-        .map_err(|message| DocError::Validation { index, message })?;
+    let declared_bind_vars: Vec<String> = namespace_bind_vars
+        .iter()
+        .map(|(bind_var, _base)| bind_var.clone())
+        .collect();
+    match crate::redis_action::validate_redis_action(&raw, &declared_bind_vars, index) {
+        Ok(crate::redis_action::ValidatedRedisAction::Del(validated)) => {
+            redis_del_action_from_validated(validated, index)
+        }
+        Ok(crate::redis_action::ValidatedRedisAction::UnlinkPrefix(validated)) => {
+            Ok(ScenarioAction::RedisUnlinkPrefix {
+                datasource: validated.datasource,
+                template: validated.template,
+            })
+        }
+        Err(message) => Err(DocError::Validation { index, message }),
+    }
+}
+
+/// Applies the demand gate to a validated `del` action (feature-on
+/// half of the split).
+#[cfg(feature = "redis")]
+fn redis_del_action_from_validated(
+    validated: crate::redis_action::RedisDelAction,
+    _index: usize,
+) -> Result<ScenarioAction, DocError> {
     Ok(ScenarioAction::RedisDel {
         datasource: validated.datasource,
         keys: validated.keys,
     })
 }
 
-/// The feature-off twin: the same validation hook, then the named
-/// demand-gate error instead of the action.
+/// The feature-off twin: the grammar already passed, so only the named
+/// demand-gate error remains.
 #[cfg(not(feature = "redis"))]
-fn redis_del_action_from_raw(
-    raw: crate::redis_action::RawRedisDelAction,
+fn redis_del_action_from_validated(
+    _validated: crate::redis_action::RedisDelAction,
     index: usize,
 ) -> Result<ScenarioAction, DocError> {
-    if let Err(message) = crate::redis_action::validate_redis_del_action(&raw, index) {
-        return Err(DocError::Validation { index, message });
-    }
     Err(DocError::Validation {
         index,
         message: "the `redis` action requires the `redis` feature, which this harness build \
@@ -1054,9 +1256,16 @@ fn parse_inline_routes(value: &serde_yaml::Value) -> Result<Vec<RouteDefinition>
 /// [`DocError::FinallyValidation`] so the rendered index reads
 /// `finally[i]` rather than the `scenario[i]` the `Validation` variant
 /// hardcodes. The parsed variant must be prepare-class: `sleep`,
-/// `sql`, `surreal`, or `redis-del`. Verdict actions (`send`,
-/// `receive`, `validate`) are rejected at load.
-fn finally_from_raw(value: serde_yaml::Value) -> Result<Vec<ScenarioAction>, DocError> {
+/// `sql`, `surreal`, `redis-del`, or `redis-unlink-prefix`. Verdict
+/// actions (`send`, `receive`, `validate`) are rejected at load.
+///
+/// The `unlinkPrefix` demand gate fires HERE, after the finally
+/// position accepted the variant: the `scenario:` loop rejects the
+/// position first, so the parse order is grammar -> position -> gate.
+fn finally_from_raw(
+    value: serde_yaml::Value,
+    namespace_bind_vars: &[(String, String)],
+) -> Result<Vec<ScenarioAction>, DocError> {
     let serde_yaml::Value::Sequence(entries) = value else {
         return Err(DocError::FinallyValidation {
             index: 0,
@@ -1071,18 +1280,33 @@ fn finally_from_raw(value: serde_yaml::Value) -> Result<Vec<ScenarioAction>, Doc
     }
     let mut actions = Vec::with_capacity(entries.len());
     for (index, item) in entries.into_iter().enumerate() {
-        let action =
-            build_action(item, index).map_err(|error| finally_position_error(index, error))?;
+        let action = build_action(item, index, namespace_bind_vars)
+            .map_err(|error| finally_position_error(index, error))?;
         match &action {
             ScenarioAction::Sleep { .. }
             | ScenarioAction::Sql { .. }
             | ScenarioAction::Surreal { .. }
-            | ScenarioAction::RedisDel { .. } => {}
+            | ScenarioAction::RedisDel { .. }
+            | ScenarioAction::RedisUnlinkPrefix { .. } => {}
             ScenarioAction::Send { .. } => return Err(finally_verdict_error(index, "send")),
             ScenarioAction::Receive { .. } => return Err(finally_verdict_error(index, "receive")),
             ScenarioAction::Validate { .. } => {
                 return Err(finally_verdict_error(index, "validate"));
             }
+        }
+        // The unlink-prefix demand gate: `build_action` deliberately
+        // left the variant ungated so the scenario position check could
+        // precede it. The finally position is the accepted one, so the
+        // gate fires now (featureless builds only).
+        #[cfg(not(feature = "redis"))]
+        if matches!(&action, ScenarioAction::RedisUnlinkPrefix { .. }) {
+            return Err(DocError::FinallyValidation {
+                index,
+                message: "the `redis` `unlinkPrefix` action requires the `redis` feature, which \
+                          this harness build does not enable: rebuild with `--features redis` \
+                          (demand-gated activation)"
+                    .to_string(),
+            });
         }
         actions.push(action);
     }
@@ -1118,7 +1342,7 @@ fn finally_verdict_error(index: usize, action: &str) -> DocError {
         index,
         message: format!(
             "`{action}` is a verdict action; `finally:` accepts only prepare-class actions: \
-             sleep, sql, surreal, redis-del"
+             sleep, sql, surreal, redis-del, redis-unlink-prefix"
         ),
     }
 }
@@ -1127,7 +1351,14 @@ fn finally_verdict_error(index: usize, action: &str) -> DocError {
 /// single-key map (`send`, `receive`, `sleep`, `validate`, `sql`,
 /// `surreal`, `redis`); dispatch
 /// runs here, not in serde, so every failure carries the action index.
-fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction, DocError> {
+/// `namespace_bind_vars` is the document's Phase A `(bindVar, base)`
+/// list, threaded so the `unlinkPrefix` template NAME validation can
+/// run against it at build time.
+fn build_action(
+    item: serde_yaml::Value,
+    index: usize,
+    namespace_bind_vars: &[(String, String)],
+) -> Result<ScenarioAction, DocError> {
     let action_error = |message: String| DocError::Validation { index, message };
     let serde_yaml::Value::Mapping(ref map) = item else {
         return Err(action_error(format!(
@@ -1413,11 +1644,12 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
         crate::redis_action::REDIS_DEL_ACTION_KEY => {
             let raw: crate::redis_action::RawRedisDelAction =
                 serde_yaml::from_value(content.clone()).map_err(action_error_from_serde)?;
-            // Ordering mandate (the `sql:` precedent): grammar
-            // validation runs BEFORE the feature demand gate, so a
-            // pattern key, an empty `del` list, or an empty datasource
-            // fails doc-validation in BOTH feature configurations.
-            redis_del_action_from_raw(raw, index)
+            // Ordering mandate (bd rc-ql8eq): the one-of rule and the
+            // template grammar run in every build BEFORE the demand
+            // gate. The `del` gate stays inside this call (the `sql:`
+            // precedent); the `unlinkPrefix` gate fires later, in
+            // `finally_from_raw`, after the position check.
+            redis_action_from_raw(raw, index, namespace_bind_vars)
         }
         other => Err(action_error(format!(
             "unknown action `{other}`; expected `send`, `receive`, `sleep`, `validate`, `sql`, \

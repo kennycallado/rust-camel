@@ -221,6 +221,8 @@ fn method_scenario_document(
         send_deadline: None,
         inbound: None,
         logs: None,
+        namespaces: Vec::new(),
+        minted_namespaces: BTreeMap::new(),
     }
 }
 
@@ -337,6 +339,8 @@ async fn outbound_bridge_header_corruption_fails() {
         send_deadline: fixture.doc.send_deadline,
         inbound: fixture.doc.inbound,
         logs: fixture.doc.logs,
+        namespaces: fixture.doc.namespaces,
+        minted_namespaces: fixture.doc.minted_namespaces,
     };
     let mut vars = ScenarioVars::new();
     let outcome = run_scenario_document(&corrupted, &fixture.router, &mut vars, None).await;

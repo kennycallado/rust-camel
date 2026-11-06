@@ -54,6 +54,8 @@ fn doc_with(actions: Vec<ScenarioAction>) -> ScenarioDocument {
         send_deadline: None,
         inbound: None,
         logs: None,
+        namespaces: Vec::new(),
+        minted_namespaces: BTreeMap::new(),
     }
 }
 

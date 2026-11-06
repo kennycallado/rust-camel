@@ -32,6 +32,9 @@ pub mod inbound;
 /// attributes every event to every open window whose
 /// `[opened_at, now)` interval contains the event timestamp.
 pub mod log_capture;
+/// Document namespaces (bd rc-ql8eq, ADR-0069 §4): the `BASE~it~RUN~ORD~`
+/// mint, the per-invocation run id, and the load-time binding validation.
+pub mod namespace;
 /// Scenario `redis:` delete-only prepare action (bd rc-6wodc): the
 /// ungated grammar and the demand-gated `DEL` executor.
 pub mod redis_action;
@@ -67,10 +70,20 @@ pub use env_layers::{AmbientLookup, LayeredEnv, ambient_std};
 #[cfg(feature = "http")]
 pub use inbound::provision_inbound;
 pub use log_capture::{LogEvent, WindowHandle, capture_installed, ensure_capture_subscriber};
+pub use namespace::{
+    MAX_DOCUMENTS, MAX_MINT_LEN, NamespaceBinding, RUN_ID_HEX_LEN, apply_namespaces,
+    check_discovery_cap, generate_run_id, is_valid_namespace_value, mint_namespace,
+    validate_namespace_entries,
+};
 #[cfg(feature = "redis")]
 pub use redis_action::execute_redis_del;
+#[cfg(feature = "redis")]
+pub use redis_action::execute_redis_unlink_prefix;
 pub use redis_action::{
-    REDIS_DEL_ACTION_KEY, RawRedisDelAction, RedisDelAction, validate_redis_del_action,
+    REDIS_DEL_ACTION_KEY, REDIS_GLOB_METACHARACTERS, RawRedisDelAction, RedisDelAction,
+    UnlinkLimits, UnlinkPrefixAction, ValidatedRedisAction, build_scan_pattern,
+    classify_scan_reply, escape_redis_glob, resolve_minted_scope, split_unlink_template,
+    validate_redis_action, validate_redis_del_action, validate_redis_unlink_prefix,
 };
 pub use runner::{
     DocumentOutcome, ScenarioEvent, ScenarioFailure, ScenarioVars, ScenarioVerdict, run_scenario,
@@ -97,9 +110,19 @@ mod doc_parse_test;
 #[cfg(test)]
 mod env_layers_test;
 
+/// Document-namespace mint tests (bd rc-ql8eq, task 2.1).
+#[cfg(test)]
+mod namespace_test;
+
 /// Scenario action runner tests (the four named tests from task 2.4).
 #[cfg(test)]
 mod runner_test;
+
+/// Pure redis unlink-prefix grammar and scan-reply classifier tests
+/// (bd rc-ql8eq, task 4.1). Ungated: the namespace-scoping law is
+/// provable without a Redis server.
+#[cfg(test)]
+mod redis_unlink_test;
 
 /// boot_scenario delegation tests (the six named tests from task 3.1,
 /// scenario-shared-boot).

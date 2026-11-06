@@ -131,6 +131,7 @@ fn action_label(index: usize, action: &camel_integration_test::ScenarioAction) -
         A::Sleep { .. } => "sleep",
         A::Sql { .. } => "sql",
         A::RedisDel { .. } => "redis-del",
+        A::RedisUnlinkPrefix { .. } => "redis-unlink-prefix",
         A::Validate { .. } => "validate",
         _ => "action",
     };
@@ -452,6 +453,7 @@ pub(super) fn needs_catalog_boot(doc: &camel_integration_test::ScenarioDocument)
         matches!(
             action,
             ScenarioAction::RedisDel { .. }
+                | ScenarioAction::RedisUnlinkPrefix { .. }
                 | ScenarioAction::Validate {
                     target: ScenarioTarget::Redis(_),
                     ..
@@ -562,11 +564,33 @@ async fn http_secret_query_keys(
         .unwrap_or_default()
 }
 
+/// The full-boot harness env tier: the partner `bindVar` map merged with
+/// the document's harness-minted namespace values.
+///
+/// The parser rejects a namespace bindVar equal to a partner bindVar at
+/// load (task 3.1, both directions), so the two maps are disjoint by construction;
+/// the fold is a `BTreeMap::extend`, which means a hypothetical clash
+/// would resolve to the mint.
+#[cfg(any(
+    test,
+    feature = "integration-http",
+    feature = "integration-sql",
+    feature = "integration-surreal",
+    feature = "integration-redis"
+))]
+pub(super) fn harness_env_bindings(
+    mut partners: std::collections::BTreeMap<String, String>,
+    doc: &camel_integration_test::ScenarioDocument,
+) -> std::collections::BTreeMap<String, String> {
+    partners.extend(doc.minted_namespaces.clone());
+    partners
+}
+
 /// The full-boot path (ADR-0069 sections 4-5, 10): bind one
 /// [`HttpPartner`] per harness `http` endpoint (each binds
-/// `127.0.0.1:0`; every harness-provisioned `bindVar` lands in the
-/// harness tier of the [`LayeredEnv`], winning over the document env),
-/// boot the real composition root through `boot_scenario`, execute the
+/// `127.0.0.1:0`; every harness-provisioned `bindVar` — partner bindVars
+/// plus the document's minted namespaces — lands in the harness
+/// tier of the [`LayeredEnv`], winning over the document env), boot the real composition root through `boot_scenario`, execute the
 /// whole document through `run_scenario_document`, then
 /// `boot.shutdown(&mut ctx)` — log-and-continue: a shutdown failure is
 /// recorded in the outcome's `final_failure` slot and rendered as the
@@ -637,12 +661,13 @@ async fn run_scenario_full_boot(
         std::collections::BTreeMap::new(),
     );
 
-    // (b) The layered environment: harness-provisioned bindings win
-    // over the document env; ambient reads stay behind the passthrough
-    // allowlist.
+    // (b) The layered environment: harness-provisioned bindings (partner
+    // bindVars plus the document's minted namespaces, folded by
+    // [`harness_env_bindings`]) win over the document env; ambient reads
+    // stay behind the passthrough allowlist.
     let env = LayeredEnv::new(
         doc.env.clone().unwrap_or_default(),
-        harness_provisioned,
+        harness_env_bindings(harness_provisioned, doc),
         doc.env_passthrough.clone().unwrap_or_default(),
         ambient_std(),
     );
@@ -769,6 +794,7 @@ mod tests;
 #[cfg(test)]
 mod boot_selection_tests {
     use camel_integration_test::{RouteSource, ScenarioAction, ScenarioDocument};
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
     /// A directly-constructed document: the struct fields are pub, so
@@ -790,6 +816,8 @@ mod boot_selection_tests {
             send_deadline: None,
             inbound: None,
             logs: None,
+            namespaces: Vec::new(),
+            minted_namespaces: BTreeMap::new(),
         }
     }
 

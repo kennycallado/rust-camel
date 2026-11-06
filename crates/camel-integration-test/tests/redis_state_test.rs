@@ -364,3 +364,214 @@ fn shutdown_closes_pools_without_releasing_redis() {
         cmd(&c, "DEL", &[k]).await;
     });
 }
+
+/// Document-level `finally:` `unlinkPrefix` teardown (bd rc-ql8eq,
+/// task 4.1): only keys under the harness-minted namespace prefix are
+/// unlinked. Sentinels outside the run id and differing only after the
+/// ordinal segment survive, because the prefix-terminating `~` is part
+/// of the scope.
+#[test]
+fn unlink_prefix_deletes_only_under_the_namespace() {
+    run(async {
+        let ns = "112~it~3f9a1c0e~0001~";
+        let k1 = format!("{ns}state:a");
+        let k2 = format!("{ns}state:b");
+        // Out-of-namespace sentinel: a different run id.
+        let outside = "112~it~deadbeef~0001~state:a".to_string();
+        // Suffix trap: same base and run id, different ordinal.
+        let trap = "112~it~3f9a1c0e~0002~state:a".to_string();
+        let u = url().await;
+        let c = connection(&u).await;
+        for key in [&k1, &k2, &outside, &trap] {
+            cmd(&c, "DEL", &[key.as_str()]).await;
+            cmd(&c, "SET", &[key.as_str(), "v"]).await;
+        }
+
+        let (mut doc, mut run) = boot(
+            "rc-redis-state:unlink_prefix_deletes_only_under_the_namespace",
+            &u,
+        )
+        .await;
+        let catalog = run.boot.datasource_catalog();
+        doc.scenario = vec![ScenarioAction::Sleep {
+            duration: Duration::from_millis(1),
+        }];
+        doc.finally = Some(vec![ScenarioAction::RedisUnlinkPrefix {
+            datasource: "statedb".to_string(),
+            template: "${env:NS}state:".to_string(),
+        }]);
+        doc.minted_namespaces
+            .insert("NS".to_string(), ns.to_string());
+
+        let router = common::router_for("fake:unused", FakeAdapter::scripted(Vec::new()));
+        let outcome =
+            run_scenario_document(&doc, &router, &mut ScenarioVars::new(), Some(&catalog)).await;
+
+        let mut exists = redis::cmd("EXISTS");
+        exists.arg(&k1).arg(&k2);
+        let scoped: i64 = exists
+            .query_async(&mut c.clone())
+            .await
+            .expect("exists in-namespace");
+        let mut exists = redis::cmd("EXISTS");
+        exists.arg(&outside).arg(&trap);
+        let sentinels: i64 = exists
+            .query_async(&mut c.clone())
+            .await
+            .expect("exists sentinels");
+
+        shutdown(&mut run).await;
+        for key in [&k1, &k2, &outside, &trap] {
+            cmd(&c, "DEL", &[key.as_str()]).await;
+        }
+
+        assert_eq!(outcome.verdict, Some(ScenarioVerdict::Pass), "{outcome:?}");
+        assert_eq!(
+            outcome.per_teardown.first(),
+            Some(&Ok(())),
+            "the teardown must succeed: {outcome:?}"
+        );
+        assert_eq!(scoped, 0, "both in-namespace keys must be gone");
+        assert_eq!(sentinels, 2, "both out-of-namespace sentinels must survive");
+    });
+}
+
+/// Executor limits (bd rc-ql8eq, task 4.1): the key cap slices the
+/// validated reply precisely and reports the deleted count; the
+/// explicit zero-deadline guard fires before any SCAN and reports
+/// zero deleted.
+#[test]
+fn unlink_prefix_executor_cap_breach() {
+    run(async {
+        let ns = "112~it~3f9a1c0e~0003~";
+        let prefix = format!("{ns}state:");
+        let keys: Vec<String> = (0..5).map(|index| format!("{prefix}{index}")).collect();
+        let u = url().await;
+        let c = connection(&u).await;
+        let (_, mut run) = boot("rc-redis-state:unlink_prefix_executor_cap_breach", &u).await;
+        let catalog = run.boot.datasource_catalog();
+
+        for key in &keys {
+            cmd(&c, "SET", &[key.as_str(), "v"]).await;
+        }
+        let err = execute_redis_unlink_prefix(
+            &catalog,
+            "statedb",
+            &prefix,
+            &UnlinkLimits {
+                deadline: Duration::from_secs(10),
+                key_cap: 2,
+            },
+        )
+        .await
+        .expect_err("a key cap of 2 over five keys must breach");
+        assert!(err.contains("cap"), "error must name the cap: {err}");
+        assert!(
+            err.contains("2 keys deleted"),
+            "error must report exactly two deleted: {err}"
+        );
+        let mut exists = redis::cmd("EXISTS");
+        for key in &keys {
+            exists.arg(key);
+        }
+        let remaining: i64 = exists
+            .query_async(&mut c.clone())
+            .await
+            .expect("exists after cap breach");
+
+        for key in &keys {
+            cmd(&c, "DEL", &[key.as_str()]).await;
+            cmd(&c, "SET", &[key.as_str(), "v"]).await;
+        }
+        let err = execute_redis_unlink_prefix(
+            &catalog,
+            "statedb",
+            &prefix,
+            &UnlinkLimits {
+                deadline: Duration::ZERO,
+                key_cap: 100_000,
+            },
+        )
+        .await
+        .expect_err("a zero deadline must fail immediately");
+        assert!(
+            err.contains("deadline"),
+            "error must name the deadline: {err}"
+        );
+        assert!(
+            err.contains("0 keys deleted"),
+            "error must report zero deleted: {err}"
+        );
+        let mut exists = redis::cmd("EXISTS");
+        for key in &keys {
+            exists.arg(key);
+        }
+        let surviving: i64 = exists
+            .query_async(&mut c.clone())
+            .await
+            .expect("exists after zero deadline");
+
+        shutdown(&mut run).await;
+        for key in &keys {
+            cmd(&c, "DEL", &[key.as_str()]).await;
+        }
+
+        assert_eq!(remaining, 3, "cap 2 over five keys leaves exactly three");
+        assert_eq!(surviving, 5, "the zero-deadline guard deletes nothing");
+    });
+}
+
+/// A failing unlink-prefix teardown is apparatus-class
+/// `TeardownFailure`, names the `finally` action, and never masks the
+/// recorded verdict (the finally-loop contract).
+#[test]
+fn unlink_prefix_teardown_failure_rendering() {
+    run(async {
+        let u = url().await;
+        let (mut doc, mut run) = boot(
+            "rc-redis-state:unlink_prefix_teardown_failure_rendering",
+            &u,
+        )
+        .await;
+        let catalog = run.boot.datasource_catalog();
+        doc.scenario = vec![ScenarioAction::Sleep {
+            duration: Duration::from_millis(1),
+        }];
+        doc.finally = Some(vec![ScenarioAction::RedisUnlinkPrefix {
+            datasource: "missing_db".to_string(),
+            template: "${env:NS}state:".to_string(),
+        }]);
+        doc.minted_namespaces
+            .insert("NS".to_string(), "112~it~3f9a1c0e~0004~".to_string());
+
+        let router = common::router_for("fake:unused", FakeAdapter::scripted(Vec::new()));
+        let outcome =
+            run_scenario_document(&doc, &router, &mut ScenarioVars::new(), Some(&catalog)).await;
+        shutdown(&mut run).await;
+
+        assert_eq!(
+            outcome.verdict,
+            Some(ScenarioVerdict::Pass),
+            "a teardown failure must not mask the verdict: {outcome:?}"
+        );
+        let Some(ScenarioFailure::TeardownFailure { message }) = outcome.final_failure.as_ref()
+        else {
+            panic!("expected TeardownFailure, got {outcome:?}");
+        };
+        assert!(
+            message.contains("finally action 0"),
+            "the message must name the finally position: {message}"
+        );
+        assert!(
+            message.contains("redis unlink-prefix"),
+            "the message must name the action: {message}"
+        );
+        assert!(
+            matches!(
+                outcome.per_teardown.first(),
+                Some(Err(ScenarioFailure::TeardownFailure { .. }))
+            ),
+            "the per-item outcome must be the uniform teardown failure: {outcome:?}"
+        );
+    });
+}

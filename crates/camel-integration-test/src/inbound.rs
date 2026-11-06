@@ -87,6 +87,8 @@ routes:
                 bind_var: "INBOUND".to_string(),
             }),
             logs: None,
+            namespaces: Vec::new(),
+            minted_namespaces: BTreeMap::new(),
         };
         let env = LayeredEnv::new(BTreeMap::new(), BTreeMap::new(), Vec::new(), ambient_std());
         let mut run = boot_scenario(&doc, dir.path(), &env)

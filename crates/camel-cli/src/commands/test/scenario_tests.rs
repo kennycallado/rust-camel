@@ -309,6 +309,7 @@ fn wiring_excludes_plain_string_validate_partner() {
         CountBound, EndpointRef, PartnerExpectation, RouteSource, ScenarioAction, ScenarioTarget,
         ValidateExpectation,
     };
+    use std::collections::BTreeMap;
 
     let doc = camel_integration_test::ScenarioDocument {
         source_path: std::path::PathBuf::new(),
@@ -351,6 +352,8 @@ fn wiring_excludes_plain_string_validate_partner() {
         send_deadline: None,
         inbound: None,
         logs: None,
+        namespaces: Vec::new(),
+        minted_namespaces: BTreeMap::new(),
     };
     let wired = wire_endpoint_refs(&doc);
     let endpoints: Vec<&str> = wired.iter().map(|r| r.endpoint.as_str()).collect();
@@ -1141,6 +1144,7 @@ fn both_final_failures_render_teardown_first() {
 #[tokio::test]
 async fn smoke_path_renders_finally_failures() {
     use camel_integration_test::{RouteSource, ScenarioAction, ScenarioDocument};
+    use std::collections::BTreeMap;
 
     let doc = ScenarioDocument {
         source_path: std::path::PathBuf::new(),
@@ -1157,6 +1161,8 @@ async fn smoke_path_renders_finally_failures() {
         send_deadline: None,
         inbound: None,
         logs: None,
+        namespaces: Vec::new(),
+        minted_namespaces: BTreeMap::new(),
     };
     let wired: Vec<&camel_integration_test::EndpointRef> = Vec::new();
     let result = run_scenario_fake_smoke(&doc, &wired).await;
@@ -1175,5 +1181,41 @@ async fn smoke_path_renders_finally_failures() {
     assert!(
         text.starts_with("teardown-failure: "),
         "the row carries the teardown class: {text}"
+    );
+}
+
+/// A document whose only teardown is a valid `unlinkPrefix` entry
+/// selects the full boot (bd rc-ql8eq, task 4.1): the action needs the
+/// booted datasource catalog exactly like `redis-del`.
+#[cfg(feature = "integration-redis")]
+#[test]
+fn unlink_prefix_selects_full_boot() {
+    use camel_integration_test::{RouteSource, ScenarioAction, ScenarioDocument};
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    let doc = ScenarioDocument {
+        source_path: PathBuf::new(),
+        route_source: RouteSource::RouteFiles(Vec::new()),
+        scenario: vec![ScenarioAction::Sleep {
+            duration: Duration::from_millis(1),
+        }],
+        finally: Some(vec![ScenarioAction::RedisUnlinkPrefix {
+            datasource: "cache".to_string(),
+            template: "${env:ns}state:".to_string(),
+        }]),
+        partners: None,
+        env: None,
+        env_passthrough: None,
+        profile: None,
+        send_deadline: None,
+        inbound: None,
+        logs: None,
+        namespaces: Vec::new(),
+        minted_namespaces: BTreeMap::new(),
+    };
+    assert!(
+        super::needs_catalog_boot(&doc),
+        "a finally unlinkPrefix action selects the full boot"
     );
 }

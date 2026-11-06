@@ -1749,6 +1749,8 @@ mod tests {
                 send_deadline: None,
                 inbound: None,
                 logs: None,
+                namespaces: Vec::new(),
+                minted_namespaces: BTreeMap::new(),
             };
             let router = PartnerRouter::new(BTreeMap::new());
             let mut vars = ScenarioVars::new();

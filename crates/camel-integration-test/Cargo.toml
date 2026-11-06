@@ -19,6 +19,11 @@ camel-dsl.workspace = true
 # predicates) shared across test tiers (shared-matcher-core).
 camel-matchers.workspace = true
 futures.workspace = true
+# Document-namespace run ids (bd rc-ql8eq, ADR-0069 §4): the run id is
+# four OS-CSPRNG bytes per `camel test` invocation rendered as eight
+# lowercase hex characters — never time/pid/hostname. Ungated: the mint
+# and the grammar check run in every build.
+getrandom.workspace = true
 humantime.workspace = true
 noyalib.workspace = true
 regex.workspace = true

@@ -1,0 +1,27 @@
+{
+  "kind": "plan",
+  "change": "scenario-namespaces",
+  "verdict": "APPROVE",
+  "hash": "sha256:fe8d317d182587b958bfaaa01554afe4169ca500f5ef56472bcb0411ea55821e",
+  "hash_note": "final hash after post-holistic archive-hygiene delta touch-up (MODIFIED 'Redis delete prepare action', one sentence); plan bless hash was b3dae4eb8b8f900ce58ee3d4ba4cf84cf8ed2102ffbb698fa583eb8949fdc90b; touch-up confirmed by e_gpt APPROVE (ses_e4e13b46effeSTdHvmJPX07EMg)",
+  "expert": "experts/e_gpt",
+  "sessions": ["ses_e4e850115ffez91SKeAbX02BoX", "ses_e4e7e0b35ffezefi9I2RTHsJ2z", "ses_e4e7b9479ffeDeVPgVvlFfMLGY", "ses_e4e13b46effeSTdHvmJPX07EMg"],
+  "reviewer_loop": {
+    "reviewer": "reviewers/r_glm",
+    "session": "ses_e4e8ebaa4ffeYmBaQE14TWkQHb",
+    "verdict": "APPROVE-WITH-FINDINGS",
+    "findings_applied": ["ScenarioDocument literal sites", "fake-smoke fold scoped to full_boot", "two-phase bindVar extraction", "sorted-clone ordinals (execution order untouched)", "ordinal from discovered list not admitted loop", ":- ban scoped to NAME segment", "validate_namespace_entries 2-param form", "finally doc comment"]
+  },
+  "rounds": [
+    {"round": 1, "verdict": "APPROVE-WITH-FIXES", "findings": 5},
+    {"round": 2, "verdict": "APPROVE-WITH-FIXES", "findings": 2},
+    {"round": 3, "verdict": "APPROVE"},
+    {"round": 4, "verdict": "APPROVE", "note": "archive-hygiene delta touch-up confirmation"}
+  ],
+  "spec_bless": {
+    "hash": "sha256:f3224db721cda711c297d4288678f1c5ffb236a12aefe59a957614a3f1b77230",
+    "rounds": 3,
+    "final": "APPROVE"
+  },
+  "date": "2026-11-06"
+}

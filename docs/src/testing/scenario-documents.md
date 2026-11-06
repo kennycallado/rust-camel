@@ -189,7 +189,7 @@ scenario:
 Known limitation, parallel mode (bd rc-gcf9n): `camel test` executes documents sequentially today. When parallel document execution lands, two concurrently booted documents that share one memory name could collide on the same shared memory database. The planned remedy is a per-boot unique suffix in the memory name (`memdb_{scenario}_{boot}`) minted by the harness for hermetic memory datasources. This note records a plan, not a rule for the current runner. Until parallel lands, documents that share a durable datasource must not run concurrently.
 
 ## Teardown with `finally:`
-A document may declare one document-level `finally:` list, a sibling of `scenario:`. The list is teardown, never test: the runner executes it after the verdict is fixed. The accepted set is the prepare class — `sleep`, `sql`, `surreal`, and the delete-only `redis:` form. `send`, `receive`, and `validate` are verdict actions, and the load rejects each of them with a message naming the `finally[i]` position and the accepted prepare-class actions. A declared-but-empty list is a load error.
+A document may declare one document-level `finally:` list, a sibling of `scenario:`. The list is teardown, never test: the runner executes it after the verdict is fixed. The accepted set is the prepare class — `sleep`, `sql`, `surreal`, the delete-only `redis:` form, and the namespace-scoped `unlinkPrefix` teardown. `send`, `receive`, and `validate` are verdict actions, and the load rejects each of them with a message naming the `finally[i]` position and the accepted prepare-class actions. A declared-but-empty list is a load error.
 
 ```yaml
 scenario:
@@ -212,7 +212,7 @@ Teardown runs on both verdict paths. A passing document reaches `finally:` after
 
 Every teardown failure is the apparatus class `teardown-failure`, and it exits 2. The recorded verdict is never masked: a passing document still passes, and a failing document keeps its own failure. The failure row names the `finally[i]` position and renders the inner failure. A panic inside one item is contained at the document boundary, so the run records that item's failure and continues with the next item and the next document.
 
-The `redis:` form is `{datasource: <name>, del: [<key>, ...]}`. `datasource` names a key from `[datasources]` in `Camel.toml`, exactly as an `sql:` action names one. `del` takes literal keys only: a key containing `*`, `?`, `[`, `]`, `{`, or `}` fails the load. Pattern delete (glob-style bulk delete) is not supported and is deferred (bd rc-ql8eq), and there is no `FLUSHDB` or `FLUSHALL`. One `DEL` through the named datasource's catalog connection removes the listed keys; a missing key is success, so the list is idempotent across runs.
+The `redis:` form is `{datasource: <name>, del: [<key>, ...]}`. `datasource` names a key from `[datasources]` in `Camel.toml`, exactly as an `sql:` action names one. `del` takes literal keys only: a key containing `*`, `?`, `[`, `]`, `{`, or `}` fails the load. Pattern delete of authored keys is not supported. The namespace-scoped `unlinkPrefix` teardown is the one exception ([Redis state assertions](scenario-redis.md#unlinkprefix-namespace-scoped-teardown)), and there is no `FLUSHDB` or `FLUSHALL`. One `DEL` through the named datasource's catalog connection removes the listed keys; a missing key is success, so the list is idempotent across runs.
 
 ```yaml
 finally:
@@ -221,8 +221,48 @@ finally:
     del: [order:42, order:42:lock]
 ```
 
-The `redis:` delete action is accepted in `scenario:` too. The clean-first idiom for a keyed store is a `redis:` delete before the asserting actions, and the same list in `finally:` is the teardown. Both positions send one `DEL` through the datasource catalog, and the two shapes share one grammar.
+The `redis:` `del` action is accepted in `scenario:` too. The clean-first idiom for a keyed store is a `redis:` delete before the asserting actions, and the same list in `finally:` is the teardown. Both positions send one `DEL` through the datasource catalog, and the two shapes share one grammar. The `unlinkPrefix` form is a separate action and is allowed only in `finally:` ([Redis state assertions](scenario-redis.md#unlinkprefix-namespace-scoped-teardown)).
 
 A document whose `scenario:` list or `finally:` list needs the datasource catalog selects the full boot. An `sql:`, `surreal:`, or `redis:` delete action in either list is such a demand, so a finally-only prepare action selects the boot on its own. A `sleep`-only teardown keeps the no-boot smoke path.
 
 The STATE-side grammar has its own page. The `sql:` prepare action writes datasource state, and the `validate` sql target reads it: [SQL state assertions](scenario-sql.md).
+
+## Document namespaces
+
+A document may declare a top-level `namespaces:` list. Each entry binds one minted namespace to an environment variable. The shape is `namespaces: [{bindVar: ns, base: '112'}]`.
+
+```yaml
+routeFiles: [routes/order.yaml]
+namespaces:
+- bindVar: ns
+  base: '112'
+scenario:
+- send: {to: direct:start}
+```
+
+`base` is a string and `bindVar` names a variable. The route file reads the minted value as `${env:ns}`, for example `key=${env:ns}order:42`.
+
+The harness mints one value per document: `BASE~it~RUN~ORD~`. For example, `112~it~3f9a1c0e~0007~`:
+
+- `BASE` matches `[A-Za-z0-9][A-Za-z0-9_-]{0,31}`. The document supplies it.
+- `RUN` is exactly eight lowercase hex characters. Four bytes from the OS CSPRNG provide the value. The harness generates one value per `camel test` invocation and shares it with every document of that run. The value never comes from the clock, the pid, or the hostname.
+- `ORD` is the 1-based, four-digit, zero-padded position of the document in the sorted discovered-document list. The driver assigns the position before every filter.
+
+The maximum mint length is 50 bytes. The minted value binds in the harness layer of the environment source, the same layer as a partner `bindVar` value. `${env:NAME}` therefore resolves to the mint. Environment references resolve on the full-boot path. The no-boot smoke path keeps them literal.
+
+The minted set is prefix-free. Two independent guarantees hold: the trailing `~` terminator and the fixed-width zero-padded fields. No mint is a prefix of another mint. The prefix of document 10's value never matches document 100's keys. Both guarantees are load-bearing, so removing either one is a defect.
+
+The load rejects these documents:
+
+- A `bindVar` that repeats in the document.
+- A `bindVar` that collides with a document `env:` key, an `envPassthrough:` name, or a partner `bindVar`.
+- A `base` that is invalid or repeats in the document.
+- More than 9999 discovered documents in one invocation.
+
+`${env:NAME}` resolves through the layered source. Harness-provisioned values come first, then document `env:` values, then `envPassthrough:` names, then inline defaults ([ADR-0069](../adr/0069-integration-tier-testing-contract.md) section 4).
+
+There is no cross-run reaper. A reaper that swept `BASE~it~*` would delete the keys of a concurrent CI job. Two concurrent jobs collide on one run id with a probability of about 2⁻³², and the design accepts that risk. Stale namespaces from crashed runs therefore accumulate.
+
+The namespace-scoped teardown has no cluster support (see [Redis state assertions](scenario-redis.md#unlinkprefix-namespace-scoped-teardown)).
+
+See [ADR-0069](../adr/0069-integration-tier-testing-contract.md) §4 for the ruling.
