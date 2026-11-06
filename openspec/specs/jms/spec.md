@@ -826,6 +826,23 @@ header SHALL appear in the IPC send payload or as a JMS property. The Java
 bridge SHALL apply the same normalized rules in a `HeaderPolicy` helper,
 verified by a parity test.
 
+When the broker or its JMS client rejects the write of a forwarded, non-denied
+property, the Java bridge SHALL fail the send with a typed
+`InvalidPropertyException` whose message names every offending property name
+and carries no property value, no credential material, and no host or
+connection detail. The bridge SHALL NOT sanitize, rename, or drop the
+offending property, SHALL NOT downgrade the failure to a log entry, and SHALL
+attempt the write of every remaining non-denied property so that legal-name
+forwarding does not depend on position in the header map. The
+`JmsBridgeService.send` handler SHALL map `InvalidPropertyException` to gRPC
+`INVALID_ARGUMENT`, keeping the generic `INTERNAL` mapping for all other send
+failures. The rejection SHALL NOT change broker-health state, restart
+semantics, or the durable-subscriber contract. Legal-name forwarding SHALL
+remain byte-identical to the pre-change behaviour. The legality set of
+property names is broker-dependent (the JMS identifier rule excludes `-`;
+Classic tolerates hyphenated names and Artemis rejects them) and the bridge
+SHALL document this difference instead of encoding it.
+
 #### Scenario: Empty allowlist forwards no user headers
 
 - **GIVEN** no `jmsHeaderAllowlist` is configured
@@ -865,6 +882,43 @@ verified by a parity test.
 - **GIVEN** a shared corpus of header names
 - **WHEN** the Rust producer and the Java `HeaderPolicy` classify them
 - **THEN** both SHALL deny the same names and allow the same names
+
+#### Scenario: A rejected property write fails the send with a name-only typed error
+
+- **GIVEN** a non-empty allowlist that names `x-crash-proof` and `traceId`
+- **WHEN** the broker client rejects the `x-crash-proof` property write while accepting `traceId`
+- **THEN** the send SHALL fail with `InvalidPropertyException`
+- **AND** the error message SHALL contain `x-crash-proof`
+- **AND** the error message SHALL NOT contain the property value, any credential material, or any host or connection detail
+
+#### Scenario: Multiple offending names are reported in one send
+
+- **GIVEN** a non-empty allowlist that names two broker-rejected properties and one legal property
+- **WHEN** the send is attempted
+- **THEN** the error message SHALL name both rejected properties
+- **AND** the legal property write SHALL still have been attempted
+
+#### Scenario: A rejected property write is classified as a sender error, not a broker failure
+
+- **GIVEN** a send whose property write the broker client rejects
+- **WHEN** the `JmsBridgeService.send` handler observes the `InvalidPropertyException`
+- **THEN** the gRPC status SHALL be `INVALID_ARGUMENT`
+- **AND** the bridge SHALL NOT record a broker-health regression, restart the bridge, or attach a `BrokerFailureClass` to the rejection
+
+#### Scenario: Legal-name forwarding is byte-identical
+
+- **GIVEN** an allowlist of legal names such as `traceId` and `orderId`
+- **WHEN** the message is sent to any broker
+- **THEN** the broker-visible properties for those names SHALL be identical to the pre-change behaviour
+- **AND** the send SHALL report success with the JMS message id
+
+#### Scenario: An illegal name on Artemis dead-letters with a name-only error
+
+- **GIVEN** the containerized Artemis fixture and an allowlist that names `x-crash-proof`
+- **WHEN** a route sends an exchange carrying `x-crash-proof`
+- **THEN** the send SHALL fail and the route error SHALL name `x-crash-proof`
+- **AND** the error SHALL carry no property value
+- **AND** a control route carrying a legal name SHALL deliver the message with that property intact
 
 ### Requirement: JMS bridge applies ActiveMQ jms.* URI options in native images
 
