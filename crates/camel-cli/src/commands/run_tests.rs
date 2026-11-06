@@ -692,8 +692,8 @@ struct FakeDevTarget {
 }
 
 impl FakeDevTarget {
-    fn new(route: &str, sources: Vec<std::path::PathBuf>) -> Arc<Self> {
-        Arc::new(Self {
+    fn new(route: &str, sources: Vec<std::path::PathBuf>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
             route: route.to_string(),
             sources,
             generation: AtomicU64::new(0),
@@ -701,8 +701,8 @@ impl FakeDevTarget {
     }
 
     /// Coerce to the erased trait-object Arc that `register` expects.
-    fn as_dyn(self: &Arc<Self>) -> Arc<dyn TemplateReloadTarget> {
-        let concrete: Arc<Self> = Arc::clone(self);
+    fn as_dyn(self: &std::sync::Arc<Self>) -> std::sync::Arc<dyn TemplateReloadTarget> {
+        let concrete: std::sync::Arc<Self> = std::sync::Arc::clone(self);
         concrete
     }
 }
