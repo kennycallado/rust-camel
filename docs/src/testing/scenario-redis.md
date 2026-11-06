@@ -5,8 +5,9 @@ Enable `integration-redis` in `camel-cli`, or `redis` in `camel-integration-test
 The default CLI (`flavor-regular`) and `flavor-full` activate this assertion executor; `flavor-slim` does not.
 Without the feature, a valid Redis target returns a named verdict failure.
 
-This family provides assertions only. There is no `redis:` scenario prepare action.
-Use the Redis producer in a route, or seed keys with a Redis client.
+This family owns the read side plus one delete-only `redis:` prepare action (see [The `redis:` del action](#the-redis-del-action)).
+Writing keys stays the route producer's job, or a Redis client's.
+There is no `set` action, no pattern delete, and no generic command runner.
 There is no generic `state:` action.
 
 ## Datasource configuration
@@ -131,9 +132,34 @@ Remaining `0` passes every legal `atMost`. It fails every legal `atLeast` and ra
 The final snapshot decides TTL together with type and rows.
 Diagnostics include permitted type/count metadata and observed TTL, but never actual cell values, fields, or members.
 
+## The `redis:` del action
+
+A `redis:` prepare action deletes keys through a named datasource:
+
+```yaml
+scenario:
+- redis:
+    datasource: statedb
+    del: [order:42, order:42:lock]
+```
+
+`datasource` names a key under `[datasources]` in `Camel.toml`.
+`del` must declare at least one key, and it takes literal keys only.
+A key containing `*`, `?`, `[`, `]`, `{`, or `}` fails the load, because `del` is not a pattern match.
+One `DEL` removes every listed key through the datasource's catalog connection.
+A missing key is success, so the action is idempotent and a delete before seeding is safe.
+There is no `FLUSHDB`, no `FLUSHALL`, and no pattern delete; glob-style bulk delete is deferred (bd rc-ql8eq).
+Diagnostics name the datasource and sanitize the driver text, never the URL.
+
+The action is accepted in both lists.
+In `scenario:` it is the clean-first idiom: delete the test's unique key before seeding it.
+In a document-level `finally:` list it is the teardown: delete the keys after the verdict, on both verdict paths.
+A teardown failure reports as `teardown-failure` and never masks the verdict.
+The `validate` redis target keeps its read vocabulary (`datasource/key/type/ttl`), and the two never mix.
+
 ## Durable state and verification
 
-Delete each test's unique key before seeding it. Delete the key after the test.
+Clean keys with the `del` action above: before seeding in `scenario:`, and after the test in `finally:`.
 Do not share keys between parallel scenarios.
 Shutdown invokes the factory's no-op close hook. It does not delete keys or release every catalog reference.
 Connections are drop-scoped: release requires dropping all boot, context, catalog, and cloned connection owners.
@@ -144,5 +170,6 @@ The default library suite starts no Redis container. Run the live battery explic
 ```sh
 cargo test -p camel-integration-test --features redis,redis-live --lib
 cargo test -p camel-integration-test --features redis --test redis_state_test
+cargo test -p camel-integration-test --features redis --test redis_state_test finally_redis_del_removes_exactly_the_listed_keys
 cargo test -p camel-cli --no-default-features --features integration-redis,itest-e2e --test test_scenario_cli_e2e
 ```

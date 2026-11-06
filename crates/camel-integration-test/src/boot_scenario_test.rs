@@ -365,6 +365,7 @@ async fn boot_inline_routes_still_rejected() {
         scenario: vec![ScenarioAction::Sleep {
             duration: std::time::Duration::from_secs(1),
         }],
+        finally: None,
         partners: None,
         env: None,
         env_passthrough: None,
@@ -406,6 +407,7 @@ async fn boot_rejects_inbound_without_http_feature() {
         scenario: vec![ScenarioAction::Sleep {
             duration: std::time::Duration::from_secs(1),
         }],
+        finally: None,
         partners: None,
         env: None,
         env_passthrough: None,

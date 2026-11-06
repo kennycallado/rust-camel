@@ -122,6 +122,54 @@ fn redis_state_e2e_route_write_validate() {
         assert!(outcome.final_failure.is_none());
     });
 }
+/// Document-level `finally:` teardown (scenario-finally-hooks task
+/// 1.3): the redis delete action removes exactly the listed literal
+/// keys through the boot's catalog handle — a sentinel key outside the
+/// list survives (no FLUSHDB, no pattern delete).
+#[test]
+fn finally_redis_del_removes_exactly_the_listed_keys() {
+    run(async {
+        let k = "rc-redis-state:finally_redis_del_removes_exactly_the_listed_keys:k1";
+        let sentinel = "rc-redis-state:finally_redis_del_removes_exactly_the_listed_keys:sentinel";
+        let u = url().await;
+        let c = connection(&u).await;
+        cmd(&c, "DEL", &[k, sentinel]).await;
+        let (mut doc, mut run) = boot(k, &u).await;
+        let catalog = run.boot.datasource_catalog();
+        doc.finally = Some(vec![ScenarioAction::RedisDel {
+            datasource: "statedb".to_string(),
+            keys: vec![k.to_string()],
+        }]);
+        cmd(&c, "SET", &[k, "teardown-me"]).await;
+        cmd(&c, "SET", &[sentinel, "keep-me"]).await;
+        let Some(ScenarioAction::RedisDel { datasource, keys }) =
+            doc.finally.as_ref().and_then(|items| items.first())
+        else {
+            panic!("the constructed finally list must hold one RedisDel");
+        };
+        let action = RedisDelAction {
+            datasource: datasource.clone(),
+            keys: keys.clone(),
+        };
+        execute_redis_del(&catalog, &action)
+            .await
+            .expect("delete through the boot's catalog");
+        let deleted = redis::cmd("GET")
+            .arg(k)
+            .query_async::<Option<String>>(&mut c.clone())
+            .await
+            .expect("get deleted key");
+        let kept = redis::cmd("GET")
+            .arg(sentinel)
+            .query_async::<String>(&mut c.clone())
+            .await
+            .expect("get sentinel key");
+        shutdown(&mut run).await;
+        cmd(&c, "DEL", &[k, sentinel]).await;
+        assert_eq!(deleted, None, "the listed key must be gone");
+        assert_eq!(kept, "keep-me", "the unlisted key must survive");
+    });
+}
 #[test]
 fn redis_datasource_create_succeeds_and_handles_ping() {
     run(async {

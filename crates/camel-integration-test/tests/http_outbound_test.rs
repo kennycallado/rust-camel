@@ -213,6 +213,7 @@ fn method_scenario_document(
         source_path: fixture_root().join("bridge.test.yaml"),
         route_source: RouteSource::RouteFiles(vec![PathBuf::from("routes/bridge.yaml")]),
         scenario,
+        finally: None,
         partners: None,
         env: None,
         env_passthrough: None,
@@ -328,6 +329,7 @@ async fn outbound_bridge_header_corruption_fails() {
                 }
             })
             .collect(),
+        finally: None,
         env: fixture.doc.env.clone(),
         env_passthrough: fixture.doc.env_passthrough.clone(),
         profile: fixture.doc.profile.clone(),

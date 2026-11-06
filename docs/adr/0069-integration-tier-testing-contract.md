@@ -1,6 +1,6 @@
 # ADR-0069: Integration-Tier Testing Contract
 
-- Status: Accepted (human-ratified 2026-09-03; e_opus + e_gpt BLESS-WITH-FIXES, fixes applied). Amended 2026-09-06: section 13 added (flake taxonomy and test-design rules R1-R7, bd rc-jwp3; ADR-0070 carries the staged-listener application of R2). Amended 2026-10-03: section 14 added (waist: adapter taxonomy and shared seams; bd rc-25lup.6); ratified by e_opus (RATIFIED-WITH-FIXES, fixes applied).
+- Status: Accepted (human-ratified 2026-09-03; e_opus + e_gpt BLESS-WITH-FIXES, fixes applied). Amended 2026-09-06: section 13 added (flake taxonomy and test-design rules R1-R7, bd rc-jwp3; ADR-0070 carries the staged-listener application of R2). Amended 2026-10-03: section 14 added (waist: adapter taxonomy and shared seams; bd rc-25lup.6); ratified by e_opus (RATIFIED-WITH-FIXES, fixes applied). Amended 2026-11-05: document-level `finally:` teardown, delete-only redis `del` prepare action, `teardown-failure` apparatus class (bd rc-6wodc).
 - Date: 2026-09-03
 - Supersedes: none. Binds the sketch in ADR-0064 section 4.
 - Epic: rc-kk69. Authoring path: human grill + ste-writing (same path as ADR-0064, per rc-379d precedent). Not a conductor-light change.
@@ -238,6 +238,9 @@ Exit 2, the scenario never got a meaningful answer:
 - `full-boot-failure`: the embedded boot failed.
 - `shutdown-failure`: teardown of the boot or a partner timed out or erred
   after the verdict was recorded.
+- `teardown-failure`: a document-declared `finally:` teardown item failed or
+  panicked after the verdict was recorded. It never masks or rewrites the
+  recorded verdict; it renders after it.
 
 Every adapter operation carries a deadline, not only `infra-unavailable`. A
 cancelled `parallel` sibling reports as cancelled, not as a verdict failure.
@@ -270,7 +273,11 @@ suite keeps its runtime and composition.
 4. Redis key assertions (rc-w8s70). The `redis` harness feature activates
    the assertion-only state adapter. The `integration-redis` CI job uses
    testcontainers Redis and proves Redis-only CLI execution. Routes or
-   clients seed keys. There is no Redis scenario prepare action.
+   clients seed keys. The delete-only `redis: {datasource, del: [keys]}`
+   prepare action (bd rc-6wodc) lands alongside the assertions: literal
+   keys only, one `DEL` through the boot's datasource catalog, glob
+   metacharacters rejected at load, no `FLUSHDB`/`FLUSHALL`/pattern
+   delete/generic runner (pattern delete deferred to rc-ql8eq).
 5. WS, after the consumer-client role lands (rc-39d6).
 6. gRPC is a loopback candidate. It needs no Docker. It activates on demand.
 7. Kafka, JMS, and other broker adapters wait for an adapter-specific
@@ -307,6 +314,11 @@ target form carries `provisioning: harness` on an `http` endpoint and a `partner
 names the URI. Proxy routes whose query varies per request use this
 channel, since those routes have no literal arrival lane (section 5) and
 a sacrificial receive is forbidden by design.
+
+A document-declared `finally:` list is the author's own cleanup, so it does
+not violate the law above. The harness never cleans resources it does not own;
+the list names resources the document owns. It runs after the verdict on both
+verdict paths, and its failure is the `teardown-failure` class of section 7.
 
 The system under test is always the embedded boot. The harness never drives a
 deployed `camel run`. A live `camel run --watch` next to a test run is two
@@ -350,7 +362,13 @@ Citrus.
 Adopt: ordered action lists. Logical endpoints bound to typed transport
 drivers. `send`, `receive` with a mandatory deadline, `sleep`, `validate`.
 Scenario variables with extraction. Exact body, header, and status
-validators.
+validators. Document-level `finally:` teardown (adopted from the
+finally-position idea, deliberately post-verdict: a teardown runs after the
+answer is fixed so it can never change it; restricted to prepare-class
+actions so it can never assert; its failures surface as the
+`teardown-failure` apparatus class of section 7). Defer remains: Citrus's
+after-action semantics are not adopted verbatim; a flush-style cleanup is
+rejected — per-key deletion keeps parallel documents safe (rc-gcf9n).
 
 Defer: `iterate`. Validator registries. A negative expect-timeout action.
 Protocol-specific action families. Structured `parallel` with sibling

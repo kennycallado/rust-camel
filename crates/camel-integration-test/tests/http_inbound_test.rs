@@ -253,6 +253,7 @@ async fn inbound_response_validated_on_wire() {
                 }
             })
             .collect(),
+        finally: None,
         env: fixture.doc.env.clone(),
         env_passthrough: fixture.doc.env_passthrough.clone(),
         profile: fixture.doc.profile.clone(),

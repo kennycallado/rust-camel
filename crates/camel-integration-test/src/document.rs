@@ -4,7 +4,9 @@
 //! A scenario document is a `.test.yaml` (or `.test.yml`) sidecar that
 //! declares one integration-tier test: exactly one route source
 //! (`routeFiles`, `routeFilesFromRoot`, or inline `routes`), an ordered
-//! `scenario:` action list, an optional `env:` map with fixed fixture
+//! `scenario:` action list, an optional document-level `finally:`
+//! teardown list (prepare-class actions executed after the verdict),
+//! an optional `env:` map with fixed fixture
 //! values, an optional `envPassthrough:` allowlist, an optional
 //! endpoint-keyed `partners:` scripting map, an optional pinned
 //! `profile`, an optional document-level `sendDeadline` bounding
@@ -82,6 +84,14 @@ pub struct ScenarioDocument {
     pub route_source: RouteSource,
     /// Ordered scenario actions.
     pub scenario: Vec<ScenarioAction>,
+    /// Document-level teardown list (scenario-finally-hooks): actions
+    /// executed after the verdict, regardless of the scenario outcome.
+    /// The allowed set is prepare-class only: `sleep`, `sql`,
+    /// `surreal`, and `redis-del`; `send`, `receive`, and `validate`
+    /// are verdict actions and are rejected at load.
+    /// Execution is the runner's post-verdict step (task 1.4). A
+    /// declared list must be non-empty (the empty-`prepare` law).
+    pub finally: Option<Vec<ScenarioAction>>,
     /// Document-level partner scripting, keyed by endpoint address.
     /// The grammar lives here; the runner consumes the map.
     pub partners: Option<BTreeMap<String, Vec<PartnerScript>>>,
@@ -247,6 +257,26 @@ pub enum ScenarioAction {
         /// against the datasource.
         prepare: Vec<String>,
     },
+    /// Delete-only redis prepare action (bd rc-6wodc): remove the
+    /// declared literal keys through the named datasource in ONE
+    /// `DEL`, before the route assertions run or in a document-level
+    /// `finally:` list as teardown. Accepted in BOTH `scenario:` and
+    /// `finally:` lists. Visibly distinct from the `validate` redis
+    /// target (`datasource/key/type/ttl`, a read): the two
+    /// vocabularies never mix, and `del` takes literal keys only —
+    /// glob metacharacters are rejected at load, there is no
+    /// `FLUSHDB`/`FLUSHALL`, no pattern delete, and no generic command
+    /// runner. Activation is demand-gated behind the harness `redis`
+    /// feature (the `sql:` precedent, ADR-0069 §8); the grammar and
+    /// validation run in every build.
+    RedisDel {
+        /// The datasource name as declared under `[datasources.*]` in
+        /// `Camel.toml`.
+        datasource: String,
+        /// Literal keys to delete; missing keys are success, never an
+        /// error.
+        keys: Vec<String>,
+    },
 }
 
 impl ScenarioAction {
@@ -293,6 +323,9 @@ impl ScenarioAction {
             // A `surreal:` action references a named datasource, never
             // an endpoint: it declares no bindings.
             Self::Surreal { .. } => Vec::new(),
+            // A `redis:` delete action references a named datasource,
+            // never an endpoint: it declares no bindings.
+            Self::RedisDel { .. } => Vec::new(),
         }
     }
 }
@@ -411,6 +444,10 @@ struct RawDocument {
     route_files_from_root: Option<Vec<String>>,
     routes: Option<serde_yaml::Value>,
     scenario: Option<Vec<serde_yaml::Value>>,
+    // Document-level teardown list: raw node; the grammar walk runs
+    // during validation so every error names the `finally[i]`
+    // position (the `inbound:`/`logs:` raw-node precedent).
+    finally: Option<serde_yaml::Value>,
     env: Option<BTreeMap<String, String>>,
     env_passthrough: Option<Vec<String>>,
     profile: Option<String>,
@@ -553,7 +590,9 @@ pub(crate) fn glob_metacharacters_in(entry: &str) -> Option<String> {
 /// list, no escape syntax);
 /// (f) each action converts (single-key dispatch, deadlines, durations,
 /// endpoint provisioning, expectation grammar, the `direct:`-only
-/// `expectReply` gate) with action-index errors; (g) each `partners`
+/// `expectReply` gate) with action-index errors; (f2) each optional
+/// `finally:` entry converts through the same dispatcher and must be a
+/// prepare-class action, with `finally`-position errors; (g) each `partners`
 /// entry converts (script grammar, response status range) with
 /// entry-key errors; (h) no `env` key collides with a declared
 /// `bindVar`; (i) each `partner` validate target URI equals a harness
@@ -675,6 +714,11 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
     for (index, item) in raw_scenario.into_iter().enumerate() {
         scenario.push(build_action(item, index)?);
     }
+    // (f2) Document-level `finally:` teardown list: the same
+    // converter runs in every build, then the allowed-set match
+    // rejects verdict actions. Errors are re-positioned at
+    // `finally[i]`.
+    let finally = raw.finally.map(finally_from_raw).transpose()?;
     // (g) Partner scripting: entries convert from the raw sequence
     // with the entry key named on every failure; an empty sequence is
     // a valid, inert entry. The grammar conversion lives in the
@@ -808,6 +852,7 @@ pub fn parse_scenario_document(path: &Path) -> Result<ScenarioDocument, DocError
         source_path: path.to_path_buf(),
         route_source,
         scenario,
+        finally,
         partners,
         env: raw.env,
         env_passthrough: raw.env_passthrough,
@@ -949,6 +994,46 @@ fn surreal_action_from_raw(
     })
 }
 
+/// Converts a raw `redis:` delete action into the model, feature-split
+/// so the arm type checks in both configurations
+/// (scenario-finally-hooks task 1.3).
+///
+/// Validation (empty datasource, empty `del`, glob-metacharacter keys)
+/// runs in every build BEFORE the gate; only a structurally valid
+/// action reaches the demand gate, which — without the harness `redis`
+/// feature — rejects it naming the feature and the rebuild instruction
+/// (the `sql:` precedent, ADR-0069 §8).
+#[cfg(feature = "redis")]
+fn redis_del_action_from_raw(
+    raw: crate::redis_action::RawRedisDelAction,
+    index: usize,
+) -> Result<ScenarioAction, DocError> {
+    let validated = crate::redis_action::validate_redis_del_action(&raw, index)
+        .map_err(|message| DocError::Validation { index, message })?;
+    Ok(ScenarioAction::RedisDel {
+        datasource: validated.datasource,
+        keys: validated.keys,
+    })
+}
+
+/// The feature-off twin: the same validation hook, then the named
+/// demand-gate error instead of the action.
+#[cfg(not(feature = "redis"))]
+fn redis_del_action_from_raw(
+    raw: crate::redis_action::RawRedisDelAction,
+    index: usize,
+) -> Result<ScenarioAction, DocError> {
+    if let Err(message) = crate::redis_action::validate_redis_del_action(&raw, index) {
+        return Err(DocError::Validation { index, message });
+    }
+    Err(DocError::Validation {
+        index,
+        message: "the `redis` action requires the `redis` feature, which this harness build \
+                  does not enable: rebuild with `--features redis` (demand-gated activation)"
+            .to_string(),
+    })
+}
+
 /// Parses inline `routes` through the shared DSL parser. `parse_yaml`
 /// expects a top-level `routes:` key; the inline value (the array under
 /// `routes:`) is wrapped back into that shape, the same as the unit-tier
@@ -961,22 +1046,99 @@ fn parse_inline_routes(value: &serde_yaml::Value) -> Result<Vec<RouteDefinition>
     camel_dsl::parse_yaml(&text).map_err(|e| DocError::InlineRoutes(e.to_string()))
 }
 
+/// Converts the raw document-level `finally:` node into the ordered
+/// teardown list. A declared list must be non-empty (the
+/// empty-`prepare` law). Entries dispatch through [`build_action`] so
+/// the grammar walk and the feature demand gate run in every build;
+/// every resulting error is re-positioned through
+/// [`DocError::FinallyValidation`] so the rendered index reads
+/// `finally[i]` rather than the `scenario[i]` the `Validation` variant
+/// hardcodes. The parsed variant must be prepare-class: `sleep`,
+/// `sql`, `surreal`, or `redis-del`. Verdict actions (`send`,
+/// `receive`, `validate`) are rejected at load.
+fn finally_from_raw(value: serde_yaml::Value) -> Result<Vec<ScenarioAction>, DocError> {
+    let serde_yaml::Value::Sequence(entries) = value else {
+        return Err(DocError::FinallyValidation {
+            index: 0,
+            message: format!("`finally` must be a list of actions, got {value:?}"),
+        });
+    };
+    if entries.is_empty() {
+        return Err(DocError::FinallyValidation {
+            index: 0,
+            message: "`finally` must declare at least one action".to_string(),
+        });
+    }
+    let mut actions = Vec::with_capacity(entries.len());
+    for (index, item) in entries.into_iter().enumerate() {
+        let action =
+            build_action(item, index).map_err(|error| finally_position_error(index, error))?;
+        match &action {
+            ScenarioAction::Sleep { .. }
+            | ScenarioAction::Sql { .. }
+            | ScenarioAction::Surreal { .. }
+            | ScenarioAction::RedisDel { .. } => {}
+            ScenarioAction::Send { .. } => return Err(finally_verdict_error(index, "send")),
+            ScenarioAction::Receive { .. } => return Err(finally_verdict_error(index, "receive")),
+            ScenarioAction::Validate { .. } => {
+                return Err(finally_verdict_error(index, "validate"));
+            }
+        }
+        actions.push(action);
+    }
+    Ok(actions)
+}
+
+/// Re-positions a [`build_action`] failure at the `finally:` index.
+/// The inner message is preserved: grammar and demand-gate text read
+/// exactly as they do for a scenario action. Message-carrying
+/// structured variants are unwrapped to their bare message, and the
+/// variant that embeds a `scenario[i]` position is re-rendered without
+/// it, so a teardown error never claims a scenario position and never
+/// doubles the `doc-validation:` token.
+fn finally_position_error(index: usize, error: DocError) -> DocError {
+    let message = match error {
+        DocError::Validation { message, .. } | DocError::Partners { message, .. } => message,
+        DocError::ExpectReplyOnUnsupportedSend { scheme, .. } => {
+            format!("`expectReply` is only valid on a `direct:` send, not `{scheme}` (exit 2)")
+        }
+        other => other
+            .to_string()
+            .trim_start_matches("doc-validation: ")
+            .to_string(),
+    };
+    DocError::FinallyValidation { index, message }
+}
+
+/// The allowed-set rejection for a verdict action declared in
+/// `finally:`, naming the action key and the accepted prepare-class
+/// set.
+fn finally_verdict_error(index: usize, action: &str) -> DocError {
+    DocError::FinallyValidation {
+        index,
+        message: format!(
+            "`{action}` is a verdict action; `finally:` accepts only prepare-class actions: \
+             sleep, sql, surreal, redis-del"
+        ),
+    }
+}
+
 /// Converts one raw action item into the public model. An item is a
 /// single-key map (`send`, `receive`, `sleep`, `validate`, `sql`,
-/// `surreal`); dispatch
+/// `surreal`, `redis`); dispatch
 /// runs here, not in serde, so every failure carries the action index.
 fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction, DocError> {
     let action_error = |message: String| DocError::Validation { index, message };
     let serde_yaml::Value::Mapping(ref map) = item else {
         return Err(action_error(format!(
             "action must be a single-key map (`send`, `receive`, `sleep`, `validate`, `sql`, \
-             `surreal`), got {item:?}"
+             `surreal`, `redis`), got {item:?}"
         )));
     };
     let Some((key, content)) = map.iter().next() else {
         return Err(action_error(
             "action must be a single-key map (`send`, `receive`, `sleep`, `validate`, `sql`, \
-             `surreal`), got an empty map"
+             `surreal`, `redis`), got an empty map"
                 .to_string(),
         ));
     };
@@ -1248,9 +1410,18 @@ fn build_action(item: serde_yaml::Value, index: usize) -> Result<ScenarioAction,
             // what this build can execute.
             surreal_action_from_raw(raw, index)
         }
+        crate::redis_action::REDIS_DEL_ACTION_KEY => {
+            let raw: crate::redis_action::RawRedisDelAction =
+                serde_yaml::from_value(content.clone()).map_err(action_error_from_serde)?;
+            // Ordering mandate (the `sql:` precedent): grammar
+            // validation runs BEFORE the feature demand gate, so a
+            // pattern key, an empty `del` list, or an empty datasource
+            // fails doc-validation in BOTH feature configurations.
+            redis_del_action_from_raw(raw, index)
+        }
         other => Err(action_error(format!(
             "unknown action `{other}`; expected `send`, `receive`, `sleep`, `validate`, `sql`, \
-             or `surreal`"
+             `surreal`, or `redis`"
         ))),
     }
 }

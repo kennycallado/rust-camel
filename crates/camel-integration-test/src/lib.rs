@@ -32,6 +32,9 @@ pub mod inbound;
 /// attributes every event to every open window whose
 /// `[opened_at, now)` interval contains the event timestamp.
 pub mod log_capture;
+/// Scenario `redis:` delete-only prepare action (bd rc-6wodc): the
+/// ungated grammar and the demand-gated `DEL` executor.
+pub mod redis_action;
 pub mod runner;
 pub mod sql_action;
 /// The datasource steering axis (name -> env-steered URL -> pool
@@ -64,8 +67,13 @@ pub use env_layers::{AmbientLookup, LayeredEnv, ambient_std};
 #[cfg(feature = "http")]
 pub use inbound::provision_inbound;
 pub use log_capture::{LogEvent, WindowHandle, capture_installed, ensure_capture_subscriber};
+#[cfg(feature = "redis")]
+pub use redis_action::execute_redis_del;
+pub use redis_action::{
+    REDIS_DEL_ACTION_KEY, RawRedisDelAction, RedisDelAction, validate_redis_del_action,
+};
 pub use runner::{
-    DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, run_scenario,
+    DocumentOutcome, ScenarioEvent, ScenarioFailure, ScenarioVars, ScenarioVerdict, run_scenario,
     run_scenario_document,
 };
 #[cfg(feature = "sql")]

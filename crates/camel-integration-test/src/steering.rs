@@ -9,8 +9,8 @@
 //! Identifier law: resolution errors name the datasource, never its
 //! URL. Every error string carries the family label (`sql action`,
 //! `sql validation`, `surreal action`, `surreal validation`,
-//! `redis validation`) and the datasource name; driver detail is
-//! retained otherwise.
+//! `redis validation`, `redis delete`) and the datasource name; driver
+//! detail is retained otherwise.
 //!
 //! Redaction law (ADR-0051, Credential Redaction at Diagnostic
 //! Boundaries): database URLs carry credential bytes and must not
@@ -100,12 +100,13 @@ mod resolver_tests {
     use super::resolve_datasource;
     use crate::sql_stub::sqlite_catalog;
 
-    /// The four family labels, one assertion per label.
-    const LABELS: [&str; 4] = [
+    /// The five family labels, one assertion per label.
+    const LABELS: [&str; 5] = [
         "sql action",
         "sql validation",
         "surreal action",
         "surreal validation",
+        "redis delete",
     ];
 
     /// Sentinel URL with a secret path component, the way a real
@@ -169,6 +170,7 @@ mod resolver_tests {
             "sql validation: unknown datasource 'missing'",
             "surreal action: unknown datasource 'missing'",
             "surreal validation: unknown datasource 'missing'",
+            "redis delete: unknown datasource 'missing'",
         ];
         for (label, expected) in LABELS.into_iter().zip(expected) {
             let err = resolve_datasource::<sqlx::AnyPool>(&catalog, "missing", label)
@@ -188,6 +190,7 @@ mod resolver_tests {
             "sql validation: datasource 'appdb': Processor error: cannot open [REDACTED]",
             "surreal action: datasource 'appdb': Processor error: cannot open [REDACTED]",
             "surreal validation: datasource 'appdb': Processor error: cannot open [REDACTED]",
+            "redis delete: datasource 'appdb': Processor error: cannot open [REDACTED]",
         ];
         for (label, expected) in LABELS.into_iter().zip(expected) {
             let err = resolve_datasource::<sqlx::AnyPool>(&catalog, "appdb", label)

@@ -20,7 +20,8 @@
 //!   [`ScenarioFailure::ActionTransport`],
 //!   [`ScenarioFailure::PartnerStartup`],
 //!   [`ScenarioFailure::ShutdownFailure`],
-//!   [`ScenarioFailure::LogCaptureUnavailable`].
+//!   [`ScenarioFailure::LogCaptureUnavailable`],
+//!   [`ScenarioFailure::TeardownFailure`].
 //!
 //! Verdict-class failures map to exit 1 at the CLI; apparatus-class
 //! failures map to exit 2, as do doc-validation failures before the
@@ -352,6 +353,17 @@ pub enum ScenarioFailure {
         /// Why capture cannot run (the foreign-subscriber condition).
         detail: String,
     },
+    /// A document-level `finally:` item failed or panicked after the
+    /// verdict was recorded (apparatus class, `teardown-failure`, bd
+    /// rc-6wodc): the scenario's answer is already fixed, so a
+    /// teardown failure is apparatus trouble — it never masks or
+    /// rewrites the recorded verdict.
+    #[error("teardown-failure: {message}")]
+    TeardownFailure {
+        /// Failure detail, naming the `finally[pos]` item and the
+        /// inner failure's rendering.
+        message: String,
+    },
 }
 
 /// Fills the harness bind variables into `vars` (ADR-0069 §9): every
@@ -406,6 +418,28 @@ pub async fn run_scenario(
     Ok(ScenarioVerdict::Pass)
 }
 
+/// One step of a document run's execution order (scenario-finally-hooks
+/// task 1.4): the runner records these strictly as they happen, so a
+/// consumer can witness the lifecycle — every action, the `logs:`
+/// evaluation, the fixed pass verdict, and every teardown item.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ScenarioEvent {
+    /// Action `i`'s execution returned (pass or fail); the index is
+    /// the action's position in `scenario:`.
+    Action(usize),
+    /// The document's `logs:` block evaluated against its capture
+    /// window. Absent when the document declares no block or an
+    /// action failed first (the block never evaluated).
+    LogsEvaluated,
+    /// The passing verdict was fixed. Absent on every failing path:
+    /// the absence is the witness that no verdict was recorded.
+    VerdictFixed,
+    /// Teardown item `i`'s execution returned; the index is the
+    /// item's position in `finally:`.
+    Teardown(usize),
+}
+
 /// The outcome of executing a whole scenario document
 /// (ADR-0069 sections 5 and 7).
 ///
@@ -423,8 +457,10 @@ pub struct DocumentOutcome {
     /// `Some(Pass)` when every action completed; `None` after any
     /// failure.
     pub verdict: Option<ScenarioVerdict>,
-    /// Post-verdict shutdown failure, recorded by the boot-owning
-    /// caller; empty when teardown is clean or never ran.
+    /// Post-verdict failure slot: the first teardown failure the runner
+    /// recorded, or a shutdown failure the boot-owning caller recorded
+    /// via [`DocumentOutcome::record_shutdown_failure`]. Empty when
+    /// teardown is clean or never ran. Never masks `verdict`.
     pub final_failure: Option<ScenarioFailure>,
     /// The bound address of the document's `inbound:` listener
     /// (rc-5yon, ADR-0070), filled by the boot-owning caller from
@@ -443,6 +479,28 @@ pub struct DocumentOutcome {
     /// first (the block never evaluated), or capture was unavailable
     /// (the apparatus failure lives in `per_action`).
     pub logs_failure: Option<String>,
+    /// One outcome per `finally:` item, in declared order
+    /// (scenario-finally-hooks task 1.4). Every teardown failure —
+    /// whether `run_action` returned `Err` or the future panicked — is
+    /// recorded uniformly as `Err(TeardownFailure)`. Teardown runs on
+    /// both verdict paths.
+    pub per_teardown: Vec<Result<(), ScenarioFailure>>,
+    /// The document lifecycle's execution order, recorded strictly as
+    /// it happened (scenario-finally-hooks task 1.4).
+    pub trace: Vec<ScenarioEvent>,
+}
+
+impl DocumentOutcome {
+    /// Records a post-verdict shutdown failure in the structured slot
+    /// only when the slot is still empty: a teardown failure the runner
+    /// already recorded wins, and the shutdown never masks it. Row
+    /// rendering comes from each failure's own source, never from this
+    /// slot.
+    pub fn record_shutdown_failure(&mut self, failure: ScenarioFailure) {
+        if self.final_failure.is_none() {
+            self.final_failure = Some(failure);
+        }
+    }
 }
 
 /// Executes a scenario document's actions in order against the
@@ -468,6 +526,15 @@ pub struct DocumentOutcome {
 /// context-stimulus adapter the caller registered for that endpoint
 /// (see [`crate::adapters`]). The single-action
 /// [`run_scenario`] loop and this loop share `run_action`.
+///
+/// A declared `finally:` list then runs as teardown (scenario-finally-hooks
+/// task 1.4) on BOTH verdict paths: one `per_teardown` entry per item, in
+/// declared order, each future panic-contained. A teardown failure is the
+/// apparatus-class [`ScenarioFailure::TeardownFailure`] and never masks the
+/// recorded verdict; the first one fills `final_failure`. `trace` records
+/// the lifecycle order: actions, logs evaluation, the fixed pass verdict,
+/// teardown. Teardown is skipped on the pre-run capture-unavailable abort
+/// ([`ScenarioFailure::LogCaptureUnavailable`]): the document never started.
 pub async fn run_scenario_document(
     doc: &ScenarioDocument,
     router: &PartnerRouter,
@@ -494,6 +561,8 @@ pub async fn run_scenario_document(
                 final_failure: None,
                 logs_failure: None,
                 inbound_bound: None,
+                per_teardown: Vec::new(),
+                trace: Vec::new(),
             };
         }
     };
@@ -502,12 +571,13 @@ pub async fn run_scenario_document(
     let started_at = Instant::now();
     let send_deadline = effective_send_deadline(doc);
     let mut per_action = Vec::with_capacity(doc.scenario.len());
+    let mut trace = Vec::new();
     let mut failed = false;
     for (index, action) in doc.scenario.iter().enumerate() {
         if failed {
             break;
         }
-        match run_action(
+        let result = run_action(
             action,
             index,
             router,
@@ -516,8 +586,11 @@ pub async fn run_scenario_document(
             send_deadline,
             datasource_catalog,
         )
-        .await
-        {
+        .await;
+        // The event records the action's execution RETURN (pass or
+        // fail): a failed scenario still witnesses its failing action.
+        trace.push(ScenarioEvent::Action(index));
+        match result {
             Ok(()) => per_action.push(Ok(ScenarioVerdict::Pass)),
             Err(failure) => {
                 per_action.push(Err(failure));
@@ -533,6 +606,9 @@ pub async fn run_scenario_document(
     let logs_failure = match (&doc.logs, capture_window) {
         (Some(assertion), Some(window)) if !failed => {
             let events = window.close();
+            // The evaluation happened: witness it before the verdict
+            // decision it feeds (the ordering the trace locks).
+            trace.push(ScenarioEvent::LogsEvaluated);
             evaluate_logs(assertion, &events)
         }
         _ => None,
@@ -542,12 +618,100 @@ pub async fn run_scenario_document(
     } else {
         Some(ScenarioVerdict::Pass)
     };
+    // The fixed pass verdict is witnessed only when one was fixed; on
+    // every failing path its absence is the witness.
+    if verdict.is_some() {
+        trace.push(ScenarioEvent::VerdictFixed);
+    }
+    // Teardown (scenario-finally-hooks task 1.4): runs after the
+    // verdict is fixed (or refused), on BOTH paths, in declared order.
+    // A panic is contained at the document boundary — the process
+    // keeps running the next document — and every failure, panic or
+    // returned `Err`, is recorded uniformly as the apparatus-class
+    // `TeardownFailure`. A teardown failure never masks or rewrites the
+    // recorded verdict.
+    let finally = doc.finally.as_deref().unwrap_or(&[]);
+    let mut per_teardown = Vec::with_capacity(finally.len());
+    let mut final_failure: Option<ScenarioFailure> = None;
+    for (index, action) in finally.iter().enumerate() {
+        let result = contain_teardown_panic(run_action(
+            action,
+            index,
+            router,
+            vars,
+            started_at,
+            send_deadline,
+            datasource_catalog,
+        ))
+        .await;
+        trace.push(ScenarioEvent::Teardown(index));
+        match result {
+            Ok(()) => per_teardown.push(Ok(())),
+            Err(failure) => {
+                let uniform = ScenarioFailure::TeardownFailure {
+                    message: teardown_message(index, failure),
+                };
+                // The first failure fills the post-verdict slot with
+                // the SAME value recorded per item; the loop still
+                // runs every declared item (one entry per finally
+                // item, in declared order).
+                if final_failure.is_none() {
+                    final_failure = Some(uniform.clone());
+                }
+                per_teardown.push(Err(uniform));
+            }
+        }
+    }
     DocumentOutcome {
         per_action,
         verdict,
-        final_failure: None,
+        final_failure,
         logs_failure,
         inbound_bound: None,
+        per_teardown,
+        trace,
+    }
+}
+
+/// Renders one teardown failure as the uniform `finally[pos]` message.
+/// A panicking future is already a [`ScenarioFailure::TeardownFailure`]
+/// from [`contain_teardown_panic`]; its message is folded in without
+/// repeating the class prefix, so `Display` renders the class exactly
+/// once.
+fn teardown_message(index: usize, failure: ScenarioFailure) -> String {
+    match failure {
+        ScenarioFailure::TeardownFailure { message } => {
+            format!("finally action {index}: {message}")
+        }
+        other => format!("finally action {index}: {other}"),
+    }
+}
+
+/// The panic payload as text: `&str` and `String` payloads survive,
+/// anything else degrades to the fixed fallback.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+/// Runs one teardown future with panic containment: a panic maps to the
+/// apparatus-class [`ScenarioFailure::TeardownFailure`], so teardown can
+/// never unwind through the document boundary.
+pub(crate) async fn contain_teardown_panic<F>(fut: F) -> Result<(), ScenarioFailure>
+where
+    F: std::future::Future<Output = Result<(), ScenarioFailure>>,
+{
+    use futures::FutureExt;
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(result) => result,
+        Err(payload) => Err(ScenarioFailure::TeardownFailure {
+            message: format!("panicked: {}", panic_payload_message(payload.as_ref())),
+        }),
     }
 }
 
@@ -769,6 +933,53 @@ async fn run_action(
                         message: "the `surreal:` action requires the `surreal` feature, which \
                                   this harness build does not enable: rebuild with \
                                   `--features surreal` (demand-gated activation)"
+                            .to_string(),
+                    },
+                });
+            }
+        }
+        ScenarioAction::RedisDel { datasource, keys } => {
+            // Apparatus class (exit 2): deleting keys is harness-side
+            // state preparation/teardown — a failure here means the
+            // scenario never got its declared preconditions (or its
+            // declared cleanup), never that the system under test
+            // misbehaved (the sql/surreal arm rationale).
+            #[cfg(feature = "redis")]
+            {
+                let Some(catalog) = datasource_catalog else {
+                    return Err(ScenarioFailure::ActionTransport {
+                        action: index,
+                        source: TransportError::Other {
+                            message: "redis action: no datasource catalog is available; the \
+                                      boot-owning caller must pass the cascade's catalog"
+                                .to_string(),
+                        },
+                    });
+                };
+                let redis_del = crate::redis_action::RedisDelAction {
+                    datasource: datasource.clone(),
+                    keys: keys.clone(),
+                };
+                crate::redis_action::execute_redis_del(catalog, &redis_del)
+                    .await
+                    .map_err(|message| ScenarioFailure::ActionTransport {
+                        action: index,
+                        source: TransportError::Other { message },
+                    })?;
+            }
+            // Defense-in-depth: the document parser rejects the `redis`
+            // action without the feature, so only a directly-constructed
+            // document reaches this arm (the boot-level inbound
+            // precedent).
+            #[cfg(not(feature = "redis"))]
+            {
+                let _ = (datasource, keys, datasource_catalog);
+                return Err(ScenarioFailure::ActionTransport {
+                    action: index,
+                    source: TransportError::Other {
+                        message: "the `redis` action requires the `redis` feature, which this \
+                                  harness build does not enable: rebuild with \
+                                  `--features redis` (demand-gated activation)"
                             .to_string(),
                     },
                 });

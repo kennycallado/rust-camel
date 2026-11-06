@@ -46,6 +46,7 @@ fn doc_with(actions: Vec<ScenarioAction>) -> ScenarioDocument {
         source_path: std::path::PathBuf::new(),
         route_source: RouteSource::RouteFiles(vec!["routes.yaml".into()]),
         scenario: actions,
+        finally: None,
         partners: None,
         env: None,
         env_passthrough: None,

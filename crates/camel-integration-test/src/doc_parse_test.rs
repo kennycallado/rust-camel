@@ -3931,3 +3931,369 @@ scenario:
         other => panic!("expected Validate, got {other:?}"),
     }
 }
+
+// -------------------------------------------------------------------------
+// Document-level `finally:` teardown list (scenario-finally-hooks task
+// 1.2). The grammar lands here; execution is task 1.4 and the
+// `redis-del` action is task 1.3. Errors name the `finally[i]`
+// position through `DocError::FinallyValidation`, never the scenario
+// action index the `Validation` variant hardcodes.
+// -------------------------------------------------------------------------
+
+#[test]
+fn finally_key_parses_sleep_only() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sleep:
+    duration: 1ms
+finally:
+- sleep:
+    duration: 2ms
+"#,
+    )
+    .expect("parse must succeed");
+    let finally = doc.finally.expect("declared finally list must parse");
+    assert_eq!(finally.len(), 1, "one declared entry");
+    match finally.first().expect("one entry") {
+        ScenarioAction::Sleep { duration } => {
+            assert_eq!(*duration, Duration::from_millis(2));
+        }
+        other => panic!("expected Sleep, got {other:?}"),
+    }
+}
+
+#[test]
+fn finally_rejects_a_verdict_action_at_load() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sleep:
+    duration: 1ms
+finally:
+- send:
+    to: "direct:x"
+    body: "y"
+"#,
+    )
+    .expect_err("parse must fail");
+    match &err {
+        DocError::FinallyValidation { index, message } => {
+            assert_eq!(*index, 0, "error must name the finally position");
+            assert!(
+                message.contains("send"),
+                "message must name the rejected action key: {message}"
+            );
+        }
+        other => panic!("expected FinallyValidation, got {other:?}"),
+    }
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("send"),
+        "rendered error must name the action key: {rendered}"
+    );
+    assert!(
+        rendered.contains("finally[0]"),
+        "rendered error must name the finally position: {rendered}"
+    );
+}
+
+#[test]
+fn declared_but_empty_finally_list_is_a_load_error() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sleep:
+    duration: 1ms
+finally: []
+"#,
+    )
+    .expect_err("parse must fail");
+    assert!(
+        matches!(err, DocError::FinallyValidation { .. }),
+        "expected FinallyValidation, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("finally"),
+        "rendered error must name `finally`: {err}"
+    );
+}
+
+#[test]
+fn finally_is_optional() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sleep:
+    duration: 1ms
+"#,
+    )
+    .expect("parse must succeed");
+    assert!(
+        doc.finally.is_none(),
+        "a document without `finally:` must parse with no teardown list"
+    );
+}
+
+/// A `finally:` entry runs through the same converter as a scenario
+/// action, so the sql grammar (read rejection) fires before the
+/// feature demand gate and is re-positioned at `finally[0]`.
+#[cfg(not(feature = "sql"))]
+#[test]
+fn finally_grammar_validation_precedes_the_demand_gate() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sleep:
+    duration: 1ms
+finally:
+- sql:
+    datasource: db
+    prepare:
+    - SELECT 1
+"#,
+    )
+    .expect_err("parse must fail");
+    match &err {
+        DocError::FinallyValidation { index, message } => {
+            assert_eq!(*index, 0, "error must name the finally position");
+            assert!(
+                message.contains("read"),
+                "message must be the read-statement grammar error: {message}"
+            );
+            assert!(
+                !message.contains("requires the `sql` feature"),
+                "grammar must precede the demand gate: {message}"
+            );
+        }
+        other => panic!("expected FinallyValidation, got {other:?}"),
+    }
+    assert!(
+        err.to_string().contains("finally[0]"),
+        "rendered error must name the finally position: {err}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Scenario `redis:` delete-only prepare action (scenario-finally-hooks
+// task 1.3, bd rc-6wodc). The grammar is ungated and runs in every
+// build; only execution is demand-gated behind the `redis` feature.
+// -------------------------------------------------------------------------
+
+/// The `del` list takes literal keys only: a glob metacharacter is a
+/// load-time grammar defect in BOTH feature configurations (grammar
+/// precedes the demand gate), naming the key and the characters found.
+#[test]
+fn redis_del_rejects_a_pattern_key() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- redis:
+    datasource: cache
+    del:
+    - "orders:*"
+"#,
+    )
+    .expect_err("parse must fail");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("orders:*"),
+        "rendered error must name the key: {rendered}"
+    );
+    assert!(
+        rendered.contains("`*`"),
+        "rendered error must name the metacharacter: {rendered}"
+    );
+    assert!(
+        rendered.contains("literal keys"),
+        "rendered error must state the literal-key law: {rendered}"
+    );
+}
+
+/// An empty `del` list is a load-time grammar defect in both feature
+/// configurations, naming `del` and the empty-list defect.
+#[test]
+fn redis_del_rejects_an_empty_del_list() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- redis:
+    datasource: cache
+    del: []
+"#,
+    )
+    .expect_err("parse must fail");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("`del`"),
+        "rendered error must name the field: {rendered}"
+    );
+    assert!(
+        rendered.contains("at least one key"),
+        "rendered error must name the empty-list defect: {rendered}"
+    );
+}
+
+/// A structurally valid redis delete entry reaches the demand gate in
+/// a featureless build, which names the feature and the rebuild
+/// instruction.
+#[cfg(not(feature = "redis"))]
+#[test]
+fn redis_del_valid_entry_fails_at_the_demand_gate() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- redis:
+    datasource: cache
+    del:
+    - k1
+"#,
+    )
+    .expect_err("parse must fail without the redis feature");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("requires the `redis` feature"),
+        "rendered error must carry the demand-gate text: {rendered}"
+    );
+}
+
+/// A `finally:` list accepts the redis delete action alongside sleep:
+/// only execution is gated, so a redis-enabled build loads the list.
+#[cfg(feature = "redis")]
+#[test]
+fn finally_key_parses_and_accepts_prepare_actions() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sleep:
+    duration: 1ms
+finally:
+- redis:
+    datasource: cache
+    del:
+    - k1
+- sleep:
+    duration: 1ms
+"#,
+    )
+    .expect("parse must succeed");
+    let finally = doc.finally.expect("declared finally list must parse");
+    assert_eq!(finally.len(), 2, "two declared entries");
+    match finally.first().expect("first entry") {
+        ScenarioAction::RedisDel { datasource, keys } => {
+            assert_eq!(datasource, "cache");
+            assert_eq!(keys, &vec!["k1".to_string()]);
+        }
+        other => panic!("expected RedisDel, got {other:?}"),
+    }
+    assert!(
+        matches!(finally.get(1), Some(ScenarioAction::Sleep { .. })),
+        "second entry must be Sleep: {finally:?}"
+    );
+}
+
+/// The redis delete action is also a scenario-list action: the same
+/// prepare vocabulary serves seeding and teardown.
+#[cfg(feature = "redis")]
+#[test]
+fn scenario_list_accepts_redis_del() {
+    let doc = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- redis:
+    datasource: cache
+    del:
+    - k1
+    - k2
+"#,
+    )
+    .expect("parse must succeed");
+    match doc.scenario.first().expect("one action") {
+        ScenarioAction::RedisDel { datasource, keys } => {
+            assert_eq!(datasource, "cache");
+            assert_eq!(keys, &vec!["k1".to_string(), "k2".to_string()]);
+        }
+        other => panic!("expected RedisDel, got {other:?}"),
+    }
+}
+
+/// A structurally valid sql entry reaches the demand gate in a
+/// featureless build; the gate text is re-positioned at `finally[0]`.
+#[cfg(not(feature = "sql"))]
+#[test]
+fn finally_sql_valid_entry_fails_at_the_demand_gate() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sleep:
+    duration: 1ms
+finally:
+- sql:
+    datasource: db
+    prepare:
+    - DELETE FROM t
+"#,
+    )
+    .expect_err("parse must fail without the sql feature");
+    match &err {
+        DocError::FinallyValidation { index, message } => {
+            assert_eq!(*index, 0, "error must name the finally position");
+            assert!(
+                message.contains("requires the `sql` feature"),
+                "message must carry the demand-gate text: {message}"
+            );
+        }
+        other => panic!("expected FinallyValidation, got {other:?}"),
+    }
+    assert!(
+        err.to_string().contains("finally[0]"),
+        "rendered error must name the finally position: {err}"
+    );
+}
+
+/// A structurally valid redis delete entry reaches the demand gate in
+/// a featureless build; the gate text is re-positioned at `finally[0]`
+/// (the `sql` twin).
+#[cfg(not(feature = "redis"))]
+#[test]
+fn finally_redis_del_valid_entry_fails_at_the_demand_gate() {
+    let err = parse_case(
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+- sleep:
+    duration: 1ms
+finally:
+- redis:
+    datasource: cache
+    del:
+    - k1
+"#,
+    )
+    .expect_err("parse must fail without the redis feature");
+    match &err {
+        DocError::FinallyValidation { index, message } => {
+            assert_eq!(*index, 0, "error must name the finally position");
+            assert!(
+                message.contains("requires the `redis` feature"),
+                "message must carry the demand-gate text: {message}"
+            );
+        }
+        other => panic!("expected FinallyValidation, got {other:?}"),
+    }
+    assert!(
+        err.to_string().contains("finally[0]"),
+        "rendered error must name the finally position: {err}"
+    );
+}

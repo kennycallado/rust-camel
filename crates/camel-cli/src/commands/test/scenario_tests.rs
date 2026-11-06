@@ -343,6 +343,7 @@ fn wiring_excludes_plain_string_validate_partner() {
                 select: None,
             },
         ],
+        finally: None,
         partners: None,
         env: None,
         env_passthrough: None,
@@ -1075,5 +1076,104 @@ scenario:
     assert!(
         result.apparatus,
         "full-boot-failure is apparatus class (exit 2)"
+    );
+}
+
+/// Post-verdict rows render each failure from exactly one source: the
+/// `per_teardown` entries render `finally[i]` rows (teardown first),
+/// the shutdown `Err` renders the `shutdown` row unconditionally from
+/// the `Err` value — never from the already-taken `final_failure` slot.
+#[test]
+fn both_final_failures_render_teardown_first() {
+    use camel_integration_test::{DocumentOutcome, ScenarioFailure, ScenarioVerdict};
+
+    let teardown = ScenarioFailure::TeardownFailure {
+        message: "finally action 0: boom".to_string(),
+    };
+    let mut outcome = DocumentOutcome {
+        per_action: vec![Ok(ScenarioVerdict::Pass)],
+        verdict: Some(ScenarioVerdict::Pass),
+        final_failure: Some(teardown.clone()),
+        inbound_bound: None,
+        logs_failure: None,
+        per_teardown: vec![Err(teardown)],
+        trace: Vec::new(),
+    };
+    let shutdown = ScenarioFailure::ShutdownFailure {
+        message: "boot broke".to_string(),
+    };
+    // The teardown failure already took the slot.
+    outcome.record_shutdown_failure(shutdown.clone());
+
+    // The run path's post-verdict assembly: finally rows first, then
+    // the unconditional shutdown-Err row.
+    let mut rows = final_failure_rows(&outcome);
+    rows.push(EndpointResult {
+        endpoint: "shutdown".to_string(),
+        outcome: Err(shutdown.to_string()),
+    });
+
+    assert_eq!(rows.len(), 2, "teardown and shutdown render exactly once");
+    assert_eq!(rows[0].endpoint, "finally[0]");
+    let teardown_text = rows[0]
+        .outcome
+        .as_ref()
+        .expect_err("the finally row must carry the failure");
+    assert!(
+        teardown_text.starts_with("teardown-failure: "),
+        "the finally row carries the teardown class: {teardown_text}"
+    );
+    assert_eq!(rows[1].endpoint, "shutdown");
+    let shutdown_text = rows[1]
+        .outcome
+        .as_ref()
+        .expect_err("the shutdown row must carry the failure");
+    assert!(
+        shutdown_text.starts_with("shutdown-failure: "),
+        "the shutdown row carries the shutdown class: {shutdown_text}"
+    );
+}
+
+/// The no-boot smoke path assembles post-verdict rows exactly like the
+/// full-boot path: a failing `finally:` item renders its `finally[i]`
+/// row and trips the apparatus class (exit 2), instead of being
+/// swallowed by `outcome_rows` (which reads only actions and logs).
+#[tokio::test]
+async fn smoke_path_renders_finally_failures() {
+    use camel_integration_test::{RouteSource, ScenarioAction, ScenarioDocument};
+
+    let doc = ScenarioDocument {
+        source_path: std::path::PathBuf::new(),
+        route_source: RouteSource::RouteFiles(Vec::new()),
+        scenario: Vec::new(),
+        finally: Some(vec![ScenarioAction::Sql {
+            datasource: "db".to_string(),
+            prepare: vec!["DELETE FROM t".to_string()],
+        }]),
+        partners: None,
+        env: None,
+        env_passthrough: None,
+        profile: None,
+        send_deadline: None,
+        inbound: None,
+        logs: None,
+    };
+    let wired: Vec<&camel_integration_test::EndpointRef> = Vec::new();
+    let result = run_scenario_fake_smoke(&doc, &wired).await;
+
+    assert_eq!(result.doc_error, None);
+    assert!(
+        result.apparatus,
+        "a teardown failure is apparatus class on the smoke path"
+    );
+    assert_eq!(result.action_results.len(), 1, "one finally[i] row");
+    assert_eq!(result.action_results[0].endpoint, "finally[0]");
+    let text = result.action_results[0]
+        .outcome
+        .as_ref()
+        .expect_err("the finally row must carry the failure");
+    assert!(
+        text.starts_with("teardown-failure: "),
+        "the row carries the teardown class: {text}"
     );
 }

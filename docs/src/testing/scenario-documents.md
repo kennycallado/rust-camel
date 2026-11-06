@@ -188,4 +188,41 @@ scenario:
 
 Known limitation, parallel mode (bd rc-gcf9n): `camel test` executes documents sequentially today. When parallel document execution lands, two concurrently booted documents that share one memory name could collide on the same shared memory database. The planned remedy is a per-boot unique suffix in the memory name (`memdb_{scenario}_{boot}`) minted by the harness for hermetic memory datasources. This note records a plan, not a rule for the current runner. Until parallel lands, documents that share a durable datasource must not run concurrently.
 
+## Teardown with `finally:`
+A document may declare one document-level `finally:` list, a sibling of `scenario:`. The list is teardown, never test: the runner executes it after the verdict is fixed. The accepted set is the prepare class — `sleep`, `sql`, `surreal`, and the delete-only `redis:` form. `send`, `receive`, and `validate` are verdict actions, and the load rejects each of them with a message naming the `finally[i]` position and the accepted prepare-class actions. A declared-but-empty list is a load error.
+
+```yaml
+scenario:
+- sql:
+    datasource: appdb
+    prepare:
+    - INSERT INTO orders VALUES ('seed-a')
+- send: {to: direct:start}
+- validate:
+    target: {sql: {datasource: appdb, query: SELECT id FROM orders}}
+    expectation: {count: 1}
+finally:
+- sql:
+    datasource: appdb
+    prepare:
+    - DELETE FROM orders WHERE id = 'seed-a'
+```
+
+Teardown runs on both verdict paths. A passing document reaches `finally:` after the last action and after the `logs:` block evaluates. A failing document stops its action list at the first failure and still runs every declared teardown item. A partially seeded durable resource therefore gets cleaned on the failing path too, so a document that fails before its last action leaves the resource as it found it. The single carve-out is the pre-run abort: when a foreign tracing subscriber denies `logs:` capture, the harness fails the document with `log-capture-unavailable` before the first action, so no verdict is fixed and no teardown runs.
+
+Every teardown failure is the apparatus class `teardown-failure`, and it exits 2. The recorded verdict is never masked: a passing document still passes, and a failing document keeps its own failure. The failure row names the `finally[i]` position and renders the inner failure. A panic inside one item is contained at the document boundary, so the run records that item's failure and continues with the next item and the next document.
+
+The `redis:` form is `{datasource: <name>, del: [<key>, ...]}`. `datasource` names a key from `[datasources]` in `Camel.toml`, exactly as an `sql:` action names one. `del` takes literal keys only: a key containing `*`, `?`, `[`, `]`, `{`, or `}` fails the load. Pattern delete (glob-style bulk delete) is not supported and is deferred (bd rc-ql8eq), and there is no `FLUSHDB` or `FLUSHALL`. One `DEL` through the named datasource's catalog connection removes the listed keys; a missing key is success, so the list is idempotent across runs.
+
+```yaml
+finally:
+- redis:
+    datasource: statedb
+    del: [order:42, order:42:lock]
+```
+
+The `redis:` delete action is accepted in `scenario:` too. The clean-first idiom for a keyed store is a `redis:` delete before the asserting actions, and the same list in `finally:` is the teardown. Both positions send one `DEL` through the datasource catalog, and the two shapes share one grammar.
+
+A document whose `scenario:` list or `finally:` list needs the datasource catalog selects the full boot. An `sql:`, `surreal:`, or `redis:` delete action in either list is such a demand, so a finally-only prepare action selects the boot on its own. A `sleep`-only teardown keeps the no-boot smoke path.
+
 The STATE-side grammar has its own page. The `sql:` prepare action writes datasource state, and the `validate` sql target reads it: [SQL state assertions](scenario-sql.md).

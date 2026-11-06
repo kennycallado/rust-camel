@@ -1,0 +1,9 @@
+{
+  "kind": "plan",
+  "verdict": "BLESSED",
+  "hash": "sha256:8bb39ee824aab9dd2366f9ea861dca8e9bd2838410b4eb0ec2c13b72d52dc0d4",
+  "expert": "experts/e_gpt",
+  "session": "ses_e52b6d919ffeZbFEbjZEWs50ix",
+  "date": "2026-11-05",
+  "note": "Mission 504 plan bless. Round 1 REJECTED (trace order vs runner.rs:533-544; ADR amendment header/acceptance) — both folds applied, re-bless BLESSED with zero findings. Prior: two r_glm plan-review rounds (ses_e52d4e96..., ses_e52c87a2..., ses_e52c02e6...) with all findings folded; spec blessed sha256:8c0b725e (ses_e52dbf7b...)."
+}

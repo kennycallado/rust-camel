@@ -87,8 +87,8 @@ const BOOT_SCHEMES: [&str; 2] = [FAKE_SCHEME, "direct"];
 pub(super) struct ScenarioDocResult {
     /// Per-action verdict rows, in action order; `endpoint` holds the
     /// row label (`scenario[i] <kind>`, `logs` for the document-level
-    /// `logs:` block slot, or `shutdown` for the post-verdict teardown
-    /// slot).
+    /// `logs:` block slot, `finally[i]` for a failed teardown item, or
+    /// `shutdown` for the post-verdict shutdown slot).
     pub action_results: Vec<EndpointResult>,
     /// Document-level error (`infra-unavailable`, `partner-bind-failure`,
     /// `full-boot-failure`): apparatus class, exit 2.
@@ -117,6 +117,7 @@ pub(super) fn is_apparatus(failure: &camel_integration_test::ScenarioFailure) ->
             | F::ShutdownFailure { .. }
             | F::ArrivalLaneOverflow { .. }
             | F::LogCaptureUnavailable { .. }
+            | F::TeardownFailure { .. }
             | F::VarUnresolved { .. }
     )
 }
@@ -129,6 +130,7 @@ fn action_label(index: usize, action: &camel_integration_test::ScenarioAction) -
         A::Receive { .. } => "receive",
         A::Sleep { .. } => "sleep",
         A::Sql { .. } => "sql",
+        A::RedisDel { .. } => "redis-del",
         A::Validate { .. } => "validate",
         _ => "action",
     };
@@ -178,6 +180,29 @@ fn outcome_rows(
         });
     }
     (action_results, apparatus)
+}
+
+/// Renders the post-verdict teardown rows: one `finally[i]` row per
+/// failed `per_teardown` entry, in declared order. The `final_failure`
+/// slot itself renders nothing here — a `TeardownFailure` is already
+/// represented by its own `finally[i]` row, and a shutdown failure
+/// renders from the shutdown `Err` in the run path — so every failure
+/// renders exactly once from its own source.
+pub(super) fn final_failure_rows(
+    outcome: &camel_integration_test::DocumentOutcome,
+) -> Vec<EndpointResult> {
+    outcome
+        .per_teardown
+        .iter()
+        .enumerate()
+        .filter_map(|(index, result)| match result {
+            Ok(()) => None,
+            Err(failure) => Some(EndpointResult {
+                endpoint: format!("finally[{index}]"),
+                outcome: Err(failure.to_string()),
+            }),
+        })
+        .collect()
 }
 
 /// The scheme (text before the first `:`) of an endpoint URI.
@@ -341,72 +366,102 @@ pub(super) async fn run_scenario_doc(
         feature = "integration-redis"
     ))]
     {
-        // A `sql:` action full-boots in every build that executes it
-        // (bd rc-25lup.1): seeding rides the booted cascade's
-        // datasource catalog. A sql-only document wires no endpoints,
-        // so the scheme predicate below alone would never select the
-        // full boot for it. The parser rejects `sql:` in builds
-        // without `integration-sql`, so `has_sql` is `false` there.
-        let has_sql = doc
-            .scenario
-            .iter()
-            .any(|action| matches!(action, camel_integration_test::ScenarioAction::Sql { .. }));
-        // The surreal counterpart (surreal-state-tier task 3.2): a
-        // `surreal:` action or a surreal `validate` target full-boots
-        // in every build that executes them — seeding and reads ride
-        // the same booted datasource catalog. A surreal-only document
-        // wires no endpoints (datasource references, the sql
-        // precedent), so the scheme predicate below alone would never
-        // select the full boot for it. The binding itself is
-        // feature-gated (has_sql's effective semantics): the parser
-        // rejects `surreal:` actions without `integration-surreal`,
-        // but the validate target's grammar is UNGATED — a
-        // surreal-target document parses in every build. Ungated,
-        // `has_surreal` would be `true` in a build without
-        // `integration-surreal` and route the document to the full
-        // boot, where it fails with a generic full-boot-failure; the
-        // gate keeps such a document on the smoke path, where the
-        // runner's feature split fires the named demand-gate error at
-        // action time.
-        #[cfg(feature = "integration-surreal")]
-        let has_surreal = doc.scenario.iter().any(|action| {
-            matches!(
-                action,
-                camel_integration_test::ScenarioAction::Surreal { .. }
-                    | camel_integration_test::ScenarioAction::Validate {
-                        target: camel_integration_test::ScenarioTarget::Surreal(_),
-                        ..
-                    }
-            )
-        });
-        // Feature-off twin: the term below is constant-false, so a
-        // surreal-target document never selects the full boot here.
-        #[cfg(not(feature = "integration-surreal"))]
-        let has_surreal = false;
-        #[cfg(feature = "integration-redis")]
-        let has_redis = doc.scenario.iter().any(|action| {
-            matches!(
-                action,
-                camel_integration_test::ScenarioAction::Validate {
-                    target: camel_integration_test::ScenarioTarget::Redis(_),
-                    ..
-                }
-            )
-        });
-        #[cfg(not(feature = "integration-redis"))]
-        let has_redis = false;
-        if (wired.iter().any(|r| scheme_of(&r.endpoint) != FAKE_SCHEME)
-            && wired
-                .iter()
-                .all(|r| BOOT_SCHEMES.contains(&scheme_of(&r.endpoint))))
-            || has_sql
-            || has_surreal
-            || has_redis
+        if needs_catalog_boot(doc)
+            || (wired.iter().any(|r| scheme_of(&r.endpoint) != FAKE_SCHEME)
+                && wired
+                    .iter()
+                    .all(|r| BOOT_SCHEMES.contains(&scheme_of(&r.endpoint))))
         {
             return run_scenario_full_boot(doc, root).await;
         }
     }
     run_scenario_fake_smoke(doc, &wired).await
+}
+
+/// Whether the document demands the booted datasource catalog even
+/// though it wires no boot scheme — the scheme predicate in
+/// [`run_scenario_doc`] alone would never select the full boot for it.
+///
+/// A `sql:` action full-boots in every build that executes it (bd
+/// rc-25lup.1): seeding rides the booted cascade's datasource catalog.
+/// The parser rejects `sql:` in builds without `integration-sql`, so
+/// `has_sql` is `false` there.
+///
+/// The surreal counterpart (surreal-state-tier task 3.2): a
+/// `surreal:` action or a surreal `validate` target full-boots in
+/// every build that executes them — seeding and reads ride the same
+/// booted datasource catalog. A surreal-only document wires no
+/// endpoints (datasource references, the sql precedent), so the scheme
+/// predicate alone would never select the full boot for it. The
+/// binding itself is feature-gated (has_sql's effective semantics):
+/// the parser rejects `surreal:` actions without `integration-surreal`,
+/// but the validate target's grammar is UNGATED — a surreal-target
+/// document parses in every build. Ungated, `has_surreal` would be
+/// `true` in a build without `integration-surreal` and route the
+/// document to the full boot, where it fails with a generic
+/// full-boot-failure; the gate keeps such a document on the smoke
+/// path, where the runner's feature split fires the named demand-gate
+/// error at action time.
+///
+/// The redis-del prepare action (bd rc-6wodc) needs the booted redis
+/// datasource, exactly like the redis `validate` target; both select
+/// the full boot. The action itself is demand-gated by the parser, but
+/// the validate target's grammar is ungated, so `has_redis` keeps the
+/// same constant-false twin as `has_surreal`: a redis-target document
+/// in a feature-free build stays on the smoke path, where the runner
+/// fires the named demand-gate error at action time.
+///
+/// Both lists count: `finally:` items run as post-verdict teardown
+/// through the same runner and the same datasource catalog, so a
+/// finally-only prepare action selects the boot on its own
+/// (scenario-finally-hooks task 1.5).
+// `test` keeps the function compiled for the boot-selection unit
+// tests in feature-free builds, where the caller block above is gone.
+#[cfg(any(
+    test,
+    feature = "integration-http",
+    feature = "integration-sql",
+    feature = "integration-surreal",
+    feature = "integration-redis"
+))]
+pub(super) fn needs_catalog_boot(doc: &camel_integration_test::ScenarioDocument) -> bool {
+    use camel_integration_test::ScenarioAction;
+    #[cfg(any(feature = "integration-surreal", feature = "integration-redis"))]
+    use camel_integration_test::ScenarioTarget;
+
+    let items = || doc.scenario.iter().chain(doc.finally.iter().flatten());
+
+    let has_sql = items().any(|action| matches!(action, ScenarioAction::Sql { .. }));
+    #[cfg(feature = "integration-surreal")]
+    let has_surreal = items().any(|action| {
+        matches!(
+            action,
+            ScenarioAction::Surreal { .. }
+                | ScenarioAction::Validate {
+                    target: ScenarioTarget::Surreal(_),
+                    ..
+                }
+        )
+    });
+    // Feature-off twin: the term below is constant-false, so a
+    // surreal-target document never selects the full boot here.
+    #[cfg(not(feature = "integration-surreal"))]
+    let has_surreal = false;
+    #[cfg(feature = "integration-redis")]
+    let has_redis = items().any(|action| {
+        matches!(
+            action,
+            ScenarioAction::RedisDel { .. }
+                | ScenarioAction::Validate {
+                    target: ScenarioTarget::Redis(_),
+                    ..
+                }
+        )
+    });
+    #[cfg(not(feature = "integration-redis"))]
+    let has_redis = false;
+
+    has_sql || has_surreal || has_redis
 }
 
 /// The no-boot fake smoke path (ADR-0069 section 5, pre-boot harness):
@@ -470,7 +525,15 @@ async fn run_scenario_fake_smoke(
     // closed through the runner's None arm.
     let outcome =
         camel_integration_test::run_scenario_document(doc, &router, &mut vars, None).await;
-    let (action_results, apparatus) = outcome_rows(doc, &outcome);
+    let (mut action_results, mut apparatus) = outcome_rows(doc, &outcome);
+    // Teardown runs on this path too: a failed `finally:` item renders
+    // its `finally[i]` row and trips the apparatus class exactly like
+    // the full-boot assembly (task 1.5 owns boot selection, not this).
+    action_results.extend(final_failure_rows(&outcome));
+    apparatus |= outcome
+        .per_teardown
+        .iter()
+        .any(|result| matches!(result, Err(failure) if is_apparatus(failure)));
     ScenarioDocResult {
         action_results,
         doc_error: None,
@@ -653,26 +716,40 @@ async fn run_scenario_full_boot(
 
     // (f) Teardown, log-and-continue: a shutdown failure never masks
     // the recorded verdict; it fills the outcome's post-verdict
-    // `final_failure` slot — the struct stays complete for
-    // programmatic consumers — and the row below renders from that
-    // slot as the `shutdown-failure` line: apparatus class, exit 2.
+    // `final_failure` slot through `record_shutdown_failure` (only when
+    // the slot is still empty — a teardown failure the runner recorded
+    // wins), and the row below renders from the `Err` value itself,
+    // never from the slot: shutdown is the only source of a
+    // `shutdown-failure` row. Apparatus class, exit 2.
+    let mut shutdown_failure: Option<ScenarioFailure> = None;
     {
         let mut guard = ctx.lock().await;
         if let Err(e) = run.boot.shutdown(&mut guard).await {
             // log-policy: system-broken
             tracing::error!("scenario boot shutdown failed: {e}");
-            outcome.final_failure = Some(ScenarioFailure::ShutdownFailure {
+            let failure = ScenarioFailure::ShutdownFailure {
                 message: e.to_string(),
-            });
+            };
+            outcome.record_shutdown_failure(failure.clone());
+            shutdown_failure = Some(failure);
         }
     }
-    if let Some(final_failure) = &outcome.final_failure {
+    // Teardown rows first (one per failed `finally:` item, from the
+    // `per_teardown` source), then the unconditional shutdown row.
+    action_results.extend(final_failure_rows(&outcome));
+    if let Some(failure) = &shutdown_failure {
         apparatus = true;
         action_results.push(EndpointResult {
             endpoint: "shutdown".to_string(),
-            outcome: Err(final_failure.to_string()),
+            outcome: Err(failure.to_string()),
         });
     }
+    // A teardown failure is apparatus class: the scenario's answer is
+    // already fixed, but the harness's own cleanup failed (exit 2).
+    apparatus |= outcome
+        .per_teardown
+        .iter()
+        .any(|result| matches!(result, Err(failure) if is_apparatus(failure)));
 
     ScenarioDocResult {
         action_results,
@@ -684,3 +761,106 @@ async fn run_scenario_full_boot(
 #[cfg(all(test, feature = "integration-http"))]
 #[path = "scenario_tests.rs"]
 mod tests;
+
+/// Boot-selection locks (scenario-finally-hooks task 1.5): the scan
+/// reads the post-verdict `finally:` list exactly like the `scenario:`
+/// list, and a `redis-del` prepare action selects the full boot like
+/// its `scenario:` counterpart.
+#[cfg(test)]
+mod boot_selection_tests {
+    use camel_integration_test::{RouteSource, ScenarioAction, ScenarioDocument};
+    use std::time::Duration;
+
+    /// A directly-constructed document: the struct fields are pub, so
+    /// boot selection is testable without the parser (and without its
+    /// demand gates).
+    fn document(
+        scenario: Vec<ScenarioAction>,
+        finally: Option<Vec<ScenarioAction>>,
+    ) -> ScenarioDocument {
+        ScenarioDocument {
+            source_path: std::path::PathBuf::new(),
+            route_source: RouteSource::RouteFiles(Vec::new()),
+            scenario,
+            finally,
+            partners: None,
+            env: None,
+            env_passthrough: None,
+            profile: None,
+            send_deadline: None,
+            inbound: None,
+            logs: None,
+        }
+    }
+
+    fn sleep() -> ScenarioAction {
+        ScenarioAction::Sleep {
+            duration: Duration::from_millis(1),
+        }
+    }
+
+    /// A feature-free document with no datasource demand anywhere must
+    /// keep the no-boot smoke path.
+    #[test]
+    fn finally_sleep_only_stays_smoke() {
+        let doc = document(vec![sleep()], Some(vec![sleep()]));
+        assert!(
+            !super::needs_catalog_boot(&doc),
+            "only sleep actions: the document selects the smoke path"
+        );
+    }
+
+    /// A `sql:` prepare action in the `finally:` list demands the booted
+    /// datasource catalog, exactly like a `scenario:` one.
+    #[cfg(feature = "integration-sql")]
+    #[test]
+    fn finally_sql_selects_full_boot() {
+        let doc = document(
+            vec![sleep()],
+            Some(vec![ScenarioAction::Sql {
+                datasource: "db".to_string(),
+                prepare: vec!["DELETE FROM t".to_string()],
+            }]),
+        );
+        assert!(
+            super::needs_catalog_boot(&doc),
+            "a finally sql prepare action selects the full boot"
+        );
+    }
+
+    /// A `redis-del` prepare action wires no endpoint and pairs with no
+    /// validate target: the scan itself must select the full boot.
+    #[cfg(feature = "integration-redis")]
+    #[test]
+    fn scenario_redis_del_alone_selects_full_boot() {
+        let doc = document(
+            vec![ScenarioAction::RedisDel {
+                datasource: "cache".to_string(),
+                keys: vec!["k".to_string()],
+            }],
+            None,
+        );
+        assert!(
+            super::needs_catalog_boot(&doc),
+            "a lone redis-del action selects the full boot"
+        );
+    }
+
+    /// A `redis-del` prepare action in the `finally:` list selects the
+    /// full boot like a `scenario:` one.
+    #[cfg(feature = "integration-redis")]
+    #[test]
+    fn finally_redis_del_selects_full_boot() {
+        let doc = document(
+            vec![sleep()],
+            Some(vec![ScenarioAction::RedisDel {
+                datasource: "cache".to_string(),
+                keys: vec!["k".to_string()],
+            }]),
+        );
+        assert!(
+            super::needs_catalog_boot(&doc),
+            "a finally redis-del action selects the full boot"
+        );
+    }
+}

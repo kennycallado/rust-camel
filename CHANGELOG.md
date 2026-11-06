@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- feat(testing): scenario documents accept a document-level `finally:` teardown list (sleep, sql, surreal, and a delete-only redis `del` prepare action) that runs after the verdict on both verdict paths; teardown failures report as the new `teardown-failure` apparatus class without masking the verdict (bd rc-6wodc).
+
 ### Changed
 
 - change(components/http,rest-dsl): non-request-borne type-conversion failures now map to HTTP 500 (conversion_failed) instead of 400 (bad_request), and the REST binding-injected unmarshal/schema check reclassifies its failures to ValidationError (400, validation_error) per ADR-0096 fault blame; mid-route user unmarshal and authored marshal keep their conversion error identity but now report 500; metric label at the binding seam moves type_conversion → validation; no opt-in window (ADR-0090) (bd rc-zwd3l).

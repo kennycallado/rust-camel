@@ -102,9 +102,9 @@ impl<'de> Deserialize<'de> for RawEndpointRef {
 ///
 /// - `doc-validation` class — Display carries the `doc-validation:`
 ///   token: `NotTestDocument`, `MissingScenario`, `MixedVocabulary`,
-///   `Validation`, `ReservedEnvKey`, `InlineRoutes`,
-///   `InlineRoutesRejected`, `RouteFilesGlobMetacharacters`,
-///   `ProvisioningWithoutAuthority`,
+///   `Validation`, `FinallyValidation`, `ReservedEnvKey`,
+///   `InlineRoutes`, `InlineRoutesRejected`,
+///   `RouteFilesGlobMetacharacters`, `ProvisioningWithoutAuthority`,
 ///   `ExpectReplyOnUnsupportedSend`, `LogsBlock`.
 /// - `infra-unavailable` class — `UnsupportedProvisioning` (reserved
 ///   provisioning grammar; Display names the class).
@@ -171,6 +171,18 @@ pub enum DocError {
     #[error("doc-validation: scenario[{index}]: {message}")]
     Validation {
         /// Zero-based position of the action in the `scenario:` list.
+        index: usize,
+        /// What failed.
+        message: String,
+    },
+    /// A document-level `finally:` entry failed validation; `index`
+    /// is the position in the `finally:` list. `Validation` hardcodes
+    /// `scenario[{index}]`, so teardown errors carry their own variant
+    /// to name `finally[index]`. A declared-but-empty list is rejected
+    /// with index 0 (the section, not an action, failed).
+    #[error("doc-validation: finally[{index}]: {message}")]
+    FinallyValidation {
+        /// Zero-based position of the entry in the `finally:` list.
         index: usize,
         /// What failed.
         message: String,

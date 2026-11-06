@@ -430,6 +430,7 @@ mod executor {
                 elapsed_at_least: None,
                 select: None,
             }],
+            finally: None,
             partners: None,
             env: None,
             env_passthrough: None,

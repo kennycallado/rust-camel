@@ -77,6 +77,7 @@ routes:
             source_path: dir.path().join("case.test.yaml"),
             route_source: RouteSource::RouteFiles(vec!["routes.yaml".into()]),
             scenario: Vec::new(),
+            finally: None,
             partners: None,
             env: None,
             env_passthrough: None,

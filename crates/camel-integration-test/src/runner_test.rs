@@ -26,9 +26,9 @@ use crate::document::{
     ScenarioTarget, SqlTarget, ValidateExpectation,
 };
 use crate::runner::{
-    DocumentOutcome, ScenarioFailure, ScenarioVars, ScenarioVerdict, effective_send_deadline,
-    fill_bind_vars, interpolate_value, reply_body_value, resolve_placeholders, run_scenario,
-    run_scenario_document,
+    DocumentOutcome, ScenarioEvent, ScenarioFailure, ScenarioVars, ScenarioVerdict,
+    contain_teardown_panic, effective_send_deadline, fill_bind_vars, interpolate_value,
+    reply_body_value, resolve_placeholders, run_scenario, run_scenario_document,
 };
 #[cfg(all(test, feature = "sql"))]
 use crate::sql_stub::{seed, sqlite_catalog};
@@ -52,6 +52,7 @@ fn doc_with(actions: Vec<ScenarioAction>) -> ScenarioDocument {
         source_path: std::path::PathBuf::new(),
         route_source: RouteSource::RouteFiles(vec!["routes.yaml".into()]),
         scenario: actions,
+        finally: None,
         partners: None,
         env: None,
         env_passthrough: None,
@@ -760,6 +761,12 @@ async fn document_run_all_pass_records_verdict() {
             final_failure: None,
             inbound_bound: None,
             logs_failure: None,
+            per_teardown: vec![],
+            trace: vec![
+                ScenarioEvent::Action(0),
+                ScenarioEvent::Action(1),
+                ScenarioEvent::VerdictFixed,
+            ],
         }
     );
 }
@@ -2386,4 +2393,203 @@ scenario:
         "the second action must have seeded the same client: {rows:?}"
     );
     run.boot.shutdown(&mut run.ctx).await.expect("shutdown");
+}
+
+// -------------------------------------------------------------------------
+// Document-level teardown execution (scenario-finally-hooks task 1.4)
+// -------------------------------------------------------------------------
+
+/// Teardown runs after the verdict is fixed, in declared order: the
+/// trace witnesses each item, and every item succeeded.
+#[tokio::test]
+async fn finally_runs_after_the_scenario_verdict() {
+    let router = PartnerRouter::new(BTreeMap::new());
+    let mut doc = doc_with(vec![ScenarioAction::Sleep {
+        duration: Duration::from_millis(1),
+    }]);
+    doc.finally = Some(vec![
+        ScenarioAction::Sleep {
+            duration: Duration::from_millis(1),
+        },
+        ScenarioAction::Sleep {
+            duration: Duration::from_millis(1),
+        },
+    ]);
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(outcome.verdict, Some(ScenarioVerdict::Pass));
+    assert_eq!(
+        outcome.trace,
+        vec![
+            ScenarioEvent::Action(0),
+            ScenarioEvent::VerdictFixed,
+            ScenarioEvent::Teardown(0),
+            ScenarioEvent::Teardown(1),
+        ],
+        "no logs block: no LogsEvaluated event; teardown follows the fixed verdict"
+    );
+    assert_eq!(outcome.per_teardown, vec![Ok(()), Ok(())]);
+}
+
+/// A failing teardown item never rewrites the recorded verdict, and the
+/// loop keeps running the remaining items: one `per_teardown` entry per
+/// finally item, in declared order.
+#[tokio::test]
+async fn finally_failure_does_not_mask_a_pass() {
+    let router = PartnerRouter::new(BTreeMap::new());
+    let mut doc = doc_with(vec![ScenarioAction::Sleep {
+        duration: Duration::from_millis(1),
+    }]);
+    doc.finally = Some(vec![
+        ScenarioAction::Sql {
+            datasource: "db".to_string(),
+            prepare: vec!["DELETE FROM t".to_string()],
+        },
+        ScenarioAction::Sleep {
+            duration: Duration::from_millis(1),
+        },
+    ]);
+    let mut vars = ScenarioVars::new();
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(
+        outcome.verdict,
+        Some(ScenarioVerdict::Pass),
+        "teardown must never rewrite the recorded verdict"
+    );
+    assert_eq!(outcome.per_teardown.len(), 2, "one entry per finally item");
+    match &outcome.per_teardown[0] {
+        Err(ScenarioFailure::TeardownFailure { message }) => assert!(
+            message.starts_with("finally action 0: "),
+            "the uniform teardown message must name the finally position: {message}"
+        ),
+        other => panic!("expected TeardownFailure on finally[0], got {other:?}"),
+    }
+    assert_eq!(
+        outcome.per_teardown[1],
+        Ok(()),
+        "the loop continues past a failed item"
+    );
+    assert_eq!(
+        outcome.trace,
+        vec![
+            ScenarioEvent::Action(0),
+            ScenarioEvent::VerdictFixed,
+            ScenarioEvent::Teardown(0),
+            ScenarioEvent::Teardown(1),
+        ],
+        "every executed teardown item is witnessed"
+    );
+    assert!(
+        matches!(
+            outcome.final_failure,
+            Some(ScenarioFailure::TeardownFailure { .. })
+        ),
+        "the first teardown failure fills the post-verdict slot"
+    );
+}
+
+async fn panicking_teardown() -> Result<(), ScenarioFailure> {
+    panic!("teardown blew up");
+}
+
+/// A panicking teardown future is contained at the document boundary and
+/// reported as the apparatus-class `TeardownFailure`.
+#[tokio::test]
+async fn finally_panic_is_contained_and_reported() {
+    let failure = contain_teardown_panic(panicking_teardown())
+        .await
+        .expect_err("a panicking teardown must be caught, not propagated");
+    match &failure {
+        ScenarioFailure::TeardownFailure { message } => assert!(
+            message.contains("teardown blew up"),
+            "the panic payload must survive containment: {message}"
+        ),
+        other => panic!("expected TeardownFailure, got {other:?}"),
+    }
+    assert!(
+        failure.to_string().starts_with("teardown-failure: "),
+        "the class prefix comes from the variant's Display: {failure}"
+    );
+}
+
+/// Teardown runs on the failure path too, after the failing action, and
+/// no verdict is fixed: the absent `VerdictFixed` is the witness.
+#[tokio::test]
+async fn finally_runs_when_the_scenario_fails() {
+    let router = PartnerRouter::new(BTreeMap::new());
+    let mut doc = doc_with(vec![ScenarioAction::Validate {
+        target: ScenarioTarget::Variable("status".to_string()),
+        expectation: ValidateExpectation::Message(Expectation::Equals(Value::String(
+            "ready".to_string(),
+        ))),
+        deadline: None,
+        elapsed_at_least: None,
+        select: None,
+    }]);
+    doc.finally = Some(vec![ScenarioAction::Sleep {
+        duration: Duration::from_millis(1),
+    }]);
+    let mut vars = ScenarioVars::new();
+    // Seeded with a MISMATCHING value: a verdict-class validation
+    // failure, not the apparatus-class unresolved variable.
+    vars.set("status", Value::String("starting".to_string()));
+    let outcome = run_scenario_document(&doc, &router, &mut vars, None).await;
+    assert_eq!(outcome.verdict, None);
+    assert!(
+        matches!(
+            outcome.per_action[0],
+            Err(ScenarioFailure::ValidationMismatch { .. })
+        ),
+        "got {:?}",
+        outcome.per_action[0]
+    );
+    assert_eq!(
+        outcome.trace,
+        vec![ScenarioEvent::Action(0), ScenarioEvent::Teardown(0)],
+        "a failed scenario fixes no verdict, yet teardown still runs"
+    );
+    assert_eq!(outcome.per_teardown[0], Ok(()));
+}
+
+fn outcome_with(final_failure: Option<ScenarioFailure>) -> DocumentOutcome {
+    DocumentOutcome {
+        per_action: Vec::new(),
+        verdict: Some(ScenarioVerdict::Pass),
+        final_failure,
+        inbound_bound: None,
+        logs_failure: None,
+        per_teardown: Vec::new(),
+        trace: Vec::new(),
+    }
+}
+
+/// The structured post-verdict slot is write-once: a recorded teardown
+/// failure wins over a later shutdown failure.
+#[test]
+fn record_shutdown_failure_writes_only_when_none() {
+    let mut empty = outcome_with(None);
+    empty.record_shutdown_failure(ScenarioFailure::ShutdownFailure {
+        message: "boot broke".to_string(),
+    });
+    assert!(
+        matches!(
+            empty.final_failure,
+            Some(ScenarioFailure::ShutdownFailure { .. })
+        ),
+        "an empty slot takes the shutdown failure: {:?}",
+        empty.final_failure
+    );
+
+    let teardown = ScenarioFailure::TeardownFailure {
+        message: "finally action 0: boom".to_string(),
+    };
+    let mut taken = outcome_with(Some(teardown.clone()));
+    taken.record_shutdown_failure(ScenarioFailure::ShutdownFailure {
+        message: "boot broke".to_string(),
+    });
+    assert_eq!(
+        taken.final_failure,
+        Some(teardown),
+        "a recorded teardown failure must stay unchanged"
+    );
 }
