@@ -313,9 +313,13 @@ reservations. Cross-process or cross-host duplicates SHALL be documented as
 bounded at N times `JMS_MAX_DELIVERY_ATTEMPTS`, where N SHALL be the number of
 distinct journal domains — `(directory, broker key, destination key)` tuples —
 consuming the queue within one retention window.
-Durable topic subscriptions are unsupported. For topic destinations the bridge
-SHALL use the same completion settlement with a subscription-scoped volatile
-counter, and SHALL document that the topic poison cap is not crash-stable.
+
+Topic delivery attempts that are NOT durable subscriptions SHALL keep the
+subscription-scoped volatile counter, and SHALL document that the topic poison
+cap is not crash-stable. Durable topic subscriptions (both `clientId` and
+`subscriptionName` configured) SHALL be broker-side durable subscriptions:
+their redelivery across reconnects is owned by the broker, and their attempts
+SHALL NOT be recorded in the attempt journal or take its lock.
 
 The directory and its files SHALL be owner-private (mode 0700 and 0600 on
 POSIX). Producer-only bridges and topic consumption SHALL NOT touch the journal
@@ -390,8 +394,9 @@ it as a startup permanent failure.
 
 - **GIVEN** a topic destination
 - **WHEN** the bridge consumes it
-- **THEN** it SHALL use a subscription-scoped volatile counter
+- **THEN** a non-durable subscription SHALL use a subscription-scoped volatile counter
 - **AND** it SHALL document that the cap is not crash-stable
+- **AND** a durable subscription SHALL NOT record attempts in the attempt journal (broker-owned redelivery)
 
 ### Requirement: Lazy per-destination journal ownership
 
