@@ -263,8 +263,14 @@ native redelivery or expiry limit. Where the native limit fires first,
 it takes precedence, and the bridge does not claim its terminal policy ran.
 Redelivery is not promised to the source queue. Observed with default ActiveMQ
 Classic configuration: the bridge cap fired first, the source queue was empty,
-and `ActiveMQ.DLQ` `EnqueueCount` was 0. Artemis destinations were not observed
-(`rc-5c6yv`). Not every native-first ordering or dead-letter query is verified.
+and `ActiveMQ.DLQ` `EnqueueCount` was 0. Observed with default ActiveMQ Artemis
+configuration: the bridge cap fired first on the 7th receipt, the message was
+acknowledged and removed broker-side, the source queue drained, and `DLQ` and
+`ExpiryQueue` reported `MESSAGES ADDED` 0. The fixture query and its limits live
+in `../../../crates/camel-test/README.md` ("Artemis broker-side disposition
+query"); it resolves the former test-design gap `rc-5c6yv`. Native-first
+precedence for Artemis remains unobserved. Not every native-first ordering or
+dead-letter query is verified.
 
 ## Trace context propagation
 

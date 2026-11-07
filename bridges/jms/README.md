@@ -133,7 +133,7 @@ The subscription persists across route cancel, reconnect, and bridge restart: th
 
 The bridge terminal cap applies only when it fires before a provider or broker native redelivery or expiry limit. Where the native limit fires first, it takes precedence, and the bridge does not claim its terminal policy ran. A redelivery is not guaranteed to land on the source queue. The bridge asserts only that the message was not acknowledged and was made available again.
 
-Observed with default ActiveMQ Classic configuration: the bridge cap fired first, the source queue was empty, and `ActiveMQ.DLQ` `EnqueueCount` was 0. Artemis destinations were not observed. That test-design gap is `rc-5c6yv`. Not every native-first ordering or dead-letter query is verified.
+Observed with default ActiveMQ Classic configuration: the bridge cap fired first, the source queue was empty, and `ActiveMQ.DLQ` `EnqueueCount` was 0. Observed with default ActiveMQ Artemis configuration: the bridge cap fired first on the 7th receipt, the message was acknowledged and removed broker-side, the source queue drained, and `DLQ` and `ExpiryQueue` reported `MESSAGES ADDED` 0. The Artemis fixture query is documented in `crates/camel-test/README.md` ("Artemis broker-side disposition query"); it resolves the former test-design gap `rc-5c6yv`. Native-first precedence for Artemis remains unobserved: no run shows a non-zero `DLQ` or `ExpiryQueue` count. Not every native-first ordering or dead-letter query is verified.
 
 ## Operator recovery
 

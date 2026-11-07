@@ -1,0 +1,28 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:7214f188079a2c9419af3a24b0ff87ac17914bf67d089bc375b50b6daccd9b7f",
+  "expert": "e_gpt",
+  "date": "2026-11-06",
+  "round": 3,
+  "amendments": [
+    {
+      "date": "2026-11-07",
+      "what": "Task 1.1 step 3 parser contract amended post-bless: pinned 2.36.0-alpine CLI wraps queue names >~25 chars across two physical table rows (counts on the first row, continuation row carries empty count cells); parse_queue_stat merges continuation rows, orphan continuation is Err. Evidence: live-broker gate failure reproduced on the pinned image; implemented in 6981e2058; r_glm re-review APPROVE-WITH-FINDINGS (2 minors, addressed).",
+      "hash_after_amendment": "sha256:423a4877bd07e542530e8dc7a1d0c6ff6972d9517a7e9bc4d5ad0f3937364dd8"
+    },
+    {
+      "date": "2026-11-07",
+      "what": "Doc-set update (holistic finding 1, r_glm delta re-review APPROVE-WITH-FINDINGS then resolved): 4 living docs corrected (jms.md, jms README, camel-jms CONTEXT.md, dated ADR-0067 amendment) + proposal.md dated resolution note (delta-review minor).",
+      "hash_after_amendment": "sha256:5d497f31e04d98edf520e39137f380ab45e7bd03fefe48f940ce657aad8240d1"
+    }
+  ],
+  "history": [
+    { "kind": "spec", "round": 1, "verdict": "BLESS-WITH-FIXES", "findings": 4 },
+    { "kind": "spec", "round": 2, "verdict": "BLESS-WITH-FIXES", "findings": 1 },
+    { "kind": "spec", "round": 3, "verdict": "BLESS", "hash": "sha256:0a5ed73f639ddc113fb488f98f2d751b79f12eca0149f6a9786f97695a4f88c6" },
+    { "kind": "plan", "round": 1, "verdict": "BLESS-WITH-FIXES", "findings": 3 },
+    { "kind": "plan", "round": 2, "verdict": "BLESS-WITH-FIXES", "findings": 1 },
+    { "kind": "plan", "round": 3, "verdict": "BLESS", "hash": "sha256:7214f188079a2c9419af3a24b0ff87ac17914bf67d089bc375b50b6daccd9b7f" }
+  ]
+}

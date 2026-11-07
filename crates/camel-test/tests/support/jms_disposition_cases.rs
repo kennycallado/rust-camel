@@ -22,16 +22,21 @@
 //!
 //! ## Disposition evidence boundaries (bd rc-5c6yv)
 //!
-//! The Artemis testcontainer fixture exposes no stable broker-side management
-//! query, so its broker-native destination is **not observed**. The Artemis
-//! case reports the bridge cap as the terminal that fired (durable `COMMIT` and
-//! native `ERROR` record) and records the unobserved destination as a filed
-//! test-design gap (rc-5c6yv); it never claims a broker-native destination or a
-//! native-first ordering for Artemis. A missing bridge `COMMIT` is NOT by
-//! itself read as native-first: native-first is reported only with actual
-//! stable broker evidence (Classic source `QueueSize` 0 **and** a non-zero
-//! `ActiveMQ.DLQ` `EnqueueCount`); otherwise the disposition is an explicit
-//! `UNKNOWN` gap.
+//! Classic exposes numeric queue `QueueSize` and `ActiveMQ.DLQ`
+//! `EnqueueCount`; Artemis exposes numeric source `MESSAGE COUNT` and `DLQ` /
+//! `ExpiryQueue` `MESSAGES ADDED` through its own container CLI query
+//! (`ArtemisBroker::queue_stat`: docker exec running the pinned container's
+//! `artemis queue stat`). The Artemis case reads those counts through the
+//! fixture query and asserts the destination was acknowledged and removed by
+//! the bridge terminal policy, or records native evidence via
+//! `classify_precedence`. A missing bridge `COMMIT` with Artemis evidence is
+//! classified exactly like Classic: native-first is reported only with stable
+//! numeric broker evidence (Classic source `QueueSize` 0 **and** a non-zero
+//! `ActiveMQ.DLQ` `EnqueueCount`, or Artemis source `MESSAGE COUNT` 0 with a
+//! non-zero `DLQ` or `ExpiryQueue` `MESSAGES ADDED`); otherwise the disposition
+//! is an explicit `UNKNOWN` gap. The load-bearing rule: removing the Artemis
+//! query, making it error, or having it report no evidence FAILS the case —
+//! the Artemis destination is never treated as unobserved.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -41,7 +46,7 @@ use camel_bridge::process::BrokerType;
 use camel_component_jms::proto::bridge_service_client::BridgeServiceClient;
 
 use super::support::activemq::{ACTIVEMQ_PASSWORD, ACTIVEMQ_USER, ActiveMqBroker};
-use super::support::artemis::{ARTEMIS_PASSWORD, ARTEMIS_USER, ArtemisBroker};
+use super::support::artemis::{ARTEMIS_PASSWORD, ARTEMIS_USER, ArtemisBroker, QueueStat};
 use super::support::jms_bridge_procs::{require_jms_bridge_binary, spawn_jms_bridge_configured};
 use super::support::jms_crash_probe::{ProbeBroker, spawn_probe_configured_with_logs};
 use super::support::jms_journal::{
@@ -134,11 +139,22 @@ impl DispositionBroker {
     ///
     /// Classic exposes numeric queue `QueueSize` and `ActiveMQ.DLQ`
     /// `EnqueueCount` through Jolokia; both numbers are retained for exact
-    /// assertions, never reduced to a generated substring. The Artemis
-    /// testcontainer fixture exposes no management API, so its broker-side
-    /// state is unobservable — returned as `None` plus an explicit unsupported
-    /// note (bd rc-5c6yv), never inferred from client-side deliveries.
-    async fn observe_destination(&self, queue: &str) -> (Option<ClassicDestination>, String) {
+    /// assertions, never reduced to a generated substring. Artemis is read
+    /// through its own container CLI (`artemis queue stat`): the source
+    /// `MESSAGE COUNT` plus `DLQ` and `ExpiryQueue` `MESSAGES ADDED`, which
+    /// distinguish a bridge acknowledgement from the broker-native dead-letter
+    /// and expiry paths. A failed Classic read panics (the fixture guarantees
+    /// the console query); a failed Artemis query is reported as `None`
+    /// evidence with an error note naming the mechanism, never inferred from
+    /// client-side deliveries.
+    async fn observe_destination(
+        &self,
+        queue: &str,
+    ) -> (
+        Option<ClassicDestination>,
+        Option<ArtemisDestination>,
+        String,
+    ) {
         match self {
             DispositionBroker::Classic(broker) => {
                 // The bridge acknowledges asynchronously: the COMMIT frame and
@@ -170,17 +186,59 @@ impl DispositionBroker {
                     dlq_enqueue,
                 };
                 let note = destination.describe();
-                (Some(destination), note)
+                (Some(destination), None, note)
             }
-            DispositionBroker::Artemis(_) => (
-                None,
-                "broker-side disposition unavailable: the Artemis testcontainer fixture exposes \
-                 no management API (no Jolokia/console) — filed test-design gap rc-5c6yv, so the \
-                 Artemis destination is NOT observed"
-                    .to_string(),
-            ),
+            DispositionBroker::Artemis(broker) => {
+                // Same asynchronous-ack window as Classic: the bridge-side
+                // COMMIT precedes the broker applying the ack. Poll, bounded,
+                // until the source queue is empty; a poll error is retried by
+                // the next iteration and a timeout is left to the final read,
+                // which reports the actual counts.
+                let _ = wait_until(
+                    "Artemis source queue drained by the terminal acknowledgement",
+                    Duration::from_secs(30),
+                    Duration::from_millis(200),
+                    || {
+                        let broker = broker.clone();
+                        async move {
+                            broker
+                                .queue_stat(queue)
+                                .await
+                                .map(|stat| stat.message_count == 0)
+                        }
+                    },
+                )
+                .await;
+                match read_artemis_destination(broker, queue).await {
+                    Ok(destination) => {
+                        let note = destination.describe();
+                        (None, Some(destination), note)
+                    }
+                    Err(error) => (
+                        None,
+                        None,
+                        format!("broker-side queue-stat query failed: {error}"),
+                    ),
+                }
+            }
         }
     }
+}
+
+/// Reads the three queues that make up the Artemis destination evidence: the
+/// source queue, `DLQ` and `ExpiryQueue`.
+async fn read_artemis_destination(
+    broker: &ArtemisBroker,
+    queue: &str,
+) -> Result<ArtemisDestination, String> {
+    let source = broker.queue_stat(queue).await?;
+    let dlq = broker.queue_stat("DLQ").await?;
+    let expiry = broker.queue_stat("ExpiryQueue").await?;
+    Ok(ArtemisDestination {
+        source,
+        dlq,
+        expiry,
+    })
 }
 
 /// Numeric Classic broker-side destination evidence.
@@ -215,6 +273,63 @@ impl ClassicDestination {
                 "broker-native dead-letter path"
             } else {
                 "inconclusive"
+            }
+        )
+    }
+}
+
+/// Numeric Artemis broker-side destination evidence.
+///
+/// All three queues are checked because the fixture routes every address to
+/// `DLQ` (`dead-letter-address=DLQ`, `match="#"`), so there is no silent-drop
+/// route and the terminal kind is distinguishable: a bridge acknowledgement
+/// drains the source with no DLQ/expiry add, native dead-lettering adds to
+/// `DLQ`, and native expiry adds to `ExpiryQueue`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ArtemisDestination {
+    /// Source queue `MESSAGE COUNT` after the run.
+    source: QueueStat,
+    /// `DLQ` counts after the run.
+    dlq: QueueStat,
+    /// `ExpiryQueue` counts after the run.
+    expiry: QueueStat,
+}
+
+impl ArtemisDestination {
+    /// True when the numbers prove the terminal acknowledgement removed the
+    /// message and neither native path delivered it.
+    fn acknowledged_and_removed(&self) -> bool {
+        self.source.message_count == 0
+            && self.dlq.messages_added == 0
+            && self.expiry.messages_added == 0
+    }
+
+    /// True when the numbers prove the provider dead-lettered the message.
+    fn native_dead_lettered(&self) -> bool {
+        self.source.message_count == 0 && self.dlq.messages_added > 0
+    }
+
+    /// True when the numbers prove the provider expired the message.
+    fn native_expired(&self) -> bool {
+        self.source.message_count == 0
+            && self.dlq.messages_added == 0
+            && self.expiry.messages_added > 0
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "source MESSAGE_COUNT={} DLQ MESSAGES_ADDED={} ExpiryQueue MESSAGES_ADDED={} ({})",
+            self.source.message_count,
+            self.dlq.messages_added,
+            self.expiry.messages_added,
+            if self.acknowledged_and_removed() {
+                "acknowledged and removed by the bridge terminal policy; no DLQ or expiry delivery"
+            } else if self.native_dead_lettered() {
+                "broker-native dead-letter path (DLQ)"
+            } else if self.native_expired() {
+                "broker-native expiry path (ExpiryQueue)"
+            } else {
+                "inconclusive: message still on the source queue"
             }
         )
     }
@@ -296,8 +411,9 @@ enum Precedence {
 }
 
 /// Classifies the observed precedence. A missing bridge `COMMIT` is not
-/// sufficient for native-first: Classic needs numeric dead-letter evidence, and
-/// a broker with no stable query is `Unknown`.
+/// sufficient for native-first: Classic needs numeric dead-letter evidence,
+/// Artemis needs numeric DLQ or `ExpiryQueue` evidence, and anything else is
+/// `Unknown`.
 fn classify_precedence(obs: &ThresholdObservation) -> Precedence {
     if obs.commit_frames == 1 && obs.terminal_check.matching == 1 {
         return Precedence::BridgeCapFirst;
@@ -319,9 +435,22 @@ fn classify_precedence(obs: &ThresholdObservation) -> Precedence {
             ),
         };
     }
+    if let Some(destination) = &obs.artemis_destination {
+        if destination.native_dead_lettered() || destination.native_expired() {
+            return Precedence::NativeLimitFirst {
+                evidence: destination.describe(),
+            };
+        }
+        return Precedence::Unknown {
+            reason: format!(
+                "no terminal COMMIT and Artemis broker evidence does not confirm the native \
+                 dead-letter path: {}",
+                destination.describe()
+            ),
+        };
+    }
     Precedence::Unknown {
-        reason: "no terminal COMMIT and no stable broker-side disposition query on this fixture \
-                 (bd rc-5c6yv)"
+        reason: "no terminal COMMIT and the broker-side disposition query returned no evidence"
             .to_string(),
     }
 }
@@ -340,6 +469,7 @@ struct ThresholdObservation {
     bridge_log_path: String,
     payload_in_log: bool,
     classic_destination: Option<ClassicDestination>,
+    artemis_destination: Option<ArtemisDestination>,
     destination_note: String,
     /// Bounded-wait failure when the terminal `COMMIT` did not appear. Kept so
     /// the disposition reporter can distinguish a timeout from a confirmed
@@ -472,7 +602,8 @@ async fn run_threshold(broker: &DispositionBroker, queue: &str) -> ThresholdObse
     let terminal_check = check_terminal_records(&log_contents, &expected_message);
     let payload_in_log = log_contents.contains(THRESHOLD_BODY);
 
-    let (classic_destination, destination_note) = broker.observe_destination(queue).await;
+    let (classic_destination, artemis_destination, destination_note) =
+        broker.observe_destination(queue).await;
 
     // Cleanup only after every assertion input has been read. The probe holds
     // the journal lock; its bridge dies with the probe's process group.
@@ -490,6 +621,7 @@ async fn run_threshold(broker: &DispositionBroker, queue: &str) -> ThresholdObse
         bridge_log_path: bridge_log_str,
         payload_in_log,
         classic_destination,
+        artemis_destination,
         destination_note,
         commit_wait_error,
     }
@@ -597,10 +729,14 @@ async fn jms_bridge_redelivery_disposition_activemq() {
     record_and_report_disposition(&obs, "activemq");
 }
 
-/// Task 5.4 case 3: the same disposition recording on Artemis. The fixture
-/// exposes no broker-side management API (bd rc-5c6yv), so the Artemis
-/// destination is recorded as unobserved; native-first is never claimed for
-/// Artemis.
+/// Task 5.4 case 3: the same disposition recording on Artemis. The broker-side
+/// counts are read through the fixture query (`ArtemisBroker::queue_stat`:
+/// docker exec + the container's own `artemis queue stat`, pinned image) and
+/// the destination must prove the bridge terminal policy acknowledged and
+/// removed the message; on a missing bridge `COMMIT`, native evidence is
+/// recorded via `classify_precedence`. The case fails when the query is
+/// removed, errors, or reports no evidence — an unobserved destination is
+/// never a pass.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn jms_bridge_redelivery_disposition_artemis() {
@@ -623,13 +759,29 @@ fn record_and_report_disposition(obs: &ThresholdObservation, label: &str) {
             assert_threshold_contract(obs);
             log_observation(obs, label);
             if label == "artemis" {
-                eprintln!(
-                    "GAP 5.4 [artemis] rc-5c6yv: test-design gap — the Artemis testcontainer \
-                     fixture exposes no stable broker-side disposition signal, so `where the \
-                     message went` is UNOBSERVED; only the durable journal and the native ERROR \
-                     record are asserted. No broker-native destination or native-first ordering \
-                     is claimed for Artemis."
-                );
+                // The load-bearing rule: a missing broker-side destination is a
+                // failure, never an unobserved pass. Removal or error of the
+                // query surfaces here as `artemis_destination: None` (the error
+                // travels in `destination_note`).
+                match obs.artemis_destination.as_ref() {
+                    None => panic!(
+                        "GAP rc-5c6yv [artemis]: broker-side disposition query returned no \
+                         evidence — destination_note: {}, commit_wait_error: {:?}",
+                        obs.destination_note, obs.commit_wait_error
+                    ),
+                    Some(destination) => {
+                        assert!(
+                            destination.acknowledged_and_removed(),
+                            "the Artemis broker-side query must prove the bridge terminal \
+                             policy acknowledged and removed the message: {}",
+                            destination.describe()
+                        );
+                        eprintln!(
+                            "PROOF rc-5c6yv [artemis]: broker-side disposition observed — {}",
+                            destination.describe()
+                        );
+                    }
+                }
             }
         }
         Precedence::NativeLimitFirst { evidence } => panic!(
@@ -721,6 +873,31 @@ mod sensitive_assertions {
                 mislabeled: 0,
             },
             ..Default::default()
+        }
+    }
+
+    /// Sibling builder for Artemis-shaped observations: a missing bridge
+    /// `COMMIT` plus explicit broker-side queue counts.
+    fn synthetic_artemis(
+        source: QueueStat,
+        dlq: QueueStat,
+        expiry: QueueStat,
+    ) -> ThresholdObservation {
+        ThresholdObservation {
+            commit_frames: 0,
+            artemis_destination: Some(ArtemisDestination {
+                source,
+                dlq,
+                expiry,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn stat(message_count: u64, messages_added: u64) -> QueueStat {
+        QueueStat {
+            message_count,
+            messages_added,
         }
     }
 
@@ -855,5 +1032,133 @@ mod sensitive_assertions {
             matches!(classify_precedence(&obs), Precedence::Unknown { .. }),
             "an empty source queue with an empty DLQ does not confirm native-first"
         );
+    }
+
+    #[test]
+    fn missing_commit_with_artemis_dlq_evidence_is_native_first() {
+        let obs = synthetic_artemis(stat(0, 1), stat(0, 1), stat(0, 0));
+        assert!(matches!(
+            classify_precedence(&obs),
+            Precedence::NativeLimitFirst { .. }
+        ));
+    }
+
+    #[test]
+    fn missing_commit_with_artemis_expiry_evidence_is_native_first() {
+        let obs = synthetic_artemis(stat(0, 1), stat(0, 0), stat(0, 1));
+        assert!(matches!(
+            classify_precedence(&obs),
+            Precedence::NativeLimitFirst { .. }
+        ));
+    }
+
+    #[test]
+    fn missing_commit_with_artemis_no_evidence_is_unknown() {
+        let obs = synthetic_artemis(stat(0, 1), stat(0, 0), stat(0, 0));
+        assert!(
+            matches!(classify_precedence(&obs), Precedence::Unknown { .. }),
+            "an empty source queue with an empty DLQ and ExpiryQueue does not confirm native-first"
+        );
+    }
+
+    #[test]
+    fn artemis_destination_describe_names_each_outcome() {
+        let acknowledged = ArtemisDestination {
+            source: stat(0, 1),
+            dlq: stat(0, 0),
+            expiry: stat(0, 0),
+        };
+        assert!(
+            acknowledged.describe().contains(
+                "acknowledged and removed by the bridge terminal policy; no DLQ or expiry delivery"
+            ),
+            "unexpected description: {}",
+            acknowledged.describe()
+        );
+
+        let dead_lettered = ArtemisDestination {
+            source: stat(0, 1),
+            dlq: stat(0, 1),
+            expiry: stat(0, 0),
+        };
+        assert!(
+            dead_lettered
+                .describe()
+                .contains("broker-native dead-letter path (DLQ)"),
+            "unexpected description: {}",
+            dead_lettered.describe()
+        );
+
+        let expired = ArtemisDestination {
+            source: stat(0, 1),
+            dlq: stat(0, 0),
+            expiry: stat(0, 1),
+        };
+        assert!(
+            expired
+                .describe()
+                .contains("broker-native expiry path (ExpiryQueue)"),
+            "unexpected description: {}",
+            expired.describe()
+        );
+
+        let inconclusive = ArtemisDestination {
+            source: stat(1, 1),
+            dlq: stat(0, 0),
+            expiry: stat(0, 0),
+        };
+        let description = inconclusive.describe();
+        assert!(
+            description.starts_with(
+                "source MESSAGE_COUNT=1 DLQ MESSAGES_ADDED=0 ExpiryQueue MESSAGES_ADDED=0 ("
+            ),
+            "unexpected description: {description}"
+        );
+        assert!(
+            description.contains("inconclusive: message still on the source queue"),
+            "unexpected description: {description}"
+        );
+    }
+
+    #[test]
+    fn artemis_acknowledged_and_removed_requires_all_three_queues() {
+        let dead_lettered = ArtemisDestination {
+            source: stat(0, 1),
+            dlq: stat(0, 1),
+            expiry: stat(0, 0),
+        };
+        assert!(!dead_lettered.acknowledged_and_removed());
+
+        let expired = ArtemisDestination {
+            source: stat(0, 1),
+            dlq: stat(0, 0),
+            expiry: stat(0, 1),
+        };
+        assert!(!expired.acknowledged_and_removed());
+    }
+
+    /// The load-bearing property: a missing Artemis broker-side destination is
+    /// not an unobserved pass — the reporter fails the case. The counters are
+    /// contract-valid because `assert_threshold_contract` runs before the
+    /// destination check, so zeroed counters would panic with the wrong message.
+    #[cfg(unix)]
+    #[test]
+    #[should_panic(expected = "returned no evidence")]
+    fn artemis_missing_destination_fails_the_case() {
+        let obs = ThresholdObservation {
+            known_id: ID.to_string(),
+            reserve_frames: DEFAULT_MAX_DELIVERY_ATTEMPTS,
+            rollback_frames: DEFAULT_MAX_DELIVERY_ATTEMPTS,
+            commit_frames: 1,
+            accepted_events: DEFAULT_MAX_DELIVERY_ATTEMPTS,
+            terminal_check: TerminalLogCheck {
+                matching: 1,
+                mislabeled: 0,
+            },
+            payload_in_log: false,
+            artemis_destination: None,
+            ..Default::default()
+        };
+        record_and_report_disposition(&obs, "artemis");
     }
 }

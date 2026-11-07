@@ -99,6 +99,17 @@ consumer demands it and the proto can express the constraints from Input 3.
   source queue was empty, and `ActiveMQ.DLQ` `EnqueueCount` was 0. Artemis
   destinations were not observed (`rc-5c6yv`). Not every native-first ordering
   or dead-letter query is verified.
+  **Amendment (2026-11-07, mission 517 / bd `rc-5c6yv`):** the unobserved-
+  destination limitation above is superseded; a run can now observe it. The
+  dedicated Artemis fixture now exposes a stable broker-side query
+  (`docker exec` into the container running its own `artemis queue stat`) under
+  the pinned `apache/activemq-artemis:2.36.0-alpine` image. The observed run
+  ends with the bridge cap first on the 7th receipt: acknowledged and removed
+  broker-side, source queue drained, `DLQ`/`ExpiryQueue` `MESSAGES ADDED` 0. The
+  query mechanism, its stability scope, and its non-proofs are documented in
+  `crates/camel-test/README.md` ("Artemis broker-side disposition query").
+  Native-first precedence for Artemis remains unobserved: no run shows non-zero
+  `DLQ` or `ExpiryQueue` evidence.
 - Operator recovery. On a permanent failure, stop the route and its context.
   Confirm that bridge and journal ownership has ended before you edit any file:
   the last subscription for the affected domain must be released, and the bridge
