@@ -339,6 +339,16 @@ jobs:
             ${{ runner.temp }}/rotation-rationale.txt
 
   report:
+    # Body construction is extracted to scripts/assurance-report-body.sh so it
+    # can be tested offline. Post-mortem of run 41999707610: runner comms were
+    # lost during mutants-baseline, so no artifact was uploaded; the old inline
+    # body step then ran a bare `find` under set -euo pipefail and died on the
+    # missing path BEFORE the infra guard, so no issue was created and the
+    # durable alarm never fired. Publication now survives zero artifacts: the
+    # script exits 0 with no evidence and reports gaps via INFRA_MISSING.
+    # Contract preserved: findings never fail the job, only missing evidence
+    # does, and the baseline-data markers stay byte-identical for next month's
+    # survivor diff.
     needs: [fuzz-deep, mutants-baseline, mutants-rotating]
     if: always()
     runs-on: ubuntu-latest
@@ -352,105 +362,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download evidence
+        # Deliberately the bare download-all form (no name/pattern/artifact-ids
+        # inputs): that is the zero-artifact-tolerant mode of
+        # actions/download-artifact@v8, verified in the action source at the
+        # pinned tag. With zero matching artifacts it logs
+        # "Total of 0 artifact(s) downloaded" and exits success.
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
 
       - name: Build issue body
+        run: |
+          OUT_ENV="$GITHUB_ENV" OUT_BODY="$RUNNER_TEMP/issue-body.md" bash scripts/assurance-report-body.sh
+
+      - name: Publish issue
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # upload-artifact preserves the least-common ancestor of its
-          # path list (baseline: mutants.out/...; rotating:
-          # mut-wt/target-mutants/...), so NEVER hardcode flat paths —
-          # resolve by filename (post-mortem of run 33984285881 report).
-          OUT_BASE=$(find art-mutants-baseline -name outcomes.json -print -quit)
-          OUT_ROT=$(find art-mutants-rotating -name outcomes.json -print -quit)
-          FUZZF=$(find art-fuzz-deep -name fuzz-findings.txt -print -quit)
-          RATIONALE=$(find art-mutants-rotating -name rotation-rationale.txt -print -quit)
-          # Shared with the infra-check step below.
-          {
-            echo "OUT_BASE=${OUT_BASE:-}"
-            echo "OUT_ROT=${OUT_ROT:-}"
-            echo "FUZZF=${FUZZF:-}"
-          } >> "$GITHUB_ENV"
-          STAMP=$(date -u +%Y-%m)
-          {
-            echo "# assurance-monthly: ${STAMP}"
-            echo
-            echo "Generated work order. bd stays the tracker — file follow-ups there."
-            echo
-            echo "## Tool jobs"
-            echo
-            echo "| job | result |"
-            echo "|---|---|"
-            echo "| fuzz-deep | ${FUZZ_RESULT} |"
-            echo "| mutants-baseline | ${BASE_RESULT} |"
-            echo "| mutants-rotating | ${ROT_RESULT} |"
-            echo
-            echo "failure here means infrastructure, not findings."
-            echo "## Fuzz deep (target matrix, ${FUZZ_SECS}s each)"
-            echo
-            echo '```'
-            cat "${FUZZF:-/nonexistent}" 2>/dev/null \
-              || echo "(no fuzz findings artifact — infra failure)"
-            echo '```'
-            echo
-            for pair in "baseline:${OUT_BASE:-}" "rotating:${OUT_ROT:-}"; do
-              name=${pair%%:*}
-              f=${pair#*:}
-              if [ -z "$f" ] || [ ! -f "$f" ]; then
-                echo "## Mutants ${name}: MISSING OUTCOMES (infra failure)"
-                echo
-                continue
-              fi
-              echo "## Mutants ${name}"
-              echo
-              tested=$(jq '.outcomes | length' "$f")
-              missed=$(jq '[.outcomes[] | select(.summary=="MissedMutant")] | length' "$f")
-              caught=$(jq '[.outcomes[] | select(.summary=="CaughtMutant")] | length' "$f")
-              unviable=$(jq '[.outcomes[] | select(.summary=="UnviableMutant")] | length' "$f")
-              echo "tested=${tested} caught=${caught} missed=${missed} unviable=${unviable}"
-              echo
-              echo '```'
-              # .name is self-contained ("file:line: mutation") — avoids
-              # null-line duplication from separately joined fields.
-              jq -r '.outcomes[] | select(.summary=="MissedMutant")
-                | .scenario.Mutant.name' "$f" | sort -u || true
-              echo '```'
-              echo
-            done
-            echo "## Triage checklist (dedup is mandatory)"
-            echo
-            echo "- bd create ONLY for survivors NOT already tracked — check the"
-            echo "  existing \`discovered-from:rc-eba8\` bds first (rc-tb93, rc-kkwh,"
-            echo "  rc-j5zp, rc-jtsw, rc-6f62, rc-ldvm, rc-e83t, rc-blcy, rc-xv4e)."
-            echo "- Fuzz crashes: promote minimized inputs as committed #[test]s,"
-            echo "  never raw corpus blobs; \`bd create -t bug\` ranked by exposure."
-            echo "- Kill rates are informational: no threshold, no gate."
-            echo
-            echo "## Rotation"
-            echo
-            echo '```'
-            cat "${RATIONALE:-/nonexistent}" 2>/dev/null || echo "(no rationale)"
-            echo '```'
-            echo
-            echo "Next window: minimal PR editing \`.github/assurance-monthly.json\`"
-            echo "(mutants_rotating_file from next_candidates + rotate rotated_on)."
-            echo "Candidates: $(jq -r '.next_candidates | join(", ")' .github/assurance-monthly.json)"
-          } > "$RUNNER_TEMP/issue-body.md"
-
-          # Machine-readable survivor set for NEXT month's diff, between
-          # HTML comment markers (robust to markdown renderers). Same
-          # .name form as the display block so diffs are stable.
-          {
-            echo "<!--baseline-data-start-->"
-            if [ -n "${OUT_BASE:-}" ] && [ -f "$OUT_BASE" ]; then
-              jq -r '.outcomes[] | select(.summary=="MissedMutant")
-                | .scenario.Mutant.name' "$OUT_BASE" | sort -u
-            fi
-            echo "<!--baseline-data-end-->"
-          } >> "$RUNNER_TEMP/issue-body.md"
-
           # Diff vs previous month's issue when one exists.
           PREV=$(gh issue list --state all --search "assurance-monthly in:title" \
             --json number,createdAt --jq 'sort_by(.createdAt) | last | .number' || true)
@@ -460,7 +387,9 @@ jobs:
               | grep -v '<!--' > "$RUNNER_TEMP/prev-survivors.txt" || true
             sed -n '/<!--baseline-data-start-->/,/<!--baseline-data-end-->/p' \
               "$RUNNER_TEMP/issue-body.md" | grep -v '<!--' \
-              > "$RUNNER_TEMP/curr-survivors.txt"
+              > "$RUNNER_TEMP/curr-survivors.txt" || true
+            # Empty survivor set is valid input to the diff, not an error (empty
+            # baseline marker block must not kill publication — bd rc-g3nls).
             {
               echo
               echo "## Baseline survivor diff vs issue #${PREV}"
@@ -480,12 +409,8 @@ jobs:
         run: |
           # Anti-obstruction: survivors/crashes above never fail the run.
           # Missing artifacts from a failed tool job = infra failure = red.
-          # Paths resolved by filename in the body step (layout lesson).
-          ok=1
-          [ -n "${FUZZF:-}" ] && [ -f "$FUZZF" ] || ok=0
-          [ -n "${OUT_BASE:-}" ] && [ -f "$OUT_BASE" ] || ok=0
-          [ -n "${OUT_ROT:-}" ] && [ -f "$OUT_ROT" ] || ok=0
-          if [ "$ok" -ne 1 ]; then
-            echo "infra failure: at least one tool job produced no evidence (see run summary)"
+          # INFRA_MISSING is emitted by scripts/assurance-report-body.sh.
+          if [ -n "${INFRA_MISSING:-}" ]; then
+            echo "infra failure: missing evidence for: ${INFRA_MISSING} (see issue body)"
             exit 1
           fi

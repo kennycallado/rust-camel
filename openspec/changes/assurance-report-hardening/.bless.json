@@ -1,0 +1,42 @@
+{
+  "kind": "plan",
+  "change": "assurance-report-hardening",
+  "hash": "sha256:aae334f9bcfe7b6b574bb04c50d77f60aff67c192da4b44462f7ee340695ed6e",
+  "verdict": "BLESSED",
+  "expert": "experts/e_gpt",
+  "session": "ses_e48b2f795ffe8k3kyucL5C9kuB",
+  "history": [
+    {
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:c1530ad8ea33e11bb0f4b041ba1761f003a893f89c5126a581380b46c8ecba91",
+      "fixes": [
+        "baseline-missing fixture contradicted INFRA_MISSING=baseline (fuzz was also absent); fixed in tasks 1.1 and 3.1: baseline absent, rotating outcomes+rationale present, fuzz present, config present"
+      ]
+    },
+    {
+      "verdict": "BLESSED",
+      "hash": "sha256:aae334f9bcfe7b6b574bb04c50d77f60aff67c192da4b44462f7ee340695ed6e"
+    }
+  ],
+  "reviewer_history": [
+    {
+      "reviewer": "reviewers/r_glm",
+      "session": "ses_e48bbe3d0ffeo9j8nkY9W25qzt",
+      "rounds": [
+        "round 1: 4 Important + 4 Minor — all applied",
+        "round 2: 2 residuals (grep-vs-header contradiction, grep -c exit status) — applied",
+        "round 3: CLEAN"
+      ]
+    }
+  ],
+  "scope_rulings": [
+    "CI wiring of battery excluded today (no-new-scope directive; mission deliverables omit ci.yml) — bd rc-eist3 follow-up, stated in park"
+  ],
+  "spec_bless": {
+    "kind": "spec",
+    "hash": "sha256:c42080d3ca4f6326284bf994dbcb8cb1cddec7cb850319050c4063fc4de90e98",
+    "verdict": "BLESSED",
+    "expert_session": "ses_e48c21467ffeUQJChKeY41D2G6"
+  },
+  "date": "2026-11-07"
+}
