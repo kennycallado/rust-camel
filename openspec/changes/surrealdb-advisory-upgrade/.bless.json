@@ -1,0 +1,30 @@
+{
+  "kind": "plan",
+  "change": "surrealdb-advisory-upgrade",
+  "verdict": "BLESS",
+  "hash": "sha256:9447d331f12c90f672ce0444c58a71fc507a1fedbe4a8bbc691f1df18dc090ca",
+  "expert": "@experts/e_gpt",
+  "session": "ses_e4d9dc92cffeyxPQ9eTnWz0m4T",
+  "history": [
+    {
+      "kind": "spec",
+      "verdict": "BLESS",
+      "hash": "sha256:74355b5a035d6e58c4250bcb5fd2c3cc1e19d24df71d3a707a10232e891eb859",
+      "expert": "@experts/e_gpt",
+      "session": "ses_e4da9827cffeOl6ceoyjZBtXn9"
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:2ccaa121d997507b3b77911a43989395d81bdb4d20164e910e79350627e3a9a6",
+      "fixes_applied": [
+        "git diff base -- paths (working tree) replaces base...HEAD (3 sites)",
+        "literal validated devshell PATH replaces placeholder",
+        "Task 1.3 drift precedence: contract-level STOP vs documentation-only continue",
+        "lock-resolution-failure covers all version mismatches",
+        "CHANGELOG zero-code-changes clause made conditional"
+      ]
+    }
+  ],
+  "date": "2026-11-06"
+}

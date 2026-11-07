@@ -303,18 +303,19 @@ fn surreal_mismatch_detail(
 /// Maps one SurrealQL value to a matcher cell (feature `surreal`),
 /// the fail-closed type law (surreal-state-tier task 2.3): the
 /// absence and null kinds stay `null`; booleans map to booleans;
-/// integers and finite floats map to JSON numbers; strings, UUIDs and
-/// datetimes map to their string forms; a record id maps to its
-/// `table:key` string; objects and arrays map to the structured value
-/// the matcher verbs see whole, built RECURSIVELY through this
-/// function so a nested unsupported kind fails closed naming the
-/// field path (`field.key`, `field[0]`).
+/// integers (every width) and finite floats (every precision) map to
+/// JSON numbers; strings, UUIDs and datetimes map to their string
+/// forms; a record id maps to its `table:key` string; objects and
+/// arrays map to the structured value the matcher verbs see whole,
+/// built RECURSIVELY through this function so a nested unsupported
+/// kind fails closed naming the field path (`field.key`, `field[0]`).
 ///
-/// Every other SurrealQL kind — decimal and non-finite numbers,
-/// bytes, durations, geometries, tables, files, ranges, regexes, and
-/// sets — is an explicit failure naming the field and its kind:
-/// fail-closed, never a silent null and never a sentinel a wildcard
-/// could match away.
+/// Every other SurrealQL kind is an explicit failure naming the field
+/// and its kind — fail-closed, never a silent null and never a
+/// sentinel a wildcard could match away. The mapped and failed kinds
+/// are enumerated at the match arms below (the surrealdb-types 4.0
+/// `Value`/`Number` widening is annotated there), which are the
+/// single source of truth for this law.
 #[cfg(feature = "surreal")]
 pub(crate) fn surreal_value_to_cell(
     v: &surrealdb::types::Value,
@@ -340,9 +341,43 @@ pub(crate) fn surreal_value_to_cell(
             "infinite float"
         })),
         Sv::Number(Number::Decimal(_)) => Err(unsupported("decimal")),
+        // surrealdb-types 4.0 widened `Number` with machine-width ints,
+        // half/single-precision floats and an arbitrary-precision decimal.
+        // The fixture-pinned server (v3.1.4) only emits Int/Float/Decimal,
+        // so these arms exist for exhaustiveness; they preserve the same
+        // contract: integer widths map through like `Int`, float widths
+        // follow the `Float` finite/NaN/infinite rule, `BigDecimal` fails
+        // closed like `Decimal`.
+        Sv::Number(Number::I8(n)) => Ok(camel_api::Value::from(*n)),
+        Sv::Number(Number::U8(n)) => Ok(camel_api::Value::from(*n)),
+        Sv::Number(Number::I16(n)) => Ok(camel_api::Value::from(*n)),
+        Sv::Number(Number::U16(n)) => Ok(camel_api::Value::from(*n)),
+        Sv::Number(Number::I32(n)) => Ok(camel_api::Value::from(*n)),
+        Sv::Number(Number::U32(n)) => Ok(camel_api::Value::from(*n)),
+        Sv::Number(Number::U64(n)) => Ok(camel_api::Value::from(*n)),
+        Sv::Number(Number::F16(f)) if f.is_finite() => Ok(camel_api::Value::from(f.to_f64())),
+        Sv::Number(Number::F16(f)) => Err(unsupported(if f.is_nan() {
+            "NaN"
+        } else {
+            "infinite float"
+        })),
+        Sv::Number(Number::F32(f)) if f.is_finite() => Ok(camel_api::Value::from(*f)),
+        Sv::Number(Number::F32(f)) => Err(unsupported(if f.is_nan() {
+            "NaN"
+        } else {
+            "infinite float"
+        })),
+        Sv::Number(Number::BigDecimal(_)) => Err(unsupported("big decimal")),
         Sv::String(s) => Ok(camel_api::Value::String(s.clone())),
         Sv::Uuid(u) => Ok(camel_api::Value::String(u.to_string())),
         Sv::Datetime(d) => Ok(camel_api::Value::String(d.to_string())),
+        // surrealdb-types 4.0 split the temporal family. The naive
+        // (time-zone-less) kinds stringify exactly like `Datetime` above;
+        // a server at the fixture pin never emits them, so these arms
+        // exist for exhaustiveness only.
+        Sv::Date(d) => Ok(camel_api::Value::String(d.to_string())),
+        Sv::Time(t) => Ok(camel_api::Value::String(t.to_string())),
+        Sv::Timestamp(ts) => Ok(camel_api::Value::String(ts.to_string())),
         Sv::RecordId(rid) => Ok(camel_api::Value::String(rid.to_sql())),
         Sv::Object(object) => {
             let mut map = serde_json::Map::with_capacity(object.len());
@@ -362,6 +397,7 @@ pub(crate) fn surreal_value_to_cell(
         }
         Sv::Bytes(_) => Err(unsupported("bytes")),
         Sv::Duration(_) => Err(unsupported("duration")),
+        Sv::Interval(_) => Err(unsupported("interval")),
         Sv::Geometry(_) => Err(unsupported("geometry")),
         Sv::Table(_) => Err(unsupported("table")),
         Sv::File(_) => Err(unsupported("file")),

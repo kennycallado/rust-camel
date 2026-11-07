@@ -2,7 +2,7 @@
 
 SurrealDB multi-model database component for [rust-camel](https://crates.io/crates/camel-api).
 
-Provides **document**, **graph**, **vector**, and **live query** operations through the [`surrealdb`](https://crates.io/crates/surrealdb) crate (v3.x). Integrates with the rust-camel datasource domain via `PoolFactory`.
+Provides **document**, **graph**, **vector**, and **live query** operations through the [`surrealdb`](https://crates.io/crates/surrealdb) crate (v4.x). Integrates with the rust-camel datasource domain via `PoolFactory`.
 
 ## Overview
 
