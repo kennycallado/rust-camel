@@ -49,6 +49,6 @@ trusting it for route-lifecycle commands violates the trust boundary.
   declare `routeId` in the URI + `authorizedRoutes`.
 - **`camel doctor` migration** (post-v1.0.0): A future `doctor` release
   will flag every `controlbus:` endpoint missing `authorizedRoutes`.
-  Until then, the CHANGELOG section documents the migration.
+  Until then, the generated release notes document the migration.
 - **No global disable:** Hardening cannot be turned off wholesale. Each
   `controlbus:` endpoint must declare its authorized targets.

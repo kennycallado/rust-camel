@@ -239,6 +239,6 @@ the transport feature.
 - **GIVEN** the bridge README
 - **WHEN** an operator reads the durable subscriber section
 - **THEN** it contains the URI example, capability name, uniqueness duty,
-  persistence semantics, no-unsubscribe-on-cancel note, and the CHANGELOG records
-  both features
+  persistence semantics, and the no-unsubscribe-on-cancel note; release notes
+  generated from Conventional Commits record both features
 

@@ -122,9 +122,9 @@ default-off compatibility surfaces ("Deletion, not hiding",
 `docs/adr/0090-pre-1.0-compatibility-policy.md:55`). Position: **no opt-in window**. A
 flag that restores 400-on-`TypeConversionFailed` preserves the mislabel this ADR
 removes. It protects no external contract, so it is not a kept surface under ADR-0090
-categories (a)-(d). The change ships with a changelog entry (`CHANGELOG.md`,
-`## Unreleased`) that names the new status mapping. The implementation issue is filed
-from the repo root, discovered-from `rc-v38bd`.
+categories (a)-(d). The shipped `fix(http)` and `fix(rest)` commit subjects name the new
+status mappings. Release notes generated from Conventional Commits record the migration.
+The implementation issue is filed from the repo root, discovered-from `rc-v38bd`.
 
 ## Alternatives considered
 
