@@ -40,6 +40,7 @@ mod jms_native_uri_cases;
 mod jms_invalid_property_cases;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use camel_api::Value;
@@ -51,7 +52,9 @@ use camel_component_jms::proto::{
 use camel_test::CamelTestContext;
 use support::activemq::ActiveMqBroker;
 use support::install_crypto_provider;
-use support::jms::{shared_jms_activemq, shared_jms_artemis, shared_jms_artemis_auth};
+use support::jms::{
+    jms_component_for_broker, shared_jms_activemq, shared_jms_artemis, shared_jms_artemis_auth,
+};
 use support::jms_bridge_procs::{require_jms_bridge_binary, spawn_jms_bridge};
 use support::wait::wait_until;
 
@@ -499,19 +502,21 @@ async fn jms_consumer_selector_filters_activemq_queue() {
 
 /// Task 3.1: same publish/receive pattern as the queue test against a topic
 /// destination. Topics retain nothing before the subscription exists, so the
-/// producers retry a few times past the subscribe race (repeats may publish
-/// more matching messages; the assertions are presence/absence, never counts).
+/// producers start only after the broker itself reports the topic subscriber
+/// (bd rc-oxj2t): a first subscribe that fails and retries 5 s later
+/// (`jms_reconnect_default`) must not race the 3-message timers — a
+/// non-durable subscriber that attaches after the publishes has no backlog
+/// and nothing is ever delivered. Repeats may publish more matching messages;
+/// the assertions are presence/absence, never counts.
 #[tokio::test(flavor = "multi_thread")]
 async fn jms_consumer_selector_filters_activemq_topic() {
     init_tracing();
     install_crypto_provider();
 
-    let h = CamelTestContext::builder()
-        .with_timer()
-        .with_mock()
-        .with_component(shared_jms_activemq().await)
-        .build()
-        .await;
+    // Broker-side readiness needs exact Jolokia counters: a dedicated broker
+    // (see the isolation note on `ActiveMqBroker`), not the shared one.
+    let broker = Arc::new(ActiveMqBroker::start().await);
+    let jms = jms_component_for_broker(&broker).await;
 
     let consumer_route = RouteBuilder::from(
         "jms:topic:test-selector-topic?messageSelector=orderRegion%20%3D%20%27EU%27",
@@ -520,6 +525,36 @@ async fn jms_consumer_selector_filters_activemq_topic() {
     .route_id("jms-selector-topic-consumer")
     .build()
     .unwrap();
+
+    let consumer_h = CamelTestContext::builder()
+        .with_mock()
+        .with_component(jms.clone())
+        .build()
+        .await;
+    consumer_h.add_route(consumer_route).await.unwrap();
+    consumer_h.start().await;
+
+    // Readiness barrier (bd rc-oxj2t): the subscriber must be registered on
+    // the broker before any publisher starts — a topic keeps no backlog.
+    {
+        let broker = broker.clone();
+        wait_until(
+            "topic subscriber registered on the broker",
+            Duration::from_secs(60),
+            Duration::from_millis(200),
+            move || {
+                let broker = broker.clone();
+                async move {
+                    broker
+                        .topic_consumer_count("test-selector-topic")
+                        .await
+                        .map(|count| count >= 1)
+                }
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+    }
 
     let matching_producer =
         RouteBuilder::from("timer:selector-topic-match?period=1000&delay=3000&repeatCount=3")
@@ -539,12 +574,16 @@ async fn jms_consumer_selector_filters_activemq_topic() {
             .build()
             .unwrap();
 
-    h.add_route(consumer_route).await.unwrap();
-    h.add_route(matching_producer).await.unwrap();
-    h.add_route(non_matching_producer).await.unwrap();
-    h.start().await;
+    let producer_h = CamelTestContext::builder()
+        .with_timer()
+        .with_component(jms)
+        .build()
+        .await;
+    producer_h.add_route(matching_producer).await.unwrap();
+    producer_h.add_route(non_matching_producer).await.unwrap();
+    producer_h.start().await;
 
-    let endpoint = h.mock().get_endpoint("selector-topic").unwrap();
+    let endpoint = consumer_h.mock().get_endpoint("selector-topic").unwrap();
     let (matched, missed) = tokio::join!(
         wait_until(
             "jms selector delivers the matching topic message",
@@ -583,7 +622,8 @@ async fn jms_consumer_selector_filters_activemq_topic() {
         "the non-matching message must NOT be received within the bounded wait"
     );
 
-    h.stop().await;
+    consumer_h.stop().await;
+    producer_h.stop().await;
 
     let exchanges = endpoint.get_received_exchanges().await;
     assert!(

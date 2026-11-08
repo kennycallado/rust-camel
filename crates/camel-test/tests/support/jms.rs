@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 use camel_component_jms::{BrokerConfig, BrokerType, JmsBridgePool, JmsComponent, JmsPoolConfig};
 use tokio::sync::OnceCell;
 
-use super::activemq::shared_activemq;
+use super::activemq::{ACTIVEMQ_PASSWORD, ACTIVEMQ_USER, ActiveMqBroker, shared_activemq};
 use super::artemis::{shared_artemis, shared_artemis_auth};
 use super::bridge_bg_rt;
 
@@ -124,4 +124,39 @@ pub async fn shared_jms_artemis_auth() -> JmsComponent {
         })
         .await
         .clone()
+}
+
+/// A fresh JmsComponent bound to a dedicated ActiveMQ Classic broker (one
+/// bridge process, no process-wide sharing).
+///
+/// Tests that assert broker-side state through the broker's Jolokia console —
+/// exact `ConsumerCount`/`EnqueueCount` readings — use a dedicated broker (see
+/// the isolation note on [`ActiveMqBroker`]) and this constructor instead of
+/// [`shared_jms_activemq`], whose shared broker carries every other test's
+/// connections and exposes no console. The slot is eagerly started on the
+/// permanent background runtime, mirroring [`shared_jms_activemq`], so the
+/// tonic Channel dispatch task and health monitor outlive the test runtime.
+pub async fn jms_component_for_broker(broker: &ActiveMqBroker) -> JmsComponent {
+    let pool_config = JmsPoolConfig {
+        max_bridges: 1,
+        brokers: HashMap::from([(
+            "default".to_string(),
+            BrokerConfig {
+                broker_url: broker.broker_url.clone(),
+                broker_type: BrokerType::ActiveMq,
+                username: Some(ACTIVEMQ_USER.to_string()),
+                password: Some(ACTIVEMQ_PASSWORD.to_string()),
+                tls: None,
+            },
+        )]),
+        bridge_start_timeout_ms: 90_000,
+        ..JmsPoolConfig::default()
+    };
+
+    let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
+    let pool_init = pool.clone();
+    let _ = bridge_bg_rt()
+        .spawn(async move { pool_init.get_or_create_slot("default", false, false).await })
+        .await; // allow-test-wait: bounded internally by bridge_start_timeout_ms (start_bridge_process total_timeout), mirroring shared_jms_*
+    JmsComponent::with_scheme("jms", pool)
 }

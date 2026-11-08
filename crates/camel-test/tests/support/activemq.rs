@@ -270,6 +270,40 @@ impl ActiveMqBroker {
             .ok_or_else(|| format!("ConsumerCount missing in Jolokia response: {response}"))
     }
 
+    /// Actual broker-side `ConsumerCount` for `topic`. Returns 0 when the
+    /// topic MBean does not exist yet (a non-durable topic has no state
+    /// before its first subscriber attaches). Topic mirror of
+    /// [`Self::consumer_count`]: readiness barrier for topic publishers —
+    /// a subscriber that attaches late must not miss sends that already
+    /// happened, because topics retain nothing (bd rc-oxj2t).
+    pub async fn topic_consumer_count(&self, topic: &str) -> Result<u64, String> {
+        let mbean = format!(
+            "org.apache.activemq:type=Broker,brokerName=localhost,\
+             destinationType=Topic,destinationName={topic}"
+        );
+        let response = self
+            .jolokia(&json!({
+                "type": "read",
+                "mbean": mbean,
+                "attribute": ["ConsumerCount"],
+            }))
+            .await?;
+
+        if response.get("status").and_then(Value::as_u64) != Some(200) {
+            let not_found = response
+                .get("error_type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind.contains("InstanceNotFound"));
+            if not_found {
+                return Ok(0);
+            }
+            return Err(format!("Jolokia ConsumerCount read failed: {response}"));
+        }
+        response["value"]["ConsumerCount"]
+            .as_u64()
+            .ok_or_else(|| format!("ConsumerCount missing in Jolokia response: {response}"))
+    }
+
     /// Actual broker-side `QueueSize` for `queue`: messages on the queue,
     /// including ones dispatched to a consumer but not yet acknowledged
     /// (Classic counts them until the ack is processed). Returns 0 when the

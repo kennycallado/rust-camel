@@ -1,0 +1,8 @@
+{
+  "kind": "trivial",
+  "verdict": "BLESS",
+  "hash": "7db000da08993f61e204a550327eeea49efac57564830626a5442e5fb8d4d844",
+  "expert": "none — trivial path authorized by mission order 535 (test-infra fix, 3 files, no canonical capability change, skip_specs: true)",
+  "round": 1,
+  "history": "r1 BLESS (mission-ordered trivial gate; proposal carries log evidence, file:line root-cause answer, N/N run evidence)"
+}
