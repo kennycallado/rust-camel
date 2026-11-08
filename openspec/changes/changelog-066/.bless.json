@@ -1,0 +1,9 @@
+{
+  "kind": "spec",
+  "verdict": "BLESS",
+  "mode": "trivial",
+  "hash": "sha256:238ba79bf3eeac4f636d9e298c27683feab4212b1f141f393d4faa888244f60a",
+  "expert": "owner-order-540",
+  "note": "Trivial docs-only release prep; mission order 540 pre-approves the trivial blessing (no expert dispatch). No plan stage: single-file CHANGELOG.md edit, skip_specs: true.",
+  "date": "2026-11-08"
+}
