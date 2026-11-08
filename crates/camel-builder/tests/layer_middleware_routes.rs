@@ -367,8 +367,19 @@ async fn layered_producer_readiness_error_surfaces() {
         .expect_err("an unregistered component must abort route-add");
     // Route-add wraps compile errors as `RouteError`; the resolution failure
     // itself must still be visible in the message (not swallowed by the wrap).
+    // rc-uqwy2: the `invalid state:` context must appear exactly once — a
+    // second occurrence means the command layer re-wrapped the DomainError
+    // payload (the doubled prefix this fix removed).
+    let CamelError::RouteError(message) = &err else {
+        panic!("expected a component-resolution RouteError, got: {err:?}");
+    };
     assert!(
-        matches!(&err, CamelError::RouteError(message) if message.contains("Component not found: mock")),
-        "expected a component-resolution RouteError, got: {err:?}"
+        message.contains("Component not found: mock"),
+        "expected the component-resolution cause in the message, got: {message}"
+    );
+    assert_eq!(
+        message.matches("invalid state:").count(),
+        1,
+        "exactly one 'invalid state:' context prefix expected, got: {message}"
     );
 }

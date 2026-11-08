@@ -42,6 +42,19 @@ fn is_optimistic_conflict(err: &impl std::fmt::Display) -> bool {
     err.to_string().contains("optimistic lock conflict")
 }
 
+/// rc-uqwy2: render a runtime registration failure without the `InvalidState`
+/// Display prefix. The runtime execution adapters forward failures as
+/// `DomainError::InvalidState` with the cause already named in the payload
+/// (e.g. "Component not found: mock"); re-rendering via Display would prepend
+/// "invalid state: " and stack a second prefix when the error later crosses
+/// back to `CamelError`.
+fn registration_failure_message(err: &DomainError) -> String {
+    match err {
+        DomainError::InvalidState(msg) => msg.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// rc-slvd: shared conflict→reload→terminal-Failed recognition for the
 /// side-effect windows where the detached failure watcher's FailRoute can
 /// commit DURING this command's own persist (Resume confirm, Start Phase
@@ -158,8 +171,9 @@ async fn handle_register(
         let route_definition = canonical_to_route_definition(spec)?;
         if let Err(runtime_err) = execution.register_route(route_definition).await {
             // 3. Compensate: mark as Failed
+            let failure_text = registration_failure_message(&runtime_err);
             let version_before_fail = aggregate.version();
-            let fail_events = aggregate.fail(runtime_err.to_string());
+            let fail_events = aggregate.fail(failure_text.clone());
             let fail_proj = project_from_aggregate(&aggregate);
             if let Some(uow) = &deps.uow {
                 if let Err(persist_err) = uow
@@ -217,7 +231,7 @@ async fn handle_register(
                 }
             }
             return Err(CamelError::RouteError(format!(
-                "runtime registration failed for route '{route_id}': {runtime_err}"
+                "runtime registration failed for route '{route_id}': {failure_text}"
             )));
         }
     }
@@ -250,8 +264,18 @@ pub(crate) async fn handle_register_internal(
         return Err(DomainError::AlreadyExists(route_id).into());
     }
 
-    if let Some(execution) = &deps.execution {
-        execution.register_route(def).await?;
+    if let Some(execution) = &deps.execution
+        && let Err(domain_err) = execution.register_route(def).await
+    {
+        // rc-uqwy2: convert at the command boundary without re-wrapping the
+        // InvalidState payload — Display would prepend "invalid state: " and
+        // the RuntimeBus port mapping (`RouteError(msg) =>
+        // DomainError::InvalidState(msg)`) would carry the already-prefixed
+        // text into a second prefix at the context surface.
+        return Err(match domain_err {
+            DomainError::InvalidState(msg) => CamelError::RouteError(msg),
+            other => other.into(),
+        });
     }
 
     let (aggregate, events) = RouteRuntimeAggregate::register(route_id.clone());

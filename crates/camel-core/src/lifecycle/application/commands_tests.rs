@@ -186,6 +186,7 @@ struct TrackingExecutionPort {
 #[derive(Clone, Default)]
 struct ConfigurableExecutionPort {
     fail_register: Arc<Mutex<bool>>,
+    register_error: Arc<Mutex<Option<DomainError>>>,
     fail_start: Arc<Mutex<bool>>,
     fail_suspend_once: Arc<Mutex<bool>>,
     fail_suspend_retry: Arc<Mutex<bool>>,
@@ -199,6 +200,20 @@ impl ConfigurableExecutionPort {
     fn with_register_failure() -> Self {
         Self {
             fail_register: Arc::new(Mutex::new(true)),
+            ..Self::default()
+        }
+    }
+
+    /// rc-uqwy2: fail `register_route` with the exact payload that
+    /// `RuntimeExecutionAdapter::to_domain` produces for a real
+    /// `CamelError::ComponentNotFound("mock")` (Display: "Component not found:
+    /// mock", camel-api error.rs) so the surfaced `RouteError` text matches
+    /// production byte-for-byte.
+    fn with_register_component_not_found() -> Self {
+        Self {
+            register_error: Arc::new(Mutex::new(Some(DomainError::InvalidState(
+                "Component not found: mock".into(),
+            )))),
             ..Self::default()
         }
     }
@@ -308,6 +323,9 @@ impl RuntimeExecutionPort for TrackingExecutionPort {
 #[async_trait]
 impl RuntimeExecutionPort for ConfigurableExecutionPort {
     async fn register_route(&self, _definition: RouteDefinition) -> Result<(), DomainError> {
+        if let Some(err) = self.register_error.lock().expect("register_error").clone() {
+            return Err(err);
+        }
         if *self.fail_register.lock().expect("fail_register") {
             return Err(DomainError::InvalidState("register failed".into()));
         }
@@ -1320,6 +1338,115 @@ async fn handle_register_compensates_to_failed_on_runtime_failure() {
     // Verify stored aggregate is in Failed state (compensation), NOT Registered
     let aggregate = deps.repo.load("route-reg-fail").await.unwrap().unwrap();
     assert!(matches!(aggregate.state(), RouteRuntimeState::Failed(_)));
+}
+
+/// rc-uqwy2: a registration failure must surface exactly one contextual
+/// prefix — `runtime registration failed for route '<id>': <original cause>`
+/// — with no `invalid state:` duplication.
+#[tokio::test]
+async fn registration_failure_has_no_duplicated_prefix() {
+    let execution = Arc::new(ConfigurableExecutionPort::with_register_component_not_found());
+    let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+    let projections: Arc<dyn ProjectionStorePort> =
+        Arc::new(InMemoryTestProjectionStore::default());
+    let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher::default());
+    let deps = CommandDeps {
+        repo: repo.clone(),
+        projections,
+        events,
+        uow: None,
+        execution: Some(execution),
+        health_registry: None,
+    };
+
+    use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec};
+
+    let spec = CanonicalRouteSpec {
+        route_id: "route-reg-prefix".into(),
+        from: "timer:test".into(),
+        steps: vec![CanonicalStepSpec::Stop],
+        circuit_breaker: None,
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+    };
+
+    let result = execute_command(
+        &deps,
+        RuntimeCommand::RegisterRoute {
+            spec,
+            command_id: "test-prefix".to_string(),
+            causation_id: None,
+        },
+    )
+    .await;
+
+    let err = result.expect_err("a failing runtime registration must surface an error");
+    let CamelError::RouteError(message) = err else {
+        panic!("expected CamelError::RouteError");
+    };
+    assert_eq!(
+        message
+            .matches("runtime registration failed for route")
+            .count(),
+        1,
+        "exactly one contextual prefix, got: {message}"
+    );
+    assert!(
+        !message.contains("invalid state:"),
+        "no spurious 'invalid state:' prefix may leak into the surfaced error, got: {message}"
+    );
+}
+
+/// rc-uqwy2: the original cause text must survive the command-layer wrap.
+#[tokio::test]
+async fn registration_error_keeps_the_original_cause() {
+    let execution = Arc::new(ConfigurableExecutionPort::with_register_component_not_found());
+    let repo: Arc<dyn RouteRepositoryPort> = Arc::new(InMemoryTestRepo::default());
+    let projections: Arc<dyn ProjectionStorePort> =
+        Arc::new(InMemoryTestProjectionStore::default());
+    let events: Arc<dyn EventPublisherPort> = Arc::new(InMemoryTestEventPublisher::default());
+    let deps = CommandDeps {
+        repo: repo.clone(),
+        projections,
+        events,
+        uow: None,
+        execution: Some(execution),
+        health_registry: None,
+    };
+
+    use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec};
+
+    let spec = CanonicalRouteSpec {
+        route_id: "route-reg-cause".into(),
+        from: "timer:test".into(),
+        steps: vec![CanonicalStepSpec::Stop],
+        circuit_breaker: None,
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+    };
+
+    let result = execute_command(
+        &deps,
+        RuntimeCommand::RegisterRoute {
+            spec,
+            command_id: "test-cause".to_string(),
+            causation_id: None,
+        },
+    )
+    .await;
+
+    let err = result.expect_err("a failing runtime registration must surface an error");
+    let CamelError::RouteError(message) = err else {
+        panic!("expected CamelError::RouteError");
+    };
+    assert!(
+        message.contains("Component not found: mock"),
+        "the original cause must remain in the surfaced message, got: {message}"
+    );
 }
 
 // --- H8 boot reconciler tests ---

@@ -1,0 +1,9 @@
+{
+  "kind": "spec",
+  "verdict": "TRIVIAL",
+  "hash": "sha256:1713be4f39f1427d3ef0f528a15ca85a2b8e56d11b652555dd5ca8867b0f1f07",
+  "expert": "mission-order-539 (owner directive: TRIVIAL path for small conversion changes)",
+  "date": "2026-11-08",
+  "round": 1,
+  "justification": "Mission order 539 authorizes a direct TRIVIAL bless when the fix is a small conversion change. Verified: conversion happens at the command layer only (commands.rs two call sites), no DomainError variant/semantics change, no port signature change, no new public type. All requirements of the TRIVIAL path hold; needs-plan escape not triggered."
+}
