@@ -1,0 +1,8 @@
+{
+  "kind": "refactor",
+  "reviewer": "reviewers/r_gpt",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "findings": "1 important: the descriptor table sampled selector_required/durable_required while building the array (startup :1757 and the monitor block), so a requirement latched mid-pass was missed where the pre-fold ladder saw it. Applied in c8b36fdeb: startup iterates (&gate, &AtomicBool) and loads each flag immediately before its gate; the monitor table arms through GateArming::Flag loaded inside the scan; new test late_durable_on_capable_slot_then_capability_loss_parks. Messages, order, latch and kill semantics byte-identical.",
+  "note": "The mission order self-blessed this as TRIVIAL although it touches src; this review substitutes the missing expert gate. Verdict APPROVE after the fix, not before.",
+  "date": "2026-11-08"
+}
