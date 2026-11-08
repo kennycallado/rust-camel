@@ -95,9 +95,11 @@ jobs:
   full-tests-linux:
     name: Full Tests (ubuntu-latest)
     runs-on: ubuntu-latest
-    # Normal run ~85 min; a hung test binary must fail fast instead of
-    # burning the runner to the 6h platform limit (rc-y24l).
-    timeout-minutes: 120
+    # Normal run 85-115 min; a hung test binary must fail fast instead of
+    # burning the runner to the 6h platform limit (rc-y24l). Raised 120 -> 150
+    # after the 2026-11-07 run was cancelled at exactly 120 min while the LAST
+    # step (camel-cli exec flavor) was still running, with every prior step green.
+    timeout-minutes: 150
     env:
       # ENOSPC mitigation: strip debug info from dev/test profiles.
       # Line-table backtraces are not needed to gate merges; rerun
