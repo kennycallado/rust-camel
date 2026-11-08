@@ -2,16 +2,17 @@
 # shellcheck shell=bash
 #
 # musl-fetch-retry-test.sh — offline stub battery for the musl toolchain
-# fetch in bridges/jms/build-native.sh and bridges/cxf/build-native.sh
-# (bd rc-1c47h, mission 530).
+# fetch in bridges/jms/build-native.sh, bridges/cxf/build-native.sh and
+# bridges/xml/build-native.sh (bd rc-1c47h mission 530, bd rc-8gpgd
+# mission 536).
 #
 # No network access is performed: a python3 http.server stub on 127.0.0.1
 # (ephemeral port) answers 504 for the first N requests, then 200 with a
 # small payload. The battery sources the production download functions
 # printed by `build-native.sh --print-musl-fetch` (jms script), so it
 # exercises exactly the logic CI runs instead of a copy that can drift.
-# CXF parity is asserted by t_cxf_function_parity (byte-identical
-# function printout).
+# CXF and XML parity are asserted by t_cxf_function_parity and
+# t_xml_function_parity (byte-identical function printout).
 #
 # Usage: bash scripts/tests/musl-fetch-retry-test.sh
 
@@ -21,6 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_NATIVE="$REPO_ROOT/bridges/jms/build-native.sh"
 BUILD_NATIVE_CXF="$REPO_ROOT/bridges/cxf/build-native.sh"
+BUILD_NATIVE_XML="$REPO_ROOT/bridges/xml/build-native.sh"
 
 ROOT="$(mktemp -d)"
 SERVER_PID=""
@@ -263,22 +265,43 @@ t_cxf_function_parity() {
   fi
 }
 
+t_xml_function_parity() {
+  # Same alignment contract as t_cxf_function_parity, extended to the XML
+  # bridge (rc-8gpgd): the constants block and the --print-musl-fetch
+  # output must stay byte-identical to the jms reference.
+  if ! diff -q <(sed -n '/^MUSL_PREFIX=/,/^ARCHIVE=/p' "$BUILD_NATIVE") \
+      <(sed -n '/^MUSL_PREFIX=/,/^ARCHIVE=/p' "$BUILD_NATIVE_XML") >/dev/null; then
+    FAIL_DETAIL="xml constants drift: MUSL_PREFIX..ARCHIVE block differs from jms"
+    return 1
+  fi
+  local xml_src="$ROOT/xml-functions.sh"
+  bash "$BUILD_NATIVE_XML" --print-musl-fetch > "$xml_src"
+  if ! cmp -s "$FUNC_SRC" "$xml_src"; then
+    FAIL_DETAIL="xml --print-musl-fetch output differs from jms (blocks are not textually aligned)"
+    return 1
+  fi
+}
+
 t_ci_cache_key_sync() {
   # The ci.yml cache keys embed the pinned SHA256 literal. If the pin is
   # bumped in build-native.sh but the keys go stale, actions/cache keeps
   # restoring a dead entry and every run re-downloads (save is skipped:
   # the key already exists). Make that drift loud here instead of silent
-  # in CI.
+  # in CI. All three bridges (jms, cxf, xml) must carry a key.
   local sha
   sha="$(grep -oE '^MUSL_TOOLCHAIN_SHA256="[0-9a-f]+"' "$BUILD_NATIVE" | cut -d'"' -f2)"
   if [[ -z "$sha" ]]; then
     FAIL_DETAIL="could not extract MUSL_TOOLCHAIN_SHA256 from build-native.sh"
     return 1
   fi
-  if ! grep -qF -- "$sha" "$REPO_ROOT/.github/workflows/ci.yml"; then
-    FAIL_DETAIL="ci.yml cache keys do not contain the pinned MUSL_TOOLCHAIN_SHA256 (${sha})"
-    return 1
-  fi
+  local bridge
+  for bridge in jms cxf xml; do
+    if ! grep -qF -- "musl-toolchain-${bridge}-v11.2.1-${sha}" \
+        "$REPO_ROOT/.github/workflows/ci.yml"; then
+      FAIL_DETAIL="ci.yml cache key for the ${bridge} bridge is missing or stale (expected musl-toolchain-${bridge}-v11.2.1-${sha})"
+      return 1
+    fi
+  done
 }
 
 main() {
@@ -294,6 +317,7 @@ main() {
     t_sha_mismatch_aborts
     t_cache_hit_skips_download
     t_cxf_function_parity
+    t_xml_function_parity
     t_ci_cache_key_sync
   )
 

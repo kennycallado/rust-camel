@@ -164,6 +164,11 @@ jobs:
           rm -rf bridges/jms/build
           find bridges/jms/.gradle-docker-cache -mindepth 1 -maxdepth 1 \
             ! -name musl-toolchain-cache -exec rm -rf -- {} + 2>/dev/null || true
+      - name: Cache musl toolchain (XML bridge)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: bridges/xml/.gradle-docker-cache/musl-toolchain-cache
+          key: musl-toolchain-xml-v11.2.1-eb1db6f0f3c2bdbdbfb993d7ef7e2eeef82ac1259f6a6e1757c33a97dbcef3ad
       - name: Build XML bridge binary
         run: cargo xtask build-xml-bridge
       - name: XML bridge integration tests
@@ -171,9 +176,13 @@ jobs:
           CAMEL_XML_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/xml/build/native/xml-bridge
         run: cargo test -p camel-test --features integration-tests --test xml_bridge_validator_test --test xml_bridge_xslt_test --test xml_bridge_xerces_diagnostics_test --test xml_bridge_xj_test
       - name: Reclaim XML bridge artifacts
+        # Keep musl-toolchain-cache for the actions/cache post step; the
+        # Gradle caches stay reclaimed.
         run: |
           pkill -x xml-bridge || true
-          rm -rf bridges/xml/build bridges/xml/.gradle-docker-cache
+          rm -rf bridges/xml/build
+          find bridges/xml/.gradle-docker-cache -mindepth 1 -maxdepth 1 \
+            ! -name musl-toolchain-cache -exec rm -rf -- {} + 2>/dev/null || true
       - name: Build CXF bridge binary
         run: cargo xtask build-cxf-bridge
       - name: CXF bridge integration tests
