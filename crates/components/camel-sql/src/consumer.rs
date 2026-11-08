@@ -1383,9 +1383,9 @@ mod tests {
             .await
             .expect("StreamList poll must succeed eagerly (lazy stream emitted)");
 
-        let stream_body = stream_rx
-            .recv()
+        let stream_body = timeout(Duration::from_secs(2), stream_rx.recv())
             .await
+            .expect("downstream must forward the stream body within 2s")
             .expect("downstream must receive the stream body");
         let mut guard = stream_body.stream.lock().await; // allow-test-wait: stream slot after delivery; no holder
         let mut stream = guard.take().expect("stream slot must hold the stream");
