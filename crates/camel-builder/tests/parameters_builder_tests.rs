@@ -9,6 +9,7 @@ use camel_builder::RouteBuilder;
 use camel_builder::StepAccumulator;
 use camel_core::route::BuilderStep;
 use camel_processor::LogLevel;
+use tower::limit::ConcurrencyLimitLayer;
 
 fn params(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
     pairs
@@ -188,6 +189,53 @@ fn builder_parameters_apply_in_build_canonical() {
         spec.steps[0],
         CanonicalStepSpec::To { ref uri } if uri == "log:out?showBody=true"
     ));
+}
+
+#[test]
+fn parameters_apply_to_layered_to() {
+    let route = RouteBuilder::from("direct:start")
+        .route_id("r-layered")
+        .to_layered("mock:b", ConcurrencyLimitLayer::new(2))
+        .parameters(params(&[("foo", "bar")]))
+        .build()
+        .unwrap();
+
+    assert_eq!(route.steps().len(), 1);
+    match &route.steps()[0] {
+        BuilderStep::LayeredTo { uri, .. } => assert_eq!(uri, "mock:b?foo=bar"),
+        other => panic!("expected BuilderStep::LayeredTo, got {other:?}"),
+    }
+}
+
+#[test]
+fn parameters_on_plain_to_unchanged() {
+    let route = RouteBuilder::from("timer:tick")
+        .route_id("r-plain-to")
+        .to("log:out")
+        .parameters(params(&[("showBody", "true")]))
+        .build()
+        .unwrap();
+
+    assert_eq!(route.steps().len(), 1);
+    match &route.steps()[0] {
+        BuilderStep::To(uri) => assert_eq!(uri, "log:out?showBody=true"),
+        other => panic!("expected BuilderStep::To, got {other:?}"),
+    }
+}
+
+#[test]
+fn parameters_on_non_endpoint_step_still_rejected() {
+    let err = build_err(
+        RouteBuilder::from("direct:x")
+            .route_id("r-nonendpoint")
+            .log("hi", LogLevel::Info)
+            .parameters(params(&[("a", "1")])),
+    );
+
+    assert!(
+        matches!(&err, CamelError::RouteError(_)),
+        "expected CamelError::RouteError, got: {err:?}"
+    );
 }
 
 #[test]

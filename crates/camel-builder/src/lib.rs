@@ -1202,7 +1202,8 @@ impl OnExceptionBuilder {
 }
 
 /// True when `slot` names an endpoint-bearing position: the `from` endpoint, or
-/// a step of one of the endpoint kinds (`To`, `WireTap`, `Enrich`, `PollEnrich`).
+/// a step of one of the endpoint kinds (`To`, `LayeredTo`, `WireTap`, `Enrich`,
+/// `PollEnrich`).
 fn endpoint_slot_bears_uri(slot: &EndpointSlot, steps: &[BuilderStep]) -> bool {
     match slot {
         EndpointSlot::From => true,
@@ -1210,6 +1211,7 @@ fn endpoint_slot_bears_uri(slot: &EndpointSlot, steps: &[BuilderStep]) -> bool {
             matches!(
                 step,
                 BuilderStep::To(_)
+                    | BuilderStep::LayeredTo { .. }
                     | BuilderStep::WireTap { .. }
                     | BuilderStep::Enrich { .. }
                     | BuilderStep::PollEnrich { .. }
@@ -1248,6 +1250,7 @@ fn apply_parameter_assignments(
             EndpointSlot::From => &mut *from_uri,
             EndpointSlot::Step(i) => match steps.get_mut(i) {
                 Some(BuilderStep::To(uri)) => uri,
+                Some(BuilderStep::LayeredTo { uri, .. }) => uri,
                 Some(BuilderStep::WireTap { uri, .. }) => uri,
                 Some(BuilderStep::Enrich { uri, .. }) => uri,
                 Some(BuilderStep::PollEnrich { uri, .. }) => uri,
