@@ -8,23 +8,26 @@ use std::time::Duration;
 use bytes::Bytes;
 use camel_api::datasource::DatasourceCatalog;
 use serde_json::json;
+use sqlx::AnyConnection;
 use sqlx::AnyPool;
 use sqlx::Either;
 use sqlx::Executor;
 use sqlx::SqlSafeStr;
 use sqlx::any::AnyRow;
+use sqlx::any::AnyTypeInfoKind;
 use sqlx::pool::PoolOptions;
 use tokio::sync::OnceCell;
 use tower::Service;
 use tracing::{debug, error, info, warn};
 
+use crate::bind_kinds::{
+    BindTarget, bind_batch_item, bind_single_item, bind_target_from_any_kind,
+    described_mode_eligible, hybrid_fallback_targets, scan_bind_targets,
+};
 use crate::config::{SqlEndpointConfig, SqlOutputType, enrich_db_url_with_ssl, redact_db_url};
 use crate::headers;
 use crate::query::{PreparedQuery, is_select_query, parse_query_template, resolve_params};
-use crate::utils::{
-    bind_batch_item, bind_json_values, bind_target_from_any_kind, fetch_error,
-    is_retryable_sqlx_error, row_to_json, scan_bind_targets,
-};
+use crate::utils::{fetch_error, is_retryable_sqlx_error, row_to_json};
 use camel_component_api::retry_async;
 use camel_component_api::{
     Body, CamelError, Exchange, Message, RuntimeObservability, StreamBody, StreamMetadata,
@@ -319,6 +322,152 @@ impl Service<Exchange> for SqlProducer {
     }
 }
 
+/// The bind plan for one single-mode statement (bd rc-mn139): which SQL
+/// text to execute, the per-position wire targets, and whether the
+/// statement may use the persistent cache.
+struct SingleBindPlan {
+    sql: String,
+    targets: Vec<Option<BindTarget>>,
+    persistent: bool,
+}
+
+/// Plans the binds for one single-mode statement on `conn` (the SAME
+/// pooled connection that will execute it — normalization must target
+/// the OIDs of the statement that actually runs, bd rc-mn139).
+async fn plan_single_binds(
+    conn: &mut AnyConnection,
+    sql: &str,
+    bindings: &[serde_json::Value],
+) -> Result<SingleBindPlan, CamelError> {
+    // Nothing to reinterpret: keep the default persistent path, with no
+    // probe round trip.
+    if bindings.is_empty() {
+        return Ok(SingleBindPlan {
+            sql: sql.to_string(),
+            targets: vec![],
+            persistent: true,
+        });
+    }
+
+    // Probe on a distinct SQL-text namespace: preparing with empty
+    // parameter types seeds a statement cache entry under the probed text,
+    // and for unmapped parameter types that entry is one no payload can
+    // satisfy. Keeping the probe on its own text keeps the user's SQL text
+    // namespace clean (mirrors the batch probe).
+    let probe_sql = format!("{sql} /* single-bind-kinds-probe */");
+    let described_kinds = match Executor::prepare_with(
+        &mut *conn,
+        sqlx::AssertSqlSafe(probe_sql).into_sql_str(),
+        &[],
+    )
+    .await
+    {
+        Ok(statement) => match statement.parameters {
+            // An empty type list cannot drive normalization.
+            Some(Either::Left(types)) if !types.is_empty() => Some(
+                types
+                    .iter()
+                    .map(|type_info| type_info.kind())
+                    .collect::<Vec<AnyTypeInfoKind>>(),
+            ),
+            _ => None,
+        },
+        // Metadata unavailable (e.g. NUMERIC columns have no Any mapping).
+        // Server and connection failures propagate unchanged.
+        Err(sqlx::Error::AnyDriverError(_)) => None,
+        Err(e) => {
+            // log-policy: handler-owned
+            // (category a: single-mode probe failure inside producer pipeline)
+            warn!("Single describe probe failed: {}", e);
+            return Err(CamelError::ProcessorError(format!(
+                "SQL query prepare failed: {e}"
+            )));
+        }
+    };
+
+    // The fallback alias is distinct from the probe alias on purpose: sqlx
+    // consults the SQL-text cache before the persistence flag, so a
+    // probe-seeded entry would otherwise be reused. Nothing is cached
+    // under the fallback text.
+    let fallback_sql = format!("{sql} /* single-bind-kinds-fallback */");
+
+    let Some(kinds) = described_kinds else {
+        return Ok(SingleBindPlan {
+            sql: fallback_sql,
+            targets: scan_bind_targets(&[bindings]),
+            persistent: false,
+        });
+    };
+
+    let described_targets = kinds
+        .iter()
+        .map(|kind| bind_target_from_any_kind(*kind))
+        .collect::<Vec<_>>();
+
+    if !described_mode_eligible(&kinds, bindings) {
+        // Hybrid fallback: keep every described numeric target so the
+        // checked guards still fire where the server described a numeric
+        // position; scan only the unresolved ones.
+        return Ok(SingleBindPlan {
+            sql: fallback_sql,
+            targets: hybrid_fallback_targets(&described_targets, bindings),
+            persistent: false,
+        });
+    }
+
+    // Describe with empty Parse parameter types so the server infers the
+    // parameter OIDs from the SQL text. On a cache hit the read-back
+    // parameters are the cached statement's actual OIDs — normalization
+    // targets those, so payloads always match the executed statement.
+    let statement = Executor::prepare_with(
+        &mut *conn,
+        sqlx::AssertSqlSafe(sql.to_string()).into_sql_str(),
+        &[],
+    )
+    .await
+    .map_err(|e| {
+        // log-policy: handler-owned
+        // (category a: single-mode described prepare failure inside producer pipeline)
+        warn!("Single describe failed: {}", e);
+        CamelError::ProcessorError(format!("SQL query prepare failed: {e}"))
+    })?;
+
+    let targets = match statement.parameters {
+        Some(Either::Left(types)) => types
+            .iter()
+            .map(|type_info| bind_target_from_any_kind(type_info.kind()))
+            .collect::<Vec<_>>(),
+        _ => scan_bind_targets(&[bindings]),
+    };
+
+    Ok(SingleBindPlan {
+        sql: sql.to_string(),
+        targets,
+        persistent: true,
+    })
+}
+
+/// Executes one single-mode SELECT on a pooled connection, planning the
+/// binds first (bd rc-mn139). Statements without bindings plan to the
+/// default persistent path with no probe and no binds.
+async fn fetch_single_rows(
+    pool: &AnyPool,
+    prepared: &PreparedQuery,
+) -> Result<Vec<AnyRow>, CamelError> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
+
+    let plan = plan_single_binds(&mut conn, &prepared.sql, &prepared.bindings).await?;
+    let query = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
+    let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
+    query
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| fetch_error("SQL query failed", e))
+}
+
 /// Executes a SELECT query and populates the exchange body with results.
 async fn execute_select(
     pool: &AnyPool,
@@ -329,13 +478,7 @@ async fn execute_select(
     match config.output_type {
         SqlOutputType::SelectOne => {
             // fetch_all and take first row
-            let mut query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str()));
-            query = bind_json_values(query, &prepared.bindings);
-
-            let rows: Vec<AnyRow> = query
-                .fetch_all(pool)
-                .await
-                .map_err(|e| fetch_error("SQL query failed", e))?;
+            let rows = fetch_single_rows(pool, prepared).await?;
 
             let count = rows.len();
             debug!(rows = count, "SQL query completed");
@@ -356,13 +499,7 @@ async fn execute_select(
         }
         SqlOutputType::SelectList => {
             // fetch_all for list output
-            let mut query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str()));
-            query = bind_json_values(query, &prepared.bindings);
-
-            let rows: Vec<AnyRow> = query
-                .fetch_all(pool)
-                .await
-                .map_err(|e| fetch_error("SQL query failed", e))?;
+            let rows = fetch_single_rows(pool, prepared).await?;
 
             let count = rows.len();
             debug!(rows = count, "SQL query completed");
@@ -387,9 +524,19 @@ async fn execute_select(
 
             // Build the stream that reads rows on demand and serializes to NDJSON bytes
             let byte_stream = async_stream::try_stream! {
-                let mut q = sqlx::query(sqlx::AssertSqlSafe(sql_str.as_str()));
-                q = bind_json_values(q, &bindings);
-                let mut rows = q.fetch(&pool_clone);
+                let mut conn = pool_clone
+                    .acquire()
+                    .await
+                    .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
+
+                // Plan and execute against the SAME pooled connection so
+                // normalization targets the OIDs of the statement that
+                // actually runs (bd rc-mn139).
+                let plan = plan_single_binds(&mut conn, &sql_str, &bindings).await?;
+                let q = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str()))
+                    .persistent(plan.persistent);
+                let q = bind_single_item(q, &bindings, &plan.targets)?;
+                let mut rows = q.fetch(&mut *conn);
                 while let Some(row) = rows
                     .try_next()
                     .await
@@ -426,10 +573,15 @@ async fn execute_modify(
     config: &SqlEndpointConfig,
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
-    let mut query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str()));
-    query = bind_json_values(query, &prepared.bindings);
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
 
-    let result = query.execute(pool).await.map_err(|e| {
+    let plan = plan_single_binds(&mut conn, &prepared.sql, &prepared.bindings).await?;
+    let query = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
+    let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
+    let result = query.execute(&mut *conn).await.map_err(|e| {
         warn!(error = %e, "SQL query failed");
         CamelError::ProcessorError(format!("Query execution failed: {}", e))
     })?;
@@ -672,6 +824,7 @@ async fn execute_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bind_kinds::bind_json_values;
     use camel_api::MetricsCollector;
     use camel_component_api::HealthCheckRegistry;
     use camel_component_api::test_support::PanicRuntimeObservability;

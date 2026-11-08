@@ -159,6 +159,22 @@ SSL parameters are appended as query string parameters to the database URL, with
 
 The SQL component supports multiple parameter placeholder styles:
 
+### Numeric Bind Safety (bd rc-fef4z / rc-mn139)
+
+Numeric payloads bind per the server-described parameter encoding
+(probe-once per SQL text, then checked conversions); statements whose
+description cannot carry a payload faithfully execute uncached on a
+private alias with that message's own encodings. A parameter position
+therefore never reinterprets numeric bits. Guards that fire as typed
+route errors:
+
+- an integer beyond 2^53 at a float position
+  (`parameter 0: integer value … exceeds 2^53 and would lose precision
+  bound as f64`),
+- a non-numeric JSON value at a described numeric position,
+- integer range checks against the described width (`SMALLINT`/`INTEGER`),
+- `REAL` overflow/underflow.
+
 ### Positional Parameters (`#`)
 
 ```sql

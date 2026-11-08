@@ -1,0 +1,9 @@
+{
+  "verdict": "BLESS",
+  "hash": "sha256:20b8e1deac5208590011a967adcb8906d988b3dfe29a13de3fefaee6948ff84c",
+  "expert": "@experts/e_gpt",
+  "kind": "spec",
+  "session": "ses_e446627edffeAme5DLFyqx2ww4",
+  "date": "2026-11-08",
+  "notes": "Gate history: v1 REJECT (5 findings: described-nonnumeric corruption hole, overstated pool-wide guarantee, select-path coverage, batch-error pins, cost wording), v2 REJECT (2 blocking: bool wire bytes under described TEXT OID; message-wide fallback dropping described numeric targets), v3 BLESS-WITH-FIXES (verification inventory completeness), v3a BLESS at the hash above. Mechanical verifications between gates: conductor reproduced the TEXT trap on postgres:17/sqlx 0.9.0 (int 3544952156018063160 under seeded described TEXT statement -> string \"12345678\"; fallback alias -> exact i64) and the closed read-back kind set (sqlx-postgres any.rs TryFrom<&PgTypeInfo>)."
+}

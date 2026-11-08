@@ -12,12 +12,14 @@ mod support;
 use support::install_crypto_provider;
 use support::postgres::{shared_postgres, shared_postgres_17, shared_postgres_tls};
 
-use camel_api::CamelError;
-use camel_api::Value;
 use camel_api::body::Body;
 use camel_api::error_handler::ErrorHandlerConfig;
+use camel_api::CamelError;
+use camel_api::Exchange;
+use camel_api::Value;
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::test_support::timeout_wait;
+use camel_component_api::Message;
 use camel_component_mock::MockComponent;
 use camel_component_sql::SqlComponent;
 use camel_test::CamelTestContext;
@@ -2012,4 +2014,760 @@ async fn streamlist_undecodable_column_is_typed() {
         }
         other => panic!("stream error must be the typed conversion failure, got {other:?}"),
     }
+}
+// ── Single-mode bind kinds (bd rc-mn139) ─────────────────────────────
+
+/// Sends one exchange into a registered direct endpoint (startup-race
+/// tolerant), so several messages flow through ONE sql endpoint instance
+/// and provably share its pool and statement cache.
+async fn send_to_direct_seam(h: &CamelTestContext, endpoint_uri: &str, exchange: Exchange) {
+    use tower::ServiceExt;
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let producer = {
+            let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+            let producer_ctx = ctx.producer_context();
+            let registry = ctx.registry();
+            let component = registry
+                .get("direct")
+                .expect("direct component not registered (with_direct missing)");
+            let endpoint = component
+                .create_endpoint(endpoint_uri, &*ctx)
+                .expect("failed to create direct endpoint");
+            endpoint
+                .create_producer(support::test_rt(), &producer_ctx)
+                .expect("failed to create direct producer")
+        };
+        match producer.oneshot(exchange.clone()).await {
+            Ok(_) => return,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(e) => panic!("direct send failed: {e}"),
+        }
+    }
+}
+
+/// Builds the harness for one bind-kinds test: direct seam + sql
+/// component + mock result/error endpoints.
+async fn kinds_harness() -> CamelTestContext {
+    CamelTestContext::builder()
+        .with_timer()
+        .with_direct()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await
+}
+
+/// Registers `direct:sqlkinds -> endpoint -> mock:result` with the
+/// stream-drain processor (no-op for JSON bodies; fully consumes NDJSON
+/// streams so lazy StreamList queries actually execute).
+async fn add_sqlkinds_route(h: &CamelTestContext, endpoint: &str) {
+    let route = RouteBuilder::from("direct:sqlkinds")
+        .to(endpoint.to_string())
+        .process(|mut ex| async move {
+            let drained = if let Body::Stream(sb) = &ex.input.body {
+                let mut guard = sb.stream.lock().await;
+                if let Some(mut s) = guard.take() {
+                    let mut buf: Vec<u8> = Vec::new();
+                    while let Some(chunk) = futures::StreamExt::next(&mut s).await {
+                        buf.extend_from_slice(chunk.expect("stream chunk").as_ref());
+                    }
+                    Some(String::from_utf8_lossy(&buf).into_owned())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(text) = drained {
+                ex.input.body = Body::Text(text);
+            }
+            Ok(ex)
+        })
+        .to("mock:result")
+        .route_id("sql-single-kinds")
+        .build()
+        .unwrap();
+    h.add_route(route).await.unwrap();
+}
+
+/// Body of a received exchange as text, for content assertions.
+fn exchange_body_text(exchange: &camel_component_api::Exchange) -> String {
+    match &exchange.input.body {
+        Body::Json(v) => v.to_string(),
+        Body::Text(t) => t.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Regression for bd rc-mn139: the same single-mode endpoint (same pool,
+/// same statement cache) receives a float message then an int message.
+/// The cached statement must never reinterpret the second message's
+/// integer under the first message's float8 OID.
+#[tokio::test(flavor = "multi_thread")]
+async fn single_insert_mixed_kinds_never_corrupts() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE test_single_mixed (id SERIAL PRIMARY KEY, f DOUBLE PRECISION, i INTEGER)",
+    )
+    .await;
+
+    let h = kinds_harness().await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let endpoint = format!(
+        "sql:INSERT INTO test_single_mixed (f, i) VALUES (#, #)?db_url={}&sslMode=disable&maxConnections=1",
+        conn_str
+    );
+    add_sqlkinds_route(&h, &endpoint).await;
+    h.start().await;
+
+    send_to_direct_seam(
+        &h,
+        "direct:sqlkinds",
+        Exchange::new(Message::new(Body::Json(serde_json::json!([10.5, 1])))),
+    )
+    .await;
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    send_to_direct_seam(
+        &h,
+        "direct:sqlkinds",
+        Exchange::new(Message::new(Body::Json(serde_json::json!([20, 2])))),
+    )
+    .await;
+    wait_for_mock_exchanges(h.mock(), "result", 2).await;
+    h.stop().await;
+
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        if !errors.is_empty() {
+            panic!("Route had errors: {:?}", errors[0].error);
+        }
+    }
+
+    let rows = sqlx::query(sqlx::AssertSqlSafe(
+        "SELECT f, i FROM test_single_mixed ORDER BY id",
+    ))
+    .fetch_all(&pool)
+    .await
+    .expect("Failed to read stored rows");
+
+    let f_vals: Vec<f64> = rows
+        .iter()
+        .map(|row| row.try_get(0).expect("f column should decode as f64"))
+        .collect();
+    let i_vals: Vec<i64> = rows
+        .iter()
+        .map(|row| row.try_get(1).expect("i column should decode as i64"))
+        .collect();
+    assert_eq!(
+        f_vals,
+        vec![10.5, 20.0],
+        "f column corrupted (int bits reinterpreted as float8?)"
+    );
+    assert_eq!(i_vals, vec![1, 2], "i column corrupted");
+}
+
+/// Same hazard on the select path: two SELECTs whose parameters flip
+/// kinds at the same position must each find their row exactly — across
+/// all three outputType paths (SelectList, SelectOne, StreamList).
+#[tokio::test(flavor = "multi_thread")]
+async fn single_select_mixed_kinds_never_corrupts() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+
+    for (leg, output_suffix) in [
+        ("list", ""),
+        ("one", "&outputType=SelectOne"),
+        ("stream", "&outputType=StreamList"),
+    ] {
+        let pool = create_pool(&conn_str).await;
+        setup_table(
+            &pool,
+            &format!(
+                "CREATE TABLE test_single_sel_{leg} (id SERIAL PRIMARY KEY, f DOUBLE PRECISION)"
+            ),
+        )
+        .await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO test_single_sel_{leg} (f) VALUES (10.5), (20.0)"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("{leg}: seed rows failed: {e}"));
+
+        let h = kinds_harness().await;
+        h.ctx()
+            .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+            .await
+            .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+            .await;
+
+        let endpoint = format!(
+            "sql:SELECT id FROM test_single_sel_{leg} WHERE f = #?db_url={}&sslMode=disable&maxConnections=1{output_suffix}",
+            conn_str
+        );
+        add_sqlkinds_route(&h, &endpoint).await;
+        h.start().await;
+
+        send_to_direct_seam(
+            &h,
+            "direct:sqlkinds",
+            Exchange::new(Message::new(Body::Json(serde_json::json!([10.5])))),
+        )
+        .await;
+        wait_for_mock_exchanges(h.mock(), "result", 1).await;
+        send_to_direct_seam(
+            &h,
+            "direct:sqlkinds",
+            Exchange::new(Message::new(Body::Json(serde_json::json!([20])))),
+        )
+        .await;
+        wait_for_mock_exchanges(h.mock(), "result", 2).await;
+        h.stop().await;
+
+        if let Some(error_ep) = h.mock().get_endpoint("error") {
+            let errors = error_ep.get_received_exchanges().await;
+            if !errors.is_empty() {
+                panic!("{leg}: route had errors: {:?}", errors[0].error);
+            }
+        }
+
+        let exchanges = h
+            .mock()
+            .get_endpoint("result")
+            .expect("mock result endpoint")
+            .get_received_exchanges()
+            .await;
+        assert_eq!(exchanges.len(), 2, "{leg}: both selects must complete");
+        // Direct sends are sequential: float param first, int second.
+        for (idx, expected_id) in [(0usize, 1i64), (1, 2)] {
+            let text = exchange_body_text(&exchanges[idx]);
+            assert!(
+                text.contains(&format!("\"id\":{expected_id}"))
+                    || text.contains(&format!("\"id\": {expected_id}")),
+                "{leg}: select {idx} (param kind flip) body should contain id {expected_id}, got {text}"
+            );
+            if leg != "stream" {
+                // StreamList does not set CamelSql.RowCount (lazy stream).
+                let count = exchanges[idx]
+                    .input
+                    .header("CamelSql.RowCount")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or_else(|| {
+                        panic!("{leg}: select {idx} missing CamelSql.RowCount header")
+                    });
+                assert_eq!(
+                    count, 1,
+                    "{leg}: select {idx} matched {count} rows — cached statement reinterpreted the bind?"
+                );
+            }
+        }
+    }
+}
+
+/// An integer beyond 2^53 targeted at a described float position must
+/// fail with the batch-equivalent typed error (single-mode wording:
+/// parameter position, no batch index) and write no row.
+#[tokio::test(flavor = "multi_thread")]
+async fn single_bind_precision_error_is_typed() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE test_single_guard (id SERIAL PRIMARY KEY, f DOUBLE PRECISION, i INTEGER)",
+    )
+    .await;
+
+    let h = kinds_harness().await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let endpoint = format!(
+        "sql:INSERT INTO test_single_guard (f, i) VALUES (#, #)?db_url={}&sslMode=disable&maxConnections=1",
+        conn_str
+    );
+    add_sqlkinds_route(&h, &endpoint).await;
+    h.start().await;
+
+    send_to_direct_seam(
+        &h,
+        "direct:sqlkinds",
+        Exchange::new(Message::new(Body::Json(serde_json::json!([
+            9007199254740993i64,
+            1
+        ])))),
+    )
+    .await;
+
+    let error_ep = h.mock().get_endpoint("error").expect("mock error endpoint");
+    let arrived = wait_until(
+        "single 2^53 typed error arrival",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let error_ep = error_ep.clone();
+            async move { Ok(!error_ep.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await;
+
+    if arrived.is_err() {
+        // Unfixed behaviour: the bind goes through as int8, the server's
+        // assignment cast rounds silently. Surface the corrupted value.
+        let stored: Option<i64> =
+            sqlx::query_scalar("SELECT f::bigint FROM test_single_guard LIMIT 1")
+                .fetch_optional(&pool)
+                .await
+                .expect("read stored row");
+        panic!(
+            "expected a typed 2^53 precision error, none arrived; silently stored f = {stored:?}"
+        );
+    }
+    h.stop().await;
+
+    let errors = error_ep.get_received_exchanges().await;
+    let text = format!("{:?}", errors[0].error);
+    assert!(
+        text.contains("parameter 0") && text.contains("exceeds 2^53"),
+        "expected single-mode typed error naming parameter 0 and 2^53, got {text}"
+    );
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM test_single_guard")
+        .fetch_one(&pool)
+        .await
+        .expect("count rows");
+    assert_eq!(count, 0, "failed insert must write no rows");
+}
+
+/// The bd's second hazard: a single-mode entry on a shared pool must not
+/// poison the batch described path into an int8-at-float8 encoding that
+/// lets an integer > 2^53 slip past the guard.
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_guard_still_holds_after_a_single_mode_entry() {
+    use std::sync::Arc;
+
+    use camel_api::DatasourceCatalog;
+    use camel_component_sql::config::SqlGlobalConfig;
+    use camel_component_sql::pool_factory::SqlPoolFactory;
+    use camel_core::datasource::RuntimeDatasourceCatalog;
+
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE test_guard_shared (id SERIAL PRIMARY KEY, f DOUBLE PRECISION, i INTEGER)",
+    )
+    .await;
+
+    // One shared datasource pool with a single connection: the single
+    // insert and the batch insert provably share the connection and its
+    // statement cache, even across distinct endpoint instances.
+    let mut configs = std::collections::HashMap::new();
+    configs.insert(
+        "pgkinds".to_string(),
+        camel_api::datasource::DatasourceConfig {
+            db_url: conn_str.clone(),
+            provider: Some("sqlx".to_string()),
+            max_connections: Some(1),
+            min_connections: Some(1),
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: Some("disable".to_string()),
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra: std::collections::HashMap::new(),
+        },
+    );
+    let catalog = RuntimeDatasourceCatalog::new(configs);
+    catalog
+        .register_factory("sqlx", Arc::new(SqlPoolFactory))
+        .expect("register sqlx pool factory");
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_direct()
+        .with_mock()
+        .with_component(SqlComponent::with_config_and_catalog(
+            SqlGlobalConfig::default(),
+            Arc::new(catalog),
+        ))
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let single_endpoint =
+        "sql:INSERT INTO test_guard_shared (f, i) VALUES (#, #)?datasource=pgkinds".to_string();
+    let batch_endpoint =
+        "sql:INSERT INTO test_guard_shared (f, i) VALUES (#, #)?datasource=pgkinds&batch=true"
+            .to_string();
+
+    // 1) Single-mode entry: after the fix this binds per the described
+    //    float8/int8 OIDs; on unfixed code it seeds int8,int8 under the
+    //    shared pool's connection.
+    add_sqlkinds_route(&h, &single_endpoint).await;
+    // 2) Batch message with an integer > 2^53 at the float position: must
+    //    still trip the per-encoding 2^53 guard. Separate endpoint, same
+    //    datasource pool.
+    let batch_route = RouteBuilder::from("timer:guard-batch?period=100&delay=300&repeatCount=1")
+        .set_body(Value::from(serde_json::json!([[9007199254740993i64, 7]])))
+        .to(batch_endpoint)
+        .to("mock:result")
+        .route_id("sql-batch-guard-shared")
+        .build()
+        .unwrap();
+    h.add_route(batch_route).await.unwrap();
+    h.start().await;
+
+    send_to_direct_seam(
+        &h,
+        "direct:sqlkinds",
+        Exchange::new(Message::new(Body::Json(serde_json::json!([1, 2])))),
+    )
+    .await;
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+
+    let error_ep = h.mock().get_endpoint("error").expect("mock error endpoint");
+    let arrived = wait_until(
+        "batch 2^53 typed error arrival after single entry",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let error_ep = error_ep.clone();
+            async move { Ok(!error_ep.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await;
+
+    if arrived.is_err() {
+        let rows = sqlx::query(sqlx::AssertSqlSafe(
+            "SELECT id, f::text, i FROM test_guard_shared ORDER BY id",
+        ))
+        .fetch_all(&pool)
+        .await
+        .expect("read rows");
+        let summary: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                format!(
+                    "id={} f={} i={}",
+                    row.try_get::<i64, _>(0).unwrap_or_default(),
+                    row.try_get::<String, _>(1).unwrap_or_default(),
+                    row.try_get::<i64, _>(2).unwrap_or_default(),
+                )
+            })
+            .collect();
+        panic!(
+            "expected the batch 2^53 guard to fire after a single-mode cache entry, none arrived; stored rows = {summary:?}"
+        );
+    }
+    h.stop().await;
+
+    let errors = error_ep.get_received_exchanges().await;
+    let text = format!("{:?}", errors[0].error);
+    assert!(
+        text.contains("exceeds 2^53"),
+        "expected batch typed 2^53 error after single-mode entry, got {text}"
+    );
+
+    // Exactly one row (the single insert); the guarded batch wrote nothing.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(
+        "SELECT f, i FROM test_guard_shared ORDER BY id",
+    ))
+    .fetch_all(&pool)
+    .await
+    .expect("read rows");
+    let f_vals: Vec<f64> = rows
+        .iter()
+        .map(|row| row.try_get(0).expect("f decodes as f64"))
+        .collect();
+    let i_vals: Vec<i64> = rows
+        .iter()
+        .map(|row| row.try_get(1).expect("i decodes as i64"))
+        .collect();
+    assert_eq!(
+        f_vals,
+        vec![1.0],
+        "only the single-mode row should exist (poisoned batch value rounded silently?)"
+    );
+    assert_eq!(i_vals, vec![2], "i column exact");
+}
+
+/// Gate-finding regression: a bare-parameter SELECT describes as TEXT, and
+/// a numeric payload under the described TEXT statement reinterprets int8
+/// bytes as ASCII ("12345678"). The hybrid fallback must keep the number
+/// exact, then the float flip at the same position too.
+#[tokio::test(flavor = "multi_thread")]
+async fn single_select_bare_param_number_stays_numeric() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+    sqlx::query("SELECT 1").execute(&pool).await.expect("ping");
+
+    let h = kinds_harness().await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let endpoint = format!(
+        "sql:SELECT # AS value?db_url={}&sslMode=disable&maxConnections=1",
+        conn_str
+    );
+    add_sqlkinds_route(&h, &endpoint).await;
+    h.start().await;
+
+    send_to_direct_seam(
+        &h,
+        "direct:sqlkinds",
+        Exchange::new(Message::new(Body::Json(serde_json::json!([
+            3544952156018063160i64
+        ])))),
+    )
+    .await;
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    send_to_direct_seam(
+        &h,
+        "direct:sqlkinds",
+        Exchange::new(Message::new(Body::Json(serde_json::json!([6.5])))),
+    )
+    .await;
+    wait_for_mock_exchanges(h.mock(), "result", 2).await;
+    h.stop().await;
+
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        if !errors.is_empty() {
+            panic!("Route had errors: {:?}", errors[0].error);
+        }
+    }
+
+    let exchanges = h
+        .mock()
+        .get_endpoint("result")
+        .expect("mock result endpoint")
+        .get_received_exchanges()
+        .await;
+    assert_eq!(exchanges.len(), 2, "both selects must complete");
+
+    // Int trap: must come back as the exact number, never the ASCII text
+    // of its bytes.
+    let text0 = exchange_body_text(&exchanges[0]);
+    assert!(
+        text0.contains("3544952156018063160"),
+        "bare-param int payload must stay numeric, got {text0}"
+    );
+    assert!(
+        !text0.contains("12345678"),
+        "bare-param int payload reinterpreted as its ASCII bytes: {text0}"
+    );
+
+    // Float flip at the same position on a warm statement.
+    let text1 = exchange_body_text(&exchanges[1]);
+    assert!(
+        text1.contains("6.5"),
+        "bare-param float payload must stay exact, got {text1}"
+    );
+}
+
+/// Gate-finding regression: a bool payload under a described TEXT OID
+/// corrupts (true → TEXT "\u0001"); the hybrid fallback must keep the
+/// bool exact, while a string payload at the same position stays in
+/// described mode and exact.
+#[tokio::test(flavor = "multi_thread")]
+async fn single_select_bool_then_string_stays_exact() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+    sqlx::query("SELECT 1").execute(&pool).await.expect("ping");
+
+    let h = kinds_harness().await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let endpoint = format!(
+        "sql:SELECT # AS value?db_url={}&sslMode=disable&maxConnections=1",
+        conn_str
+    );
+    add_sqlkinds_route(&h, &endpoint).await;
+    h.start().await;
+
+    send_to_direct_seam(
+        &h,
+        "direct:sqlkinds",
+        Exchange::new(Message::new(Body::Json(serde_json::json!([true])))),
+    )
+    .await;
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    send_to_direct_seam(
+        &h,
+        "direct:sqlkinds",
+        Exchange::new(Message::new(Body::Json(serde_json::json!(["hello"])))),
+    )
+    .await;
+    wait_for_mock_exchanges(h.mock(), "result", 2).await;
+    h.stop().await;
+
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        if !errors.is_empty() {
+            panic!("Route had errors: {:?}", errors[0].error);
+        }
+    }
+
+    let exchanges = h
+        .mock()
+        .get_endpoint("result")
+        .expect("mock result endpoint")
+        .get_received_exchanges()
+        .await;
+    assert_eq!(exchanges.len(), 2, "both selects must complete");
+
+    let text0 = exchange_body_text(&exchanges[0]);
+    assert!(
+        text0.contains("true"),
+        "bool payload must stay boolean, got {text0}"
+    );
+    assert!(
+        !text0.contains('\\') && !text0.contains("u0001"),
+        "bool payload reinterpreted under a described TEXT OID: {text0}"
+    );
+
+    let text1 = exchange_body_text(&exchanges[1]);
+    assert!(
+        text1.contains("hello"),
+        "string payload must stay exact, got {text1}"
+    );
+}
+
+/// Gate-finding regression: a message that falls back must keep every
+/// described numeric target, so the 2^53 guard still fires at the float
+/// position instead of a silent ::double precision cast-round.
+#[tokio::test(flavor = "multi_thread")]
+async fn single_select_hybrid_keeps_described_float_guard() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+    sqlx::query("SELECT 1").execute(&pool).await.expect("ping");
+
+    let h = kinds_harness().await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let endpoint = format!(
+        "sql:SELECT #::double precision AS f, # AS n?db_url={}&sslMode=disable&maxConnections=1",
+        conn_str
+    );
+    add_sqlkinds_route(&h, &endpoint).await;
+    h.start().await;
+
+    // Describes (Double, Text); the number at the Text position forces the
+    // hybrid fallback — position 0 must keep its F64 target and trip the
+    // typed 2^53 error, never a silent cast-round.
+    send_to_direct_seam(
+        &h,
+        "direct:sqlkinds",
+        Exchange::new(Message::new(Body::Json(serde_json::json!([
+            9007199254740993i64,
+            3544952156018063160i64
+        ])))),
+    )
+    .await;
+
+    let error_ep = h.mock().get_endpoint("error").expect("mock error endpoint");
+    let arrived = wait_until(
+        "hybrid 2^53 typed error arrival",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let error_ep = error_ep.clone();
+            async move { Ok(!error_ep.get_received_exchanges().await.is_empty()) }
+        },
+    )
+    .await;
+
+    if arrived.is_err() {
+        panic!(
+            "expected the hybrid fallback to keep the described Double target and trip the 2^53 guard, none arrived"
+        );
+    }
+    h.stop().await;
+
+    let errors = error_ep.get_received_exchanges().await;
+    let text = format!("{:?}", errors[0].error);
+    assert!(
+        text.contains("parameter 0") && text.contains("exceeds 2^53"),
+        "expected typed 2^53 error at parameter 0 through the hybrid fallback, got {text}"
+    );
+
+    // Second message: exact values through the hybrid fallback (f64 under
+    // float8 at position 0, i64 under int8 at position 1).
+    let h2 = kinds_harness().await;
+    h2.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+    add_sqlkinds_route(&h2, &endpoint).await;
+    h2.start().await;
+    send_to_direct_seam(
+        &h2,
+        "direct:sqlkinds",
+        Exchange::new(Message::new(Body::Json(serde_json::json!([
+            2.5,
+            3544952156018063160i64
+        ])))),
+    )
+    .await;
+    wait_for_mock_exchanges(h2.mock(), "result", 1).await;
+    h2.stop().await;
+
+    if let Some(error_ep) = h2.mock().get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        if !errors.is_empty() {
+            panic!("exact-value leg had errors: {:?}", errors[0].error);
+        }
+    }
+
+    let exchanges = h2
+        .mock()
+        .get_endpoint("result")
+        .expect("mock result endpoint")
+        .get_received_exchanges()
+        .await;
+    let text = exchange_body_text(&exchanges[0]);
+    assert!(
+        text.contains("2.5") && text.contains("3544952156018063160"),
+        "exact-value select must return f=2.5 and n=3544952156018063160, got {text}"
+    );
 }

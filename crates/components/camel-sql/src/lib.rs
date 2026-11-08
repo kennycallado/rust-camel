@@ -1,3 +1,4 @@
+pub(crate) mod bind_kinds;
 pub mod bundle;
 pub mod config;
 pub mod consumer;

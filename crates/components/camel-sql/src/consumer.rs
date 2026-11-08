@@ -18,13 +18,14 @@ use camel_component_api::{
 };
 use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 
+use crate::bind_kinds::bind_json_values;
 use crate::config::{
     PollStrategy, ProcessingStrategy, SqlEndpointConfig, SqlOutputType, TransactionMode,
     enrich_db_url_with_ssl, redact_db_url,
 };
 use crate::headers;
 use crate::query::{QueryTemplate, parse_query_template, resolve_params};
-use crate::utils::{bind_json_values, fetch_error, is_retryable_sqlx_error, row_to_json};
+use crate::utils::{fetch_error, is_retryable_sqlx_error, row_to_json};
 
 /// Record a post-process (b′) failure for ADR-0012 outside-contract sites in this
 /// consumer. Increments the per-label error metric AND emits an `error!` log
