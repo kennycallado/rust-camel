@@ -39,6 +39,35 @@ pub async fn shared_postgres() -> &'static str {
         .as_str()
 }
 
+static POSTGRES_17: OnceCell<(ContainerAsync<Postgres>, String)> = OnceCell::const_new();
+
+/// Shared non-TLS Postgres 17 container — the reporter's exact repro
+/// environment for bd rc-fef4z. Returns the connection string.
+pub async fn shared_postgres_17() -> &'static str {
+    POSTGRES_17
+        .get_or_init(|| async {
+            super::init_tracing();
+            super::install_crypto_provider();
+            sqlx::any::install_default_drivers();
+
+            let container = Postgres::default()
+                .with_tag("17")
+                .start()
+                .await
+                .expect("Postgres 17 container failed to start");
+            let port = container
+                .get_host_port_ipv4(5432)
+                .await
+                .expect("Postgres 17 port not available");
+            let conn_str = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
+            eprintln!("PostgreSQL 17 connection: {conn_str}");
+            (container, conn_str)
+        })
+        .await
+        .1
+        .as_str()
+}
+
 // ── TLS Postgres ──────────────────────────────────────────────────────────
 
 static POSTGRES_TLS: OnceCell<(ContainerAsync<GenericImage>, String)> = OnceCell::const_new();

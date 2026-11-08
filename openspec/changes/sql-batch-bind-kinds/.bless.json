@@ -1,0 +1,10 @@
+{
+  "verdict": "BLESS",
+  "hash": "sha256:c58bb0d705a2ce8bcf212d1fb0041a4535cd80ba6490fa640dd334677ed8963c",
+  "proposal_hash_current": "sha256:0104ae1bb90994c1b2a014a8e2acb45595f24ffb4957120561c22ecd45da9262 (superseded by post-bless edits, see notes)",
+  "expert": "@experts/e_gpt",
+  "kind": "spec",
+  "session": "ses_e45287d94ffe5oBPwD218kly6x",
+  "date": "2026-11-08",
+  "notes": "Gate history: v1 REJECT (5 findings), v2 BLESS-WITH-FIXES (3 gaps), v3 BLESS (hash above). Post-bless revisions to proposal.md: (1) fallback redesign v4 (fresh-connection swap) — REJECTED by expert, (2) Connection-trait clear — proven a no-op through the Any layer (AnyConnectionBackend default no-op, no Pg override; evidence: sqlx-core-0.9.0/src/any/connection/backend.rs:71, any/connection/mod.rs:134), replaced by the alias-namespace fallback + probe-on-alias text, (3) probe eligibility widened per r_glm Important finding (non-numeric Any-mapped kinds are described-eligible). Autopilot e_gpt budget was exhausted (4 gate dispatches), so the alias-text fallback and the eligibility widening carry reviewer verification (r_glm APPROVE-WITH-FINDINGS, all findings resolved) instead of a fresh expert bless. Surfaced for merge-gate judgment."
+}

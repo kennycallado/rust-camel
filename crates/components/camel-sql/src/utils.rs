@@ -1,6 +1,7 @@
 use camel_component_api::CamelError;
 use sqlx::any::AnyArguments;
 use sqlx::any::AnyRow;
+use sqlx::any::AnyTypeInfoKind;
 use sqlx::query::Query;
 use sqlx::{Any, Column, Row};
 use tracing::warn;
@@ -151,25 +152,346 @@ pub(crate) fn bind_json_values<'q>(
     values: &'q [serde_json::Value],
 ) -> Query<'q, Any, AnyArguments> {
     for value in values {
-        query = match value {
-            serde_json::Value::Null => query.bind(Option::<String>::None),
-            serde_json::Value::Bool(b) => query.bind(*b),
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    query.bind(i)
-                } else if let Some(f) = n.as_f64() {
-                    query.bind(f)
-                } else {
-                    query.bind(n.to_string())
-                }
+        query = bind_single_json_value(query, value);
+    }
+    query
+}
+
+/// Binds one JSON value through the default JSON path.
+///
+/// Handles: Null, Bool, Number (i64/f64), String, Array/Object (serialized to JSON string).
+fn bind_single_json_value<'q>(
+    query: Query<'q, Any, AnyArguments>,
+    value: &'q serde_json::Value,
+) -> Query<'q, Any, AnyArguments> {
+    match value {
+        serde_json::Value::Null => query.bind(Option::<String>::None),
+        serde_json::Value::Bool(b) => query.bind(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                query.bind(i)
+            } else if let Some(f) = n.as_f64() {
+                query.bind(f)
+            } else {
+                query.bind(n.to_string())
             }
-            serde_json::Value::String(s) => query.bind(s.as_str()),
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                query.bind(value.to_string())
+        }
+        serde_json::Value::String(s) => query.bind(s.as_str()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => query.bind(value.to_string()),
+    }
+}
+
+// ── Batch bind-kind normalization (bd rc-fef4z) ──────────────────────
+
+/// Conservative exactness limit for integers bound as f64 (owner-specified
+/// policy): integers with magnitude above 2^53 fail with a typed error
+/// instead of silently rounding.
+const F64_EXACT_INT_LIMIT: i128 = 9_007_199_254_740_992;
+
+/// Exactly representable `i64::MIN` as f64 (`-2^63`).
+const I64_MIN_AS_F64: f64 = -9_223_372_036_854_775_808.0;
+
+/// The first f64 above every `i64` value (`2^63`; `i64::MAX as f64` rounds
+/// up to this, so the upper bound is exclusive).
+const I64_BOUND_EXCLUSIVE_AS_F64: f64 = 9_223_372_036_854_775_808.0;
+
+/// Wire bind encoding for a described numeric parameter position.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BindTarget {
+    I16,
+    I32,
+    I64,
+    F32,
+    F64,
+}
+
+impl BindTarget {
+    fn name(self) -> &'static str {
+        match self {
+            BindTarget::I16 => "SMALLINT",
+            BindTarget::I32 => "INTEGER",
+            BindTarget::I64 => "BIGINT",
+            BindTarget::F32 => "REAL",
+            BindTarget::F64 => "DOUBLE PRECISION",
+        }
+    }
+}
+
+/// Maps a described parameter type to its exact wire bind encoding.
+///
+/// Broad `i64`/`f64` categories are not used: an `i64` payload under a
+/// described `int4`/`int2` OID fails the server's binary width check.
+pub(crate) fn bind_target_from_any_kind(kind: AnyTypeInfoKind) -> Option<BindTarget> {
+    match kind {
+        AnyTypeInfoKind::SmallInt => Some(BindTarget::I16),
+        AnyTypeInfoKind::Integer => Some(BindTarget::I32),
+        AnyTypeInfoKind::BigInt => Some(BindTarget::I64),
+        AnyTypeInfoKind::Real => Some(BindTarget::F32),
+        AnyTypeInfoKind::Double => Some(BindTarget::F64),
+        _ => None,
+    }
+}
+
+/// Fallback scan when the server description is unavailable: a parameter
+/// position binds as the float encoding once any row carries a float JSON
+/// number there; positions carrying only integers bind as the integer
+/// encoding; positions without any JSON number keep the default binding.
+pub(crate) fn scan_bind_targets(rows: &[&[serde_json::Value]]) -> Vec<Option<BindTarget>> {
+    let width = rows.iter().map(|row| row.len()).max().unwrap_or(0);
+    let mut targets = vec![None; width];
+
+    for row in rows {
+        for (position, value) in row.iter().enumerate() {
+            let serde_json::Value::Number(n) = value else {
+                continue;
+            };
+            // serde_json never converts an f64-backed number in `as_i64`,
+            // so a float literal is exactly: no i64, but an f64.
+            if n.as_i64().is_none() && n.as_f64().is_some() {
+                targets[position] = Some(BindTarget::F64);
+            } else if targets[position].is_none() && n.as_i64().is_some() {
+                targets[position] = Some(BindTarget::I64);
+            }
+        }
+    }
+
+    targets
+}
+
+/// A JSON value normalized for one parameter position's wire encoding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum NormalizedBind {
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+    Null(BindTarget),
+    /// No described numeric target — bind through the default JSON path.
+    Default,
+}
+
+/// Normalizes one JSON value against its position's bind target.
+///
+/// Numeric values are converted to the target encoding with checked
+/// conversions (ties-to-even rounding for float -> integer, the 2^53
+/// conservative guard for integer -> float, f32 overflow/underflow checks).
+/// Non-numeric values at described numeric positions fail: raw text or
+/// bool payloads must never reach a numeric OID, because an 8-byte string
+/// silently reinterprets as float8 bits.
+pub(crate) fn normalize_for_target(
+    value: &serde_json::Value,
+    target: Option<BindTarget>,
+    item: usize,
+    position: usize,
+) -> Result<NormalizedBind, CamelError> {
+    let Some(target) = target else {
+        return Ok(NormalizedBind::Default);
+    };
+
+    let reject = |reason: String| {
+        Err(CamelError::ProcessorError(format!(
+            "Batch item {item}, parameter {position}: {reason}"
+        )))
+    };
+
+    match value {
+        serde_json::Value::Null => Ok(NormalizedBind::Null(target)),
+        serde_json::Value::Number(n) => normalize_number(n, target, item, position),
+        other => reject(format!(
+            "{} value at a numeric parameter; batch mode requires numeric JSON at described numeric positions",
+            json_kind_name(other)
+        )),
+    }
+}
+
+fn normalize_number(
+    n: &serde_json::Number,
+    target: BindTarget,
+    item: usize,
+    position: usize,
+) -> Result<NormalizedBind, CamelError> {
+    // Unsigned magnitudes beyond i64::MAX are detected through the u64
+    // value before any lossy f64 conversion.
+    if let Some(u) = n.as_u64()
+        && n.as_i64().is_none()
+    {
+        return Err(reject_number(
+            item,
+            position,
+            format!(
+                "unsigned integer value {u} exceeds the described {} parameter range",
+                target.name()
+            ),
+        ));
+    }
+
+    if let Some(i) = n.as_i64() {
+        return match target {
+            BindTarget::I64 => Ok(NormalizedBind::I64(i)),
+            BindTarget::I32 => i32::try_from(i).map(NormalizedBind::I32).map_err(|_| {
+                reject_number(
+                    item,
+                    position,
+                    format!("integer value {i} does not fit in the described INTEGER parameter"),
+                )
+            }),
+            BindTarget::I16 => i16::try_from(i).map(NormalizedBind::I16).map_err(|_| {
+                reject_number(
+                    item,
+                    position,
+                    format!("integer value {i} does not fit in the described SMALLINT parameter"),
+                )
+            }),
+            BindTarget::F64 => {
+                if i128::from(i).abs() > F64_EXACT_INT_LIMIT {
+                    return Err(reject_number(
+                        item,
+                        position,
+                        format!(
+                            "integer value {i} exceeds 2^53 and would lose precision bound as f64"
+                        ),
+                    ));
+                }
+                Ok(NormalizedBind::F64(i as f64))
+            }
+            BindTarget::F32 => {
+                if i128::from(i).abs() > F64_EXACT_INT_LIMIT {
+                    return Err(reject_number(
+                        item,
+                        position,
+                        format!(
+                            "integer value {i} exceeds 2^53 and would lose precision bound as f32"
+                        ),
+                    ));
+                }
+                to_f32_checked(i as f64, item, position).map(NormalizedBind::F32)
             }
         };
     }
-    query
+
+    let Some(f) = n.as_f64() else {
+        return Err(reject_number(
+            item,
+            position,
+            "number value cannot be represented as f64".to_string(),
+        ));
+    };
+
+    match target {
+        BindTarget::F64 => Ok(NormalizedBind::F64(f)),
+        BindTarget::F32 => to_f32_checked(f, item, position).map(NormalizedBind::F32),
+        BindTarget::I64 => f64_to_int(f, item, position, target).map(NormalizedBind::I64),
+        BindTarget::I32 | BindTarget::I16 => {
+            let rounded = f64_to_int(f, item, position, target)?;
+            let reason = |v: i64| {
+                format!(
+                    "float value {f} rounds to {v}, outside the described {} parameter range",
+                    target.name()
+                )
+            };
+            if target == BindTarget::I32 {
+                i32::try_from(rounded)
+                    .map(NormalizedBind::I32)
+                    .map_err(|_| reject_number(item, position, reason(rounded)))
+            } else {
+                i16::try_from(rounded)
+                    .map(NormalizedBind::I16)
+                    .map_err(|_| reject_number(item, position, reason(rounded)))
+            }
+        }
+    }
+}
+
+/// Rounds with ties-to-even (Postgres `rint` semantics) and range-checks
+/// against `i64` before the cast, so the conversion can never saturate.
+fn f64_to_int(f: f64, item: usize, position: usize, target: BindTarget) -> Result<i64, CamelError> {
+    let rounded = f.round_ties_even();
+    if !rounded.is_finite() || rounded < I64_MIN_AS_F64 || rounded >= I64_BOUND_EXCLUSIVE_AS_F64 {
+        return Err(reject_number(
+            item,
+            position,
+            format!(
+                "float value {f} rounds outside the described {} parameter range",
+                target.name()
+            ),
+        ));
+    }
+    Ok(rounded as i64)
+}
+
+/// Converts f64 to f32 with the same overflow/underflow rejection Postgres
+/// applies in its `float8` -> `float4` cast: a finite value that would
+/// become infinite, or a non-zero value that would become zero, fails.
+fn to_f32_checked(f: f64, item: usize, position: usize) -> Result<f32, CamelError> {
+    let g = f as f32;
+    if g.is_infinite() {
+        return Err(reject_number(
+            item,
+            position,
+            format!("float value {f} overflows the described REAL parameter"),
+        ));
+    }
+    if f != 0.0 && g == 0.0 {
+        return Err(reject_number(
+            item,
+            position,
+            format!("float value {f} underflows the described REAL parameter"),
+        ));
+    }
+    Ok(g)
+}
+
+fn reject_number(item: usize, position: usize, reason: String) -> CamelError {
+    CamelError::ProcessorError(format!("Batch item {item}, parameter {position}: {reason}"))
+}
+
+fn json_kind_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Binds one batch item's values against the position targets.
+///
+/// `targets[position]` drives normalization; positions without a target
+/// bind through the default JSON path. On a normalization failure the
+/// returned error names the 0-based batch item index and parameter
+/// position.
+pub(crate) fn bind_batch_item<'q>(
+    mut query: Query<'q, Any, AnyArguments>,
+    values: &'q [serde_json::Value],
+    targets: &[Option<BindTarget>],
+    item: usize,
+) -> Result<Query<'q, Any, AnyArguments>, CamelError> {
+    for (position, value) in values.iter().enumerate() {
+        query = match normalize_for_target(
+            value,
+            targets.get(position).copied().flatten(),
+            item,
+            position,
+        )? {
+            NormalizedBind::I16(v) => query.bind(v),
+            NormalizedBind::I32(v) => query.bind(v),
+            NormalizedBind::I64(v) => query.bind(v),
+            NormalizedBind::F32(v) => query.bind(v),
+            NormalizedBind::F64(v) => query.bind(v),
+            NormalizedBind::Null(target) => match target {
+                BindTarget::I16 => query.bind(Option::<i16>::None),
+                BindTarget::I32 => query.bind(Option::<i32>::None),
+                BindTarget::I64 => query.bind(Option::<i64>::None),
+                BindTarget::F32 => query.bind(Option::<f32>::None),
+                BindTarget::F64 => query.bind(Option::<f64>::None),
+            },
+            NormalizedBind::Default => bind_single_json_value(query, value),
+        };
+    }
+    Ok(query)
 }
 
 // ── Retry classification ─────────────────────────────────────────────
@@ -397,5 +719,233 @@ mod tests {
             source: "mismatched types".into(),
         };
         assert!(actionable_any_type_error(&decode).is_none());
+    }
+    // ── Batch bind-kind normalization (bd rc-fef4z) ──────────────────
+
+    mod batch_kinds {
+        use super::*;
+        use serde_json::json;
+
+        fn norm_f64(v: serde_json::Value) -> Result<NormalizedBind, CamelError> {
+            normalize_for_target(&v, Some(BindTarget::F64), 1, 0)
+        }
+
+        fn norm_i64(v: serde_json::Value) -> Result<NormalizedBind, CamelError> {
+            normalize_for_target(&v, Some(BindTarget::I64), 1, 0)
+        }
+
+        fn err_text(result: Result<NormalizedBind, CamelError>) -> String {
+            result.expect_err("expected typed error").to_string()
+        }
+
+        #[test]
+        fn target_mapping_is_exact_per_wire_encoding() {
+            let cases = [
+                (AnyTypeInfoKind::SmallInt, Some(BindTarget::I16)),
+                (AnyTypeInfoKind::Integer, Some(BindTarget::I32)),
+                (AnyTypeInfoKind::BigInt, Some(BindTarget::I64)),
+                (AnyTypeInfoKind::Real, Some(BindTarget::F32)),
+                (AnyTypeInfoKind::Double, Some(BindTarget::F64)),
+                (AnyTypeInfoKind::Text, None),
+                (AnyTypeInfoKind::Bool, None),
+                (AnyTypeInfoKind::Blob, None),
+                (AnyTypeInfoKind::Null, None),
+            ];
+            for (kind, expected) in cases {
+                assert_eq!(
+                    bind_target_from_any_kind(kind),
+                    expected,
+                    "unexpected mapping for {kind:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn scan_lets_float_win_per_position() {
+            let batch = [
+                [json!(1), json!(2), json!("x")],
+                [json!(3.5), json!(4), json!("y")],
+            ];
+            let rows: Vec<&[serde_json::Value]> = batch.iter().map(|r| r.as_slice()).collect();
+            let targets = scan_bind_targets(&rows);
+            assert_eq!(
+                targets,
+                vec![Some(BindTarget::F64), Some(BindTarget::I64), None]
+            );
+        }
+
+        #[test]
+        fn scan_without_numbers_defaults() {
+            let batch = [[json!("a"), json!(true)], [json!("b"), json!(false)]];
+            let rows: Vec<&[serde_json::Value]> = batch.iter().map(|r| r.as_slice()).collect();
+            let targets = scan_bind_targets(&rows);
+            assert_eq!(targets, vec![None, None]);
+        }
+
+        #[test]
+        fn int_to_double_stays_exact_within_2_pow_53() {
+            assert_eq!(
+                norm_f64(json!(9007199254740992i64)).unwrap(),
+                NormalizedBind::F64(9007199254740992.0)
+            );
+            assert_eq!(norm_f64(json!(20)).unwrap(), NormalizedBind::F64(20.0));
+            assert_eq!(norm_f64(json!(-3)).unwrap(), NormalizedBind::F64(-3.0));
+        }
+
+        #[test]
+        fn int_over_2_pow_53_is_rejected_for_float_targets() {
+            let text = err_text(norm_f64(json!(9007199254740993i64)));
+            assert!(text.contains("Batch item 1, parameter 0"), "got: {text}");
+            assert!(text.contains("2^53"), "got: {text}");
+            // i64::MIN exceeds 2^53 in magnitude and must be rejected too.
+            let text = err_text(norm_f64(json!(i64::MIN)));
+            assert!(text.contains("2^53"), "got: {text}");
+        }
+
+        #[test]
+        fn int_to_smallint_integer_range_checks() {
+            assert_eq!(
+                normalize_for_target(&json!(30000), Some(BindTarget::I16), 0, 1).unwrap(),
+                NormalizedBind::I16(30000)
+            );
+            assert_eq!(
+                normalize_for_target(&json!(300000), Some(BindTarget::I32), 0, 1).unwrap(),
+                NormalizedBind::I32(300000)
+            );
+            let text = err_text(normalize_for_target(
+                &json!(300000),
+                Some(BindTarget::I16),
+                2,
+                1,
+            ));
+            assert!(text.contains("SMALLINT"), "got: {text}");
+            assert!(text.contains("Batch item 2, parameter 1"), "got: {text}");
+            let text = err_text(normalize_for_target(
+                &json!(i64::MAX),
+                Some(BindTarget::I32),
+                0,
+                0,
+            ));
+            assert!(text.contains("INTEGER"), "got: {text}");
+        }
+
+        #[test]
+        fn float_to_int_rounds_ties_even_like_postgres_rint() {
+            assert_eq!(norm_i64(json!(2.5)).unwrap(), NormalizedBind::I64(2));
+            assert_eq!(norm_i64(json!(3.5)).unwrap(), NormalizedBind::I64(4));
+            assert_eq!(norm_i64(json!(-2.5)).unwrap(), NormalizedBind::I64(-2));
+            assert_eq!(norm_i64(json!(0.5)).unwrap(), NormalizedBind::I64(0));
+            // 6.5 ties to the even integer 6, like Postgres `rint`.
+            assert_eq!(norm_i64(json!(6.5)).unwrap(), NormalizedBind::I64(6));
+            assert_eq!(
+                normalize_for_target(&json!(7.5), Some(BindTarget::I16), 0, 0).unwrap(),
+                NormalizedBind::I16(8)
+            );
+        }
+
+        #[test]
+        fn float_to_int_out_of_range_is_rejected() {
+            let text = err_text(norm_i64(json!(1e30)));
+            assert!(text.contains("outside the described BIGINT"), "got: {text}");
+            let text = err_text(normalize_for_target(
+                &json!(1e10),
+                Some(BindTarget::I16),
+                0,
+                0,
+            ));
+            assert!(text.contains("SMALLINT"), "got: {text}");
+        }
+
+        #[test]
+        fn f32_overflow_and_underflow_are_rejected() {
+            let text = err_text(normalize_for_target(
+                &json!(1e40),
+                Some(BindTarget::F32),
+                0,
+                0,
+            ));
+            assert!(text.contains("overflows the described REAL"), "got: {text}");
+            let text = err_text(normalize_for_target(
+                &json!(1e-50),
+                Some(BindTarget::F32),
+                0,
+                0,
+            ));
+            assert!(
+                text.contains("underflows the described REAL"),
+                "got: {text}"
+            );
+            assert_eq!(
+                normalize_for_target(&json!(6.5), Some(BindTarget::F32), 0, 0).unwrap(),
+                NormalizedBind::F32(6.5)
+            );
+        }
+
+        #[test]
+        fn unsigned_beyond_i64_is_rejected_everywhere() {
+            let huge = serde_json::Number::from(u64::MAX);
+            for target in [
+                BindTarget::I16,
+                BindTarget::I32,
+                BindTarget::I64,
+                BindTarget::F32,
+                BindTarget::F64,
+            ] {
+                let result = normalize_for_target(
+                    &serde_json::Value::Number(huge.clone()),
+                    Some(target),
+                    3,
+                    1,
+                );
+                let text = err_text(result);
+                assert!(text.contains("Batch item 3, parameter 1"), "got: {text}");
+            }
+        }
+
+        #[test]
+        fn string_at_numeric_position_is_rejected() {
+            let text = err_text(norm_f64(json!("12345678")));
+            assert!(text.contains("string value"), "got: {text}");
+            assert!(text.contains("numeric"), "got: {text}");
+            let text = err_text(norm_i64(json!(true)));
+            assert!(text.contains("bool value"), "got: {text}");
+        }
+
+        #[test]
+        fn null_binds_typed_per_target() {
+            assert_eq!(
+                normalize_for_target(&json!(null), Some(BindTarget::I32), 0, 0).unwrap(),
+                NormalizedBind::Null(BindTarget::I32)
+            );
+            assert_eq!(
+                normalize_for_target(&json!(null), Some(BindTarget::F32), 0, 0).unwrap(),
+                NormalizedBind::Null(BindTarget::F32)
+            );
+        }
+
+        #[test]
+        fn no_target_keeps_default_binding() {
+            assert_eq!(
+                normalize_for_target(&json!("abc"), None, 0, 0).unwrap(),
+                NormalizedBind::Default
+            );
+            assert_eq!(
+                normalize_for_target(&json!(5), None, 0, 0).unwrap(),
+                NormalizedBind::Default
+            );
+        }
+
+        #[test]
+        fn bind_batch_item_uses_targets_per_position() {
+            let values = vec![json!(20), json!(6.5), json!("x")];
+            let targets = [Some(BindTarget::F64), Some(BindTarget::I64), None];
+            let query = sqlx::query(sqlx::AssertSqlSafe("SELECT 1".to_string()));
+            let bound = bind_batch_item(query, &values, &targets, 0);
+            assert!(
+                bound.is_ok(),
+                "expected all values to bind, got {:?}",
+                bound.err()
+            );
+        }
     }
 }

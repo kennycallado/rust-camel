@@ -9,6 +9,9 @@ use bytes::Bytes;
 use camel_api::datasource::DatasourceCatalog;
 use serde_json::json;
 use sqlx::AnyPool;
+use sqlx::Either;
+use sqlx::Executor;
+use sqlx::SqlSafeStr;
 use sqlx::any::AnyRow;
 use sqlx::pool::PoolOptions;
 use tokio::sync::OnceCell;
@@ -18,7 +21,10 @@ use tracing::{debug, error, info, warn};
 use crate::config::{SqlEndpointConfig, SqlOutputType, enrich_db_url_with_ssl, redact_db_url};
 use crate::headers;
 use crate::query::{PreparedQuery, is_select_query, parse_query_template, resolve_params};
-use crate::utils::{bind_json_values, fetch_error, is_retryable_sqlx_error, row_to_json};
+use crate::utils::{
+    bind_batch_item, bind_json_values, bind_target_from_any_kind, fetch_error,
+    is_retryable_sqlx_error, row_to_json, scan_bind_targets,
+};
 use camel_component_api::retry_async;
 use camel_component_api::{
     Body, CamelError, Exchange, Message, RuntimeObservability, StreamBody, StreamMetadata,
@@ -459,6 +465,13 @@ async fn execute_modify(
 }
 
 /// Executes a batch of queries from a JSON array body.
+///
+/// Bind-kind safety (bd rc-fef4z): sqlx keys its statement cache by SQL text
+/// alone and fixes parameter OIDs at the first `Parse`, so a position that
+/// carries different Rust bind kinds across items silently reinterprets
+/// bits. Every position therefore binds exactly one wire encoding per
+/// statement: the server-described encoding when available, otherwise a
+/// per-batch scan (float wins) executed without statement caching.
 async fn execute_batch(
     pool: &AnyPool,
     config: &SqlEndpointConfig,
@@ -484,17 +497,10 @@ async fn execute_batch(
     // Parse template from config query
     let template = parse_query_template(&config.query, config.placeholder)?;
 
-    // Fix 2: Batch operations must be wrapped in a transaction
-    let mut tx = pool.begin().await.map_err(|e| {
-        // log-policy: handler-owned
-        // (category a: tx begin failure inside producer pipeline)
-        warn!(error = %e, "Failed to begin transaction");
-        CamelError::ProcessorError(format!("Failed to begin transaction: {}", e))
-    })?;
-
-    let mut total_rows_affected: u64 = 0;
-
-    for (batch_idx, params_array) in batch_data.into_iter().enumerate() {
+    // Resolve every item up front so the fallback bind-kind scan sees the
+    // whole batch.
+    let mut prepared_items = Vec::with_capacity(batch_data.len());
+    for (batch_idx, params_array) in batch_data.iter().enumerate() {
         // Each item must be an array of parameters
         params_array.as_array().ok_or_else(|| {
             CamelError::ProcessorError(format!(
@@ -507,12 +513,112 @@ async fn execute_batch(
         let temp_msg = Message::new(Body::Json(params_array.clone()));
         let temp_exchange = Exchange::new(temp_msg);
 
-        // Resolve parameters for this batch item
-        let prepared = resolve_params(&template, &temp_exchange, &config.in_separator)?;
+        prepared_items.push(resolve_params(
+            &template,
+            &temp_exchange,
+            &config.in_separator,
+        )?);
+    }
 
-        // Execute against transaction
-        let mut query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str()));
-        query = bind_json_values(query, &prepared.bindings);
+    // Fallback targets: one bind kind per position across the batch, float wins.
+    let binding_rows: Vec<&[serde_json::Value]> = prepared_items
+        .iter()
+        .map(|prepared| prepared.bindings.as_slice())
+        .collect();
+    let scanned_targets = scan_bind_targets(&binding_rows);
+
+    // Fix 2: Batch operations must be wrapped in a transaction
+    let mut tx = pool.begin().await.map_err(|e| {
+        // log-policy: handler-owned
+        // (category a: tx begin failure inside producer pipeline)
+        warn!(error = %e, "Failed to begin transaction");
+        CamelError::ProcessorError(format!("Failed to begin transaction: {}", e))
+    })?;
+
+    // Probe the described parameter types once with the first item's SQL
+    // text. Described batches keep using the transaction connection (later
+    // items with the same text hit the statement cache for free).
+    let mut described_mode = true;
+    if let Some(first) = prepared_items.first() {
+        // Probe on a distinct SQL-text namespace: preparing with empty
+        // parameter types seeds a statement cache entry under the probed
+        // text, and for unmapped types (e.g. NUMERIC) that entry is one no
+        // payload can satisfy. Keeping the probe on its own text keeps the
+        // user's SQL text namespace clean.
+        let probe_sql = format!("{} /* batch-bind-kinds-probe */", first.sql);
+        described_mode = match Executor::prepare_with(
+            &mut *tx,
+            sqlx::AssertSqlSafe(probe_sql).into_sql_str(),
+            &[],
+        )
+        .await
+        {
+            Ok(statement) => match statement.parameters {
+                // Any-mapped parameter types are described-eligible: numeric
+                // kinds get bind targets, non-numeric kinds (text, bool,
+                // blob) keep the default JSON binding under their described
+                // OIDs. Unmapped kinds (e.g. NUMERIC) fail the probe itself.
+                // An empty type list cannot drive normalization.
+                Some(Either::Left(types)) => !types.is_empty(),
+                _ => false,
+            },
+            // Metadata unavailable (e.g. NUMERIC columns have no Any
+            // mapping). Server and connection failures propagate unchanged.
+            Err(sqlx::Error::AnyDriverError(_)) => false,
+            Err(e) => {
+                // log-policy: handler-owned
+                // (category a: batch probe failure inside producer pipeline)
+                warn!("Batch describe probe failed: {}", e);
+                return Err(CamelError::ProcessorError(format!(
+                    "Batch query prepare failed: {e}"
+                )));
+            }
+        };
+    }
+
+    let mut total_rows_affected: u64 = 0;
+
+    for (batch_idx, prepared) in prepared_items.iter().enumerate() {
+        let (mut query, targets) = if described_mode {
+            // Describe with empty Parse parameter types so the server infers
+            // the parameter OIDs from the SQL text. On a cache hit the
+            // read-back parameters are the cached statement's actual OIDs —
+            // normalization targets those, so payloads always match the
+            // executed statement.
+            let statement = Executor::prepare_with(
+                &mut *tx,
+                sqlx::AssertSqlSafe(prepared.sql.clone()).into_sql_str(),
+                &[],
+            )
+            .await
+            .map_err(|e| {
+                // log-policy: handler-owned
+                // (category a: batch describe failure inside producer pipeline)
+                warn!("Batch describe failed at index {}: {}", batch_idx, e);
+                CamelError::ProcessorError(format!("Batch query prepare failed: {e}"))
+            })?;
+            let query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str()));
+            let targets = match statement.parameters {
+                Some(Either::Left(types)) => types
+                    .iter()
+                    .map(|type_info| bind_target_from_any_kind(type_info.kind()))
+                    .collect::<Vec<_>>(),
+                _ => scanned_targets.clone(),
+            };
+            (query, targets)
+        } else {
+            // Uncached fallback: execute a semantically identical alias text
+            // in its own cache namespace with persistent(false), so every
+            // item prepares an unnamed statement whose parameter types
+            // derive from the scan-normalized binds. Nothing is cached and
+            // nothing else uses this namespace, so no incompatible cached
+            // entry can be reused.
+            let fallback_sql = format!("{} /* batch-bind-kinds-fallback */", prepared.sql);
+            let query = sqlx::query(sqlx::AssertSqlSafe(fallback_sql.as_str())).persistent(false);
+            (query, scanned_targets.clone())
+        };
+
+        query = bind_batch_item(query, &prepared.bindings, &targets, batch_idx)?;
 
         let result = query.execute(&mut *tx).await.map_err(|e| {
             // log-policy: handler-owned
