@@ -821,6 +821,202 @@ mod mapping {
         .expect_err("an absent field must fail closed");
         assert!(err.contains("missing"), "must name the field: {err}");
     }
+
+    // ---- surrealdb-types 4.0 exhaustiveness arms (bd rc-ivtr6) ----
+    // The fixture-pinned server (v3.1.4) never emits these kinds; the
+    // table tests below pin each arm's contract directly so a
+    // regression there surfaces at unit-test time, not at a future
+    // server-pin bump.
+
+    /// The 4.0 integer widths map through exactly like `Int`: both
+    /// extremes of every width survive as exact JSON integers,
+    /// including `u64::MAX`, which a narrower mapping would corrupt.
+    #[test]
+    fn integer_widths_map_like_int() {
+        let table: [(&str, Sv, serde_json::Value); 14] = [
+            (
+                "i8.min",
+                Sv::Number(Number::I8(i8::MIN)),
+                serde_json::json!(i8::MIN),
+            ),
+            (
+                "i8.max",
+                Sv::Number(Number::I8(i8::MAX)),
+                serde_json::json!(i8::MAX),
+            ),
+            (
+                "u8.min",
+                Sv::Number(Number::U8(u8::MIN)),
+                serde_json::json!(u8::MIN),
+            ),
+            (
+                "u8.max",
+                Sv::Number(Number::U8(u8::MAX)),
+                serde_json::json!(u8::MAX),
+            ),
+            (
+                "i16.min",
+                Sv::Number(Number::I16(i16::MIN)),
+                serde_json::json!(i16::MIN),
+            ),
+            (
+                "i16.max",
+                Sv::Number(Number::I16(i16::MAX)),
+                serde_json::json!(i16::MAX),
+            ),
+            (
+                "u16.min",
+                Sv::Number(Number::U16(u16::MIN)),
+                serde_json::json!(u16::MIN),
+            ),
+            (
+                "u16.max",
+                Sv::Number(Number::U16(u16::MAX)),
+                serde_json::json!(u16::MAX),
+            ),
+            (
+                "i32.min",
+                Sv::Number(Number::I32(i32::MIN)),
+                serde_json::json!(i32::MIN),
+            ),
+            (
+                "i32.max",
+                Sv::Number(Number::I32(i32::MAX)),
+                serde_json::json!(i32::MAX),
+            ),
+            (
+                "u32.min",
+                Sv::Number(Number::U32(u32::MIN)),
+                serde_json::json!(u32::MIN),
+            ),
+            (
+                "u32.max",
+                Sv::Number(Number::U32(u32::MAX)),
+                serde_json::json!(u32::MAX),
+            ),
+            (
+                "u64.min",
+                Sv::Number(Number::U64(u64::MIN)),
+                serde_json::json!(u64::MIN),
+            ),
+            (
+                "u64.max",
+                Sv::Number(Number::U64(u64::MAX)),
+                serde_json::json!(u64::MAX),
+            ),
+        ];
+        for (label, value, expected) in table {
+            let cell = surreal_value_to_cell(&value, "n").expect("a width int must map");
+            assert_eq!(cell, expected, "{label}: the width must survive exactly");
+        }
+    }
+
+    /// A finite `F16` maps through `f64`: the JSON number the matcher
+    /// verbs see is the exact widened value.
+    #[test]
+    fn f16_finite_maps_to_json_number() {
+        use surrealdb::types::f16;
+        for (value, expected) in [
+            (f16::from_f32(1.5), serde_json::json!(1.5_f64)),
+            (f16::from_f32(0.0), serde_json::json!(0.0_f64)),
+        ] {
+            let cell = surreal_value_to_cell(&Sv::Number(Number::F16(value)), "v")
+                .expect("a finite f16 must map");
+            assert_eq!(cell, expected);
+        }
+    }
+
+    /// A non-finite `F16` fails closed like `Float`: NaN names
+    /// `NaN`, the infinities name `infinite float`, and each error
+    /// names the field.
+    #[test]
+    fn f16_non_finite_fails_closed() {
+        use surrealdb::types::f16;
+        for (label, value, kind) in [
+            ("NaN", f16::NAN, "NaN"),
+            ("+inf", f16::INFINITY, "infinite float"),
+            ("-inf", f16::NEG_INFINITY, "infinite float"),
+        ] {
+            let err = surreal_value_to_cell(&Sv::Number(Number::F16(value)), "temp")
+                .expect_err("a non-finite f16 must fail closed");
+            assert!(err.contains("temp"), "{label}: must name the field: {err}");
+            assert!(err.contains(kind), "{label}: must name the kind: {err}");
+        }
+    }
+
+    /// A finite `F32` maps to the exact widened JSON number.
+    #[test]
+    fn f32_finite_maps_to_json_number() {
+        for (value, expected) in [
+            (1.5_f32, serde_json::json!(1.5_f64)),
+            (0.0_f32, serde_json::json!(0.0_f64)),
+        ] {
+            let cell = surreal_value_to_cell(&Sv::Number(Number::F32(value)), "v")
+                .expect("a finite f32 must map");
+            assert_eq!(cell, expected);
+        }
+    }
+
+    /// A non-finite `F32` fails closed like `Float`: NaN names
+    /// `NaN`, the infinities name `infinite float`, and each error
+    /// names the field.
+    #[test]
+    fn f32_non_finite_fails_closed() {
+        for (label, value, kind) in [
+            ("NaN", f32::NAN, "NaN"),
+            ("+inf", f32::INFINITY, "infinite float"),
+            ("-inf", f32::NEG_INFINITY, "infinite float"),
+        ] {
+            let err = surreal_value_to_cell(&Sv::Number(Number::F32(value)), "ratio")
+                .expect_err("a non-finite f32 must fail closed");
+            assert!(err.contains("ratio"), "{label}: must name the field: {err}");
+            assert!(err.contains(kind), "{label}: must name the kind: {err}");
+        }
+    }
+
+    /// A `BigDecimal` fails closed like `Decimal`: the error names
+    /// the field and the `big decimal` kind.
+    #[test]
+    fn big_decimal_fails_closed() {
+        use surrealdb::types::BigDecimal;
+        let bd: BigDecimal = "1.5".parse().expect("a valid big decimal");
+        let err = surreal_value_to_cell(&Sv::Number(Number::BigDecimal(Box::new(bd))), "amount")
+            .expect_err("a big decimal must fail closed");
+        assert!(err.contains("amount"), "must name the field: {err}");
+        assert!(err.contains("big decimal"), "must name the kind: {err}");
+    }
+
+    /// The split naive temporal family stringifies exactly like
+    /// `Datetime`: the cell is the value's own `Display` form —
+    /// asserted through `to_string()` itself, never a hard-coded
+    /// date format the type does not promise.
+    #[test]
+    fn temporal_family_stringifies() {
+        use surrealdb::types::{Date, Time, Timestamp};
+        let date = Date::from_days(0).expect("a valid date");
+        let time = Time::from_nanos(1_500_000_000).expect("a valid time");
+        let ts = Timestamp::from_parts(1_700_000_000, 0).expect("a valid timestamp");
+        for (value, expected) in [
+            (Sv::Date(date), serde_json::json!(date.to_string())),
+            (Sv::Time(time), serde_json::json!(time.to_string())),
+            (Sv::Timestamp(ts), serde_json::json!(ts.to_string())),
+        ] {
+            let cell = surreal_value_to_cell(&value, "when").expect("a temporal kind must map");
+            assert_eq!(cell, expected);
+        }
+    }
+
+    /// An `Interval` fails closed: the error names the field and the
+    /// `interval` kind.
+    #[test]
+    fn interval_fails_closed() {
+        use surrealdb::types::Interval;
+        let interval: Interval = "PT1H".parse().expect("a valid interval");
+        let err = surreal_value_to_cell(&Sv::Interval(interval), "span")
+            .expect_err("an interval must fail closed");
+        assert!(err.contains("span"), "must name the field: {err}");
+        assert!(err.contains("interval"), "must name the kind: {err}");
+    }
 }
 
 /// The feature-off twin gate (the sql twin precedent): the document
