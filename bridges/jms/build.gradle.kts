@@ -25,6 +25,16 @@ repositories {
 
 val quarkusVersion = "3.39.1"
 
+/**
+ * Closed dependency set for the pool-evictor verifier (native + JVM legs). The
+ * verifier exercises the two pool implementations behind stubs, so it needs the
+ * pool libraries and nothing from the Quarkus application runtime.
+ */
+val evictorVerifierLibs by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+
 dependencies {
     implementation(enforcedPlatform("io.quarkus.platform:quarkus-bom:$quarkusVersion"))
     implementation("io.quarkus:quarkus-grpc")
@@ -44,6 +54,12 @@ dependencies {
 
     // Generic JMS connection pooling (used for Artemis)
     implementation("org.messaginghub:pooled-jms:2.0.8")
+
+    // Verifier legs (see evictorVerifierLibs): same pool versions as the bridge,
+    // resolved on their own so Quarkus runtime jars never reach the raw
+    // native-image build.
+    evictorVerifierLibs("org.apache.activemq:activemq-pool:5.19.10")
+    evictorVerifierLibs("org.messaginghub:pooled-jms:2.0.8")
 
     // log4j-api needed at native-image build time (Log4J2LogImpl in artemis-jms-client-all)
     runtimeOnly("org.apache.logging.log4j:log4j-api:2.26.1")
@@ -96,7 +112,47 @@ tasks.wrapper {
 
 val evictorVerifierClass = "org.rustcamel.jms.PoolEvictorVerifier"
 val evictorVerifyDir = layout.buildDirectory.dir("evictor-verify")
-val evictorVerifierClasspath = sourceSets.test.get().runtimeClasspath
+
+/**
+ * Verifier classpath: only what the verifier actually links against — the two
+ * pool implementations plus the compiled test classes (the stubs). It is
+ * deliberately NOT the application runtime classpath: a raw native-image build
+ * of the Quarkus runtime drags Quarkus' graal substitutions into the analysis,
+ * and those target the library versions Quarkus manages. Any drift there (a
+ * shaded netty inside artemis-jms-client-all, smallrye-common-net newer than
+ * quarkus-core expects) fails the image with errors the application build never
+ * hits, because the application never reaches that code. Keep this list closed;
+ * checkEvictorClasspath enforces it.
+ */
+val evictorVerifierClasspath =
+    files(
+        configurations.named("evictorVerifierLibs"),
+        sourceSets.test.get().output,
+        // Native-image metadata (reflect-config.json with the commons-pool2
+        // eviction policy, resource patterns, initialize-at-build-time args).
+        // Without it the native verifier dies at startup: "Unable to create
+        // EvictionPolicy instance of type DefaultEvictionPolicy".
+        sourceSets.main.get().output.resourcesDir,
+    )
+
+/**
+ * Fails fast when the verifier classpath grows something that only the Quarkus
+ * application build can handle. Runs on the JVM leg too, so the invariant is
+ * enforced without a GraalVM toolchain.
+ */
+fun checkEvictorClasspath(entries: List<File>) {
+    val names = entries.map { it.name }
+    val quarkus = names.filter { it.startsWith("quarkus-") }
+    check(quarkus.isEmpty()) {
+        "the evictor verifier must not see Quarkus jars: their graal substitutions " +
+            "target Quarkus-managed library versions and break a raw native-image build (got $quarkus)"
+    }
+    val artemisAll = names.filter { it.startsWith("artemis-jms-client-all-") }
+    check(artemisAll.isEmpty()) {
+        "the evictor verifier must not see the artemis uber-jar (it shadows real netty " +
+            "classes with an older shaded copy): $artemisAll"
+    }
+}
 
 val evictorClassicPassLine = "PASS branch=classic proofs=START,RETAINED,EVICT,SHUTDOWN"
 val evictorArtemisPassLine = "PASS branch=artemis proofs=START,RETAINED,EVICT,SHUTDOWN"
@@ -262,6 +318,7 @@ val evictorVerifyJvm =
         mainClass.set(evictorVerifierClass)
         classpath = evictorVerifierClasspath
         maxHeapSize = "1g"
+        doFirst { checkEvictorClasspath(evictorVerifierClasspath.files.toList()) }
     }
 
 val evictorVerifyNativeImage =
@@ -272,6 +329,7 @@ val evictorVerifyNativeImage =
         val verifierClasspath = evictorVerifierClasspath
         val verifyDir = evictorVerifyDir
         doLast {
+            checkEvictorClasspath(verifierClasspath.files.toList())
             val neutralArgs = readNeutralNativeBuildArgs()
             val directory = verifyDir.get().asFile
             directory.mkdirs()
