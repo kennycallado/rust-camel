@@ -1420,8 +1420,8 @@ async fn producer_non_utf8_bytea_fails_loudly() {
             let error_ep = error_ep.clone();
             let result_ep = result_ep.clone();
             async move {
-                Ok(error_ep.get_received_exchanges().await.len() >= 1
-                    || result_ep.get_received_exchanges().await.len() >= 1)
+                Ok(!error_ep.get_received_exchanges().await.is_empty()
+                    || !result_ep.get_received_exchanges().await.is_empty())
             }
         },
     )
@@ -1551,8 +1551,8 @@ async fn consumer_undecodable_column_fails_loudly() {
             let error_ep = error_ep.clone();
             let consumed_ep = consumed_ep.clone();
             async move {
-                Ok(error_ep.get_received_exchanges().await.len() >= 1
-                    || consumed_ep.get_received_exchanges().await.len() >= 1)
+                Ok(!error_ep.get_received_exchanges().await.is_empty()
+                    || !consumed_ep.get_received_exchanges().await.is_empty())
             }
         },
     )

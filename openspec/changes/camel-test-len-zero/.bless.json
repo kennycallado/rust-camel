@@ -1,0 +1,9 @@
+{
+  "kind": "trivial",
+  "verdict": "BLESS",
+  "hash": "6e7736224d5472dd0e07b764580ab8a1b8a76041071519aa036f28a8aed271c9",
+  "authority": "rc-0e0n3 (mechanical clippy fix)",
+  "justification": "Diff property verified: touches no crates/**/src/** file, 8 changed lines (< 50), single test file. Trivial path legitimate per owner ruling 2026-11-08.",
+  "expert": "self (trivial path)",
+  "round": 1
+}
