@@ -56,6 +56,15 @@ Either `datasource` or `db_url` is required (not both).
 | `idleTimeoutSecs` | `300` | Idle connection timeout in seconds |
 | `maxLifetimeSecs` | `1800` | Maximum connection lifetime in seconds |
 
+### Timeouts
+
+No TCP connect timeout is applied at the URL level: sqlx-postgres 0.9 does not read a
+`connect_timeout` key from the database URL (it warns "ignoring unrecognized connect parameter"
+and drops it, so this component no longer appends one). A stuck connection attempt is bounded by
+the pool **acquire timeout**, which sqlx fixes at **30 seconds** and which covers the whole
+acquire (queue wait plus connect), not just the TCP handshake. A `connect_timeout=…` key you set
+in `db_url` yourself is passed through untouched, but sqlx-postgres 0.9 ignores it.
+
 ### Named Datasources
 
 Instead of embedding `db_url` in every URI, define named datasources in `Camel.toml`:

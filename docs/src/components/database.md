@@ -20,6 +20,15 @@ sql:<query>[?outputType=<mode>&dataSource=<name>&allowDynamicQuery=<bool>&bridge
 | `allowDynamicQuery` | no | `false` | Allow query from Exchange header or body (ADR-0032) |
 | `bridgeErrorHandler` | no | `false` | Route poll errors through the error handler |
 
+#### Timeouts
+
+No TCP connect timeout is applied at the URL level: sqlx-postgres 0.9 does not read a
+`connect_timeout` key from the database URL (it warns "ignoring unrecognized connect parameter"
+and drops it, so the component no longer appends one). A stuck connection attempt is bounded by
+the pool **acquire timeout**: sqlx fixes it at 30 seconds, it covers the whole acquire (queue
+wait plus connect) rather than the TCP handshake alone, and a `connect_timeout=…` key present in
+`db_url` passes through untouched but is ignored by sqlx-postgres 0.9.
+
 ### Consumer
 
 `sql:SELECT * FROM users?outputType=SelectList` polls the query result. The Consumer submits one Exchange per poll cycle. The body carries the result set as `Body::Json`.

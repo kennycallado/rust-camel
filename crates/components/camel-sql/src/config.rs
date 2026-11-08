@@ -908,11 +908,11 @@ pub(crate) fn enrich_db_url_with_ssl_params(
         }
     }
 
-    // Add TCP connect timeout (10s) if not already set.
-    // This is the sqlx URL-level connect_timeout, NOT the pool acquire_timeout.
-    if !query_pairs.iter().any(|(k, _)| k == "connect_timeout") {
-        query_pairs.push(("connect_timeout".into(), "10".into()));
-    }
+    // NOTE (bd rc-sa1zo): no connect_timeout is appended here. sqlx-postgres
+    // 0.9 does not read that URL key (it warns "ignoring unrecognized connect
+    // parameter" and drops it), so the historical connect_timeout=10 append
+    // never applied a TCP timeout. A stuck connect is bounded by the pool
+    // acquire_timeout instead (sqlx default 30 s, covers acquire + connect).
 
     {
         let mut serializer = url::form_urlencoded::Serializer::new(String::new());
@@ -1843,15 +1843,16 @@ mod tests {
             SqlEndpointConfig::from_uri("sql:select 1?db_url=postgres://localhost/test").unwrap();
         c.resolve_defaults();
         let url = enrich_db_url_with_ssl(&c.db_url, &c).unwrap();
-        // Default ssl_mode and connect_timeout are applied at enrichment time
+        // Default ssl_mode is applied at enrichment time. connect_timeout is
+        // NOT appended: sqlx-postgres 0.9 does not read that URL key (bd rc-sa1zo).
         assert!(
             url.contains("sslmode=require"),
             "expected sslmode=require, got: {}",
             url
         );
         assert!(
-            url.contains("connect_timeout=10"),
-            "expected connect_timeout=10, got: {}",
+            !url.contains("connect_timeout"),
+            "connect_timeout must not be appended, got: {}",
             url
         );
     }
@@ -1868,8 +1869,8 @@ mod tests {
             url
         );
         assert!(
-            url.contains("connect_timeout=10"),
-            "expected connect_timeout=10, got: {}",
+            !url.contains("connect_timeout"),
+            "connect_timeout must not be appended, got: {}",
             url
         );
     }
@@ -1886,7 +1887,35 @@ mod tests {
         .unwrap();
         assert!(url.contains("sslmode=disable"), "got: {}", url);
         assert!(!url.contains("sslmode=require"), "got: {}", url);
-        assert!(url.contains("connect_timeout=10"), "got: {}", url);
+        assert!(!url.contains("connect_timeout"), "got: {}", url);
+    }
+
+    #[test]
+    fn enrich_does_not_append_connect_timeout() {
+        // Arrange: URL without connect_timeout, sslMode supplied via config
+        // (bd rc-sa1zo: sqlx-postgres 0.9 does not read connect_timeout from
+        // the URL; appending it only produces "ignoring unrecognized connect
+        // parameter" warnings on every pool creation).
+        // Act: enrich as usual.
+        let url = enrich_db_url_with_ssl_params(
+            "postgres://localhost/test",
+            Some("require"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        // Assert: the fabricated key is gone, the SSL pair is still applied.
+        assert!(
+            !url.contains("connect_timeout"),
+            "connect_timeout must not be appended, got: {}",
+            url
+        );
+        assert!(
+            url.contains("sslmode=require"),
+            "expected sslmode=require, got: {}",
+            url
+        );
     }
 
     #[test]

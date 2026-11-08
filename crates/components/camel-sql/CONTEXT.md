@@ -159,16 +159,18 @@ Applied in `enrich_db_url_with_ssl_params()` (`fn enrich_db_url_with_ssl`, confi
 - `SqlEndpointConfig.ssl_mode` stays `Option<String>` — `Default::default()` remains `None` for backward compatibility.
 - The `SqlGlobalConfig` also has `ssl_mode: Option<String>`; it propagates to endpoints via `apply_defaults()` (`fn apply_defaults`, config.rs:693-723).
 
-### `connect_timeout=10` appended to URL
+### No connect_timeout appended to URL
 
-In `enrich_db_url_with_ssl_params()` (config.rs:873-877): appends `connect_timeout=10` via `url::Url`
-query mutation when no `connect_timeout` query parameter already exists. This is the `sqlx` URL-level
-TCP connect timeout, NOT the pool `acquire_timeout`.
+Removed (bd rc-sa1zo): `enrich_db_url_with_ssl_params()` no longer appends `connect_timeout=10`.
+`sqlx-postgres 0.9` does not read that URL key — it logs "ignoring unrecognized connect parameter"
+and drops it — so the appended value never applied a TCP timeout. A stuck connection attempt is
+bounded by the pool `acquire_timeout` instead (sqlx default 30 s, covering acquire + connect).
+An operator-supplied `connect_timeout=…` URL key passes through untouched and is ignored by
+sqlx-postgres 0.9.
 
 ### SQLite unaffected
 
-SQLite URLs (`sqlite*` scheme) return early at `fn enrich_db_url_with_ssl_params` (config.rs:815-823) before any SSL enrichment or connect_timeout
-appending. SSL options set alongside a SQLite URL are ignored; the diagnostic is logged at DEBUG level so a shared config does not warn on every boot.
+SQLite URLs (`sqlite*` scheme) return early at `fn enrich_db_url_with_ssl_params` (config.rs:815-823) before any SSL enrichment. SSL options set alongside a SQLite URL are ignored; the diagnostic is logged at DEBUG level so a shared config does not warn on every boot.
 
 ## Dependency boundary
 

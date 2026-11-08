@@ -1,0 +1,9 @@
+{
+  "kind": "trivial",
+  "verdict": "BLESS",
+  "expert": "mission-order-trivial-bless",
+  "hash": "sha256:68230feceb1a5d2fa119c09cc1cac4246868c9fc333e029d2fe52ad1c4d22fc4",
+  "date": "2026-11-08",
+  "order": "/.opencode/fleet/orders/533-sqltimeout-mission.md",
+  "note": "Order authorizes /trivial bless with no expert gates. Hash covers proposal.md + .openspec.yaml (skip_specs: true)."
+}
