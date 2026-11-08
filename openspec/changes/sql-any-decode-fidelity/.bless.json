@@ -1,0 +1,22 @@
+{
+  "verdict": "BLESS",
+  "hash": "sha256:0144d5c110b1c26c107443bd4e1d2a524c073703b3a8465f7eea07fefd50c8dd",
+  "expert": "fix-from-retro-audit (mission 545 flow step 2); plan gate: reviewers/r_glm",
+  "kind": "fix-from-retro-audit",
+  "authority": "retro-audit-2026-11-08",
+  "artifacts": [
+    "openspec/changes/sql-any-decode-fidelity/proposal.md",
+    "openspec/changes/sql-any-decode-fidelity/tasks.md",
+    "openspec/changes/sql-any-decode-fidelity/.openspec.yaml"
+  ],
+  "plan_review": {
+    "reviewer": "reviewers/r_glm",
+    "session": "ses_e44756d06ffe2iFiQ4Y8W6CtY2",
+    "rounds": 2,
+    "round1_verdict": "REJECT",
+    "round1_findings": "5 findings (2 critical: StreamList test input NUMERIC fails at fetch, never reaching the wrapped row_to_json site, and no mechanism observed Body::Stream; consumer useIterator never enters poll_database_stream; plus SelectList emits one exchange, rg CHAR substring matches, test-count baseline 22 not 47)",
+    "round2_verdict": "APPROVE-WITH-FINDINGS",
+    "resolution": "Streaming coverage redesigned (BYTEA trigger + in-test stream drain; consumer unit test on poll_database_stream per the mission's stated fallback); 3 minor wording fixes applied: GREEN-ON-ARRIVAL count four-not-three, f32_column_value relocation out of cfg(test), consumer stream Arc forwarded via side channel before reply"
+  },
+  "scope_assessment": "Bounded correctness + docs fix on an unreleased change: f32 branch in row_to_json (utils.rs), typed-error propagation in both streaming sites (producer.rs, consumer.rs), NULL-guarantee narrowing + CHAR relocation in two doc matrices, tests-first with red/green-on-arrival evidence. No public API, schema, or spec-canon change (skip_specs: true). Non-goals honored: no new URI parameter, no driver change, no schema change, no retry/backoff changes, no bridge scripts, no weakening of existing typed-error assertions."
+}

@@ -1,0 +1,18 @@
+{
+  "stage": "holistic",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_e4443f56affeyDJl31DfztdEZY",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "hash": "sha256:0144d5c110b1c26c107443bd4e1d2a524c073703b3a8465f7eea07fefd50c8dd",
+  "impl_hash_note": "bless-hash of the change dir is identical to the blessed plan hash (0144d5c1...) — zero artifact drift through implementation; tasks.md checkbox flips do not alter the hash input.",
+  "findings": {
+    "minor_resolved": "Missing direct tests for f32_column_value None (SQL NULL REAL) and f32::NEG_INFINITY arms — resolved by extending the two existing unit tests exactly as the reviewer prescribed (session ses_e44521d29ffegrxFJcBL4dkvKB); lib 281/281, fmt/clippy/lint-unwrap re-verified green.",
+    "absurd_minors_discarded": [
+      "tasks.md T2 acceptance says 'exactly 2 hits' for rg \"JSON serialization failed\"; observed 3 (third is the T1 test's own negative-assertion literal, added after the criterion was written)",
+      "integration tests appended at EOF instead of after producer_timestamptz_column_fails_loudly (pure placement)",
+      "inline comment duplicates the helper doc comment verbatim"
+    ]
+  },
+  "named_checkpoint": "lint-unwrap plan deviation: blessed T2 sketch used .expect(...) in f32_column_value; workspace xtask bans expect in production src. Rewritten to mirror the f64 branch's from_f64 match (None arm => typed error); behavior identical, carried by the 2 unit tests; accepted by the holistic reviewer.",
+  "defect_coverage": "All four retro-audit defects (a)-(d) verified covered with no drift: f32 branch (a), typed-error propagation at both streaming sites (c), NULL guarantee narrowed in both doc matrices (b), CHAR moved to unsupported row with CAST hint (d)."
+}

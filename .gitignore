@@ -58,8 +58,9 @@ benchmarks/harness/out/
 .bless.json
 # Final implementation blessing records are committed per change.
 !openspec/changes/**/.bless.json
-!openspec/changes/**/.review.json
 .review.json
+# Review verdicts are the evidence the flow requires; keep them with the change.
+!openspec/changes/**/.review.json
 benchmarks/runner/DIGEST
 
 .opencode/fleet/

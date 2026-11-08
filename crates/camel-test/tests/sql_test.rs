@@ -1679,3 +1679,337 @@ async fn sql_ssl_connection_roundtrip() {
     assert_eq!(arr[0].get("name").and_then(|v| v.as_str()), Some("TLSRow"));
     assert_eq!(arr[0].get("value").and_then(|v| v.as_i64()), Some(443));
 }
+
+/// A REAL column is a genuine `Any` type (f32), so finite values must decode as
+/// JSON numbers instead of dead-lettering with the typed undecodable error.
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_real_column_decodes_as_number() {
+    install_crypto_provider();
+    let conn_str = shared_postgres().await.to_string();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(format!(
+            "sql:SELECT 1.5::real AS r UNION ALL SELECT 2.5::real AS r?db_url={}&sslMode=disable",
+            conn_str
+        ))
+        .to("mock:result")
+        .route_id("sql-real-type-test")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    h.stop().await;
+
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        assert!(
+            errors.is_empty(),
+            "finite REAL must decode, not fail the route: {:?}",
+            errors[0].error
+        );
+    }
+
+    let endpoint = h.mock().get_endpoint("result").unwrap();
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert_eq!(
+        exchanges.len(),
+        1,
+        "SelectList emits one exchange holding all rows"
+    );
+    let body = match &exchanges[0].input.body {
+        Body::Json(v) => v,
+        other => panic!("Body should be JSON, got: {other:?}"),
+    };
+    let rows = body.as_array().expect("SelectList body should be an array");
+    assert_eq!(rows.len(), 2, "both UNION ALL rows must be present: {body}");
+    let mut values: Vec<f64> = rows
+        .iter()
+        .map(|row| {
+            let value = row.get("r").expect("row must carry column r");
+            value
+                .as_f64()
+                .unwrap_or_else(|| panic!("r must be a JSON number, got: {value:?}"))
+        })
+        .collect();
+    values.sort_by(|a, b| a.partial_cmp(b).expect("REAL values are ordered"));
+    assert_eq!(values, vec![1.5, 2.5], "REAL must decode exactly");
+}
+
+/// JSON cannot hold NaN/±Infinity: a non-finite REAL is a real server-sent
+/// value and must fail the route with the typed error, never a substituted null.
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_non_finite_real_fails_typed() {
+    install_crypto_provider();
+    let conn_str = shared_postgres().await.to_string();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(format!(
+            "sql:SELECT 'NaN'::real AS r?db_url={}&sslMode=disable",
+            conn_str
+        ))
+        .to("mock:result")
+        .route_id("sql-real-nan-test")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    wait_for_mock_exchanges(h.mock(), "error", 1).await;
+    h.stop().await;
+
+    let result_ep = h.mock().get_endpoint("result").unwrap();
+    assert!(
+        result_ep.get_received_exchanges().await.is_empty(),
+        "non-finite REAL must never produce a body"
+    );
+
+    let error_ep = h.mock().get_endpoint("error").unwrap();
+    let errors = error_ep.get_received_exchanges().await;
+    assert!(!errors.is_empty(), "non-finite REAL must fail the route");
+    let err_msg = errors[0]
+        .error
+        .as_ref()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err_msg.contains("column 'r'"), "column named: {err_msg}");
+    assert!(
+        err_msg.to_lowercase().contains("real"),
+        "driver type named: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("CAST(r AS text)"),
+        "workaround shown: {err_msg}"
+    );
+}
+
+/// A projection of an unsupported type stays typed even when the value is SQL
+/// NULL: row construction fails before any null handling, so the route never
+/// yields `{ "n": null }` and never an opaque serialization wrapper.
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_unsupported_typed_null_fails_typed() {
+    install_crypto_provider();
+    let conn_str = shared_postgres().await.to_string();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(format!(
+            "sql:SELECT NULL::numeric AS n?db_url={}&sslMode=disable",
+            conn_str
+        ))
+        .to("mock:result")
+        .route_id("sql-null-numeric-test")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    wait_for_mock_exchanges(h.mock(), "error", 1).await;
+    h.stop().await;
+
+    let result_ep = h.mock().get_endpoint("result").unwrap();
+    let results = result_ep.get_received_exchanges().await;
+    assert!(
+        results.is_empty(),
+        "unsupported-type NULL must not become a body (never {{\"n\": null}}), got: {:?}",
+        results.first().map(|ex| &ex.input.body)
+    );
+
+    let error_ep = h.mock().get_endpoint("error").unwrap();
+    let errors = error_ep.get_received_exchanges().await;
+    assert!(
+        !errors.is_empty(),
+        "unsupported-type NULL must fail the route"
+    );
+    let err_msg = errors[0]
+        .error
+        .as_ref()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err_msg.contains("column 'n'"), "column named: {err_msg}");
+    assert!(err_msg.contains("Numeric"), "driver type named: {err_msg}");
+    assert!(err_msg.contains("CAST(n AS"), "workaround shown: {err_msg}");
+    assert!(
+        !err_msg.contains("JSON serialization failed"),
+        "typed error must not be wrapped: {err_msg}"
+    );
+}
+
+/// `char(n)` maps to BPCHAR, which the `Any` driver does not carry: the route
+/// must fail with the typed error and the CAST AS text workaround.
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_char_column_fails_typed_with_cast_hint() {
+    install_crypto_provider();
+    let conn_str = shared_postgres().await.to_string();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(format!(
+            "sql:SELECT 'ab'::char(2) AS c?db_url={}&sslMode=disable",
+            conn_str
+        ))
+        .to("mock:result")
+        .route_id("sql-char-type-test")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    wait_for_mock_exchanges(h.mock(), "error", 1).await;
+    h.stop().await;
+
+    let result_ep = h.mock().get_endpoint("result").unwrap();
+    assert!(
+        result_ep.get_received_exchanges().await.is_empty(),
+        "BPCHAR column must never produce a body"
+    );
+
+    let error_ep = h.mock().get_endpoint("error").unwrap();
+    let errors = error_ep.get_received_exchanges().await;
+    assert!(!errors.is_empty(), "BPCHAR column must fail the route");
+    let err_msg = errors[0]
+        .error
+        .as_ref()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err_msg.contains("column 'c'"), "column named: {err_msg}");
+    assert!(
+        err_msg.contains("CAST(c AS text)"),
+        "workaround shown: {err_msg}"
+    );
+}
+
+/// The StreamList producer is lazy: the undecodable row only fails while the
+/// downstream drains the body. The drained item must be the typed conversion
+/// error, not `ProcessorError("JSON serialization failed: …")`, and no bytes
+/// may precede it.
+#[tokio::test(flavor = "multi_thread")]
+async fn streamlist_undecodable_column_is_typed() {
+    install_crypto_provider();
+    let conn_str = shared_postgres().await.to_string();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(format!(
+            "sql:SELECT decode('00ff00', 'hex') AS payload?db_url={}&sslMode=disable&outputType=StreamList",
+            conn_str
+        ))
+        .to("mock:result")
+        .route_id("sql-streamlist-type-test")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    h.stop().await;
+
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        assert!(
+            errors.is_empty(),
+            "the lazy stream defers the failure; no eager route error expected: {:?}",
+            errors[0].error
+        );
+    }
+
+    let endpoint = h.mock().get_endpoint("result").unwrap();
+    let exchanges = endpoint.get_received_exchanges().await;
+    assert_eq!(
+        exchanges.len(),
+        1,
+        "StreamList emits one exchange holding the lazy stream"
+    );
+    let stream_body = match &exchanges[0].input.body {
+        Body::Stream(stream_body) => stream_body.clone(),
+        other => panic!("Body should be a stream, got: {other:?}"),
+    };
+
+    use futures::StreamExt;
+    let mut guard = stream_body.stream.lock().await; // allow-test-wait: mock stored the exchange without draining; slot is unconsumed
+    let mut stream = guard.take().expect("stream slot must hold the lazy stream");
+    drop(guard);
+
+    let mut items = Vec::new();
+    while let Some(item) = stream.next().await {
+        items.push(item);
+    }
+    assert_eq!(
+        items.len(),
+        1,
+        "undecodable row must yield exactly one item, got {}",
+        items.len()
+    );
+    let err = match items.remove(0) {
+        Ok(chunk) => panic!("undecodable column must not yield bytes, got: {chunk:?}"),
+        Err(e) => e,
+    };
+    match err {
+        CamelError::TypeConversionFailed(msg) => {
+            assert!(msg.contains("payload"), "column named: {msg}");
+            assert!(
+                !msg.contains("JSON serialization failed"),
+                "stream error must not be wrapped: {msg}"
+            );
+        }
+        other => panic!("stream error must be the typed conversion failure, got {other:?}"),
+    }
+}

@@ -395,9 +395,7 @@ async fn execute_select(
                     .await
                     .map_err(|e| fetch_error("Query execution failed", e))?
                 {
-                    let json_val = row_to_json(&row).map_err(|e| {
-                        CamelError::ProcessorError(format!("JSON serialization failed: {}", e))
-                    })?;
+                    let json_val = row_to_json(&row)?;
                     let mut bytes = serde_json::to_vec(&json_val)
                         .map_err(|e| CamelError::ProcessorError(format!("JSON serialization failed: {}", e)))?;
                     bytes.push(b'\n');

@@ -330,17 +330,19 @@ When `useIterator=true`, each row's columns are also set as headers:
 The component runs every query through sqlx's `Any` driver, which decodes a fixed
 type set. Types outside that set fail the route with a typed error that names the
 column, the driver-reported type, and the CAST workaround. SQL NULL decodes to JSON
-`null` for every column type; a value the server sent is never substituted with null.
+`null` for every supported column type. A projection of an unsupported type (for
+example `NULL::numeric`) fails the route with the typed error at row construction,
+before any null handling. A value the server sent is never substituted with null.
 
 | Column type (Postgres terms) | Decoded as | Notes |
 |------------------------------|------------|-------|
 | BOOLEAN | JSON boolean | |
 | SMALLINT, INTEGER, BIGINT | JSON number | |
-| REAL, DOUBLE PRECISION | JSON number | NaN/±Infinity fails the route |
-| TEXT, VARCHAR, CHAR, CITEXT | JSON string | |
+| REAL, DOUBLE PRECISION | JSON number | finite values only (REAL widens from f32); NaN/±Infinity fails the route |
+| TEXT, VARCHAR, CITEXT | JSON string | |
 | BYTEA | JSON string | UTF-8 content only; other bytes fail the route |
 | NUMERIC, DECIMAL | typed error | `CAST(col AS double precision)` (approximate) or `CAST(col AS text)` (exact) |
-| TIMESTAMPTZ, TIMESTAMP, DATE, TIME, UUID, JSON, JSONB, arrays | typed error | `CAST(col AS text)` |
+| CHAR (BPCHAR), TIMESTAMPTZ, TIMESTAMP, DATE, TIME, UUID, JSON, JSONB, arrays | typed error | `CAST(col AS text)` |
 
 Example: a NUMERIC column becomes readable without a driver change:
 

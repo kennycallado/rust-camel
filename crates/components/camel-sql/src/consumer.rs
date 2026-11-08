@@ -248,9 +248,7 @@ impl SqlConsumer {
                 .await
                 .map_err(|e| fetch_error("Query execution failed", e))?
             {
-                let json_val = row_to_json(&row).map_err(|e| {
-                    CamelError::ProcessorError(format!("JSON serialization failed: {}", e))
-                })?;
+                let json_val = row_to_json(&row)?;
                 let mut bytes = serde_json::to_vec(&json_val)
                     .map_err(|e| CamelError::ProcessorError(format!("JSON serialization failed: {}", e)))?;
                 bytes.push(b'\n');
@@ -1330,6 +1328,94 @@ mod tests {
             logs_contain("ERROR"),
             "unbridged send_and_wait failure MUST emit ERROR (consumer owns the signal)"
         );
+    }
+
+    /// The lazy StreamList body propagates `row_to_json` failures verbatim:
+    /// the consumer must surface the typed conversion error (column, driver
+    /// type, CAST hint), never wrap it in an opaque serialization error.
+    ///
+    /// A non-UTF-8 BLOB fetches fine; it fails the UTF-8 branch inside
+    /// `row_to_json`, which is exactly the wrapped site in
+    /// `poll_database_stream`.
+    #[tokio::test]
+    async fn consumer_stream_body_error_is_typed_not_wrapped() {
+        let pool = sqlite_pool().await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=sqlite::memory:&outputType=StreamList&initialDelay=0&delay=1",
+        )
+        .unwrap();
+        config.resolve_defaults();
+        config.query = "SELECT x'00FF00' AS payload".to_string();
+        let consumer = SqlConsumer::new(config.clone(), Arc::new(OnceCell::new()), None, test_rt());
+        let template = parse_query_template(&config.query, config.placeholder).unwrap();
+        let prepared = resolve_params(
+            &template,
+            &Exchange::new(Message::default()),
+            &config.in_separator,
+        )
+        .expect("resolve stream query params");
+
+        // Downstream forwards the received stream body through a side channel
+        // BEFORE replying Ok: the exchange itself is consumed by the producer's
+        // send_and_wait, only the shared `Arc<Mutex<...>>` reaches the test.
+        let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(8);
+        let (stream_tx, mut stream_rx) = mpsc::channel::<StreamBody>(1);
+        tokio::spawn(async move {
+            match timeout(Duration::from_secs(2), rx.recv()).await {
+                Ok(Some(env)) => {
+                    if let Body::Stream(stream_body) = &env.exchange.input.body {
+                        let _ = stream_tx.send(stream_body.clone()).await;
+                    }
+                    if let Some(reply_tx) = env.reply_tx {
+                        let _ = reply_tx.send(Ok(env.exchange));
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+        });
+        let ctx = ConsumerContext::new(tx, CancellationToken::new(), "sql-test-route".to_string());
+
+        consumer
+            .poll_database_stream(&pool, &ctx, &prepared)
+            .await
+            .expect("StreamList poll must succeed eagerly (lazy stream emitted)");
+
+        let stream_body = stream_rx
+            .recv()
+            .await
+            .expect("downstream must receive the stream body");
+        let mut guard = stream_body.stream.lock().await; // allow-test-wait: stream slot after delivery; no holder
+        let mut stream = guard.take().expect("stream slot must hold the stream");
+        drop(guard);
+
+        use futures::StreamExt;
+        let mut items = Vec::new();
+        while let Some(item) = stream.next().await {
+            items.push(item);
+        }
+
+        assert_eq!(
+            items.len(),
+            1,
+            "undecodable row must yield exactly one item, got {}",
+            items.len()
+        );
+        let err = match items.remove(0) {
+            Ok(chunk) => panic!("undecodable column must not yield bytes, got: {chunk:?}"),
+            Err(e) => e,
+        };
+        match err {
+            CamelError::TypeConversionFailed(msg) => {
+                assert!(msg.contains("payload"), "column named: {msg}");
+                assert!(
+                    !msg.contains("JSON serialization failed"),
+                    "stream error must not be wrapped: {msg}"
+                );
+            }
+            other => panic!("stream error must be the typed conversion failure, got {other:?}"),
+        }
     }
 
     /// Regression for ADR-0012: when bridge_error_handler=false, the unbridged

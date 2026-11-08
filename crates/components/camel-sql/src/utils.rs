@@ -9,7 +9,8 @@ use tracing::warn;
 /// Converts a database row to a JSON object.
 ///
 /// Iterates columns and extracts values by trying types in order:
-/// Option<i64>, Option<i32>, Option<f64>, Option<bool>, Option<String>, timestamp strings.
+/// Option<i64>, Option<i32>, Option<f64>, Option<f32>, Option<bool>,
+/// Option<String>, timestamp strings.
 /// SQL NULLs are properly represented as JSON null.
 ///
 /// A value the server sent is never substituted with null: anything outside the
@@ -33,6 +34,8 @@ pub(crate) fn row_to_json(row: &AnyRow) -> Result<serde_json::Value, CamelError>
                 // them, so fail loudly instead of substituting null.
                 None => return Err(undecodable_column_error(&name, &type_name)),
             }
+        } else if let Ok(v) = row.try_get::<Option<f32>, _>(i) {
+            f32_column_value(&name, &type_name, v)?
         } else if let Ok(Some(v)) = row.try_get::<Option<bool>, _>(i) {
             serde_json::Value::Bool(v)
         } else if let Ok(Some(v)) = row.try_get::<Option<String>, _>(i) {
@@ -84,6 +87,30 @@ fn decode_blob_text(text: &str) -> serde_json::Value {
         )
     } else {
         serde_json::Value::String(text.to_string())
+    }
+}
+
+/// Maps a decoded REAL (`f32`) column to its JSON value.
+///
+/// The sqlx `Any` driver decodes Postgres `REAL`/`FLOAT4` only as `f32` (strict
+/// type compatibility), so `row_to_json` needs its own branch after `f64`.
+/// Finite values widen exactly to `f64`; JSON cannot hold NaN/±Infinity, so the
+/// `None` arm of `from_f64` (its non-finite rejection) fails loudly with the
+/// typed error instead of substituting null.
+fn f32_column_value(
+    name: &str,
+    type_name: &str,
+    v: Option<f32>,
+) -> Result<serde_json::Value, CamelError> {
+    match v {
+        // SQL NULL REAL stays null.
+        None => Ok(serde_json::Value::Null),
+        // Finite values widen exactly to f64; JSON cannot hold NaN/±Infinity,
+        // so from_f64's None arm fails loudly instead of substituting null.
+        Some(v) => match serde_json::Number::from_f64(f64::from(v)) {
+            Some(n) => Ok(serde_json::Value::Number(n)),
+            None => Err(undecodable_column_error(name, type_name)),
+        },
     }
 }
 
@@ -720,6 +747,47 @@ mod tests {
         };
         assert!(actionable_any_type_error(&decode).is_none());
     }
+
+    // ── REAL (f32) decode (bd sql-any-decode-fidelity) ───────────────
+
+    #[test]
+    fn real_f32_finite_decodes_as_json_number() {
+        for (input, expected) in [(1.5_f32, 1.5_f64), (2.5_f32, 2.5_f64)] {
+            match f32_column_value("r", "REAL", Some(input)) {
+                Ok(serde_json::Value::Number(n)) => {
+                    assert_eq!(
+                        n.as_f64(),
+                        Some(expected),
+                        "REAL {input} must widen exactly to f64"
+                    );
+                }
+                Ok(other) => panic!("REAL {input} must decode as a JSON number, got {other:?}"),
+                Err(e) => panic!("finite REAL {input} must decode, got error: {e}"),
+            }
+        }
+        // SQL NULL REAL stays null (it is not an undecodable value).
+        match f32_column_value("r", "REAL", None) {
+            Ok(serde_json::Value::Null) => {}
+            other => panic!("SQL NULL REAL must stay JSON null, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn real_f32_non_finite_fails_typed() {
+        for input in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let err = f32_column_value("r", "REAL", Some(input))
+                .expect_err("non-finite REAL cannot be represented in JSON");
+            match err {
+                CamelError::TypeConversionFailed(msg) => {
+                    assert!(msg.contains("column 'r'"), "column named: {msg}");
+                    assert!(msg.contains("REAL"), "driver type named: {msg}");
+                    assert!(msg.contains("CAST(r AS text)"), "workaround shown: {msg}");
+                }
+                other => panic!("non-finite REAL must fail with the typed error, got {other:?}"),
+            }
+        }
+    }
+
     // ── Batch bind-kind normalization (bd rc-fef4z) ──────────────────
 
     mod batch_kinds {
