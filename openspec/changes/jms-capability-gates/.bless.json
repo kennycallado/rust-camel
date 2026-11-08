@@ -1,0 +1,8 @@
+{
+  "kind": "spec",
+  "verdict": "BLESS",
+  "hash": "sha256:90fc428d4a977928b7650759c170c7da792f6820c9ede1c50ae24a771395e067",
+  "expert": "trivial",
+  "date": "2026-11-08",
+  "note": "Mission 542 order: TRIVIAL bless channel (behaviour-preserving refactor, byte-identical messages pinned by existing tests + proposal message table). No expert dispatch per order step 2."
+}

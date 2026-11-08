@@ -14,11 +14,11 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::component::{
-    BRIDGE_TRANSPORT_ERROR_PREFIX, BridgeState, JmsBridgePool, OPERATOR_REPAIR_HINT,
-    bridge_service_client, is_bridge_transport_error, parked_operator_error,
+    BRIDGE_TRANSPORT_ERROR_PREFIX, BridgeState, CapabilityRequirements, JmsBridgePool,
+    OPERATOR_REPAIR_HINT, bridge_service_client, is_bridge_transport_error, parked_operator_error,
 };
 use crate::config::{DestinationType, ExchangePattern, JmsEndpointConfig, JmsTransactionMode};
-use crate::diagnostics::render_failure_message;
+use crate::diagnostics::{CapabilityGate, render_failure_message};
 use crate::headers::apply_jms_headers;
 use crate::proto::{CompletionOutcome, CompletionRequest, JmsMessage, SubscribeRequest};
 
@@ -276,11 +276,10 @@ fn durable_required(endpoint_config: &JmsEndpointConfig) -> bool {
 async fn await_ready_channel(
     pool: &JmsBridgePool,
     broker_name: &str,
-    selector_required: bool,
-    durable_required: bool,
+    requirements: CapabilityRequirements,
 ) -> Result<Channel, WaitReadyError> {
     let slot = pool
-        .get_or_create_slot(broker_name, selector_required, durable_required)
+        .get_or_create_slot(broker_name, requirements)
         .await
         .map_err(WaitReadyError::Transient)?;
     let mut rx = slot.state_rx.clone();
@@ -291,26 +290,23 @@ async fn await_ready_channel(
         let state = rx.borrow().clone();
         match state {
             BridgeState::Ready { channel } => {
-                // Task 1.2: consumer-attach selector gate. The shared
-                // requirement is already latched (get_or_create_slot above),
-                // and the gate issues ONE fresh Health RPC before the
+                // Tasks 1.2/1.3: consumer-attach capability gates. The shared
+                // requirements are already latched (get_or_create_slot above),
+                // and each gate issues ONE fresh Health RPC before the
                 // consumer's first Subscribe — at slot start or late. A
                 // failure parks the slot permanently and fails this consumer
-                // terminally (no silent start).
-                if selector_required {
-                    pool.selector_attach_gate(&slot, &channel)
-                        .await
-                        .map_err(WaitReadyError::Terminal)?;
-                }
-                // Task 1.3: consumer-attach durable-subscriber gate, in the
-                // same preflight position: ONE fresh Health RPC before the
-                // consumer's first Subscribe, including when the slot went
-                // Ready earlier for a non-durable route. A failure parks the
-                // slot permanently and fails this consumer terminally.
-                if durable_required {
-                    pool.durable_attach_gate(&slot, &channel)
-                        .await
-                        .map_err(WaitReadyError::Terminal)?;
+                // terminally (no silent start). The descriptor table
+                // (rc-06dy1) scans SELECTOR → DURABLE in the fixed order the
+                // two if-blocks used.
+                for (gate, required) in [
+                    (&CapabilityGate::SELECTOR, requirements.selector),
+                    (&CapabilityGate::DURABLE, requirements.durable),
+                ] {
+                    if required {
+                        pool.capability_attach_gate(&slot, &channel, gate)
+                            .await
+                            .map_err(WaitReadyError::Terminal)?;
+                    }
                 }
                 return Ok(channel);
             }
@@ -510,7 +506,14 @@ async fn consumer_loop(
                 );
                 break;
             }
-            result = await_ready_channel(pool, broker_name, selector_required(endpoint_config), durable_required(endpoint_config)) => {
+            result = await_ready_channel(
+                pool,
+                broker_name,
+                CapabilityRequirements {
+                    selector: selector_required(endpoint_config),
+                    durable: durable_required(endpoint_config),
+                },
+            ) => {
                 match result {
                     Ok(channel) => channel,
                     Err(WaitReadyError::Terminal(e)) => {
@@ -1019,8 +1022,10 @@ impl Consumer for JmsConsumer {
                 .pool
                 .get_or_create_slot(
                     &self.broker_name,
-                    selector_required(&self.endpoint_config),
-                    durable_required(&self.endpoint_config),
+                    CapabilityRequirements {
+                        selector: selector_required(&self.endpoint_config),
+                        durable: durable_required(&self.endpoint_config),
+                    },
                 )
                 .await?;
             match &*slot.state_rx.borrow() {
@@ -1385,7 +1390,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            await_ready_channel(&pool, "default", false, false),
+            await_ready_channel(&pool, "default", CapabilityRequirements::default()),
         )
         .await
         .expect("await_ready_channel must not hang on a parked slot");
@@ -3738,6 +3743,64 @@ mod tests {
         bridge.shutdown().await;
     }
 
+    /// rc-06dy1 review fix: a durable requirement latched by a sibling route
+    /// while the monitor is already polling (the concurrent store into the
+    /// slot's shared atomic) is observed on the monitor's next pass — the
+    /// requirement flags are read per gate at evaluation time, never sampled
+    /// into an up-front snapshot. Mirrors the selector twin
+    /// (`late_selector_on_capable_slot_then_capability_loss_parks`): a plain
+    /// consumer starts the slot without a durable requirement, the durable
+    /// route attaches late (storing the flag mid-polling), and once the
+    /// bridge stops advertising the capability the freshly-armed flag parks
+    /// the slot permanently with the three-fragment durable text.
+    #[tokio::test]
+    async fn late_durable_on_capable_slot_then_capability_loss_parks() {
+        let mut bridge = spawn_durable_gate_bridge(&["durable-subscribers-v1"]).await;
+        let (pool, slot) = selector_monitor_fixture(bridge.port).await;
+
+        // A NON-durable consumer keeps running: the slot started without a
+        // durable requirement, so early monitor passes skip the durable gate.
+        let plain_cfg = JmsEndpointConfig::from_uri("jms:queue:orders")
+            .expect("uri without durable params must parse");
+        let (plain_handle, _plain_cancel) =
+            spawn_route_consumer(Arc::clone(&pool), plain_cfg, "jms-late-durable-plain");
+        bridge.next_subscribe().await;
+
+        // The durable route attaches LATE: its registration stores the
+        // shared durable_required flag while the monitor is already polling.
+        // The fresh attach check passes (the capability is still advertised)
+        // and the Subscribe proceeds.
+        let (durable_handle, _durable_cancel) =
+            spawn_route_consumer(Arc::clone(&pool), durable_endpoint(), "jms-late-durable");
+        bridge.next_subscribe().await;
+        assert_eq!(bridge.subscribe_count(), 2, "both consumers subscribed");
+
+        // The bridge stops advertising the capability: the
+        // concurrently-stored flag trips the monitor's durable gate on its
+        // next pass — proof the store is observed, not lost to a snapshot.
+        bridge.set_capabilities(&[]);
+        let reason = wait_parked(&slot).await;
+        assert_durable_park_text(&reason);
+
+        bridge.end_streams();
+        for handle in [plain_handle, durable_handle] {
+            let result = tokio::time::timeout(Duration::from_secs(5), handle)
+                .await
+                .expect("consumer must terminate after the park")
+                .expect("consumer task must not panic");
+            let err = result.expect_err("the parked slot must fail consumers terminally");
+            assert_durable_park_text(&err.to_string());
+        }
+        assert_eq!(
+            bridge.subscribe_count(),
+            2,
+            "no further Subscribe calls after capability loss"
+        );
+
+        shutdown_test_slot(&slot).await;
+        bridge.shutdown().await;
+    }
+
     // ── Task 3.5: send_and_wait settlement harness ───────────────────────────
     //
     // These tests drive the real `consumer_loop` against an in-process tonic
@@ -4521,7 +4584,7 @@ mod tests {
             // The slot is never parked or restarted: it stays Ready for other
             // routes and producers sharing it.
             let slot = pool
-                .get_or_create_slot("default", false, false)
+                .get_or_create_slot("default", CapabilityRequirements::default())
                 .await
                 .expect("slot");
             assert!(
@@ -5172,7 +5235,7 @@ mod tests {
         );
 
         let slot = ready_pool
-            .get_or_create_slot("default", false, false)
+            .get_or_create_slot("default", CapabilityRequirements::default())
             .await
             .expect("slot");
         assert!(
@@ -5559,7 +5622,7 @@ mod tests {
         .expect("spawn park-during-reconnect bridge");
         let pool = pool_with_mock_channel(port).await;
         let slot = pool
-            .get_or_create_slot("default", false, false)
+            .get_or_create_slot("default", CapabilityRequirements::default())
             .await
             .expect("slot");
         let state_tx = slot.state_tx.clone();
