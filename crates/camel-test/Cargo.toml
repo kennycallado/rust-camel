@@ -121,6 +121,7 @@ opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 jsonwebtoken.workspace = true
 tokio-tungstenite.workspace = true
+ctor.workspace = true
 
 [features]
 integration-tests-cxf = ["dep:camel-component-cxf"]

@@ -2,6 +2,17 @@
 
 mod support;
 
+/// Suite-level skip gate: before libtest discovers any case, skip the
+/// whole binary loudly when the cxf-bridge is unprovisioned (both
+/// selectors unset and worktree-native build absent). A set selector —
+/// even invalid — always reaches the real suite.
+#[ctor::ctor(unsafe)]
+fn suite_skip_gate() {
+    if !support::bridge_skip::cxf_bridge_suite_may_run("cxf_test") {
+        std::process::exit(0);
+    }
+}
+
 // Nested module: declared by `#[path]` so it stays part of the `cxf_test`
 // target (a plain `mod wire;` would resolve to `tests/wire.rs`, and a
 // top-level `tests/wire.rs` would become its own integration target, breaking

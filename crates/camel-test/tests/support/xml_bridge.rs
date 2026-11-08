@@ -36,19 +36,29 @@ pub fn resolve_xml_bridge_binary() -> Option<PathBuf> {
 
 /// Ensures the explicit xml-bridge binary override is present and returns it.
 ///
-/// Panics with a clear message naming `CAMEL_XML_BRIDGE_BINARY_PATH` when the
-/// override is absent or does not name a file, so the test fails fast with
+/// Panics naming `CAMEL_XML_BRIDGE_BINARY_PATH` when the override is
+/// absent, and naming both the variable and the offending value when it is
+/// set but does not name an existing file, so the test fails fast with
 /// actionable instructions instead of a cryptic download/connection error.
 pub fn require_xml_bridge_binary() -> PathBuf {
-    resolve_xml_bridge_binary().unwrap_or_else(|| {
+    let value = std::env::var_os(ENV_CAMEL).unwrap_or_else(|| {
         panic!(
-            "xml-bridge binary not found: {} is not set to an existing file.\n\
-             Build it with:\n  cd bridges/xml && ./build-native.sh\n\
-             Then export {} to the built binary path.\n\
-             Example: {} bridges/xml/build/native/xml-bridge cargo test ...",
-            ENV_CAMEL, ENV_CAMEL, ENV_CAMEL,
+            "xml-bridge binary not found: {ENV_CAMEL} is not set.\n\
+             Provision with `cargo xtask build-xml-bridge`, then \
+             `export {ENV_CAMEL}=\"$PWD/bridges/xml/build/native/xml-bridge\"` \
+             (or unset it to skip when no build exists)."
         )
-    })
+    });
+    let path = PathBuf::from(value);
+    assert!(
+        path.is_file(),
+        "{ENV_CAMEL} is set to {:?}, which is not an existing file. \
+         Provision with `cargo xtask build-xml-bridge`, then \
+         `export {ENV_CAMEL}=\"$PWD/bridges/xml/build/native/xml-bridge\"` \
+         (or unset it to skip).",
+        path.display(),
+    );
+    path
 }
 
 /// Returns the explicit xml-bridge binary override, or `None` with a `SKIP`

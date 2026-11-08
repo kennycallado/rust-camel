@@ -103,39 +103,65 @@ pub async fn start_capturing_mock_soap_service(
     (addr, captured)
 }
 
+/// Resolves the cxf-bridge binary for this process, or `None` when no
+/// selector is configured and no worktree-native build exists.
+///
+/// Selection order and failure policy:
+/// 1. `CAMEL_CXF_BRIDGE_BINARY_PATH` — when present it is authoritative;
+///    an empty or nonexistent value is a hard failure naming the value,
+///    with no fallback to the alias or the native binary.
+/// 2. `CXF_BRIDGE_PATH` — same policy, only when the primary is absent.
+/// 3. The worktree-native build at `bridges/cxf/build/native/cxf-bridge`.
+/// 4. Otherwise `None`, which lets the suite-level gate skip loudly.
 pub fn resolve_cxf_bridge_binary() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var(ENV_CAMEL) {
-        let path = PathBuf::from(&p);
-        if path.is_file() {
-            return Some(path);
-        }
+    if let Some(value) = std::env::var_os(ENV_CAMEL) {
+        return Some(selector_file(ENV_CAMEL, &value));
     }
-
-    if let Ok(p) = std::env::var(ENV_ALIAS) {
-        let path = PathBuf::from(&p);
-        if path.is_file() {
-            return Some(path);
-        }
+    if let Some(value) = std::env::var_os(ENV_ALIAS) {
+        return Some(selector_file(ENV_ALIAS, &value));
     }
-
-    if let Some(root) = find_workspace_root() {
-        let candidate = root.join("bridges/cxf/build/native/cxf-bridge");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-
-    None
+    worktree_native_binary().filter(|path| path.is_file())
 }
 
+/// Converts a configured selector value into an existing-file path, or
+/// panics naming the selector and the offending value.
+///
+/// A selector that is present is authoritative: an empty or nonexistent
+/// value never falls back to the alias or the worktree-native binary, so
+/// a misconfigured explicit path cannot be masked by a valid fallback.
+fn selector_file(selector: &str, value: &std::ffi::OsStr) -> PathBuf {
+    let path = PathBuf::from(value);
+    assert!(
+        path.is_file(),
+        "{selector} is set to {:?}, which is not an existing file. \
+         Provision with `cargo xtask build-cxf-bridge`, then \
+         `export {ENV_CAMEL}=\"$PWD/bridges/cxf/build/native/cxf-bridge\"` \
+         (or unset it to let the suite skip).",
+        path.display(),
+    );
+    path
+}
+
+/// Path of the worktree-native cxf-bridge built by `cargo xtask build-cxf-bridge`.
+///
+/// Derived from this crate's manifest dir, so it always resolves inside
+/// the checkout that compiled the test binary — never a shared/stale main
+/// artifact.
+pub fn worktree_native_binary() -> Option<PathBuf> {
+    find_workspace_root().map(|root| root.join("bridges/cxf/build/native/cxf-bridge"))
+}
+
+/// Resolves the cxf-bridge binary path for this process.
+///
+/// See the selection-order and failure-policy contract on
+/// [`resolve_cxf_bridge_binary`].
 pub fn require_cxf_bridge_binary() -> PathBuf {
     resolve_cxf_bridge_binary().unwrap_or_else(|| {
         panic!(
             "cxf-bridge binary not found.\n\
-             Build it with:\n  cd bridges/cxf && ./build-native.sh\n\
-             Or set {} or {} to the binary path.\n\
-             Example: {} bridges/cxf/build/native/cxf-bridge cargo test ...",
-            ENV_CAMEL, ENV_ALIAS, ENV_ALIAS,
+             Provision with `cargo xtask build-cxf-bridge`, then \
+             `export {ENV_CAMEL}=\"$PWD/bridges/cxf/build/native/cxf-bridge\"` \
+             (or unset the selectors to skip when no build exists)."
         )
     })
 }

@@ -202,6 +202,7 @@ hostname = "0.4"
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
+ctor = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 async-stream = "0.3"
 dirs = "7"

@@ -153,6 +153,9 @@ pub mod cxf;
 #[cfg(feature = "integration-tests")]
 pub mod xml_bridge;
 
+#[cfg(any(feature = "integration-tests", feature = "integration-tests-cxf"))]
+pub mod bridge_skip;
+
 #[cfg(feature = "integration-tests")]
 pub mod kafka;
 

@@ -1,0 +1,25 @@
+{
+  "change": "bridge-suite-skip-contract",
+  "kind": "trivial",
+  "verdict": "BLESS",
+  "hash": "sha256:52d33c9cd27940cf25945178f6cb59412a5de65d53251a689869c7700575ec6b",
+  "expert": "experts/e_gpt",
+  "passes": [
+    {
+      "hash": "sha256:c25f1d9b37b2debfc8b939a010409bfb6fd8169bf993f107fa6d3c72ec37f247",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": [
+        "important: cxf resolver fail-open could mask set-but-invalid selector as skip or fallback run",
+        "important: acceptance matrix omitted dangerous branches (unset+present fail-closed, invalid explicit, broken executable)",
+        "important: require_xml_bridge_binary panic did not name the offending path",
+        "minor: diagnosis claim overbroad"
+      ]
+    },
+    {
+      "hash": "sha256:52d33c9cd27940cf25945178f6cb59412a5de65d53251a689869c7700575ec6b",
+      "verdict": "BLESS",
+      "findings": []
+    }
+  ],
+  "date": "2026-11-08"
+}

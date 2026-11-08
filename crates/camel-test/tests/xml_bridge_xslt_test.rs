@@ -9,6 +9,17 @@
 
 mod support;
 
+/// Suite-level skip gate: before libtest discovers any case, skip the
+/// whole binary loudly when the xml-bridge is unprovisioned (selector
+/// unset and worktree-native build absent). A set selector — even
+/// invalid — always reaches the real suite.
+#[ctor::ctor(unsafe)]
+fn suite_skip_gate() {
+    if !support::bridge_skip::xml_bridge_suite_may_run("xml_bridge_xslt_test") {
+        std::process::exit(0);
+    }
+}
+
 use std::time::Duration;
 
 use camel_api::{Exchange, Message, body::Body};
