@@ -15,7 +15,6 @@
 
 - change(deps): surrealdb 3.2.4 → 4.0.0 clears RUSTSEC-2026-0453 (KV use-after-free via affinitypool) and RUSTSEC-2026-0454 (reblessive Send/Sync); workspace requirement moves "3" → "4" with the same feature set, zero component code changes, cargo audit now vulnerability-free (bd rc-yhpyz).
 - change(components/http,rest-dsl): non-request-borne type-conversion failures now map to HTTP 500 (conversion_failed) instead of 400 (bad_request), and the REST binding-injected unmarshal/schema check reclassifies its failures to ValidationError (400, validation_error) per ADR-0096 fault blame; mid-route user unmarshal and authored marshal keep their conversion error identity but now report 500; metric label at the binding seam moves type_conversion → validation; no opt-in window (ADR-0090) (bd rc-zwd3l).
-- change(deps): wasmtime-wasi 49 → 50 — the host surface (`WasiView`/`WasiCtxView`, builders, per-interface `add_to_linker`) compiles unchanged and the source drain moves to the new lifetime-carrying `AccessorTask` trait via an async closure; the denial boundary and guest contract are untouched (bd rc-y093x).
 
 ### Fixes
 

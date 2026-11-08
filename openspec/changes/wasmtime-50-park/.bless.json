@@ -1,0 +1,19 @@
+{
+  "kind": "revert-park",
+  "verdict": "BLESS",
+  "hash": "sha256:9999fce459955b9e1706187b27cad35dd80b320d4678418c409e913ceb595e12",
+  "expert": "conductor-light (owner decision 2026-11-08: park the bump, do not raise the floor)",
+  "authority": "retro-audit-2026-11-08 finding 4 + ADR-0095 decision 1/2",
+  "evidence": {
+    "wasmtime_50_1_rust_version": "1.97.0 (~/.cargo/registry/src/*/wasmtime-50.0.1/Cargo.toml:14)",
+    "workspace_floor": "1.96 (Cargo.toml:65)",
+    "ci_job": "msrv-check 1.96.0, cargo check --workspace --locked (.github/workflows/ci.yml:68-100)",
+    "baseline_green": "origin/main run 42470660723 with wasmtime 49.0.4",
+    "after_revert_max_rust_version": "1.96.0 (cargo metadata --locked over 923 declaring packages)"
+  },
+  "review": {
+    "reviewer": "reviewers/r_gpt",
+    "verdict": "APPROVE-WITH-FINDINGS",
+    "findings": "1 minor applied: the proposal mis-stated the pre-bump lock (49.0.5, not 49.0.4) and the family had been pinned one patch lower; lock restored to 49.0.5 and the wording corrected. No other findings."
+  }
+}
