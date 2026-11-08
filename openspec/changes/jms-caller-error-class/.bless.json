@@ -1,0 +1,9 @@
+{
+  "kind": "trivial",
+  "change": "jms-caller-error-class",
+  "verdict": "BLESS",
+  "hash": "sha256:6a34586396428ae18124b662328788cd8ec08ccfbc010c06f936a7dde1dda7e9",
+  "expert": "mission-order-541 (owner pre-bless: TRIVIAL for a mapping + tests change)",
+  "date": "2026-11-08",
+  "history": []
+}

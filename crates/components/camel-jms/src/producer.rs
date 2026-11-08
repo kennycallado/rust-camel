@@ -19,6 +19,28 @@ use crate::proto::SendRequest;
 /// Default concurrency limit for JMS producer backpressure.
 const DEFAULT_CONCURRENCY_LIMIT: usize = 128;
 
+/// Maps a bridge `send` failure to the crate error, classifying caller faults
+/// off the transport path (bd rc-qpkok).
+///
+/// The Java bridge uses gRPC `INVALID_ARGUMENT` for exactly one send-time
+/// fault: a rejected forwarded property — `JmsBridgeService.send()` catches
+/// `InvalidPropertyException`, whose message names the offending properties
+/// and never their values. That is the caller's mistake: it must not match
+/// `is_bridge_transport_error`, or the send would emit the
+/// "JMS send transport error" warn and rebuild the channel (process lock +
+/// churn) on every illegal property. Every other status — the bridge's
+/// `INTERNAL` catch-all (`JmsBridgeService.send()` lines 100-106) and the
+/// transport-level failures tonic itself surfaces (`UNAVAILABLE`,
+/// `DEADLINE_EXCEEDED`, `UNKNOWN`, `CANCELLED`, connection reset) — keeps the transport
+/// prefix and the existing retry/refresh behaviour byte-identically.
+fn map_send_status(s: tonic::Status) -> CamelError {
+    if s.code() == tonic::Code::InvalidArgument {
+        CamelError::ProcessorError(format!("JMS send rejected by the bridge: {s}"))
+    } else {
+        CamelError::ProcessorError(format!("{BRIDGE_TRANSPORT_ERROR_PREFIX}send error: {s}"))
+    }
+}
+
 // JMS-004 [resource-leak]: Exchange is NOT cloned. It is passed by value (moved)
 // through LazyJmsProducer::call → JmsProducer::call → async block → returned.
 // No clone site exists in this crate.
@@ -198,11 +220,7 @@ impl Service<Exchange> for JmsProducer {
             let response = client
                 .send(request)
                 .await
-                .map_err(|s| {
-                    CamelError::ProcessorError(format!(
-                        "{BRIDGE_TRANSPORT_ERROR_PREFIX}send error: {s}"
-                    ))
-                })?
+                .map_err(map_send_status)?
                 .into_inner();
 
             debug!(message_id = %response.message_id, "JMS message sent");
@@ -372,5 +390,55 @@ mod tests {
             0,
             "call future must now hold the permit (past acquisition)"
         );
+    }
+
+    // ── rc-qpkok: caller faults stay off the transport path ──────────────────
+
+    #[test]
+    fn caller_error_is_not_transport_classified() {
+        let status = tonic::Status::invalid_argument(
+            "Invalid or rejected JMS property names: JMSXIllegalHeader",
+        );
+        let err = map_send_status(status);
+        assert!(
+            !crate::component::is_bridge_transport_error(&err),
+            "INVALID_ARGUMENT is a caller fault and must not be transport-classified, got: {err}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("JMS send rejected by the bridge"),
+            "the caller error must use the rejection wording, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("JMSXIllegalHeader"),
+            "the caller error must name the offending property, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains(BRIDGE_TRANSPORT_ERROR_PREFIX),
+            "the caller error must not carry the transport prefix, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn transport_error_keeps_prefix_and_classification() {
+        let cases = [
+            tonic::Status::unavailable("connection reset"),
+            tonic::Status::internal("JMS send failed"),
+            tonic::Status::deadline_exceeded("send timeout"),
+            tonic::Status::unknown("h2 stream closed"),
+            tonic::Status::cancelled("client cancelled"),
+        ];
+        for status in cases {
+            let err = map_send_status(status);
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains(&format!("{BRIDGE_TRANSPORT_ERROR_PREFIX}send error:")),
+                "transport faults keep the prefix and format byte-identically, got: {rendered}"
+            );
+            assert!(
+                crate::component::is_bridge_transport_error(&err),
+                "transport faults must stay transport-classified, got: {err}"
+            );
+        }
     }
 }
