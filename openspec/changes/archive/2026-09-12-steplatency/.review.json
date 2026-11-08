@@ -1,0 +1,10 @@
+{
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "impl_hash": "sha256:43b454c50ef7b92302ccec4f4996e026bb2a95d39277b2a2fa81de99f6c153ad",
+  "findings": [
+    "ADR number collision requires merge coordination",
+    "CONTEXT-MAP index lag",
+    "metrics wiring test file crossed 1k lines"
+  ]
+}

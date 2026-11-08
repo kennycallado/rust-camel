@@ -1,0 +1,13 @@
+{
+  "kind": "holistic",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "opus (general-purpose, r_glm rubric)",
+  "impl_hash": "sha256:4a9134fec6052a19826b61998331d177d9ec3c91bc809cc327eac8469ea729b8",
+  "head": "c77c2def",
+  "findings_resolved": [
+    "[important] matrix e2e raced stream registration -> post_soap_when_registered retries 503 inside wait_until (c77c2def)",
+    "[minor] stale allow(dead_code), vacuous header loops -> fixed (c77c2def)",
+    "[minor] tasks ledger lag -> checked"
+  ],
+  "notes": "Java block reviewed separately (4 minors fixed in 96f1baeb; completeFromConsumer owner check filed rc-l9omx). All 4.1 quality gates exit 0 (lint-commits skipped by policy). cxf_test full file 48/48 twice against native bridge built from this branch."
+}
