@@ -1,0 +1,9 @@
+{
+  "kind": "trivial",
+  "change": "jms-pool-config-dedup",
+  "verdict": "TRIVIAL",
+  "hash": "sha256:d8ff2ee631143fad0a6b814d6d1e412dddc5f463db6248ea59f4cc7c746ff1b7",
+  "expert": "conductor",
+  "date": "2026-11-08",
+  "note": "Mission 544 trivial bless per order flow step 2 (test-support dedup, bd rc-fpn7p): bless-hash.sh verdict TRIVIAL, no expert dispatch required. Proposal-only change, skip_specs: true. Deviation from order's example signature documented in proposal.md (broker_type added; reconnect_ms renamed bridge_start_timeout_ms)."
+}

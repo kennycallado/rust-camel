@@ -9,6 +9,38 @@ use super::activemq::{ACTIVEMQ_PASSWORD, ACTIVEMQ_USER, ActiveMqBroker, shared_a
 use super::artemis::{shared_artemis, shared_artemis_auth};
 use super::bridge_bg_rt;
 
+/// Builds the single-broker pool config every JMS fixture in this module
+/// uses: one broker keyed `"default"`, one bridge, no TLS, a 90 s bridge
+/// start budget, everything else at the [`JmsPoolConfig`] default. The
+/// fixtures used to carry this literal inline; the builder keeps the
+/// values byte-identical while giving each fixture its own URL, broker
+/// type, and credentials. (`JmsPoolConfig::single_broker` does not fit:
+/// it hardcodes `username/password: None` and the 30 s default start
+/// timeout.)
+fn pool_config(
+    broker_url: String,
+    broker_type: BrokerType,
+    username: Option<&str>,
+    password: Option<&str>,
+    bridge_start_timeout_ms: u64,
+) -> JmsPoolConfig {
+    JmsPoolConfig {
+        max_bridges: 1,
+        brokers: HashMap::from([(
+            "default".to_string(),
+            BrokerConfig {
+                broker_url,
+                broker_type,
+                username: username.map(str::to_string),
+                password: password.map(str::to_string),
+                tls: None,
+            },
+        )]),
+        bridge_start_timeout_ms,
+        ..JmsPoolConfig::default()
+    }
+}
+
 /// Shared JmsComponent backed by ActiveMQ Classic.
 /// Cloning this component shares the same underlying bridge process, so
 /// parallel tests do not each spawn their own native bridge binary.
@@ -30,21 +62,13 @@ pub async fn shared_jms_activemq() -> JmsComponent {
     JMS_ACTIVEMQ
         .get_or_init(|| async {
             let (_, broker_url) = shared_activemq().await;
-            let pool_config = JmsPoolConfig {
-                max_bridges: 1,
-                brokers: HashMap::from([(
-                    "default".to_string(),
-                    BrokerConfig {
-                        broker_url: broker_url.to_string(),
-                        broker_type: BrokerType::ActiveMq,
-                        username: Some("admin".to_string()),
-                        password: Some("admin".to_string()),
-                        tls: None,
-                    },
-                )]),
-                bridge_start_timeout_ms: 90_000,
-                ..JmsPoolConfig::default()
-            };
+            let pool_config = pool_config(
+                broker_url.to_string(),
+                BrokerType::ActiveMq,
+                Some("admin"),
+                Some("admin"),
+                90_000,
+            );
 
             let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
             // Eagerly start the bridge slot on the permanent background runtime so
@@ -65,21 +89,13 @@ pub async fn shared_jms_artemis() -> JmsComponent {
     JMS_ARTEMIS
         .get_or_init(|| async {
             let (_, broker_url) = shared_artemis().await;
-            let pool_config = JmsPoolConfig {
-                max_bridges: 1,
-                brokers: HashMap::from([(
-                    "default".to_string(),
-                    BrokerConfig {
-                        broker_url: broker_url.to_string(),
-                        broker_type: BrokerType::Artemis,
-                        username: None,
-                        password: None,
-                        tls: None,
-                    },
-                )]),
-                bridge_start_timeout_ms: 90_000,
-                ..JmsPoolConfig::default()
-            };
+            let pool_config = pool_config(
+                broker_url.to_string(),
+                BrokerType::Artemis,
+                None,
+                None,
+                90_000,
+            );
 
             let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
             // Eagerly start the bridge slot on the permanent background runtime.
@@ -98,21 +114,13 @@ pub async fn shared_jms_artemis_auth() -> JmsComponent {
     JMS_ARTEMIS_AUTH
         .get_or_init(|| async {
             let (_, broker_url) = shared_artemis_auth().await;
-            let pool_config = JmsPoolConfig {
-                max_bridges: 1,
-                brokers: HashMap::from([(
-                    "default".to_string(),
-                    BrokerConfig {
-                        broker_url: broker_url.to_string(),
-                        broker_type: BrokerType::Artemis,
-                        username: Some("artemis".to_string()),
-                        password: Some("artemis".to_string()),
-                        tls: None,
-                    },
-                )]),
-                bridge_start_timeout_ms: 90_000,
-                ..JmsPoolConfig::default()
-            };
+            let pool_config = pool_config(
+                broker_url.to_string(),
+                BrokerType::Artemis,
+                Some("artemis"),
+                Some("artemis"),
+                90_000,
+            );
 
             let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
             // Eagerly start the bridge slot on the permanent background runtime.
@@ -137,21 +145,13 @@ pub async fn shared_jms_artemis_auth() -> JmsComponent {
 /// permanent background runtime, mirroring [`shared_jms_activemq`], so the
 /// tonic Channel dispatch task and health monitor outlive the test runtime.
 pub async fn jms_component_for_broker(broker: &ActiveMqBroker) -> JmsComponent {
-    let pool_config = JmsPoolConfig {
-        max_bridges: 1,
-        brokers: HashMap::from([(
-            "default".to_string(),
-            BrokerConfig {
-                broker_url: broker.broker_url.clone(),
-                broker_type: BrokerType::ActiveMq,
-                username: Some(ACTIVEMQ_USER.to_string()),
-                password: Some(ACTIVEMQ_PASSWORD.to_string()),
-                tls: None,
-            },
-        )]),
-        bridge_start_timeout_ms: 90_000,
-        ..JmsPoolConfig::default()
-    };
+    let pool_config = pool_config(
+        broker.broker_url.clone(),
+        BrokerType::ActiveMq,
+        Some(ACTIVEMQ_USER),
+        Some(ACTIVEMQ_PASSWORD),
+        90_000,
+    );
 
     let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
     let pool_init = pool.clone();
