@@ -396,6 +396,10 @@ jobs:
         # and the report job of assurance-monthly.yml (12 scenarios, stubbed
         # evidence, no network). Mirrors the release-asset battery above.
         run: bash scripts/tests/assurance-report-body-test.sh
+      - name: musl fetch retry stub tests
+        # bd rc-zy1qo: offline battery for the bridge musl download logic
+        # (backoff, budget, SHA, cache-hit, jms/cxf/xml parity, ci key sync).
+        run: bash scripts/tests/musl-fetch-retry-test.sh
       - name: lint-unwrap
         run: cargo xtask lint-unwrap
       - name: lint-glob-imports
