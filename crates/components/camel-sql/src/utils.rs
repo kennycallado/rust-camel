@@ -10,64 +10,137 @@ use tracing::warn;
 /// Iterates columns and extracts values by trying types in order:
 /// Option<i64>, Option<i32>, Option<f64>, Option<bool>, Option<String>, timestamp strings.
 /// SQL NULLs are properly represented as JSON null.
+///
+/// A value the server sent is never substituted with null: anything outside the
+/// decode matrix (including non-UTF-8 blobs and non-finite floats) fails with
+/// `undecodable_column_error`. See the README type matrix.
 pub(crate) fn row_to_json(row: &AnyRow) -> Result<serde_json::Value, CamelError> {
     let mut map = serde_json::Map::new();
 
     for (i, column) in row.columns().iter().enumerate() {
         let name = column.name().to_string();
+        let type_name = column.type_info().to_string();
 
         let value = if let Ok(Some(v)) = row.try_get::<Option<i64>, _>(i) {
             serde_json::Value::Number(v.into())
         } else if let Ok(Some(v)) = row.try_get::<Option<i32>, _>(i) {
             serde_json::Value::Number(v.into())
         } else if let Ok(Some(v)) = row.try_get::<Option<f64>, _>(i) {
-            serde_json::Number::from_f64(v)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null)
+            match serde_json::Number::from_f64(v) {
+                Some(n) => serde_json::Value::Number(n),
+                // NaN/±Infinity are real server-sent values; JSON cannot hold
+                // them, so fail loudly instead of substituting null.
+                None => return Err(undecodable_column_error(&name, &type_name)),
+            }
         } else if let Ok(Some(v)) = row.try_get::<Option<bool>, _>(i) {
             serde_json::Value::Bool(v)
         } else if let Ok(Some(v)) = row.try_get::<Option<String>, _>(i) {
             serde_json::Value::String(v)
         } else if let Ok(Some(v)) = row.try_get::<Option<Vec<u8>>, _>(i) {
-            if let Ok(text) = std::str::from_utf8(&v) {
-                if let Ok(date) = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d") {
-                    serde_json::Value::String(date.format("%Y-%m-%d").to_string())
-                } else if let Ok(dt) =
-                    chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f")
-                {
-                    serde_json::Value::String(dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string())
-                } else if let Ok(dt) =
-                    chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
-                {
-                    serde_json::Value::String(dt.format("%Y-%m-%dT%H:%M:%S").to_string())
-                } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
-                    serde_json::Value::String(
-                        dt.with_timezone(&chrono::Utc)
-                            .format("%Y-%m-%dT%H:%M:%SZ")
-                            .to_string(),
-                    )
-                } else {
-                    serde_json::Value::String(text.to_string())
-                }
-            } else {
-                serde_json::Value::Null
+            match std::str::from_utf8(&v) {
+                Ok(text) => decode_blob_text(text),
+                // Binary data is a real server-sent value; JSON cannot hold
+                // raw bytes, so fail loudly instead of substituting null.
+                Err(_) => return Err(undecodable_column_error(&name, &type_name)),
             }
         } else if matches!(row.try_get::<Option<String>, _>(i), Ok(None)) {
             // Confirmed SQL NULL — no warning needed
             serde_json::Value::Null
-        } else {
-            // Truly undecodable — log a warning
-            warn!(
-                column = column.name(),
-                "Could not decode column value, falling back to null"
-            );
+        } else if row
+            .try_get_raw(i)
+            .is_ok_and(|raw| sqlx::ValueRef::is_null(&raw))
+        {
+            // SQL NULL of a kind the string decode cannot confirm (e.g. a
+            // non-text column type) — stays null, the error below must not fire.
             serde_json::Value::Null
+        } else {
+            // Truly undecodable, non-null value — fail the route loudly.
+            return Err(undecodable_column_error(&name, &type_name));
         };
 
         map.insert(name, value);
     }
 
     Ok(serde_json::Value::Object(map))
+}
+
+/// Maps a UTF-8 blob payload to its JSON value, normalizing date-like text to ISO 8601.
+///
+/// Mirrors the historical bytea handling: string content keeps date parsing;
+/// the JSON value never substitutes null for the payload itself.
+fn decode_blob_text(text: &str) -> serde_json::Value {
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+        serde_json::Value::String(date.format("%Y-%m-%d").to_string())
+    } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f") {
+        serde_json::Value::String(dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string())
+    } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S") {
+        serde_json::Value::String(dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+    } else if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(text) {
+        serde_json::Value::String(
+            dt.with_timezone(&chrono::Utc)
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string(),
+        )
+    } else {
+        serde_json::Value::String(text.to_string())
+    }
+}
+
+/// Builds the actionable error for a column the sqlx `Any` driver cannot decode.
+///
+/// Names the column, the driver-reported type, and the CAST workaround so the
+/// route author can fix the query (see the README type matrix). SQL NULL is
+/// handled before this is called: it stays JSON null and never reaches here.
+pub(crate) fn undecodable_column_error(column: &str, type_name: &str) -> CamelError {
+    let hint = if matches!(type_name.to_uppercase().as_str(), "NUMERIC" | "DECIMAL") {
+        "CAST(col AS double precision) for an approximate value, or CAST(col AS text) to preserve the exact value"
+    } else {
+        "CAST(col AS text) to fetch the value as text"
+    };
+    CamelError::TypeConversionFailed(format!(
+        "column '{column}' has type {type_name} which the SQL Any driver cannot decode; \
+         rewrite the query, e.g. {}. See the camel-sql README type matrix",
+        hint.replace("col", column)
+    ))
+}
+
+/// Rewrites sqlx's unsupported-type fetch error into the actionable decode error.
+///
+/// The `Any` bridge raises `ColumnDecode` (source `AnyDriverError`) when a row
+/// carries a column type outside the `Any` type set (e.g. Postgres NUMERIC or
+/// TIMESTAMPTZ). The raw message names the column and type but no workaround;
+/// this restores the CAST hint. Returns `None` for every other error so callers
+/// keep their existing shape.
+pub(crate) fn actionable_any_type_error(e: &sqlx::Error) -> Option<CamelError> {
+    let (column, driver_message) = match e {
+        sqlx::Error::ColumnDecode { index, source } => (index.as_str(), source.to_string()),
+        sqlx::Error::AnyDriverError(source) => ("", source.to_string()),
+        _ => return None,
+    };
+    const MARKER: &str = "Any driver does not support the Postgres type ";
+    let raw = driver_message.split(MARKER).nth(1)?;
+    let type_name = raw
+        .trim()
+        .strip_prefix("PgTypeInfo(")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or(raw.trim());
+    if column.is_empty() {
+        Some(undecodable_column_error("unknown", type_name))
+    } else {
+        Some(undecodable_column_error(column, type_name))
+    }
+}
+
+/// Maps a sqlx fetch error, upgrading unsupported-column-type failures to the
+/// actionable decode error (`actionable_any_type_error`); other errors keep the
+/// existing `ProcessorError` shape.
+pub(crate) fn fetch_error(context: &'static str, e: sqlx::Error) -> CamelError {
+    if let Some(typed) = actionable_any_type_error(&e) {
+        warn!(error = %typed, "{context}");
+        return typed;
+    }
+    warn!(error = %e, "{context}");
+    CamelError::ProcessorError(format!("Query execution failed: {}", e))
 }
 
 /// Binds JSON values to a sqlx query.
@@ -261,5 +334,68 @@ mod tests {
         fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
             self
         }
+    }
+
+    #[test]
+    fn undecodable_numeric_error_names_column_type_and_cast() {
+        let err = undecodable_column_error("price", "Numeric");
+        let msg = err.to_string();
+        assert!(msg.contains("price"), "column name missing: {msg}");
+        assert!(msg.contains("Numeric"), "driver type missing: {msg}");
+        assert!(
+            msg.contains("CAST(price AS double precision)"),
+            "numeric hint missing: {msg}"
+        );
+        assert!(
+            msg.contains("CAST(price AS text)"),
+            "text hint missing: {msg}"
+        );
+        assert!(
+            matches!(err, CamelError::TypeConversionFailed(_)),
+            "must be the typed conversion error"
+        );
+    }
+
+    #[test]
+    fn undecodable_timestamptz_error_suggests_text_cast() {
+        let err = undecodable_column_error("created_at", "Timestamptz");
+        let msg = err.to_string();
+        assert!(msg.contains("created_at"), "column name missing: {msg}");
+        assert!(msg.contains("Timestamptz"), "driver type missing: {msg}");
+        assert!(
+            msg.contains("CAST(created_at AS text)"),
+            "text hint missing: {msg}"
+        );
+        assert!(
+            !msg.contains("double precision"),
+            "timestamps have no numeric hint: {msg}"
+        );
+    }
+
+    #[test]
+    fn unsupported_type_fetch_error_is_rewritten() {
+        let e = sqlx::Error::ColumnDecode {
+            index: "price".to_string(),
+            source: "error in Any driver mapping: Any driver does not support the Postgres type PgTypeInfo(Numeric)"
+                .into(),
+        };
+        let rewritten = actionable_any_type_error(&e).expect("unsupported type must rewrite");
+        let msg = rewritten.to_string();
+        assert!(msg.contains("price"), "column name missing: {msg}");
+        assert!(msg.contains("Numeric"), "driver type missing: {msg}");
+        assert!(
+            msg.contains("CAST(price AS double precision)"),
+            "workaround missing: {msg}"
+        );
+    }
+
+    #[test]
+    fn other_sqlx_errors_are_not_rewritten() {
+        assert!(actionable_any_type_error(&sqlx::Error::PoolTimedOut).is_none());
+        let decode = sqlx::Error::ColumnDecode {
+            index: "price".to_string(),
+            source: "mismatched types".into(),
+        };
+        assert!(actionable_any_type_error(&decode).is_none());
     }
 }

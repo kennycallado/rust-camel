@@ -836,6 +836,334 @@ async fn consumer_empty_result_routed() {
     );
 }
 
+/// A NUMERIC column is outside sqlx's `Any` type set: the route must fail with a
+/// typed error naming the column, the driver-reported type, and the CAST
+/// workaround — never a null-substituted body (bd rc-s7lb0).
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_numeric_column_fails_loudly() {
+    install_crypto_provider();
+    let conn_str = shared_postgres().await.to_string();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(format!(
+            "sql:SELECT 1.5::numeric AS price?db_url={}&sslMode=disable",
+            conn_str
+        ))
+        .to("mock:result")
+        .route_id("sql-numeric-type-test")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    wait_for_mock_exchanges(h.mock(), "error", 1).await;
+    h.stop().await;
+
+    let result_ep = h.mock().get_endpoint("result").unwrap();
+    assert!(
+        result_ep.get_received_exchanges().await.is_empty(),
+        "undecodable column must never produce a body"
+    );
+
+    let error_ep = h.mock().get_endpoint("error").unwrap();
+    let errors = error_ep.get_received_exchanges().await;
+    assert!(!errors.is_empty(), "NUMERIC column must fail the route");
+    let err_msg = errors[0]
+        .error
+        .as_ref()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err_msg.contains("price"), "column named: {err_msg}");
+    assert!(err_msg.contains("Numeric"), "driver type named: {err_msg}");
+    assert!(
+        err_msg.contains("CAST(price AS"),
+        "workaround shown: {err_msg}"
+    );
+}
+
+/// A TIMESTAMPTZ column is outside sqlx's `Any` type set: typed error with the
+/// column, the driver type, and the CAST AS text workaround (bd rc-s7lb0).
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_timestamptz_column_fails_loudly() {
+    install_crypto_provider();
+    let conn_str = shared_postgres().await.to_string();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(format!(
+            "sql:SELECT now()::timestamptz AS created_at?db_url={}&sslMode=disable",
+            conn_str
+        ))
+        .to("mock:result")
+        .route_id("sql-timestamptz-type-test")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    wait_for_mock_exchanges(h.mock(), "error", 1).await;
+    h.stop().await;
+
+    let result_ep = h.mock().get_endpoint("result").unwrap();
+    assert!(
+        result_ep.get_received_exchanges().await.is_empty(),
+        "undecodable column must never produce a body"
+    );
+
+    let error_ep = h.mock().get_endpoint("error").unwrap();
+    let errors = error_ep.get_received_exchanges().await;
+    assert!(!errors.is_empty(), "TIMESTAMPTZ column must fail the route");
+    let err_msg = errors[0]
+        .error
+        .as_ref()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err_msg.contains("created_at"), "column named: {err_msg}");
+    assert!(
+        err_msg.contains("Timestamptz"),
+        "driver type named: {err_msg}"
+    );
+    assert!(
+        err_msg.contains("CAST(created_at AS text)"),
+        "text workaround shown: {err_msg}"
+    );
+}
+
+/// A non-UTF-8 BYTEA value is a real server-sent value: it must fail with a
+/// typed error. On the unfixed code path it silently became JSON null —
+/// data loss disguised as a value (bd rc-s7lb0).
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_non_utf8_bytea_fails_loudly() {
+    install_crypto_provider();
+    let conn_str = shared_postgres().await.to_string();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(format!(
+            "sql:SELECT decode('00ff00', 'hex') AS payload?db_url={}&sslMode=disable",
+            conn_str
+        ))
+        .to("mock:result")
+        .route_id("sql-bytea-type-test")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+
+    // Either the typed error dead-letters (fixed behavior) or a body arrives
+    // (unfixed behavior: {"payload": null}). Wait for whichever lands first.
+    let error_ep = h.mock().get_endpoint("error").unwrap();
+    let result_ep = h.mock().get_endpoint("result").unwrap();
+    wait_until(
+        "sql bytea outcome (error dead-letter or body)",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let error_ep = error_ep.clone();
+            let result_ep = result_ep.clone();
+            async move {
+                Ok(error_ep.get_received_exchanges().await.len() >= 1
+                    || result_ep.get_received_exchanges().await.len() >= 1)
+            }
+        },
+    )
+    .await
+    .unwrap();
+    h.stop().await;
+
+    let results = result_ep.get_received_exchanges().await;
+    assert!(
+        results.is_empty(),
+        "non-UTF-8 BYTEA must fail loudly, not substitute null; got body: {:?}",
+        results.first().map(|ex| &ex.input.body)
+    );
+
+    let errors = error_ep.get_received_exchanges().await;
+    assert!(!errors.is_empty(), "non-UTF-8 BYTEA must fail the route");
+    let err_msg = errors[0]
+        .error
+        .as_ref()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(err_msg.contains("payload"), "column named: {err_msg}");
+    assert!(err_msg.contains("BLOB"), "driver type named: {err_msg}");
+    assert!(
+        err_msg.contains("CAST(payload AS text)"),
+        "workaround shown: {err_msg}"
+    );
+}
+
+/// A plain SQL NULL column stays JSON null — the typed undecodable error must
+/// never fire on it (bd rc-s7lb0).
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_sql_null_stays_null() {
+    install_crypto_provider();
+    let conn_str = shared_postgres().await.to_string();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
+        .to(format!(
+            "sql:SELECT 7::bigint AS ok_col, NULL::text AS maybe_null?db_url={}&sslMode=disable",
+            conn_str
+        ))
+        .to("mock:result")
+        .route_id("sql-null-test")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    wait_for_mock_exchanges(h.mock(), "result", 1).await;
+    h.stop().await;
+
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        if !errors.is_empty() {
+            panic!("Route had errors: {:?}", errors[0].error);
+        }
+    }
+
+    let endpoint = h.mock().get_endpoint("result").unwrap();
+    let exchanges = endpoint.get_received_exchanges().await;
+    let body = match &exchanges[0].input.body {
+        Body::Json(v) => v,
+        other => panic!("Body should be JSON, got: {other:?}"),
+    };
+    let row = &body.as_array().expect("SelectList body should be an array")[0];
+    assert_eq!(row.get("ok_col").and_then(|v| v.as_i64()), Some(7));
+    assert!(
+        row.get("maybe_null").map(|v| v.is_null()).unwrap_or(false),
+        "SQL NULL must stay null: {row}"
+    );
+}
+
+/// The polling consumer surfaces one clear typed error per undecodable poll
+/// (via bridgeErrorHandler) — never a null-substituted row (bd rc-s7lb0).
+#[tokio::test(flavor = "multi_thread")]
+async fn consumer_undecodable_column_fails_loudly() {
+    install_crypto_provider();
+    let conn_str = shared_postgres().await.to_string();
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let sql_uri = format!(
+        "sql:SELECT 1.5::numeric AS price?db_url={}&sslMode=disable&delay=200&initialDelay=50&bridgeErrorHandler=true",
+        conn_str
+    );
+    let consumer_route = RouteBuilder::from(sql_uri.as_str())
+        .to("mock:consumed")
+        .route_id("sql-consumer-type-test")
+        .build()
+        .unwrap();
+
+    h.add_route(consumer_route).await.unwrap();
+    h.start().await;
+
+    // The bridged poll error lands on the route downstream (mock:error via the
+    // dead-letter channel, or mock:consumed as a pre-errored exchange, depending
+    // on where the route delivers it). Wait for either to receive one.
+    let error_ep = h.mock().get_endpoint("error").unwrap();
+    let consumed_ep = h.mock().get_endpoint("consumed").unwrap();
+    wait_until(
+        "sql consumer undecodable outcome",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let error_ep = error_ep.clone();
+            let consumed_ep = consumed_ep.clone();
+            async move {
+                Ok(error_ep.get_received_exchanges().await.len() >= 1
+                    || consumed_ep.get_received_exchanges().await.len() >= 1)
+            }
+        },
+    )
+    .await
+    .unwrap();
+    h.stop().await;
+
+    let mut errored: Vec<String> = Vec::new();
+    for exchange in error_ep.get_received_exchanges().await {
+        match exchange.error {
+            Some(e) => errored.push(e.to_string()),
+            None => panic!("clean body on error endpoint: {:?}", exchange.input.body),
+        }
+    }
+    for exchange in consumed_ep.get_received_exchanges().await {
+        match exchange.error {
+            Some(e) => errored.push(e.to_string()),
+            None => panic!(
+                "null-substituted row reached the route: {:?}",
+                exchange.input.body
+            ),
+        }
+    }
+    assert!(
+        !errored.is_empty(),
+        "undecodable poll must surface an error"
+    );
+    for msg in &errored {
+        assert!(msg.contains("price"), "column named: {msg}");
+        assert!(msg.contains("Numeric"), "driver type named: {msg}");
+        assert!(msg.contains("CAST(price AS"), "workaround shown: {msg}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn sql_ssl_connection_roundtrip() {
     install_crypto_provider();

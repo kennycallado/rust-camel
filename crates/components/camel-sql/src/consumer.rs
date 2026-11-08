@@ -24,7 +24,7 @@ use crate::config::{
 };
 use crate::headers;
 use crate::query::{QueryTemplate, parse_query_template, resolve_params};
-use crate::utils::{bind_json_values, is_retryable_sqlx_error, row_to_json};
+use crate::utils::{bind_json_values, fetch_error, is_retryable_sqlx_error, row_to_json};
 
 /// Record a post-process (b′) failure for ADR-0012 outside-contract sites in this
 /// consumer. Increments the per-label error metric AND emits an `error!` log
@@ -112,10 +112,10 @@ impl SqlConsumer {
             sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str())),
             &prepared.bindings,
         );
-        let rows: Vec<AnyRow> = query.fetch_all(pool).await.map_err(|e| {
-            warn!(error = %e, "SQL consumer poll query failed");
-            CamelError::ProcessorError(format!("Query execution failed: {}", e))
-        })?;
+        let rows: Vec<AnyRow> = query
+            .fetch_all(pool)
+            .await
+            .map_err(|e| fetch_error("SQL consumer poll query failed", e))?;
 
         debug!(rows = rows.len(), "SQL consumer poll completed");
 
@@ -243,9 +243,11 @@ impl SqlConsumer {
             let mut q = sqlx::query(sqlx::AssertSqlSafe(sql_str.as_str()));
             q = bind_json_values(q, &bindings);
             let mut rows = q.fetch(&pool_clone);
-            while let Some(row) = rows.try_next().await.map_err(|e| {
-                CamelError::ProcessorError(format!("Query execution failed: {}", e))
-            })? {
+            while let Some(row) = rows
+                .try_next()
+                .await
+                .map_err(|e| fetch_error("Query execution failed", e))?
+            {
                 let json_val = row_to_json(&row).map_err(|e| {
                     CamelError::ProcessorError(format!("JSON serialization failed: {}", e))
                 })?;

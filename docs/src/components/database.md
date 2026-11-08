@@ -53,6 +53,25 @@ The SQL placeholder parser accepts these forms:
 
 The full contract surface with accepted, rejected, and forbidden patterns lives in the SQL crate CONTEXT.
 
+### Type matrix (sqlx `Any` driver)
+
+The SQL component runs every query through sqlx's `Any` driver, which decodes a fixed
+type set. Types outside that set fail the route with a typed error that names the
+column, the driver-reported type, and the CAST workaround. SQL NULL decodes to JSON
+`null` for every column type; a value the server sent is never substituted with null.
+
+| Column type (Postgres terms) | Decoded as | Notes |
+| --- | --- | --- |
+| BOOLEAN | JSON boolean | |
+| SMALLINT, INTEGER, BIGINT | JSON number | |
+| REAL, DOUBLE PRECISION | JSON number | NaN/±Infinity fails the route |
+| TEXT, VARCHAR, CHAR, CITEXT | JSON string | |
+| BYTEA | JSON string | UTF-8 content only; other bytes fail the route |
+| NUMERIC, DECIMAL | typed error | `CAST(col AS double precision)` (approximate) or `CAST(col AS text)` (exact) |
+| TIMESTAMPTZ, TIMESTAMP, DATE, TIME, UUID, JSON, JSONB, arrays | typed error | `CAST(col AS text)` |
+
+The full matrix with examples lives in the [SQL crate README](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-sql/README.md).
+
 ## SurrealDB
 
 The SurrealDB component connects routes to SurrealDB for document, graph, vector, function, and live-query operations. It uses the SurrealDB SDK directly.

@@ -325,6 +325,32 @@ When `useIterator=true`, each row's columns are also set as headers:
 | `SelectOne` | First row only | `{...}` or empty |
 | `StreamList` | Stream rows on demand | NDJSON stream (`{...}\n{...}\n`) |
 
+## Type matrix (sqlx `Any` driver)
+
+The component runs every query through sqlx's `Any` driver, which decodes a fixed
+type set. Types outside that set fail the route with a typed error that names the
+column, the driver-reported type, and the CAST workaround. SQL NULL decodes to JSON
+`null` for every column type; a value the server sent is never substituted with null.
+
+| Column type (Postgres terms) | Decoded as | Notes |
+|------------------------------|------------|-------|
+| BOOLEAN | JSON boolean | |
+| SMALLINT, INTEGER, BIGINT | JSON number | |
+| REAL, DOUBLE PRECISION | JSON number | NaN/±Infinity fails the route |
+| TEXT, VARCHAR, CHAR, CITEXT | JSON string | |
+| BYTEA | JSON string | UTF-8 content only; other bytes fail the route |
+| NUMERIC, DECIMAL | typed error | `CAST(col AS double precision)` (approximate) or `CAST(col AS text)` (exact) |
+| TIMESTAMPTZ, TIMESTAMP, DATE, TIME, UUID, JSON, JSONB, arrays | typed error | `CAST(col AS text)` |
+
+Example: a NUMERIC column becomes readable without a driver change:
+
+```sql
+SELECT CAST(total AS double precision) AS total FROM orders
+```
+
+A future typed (non-`Any`) driver path would decode NUMERIC and TIMESTAMPTZ natively
+and retire the CAST workaround. It is not implemented here.
+
 ## Example: Order Processing Pipeline
 
 ```rust

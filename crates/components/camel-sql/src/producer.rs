@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{SqlEndpointConfig, SqlOutputType, enrich_db_url_with_ssl, redact_db_url};
 use crate::headers;
 use crate::query::{PreparedQuery, is_select_query, parse_query_template, resolve_params};
-use crate::utils::{bind_json_values, is_retryable_sqlx_error, row_to_json};
+use crate::utils::{bind_json_values, fetch_error, is_retryable_sqlx_error, row_to_json};
 use camel_component_api::retry_async;
 use camel_component_api::{
     Body, CamelError, Exchange, Message, RuntimeObservability, StreamBody, StreamMetadata,
@@ -326,10 +326,10 @@ async fn execute_select(
             let mut query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str()));
             query = bind_json_values(query, &prepared.bindings);
 
-            let rows: Vec<AnyRow> = query.fetch_all(pool).await.map_err(|e| {
-                warn!(error = %e, "SQL query failed");
-                CamelError::ProcessorError(format!("Query execution failed: {}", e))
-            })?;
+            let rows: Vec<AnyRow> = query
+                .fetch_all(pool)
+                .await
+                .map_err(|e| fetch_error("SQL query failed", e))?;
 
             let count = rows.len();
             debug!(rows = count, "SQL query completed");
@@ -353,10 +353,10 @@ async fn execute_select(
             let mut query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str()));
             query = bind_json_values(query, &prepared.bindings);
 
-            let rows: Vec<AnyRow> = query.fetch_all(pool).await.map_err(|e| {
-                warn!(error = %e, "SQL query failed");
-                CamelError::ProcessorError(format!("Query execution failed: {}", e))
-            })?;
+            let rows: Vec<AnyRow> = query
+                .fetch_all(pool)
+                .await
+                .map_err(|e| fetch_error("SQL query failed", e))?;
 
             let count = rows.len();
             debug!(rows = count, "SQL query completed");
@@ -384,9 +384,11 @@ async fn execute_select(
                 let mut q = sqlx::query(sqlx::AssertSqlSafe(sql_str.as_str()));
                 q = bind_json_values(q, &bindings);
                 let mut rows = q.fetch(&pool_clone);
-                while let Some(row) = rows.try_next().await.map_err(|e| {
-                    CamelError::ProcessorError(format!("Query execution failed: {}", e))
-                })? {
+                while let Some(row) = rows
+                    .try_next()
+                    .await
+                    .map_err(|e| fetch_error("Query execution failed", e))?
+                {
                     let json_val = row_to_json(&row).map_err(|e| {
                         CamelError::ProcessorError(format!("JSON serialization failed: {}", e))
                     })?;

@@ -1,0 +1,11 @@
+{
+  "verdict": "TRIVIAL",
+  "hash": "sha256:e1ea365fb7307a1a6126c2c09f0a18a8bb5c3bb30024f4acc1527a421bc7bf7a",
+  "expert": "trivial-self-bless (mission order 534 flow step 2: small clearly-scoped fix)",
+  "kind": "spec",
+  "artifacts": [
+    "openspec/changes/sql-any-type-matrix/proposal.md",
+    "openspec/changes/sql-any-type-matrix/.openspec.yaml"
+  ],
+  "scope_assessment": "Single-crate data-fidelity fix in camel-sql utils.rs + fetch-site error rewrite, two doc tables, unit+integration tests. No public API, schema, or spec-canon change (skip_specs: true). Non-goals honored: no typed-driver path, no bind-path changes (rc-fef4z), no new URI parameter."
+}
