@@ -112,6 +112,12 @@
   run: cargo audit
 ```
 
+**Local sweep**: `bash scripts/gates-local.sh` runs this registry locally by
+parsing the block above (it cannot drift). Network and docs-toolchain gates
+(`lint-commits`, `doc-guide-test`, `cargo-audit`, `audit`) are skipped by
+default and left to CI; `GATES_ONLY=`/`GATES_SKIP=` narrow or widen the run.
+The merge gate and any release bump require exit 0.
+
 ## NEW-CODE-ONLY STYLE NORMS (ADR-0091)
 
 These norms apply to new code. Existing code is grandfathered; do not retrofit in a feature PR. Full policy: `docs/adr/0091-rust-style-policy.md`.

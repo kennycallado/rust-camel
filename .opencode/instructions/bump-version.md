@@ -5,11 +5,19 @@ Verified against the v0.48.0 precedent (`0f67ee5d`) and the v0.49.0 bump
 
 0. **GATE SWEEP FIRST** (born from the v0.49.0 rustdoc miss): a release
    push must NEVER be the first doc-build. Before the bump commit, in a
-   worktree at the release candidate HEAD run:
-   `RUSTC_WRAPPER= RUSTDOCFLAGS="-D warnings" cargo doc -p camel-api -p
-   camel-core -p camel-builder -p camel-dsl -p camel-endpoint --no-deps`
-   plus `cargo fmt --check --all`. The 7-target release matrix is
-   CI-only; doc-build and fmt are cheap locally — run them.
+   worktree at the release candidate HEAD run `bash scripts/gates-local.sh`
+   (the local subset of the AGENTS.md registry, parsed not copied). It covers
+   `cargo fmt --check --all` and the seven-crate doc build with
+   `-D warnings`; the 7-target release matrix stays CI-only.
+
+0b. **TAG ONLY ON A GREEN SHA** (born from v0.66.0, 2026-11-08). We tagged
+   while CI was still running, and `Quality Gates` turned red on
+   `lint-unbounded-wait` minutes later: a test-only defect, but the tag and
+   the release assets point at a commit whose CI never passed, and a
+   published version cannot be re-cut. The order is: push main, **wait for
+   `CI` to finish green on that exact SHA**, and only then create and push
+   the tag. A `-rc.*` tag is the rehearsal escape hatch when a red is found
+   after tagging.
 
 1. **Version pins**: the workspace ROOT `Cargo.toml` carries ~69 version
    strings (the `[workspace.package]` version AND internal camel-* pins).
