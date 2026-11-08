@@ -58,6 +58,7 @@ benchmarks/harness/out/
 .bless.json
 # Final implementation blessing records are committed per change.
 !openspec/changes/**/.bless.json
+!openspec/changes/**/.review.json
 .review.json
 benchmarks/runner/DIGEST
 
