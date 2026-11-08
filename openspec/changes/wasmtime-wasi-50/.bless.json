@@ -1,0 +1,1 @@
+{"verdict":"TRIVIAL","hash":"sha256:49a6bceaa3c5a00ddda8057b508350006bfaf53832649b8c63400ca0e25b5a43","expert":"conductor","kind":"trivial","note":"host-side wiring only: workspace version pins + AccessorTask async-closure adaptation; no semantic change, no guest-contract change; gate suite green incl. streaming/source paths"}

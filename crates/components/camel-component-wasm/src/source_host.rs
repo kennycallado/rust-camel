@@ -13,7 +13,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use wasmtime::component::{Accessor, AccessorTask, HasSelf, Linker, Resource, ResourceTable};
+use wasmtime::component::{Accessor, HasSelf, Linker, Resource, ResourceTable};
 
 use camel_api::security_policy::{AccessMode, RouteSecurityPlan};
 use camel_api::{Body, CamelError, Exchange, ExchangePattern, Message, StreamBody, Value};
@@ -439,12 +439,31 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
             // fail fast by writing the terminal error the drain would have
             // written; chunk_tx drops inside spawn, closing the channel.
             // write_terminal is poison-safe: the error always surfaces.
-            if let Err(spawn_err) = accessor.spawn(SubmitExchangeDrain {
-                stream_reader,
-                terminal,
-                chunk_tx,
-                coord,
-            }) {
+            // wasmtime 50: AccessorTask is a trait for async closures
+            // (blanket impl, manual impls no longer supported), so the drain
+            // is spawned as an async closure capturing the drain inputs.
+            if let Err(spawn_err) = accessor.spawn(
+                async move |accessor: &Accessor<
+                    SourceHostState,
+                    HasSelf<SourceHostState>,
+                >|
+                 -> wasmtime::Result<()> {
+                    drain_guest_stream::<SourceWasmError, SourceHostState>(
+                        accessor,
+                        stream_reader,
+                        terminal,
+                        chunk_tx,
+                        coord,
+                    )
+                    .await;
+                    // Terminal errors are surfaced through the chunk channel
+                    // (`DrainEvent::Error`), not the task return — the
+                    // downstream `Body::Stream` reader observes them.
+                    // Returning `Ok` keeps the event loop's task accounting
+                    // clean.
+                    Ok(())
+                },
+            ) {
                 write_terminal(
                     &source_terminal,
                     Err(CamelError::ProcessorError(format!(
@@ -483,45 +502,6 @@ impl crate::source_bindings::camel::plugin::source_host::HostWithStore<SourceHos
             _ = cancel_token.cancelled() => SubmitOutcome::Stopped,
         };
         Ok(outcome)
-    }
-}
-
-// ─── submit-exchange background drain (AccessorTask) ──────────────────────
-
-/// `AccessorTask` driving the guest→host body drain for a streaming
-/// `submit-exchange`.
-///
-/// Unlike the plugin/bean return path (`spawn_return_drain`), the source world
-/// CANNOT `tokio::spawn` a moved store and open a fresh `run_concurrent` — the
-/// source `run` is already inside `run_concurrent` and `check_recursive_run`
-/// panics on a nested call. `Accessor::spawn` instead registers this task on
-/// the SAME event loop already driving `run`, so the drain progresses
-/// concurrently with the guest fiber (and the guest's `spawn_local` writer).
-struct SubmitExchangeDrain {
-    stream_reader: wasmtime::component::StreamReader<u8>,
-    terminal: wasmtime::component::FutureReader<Result<(), SourceWasmError>>,
-    chunk_tx: mpsc::Sender<DrainEvent>,
-    coord: DrainCoord,
-}
-
-impl AccessorTask<SourceHostState, HasSelf<SourceHostState>> for SubmitExchangeDrain {
-    async fn run(
-        self,
-        accessor: &Accessor<SourceHostState, HasSelf<SourceHostState>>,
-    ) -> wasmtime::Result<()> {
-        drain_guest_stream::<SourceWasmError, SourceHostState>(
-            accessor,
-            self.stream_reader,
-            self.terminal,
-            self.chunk_tx,
-            self.coord,
-        )
-        .await;
-        // Terminal errors are surfaced through the chunk channel
-        // (`DrainEvent::Error`), not the task return — the downstream
-        // `Body::Stream` reader observes them. Returning `Ok` keeps the
-        // event loop's task accounting clean.
-        Ok(())
     }
 }
 
