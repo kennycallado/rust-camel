@@ -70,11 +70,22 @@ Endpoints declared through a `rest:` block are `http:` consumers after lowering,
 
 ## Client
 
-`to: http://example.org/api/data` is a Producer Endpoint. The Producer builds an outbound request, sends it through the configured transport, and returns the response as the new Exchange body. The Producer follows redirects, applies the configured `NetworkRetryPolicy`, and surfaces transport failures as `CamelError`.
+`to: http://example.org/api/data` is a Producer Endpoint. The Producer builds an outbound request, sends it through the configured transport, and returns the response as the new Exchange body. The Producer applies the configured `NetworkRetryPolicy` and surfaces transport failures as `CamelError`. By default the Producer does not follow redirects: a 3xx response is returned as-is, and `throwExceptionOnFailure=true` (the default) fails the exchange with an error that names `followRedirects`.
 
 The component validates each outbound URL and each redirect hop. `allow_internal=false` rejects internal addresses by default. The Producer pins DNS resolution to validated addresses to prevent DNS rebinding. Cross-origin redirects drop the `Authorization` and `Cookie` headers. The Producer has a 10 MiB default response-body limit.
 
 `TlsConfig` verifies peer certificates by default. An operator can opt out with `insecure=true` or `verify_peer=false`. The opt-out emits a warning. The component forbids cleartext HTTP to public addresses even with `allow_internal=true`.
+
+### Redirects
+
+The Producer does not follow redirects by default. A 3xx response is returned as-is, and the exchange fails when `throwExceptionOnFailure=true`.
+
+| Option | Default | Accepted | Effect |
+| --- | --- | --- | --- |
+| `followRedirects` | `false` | `true`, `false` | Follows 301, 302, 303, 307, and 308 responses through the SSRF-validated redirect loop. |
+| `maxRedirects` | `10` | `0` to `20` | Hop budget for the redirect loop. `0` sends once and returns the redirect as-is. Has no effect unless `followRedirects=true`. |
+
+Following redirects widens egress: each hop can name a new target, so the request reaches hosts beyond the one in the URI. That trade-off is why the default is off. Every hop passes the same SSRF validation as the initial request; see [ADR-0071](https://github.com/kennycallado/rust-camel/blob/main/docs/adr/0071-http-outbound-url-policy.md) for the outbound URL policy.
 
 ### HTTP method selection
 

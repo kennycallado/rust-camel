@@ -2407,7 +2407,7 @@ async fn test_follow_redirects_false_does_not_follow() {
 }
 
 #[tokio::test]
-async fn test_follow_redirects_true_follows_redirect() {
+async fn follow_redirects_true_302_is_followed() {
     use tower::ServiceExt;
 
     let (url, _handle) = start_redirect_server().await;
@@ -2432,6 +2432,139 @@ async fn test_follow_redirects_true_follows_redirect() {
     assert_eq!(
         status, 200,
         "Should follow redirect when followRedirects=true"
+    );
+    // The body must come from the redirect target, not the 302 response.
+    let camel_component_api::Body::Bytes(body) = &result.input.body else {
+        panic!("expected Bytes body, got: {:?}", result.input.body);
+    };
+    let body = String::from_utf8_lossy(body);
+    assert!(
+        body.contains(r#""status":"final""#),
+        "expected redirect-target body, got: {body}"
+    );
+}
+
+/// rc-qt54d: with `followRedirects=false` (the default), a 302 surfaces as
+/// `CamelError::HttpOperationFailed` whose display names the parameter that
+/// enables following — and does not leak the redirect target.
+#[tokio::test]
+async fn follow_redirects_false_error_names_the_param() {
+    use tower::ServiceExt;
+
+    let (url, _handle) = start_redirect_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default().with_follow_redirects(false));
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}?throwExceptionOnFailure=true&allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await;
+
+    assert!(
+        result.is_err(),
+        "302 with throwExceptionOnFailure=true must fail, got: {:?}",
+        result
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("302 Found (redirect not followed; set followRedirects=true)"),
+        "error must name the parameter, got: {err}"
+    );
+    assert!(
+        !err.contains("/final"),
+        "error must not leak the redirect target, got: {err}"
+    );
+}
+
+/// rc-qt54d: 304 is not a redirect — the error display must stay clean.
+#[tokio::test]
+async fn not_modified_304_has_no_redirect_hint() {
+    use tower::ServiceExt;
+
+    let _server = HttpTestServer::start(Responder::Fixed(Response::raw(
+        b"HTTP/1.1 304 Not Modified\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".to_vec(),
+    )))
+    .await
+    .expect("start 304 server");
+    let url = format!("http://127.0.0.1:{}", _server.port());
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default());
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!("{url}?throwExceptionOnFailure=true&allowInternal=true"),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await;
+
+    assert!(
+        result.is_err(),
+        "304 with throwExceptionOnFailure=true must fail, got: {:?}",
+        result
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("304 Not Modified"),
+        "error should surface the status, got: {err}"
+    );
+    assert!(
+        !err.contains("redirect not followed"),
+        "304 must not carry the redirect hint, got: {err}"
+    );
+}
+
+/// rc-qt54d: the hint must not reintroduce the raw URL — ADR-0051
+/// redaction survives on the redirect-hint path.
+#[tokio::test]
+async fn error_hint_preserves_url_redaction() {
+    use tower::ServiceExt;
+
+    let (_url, server) = start_redirect_server().await;
+    let ctx = test_producer_ctx();
+
+    let component = HttpComponent::with_config(HttpConfig::default().with_follow_redirects(false));
+    let endpoint_ctx = NoOpComponentContext;
+    let endpoint = component
+        .create_endpoint(
+            &format!(
+                "http://user:secret@127.0.0.1:{}?throwExceptionOnFailure=true&allowInternal=true",
+                server.port()
+            ),
+            &endpoint_ctx,
+        )
+        .unwrap();
+    let producer = endpoint.create_producer(rt(), &ctx).unwrap();
+
+    let exchange = Exchange::new(Message::default());
+    let result = producer.oneshot(exchange).await;
+
+    assert!(
+        result.is_err(),
+        "302 with throwExceptionOnFailure=true must fail, got: {:?}",
+        result
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("redirect not followed; set followRedirects=true"),
+        "hint expected, got: {err}"
+    );
+    assert!(!err.contains("secret"), "password leaked: {err}");
+    assert!(!err.contains("user:secret"), "userinfo leaked: {err}");
+    assert!(
+        err.contains("***@"),
+        "expected the ADR-0051 redaction mask on the URL, got: {err}"
     );
 }
 

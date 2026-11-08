@@ -1,0 +1,6 @@
+{
+  "verdict": "TRIVIAL",
+  "hash": "sha256:e0fd3a44aa92b6da5b54df11cafedb136d047a2cc418932358eca3b4565534a1",
+  "expert": "conductor",
+  "kind": "trivial"
+}

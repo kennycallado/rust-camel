@@ -3585,6 +3585,20 @@ impl Service<Exchange> for HttpProducer {
                 if config.throw_exception_on_failure
                     && !HttpProducer::is_ok_status(status_code, config.ok_status_code_range)
                 {
+                    // Display-only hint: reqwest would have followed
+                    // 301/302/303/307/308, but followRedirects defaults to
+                    // false, so the response surfaces as a failure. Name the
+                    // parameter that changes this. Display is unchanged for
+                    // 300/304/305/306 (not followable) and for the
+                    // followRedirects=true path (hop exhaustion carries its
+                    // own message). The CamelError shape stays put.
+                    let redirect_not_followed = !config.follow_redirects
+                        && matches!(status_code, 301 | 302 | 303 | 307 | 308);
+                    let status_text = if redirect_not_followed {
+                        format!("{status_text} (redirect not followed; set followRedirects=true)")
+                    } else {
+                        status_text
+                    };
                     return Err(CamelError::HttpOperationFailed {
                         method: method_str,
                         // ADR-0051 redact-by-construction: never embed
