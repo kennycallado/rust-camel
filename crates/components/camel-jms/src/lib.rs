@@ -28,8 +28,8 @@ mod trace_context;
 pub use bundle::JmsBundle;
 pub use camel_bridge::process::BrokerType;
 pub use component::{
-    BRIDGE_TRANSPORT_ERROR_PREFIX, BridgeSlot, BridgeState, JmsBridgePool, JmsComponent,
-    is_bridge_transport_error,
+    BRIDGE_TRANSPORT_ERROR_PREFIX, BridgeSlot, BridgeState, CapabilityRequirements, JmsBridgePool,
+    JmsComponent, is_bridge_transport_error,
 };
 pub use config::default_bridge_cache_dir;
 pub use config::{

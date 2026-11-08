@@ -2,7 +2,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use camel_component_jms::{BrokerConfig, BrokerType, JmsBridgePool, JmsComponent, JmsPoolConfig};
+use camel_component_jms::{
+    BrokerConfig, BrokerType, CapabilityRequirements, JmsBridgePool, JmsComponent, JmsPoolConfig,
+};
 use tokio::sync::OnceCell;
 
 use super::activemq::{ACTIVEMQ_PASSWORD, ACTIVEMQ_USER, ActiveMqBroker, shared_activemq};
@@ -76,7 +78,11 @@ pub async fn shared_jms_activemq() -> JmsComponent {
             // individual test runtimes.
             let pool_init = pool.clone();
             let _ = bridge_bg_rt()
-                .spawn(async move { pool_init.get_or_create_slot("default", false, false).await })
+                .spawn(async move {
+                    pool_init
+                        .get_or_create_slot("default", CapabilityRequirements::default())
+                        .await
+                })
                 .await;
             JmsComponent::with_scheme("jms", pool)
         })
@@ -101,7 +107,11 @@ pub async fn shared_jms_artemis() -> JmsComponent {
             // Eagerly start the bridge slot on the permanent background runtime.
             let pool_init = pool.clone();
             let _ = bridge_bg_rt()
-                .spawn(async move { pool_init.get_or_create_slot("default", false, false).await })
+                .spawn(async move {
+                    pool_init
+                        .get_or_create_slot("default", CapabilityRequirements::default())
+                        .await
+                })
                 .await;
             JmsComponent::with_scheme("jms", pool)
         })
@@ -126,7 +136,11 @@ pub async fn shared_jms_artemis_auth() -> JmsComponent {
             // Eagerly start the bridge slot on the permanent background runtime.
             let pool_init = pool.clone();
             let _ = bridge_bg_rt()
-                .spawn(async move { pool_init.get_or_create_slot("default", false, false).await })
+                .spawn(async move {
+                    pool_init
+                        .get_or_create_slot("default", CapabilityRequirements::default())
+                        .await
+                })
                 .await;
             JmsComponent::with_scheme("jms", pool)
         })
@@ -156,7 +170,11 @@ pub async fn jms_component_for_broker(broker: &ActiveMqBroker) -> JmsComponent {
     let pool = Arc::new(JmsBridgePool::from_config(pool_config).unwrap());
     let pool_init = pool.clone();
     let _ = bridge_bg_rt()
-        .spawn(async move { pool_init.get_or_create_slot("default", false, false).await })
+        .spawn(async move {
+            pool_init
+                .get_or_create_slot("default", CapabilityRequirements::default())
+                .await
+        })
         .await; // allow-test-wait: bounded internally by bridge_start_timeout_ms (start_bridge_process total_timeout), mirroring shared_jms_*
     JmsComponent::with_scheme("jms", pool)
 }

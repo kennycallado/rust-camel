@@ -30,7 +30,9 @@ use std::time::Duration;
 
 use camel_api::Value;
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_jms::{BrokerConfig, BrokerType, JmsBridgePool, JmsComponent, JmsPoolConfig};
+use camel_component_jms::{
+    BrokerConfig, BrokerType, CapabilityRequirements, JmsBridgePool, JmsComponent, JmsPoolConfig,
+};
 use camel_test::CamelTestContext;
 
 use super::support::activemq::{
@@ -93,8 +95,11 @@ async fn dedicated_jms_component(broker: &ActiveMqBroker) -> JmsComponent {
     // Start the slot on the permanent background runtime so the tonic dispatch
     // task and health monitor are not killed when this test's runtime is dropped.
     let pool_init = pool.clone();
-    let handle = bridge_bg_rt()
-        .spawn(async move { pool_init.get_or_create_slot("default", false, false).await });
+    let handle = bridge_bg_rt().spawn(async move {
+        pool_init
+            .get_or_create_slot("default", CapabilityRequirements::default())
+            .await
+    });
     let _ = tokio::time::timeout(Duration::from_secs(90), handle).await;
     JmsComponent::with_scheme("jms", pool)
 }
