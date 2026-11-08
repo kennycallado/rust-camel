@@ -651,12 +651,18 @@ pub(crate) fn spawn_consumer_task(
 
                 let bg_handle = consumer.background_task_handle();
 
-                if bg_handle.is_none() && startup_for_task.mark_ready() {
-                    warn!(
-                        route_id = %route_id,
-                        "Explicit consumer returned Ok without calling ctx.mark_ready(); \
-                         applied defensive fallback. This indicates a contract violation."
-                    );
+                if bg_handle.is_none() {
+                    let readiness_fallback = startup_for_task.mark_ready();
+                    if !consumer_ctx.is_cancelled() {
+                        warn!(
+                            route_id = %route_id,
+                            readiness_fallback,
+                            "Explicit consumer returned Ok without a background handle before \
+                             cancellation; stop() follows immediately. Consumers intended to remain \
+                             active should keep start() alive until cancellation or return a \
+                             background handle."
+                        );
+                    }
                 }
 
                 if let Some(mut bg_handle) = bg_handle {
@@ -2767,3 +2773,7 @@ mod tests {
 #[cfg(test)]
 #[path = "handshake_tests.rs"]
 mod handshake_tests;
+
+#[cfg(test)]
+#[path = "consumer_exit_tests.rs"]
+mod consumer_exit_tests;

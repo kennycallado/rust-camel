@@ -548,6 +548,12 @@ pub enum ConcurrencyModel {
 /// 4. `background_task_handle()` is a supervision hook for crash propagation (ADR-0007),
 ///    NOT the shutdown API.
 ///
+/// Readiness does not extend the consumer's lifetime. Without a background handle,
+/// `stop()` follows successful `start()` completion immediately. Long-lived consumers
+/// must keep `start()` alive until cancellation or return a background handle.
+/// Finite completion remains valid; for Explicit consumers, the Runtime only warns
+/// about successful no-handle completion when cancellation has not been requested.
+///
 /// Component authors MUST ensure:
 ///
 /// - `stop()` cancels all component-owned inner tasks and cleans up registrations/resources.
@@ -617,6 +623,12 @@ pub trait Consumer: Send + Sync {
     ///
     /// Default: `None` — consumer's work completes entirely within `start()`.
     /// Override: return `Some(handle)` if `start()` spawns a detached task.
+    ///
+    /// With `None`, the Runtime calls `stop()` immediately after `start()` succeeds,
+    /// even if readiness was already signalled. Keep `start()` alive until
+    /// cancellation or return a handle when the consumer should remain active.
+    /// Successful finite completion is permitted; an Explicit consumer completing
+    /// without a handle before cancellation receives a diagnostic warning.
     ///
     /// **Contract:** the task must observe `ConsumerContext::cancelled()` so
     /// runtime shutdown is distinguishable from crash exits.

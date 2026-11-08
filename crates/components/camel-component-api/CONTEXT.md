@@ -54,6 +54,14 @@ The Runtime owns each Consumer and applies this sequence:
 should use the `ConsumerContext` cancellation token, or a child token. This lets them stop before
 `stop()` waits for them. ADR-0007 defines crash propagation and Route supervision.
 
+Readiness does not extend a Consumer's lifetime. Without a background handle, the Runtime calls
+`stop()` immediately after `start()` succeeds, even if `mark_ready()` was called. Long-lived
+consumers must keep `start()` alive until cancellation or return a background handle for the
+Runtime to monitor. Successful finite completion remains valid. For Explicit consumers, the
+Runtime emits one route-scoped warning only when no-handle completion occurs before cancellation;
+its `readiness_fallback` field records whether the defensive fallback resolved readiness. This
+diagnostic applies on initial start and resume and does not publish a Route failure.
+
 Producer-side and processor-side code (which has no `ConsumerContext`) observes Runtime shutdown
 through `ComponentContext::shutdown_token()`, resolved per call (the Runtime token is replaced on
 each start); unbound contexts return `None` and callers fall back to a local token. Token lineage
