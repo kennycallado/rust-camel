@@ -2538,8 +2538,10 @@ async fn error_hint_preserves_url_redaction() {
     let endpoint_ctx = NoOpComponentContext;
     let endpoint = component
         .create_endpoint(
+            // Fixture credential; the assertions below prove it is redacted out of
+            // the error message (ADR-0051).
             &format!(
-                "http://user:secret@127.0.0.1:{}?throwExceptionOnFailure=true&allowInternal=true",
+                "http://user:secret@127.0.0.1:{}?throwExceptionOnFailure=true&allowInternal=true", // allow-secret: fixture credential, asserted redacted
                 server.port()
             ),
             &endpoint_ctx,
