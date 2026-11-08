@@ -12,14 +12,14 @@ mod support;
 use support::install_crypto_provider;
 use support::postgres::{shared_postgres, shared_postgres_17, shared_postgres_tls};
 
-use camel_api::body::Body;
-use camel_api::error_handler::ErrorHandlerConfig;
 use camel_api::CamelError;
 use camel_api::Exchange;
 use camel_api::Value;
+use camel_api::body::Body;
+use camel_api::error_handler::ErrorHandlerConfig;
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_api::test_support::timeout_wait;
 use camel_component_api::Message;
+use camel_component_api::test_support::timeout_wait;
 use camel_component_mock::MockComponent;
 use camel_component_sql::SqlComponent;
 use camel_test::CamelTestContext;
