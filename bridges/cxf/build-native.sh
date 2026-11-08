@@ -1,6 +1,118 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- Musl toolchain setup for static linking ---
+# The extracted toolchain lives in /tmp (fast, execable tmpfs on CI runners),
+# but the 89 MB source tarball is cached under GRADLE_USER_HOME, which the CI
+# workflow persists via actions/cache. After the first successful run the
+# tarball is verified from cache and the network download never happens again.
+MUSL_PREFIX="/tmp/musl-toolchain"
+ZLIB_VERSION="1.3.1"
+MUSL_TOOLCHAIN_SHA256="eb1db6f0f3c2bdbdbfb993d7ef7e2eeef82ac1259f6a6e1757c33a97dbcef3ad"
+MUSL_TOOLCHAIN_URL="https://github.com/kennycallado/rust-camel/releases/download/musl-toolchain-v11.2.1/x86_64-linux-musl-native.tgz"
+# Test-only override for the offline battery (scripts/tests/
+# musl-fetch-retry-test.sh). Default unchanged; the SHA256 check below
+# still fails a wrong payload, which the battery relies on.
+MUSL_TOOLCHAIN_URL="${MUSL_TOOLCHAIN_URL_OVERRIDE:-${MUSL_TOOLCHAIN_URL}}"
+ZLIB_URL="https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz"
+# Persist the verified tarball in the CI-cached Gradle home so re-runs skip the
+# download entirely. Falls back to /tmp when GRADLE_USER_HOME is unset.
+MUSL_CACHE_DIR="${GRADLE_USER_HOME:-/tmp}/musl-toolchain-cache"
+ARCHIVE="${MUSL_CACHE_DIR}/x86_64-linux-musl-native.tgz"
+
+# Verify a candidate tarball against the pinned SHA256. Returns non-zero on a
+# missing file or hash mismatch so callers can decide whether to (re)download.
+verify_archive() {
+    [[ -f "${ARCHIVE}" ]] || return 1
+    echo "${MUSL_TOOLCHAIN_SHA256}  ${ARCHIVE}" | sha256sum -c - >/dev/null 2>&1
+}
+
+# Download the musl toolchain tarball with exponential backoff inside a
+# total time budget (MUSL_FETCH_BUDGET_SECONDS, default 600 s; the schedule
+# is 5/10/20/40/60 s capped at 60 s, overridable via MUSL_FETCH_DELAYS for
+# the offline battery). curl's fixed `--retry 5 --retry-delay 5` gave a
+# ~25 s window and lost a Full Tests run to a transient 504 storm on the
+# release asset (rc-1c47h). Per-attempt curl semantics are unchanged:
+# -f fails on any HTTP >=400 instead of writing an error page to disk,
+# -C - resumes partial transfers across attempts; --retry-all-errors is
+# kept for parity. On exhaustion: non-zero exit naming the URL, the
+# attempt count and the elapsed budget — no silent skip.
+fetch_musl_toolchain() {
+    local archive="$1"
+    local url="${MUSL_TOOLCHAIN_URL_OVERRIDE:-${MUSL_TOOLCHAIN_URL}}"
+    local budget="${MUSL_FETCH_BUDGET_SECONDS:-600}"
+    local -a delays
+    read -r -a delays <<< "${MUSL_FETCH_DELAYS:-5 10 20 40 60}"
+    local start=$SECONDS
+    local attempt=0
+    local elapsed remaining delay
+
+    while true; do
+        elapsed=$((SECONDS - start))
+        remaining=$((budget - elapsed))
+        if (( remaining <= 0 )); then
+            echo "ERROR: musl toolchain download failed from ${url}" >&2
+            echo "  Gave up after ${attempt} attempt(s): ${elapsed}s elapsed against a ${budget}s budget." >&2
+            rm -f "${archive}"
+            return 1
+        fi
+        attempt=$((attempt + 1))
+        echo "  Attempt ${attempt}: GET ${url} (budget left: ${remaining}s)"
+        if curl -fSL --retry-all-errors --connect-timeout 30 \
+            --max-time "${remaining}" -C - -o "${archive}" "${url}"; then
+            return 0
+        fi
+        if (( attempt <= ${#delays[@]} )); then
+            delay=${delays[$((attempt - 1))]}
+        else
+            delay=${delays[${#delays[@]} - 1]}
+        fi
+        if (( delay > remaining )); then
+            delay=$remaining
+        fi
+        echo "  Attempt ${attempt} failed; retrying in ${delay}s..."
+        sleep "${delay}"
+    done
+}
+
+# Ensure the toolchain tarball at $ARCHIVE exists and matches the pinned
+# SHA256: cache hit is used as-is; otherwise fetch (with backoff) and
+# verify. Original call-site logic, unchanged apart from the extraction.
+ensure_musl_archive() {
+    if verify_archive; then
+        echo "  Using cached musl toolchain tarball (SHA256 verified)."
+        return 0
+    fi
+    # A stale/corrupt cached tarball must not be trusted or extracted.
+    rm -f "${ARCHIVE}"
+    echo "  Downloading musl toolchain..."
+    fetch_musl_toolchain "${ARCHIVE}" || return 1
+    echo "  Verifying SHA256..."
+    if ! verify_archive; then
+        echo "ERROR: musl toolchain SHA256 mismatch after download." >&2
+        echo "  Expected: ${MUSL_TOOLCHAIN_SHA256}" >&2
+        echo "  Actual:   $(sha256sum "${ARCHIVE}" | cut -d' ' -f1)" >&2
+        echo "  The pinned release asset may have been replaced. Do NOT" >&2
+        echo "  update the pin without verifying the new artifact." >&2
+        rm -f "${ARCHIVE}"
+        return 1
+    fi
+    return 0
+}
+
+# --- Test hook -------------------------------------------------------------
+# `--print-musl-fetch` prints the production musl-download functions and
+# exits 0, before the in-container guard: the offline battery
+# (scripts/tests/musl-fetch-retry-test.sh) sources this output on the
+# host so it exercises exactly the logic CI runs instead of a drifting
+# copy. A guarded main would not work — this script's top-level flow
+# (arg parsing, container guard, traps) is meant to run, not to be
+# sourced.
+if [[ "${1:-}" == "--print-musl-fetch" ]]; then
+    declare -f verify_archive fetch_musl_toolchain ensure_musl_archive
+    exit 0
+fi
+
 IN_CONTAINER=false
 VERSION="dev"
 
@@ -45,64 +157,11 @@ cleanup_permissions() {
 }
 trap cleanup_permissions EXIT
 
-# --- Musl toolchain setup for static linking ---
-# The extracted toolchain lives in /tmp (fast, execable tmpfs on CI runners),
-# but the 89 MB source tarball is cached under GRADLE_USER_HOME, which the CI
-# workflow persists via actions/cache. After the first successful run the
-# tarball is verified from cache and the network download never happens again.
-MUSL_PREFIX="/tmp/musl-toolchain"
-ZLIB_VERSION="1.3.1"
-MUSL_TOOLCHAIN_SHA256="eb1db6f0f3c2bdbdbfb993d7ef7e2eeef82ac1259f6a6e1757c33a97dbcef3ad"
-MUSL_TOOLCHAIN_URL="https://github.com/kennycallado/rust-camel/releases/download/musl-toolchain-v11.2.1/x86_64-linux-musl-native.tgz"
-ZLIB_URL="https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz"
-# Persist the verified tarball in the CI-cached Gradle home so re-runs skip the
-# download entirely. Falls back to /tmp when GRADLE_USER_HOME is unset.
-MUSL_CACHE_DIR="${GRADLE_USER_HOME:-/tmp}/musl-toolchain-cache"
-ARCHIVE="${MUSL_CACHE_DIR}/x86_64-linux-musl-native.tgz"
-
 echo "Setting up musl toolchain for static native-image build..."
-
-# Verify a candidate tarball against the pinned SHA256. Returns non-zero on a
-# missing file or hash mismatch so callers can decide whether to (re)download.
-verify_archive() {
-    [[ -f "${ARCHIVE}" ]] || return 1
-    echo "${MUSL_TOOLCHAIN_SHA256}  ${ARCHIVE}" | sha256sum -c - >/dev/null 2>&1
-}
 
 if [[ ! -x "${MUSL_PREFIX}/bin/x86_64-linux-musl-gcc" ]]; then
     mkdir -p "${MUSL_PREFIX}" "${MUSL_CACHE_DIR}"
-
-    if verify_archive; then
-        echo "  Using cached musl toolchain tarball (SHA256 verified)."
-    else
-        # A stale/corrupt cached tarball must not be trusted or extracted.
-        rm -f "${ARCHIVE}"
-        echo "  Downloading musl toolchain..."
-        echo "  Trying ${MUSL_TOOLCHAIN_URL}..."
-        # --fail: treat HTTP >=400 as an error instead of writing an error page
-        #   to disk (the silent-corruption bug that produced the SHA mismatch).
-        # --retry-all-errors: retry on transient TLS/connection/HTTP failures,
-        #   not just curl's default "transient" subset.
-        # -C -: resume a partial transfer across retries.
-        curl -fSL --retry 5 --retry-all-errors --retry-delay 5 \
-            --connect-timeout 30 --max-time 600 -C - \
-            -o "${ARCHIVE}" "${MUSL_TOOLCHAIN_URL}" || {
-            echo "ERROR: musl toolchain download failed from ${MUSL_TOOLCHAIN_URL}" >&2
-            rm -f "${ARCHIVE}"
-            exit 1
-        }
-        echo "  Verifying SHA256..."
-        if ! verify_archive; then
-            echo "ERROR: musl toolchain SHA256 mismatch after download." >&2
-            echo "  Expected: ${MUSL_TOOLCHAIN_SHA256}" >&2
-            echo "  Actual:   $(sha256sum "${ARCHIVE}" | cut -d' ' -f1)" >&2
-            echo "  The pinned release asset may have been replaced. Do NOT" >&2
-            echo "  update the pin without verifying the new artifact." >&2
-            rm -f "${ARCHIVE}"
-            exit 1
-        fi
-    fi
-
+    ensure_musl_archive || exit 1
     tar -xz -C "${MUSL_PREFIX}" --strip-components=1 < "${ARCHIVE}"
 fi
 

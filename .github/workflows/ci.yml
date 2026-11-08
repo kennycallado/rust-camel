@@ -128,6 +128,26 @@ jobs:
         run: cargo build --workspace
       - name: Hexagonal boundaries (camel-core)
         run: cargo test -p camel-core --test hexagonal_architecture_boundaries_test
+      - name: Cache musl toolchain (JMS bridge)
+        # build-native.sh caches the verified tarball under GRADLE_USER_HOME;
+        # xtask mounts bridges/jms at /project and sets
+        # GRADLE_USER_HOME=/project/.gradle-docker-cache, so this host path
+        # is where the Docker build reads it (the release workflow already
+        # caches this path for Gradle).
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: bridges/jms/.gradle-docker-cache/musl-toolchain-cache
+          # Keep in sync with MUSL_TOOLCHAIN_SHA256 and the musl-toolchain-v*
+          # release tag in bridges/jms/build-native.sh and
+          # bridges/cxf/build-native.sh.
+          key: musl-toolchain-jms-v11.2.1-eb1db6f0f3c2bdbdbfb993d7ef7e2eeef82ac1259f6a6e1757c33a97dbcef3ad
+
+      - name: Cache musl toolchain (CXF bridge)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: bridges/cxf/.gradle-docker-cache/musl-toolchain-cache
+          key: musl-toolchain-cxf-v11.2.1-eb1db6f0f3c2bdbdbfb993d7ef7e2eeef82ac1259f6a6e1757c33a97dbcef3ad
+
       - name: Build JMS bridge binary
         run: cargo xtask build-jms-bridge
       - name: JMS integration tests
@@ -136,10 +156,14 @@ jobs:
         run: cargo test -p camel-test --features integration-tests --test jms_test
       - name: Reclaim JMS bridge artifacts
         # Kill the bridge process too: orphans hold ports and pollute
-        # later steps (rc-qdt3).
+        # later steps (rc-qdt3). Keep musl-toolchain-cache: the
+        # actions/cache post step saves it after the job (immutable
+        # pinned-SHA key); the Gradle caches stay reclaimed.
         run: |
           pkill -x jms-bridge || true
-          rm -rf bridges/jms/build bridges/jms/.gradle-docker-cache
+          rm -rf bridges/jms/build
+          find bridges/jms/.gradle-docker-cache -mindepth 1 -maxdepth 1 \
+            ! -name musl-toolchain-cache -exec rm -rf -- {} + 2>/dev/null || true
       - name: Build XML bridge binary
         run: cargo xtask build-xml-bridge
       - name: XML bridge integration tests
@@ -157,9 +181,13 @@ jobs:
           CAMEL_CXF_BRIDGE_BINARY_PATH: ${{ github.workspace }}/bridges/cxf/build/native/cxf-bridge
         run: cargo test -p camel-test --features integration-tests --test cxf_test
       - name: Reclaim CXF bridge artifacts
+        # Keep musl-toolchain-cache for the actions/cache post step; the
+        # Gradle caches stay reclaimed.
         run: |
           pkill -x cxf-bridge || true
-          rm -rf bridges/cxf/build bridges/cxf/.gradle-docker-cache
+          rm -rf bridges/cxf/build
+          find bridges/cxf/.gradle-docker-cache -mindepth 1 -maxdepth 1 \
+            ! -name musl-toolchain-cache -exec rm -rf -- {} + 2>/dev/null || true
       - name: Container integration tests
         run: cargo test -p camel-test --features integration-tests --test container_test
       - name: Kafka integration tests (testcontainers)
