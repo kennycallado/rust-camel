@@ -5,7 +5,6 @@ The `camel test` declarative test runner. It parses `.test.yaml` documents,
 boots one in-process context per document, delivers inputs, evaluates mock and
 matcher expectations with settling, and reports through exit codes, an
 optional JUnit XML file, filters, and a document env layer.
-
 ## Requirements
 ### Requirement: Declarative test document parsing
 
@@ -510,8 +509,37 @@ Parse-class failures SHALL NOT count toward the passed or failed counts, and
 the exit-code rules above SHALL apply unchanged. stderr SHALL name every
 parse-error entry on one line, in occurrence order, immediately before the
 summary line; the per-failure stderr diagnostics SHALL stay as before. When
-no parse-class failure occurred, the summary SHALL read exactly
-`N passed, M failed` and stderr SHALL carry no naming line.
+no parse-class failure occurred and no case is `not run`, the summary SHALL
+read exactly `N passed, M failed` and stderr SHALL carry no naming line.
+
+The run SHALL count the cases each attempted document declares, using the
+row labels a successful run prints: for a unit document the `expects:` keys,
+the `reply[i] <to>` label per input that declares a reply expectation, and
+`<sequence>` when a sequence is declared; for a scenario document the
+`scenario[i] <kind>` label per declared action. A document that fails to
+read or parse SHALL declare no cases. The run SHALL count a case as
+`not run` when its document parsed but the case produced no verdict row:
+per document, `not run` is the declared case count minus the document's
+verdict rows, saturated at zero. Verdict rows beyond the declared set (a
+failed `logs:` block, a failed teardown row) SHALL NOT push the count
+negative. The summary SHALL carry the additive segment `, N not run`
+immediately after the failed count and only when N > 0, placed before any
+parse-error segment. When the segment appears, the summary SHALL end with
+` — N cases`, where N is the total declared case count over attempted
+documents that parsed, and ` in M docs` SHALL follow when the run attempted
+more documents than completed. An attempted document is a document that
+produced a report or a parse-error entry; a completed document is an
+attempted document that reached evaluation with no document-level error.
+Documents excluded silently by a document filter, and expansion-level
+entries, are neither attempted nor completed; a tier-filter collision on an
+explicitly named document is attempted and not completed. A
+settled-but-timed-out document keeps its one `<settle>` failed verdict row;
+the declared cases it replaced SHALL count as `not run`. When no
+parse-class failure occurred and no case is `not run`, the summary SHALL
+read exactly `N passed, M failed`; when parse-class failures occurred and
+no case is `not run`, the summary SHALL read exactly the parse-error form
+above with no trailer. The exit-code rules SHALL apply unchanged, and a
+`not run` case SHALL NOT move the exit code.
 
 #### Scenario: all pass
 - **Given** a document whose expectations all hold
@@ -585,6 +613,30 @@ no parse-class failure occurred, the summary SHALL read exactly
 - **Given** a run where every document parses and every expectation passes
 - **When** `camel test a.test.yaml b.test.yaml` runs
 - **Then** the summary reads `N passed, 0 failed` with no parse-error segment, and stderr carries no naming line
+
+#### Scenario: settle timeout reports not run cases
+
+- **Given** a passing unit document with 2 declared cases and a unit document with 8 declared cases whose settle phase times out
+- **When** `camel test a.test.yaml b.test.yaml` runs
+- **Then** the settle document keeps its one failed `<settle>` row, the summary reads `2 passed, 1 failed, 7 not run — 10 cases`, and the exit code is 1
+
+#### Scenario: document error reports not run cases
+
+- **Given** a passing unit document with 2 declared cases and a unit document with 3 declared cases whose input delivery fails
+- **When** `camel test a.test.yaml b.test.yaml` runs
+- **Then** the summary reads `2 passed, 0 failed, 3 not run, 1 parse-error doc (skipped) — 5 cases in 2 docs`, and the exit code is 2
+
+#### Scenario: scenario early stop reports not run actions
+
+- **Given** a scenario document with 4 declared actions where actions 0 and 1 pass and action 2 fails
+- **When** the document runs
+- **Then** action 3 produces no verdict row, the summary counts `2 passed, 1 failed, 1 not run — 4 cases`, and the exit code is 1
+
+#### Scenario: clean run prints no not run segment
+
+- **Given** a run where every declared case of every document produces a verdict row
+- **When** the run completes
+- **Then** the summary carries no `not run` segment and no `cases` trailer and is byte-identical to the previous format
 
 ### Requirement: camel run non-interference
 
@@ -1087,16 +1139,28 @@ that document's suite. `failure` and `error` elements SHALL carry a
 text holding the full detail. An expansion-level error (unreadable
 directory entry, zero-document directory) SHALL appear as one synthetic
 `testsuite` named by the path in the error message with a single `<error>`
-testcase named `<expansion>`. Attribute counts on both the `testsuites`
-and per-suite levels SHALL follow exact formulas: `tests` = testcase
-count (`passed + failed + errors` against the stdout summary counters),
-`failures` = failing rows, `errors` = error testcases. When the flag
-validates, the report SHALL be written on exit-0, exit-1, and exit-2
-runs alike; an invalid filter flag (before validation completes) SHALL
-produce no report. A report write failure SHALL print to stderr and exit
-2. Text SHALL be XML-escaped, and characters XML 1.0 forbids in content
-SHALL be removed. When the flag is absent, no report is written and
-behavior is unchanged.
+testcase named `<expansion>`. Each declared case of a parsed document that
+produced no verdict row SHALL appear as one `<testcase>` named by the row
+label a successful run would print, with the document path as the
+`classname` attribute, carrying a `<skipped>` element whose
+`message` attribute starts with `not run:`. The message SHALL read
+`not run: document error` when the document failed at the document level,
+`not run: settle timeout` when the suite holds a failed `<settle>` row, and
+`not run: stopped after scenario[i] failure` when a scenario action failed
+and later declared actions produced no row. A document that failed to read
+or parse SHALL contribute no skipped testcases. Attribute counts on both
+the `testsuites` and per-suite levels SHALL follow exact formulas: `tests`
+= testcase count = `passed + failed + errors + skipped`, `failures` =
+failing rows, `errors` = error testcases, `skipped` = skipped testcases.
+The `skipped` attribute SHALL appear on a `testsuite` and on `testsuites`
+only when that level holds at least one skipped testcase, and SHALL be
+omitted otherwise. A fully evaluated document's suite SHALL be byte-identical
+to the previous format. When the flag validates, the report SHALL be
+written on exit-0, exit-1, and exit-2 runs alike; an invalid filter flag
+(before validation completes) SHALL produce no report. A report write
+failure SHALL print to stderr and exit 2. Text SHALL be XML-escaped, and
+characters XML 1.0 forbids in content SHALL be removed. When the flag is
+absent, no report is written and behavior is unchanged.
 
 #### Scenario: all-pass report
 - **Given** a document whose expectations all hold
@@ -1111,7 +1175,7 @@ behavior is unchanged.
 #### Scenario: document error lands in the report
 - **Given** a run where one document fails to parse and another passes
 - **When** `camel test a.test.yaml bad.test.yaml --junit r.xml` runs
-- **Then** `r.xml` holds the passing suite plus an `errors="1"` suite for the broken document with one `<error>` testcase named `<document>`, and the exit code is 2
+- **Then** `r.xml` holds the passing suite plus an `errors="1"` suite for the broken document with one `<error>` testcase named `<document>` and no skipped testcases, and the exit code is 2
 
 #### Scenario: XML-significant characters are escaped
 - **Given** a document whose settle phase times out (row label `<settle>`) and whose detail contains `<`, `&`, a quote, and a control character
@@ -1127,6 +1191,30 @@ behavior is unchanged.
 - **Given** any run without `--junit`
 - **When** `camel test doc.test.yaml` runs
 - **Then** no report file is created and stdout matches the flag-less behavior
+
+#### Scenario: settle timeout produces skipped testcases
+
+- **Given** a unit document with 8 declared cases whose settle phase times out
+- **When** the report is written
+- **Then** the suite holds the failed `<settle>` testcase plus 8 skipped testcases named by the declared labels with message `not run: settle timeout`, and the attributes read `tests="9"`, `failures="1"`, `errors="0"`, `skipped="8"`
+
+#### Scenario: document error produces skipped testcases and one error
+
+- **Given** a unit document with 3 declared cases whose boot fails
+- **When** the report is written
+- **Then** the suite holds one `<error>` testcase named `<document>` plus 3 skipped testcases with message `not run: document error`, and the attributes read `tests="4"`, `errors="1"`, `skipped="3"`
+
+#### Scenario: early stop produces skipped testcases for unreached actions
+
+- **Given** a scenario document with 4 declared actions where action 2 fails and actions 0 and 1 pass
+- **When** the report is written
+- **Then** the suite holds the 3 executed action rows plus one skipped testcase for action 3 with message `not run: stopped after scenario[2] failure`, and the attributes read `tests="4"`, `failures="1"`, `skipped="1"`
+
+#### Scenario: fully evaluated suite carries no skipped testcases
+
+- **Given** a document whose declared cases all produce verdict rows
+- **When** the report is written
+- **Then** the suite holds no `<skipped>` elements, carries no `skipped` attribute, and is byte-identical to the previous format
 
 ### Requirement: Document filters
 
